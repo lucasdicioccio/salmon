@@ -8,6 +8,7 @@ import Data.Foldable (traverse_, toList)
 
 import Salmon.FoldBranch
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
 

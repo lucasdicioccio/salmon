@@ -4,6 +4,7 @@ module Salmon.Op.Eval where
 import Control.Comonad.Cofree (Cofree, unfoldM)
 
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 
 -- | Expands all predecessors.
 expand :: (Monad m) => OpGraph m node -> m (Cofree Graph (OpGraph m node))

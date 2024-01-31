@@ -4,6 +4,7 @@
 
 module Salmon.Actions.Dot
   ( printDigraph
+  , printCograph
   , dotRef
   , Ref
   ) where
@@ -21,6 +22,7 @@ import qualified Data.Text.IO as Text
 
 import Salmon.FoldBranch
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
 

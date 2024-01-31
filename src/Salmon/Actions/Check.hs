@@ -9,6 +9,7 @@ import Control.Comonad.Cofree (Cofree)
 
 import Salmon.FoldBranch
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
 

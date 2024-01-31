@@ -4,6 +4,7 @@
 module Salmon.Op.Track where
 
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 import Data.Functor.Contravariant (Contravariant(..),(>$<))
 import Data.Functor.Contravariant.Divisible (Divisible(..), divided)
 

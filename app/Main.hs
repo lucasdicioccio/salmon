@@ -3,11 +3,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
-import Salmon.Actions.Print
-import Salmon.Actions.UpDown
-import Salmon.Actions.Check
-import Salmon.Actions.Dot
+import Salmon.Actions.Help as Help
+import Salmon.Actions.UpDown as UpDown
+import Salmon.Actions.Check as Check
+import Salmon.Actions.Dot as Dot
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
 import Salmon.Op.Track
@@ -188,7 +189,9 @@ main :: IO ()
 main = void $ do
   let srv = Server DNSName Key
   let gr0 = homeServer srv `inject` dnsAccount `inject` cycleOfRef `inject` collatz
+  -- nat style
   let nat = pure . runIdentity
-  printHelpTree nat gr0
-  upTree nat gr0
-  printDigraph nat gr0
+  Help.printHelpTree nat gr0
+  UpDown.upTree nat gr0
+  -- direct style
+  Dot.printCograph (runIdentity $ expand gr0)

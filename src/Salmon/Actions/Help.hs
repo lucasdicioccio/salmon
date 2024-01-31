@@ -1,7 +1,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-module Salmon.Actions.Print where
+module Salmon.Actions.Help where
 
 import GHC.Records
 import Data.Foldable (traverse_, toList)
@@ -9,6 +9,7 @@ import Control.Comonad.Cofree (Cofree)
 
 import Salmon.FoldBranch
 import Salmon.Op.Graph
+import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
 

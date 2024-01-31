@@ -23,11 +23,12 @@ extra-source-files: CHANGELOG.md
 
 library
     exposed-modules: Salmon.Op.Graph
+                   , Salmon.Op.OpGraph
                    , Salmon.Op.Actions
                    , Salmon.Op.Eval
                    , Salmon.Op.Track
                    , Salmon.FoldBranch
-                   , Salmon.Actions.Print
+                   , Salmon.Actions.Help
                    , Salmon.Actions.UpDown
                    , Salmon.Actions.Check
                    , Salmon.Actions.Dot
