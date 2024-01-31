@@ -5,15 +5,12 @@
 module Salmon.Actions.Dot
   ( printDigraph
   , printCograph
-  , dotRef
-  , Ref
   ) where
 
 import GHC.Records
 import Data.Foldable (traverse_, toList)
 import Control.Comonad.Cofree (Cofree)
 
-import Data.Hashable (hash)
 import qualified Data.List as List
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -25,25 +22,7 @@ import Salmon.Op.Graph
 import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
-
-import Text.Printf (printf)
-
-newtype Ref = Ref { unRef :: Text }
-  deriving (Show, Eq)
-
-instance Semigroup Ref where
-  r1 <> r2 = dotRef $ unRef r1 <> unRef r2
-
-dotRef :: Text -> Ref
-dotRef orig = Ref $
-  if x > 0
-  then str x
-  else "n" <> str (negate x)
-  where
-    str :: Int -> Text
-    str = Text.pack . printf "%d"
-    x :: Int
-    x = hash orig
+import Salmon.Op.Ref
 
 dotNode :: Node -> Text
 dotNode (Just (ref,name)) = mconcat [ unRef ref, "[label=\"", dotEscape name, "\"];" ]
