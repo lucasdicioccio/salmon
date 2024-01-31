@@ -25,6 +25,30 @@ import qualified Data.Text as Text
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Demo as Demo
+import Salmon.Builtin.Nodes.Keys as Keys
+import Salmon.Builtin.Nodes.Certificates as Certs
+
+tlsCertsExample =
+    op "tls-certs" certsinfo id
+  where
+    domain = Certs.Domain "localhost.example.com"
+    key = Certs.Key Certs.RSA4096 "./tls/keys" "signing-key.rsa2048.pem"
+    csr = Certs.SigningRequest domain key "./tls/certs/localhost.example.com" "cert.csr"
+    ssReq = Certs.SelfSigned "./tls/certs/localhost.example.com/cert.pem" csr
+    certsinfo = deps
+      [ Certs.tlsKey key
+      , Certs.signingRequest csr
+      , Certs.selfSign ssReq
+      ]
+
+sshKeysExample =
+    op "ssh-keys" keys id
+  where
+    keys = deps
+      [ Keys.sshKey (Keys.SSHKeyPair Keys.RSA2048 "./ssh-keys" "example-key-rsa2k")
+      , Keys.sshKey (Keys.SSHKeyPair Keys.RSA4096 "./ssh-keys" "example-key-rsa4k")
+      , Keys.sshKey (Keys.SSHKeyPair Keys.ED25519 "./ssh-keys" "example-key-ed")
+      ]
 
 filesystemExample =
     track mkFileContents "fs-example"  configObj
@@ -39,7 +63,7 @@ filesystemExample =
 -- main
 main :: IO ()
 main = void $ do
-  let gr0 = Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample
+  let gr0 = Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample `inject` sshKeysExample `inject` tlsCertsExample
   -- nat style
   let nat = pure . runIdentity
   Help.printHelpTree nat gr0

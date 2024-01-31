@@ -35,7 +35,9 @@ library
                    , Salmon.Actions.Dot
                    , Salmon.Actions.Notify
                    , Salmon.Builtin.Extension
+                   , Salmon.Builtin.Nodes.Certificates
                    , Salmon.Builtin.Nodes.Demo
+                   , Salmon.Builtin.Nodes.Keys
                    , Salmon.Builtin.Nodes.Filesystem
     build-depends:    base ^>=4.16.3.0
                     , free
@@ -47,6 +49,7 @@ library
                     , bytestring
                     , directory
                     , filepath
+                    , process-extras
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions: KindSignatures
