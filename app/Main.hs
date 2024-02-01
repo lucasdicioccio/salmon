@@ -56,10 +56,12 @@ sshKeysExample =
     op "ssh-keys" keys id
   where
     keys = deps
-      [ Keys.sshKey (Keys.SSHKeyPair Keys.RSA2048 "./ssh-keys" "example-key-rsa2k")
-      , Keys.sshKey (Keys.SSHKeyPair Keys.RSA4096 "./ssh-keys" "example-key-rsa4k")
-      , Keys.sshKey (Keys.SSHKeyPair Keys.ED25519 "./ssh-keys" "example-key-ed")
+      [ Keys.signKey caKey (Keys.KeyIdentifier "key0") key0
+      , Keys.signKey caKey (Keys.KeyIdentifier "key1") key1
       ]
+    caKey = Keys.SSHCertificateAuthority $ Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/ca" "certificate-auth"
+    key0 = Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/keys" "node1"
+    key1 = Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/keys" "node2"
 
 gitRepoExample =
     Git.repo (Repo "./git-repos/" "ks" remote branch)
@@ -73,7 +75,6 @@ main = void $ do
   let gr0 = Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample `inject` sshKeysExample `inject` tlsCertsExample `inject` gitRepoExample
   -- nat style
   let nat = pure . runIdentity
-  Help.printHelpTree nat gr0
   UpDown.upTree nat gr0
   -- direct style
   Dot.printCograph (runIdentity $ expand gr0)
