@@ -29,9 +29,10 @@ import Salmon.Builtin.Nodes.Keys as Keys
 import Salmon.Builtin.Nodes.Certificates as Certs
 import Salmon.Builtin.Nodes.Git as Git
 import Salmon.Builtin.Nodes.Debian.Package as Debian
+import Salmon.Builtin.Nodes.Debian.OS as Debian
 
 filesystemExample =
-    track mkFileContents "fs-example"  configObj
+    op "fs-example" (deps [run mkFileContents configObj]) id
   where
     mkFileContents :: Track' (FileContents Text, Directory)
     mkFileContents = Track filecontents >*< Track dir
@@ -56,9 +57,10 @@ tlsCertsExample =
 sshKeysExample =
     op "ssh-keys" keys id
   where
+    ssh = Debian.sshClient
     keys = deps
-      [ Keys.signKey caKey (Keys.KeyIdentifier "key0") key0
-      , Keys.signKey caKey (Keys.KeyIdentifier "key1") key1
+      [ Keys.signKey ssh caKey (Keys.KeyIdentifier "key0") key0
+      , Keys.signKey ssh caKey (Keys.KeyIdentifier "key1") key1
       ]
     caKey = Keys.SSHCertificateAuthority $ Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/ca" "certificate-auth"
     key0 = Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/keys" "node1"
@@ -81,7 +83,7 @@ demoOps =
   , packagesExample
   ]
   where
-    deb n = Debian.deb . Debian.Package
+    deb = Debian.deb . Debian.Package
 
 optimizedDeps =
   let

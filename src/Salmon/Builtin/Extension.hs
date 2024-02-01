@@ -52,6 +52,8 @@ instance Semigroup Extension where
 
 type Op = OpGraph Identity Actions'
 
+type Track' a = Track Identity Actions' a
+
 evalDeps :: Op -> Cofree Graph Op
 evalDeps = runIdentity . expand
 
@@ -60,14 +62,6 @@ nodeps = pure $ Vertices []
 
 deps :: [Op] -> Identity (Graph Op)
 deps xs = pure $ Vertices  xs
-
-type Track' a = Track Identity Actions' a
-
-track :: Track' a -> ShortHand -> a -> Op
-track track name a = op name (deps [inner]) id
-  where
-    inner :: Op
-    inner = run track a
 
 realNoop :: Op
 realNoop =

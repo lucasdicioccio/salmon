@@ -11,7 +11,7 @@ collatz :: [Int] -> Op
 collatz ks =
     op "collatzs-orbits" (deps [segment k | k <- ks]) id
   where
-    opname k = "collatz-orbit-" <> (Text.pack $ show k)
+    opname k = "cltz-" <> (Text.pack $ show k)
     useRef k = \actions -> actions { ref = dotRef $ opname k }
     depsAtLevel 1 = nodeps
     depsAtLevel n

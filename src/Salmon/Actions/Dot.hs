@@ -9,7 +9,7 @@ module Salmon.Actions.Dot
 
 import GHC.Records
 import Data.Foldable (traverse_, toList)
-import Control.Comonad.Cofree (Cofree)
+import Control.Comonad.Cofree (Cofree(..), hoistCofree)
 
 import qualified Data.List as List
 import qualified Data.Maybe as Maybe
@@ -29,7 +29,11 @@ dotNode (Just (ref,name)) = mconcat [ unRef ref, "[label=\"", dotEscape name, "\
 dotNode _ = ""
 
 dotEdge :: Edge -> Text
-dotEdge (ref1,ref2) = mconcat [ unRef ref1, "->", unRef ref2 ]
+dotEdge e =
+  let (ref1,ref2) = e.rawEdge in
+  case e.connectType of
+    O -> mconcat [ unRef ref1, "->", unRef ref2 ]
+    C -> mconcat [ unRef ref1, "->", unRef ref2, "[color=red]" ]
 
 dotEscape :: Text -> Text
 dotEscape = id
@@ -42,10 +46,43 @@ sameNode n1 n2 = Maybe.fromMaybe False $ do
   (r,_) <- n2
   pure $ l == r
 
-type Edge = (Ref, Ref)
+type RawEdge = (Ref, Ref)
 
 sameEdge :: Edge -> Edge -> Bool
-sameEdge e1 e2 = e1 == e2
+sameEdge e1 e2 = e1.rawEdge == e2.rawEdge
+
+data ConnectType = C | O
+data Edge = Edge { connectType :: ConnectType, rawEdge :: RawEdge }
+
+evalEdges
+  :: forall m ext.
+     ( HasField "ref" ext Ref
+     )
+  => Cofree Graph (OpGraph m (Actions ext))
+  -> [Edge]
+evalEdges = go Nothing . fmap node
+  where
+    go :: Maybe (ConnectType, ext) -> Cofree Graph (Actions ext)-> [Edge]
+    go prev (a :< (Vertices d))    =
+         let set1 = [ Edge ct (l.ref,r.ref) | r <- toList a, (ct, l) <- toList prev ]
+             next = case a of Actionless -> prev ; Actions (Act _ ext) -> Just (O, ext)
+             set2 = concatMap (go next) d
+         in
+         set1 <> set2
+    go prev (a :< (Overlay d1 d2)) =
+         let set1 = [ Edge ct (l.ref,r.ref) | r <- toList a, (ct, l) <- toList prev ]
+             next = case a of Actionless -> prev ; Actions (Act _ ext) -> Just (O, ext)
+             set2 = concatMap (go next) d1
+             set3 = concatMap (go next) d2
+         in
+         set1 <> set2 <> set3
+    go prev (a :< (Connect d1 d2)) =
+         let set1 = [ Edge ct (l.ref,r.ref) | r <- toList a, (ct, l) <- toList prev ]
+             next k = case a of Actionless -> prev ; Actions (Act _ ext) -> Just (k, ext)
+             set2 = concatMap (go $ next C) d1
+             set3 = concatMap (go $ next O) d2
+         in
+         set1 <> set2 <> set3
 
 printDigraph
   :: forall m ext.
@@ -67,7 +104,7 @@ printCograph
   -> IO ()
 printCograph gr1 = do
     let nodes = fmap dotNode $ List.nubBy sameNode $ toList $ dirNodes gr1
-    let edges = fmap dotEdge $ List.nubBy sameEdge $ Maybe.catMaybes $ toList $ dirEdges gr1 
+    let edges = fmap dotEdge $ List.nubBy sameEdge $ evalEdges gr1 
     putStrLn "digraph {"
     putStrLn "rankdir=LR;"
     traverse_ Text.putStrLn $ nodes
@@ -84,17 +121,3 @@ printCograph gr1 = do
           Nothing
         (Actions act) ->
           Just ((extension act).ref, act.shorthand)
-
-    -- implementation is akin to a zip storing the previous parent
-    dirEdges :: Cofree Graph (OpGraph m (Actions ext)) -> Cofree Graph (Maybe Edge)
-    dirEdges = fmap snd <$> foldBranch mkEdges (Nothing, Nothing)
-
-    mkEdges :: (Maybe Ref, Maybe Edge) -> OpGraph m (Actions ext) -> (Maybe Ref, Maybe Edge)
-    mkEdges ante@(pred,_) x =
-      case node x of
-        Actionless -> ante
-        Actions act ->
-          let ref1 = (extension act).ref in
-          case pred of
-            Just ref0 -> (Just ref1, Just (ref0, ref1))
-            Nothing -> (Just ref1, Nothing)
