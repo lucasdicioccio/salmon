@@ -27,6 +27,17 @@ import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Demo as Demo
 import Salmon.Builtin.Nodes.Keys as Keys
 import Salmon.Builtin.Nodes.Certificates as Certs
+import Salmon.Builtin.Nodes.Git as Git
+
+filesystemExample =
+    track mkFileContents "fs-example"  configObj
+  where
+    mkFileContents :: Track' (FileContents Text, Directory)
+    mkFileContents = Track filecontents >*< Track dir
+
+    configObj = (contents,directory)
+    contents = FileContents "./example-dir/file1" "hello world\n"
+    directory = Directory "./example-dir"
 
 tlsCertsExample =
     op "tls-certs" certsinfo id
@@ -50,20 +61,16 @@ sshKeysExample =
       , Keys.sshKey (Keys.SSHKeyPair Keys.ED25519 "./ssh-keys" "example-key-ed")
       ]
 
-filesystemExample =
-    track mkFileContents "fs-example"  configObj
+gitRepoExample =
+    Git.repo (Repo "./git-repos/" "ks" remote branch)
   where
-    mkFileContents :: Track' (FileContents Text, Directory)
-    mkFileContents = Track filecontents >*< Track dir
-
-    configObj = (contents,directory)
-    contents = FileContents "./example-dir/file1" "hello world\n"
-    directory = Directory "./example-dir"
+    remote = Git.Remote "git@github.com:kitchensink-tech/kitchensink.git"
+    branch = Git.Branch "main"
 
 -- main
 main :: IO ()
 main = void $ do
-  let gr0 = Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample `inject` sshKeysExample `inject` tlsCertsExample
+  let gr0 = Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample `inject` sshKeysExample `inject` tlsCertsExample `inject` gitRepoExample
   -- nat style
   let nat = pure . runIdentity
   Help.printHelpTree nat gr0
