@@ -28,6 +28,7 @@ import Salmon.Builtin.Nodes.Demo as Demo
 import Salmon.Builtin.Nodes.Keys as Keys
 import Salmon.Builtin.Nodes.Certificates as Certs
 import Salmon.Builtin.Nodes.Git as Git
+import Salmon.Builtin.Nodes.Debian.Package as Debian
 
 filesystemExample =
     track mkFileContents "fs-example"  configObj
@@ -69,12 +70,30 @@ gitRepoExample =
     remote = Git.Remote "git@github.com:kitchensink-tech/kitchensink.git"
     branch = Git.Branch "main"
 
+packagesExample =
+   Debian.deb (Debian.Package "vlc")
+
+demoOps =
+  [ Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample
+  , sshKeysExample
+  , tlsCertsExample
+  , gitRepoExample
+  , packagesExample
+  ]
+  where
+    deb n = Debian.deb . Debian.Package
+
+optimizedDeps =
+  let
+    base = op "base" (deps demoOps) id
+    pkgs = Debian.installAllDebsAtOnce base
+  in 
+  base `inject` pkgs
+
 -- main
 main :: IO ()
 main = void $ do
-  let gr0 = Demo.collatz [1,3,5,7,9,11,13,15] `inject` filesystemExample `inject` sshKeysExample `inject` tlsCertsExample `inject` gitRepoExample
-  -- nat style
+  let gr0 = op "demo" (deps [optimizedDeps]) id
   let nat = pure . runIdentity
   UpDown.upTree nat gr0
-  -- direct style
   Dot.printCograph (runIdentity $ expand gr0)

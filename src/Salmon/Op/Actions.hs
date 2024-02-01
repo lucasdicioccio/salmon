@@ -13,7 +13,7 @@ type ShortHand = Text
 data Act extension = Act
   { shorthand    :: ShortHand
   , extension    :: extension
-  } deriving (Show, Functor)
+  } deriving (Show, Functor, Foldable, Traversable)
 
 -- | Actions are bundles of effects ongoing in a given monad m.
 --
@@ -26,10 +26,7 @@ data Actions e
   -- ^ a true no-op action as in, it behaves as a mempty for the Monoid instance
   | Actions (Act e)
   -- ^ a proper set of actions
-  deriving (Show, Functor)
-
--- | A shorthand for when using no exension.
-type ActionsN' = Actions ()
+  deriving (Show, Functor, Foldable, Traversable)
 
 -- | The monoidal actions revert the up and down.
 instance (Semigroup e) => Semigroup (Actions e) where

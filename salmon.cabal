@@ -40,7 +40,9 @@ library
                    , Salmon.Builtin.Nodes.Keys
                    , Salmon.Builtin.Nodes.Filesystem
                    , Salmon.Builtin.Nodes.Git
+                   , Salmon.Builtin.Nodes.Debian.Package
     build-depends:    base ^>=4.16.3.0
+                    , containers
                     , free
                     , mtl
                     , transformers
