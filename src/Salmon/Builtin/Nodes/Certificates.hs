@@ -1,7 +1,9 @@
 module Salmon.Builtin.Nodes.Certificates where
 
 import Salmon.Op.Ref
+import Salmon.Op.Track
 import Salmon.Builtin.Extension
+import Salmon.Builtin.Nodes.Binary
 import Salmon.Builtin.Nodes.Filesystem
 
 import Control.Monad (void)
@@ -36,7 +38,6 @@ data SigningRequest
   }
   deriving (Show, Ord, Eq)
 
-
 csrPath :: SigningRequest -> FilePath
 csrPath req = req.certCSRDir </> Text.unpack req.certCSRName
 
@@ -47,17 +48,20 @@ data SelfSigned
   }
   deriving (Show, Ord, Eq)
 
-tlsKey :: Key -> Op
-tlsKey key =
-  op "certificate-key" (deps [enclosingdir]) $ \actions -> actions {
+tlsKey :: Track' (Binary "openssl") -> Key -> Op
+tlsKey bin key =
+  op "certificate-key" (deps [install, enclosingdir]) $ \actions -> actions {
       help = "generate a certificate-key"
     , notes =
       [ "does not delete keys on down"
       ]
     , ref = dotRef $ "openssl:" <> Text.pack path
-    , up = void $ readCreateProcessWithExitCode (createGenTLSKeyProcess key.keyType path) ""
+    , up = up
     }
   where
+    (exe, up) = exec openssl (GenTLSKey key.keyType path)
+    install = run bin exe
+
     path :: FilePath
     path = keyPath key
 
@@ -67,21 +71,17 @@ tlsKey key =
 keyPath :: Key -> FilePath
 keyPath key = key.keyDir </> Text.unpack key.keyName
 
-signingRequest :: SigningRequest -> Op
-signingRequest req =
-  op "certificate-csr" (deps [enclosingdir, tlsKey req.certKey]) $ \actions -> actions {
+signingRequest :: Track' (Binary "openssl") -> SigningRequest -> Op
+signingRequest bin req =
+  op "certificate-csr" (deps [install, enclosingdir, tlsKey bin req.certKey]) $ \actions -> actions {
       help = "generate a certificate signing request"
     , ref = dotRef $ "openssl:csr:" <> Text.pack csrpath
-    , up = void $ do
-             readCreateProcessWithExitCode genCSR ""
-             readCreateProcessWithExitCode convertDER ""
+    , up = void $ makeCSR >> convert
     }
   where
-    genCSR :: CreateProcess
-    genCSR = createGenCSR kpath csrpath dom
-
-    convertDER :: CreateProcess
-    convertDER = convertCSRtoDER csrpath derpath
+    (exe,makeCSR) = exec openssl $ GenCSR kpath csrpath dom
+    (_,convert) = exec openssl $ ConvertCSR2DER csrpath derpath
+    install = run bin exe
 
     kpath :: FilePath
     kpath = keyPath req.certKey
@@ -101,16 +101,16 @@ signingRequest req =
     dom :: Domain
     dom = req.certDomain
 
-selfSign :: SelfSigned -> Op
-selfSign selfsigned =
-  op "certificate-self-sign" (deps [signingRequest selfsigned.selfSignedRequest]) $ \actions -> actions {
+selfSign :: Track' (Binary "openssl") -> SelfSigned -> Op
+selfSign bin selfsigned =
+  op "certificate-self-sign" (deps [install, signingRequest bin selfsigned.selfSignedRequest]) $ \actions -> actions {
       help = "self sign a certificate"
     , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath
-    , up = void $ readCreateProcessWithExitCode genCSR ""
+    , up = up
     }
   where
-    genCSR :: CreateProcess
-    genCSR = signCSRProcess csr key pempath
+    (exe, up) = exec openssl (SignCSR csr key pempath)
+    install = run bin exe
 
     key :: FilePath
     key = keyPath selfsigned.selfSignedRequest.certKey
@@ -121,36 +121,41 @@ selfSign selfsigned =
     pempath :: FilePath
     pempath = selfsigned.selfSignedPEMPath
 
-createGenCSR :: FilePath -> FilePath -> Domain -> CreateProcess
-createGenCSR keyPath csrPath dom =
-  proc "openssl"
-    [ "req"
-    , "-new"
-    , "-key", keyPath
-    , "-out", csrPath
-    , "-subj", Text.unpack $ "/CN=" <> getDomain dom
-    ]
+data OpenSSL
+  = GenCSR FilePath FilePath Domain
+  | ConvertCSR2DER FilePath FilePath
+  | SignCSR FilePath FilePath FilePath
+  | GenTLSKey KeyType FilePath
 
-convertCSRtoDER :: FilePath -> FilePath -> CreateProcess
-convertCSRtoDER csrPath derPath =
-  proc "openssl"
-    [ "req"
-    , "-in", csrPath
-    , "-outform", "DER"
-    , "-out", derPath
-    ]
+openssl :: Command "openssl" OpenSSL
+openssl = Command $ \cmd ->
+  case cmd of
+    (GenTLSKey kt filepath) ->
+      case kt of
+        RSA4096 -> proc "openssl" ["genrsa", "-out", filepath, "4096"]
 
-createGenTLSKeyProcess :: KeyType -> FilePath -> CreateProcess
-createGenTLSKeyProcess kt filepath =
-  case kt of
-    RSA4096 -> proc "openssl" ["genrsa", "-out", filepath, "4096"]
+    (GenCSR keyPath csrPath dom) ->
+      proc "openssl"
+        [ "req"
+        , "-new"
+        , "-key", keyPath
+        , "-out", csrPath
+        , "-subj", Text.unpack $ "/CN=" <> getDomain dom
+        ]
 
-signCSRProcess :: FilePath -> FilePath -> FilePath -> CreateProcess
-signCSRProcess csrPath keyPath pemPath =
-  proc "openssl"
-    [ "x509"
-    , "-req"
-    , "-in", csrPath
-    , "-signkey", keyPath
-    , "-out", pemPath
-    ]
+    (ConvertCSR2DER csrPath derPath) ->
+      proc "openssl"
+        [ "req"
+        , "-in", csrPath
+        , "-outform", "DER"
+        , "-out", derPath
+        ]
+
+    (SignCSR csrPath keyPath pemPath) ->
+      proc "openssl"
+        [ "x509"
+        , "-req"
+        , "-in", csrPath
+        , "-signkey", keyPath
+        , "-out", pemPath
+        ]

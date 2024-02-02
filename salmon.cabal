@@ -80,5 +80,6 @@ executable salmon-exe
                     , lens
                     , contravariant
                     , text
+                    , optparse-generic
     hs-source-dirs:   app
     default-language: Haskell2010

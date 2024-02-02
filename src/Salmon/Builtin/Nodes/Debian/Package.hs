@@ -11,6 +11,7 @@ import Data.Text (Text)
 import Data.Foldable (toList)
 import qualified Data.Text as Text
 import qualified Data.List.NonEmpty as NEList
+import qualified Data.Set as Set
 import System.Environment (getEnvironment)
 import System.Process.ListLike (CreateProcess, proc, env)
 import System.Process.ByteString (readCreateProcessWithExitCode)
@@ -43,14 +44,16 @@ deb pkg =
 debs :: NEList.NonEmpty Package -> Op
 debs pkgs =
   op "debs" nodeps $ \actions -> actions {
-      help = "installs " <> Text.pack (show (length pkgs)) <> " packages"
-    , notes = pkgName <$> toList pkgs
-    , ref = dotRef $ "debian:deb:set:" <> foldMap pkgName pkgs
+      help = "installs " <> Text.pack (show (length pkgset)) <> " packages"
+    , notes = pkgName <$> toList pkgset
+    , ref = dotRef $ "debian:deb:set:" <> foldMap pkgName pkgset
     , up = upAction
     , down = downAction
     }
 
   where
+    pkgset :: Set.Set Package
+    pkgset = Set.fromList $ NEList.toList pkgs
     upAction :: IO ()
     upAction = void $ do
       baseEnv <- getEnvironment

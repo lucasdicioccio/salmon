@@ -12,7 +12,13 @@ import Data.Text (Text)
 type Provider sym = Track' (Binary sym)
 
 installWith :: Text -> Provider sym
-installWith x = Track (const $ deb (Package "ssh-client"))
+installWith x = Track (const $ deb (Package x))
 
 sshClient :: Provider "ssh-keygen"
 sshClient = installWith "ssh-client"
+
+openssl :: Provider "openssl"
+openssl = installWith "openssl"
+
+git :: Provider "git"
+git = installWith "git-core"

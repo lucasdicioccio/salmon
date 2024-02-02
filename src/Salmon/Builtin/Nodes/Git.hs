@@ -3,6 +3,8 @@ module Salmon.Builtin.Nodes.Git where
 import Salmon.Op.Ref
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
+import Salmon.Op.Track
+import Salmon.Builtin.Nodes.Binary
 
 import Control.Monad (void)
 import Data.Text (Text)
@@ -21,14 +23,17 @@ newtype Branch = Branch { getBranch :: Text }
 data Repo = Repo { repoClonedir :: FilePath , repoLocalName :: Text, repoRemote :: Remote, repoBranch :: Branch }
   deriving (Eq, Ord, Show)
 
-repo :: Repo -> Op
-repo r =
-  op "git-repo" (deps [enclosingdir]) $ \actions -> actions {
+repo :: Track' (Binary "git") -> Repo -> Op
+repo bin r =
+  op "git-repo" (deps [install, enclosingdir]) $ \actions -> actions {
       help = "clones and force sync a repo"
     , ref = dotRef $ "repo:" <> Text.pack clonedir
-    , up = void $ readCreateProcessWithExitCode (gitclone remote branch clonedir) ""
+    , up = up
     }
   where
+    (exe, up) = exec gitclone (Clone remote branch clonedir)
+    install = run bin exe
+
     clonedir :: FilePath
     clonedir = r.repoClonedir </> Text.unpack r.repoLocalName
 
@@ -44,8 +49,10 @@ repo r =
     enclosingdir :: Op
     enclosingdir = dir (Directory cloneparentdir)
 
-gitclone :: Remote -> Branch -> FilePath -> CreateProcess
-gitclone repo branch localdir =
+data Clone = Clone Remote Branch FilePath
+
+gitclone :: Command "git" Clone
+gitclone = Command $ \(Clone repo branch localdir) ->
   proc "git"
     [ "clone"
     , "-b"
