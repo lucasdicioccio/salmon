@@ -2,28 +2,16 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 module Main where
 
-import Salmon.Actions.Help as Help
-import Salmon.Actions.UpDown as UpDown
-import Salmon.Actions.Check as Check
-import Salmon.Actions.Dot as Dot
-import Salmon.Op.Graph
-import Salmon.Op.OpGraph
-import Salmon.Op.Eval
-import Salmon.Op.Actions
-import Salmon.Op.Track
-import Control.Monad.Identity
-import Control.Comonad.Cofree
-import Control.Lens ((^..))
-import Data.Traversable (mapAccumL)
-import Data.Functor.Contravariant (Contravariant(..),(>$<))
-import Data.Functor.Contravariant.Divisible (Divisible(..), divided)
-import Data.Text (Text)
-import qualified Data.Text as Text
+-- to-re-export
+import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Configure (Configure(..))
+import Salmon.Op.Track (Track(..), (>*<))
+import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
 
-import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Demo as Demo
 import Salmon.Builtin.Nodes.Keys as Keys
@@ -31,6 +19,8 @@ import Salmon.Builtin.Nodes.Certificates as Certs
 import Salmon.Builtin.Nodes.Git as Git
 import Salmon.Builtin.Nodes.Debian.Package as Debian
 import Salmon.Builtin.Nodes.Debian.OS as Debian
+import Salmon.Builtin.Extension
+import Salmon.Builtin.CommandLine
 
 filesystemExample =
     op "fs-example" (deps [run mkFileContents configObj]) id
@@ -86,45 +76,30 @@ demoOps =
   , packagesExample
   ]
 
-optimizedDeps =
+-------------------------------------------------------------------------------
+data Spec
+  = Spec
+  deriving (Generic)
+instance FromJSON Spec
+instance ToJSON Spec
+
+demo :: Track' Spec
+demo = Track $ \(Spec) -> optimizedDeps $ op "demo" (deps demoOps) id
+  where
+optimizedDeps base =
   let
-    base = op "demo" (deps demoOps) id
     pkgs = Debian.installAllDebsAtOnce base
   in 
   base `inject` pkgs
 
-data Command
-  = Run OpCommand
-  | Help
-  | DAG
-  deriving (Generic, Show)
+-------------------------------------------------------------------------------
+type Seed = ()
 
-data OpCommand
-  = Up
-  | Down
-  deriving (Generic, Show, Read)
+configure :: Configure' Seed Spec
+configure = Configure $ const $ pure Spec
 
-instance ParseRecord Command
-instance ParseRecord OpCommand
-instance ParseField OpCommand
-instance ParseFields OpCommand
-
--- main
+-------------------------------------------------------------------------------
 main :: IO ()
-main = void $ do
-  cmd <- getRecord "demo-program"
-  case cmd of
-    Run Up -> do
-      let gr0 = optimizedDeps
-      let nat = pure . runIdentity
-      UpDown.upTree nat gr0
-    Run Down -> do
-      let gr0 = optimizedDeps
-      let nat = pure . runIdentity
-      UpDown.downTree nat gr0
-    Help -> do
-      let gr0 = optimizedDeps
-      Help.printHelpCograph (runIdentity $ expand gr0)
-    DAG -> do
-      let gr0 = optimizedDeps
-      Dot.printCograph (runIdentity $ expand gr0)
+main = do
+  cmd <- getRecord "demo-program" :: IO (Command Seed)
+  execCommand configure demo cmd

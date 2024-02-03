@@ -16,6 +16,7 @@ import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
 import Salmon.Op.Track
+import Salmon.Op.Configure
 
 -- | Instanciate actions.
 type Actions' = Actions Extension
@@ -53,6 +54,8 @@ instance Semigroup Extension where
 type Op = OpGraph Identity Actions'
 
 type Track' a = Track Identity Actions' a
+
+type Configure' seed a = Configure Identity seed a
 
 evalDeps :: Op -> Cofree Graph Op
 evalDeps = runIdentity . expand
