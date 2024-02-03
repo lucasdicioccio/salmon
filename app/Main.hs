@@ -11,6 +11,10 @@ import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<))
 import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
+import Options.Applicative
+
+import qualified Data.Text as Text
+import Text.Read (readMaybe)
 
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Demo as Demo
@@ -68,8 +72,8 @@ gitRepoExample =
 packagesExample =
    Debian.deb (Debian.Package "vlc")
 
-demoOps =
-  [ Demo.collatz [1,3,5,7,9,11,13,15]
+demoOps n =
+  [ Demo.collatz [x | x <- [1 .. n], odd x]
   , sshKeysExample
   , tlsCertsExample
   , gitRepoExample
@@ -78,13 +82,13 @@ demoOps =
 
 -------------------------------------------------------------------------------
 data Spec
-  = Spec
+  = Spec { specCollatz :: Int }
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
 
 demo :: Track' Spec
-demo = Track $ \(Spec) -> optimizedDeps $ op "demo" (deps demoOps) id
+demo = Track $ \(Spec cltz) -> optimizedDeps $ op "demo" (deps $ demoOps cltz) id
   where
 optimizedDeps base =
   let
@@ -93,13 +97,20 @@ optimizedDeps base =
   base `inject` pkgs
 
 -------------------------------------------------------------------------------
-type Seed = ()
+data Seed = Seed { collatzNum :: Int }
+
+instance ParseRecord Seed where
+  parseRecord =
+    Seed <$> option auto ( long "n-collatz" )
 
 configure :: Configure' Seed Spec
-configure = Configure $ const $ pure Spec
+configure = Configure $ \(Seed n) -> pure (Spec n)
 
 -------------------------------------------------------------------------------
 main :: IO ()
 main = do
-  cmd <- getRecord "demo-program" :: IO (Command Seed)
+  -- cmd <- getRecord "demo-program" :: IO (Command Seed)
+  let desc = fullDesc <> progDesc "A Salmon program." <> header "demonstration examples"
+  let opts = info parseRecord desc
+  cmd <- execParser opts
   execCommand configure demo cmd

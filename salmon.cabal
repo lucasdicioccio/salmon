@@ -59,6 +59,7 @@ library
                     , process-extras
                     , aeson
                     , optparse-generic
+                    , optparse-applicative
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions: KindSignatures
@@ -84,6 +85,7 @@ executable salmon-exe
                     , lens
                     , contravariant
                     , text
+                    , optparse-applicative
                     , optparse-generic
                     , aeson
                     , bytestring
