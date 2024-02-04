@@ -43,6 +43,7 @@ library
                    , Salmon.Builtin.Nodes.Binary
                    , Salmon.Builtin.Nodes.Filesystem
                    , Salmon.Builtin.Nodes.Git
+                   , Salmon.Builtin.Nodes.Bash
                    , Salmon.Builtin.Nodes.Debian.Package
                    , Salmon.Builtin.Nodes.Debian.OS
     build-depends:    base ^>=4.16.3.0

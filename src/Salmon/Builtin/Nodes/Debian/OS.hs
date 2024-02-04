@@ -9,16 +9,19 @@ import Salmon.Builtin.Nodes.Debian.Package
 
 import Data.Text (Text)
 
-type Provider sym = Track' (Binary sym)
+type Installer sym = Track' (Binary sym)
 
-installWith :: Text -> Provider sym
+installWith :: Text -> Installer sym
 installWith x = Track (const $ deb (Package x))
 
-sshClient :: Provider "ssh-keygen"
+sshClient :: Installer "ssh-keygen"
 sshClient = installWith "ssh-client"
 
-openssl :: Provider "openssl"
+openssl :: Installer "openssl"
 openssl = installWith "openssl"
 
-git :: Provider "git"
+git :: Installer "git"
 git = installWith "git-core"
+
+bash :: Installer "bash"
+bash = installWith "bash"

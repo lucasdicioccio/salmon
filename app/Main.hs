@@ -23,6 +23,7 @@ import Salmon.Builtin.Nodes.Certificates as Certs
 import Salmon.Builtin.Nodes.Git as Git
 import Salmon.Builtin.Nodes.Debian.Package as Debian
 import Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Bash as Bash
 import Salmon.Builtin.Extension
 import Salmon.Builtin.CommandLine
 
@@ -35,6 +36,17 @@ filesystemExample =
     configObj = (contents,directory)
     contents = FileContents "./example-dir/file1" "hello world\n"
     directory = Directory "./example-dir"
+
+bashHelloExample =
+    op "bash-hello" (deps [go]) id
+  where
+    go = Bash.run Debian.bash script
+    script = ToInstall mkBashScript "./example-script/hello.sh"
+    mkBashScript :: Track' FilePath
+    mkBashScript = Track $ \path -> filecontents $ FileContents path body
+    body :: Text
+    body = "echo hello >> hello-world.txt"
+
 
 tlsCertsExample =
     op "tls-certs" certsinfo id
@@ -78,6 +90,7 @@ demoOps n =
   , tlsCertsExample
   , gitRepoExample
   , packagesExample
+  , bashHelloExample
   ]
 
 -------------------------------------------------------------------------------

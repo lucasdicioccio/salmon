@@ -6,6 +6,8 @@ module Salmon.Builtin.Nodes.Filesystem where
 import Salmon.Builtin.Extension
 import Salmon.Op.Ref
 
+import Salmon.Op.Track
+import GHC.TypeLits (Symbol)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.ByteString as ByteString
@@ -32,6 +34,8 @@ dir directory =
   where
     path :: FilePath
     path = directory.directoryPath
+
+-------------------------------------------------------------------------------
 
 -- | Some file contents that get set once.
 -- 
@@ -70,3 +74,13 @@ instance EncodeFileContents ByteString.ByteString where
 
 instance EncodeFileContents String where
    encodeFileContents = C8.pack
+
+-------------------------------------------------------------------------------
+
+data File (sym :: Symbol)
+  = PreExisting FilePath
+  | Generated (Track' FilePath) FilePath
+
+withFile :: File a -> (FilePath -> Op) -> Op
+withFile (PreExisting path) f = f path
+withFile (Generated mkp path) f = tracking mkp (\x -> (x,x)) path f

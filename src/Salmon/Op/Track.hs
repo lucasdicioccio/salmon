@@ -28,3 +28,17 @@ instance (Applicative m, Monoid n) => Divisible (Track m n) where
       y = run t2 k
     in
     OpGraph (Vertices <$> pure [x,y]) mempty
+
+
+-- | A function to inject a dependency form a tracer when generating an OpGraph.
+-- At first it looks like the we could just directly apply.
+tracking
+  :: Applicative m
+  => Track m n z
+  -> (a -> (b,z))
+  -> a
+  -> (b -> OpGraph m n)
+  -> OpGraph m n
+tracking t f arg use =
+  let (b,z) = f arg
+  in use b `inject` run t z

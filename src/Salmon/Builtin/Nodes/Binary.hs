@@ -33,7 +33,9 @@ data Command (wellKnownName :: Symbol) arg =
 -- dependencies from the binary provider.
 using :: Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
 using t cmd arg consumeIO =
-  consumeIO (untrackedExec cmd arg) `inject` run t Binary
+  let mk a = (untrackedExec cmd a, Binary)
+  in
+  tracking t mk arg consumeIO
 
 untrackedExec :: Command x a -> a -> IO ()
 untrackedExec binary arg =
