@@ -50,7 +50,8 @@ data SelfSigned
 
 tlsKey :: Track' (Binary "openssl") -> Key -> Op
 tlsKey bin key =
-  op "certificate-key" (deps [install, enclosingdir]) $ \actions -> actions {
+  using bin openssl (GenTLSKey key.keyType path) $ \up -> do
+  op "certificate-key" (deps [enclosingdir]) $ \actions -> actions {
       help = "generate a certificate-key"
     , notes =
       [ "does not delete keys on down"
@@ -59,9 +60,6 @@ tlsKey bin key =
     , up = up
     }
   where
-    (exe, up) = exec openssl (GenTLSKey key.keyType path)
-    install = run bin exe
-
     path :: FilePath
     path = keyPath key
 
@@ -73,15 +71,15 @@ keyPath key = key.keyDir </> Text.unpack key.keyName
 
 signingRequest :: Track' (Binary "openssl") -> SigningRequest -> Op
 signingRequest bin req =
-  op "certificate-csr" (deps [install, enclosingdir, tlsKey bin req.certKey]) $ \actions -> actions {
+  using bin openssl (GenCSR kpath csrpath dom) $ \makeCSR ->
+  using bin openssl (ConvertCSR2DER csrpath derpath) $ \convert ->
+
+  op "certificate-csr" (deps [enclosingdir, tlsKey bin req.certKey]) $ \actions -> actions {
       help = "generate a certificate signing request"
     , ref = dotRef $ "openssl:csr:" <> Text.pack csrpath
     , up = void $ makeCSR >> convert
     }
   where
-    (exe,makeCSR) = exec openssl $ GenCSR kpath csrpath dom
-    (_,convert) = exec openssl $ ConvertCSR2DER csrpath derpath
-    install = run bin exe
 
     kpath :: FilePath
     kpath = keyPath req.certKey
@@ -103,14 +101,13 @@ signingRequest bin req =
 
 selfSign :: Track' (Binary "openssl") -> SelfSigned -> Op
 selfSign bin selfsigned =
-  op "certificate-self-sign" (deps [install, signingRequest bin selfsigned.selfSignedRequest]) $ \actions -> actions {
+  using bin openssl (SignCSR csr key pempath) $ \up ->
+  op "certificate-self-sign" (deps [signingRequest bin selfsigned.selfSignedRequest]) $ \actions -> actions {
       help = "self sign a certificate"
     , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath
     , up = up
     }
   where
-    (exe, up) = exec openssl (SignCSR csr key pempath)
-    install = run bin exe
 
     key :: FilePath
     key = keyPath selfsigned.selfSignedRequest.certKey

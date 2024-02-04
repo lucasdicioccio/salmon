@@ -24,15 +24,14 @@ data Repo = Repo { repoClonedir :: FilePath , repoLocalName :: Text, repoRemote 
   deriving (Eq, Ord, Show)
 
 repo :: Track' (Binary "git") -> Repo -> Op
-repo bin r =
-  op "git-repo" (deps [install, enclosingdir]) $ \actions -> actions {
-      help = "clones and force sync a repo"
-    , ref = dotRef $ "repo:" <> Text.pack clonedir
-    , up = up
-    }
+repo git r =
+  using git gitclone (Clone remote branch clonedir) $ \up -> 
+    op "git-repo" (deps [enclosingdir]) $ \actions -> actions {
+        help = "clones and force sync a repo"
+      , ref = dotRef $ "repo:" <> Text.pack clonedir
+      , up = up
+      }
   where
-    (exe, up) = exec gitclone (Clone remote branch clonedir)
-    install = run bin exe
 
     clonedir :: FilePath
     clonedir = r.repoClonedir </> Text.unpack r.repoLocalName
