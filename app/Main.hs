@@ -9,14 +9,19 @@ module Main where
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<))
+import Data.Functor.Contravariant ((>$<))
 import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
 import Options.Applicative
 
+import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
+import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2)
+import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow)
 
 import Salmon.Builtin.Nodes.Filesystem
+import qualified Salmon.Builtin.Nodes.Acme as Acme
 import qualified Salmon.Builtin.Nodes.Demo as Demo
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import qualified Salmon.Builtin.Nodes.Keys as Keys
@@ -26,6 +31,7 @@ import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Bash as Bash
+import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
 
@@ -66,7 +72,7 @@ tlsCertsExample =
     op "tls-certs" certsinfo id
   where
     domain = Certs.Domain "localhost.example.com"
-    key = Certs.Key Certs.RSA4096 "./tls/keys" "signing-key.rsa2048.pem"
+    key = Certs.Key Certs.RSA4096 "./tls/keys" "signing-key.rsa2048.key"
     csr = Certs.SigningRequest domain key "./tls/certs/localhost.example.com" "cert.csr"
     ssReq = Certs.SelfSigned "./tls/certs/localhost.example.com/cert.pem" csr
     openssl = Debian.openssl
@@ -74,6 +80,14 @@ tlsCertsExample =
       [ Certs.tlsKey openssl key
       , Certs.signingRequest openssl csr
       , Certs.selfSign openssl ssReq
+      ]
+
+jwkKeysExample =
+    op "jwk-keys" keys id
+  where
+    keys = deps
+      [ Keys.jwkKey (Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "staging-key")
+      , Keys.jwkKey (Keys.JWKKeyPair Keys.RSA4096 "./jwk-keys" "prod-key")
       ]
 
 sshKeysExample =
@@ -98,15 +112,52 @@ gitRepoExample =
 packagesExample =
    Debian.deb (Debian.Package "vlc")
 
-demoOps n =
+acmeExample =
+    op "acme" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) id
+  where
+    chall :: Track' Acme.Challenger
+    chall = adapt >$< f1 >*< f2
+
+    adapt c = (Acme.challengerRequest c, Acme.challengerAccount c)
+    f1 :: Track' Certs.SigningRequest
+    f1 = Track $ Certs.signingRequest Debian.openssl
+    f2 :: Track' Acme.Account
+    f2 = Track $ Acme.acmeAccount
+
+    challenger = Acme.Challenger acc csr pemdir pemname
+    csr = Certs.SigningRequest domain domainKey csrpath "cert.csr"
+    acc = Acme.Account staging_letsencryptv2 accountKey mail
+    mail = Acme.Email "salmon+001@dicioccio.fr"
+    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "staging-key"
+    domain :: Certs.Domain
+    domain = Certs.Domain "salmon.dicioccio.fr"
+    pemdir = "./acme/certs"
+    pemname = mconcat [ "acme", "staging", Certs.getDomain domain, ".pem"]
+    csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
+    domainKey = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
+
+
+httpPostExample manager =
+    op "http" (deps $ catMaybes [ get1 ]) id
+  where
+    get1 :: Maybe Op
+    get1 = Web.call ignoreTrack <$> call1
+
+    call1 :: Maybe Web.Call
+    call1 = Web.Call manager <$> parseUrlThrow "http://dicioccio.fr/index.html"
+
+demoOps httpManager n =
   [ Demo.collatz [x | x <- [1 .. n], odd x]
   , sshKeysExample
+  , jwkKeysExample
   , tlsCertsExample
   , gitRepoExample
   , packagesExample
   , filesystemExample
   , bashHelloExample
   , rsyncCopyExample
+  , acmeExample
+  , httpPostExample httpManager
   ]
 
 -------------------------------------------------------------------------------
@@ -148,11 +199,11 @@ data Spec
 instance FromJSON Spec
 instance ToJSON Spec
 
-program :: Track' Spec
-program = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
+program :: Manager -> Track' Spec
+program httpManager = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (DemoSpec k) =  demoOps k
+   specOp (DemoSpec k) =  demoOps httpManager k
    specOp (BuildSpec k) =  buildOps k
   
    optimizedDeps :: Op -> Op
@@ -188,4 +239,5 @@ main = do
   let desc = fullDesc <> progDesc "A Salmon program." <> header "demonstration examples"
   let opts = info parseRecord desc
   cmd <- execParser opts
-  CLI.execCommand configure program cmd
+  manager <- newManager defaultManagerSettings
+  CLI.execCommand configure (program manager) cmd

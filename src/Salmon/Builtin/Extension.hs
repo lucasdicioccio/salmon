@@ -70,6 +70,9 @@ realNoop :: Op
 realNoop =
   OpGraph nodeps Actionless
 
+ignoreTrack :: Track' a
+ignoreTrack = Track (const realNoop)
+
 noop :: ShortHand -> Op
 noop short =
   OpGraph

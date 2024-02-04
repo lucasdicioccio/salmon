@@ -41,6 +41,9 @@ data SigningRequest
 csrPath :: SigningRequest -> FilePath
 csrPath req = req.certCSRDir </> Text.unpack req.certCSRName
 
+derPath :: SigningRequest -> FilePath
+derPath req = csrPath req <> ".der"
+
 data SelfSigned
   = SelfSigned
   { selfSignedPEMPath :: FilePath
@@ -87,14 +90,14 @@ signingRequest bin req =
     csrpath :: FilePath
     csrpath = csrPath req
 
+    derpath :: FilePath
+    derpath = derPath req
+
     enclosingdir :: Op
     enclosingdir = dir (Directory csrdir)
 
     csrdir :: FilePath
     csrdir = req.certCSRDir
-
-    derpath :: FilePath
-    derpath = csrpath <> ".der"
 
     dom :: Domain
     dom = req.certDomain

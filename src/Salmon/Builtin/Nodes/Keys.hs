@@ -6,6 +6,9 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Binary
 
+import qualified Crypto.JOSE.JWK as JWK
+import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson (encode)
 import Control.Monad (void)
 import Data.Text (Text)
 import Data.Functor.Contravariant (contramap)
@@ -100,3 +103,41 @@ newtype SignKey = SignKey (SSHCertificateAuthority, KeyIdentifier, FilePath)
 sshsign :: Command "ssh-keygen" SignKey
 sshsign = Command $ \(SignKey(ca,kid,certifiedPath)) ->
   proc "ssh-keygen" ["-s", privateKeyPath ca.sshcaKey, "-I", Text.unpack kid.getIdentifier, certifiedPath ]
+
+
+data JWKKeyPair = JWKKeyPair { jwkKeyType :: KeyType , jwkKeyDir :: FilePath, jwkKeyName :: Text }
+  deriving (Eq, Ord, Show)
+
+jwkfilepath :: JWKKeyPair -> FilePath
+jwkfilepath key =
+  key.jwkKeyDir </> Text.unpack key.jwkKeyName
+
+
+jwkKey :: JWKKeyPair -> Op
+jwkKey key =
+  op "jwk-key" (deps [enclosingdir]) $ \actions -> actions {
+      help = "generate a jwk-key"
+    , notes = [ "keeps keys around" ]
+    , ref = dotRef $ "jwk:" <> Text.pack jwkdir <> key.jwkKeyName
+    , up = up
+    }
+  where
+    up :: IO ()
+    up =  jwk >>= LBS.writeFile (jwkfilepath key) . encode
+
+    jwk :: IO JWK.JWK
+    jwk = case key.jwkKeyType of
+             RSA2048 -> JWK.genJWK (JWK.RSAGenParam (2048 `div` 8))
+             RSA4096 -> JWK.genJWK (JWK.RSAGenParam (4096 `div` 8))
+             ED25519 -> JWK.genJWK (JWK.OKPGenParam JWK.Ed25519)
+
+    filename :: FilePath
+    filename = Text.unpack key.jwkKeyName
+
+    jwkdir :: FilePath
+    jwkdir = key.jwkKeyDir
+
+    enclosingdir :: Op
+    enclosingdir = dir (Directory jwkdir)
+
+
