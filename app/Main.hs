@@ -24,6 +24,7 @@ import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Bash as Bash
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
@@ -47,6 +48,18 @@ bashHelloExample =
     mkBashScript = Track $ \path -> filecontents $ FileContents path body
     body :: Text
     body = "echo hello >> hello-world.txt"
+
+rsyncCopyExample =
+    op "rsync-exampe" (deps [go]) id
+  where
+    go = Rsync.sendFile Debian.rsync payload remote remotepath
+    payload = Generated mkHelloWorld "./example-rsync/rsync-salmon-demo.txt"
+    mkHelloWorld :: Track' FilePath
+    mkHelloWorld = Track $ \path -> filecontents $ FileContents path body
+    body :: Text
+    body = "hello from a demo RSync copy started from a Salmon operation"
+    remote = Rsync.Remote "devop" "cheddar.local"
+    remotepath = "tmp/"
 
 
 tlsCertsExample =
@@ -93,6 +106,7 @@ demoOps n =
   , packagesExample
   , filesystemExample
   , bashHelloExample
+  , rsyncCopyExample
   ]
 
 -------------------------------------------------------------------------------

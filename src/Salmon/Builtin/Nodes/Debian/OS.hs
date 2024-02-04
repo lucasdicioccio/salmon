@@ -25,3 +25,6 @@ git = installWith "git-core"
 
 bash :: Installer "bash"
 bash = installWith "bash"
+
+rsync :: Installer "rsync"
+rsync = installWith "rsync"
