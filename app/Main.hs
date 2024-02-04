@@ -17,16 +17,16 @@ import qualified Data.Text as Text
 import Text.Read (readMaybe)
 
 import Salmon.Builtin.Nodes.Filesystem
-import Salmon.Builtin.Nodes.Demo as Demo
+import qualified Salmon.Builtin.Nodes.Demo as Demo
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
-import Salmon.Builtin.Nodes.Keys as Keys
-import Salmon.Builtin.Nodes.Certificates as Certs
-import Salmon.Builtin.Nodes.Git as Git
-import Salmon.Builtin.Nodes.Debian.Package as Debian
-import Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Keys as Keys
+import qualified Salmon.Builtin.Nodes.Certificates as Certs
+import qualified Salmon.Builtin.Nodes.Git as Git
+import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
+import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Bash as Bash
 import Salmon.Builtin.Extension
-import Salmon.Builtin.CommandLine
+import qualified Salmon.Builtin.CommandLine as CLI
 
 filesystemExample =
     op "fs-example" (deps [run mkFileContents configObj]) id
@@ -76,7 +76,7 @@ sshKeysExample =
     key1 = Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/keys" "node2"
 
 gitRepoExample =
-    Git.repo git (Repo "./git-repos/" "ks" remote branch)
+    Git.repo git (Git.Repo "./git-repos/" "ks" remote branch)
   where
     remote = Git.Remote "git@github.com:kitchensink-tech/kitchensink.git"
     branch = Git.Branch "main"
@@ -121,7 +121,7 @@ cabalRepoBuild dirname target remote branch subdir =
       Cabal.install cabal (Cabal.Cabal repopath target) bindir
   where
     bindir = "/opt/builds/bin"
-    repo = Repo "./git-repos/" dirname (Git.Remote remote) (Git.Branch branch)
+    repo = Git.Repo "./git-repos/" dirname (Git.Remote remote) (Git.Branch branch)
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
     mkrepo = Track $ Git.repo git
@@ -174,4 +174,4 @@ main = do
   let desc = fullDesc <> progDesc "A Salmon program." <> header "demonstration examples"
   let opts = info parseRecord desc
   cmd <- execParser opts
-  execCommand configure program cmd
+  CLI.execCommand configure program cmd
