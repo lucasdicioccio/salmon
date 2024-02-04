@@ -37,15 +37,16 @@ library
                    , Salmon.Actions.Notify
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine
-                   , Salmon.Builtin.Nodes.Certificates
-                   , Salmon.Builtin.Nodes.Demo
-                   , Salmon.Builtin.Nodes.Keys
-                   , Salmon.Builtin.Nodes.Binary
-                   , Salmon.Builtin.Nodes.Filesystem
-                   , Salmon.Builtin.Nodes.Git
                    , Salmon.Builtin.Nodes.Bash
+                   , Salmon.Builtin.Nodes.Binary
+                   , Salmon.Builtin.Nodes.Cabal
+                   , Salmon.Builtin.Nodes.Certificates
                    , Salmon.Builtin.Nodes.Debian.Package
                    , Salmon.Builtin.Nodes.Debian.OS
+                   , Salmon.Builtin.Nodes.Demo
+                   , Salmon.Builtin.Nodes.Filesystem
+                   , Salmon.Builtin.Nodes.Git
+                   , Salmon.Builtin.Nodes.Keys
     build-depends:    base ^>=4.16.3.0
                     , containers
                     , free

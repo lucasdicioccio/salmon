@@ -23,18 +23,19 @@ newtype Branch = Branch { getBranch :: Text }
 data Repo = Repo { repoClonedir :: FilePath , repoLocalName :: Text, repoRemote :: Remote, repoBranch :: Branch }
   deriving (Eq, Ord, Show)
 
+clonedir :: Repo -> FilePath
+clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
+
+-- | Clones a repository.
 repo :: Track' (Binary "git") -> Repo -> Op
 repo git r =
-  using git gitclone (Clone remote branch clonedir) $ \up -> 
+  using git gitclone (Clone remote branch (clonedir r)) $ \up -> 
     op "git-repo" (deps [enclosingdir]) $ \actions -> actions {
         help = "clones and force sync a repo"
-      , ref = dotRef $ "repo:" <> Text.pack clonedir
+      , ref = dotRef $ "repo:" <> Text.pack (clonedir r)
       , up = up
       }
   where
-
-    clonedir :: FilePath
-    clonedir = r.repoClonedir </> Text.unpack r.repoLocalName
 
     cloneparentdir :: FilePath
     cloneparentdir = r.repoClonedir
@@ -61,3 +62,16 @@ gitclone = Command $ \(Clone repo branch localdir) ->
     , Text.unpack repo.getRemote
     , localdir
     ]
+
+-------------------------------------------------------------------------------
+
+-- | Provides a file from an existing repository.
+repofile :: Track' Repo -> Repo -> FilePath -> File a
+repofile t r sub =
+  let
+    path = clonedir r </> sub
+  in Generated mkPath path
+
+  where
+    mkPath :: Track' FilePath
+    mkPath = Track $ \_ -> run t r

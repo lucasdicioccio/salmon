@@ -18,6 +18,7 @@ import Text.Read (readMaybe)
 
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Demo as Demo
+import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import Salmon.Builtin.Nodes.Keys as Keys
 import Salmon.Builtin.Nodes.Certificates as Certs
 import Salmon.Builtin.Nodes.Git as Git
@@ -41,7 +42,7 @@ bashHelloExample =
     op "bash-hello" (deps [go]) id
   where
     go = Bash.run Debian.bash script
-    script = ToInstall mkBashScript "./example-script/hello.sh"
+    script = Generated mkBashScript "./example-script/hello.sh"
     mkBashScript :: Track' FilePath
     mkBashScript = Track $ \path -> filecontents $ FileContents path body
     body :: Text
@@ -90,40 +91,87 @@ demoOps n =
   , tlsCertsExample
   , gitRepoExample
   , packagesExample
+  , filesystemExample
   , bashHelloExample
   ]
 
 -------------------------------------------------------------------------------
+buildOps _ =
+  [ microDNS
+  , kitchensink
+  ]
+
+kitchensink = cabalRepoBuild
+  "ks"
+  "exe:kitchen-sink"
+  "https://github.com/kitchensink-tech/kitchensink.git"
+  "main"
+  "hs"
+
+microDNS = cabalRepoBuild
+  "microdns"
+  "microdns"
+  "https://github.com/lucasdicioccio/microdns.git"
+  "main"
+  ""
+
+-- builds a cabal repository
+cabalRepoBuild dirname target remote branch subdir = 
+    withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
+      Cabal.install cabal (Cabal.Cabal repopath target) bindir
+  where
+    bindir = "/opt/builds/bin"
+    repo = Repo "./git-repos/" dirname (Git.Remote remote) (Git.Branch branch)
+    git = Debian.git
+    cabal = (Track $ \_ -> noop "preinstalled")
+    mkrepo = Track $ Git.repo git
+
+-------------------------------------------------------------------------------
 data Spec
-  = Spec { specCollatz :: Int }
+  = DemoSpec { specCollatz :: Int }
+  | BuildSpec { specBuildName :: Text }
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
 
-demo :: Track' Spec
-demo = Track $ \(Spec cltz) -> optimizedDeps $ op "demo" (deps $ demoOps cltz) id
+program :: Track' Spec
+program = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
-optimizedDeps base =
-  let
-    pkgs = Debian.installAllDebsAtOnce base
-  in 
-  base `inject` pkgs
+   specOp :: Spec -> [Op]
+   specOp (DemoSpec k) =  demoOps k
+   specOp (BuildSpec k) =  buildOps k
+  
+   optimizedDeps :: Op -> Op
+   optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs
 
 -------------------------------------------------------------------------------
-data Seed = Seed { collatzNum :: Int }
+data Seed
+  = DemoSeed { seedCollatzNum :: Int }
+  | BuildSeed { seedBuildName :: Text }
 
 instance ParseRecord Seed where
   parseRecord =
-    Seed <$> option auto ( long "n-collatz" )
+      combo <**> helper
+    where
+      combo =
+        subparser $ mconcat
+          [ command "demo" (info demo (progDesc "runs demo"))
+          , command "build" (info builds (progDesc "runs builds"))
+          ]
+      demo = DemoSeed <$> option auto (long "n-collatz")
+      builds = BuildSeed <$> strArgument (Options.Applicative.help "build-name")
 
 configure :: Configure' Seed Spec
-configure = Configure $ \(Seed n) -> pure (Spec n)
+configure = Configure $ pure . go 
+  where
+    go :: Seed -> Spec
+    go (DemoSeed k) = DemoSpec k
+    go (BuildSeed k) = BuildSpec k
 
 -------------------------------------------------------------------------------
 main :: IO ()
 main = do
-  -- cmd <- getRecord "demo-program" :: IO (Command Seed)
   let desc = fullDesc <> progDesc "A Salmon program." <> header "demonstration examples"
   let opts = info parseRecord desc
   cmd <- execParser opts
-  execCommand configure demo cmd
+  execCommand configure program cmd
