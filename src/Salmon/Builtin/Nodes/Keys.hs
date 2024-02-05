@@ -37,7 +37,7 @@ publicKeyPath key = key.sshKeyDir </> Text.unpack key.sshKeyName <> ".pub"
 
 sshKey :: Track' (Binary "ssh-keygen") -> SSHKeyPair -> Op
 sshKey bin key =
-  using bin sshkeygen (Keygen (key.sshKeyType, filepath)) $ \up ->
+  withBinary bin sshkeygen (Keygen (key.sshKeyType, filepath)) $ \up ->
   op "ssh-key" (deps [enclosingdir]) $ \actions -> actions {
       help = "generate an ssh-key"
     , notes =
@@ -85,7 +85,7 @@ signKey
   -> SSHKeyPair
   -> Op
 signKey bin ca kid keyToSign =
-  using bin sshsign (SignKey (ca, kid,(privateKeyPath keyToSign))) $ \up ->
+  withBinary bin sshsign (SignKey (ca, kid,(privateKeyPath keyToSign))) $ \up ->
   op "ssh-ca-sign" (deps preds) $ \actions -> actions {
       help = "sign a SSH-key"
     , ref = dotRef $ "ssh-ca-sign:" <> Text.pack (show ca) <> kid.getIdentifier

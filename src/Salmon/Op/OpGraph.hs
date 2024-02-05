@@ -20,3 +20,7 @@ instance Show a => Show (OpGraph m a) where
 -- | injects a dependency so that op1 `inject` op2 is adding op2 as Connect-ed predecessor to op1
 inject :: Applicative m => OpGraph m a -> OpGraph m a -> OpGraph m a
 inject x y = x { predecessors = Connect <$> pure (Vertices [y]) <*> predecessors x }
+
+-- | injects a dependency so that op1 `inject` op2 is adding op2 as Connect-ed predecessor to op1
+overlaid :: Applicative m => OpGraph m a -> OpGraph m a -> OpGraph m a
+overlaid x y = x { predecessors = Overlay <$> pure (Vertices [y]) <*> predecessors x }

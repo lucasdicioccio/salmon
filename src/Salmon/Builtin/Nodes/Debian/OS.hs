@@ -28,3 +28,6 @@ bash = installWith "bash"
 
 rsync :: Installer "rsync"
 rsync = installWith "rsync"
+
+ssh :: Installer "ssh"
+ssh = installWith "ssh-client"

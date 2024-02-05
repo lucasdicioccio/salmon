@@ -8,13 +8,14 @@ module Main where
 -- to-re-export
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Configure (Configure(..))
-import Salmon.Op.Track (Track(..), (>*<))
+import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
 import Data.Functor.Contravariant ((>$<))
 import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
 import Options.Applicative
 
 import Control.Monad (void)
+import Control.Concurrent (threadDelay)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
@@ -22,6 +23,7 @@ import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2)
 import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow)
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Dancer (DanceStep(..), showProof, showToken, showKeyAuth)
+import System.FilePath ((</>), takeFileName)
 
 import qualified Salmon.Builtin.Nodes.Continuation as Continuation
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -34,6 +36,7 @@ import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Bash as Bash
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
@@ -68,9 +71,11 @@ rsyncCopyExample =
     mkHelloWorld = Track $ \path -> FS.filecontents $ FS.FileContents path body
     body :: Text
     body = "hello from a demo RSync copy started from a Salmon operation"
-    remote = Rsync.Remote "devop" "cheddar.local"
+    remote = cheddarRsync
     remotepath = "tmp/"
 
+cheddarRsync = Rsync.Remote "devop" "cheddar.local"
+cheddarSSH = Ssh.Remote "devop" "cheddar.local"
 
 tlsCertsExample =
     op "tls-certs" certsinfo id
@@ -138,7 +143,7 @@ acmeExample =
     mail = Acme.Email "salmon+001@dicioccio.fr"
     accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "staging-key"
     domain :: Certs.Domain
-    domain = Certs.Domain "salmon.dicioccio.fr"
+    domain = Certs.Domain "salmon.dyn.dicioccio.fr"
     pemdir = "./acme/certs"
     pemname = mconcat [ "acme", "staging", Certs.getDomain domain, ".pem"]
     csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
@@ -158,11 +163,18 @@ acmeExample =
               print ("key authorization (http01) is" :: Text, showKeyAuth keyAuth)
               print ("sha256 (dns01) is" :: Text, showProof sha)
               print ("press enter to continue" :: Text)
-              void getLine
+              -- void getLine
+
+              threadDelay 100000000
+              pure ()
             _ -> pure ()
 
-    dnsTodo = noop "todo:DNS"
+    dnsTodo = placeholder "DNS" "a dns server on which we can add known records" `inject` remoteDNS
 
+    remoteDNS :: Op
+    remoteDNS =
+      using (cabalBinUpload microDNS) $ \remotepath ->
+        Ssh.call Debian.ssh (Track $ const realNoop) cheddarSSH remotepath
 
 httpPostExample manager =
     op "http" (deps $ catMaybes [ get1 ]) id
@@ -189,13 +201,25 @@ demoOps httpManager n =
 
 -------------------------------------------------------------------------------
 buildOps _ =
+  fmap opGraph
   [ microDNS
   , kitchensink
   ]
 
+cabalBinUpload :: Tracked' FilePath -> Tracked' FilePath
+cabalBinUpload mkbin =
+    mkbin `bindTracked` go
+  where
+    go localpath =
+       Tracked (Track $ const $ upload localpath) (remotePath localpath)
+    upload local = Rsync.sendFile Debian.rsync (FS.PreExisting local) cheddarRsync distpath
+    distpath = "tmp/"
+    remotePath local = distpath  </> takeFileName local
+
 kitchensink = cabalRepoBuild
   "ks"
   "exe:kitchen-sink"
+  "kitchen-sink"
   "https://github.com/kitchensink-tech/kitchensink.git"
   "main"
   "hs"
@@ -203,16 +227,19 @@ kitchensink = cabalRepoBuild
 microDNS = cabalRepoBuild
   "microdns"
   "microdns"
+  "microdns"
   "https://github.com/lucasdicioccio/microdns.git"
   "main"
   ""
 
 -- builds a cabal repository
-cabalRepoBuild dirname target remote branch subdir = 
-    FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
-      Cabal.install cabal (Cabal.Cabal repopath target) bindir
+cabalRepoBuild dirname target binname remote branch subdir = 
+    Tracked (Track $ const op) binpath
   where
+    op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
+           Cabal.install cabal (Cabal.Cabal repopath target) bindir
     bindir = "/opt/builds/bin"
+    binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname (Git.Remote remote) (Git.Branch branch)
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
@@ -231,7 +258,7 @@ program httpManager = Track $ \spec -> optimizedDeps $ op "program" (deps $ spec
   where
    specOp :: Spec -> [Op]
    specOp (DemoSpec k) =  demoOps httpManager k
-   specOp (BuildSpec k) =  buildOps k
+   specOp (BuildSpec k) = buildOps k
   
    optimizedDeps :: Op -> Op
    optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs

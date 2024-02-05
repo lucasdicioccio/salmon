@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -5,6 +6,8 @@
 module Salmon.Actions.Dot
   ( printDigraph
   , printCograph
+  , PlaceHolder(..)
+  , DotGraphExt
   ) where
 
 import GHC.Records
@@ -14,6 +17,7 @@ import Control.Comonad.Cofree (Cofree(..), hoistCofree)
 import qualified Data.List as List
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
+import Data.Dynamic (Dynamic, fromDynamic)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 
@@ -24,9 +28,30 @@ import Salmon.Op.Eval
 import Salmon.Op.Actions
 import Salmon.Op.Ref
 
-dotNode :: Node -> Text
-dotNode (Just (ref,name)) = mconcat [ unRef ref, "[label=\"", dotEscape name, "\"];" ]
-dotNode _ = ""
+type Node ext = Maybe (Ref, ShortHand, ext)
+
+type RawEdge = (Ref, Ref)
+
+data Edge = Edge { connectType :: ConnectType, rawEdge :: RawEdge }
+data ConnectType = C | O
+
+-- | Slightly over-constrained constraint for graph extentions we want to represent.
+type DotGraphExt ext = (HasField "dynamics" ext [Dynamic], HasField "ref" ext Ref)
+
+data PlaceHolder = PlaceHolder Text
+
+hasPlaceholder
+  :: DotGraphExt ext
+  => ext
+  -> Bool
+hasPlaceholder e =
+  not $ null $ Maybe.catMaybes $ map (fromDynamic @PlaceHolder) e.dynamics
+
+dotNode :: DotGraphExt ext => Node ext -> Text
+dotNode Nothing = ""
+dotNode (Just (ref,name,ext))
+  | hasPlaceholder ext = mconcat [ unRef ref, "[color=grey;label=\"", dotEscape name, "\"];" ]
+  | otherwise = mconcat [ unRef ref, "[label=\"", dotEscape name, "\"];" ]
 
 dotEdge :: Edge -> Text
 dotEdge e =
@@ -38,26 +63,19 @@ dotEdge e =
 dotEscape :: Text -> Text
 dotEscape = id
 
-type Node = Maybe (Ref, ShortHand)
-
-sameNode :: Node -> Node -> Bool
+sameNode :: Node a -> Node a -> Bool
 sameNode n1 n2 = Maybe.fromMaybe False $ do
-  (l,_) <- n1
-  (r,_) <- n2
+  (l,_,_) <- n1
+  (r,_,_) <- n2
   pure $ l == r
-
-type RawEdge = (Ref, Ref)
 
 sameEdge :: Edge -> Edge -> Bool
 sameEdge e1 e2 = e1.rawEdge == e2.rawEdge
 
-data ConnectType = C | O
-data Edge = Edge { connectType :: ConnectType, rawEdge :: RawEdge }
+-------------------------------------------------------------------------------
 
 evalEdges
-  :: forall m ext.
-     ( HasField "ref" ext Ref
-     )
+  :: forall m ext. (DotGraphExt ext)
   => Cofree Graph (OpGraph m (Actions ext))
   -> [Edge]
 evalEdges = go Nothing . fmap node
@@ -84,10 +102,31 @@ evalEdges = go Nothing . fmap node
          in
          set1 <> set2 <> set3
 
+-------------------------------------------------------------------------------
+
+evalNodes
+  :: (DotGraphExt ext)
+  => Cofree Graph (OpGraph m (Actions ext))
+  -> Cofree Graph (Node ext)
+evalNodes = fmap (\x -> mkNode x.node)
+
+mkNode
+  :: (DotGraphExt ext)
+  => Actions ext
+  -> Node ext
+mkNode x =
+  case x of
+    Actionless ->
+      Nothing
+    (Actions act) ->
+      Just (act.extension.ref, act.shorthand, act.extension)
+
+-------------------------------------------------------------------------------
+
 printDigraph
   :: forall m ext.
      ( Monad m
-     , HasField "ref" ext Ref
+     , DotGraphExt ext
      )
   => (forall a. m a -> IO a)
   -> OpGraph m (Actions ext)
@@ -98,26 +137,15 @@ printDigraph nat graph = do
 printCograph
   :: forall m ext.
      ( Monad m
-     , HasField "ref" ext Ref
+     , DotGraphExt ext
      )
   => Cofree Graph (OpGraph m (Actions ext))
   -> IO ()
 printCograph gr1 = do
-    let nodes = fmap dotNode $ List.nubBy sameNode $ toList $ dirNodes gr1
+    let nodes = fmap dotNode $ List.nubBy sameNode $ toList $ evalNodes gr1
     let edges = fmap dotEdge $ List.nubBy sameEdge $ evalEdges gr1 
     putStrLn "digraph {"
     putStrLn "rankdir=LR;"
     traverse_ Text.putStrLn $ nodes
     traverse_ Text.putStrLn $ edges
     putStrLn "}"
-  where
-    dirNodes :: Cofree Graph (OpGraph m (Actions ext)) -> Cofree Graph Node
-    dirNodes = fmap (\x -> mkNode x.node)
-
-    mkNode :: Actions ext -> Node
-    mkNode x =
-      case x of
-        Actionless ->
-          Nothing
-        (Actions act) ->
-          Just ((extension act).ref, act.shorthand)

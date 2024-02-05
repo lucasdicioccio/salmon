@@ -28,7 +28,7 @@ upTree nat graph = do
     upnode x =
       case x of
         Actionless -> pure ()
-        (Actions act) -> (extension act).up
+        (Actions act) -> (print $ shorthand act) >> (extension act).up
 
 downTree
   :: ( Monad m

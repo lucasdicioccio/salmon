@@ -1,4 +1,3 @@
-
 -- A contravariant functor to track dependencies in a "serializer" style:
 -- you defined basic nodes and then compose them.
 module Salmon.Op.Track where
@@ -29,7 +28,6 @@ instance (Applicative m, Monoid n) => Divisible (Track m n) where
     in
     OpGraph (Vertices <$> pure [x,y]) mempty
 
-
 -- | A function to inject a dependency form a tracer when generating an OpGraph.
 -- At first it looks like the we could just directly apply.
 tracking
@@ -42,3 +40,33 @@ tracking
 tracking t f arg use =
   let (b,z) = f arg
   in use b `inject` run t z
+
+
+data Tracked m n a
+  = Tracked
+  { track :: Track m n a
+  , obj   :: a
+  }
+
+opGraph :: Tracked m n a -> OpGraph m n
+opGraph t = run t.track t.obj
+
+-- | a quasi-functor which records all dependencies at the point of mapping
+mapTracked :: (a -> b) -> Tracked m n a -> Tracked m n b
+mapTracked f t = Tracked (Track $ const $ opGraph t) (f t.obj)
+
+-- | a quasi-applicative which records all combined dependencies at the point of mapping
+apTracked :: (Applicative m) => Tracked m n (a -> b) -> Tracked m n a -> Tracked m n b
+apTracked tf ta = Tracked (Track $ const $ opGraph tf `overlaid` opGraph ta) (tf.obj ta.obj)
+
+-- | a quasi-monad which records previous dependencies as predecessors before binding
+bindTracked :: (Applicative m) => Tracked m n a -> (a -> Tracked m n b) -> Tracked m n b
+bindTracked ta f = Tracked (Track $ const $ opGraph tb `inject` opGraph ta) b
+  where
+    tb@(Tracked _ b) = f ta.obj
+
+using :: (Applicative m) => Tracked m n a -> (a -> OpGraph m n) -> OpGraph m n
+using tracked use =
+    tracking tracked.track dup tracked.obj use
+  where
+    dup a = (a,a)

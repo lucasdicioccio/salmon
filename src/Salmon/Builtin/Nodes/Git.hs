@@ -29,7 +29,7 @@ clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
 -- | Clones a repository.
 repo :: Track' (Binary "git") -> Repo -> Op
 repo git r =
-  using git gitclone (Clone remote branch (clonedir r)) $ \up -> 
+  withBinary git gitclone (Clone remote branch (clonedir r)) $ \up -> 
     op "git-repo" (deps [enclosingdir]) $ \actions -> actions {
         help = "clones and force sync a repo"
       , ref = dotRef $ "repo:" <> Text.pack (clonedir r)

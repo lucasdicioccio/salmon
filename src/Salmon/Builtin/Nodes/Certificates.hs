@@ -53,7 +53,7 @@ data SelfSigned
 
 tlsKey :: Track' (Binary "openssl") -> Key -> Op
 tlsKey bin key =
-  using bin openssl (GenTLSKey key.keyType path) $ \up -> do
+  withBinary bin openssl (GenTLSKey key.keyType path) $ \up -> do
   op "certificate-key" (deps [enclosingdir]) $ \actions -> actions {
       help = "generate a certificate-key"
     , notes =
@@ -74,8 +74,8 @@ keyPath key = key.keyDir </> Text.unpack key.keyName
 
 signingRequest :: Track' (Binary "openssl") -> SigningRequest -> Op
 signingRequest bin req =
-  using bin openssl (GenCSR kpath csrpath dom) $ \makeCSR ->
-  using bin openssl (ConvertCSR2DER csrpath derpath) $ \convert ->
+  withBinary bin openssl (GenCSR kpath csrpath dom) $ \makeCSR ->
+  withBinary bin openssl (ConvertCSR2DER csrpath derpath) $ \convert ->
 
   op "certificate-csr" (deps [enclosingdir, tlsKey bin req.certKey]) $ \actions -> actions {
       help = "generate a certificate signing request"
@@ -104,7 +104,7 @@ signingRequest bin req =
 
 selfSign :: Track' (Binary "openssl") -> SelfSigned -> Op
 selfSign bin selfsigned =
-  using bin openssl (SignCSR csr key pempath) $ \up ->
+  withBinary bin openssl (SignCSR csr key pempath) $ \up ->
   op "certificate-self-sign" (deps [signingRequest bin selfsigned.selfSignedRequest]) $ \actions -> actions {
       help = "self sign a certificate"
     , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath

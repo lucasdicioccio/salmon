@@ -19,9 +19,9 @@ data Remote = Remote { remoteUser :: Text , remoteHost :: Text }
 sendFile :: Track' (Binary "rsync") -> File "source" -> Remote -> FilePath -> Op
 sendFile rsync script remote remotepath =
   withFile script $ \filepath ->
-  using rsync rsyncRun (SendFile filepath remote  remotepath) $ \up -> 
-    op "scp:sendfile" nodeps $ \actions -> actions {
-        help = "copies over rsync"
+  withBinary rsync rsyncRun (SendFile filepath remote  remotepath) $ \up -> 
+    op "rsync:sendfile" nodeps $ \actions -> actions {
+        help = "copies " <> Text.pack filepath <> " to " <> Text.pack remotepath <> " over rsync"
       , ref = dotRef $ "rsync-copy:" <> Text.pack (show (filepath, remote))
       , up = up
       }
@@ -31,7 +31,8 @@ data Run = SendFile FilePath Remote FilePath
 rsyncRun :: Command "rsync" Run
 rsyncRun = Command $ \(SendFile src rem dst) ->
   proc "rsync"
-    [ src
+    [ "--copy-links"
+    , src
     , Text.unpack (loginAtHost rem) <> ":" <> dst
     ]
 

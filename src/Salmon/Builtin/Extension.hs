@@ -8,7 +8,7 @@ import Control.Comonad.Cofree
 import Data.Maybe (catMaybes)
 import Data.Foldable (toList)
 import Data.Text (Text)
-import Data.Dynamic (Dynamic, Typeable, fromDynamic)
+import Data.Dynamic (Dynamic, Typeable, fromDynamic, toDyn)
 
 import Salmon.Op.Ref (Ref, dotRef)
 import Salmon.Op.Graph
@@ -17,6 +17,7 @@ import Salmon.Op.Eval
 import Salmon.Op.Actions
 import Salmon.Op.Track
 import Salmon.Op.Configure
+import Salmon.Actions.Dot (PlaceHolder(..))
 
 -- | Instanciate actions.
 type Actions' = Actions Extension
@@ -54,6 +55,8 @@ instance Semigroup Extension where
 type Op = OpGraph Identity Actions'
 
 type Track' a = Track Identity Actions' a
+
+type Tracked' a = Tracked Identity Actions' a
 
 type Configure' seed a = Configure Identity seed a
 
@@ -112,6 +115,12 @@ op short pred f =
   let baseOp = (noop short) { predecessors = pred }
       baseNode = node baseOp
   in baseOp { node = fmap f baseNode }
+
+placeholder :: ShortHand -> Text -> Op
+placeholder short t = op short nodeps $ \actions -> actions {
+    dynamics = [ toDyn $ PlaceHolder t ]
+  }
+
 
 -- | Function to retrieve the dynamic objects of a given type.
 getDynamics :: Typeable a => Op -> [a]

@@ -1,7 +1,7 @@
 module Salmon.Builtin.Nodes.Binary
   ( Binary
   , Command(..)
-  , using
+  , withBinary
   , untrackedExec
   ) where
 
@@ -31,8 +31,8 @@ data Command (wellKnownName :: Symbol) arg =
 
 -- | Captures the property that, to use a binary one needs to inherit the
 -- dependencies from the binary provider.
-using :: Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
-using t cmd arg consumeIO =
+withBinary :: Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
+withBinary t cmd arg consumeIO =
   let mk a = (untrackedExec cmd a, Binary)
   in
   tracking t mk arg consumeIO

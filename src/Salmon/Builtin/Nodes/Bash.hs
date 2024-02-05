@@ -16,7 +16,7 @@ import System.Process.ByteString (readCreateProcessWithExitCode)
 run :: Track' (Binary "bash") -> File "script" -> Op
 run bash script =
   withFile script $ \filepath ->
-  using bash bashrun (Run filepath) $ \up -> 
+  withBinary bash bashrun (Run filepath) $ \up -> 
     op "bash-run" nodeps $ \actions -> actions {
         help = "runs a bash command"
       , ref = dotRef $ "bash-run:" <> Text.pack filepath
