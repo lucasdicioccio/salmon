@@ -14,13 +14,17 @@ import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
 import Options.Applicative
 
+import Control.Monad (void)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
 import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2)
 import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow)
+import Acme.NotAJoke.Api.Certificate (storeCert)
+import Acme.NotAJoke.Dancer (DanceStep(..), showProof, showToken, showKeyAuth)
 
-import Salmon.Builtin.Nodes.Filesystem
+import qualified Salmon.Builtin.Nodes.Continuation as Continuation
+import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Acme as Acme
 import qualified Salmon.Builtin.Nodes.Demo as Demo
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
@@ -38,20 +42,20 @@ import qualified Salmon.Builtin.CommandLine as CLI
 filesystemExample =
     op "fs-example" (deps [run mkFileContents configObj]) id
   where
-    mkFileContents :: Track' (FileContents Text, Directory)
-    mkFileContents = Track filecontents >*< Track dir
+    mkFileContents :: Track' (FS.FileContents Text, FS.Directory)
+    mkFileContents = Track FS.filecontents >*< Track FS.dir
 
     configObj = (contents,directory)
-    contents = FileContents "./example-dir/file1" "hello world\n"
-    directory = Directory "./example-dir"
+    contents = FS.FileContents "./example-dir/file1" "hello world\n"
+    directory = FS.Directory "./example-dir"
 
 bashHelloExample =
     op "bash-hello" (deps [go]) id
   where
     go = Bash.run Debian.bash script
-    script = Generated mkBashScript "./example-script/hello.sh"
+    script = FS.Generated mkBashScript "./example-script/hello.sh"
     mkBashScript :: Track' FilePath
-    mkBashScript = Track $ \path -> filecontents $ FileContents path body
+    mkBashScript = Track $ \path -> FS.filecontents $ FS.FileContents path body
     body :: Text
     body = "echo hello >> hello-world.txt"
 
@@ -59,9 +63,9 @@ rsyncCopyExample =
     op "rsync-exampe" (deps [go]) id
   where
     go = Rsync.sendFile Debian.rsync payload remote remotepath
-    payload = Generated mkHelloWorld "./example-rsync/rsync-salmon-demo.txt"
+    payload = FS.Generated mkHelloWorld "./example-rsync/rsync-salmon-demo.txt"
     mkHelloWorld :: Track' FilePath
-    mkHelloWorld = Track $ \path -> filecontents $ FileContents path body
+    mkHelloWorld = Track $ \path -> FS.filecontents $ FS.FileContents path body
     body :: Text
     body = "hello from a demo RSync copy started from a Salmon operation"
     remote = Rsync.Remote "devop" "cheddar.local"
@@ -110,7 +114,11 @@ gitRepoExample =
     git = Debian.git
 
 packagesExample =
-   Debian.deb (Debian.Package "vlc")
+    op "packages" (deps [pkg1, pkg2, pkg3]) id
+  where
+   pkg1 = Debian.deb (Debian.Package "vlc")
+   pkg2 = Debian.deb (Debian.Package "gimp")
+   pkg3 = Debian.deb (Debian.Package "vim")
 
 acmeExample =
     op "acme" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) id
@@ -124,7 +132,7 @@ acmeExample =
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 
-    challenger = Acme.Challenger acc csr pemdir pemname
+    challenger = Acme.Challenger acc csr pemdir pemname runAcmeDance
     csr = Certs.SigningRequest domain domainKey csrpath "cert.csr"
     acc = Acme.Account staging_letsencryptv2 accountKey mail
     mail = Acme.Email "salmon+001@dicioccio.fr"
@@ -135,6 +143,25 @@ acmeExample =
     pemname = mconcat [ "acme", "staging", Certs.getDomain domain, ".pem"]
     csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
     domainKey = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
+
+    runAcmeDance :: Continuation.Continue a (FilePath -> DanceStep -> IO ())
+    runAcmeDance = Continuation.Continue (Track $ const dnsTodo) handle
+      where
+        handle :: FilePath -> DanceStep -> IO ()
+        handle pemPath step =
+          case step of
+            Done _ cert -> do
+              print ("storing cert at", pemPath)
+              storeCert pemPath cert
+            Validation (tok,keyAuth,sha) -> do
+              print ("token (http01) is" :: Text, showToken tok)
+              print ("key authorization (http01) is" :: Text, showKeyAuth keyAuth)
+              print ("sha256 (dns01) is" :: Text, showProof sha)
+              print ("press enter to continue" :: Text)
+              void getLine
+            _ -> pure ()
+
+    dnsTodo = noop "todo:DNS"
 
 
 httpPostExample manager =
@@ -182,7 +209,7 @@ microDNS = cabalRepoBuild
 
 -- builds a cabal repository
 cabalRepoBuild dirname target remote branch subdir = 
-    withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
+    FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
       Cabal.install cabal (Cabal.Cabal repopath target) bindir
   where
     bindir = "/opt/builds/bin"
