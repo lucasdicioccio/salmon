@@ -13,6 +13,7 @@ import Data.Functor.Contravariant ((>$<))
 import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
 import Options.Applicative
+import System.Posix.Files (readSymbolicLink)
 
 import Control.Monad (void)
 import Control.Concurrent (threadDelay)
@@ -63,16 +64,23 @@ bashHelloExample =
     body = "echo hello >> hello-world.txt"
 
 rsyncCopyExample =
-    op "rsync-exampe" (deps [go]) id
+    op "rsync-exampe" (deps [uploadExample]) id
   where
-    go = Rsync.sendFile Debian.rsync payload remote remotepath
+    uploadExample = Rsync.sendFile Debian.rsync payload remote remotedir
     payload = FS.Generated mkHelloWorld "./example-rsync/rsync-salmon-demo.txt"
     mkHelloWorld :: Track' FilePath
     mkHelloWorld = Track $ \path -> FS.filecontents $ FS.FileContents path body
     body :: Text
     body = "hello from a demo RSync copy started from a Salmon operation"
     remote = cheddarRsync
-    remotepath = "tmp/"
+    remotedir = "tmp/"
+
+uploadSelf path =
+    op "copy-onself" (deps [copy]) id
+  where
+    remote = cheddarRsync
+    remotedir = "tmp/"
+    copy = Rsync.sendFile Debian.rsync (FS.PreExisting path) remote remotedir
 
 cheddarRsync = Rsync.Remote "devop" "cheddar.local"
 cheddarSSH = Ssh.Remote "devop" "cheddar.local"
@@ -185,7 +193,7 @@ httpPostExample manager =
     call1 :: Maybe Web.Call
     call1 = Web.Call manager <$> parseUrlThrow "http://dicioccio.fr/index.html"
 
-demoOps httpManager n =
+demoOps selfpath httpManager n =
   [ Demo.collatz [x | x <- [1 .. n], odd x]
   , sshKeysExample
   , jwkKeysExample
@@ -195,7 +203,8 @@ demoOps httpManager n =
   , filesystemExample
   , bashHelloExample
   , rsyncCopyExample
-  , acmeExample
+  , uploadSelf selfpath
+  -- , acmeExample
   , httpPostExample httpManager
   ]
 
@@ -253,11 +262,11 @@ data Spec
 instance FromJSON Spec
 instance ToJSON Spec
 
-program :: Manager -> Track' Spec
-program httpManager = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
+program :: FilePath -> Manager -> Track' Spec
+program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (DemoSpec k) =  demoOps httpManager k
+   specOp (DemoSpec k) =  demoOps selfpath httpManager k
    specOp (BuildSpec k) = buildOps k
   
    optimizedDeps :: Op -> Op
@@ -294,4 +303,5 @@ main = do
   let opts = info parseRecord desc
   cmd <- execParser opts
   manager <- newManager defaultManagerSettings
-  CLI.execCommand configure (program manager) cmd
+  selfpath <- readSymbolicLink "/proc/self/exe"
+  CLI.execCommand configure (program selfpath manager) cmd

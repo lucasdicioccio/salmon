@@ -21,7 +21,7 @@ call :: Track' (Binary "ssh") -> Track' Remote -> Remote -> FilePath -> Op
 call ssh tRemote remote remotepath =
   withBinary ssh sshRun (Call remotepath remote) $ \up -> 
     op "ssh:call" (deps [run tRemote remote]) $ \actions -> actions {
-        help = "calls " <>  Text.pack remotepath <> " on " <> ""
+        help = "calls " <>  Text.pack remotepath <> " on " <> remote.remoteHost
       , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote))
       , up = up
       }

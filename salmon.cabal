@@ -104,5 +104,6 @@ executable salmon-exe
                     , http-client
                     , http-client-tls
                     , filepath
+                    , unix
     hs-source-dirs:   app
     default-language: Haskell2010
