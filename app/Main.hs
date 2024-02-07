@@ -38,6 +38,7 @@ import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
+import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Bash as Bash
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
@@ -75,15 +76,9 @@ rsyncCopyExample =
     remote = cheddarRsync
     remotedir = "tmp/"
 
-uploadSelf path =
-    op "copy-onself" (deps [copy]) id
-  where
-    remote = cheddarRsync
-    remotedir = "tmp/"
-    copy = Rsync.sendFile Debian.rsync (FS.PreExisting path) remote remotedir
-
-cheddarRsync = Rsync.Remote "devop" "cheddar.local"
-cheddarSSH = Ssh.Remote "devop" "cheddar.local"
+cheddarSelf = Self.Remote "salmon" "cheddar.local"
+cheddarRsync = Rsync.Remote "salmon" "cheddar.local"
+cheddarSSH = Ssh.Remote "salmon" "cheddar.local"
 
 tlsCertsExample =
     op "tls-certs" certsinfo id
@@ -177,12 +172,46 @@ acmeExample =
               pure ()
             _ -> pure ()
 
-    dnsTodo = placeholder "DNS" "a dns server on which we can add known records" `inject` remoteDNS
+    dnsTodo = placeholder "DNS" "a dns server on which we can add known records" `inject` dnsService
 
-    remoteDNS :: Op
-    remoteDNS =
-      using (cabalBinUpload microDNS) $ \remotepath ->
-        Ssh.call Debian.ssh (Track $ const realNoop) cheddarSSH remotepath
+dnsService :: Op
+dnsService =
+  op "dns-service" (deps [remoteDNS, remoteDNSFile, remoteDNSSecretFile]) id
+
+remoteDNS :: Op
+remoteDNS =
+  using (cabalBinUpload microDNS) $ \remotepath ->
+    Ssh.call Debian.ssh (Track $ const realNoop) cheddarSSH remotepath
+
+remoteDNSFile :: Op
+remoteDNSFile =
+  Rsync.sendFile Debian.rsync file cheddarRsync distpath
+  where
+    distpath = "tmp/microdns.zone"
+    file = FS.Generated (Track dnsZoneFile) "tmp/microdns.zone"
+
+remoteDNSSecretFile :: Op
+remoteDNSSecretFile =
+  Rsync.sendFile Debian.rsync file cheddarRsync distpath
+  where
+    distpath = "tmp/microdns.secret"
+    file = FS.Generated (Track dnsSecretFile) "tmp/microdns.secret"
+
+dnsZoneFile :: FilePath -> Op
+dnsZoneFile path =
+    FS.filecontents (FS.FileContents path contents)
+  where
+    contents =
+      Text.unlines
+        [ "CAA dicioccio.fr. \"issue\" \"letsencrypt\""
+        ]
+
+dnsSecretFile :: FilePath -> Op
+dnsSecretFile path =
+    FS.filecontents (FS.FileContents path contents)
+  where
+    contents :: Text
+    contents = "unsafe-1234!@#@!3eqe"
 
 httpPostExample manager =
     op "http" (deps $ catMaybes [ get1 ]) id
@@ -203,9 +232,10 @@ demoOps selfpath httpManager n =
   , filesystemExample
   , bashHelloExample
   , rsyncCopyExample
-  , uploadSelf selfpath
+  , opGraph $ Self.uploadSelf "tmp" cheddarSelf selfpath
   -- , acmeExample
   , httpPostExample httpManager
+  , dnsService
   ]
 
 -------------------------------------------------------------------------------

@@ -50,6 +50,7 @@ library
                    , Salmon.Builtin.Nodes.Git
                    , Salmon.Builtin.Nodes.Keys
                    , Salmon.Builtin.Nodes.Rsync
+                   , Salmon.Builtin.Nodes.Self
                    , Salmon.Builtin.Nodes.Ssh
                    , Salmon.Builtin.Nodes.Web
     build-depends:    base ^>=4.16.3.0
