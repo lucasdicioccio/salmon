@@ -13,7 +13,6 @@ import Data.Functor.Contravariant ((>$<))
 import Data.Aeson (FromJSON, ToJSON)
 import Options.Generic
 import Options.Applicative
-import System.Posix.Files (readSymbolicLink)
 
 import Control.Monad (void)
 import Control.Concurrent (threadDelay)
@@ -44,14 +43,14 @@ import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
 
-filesystemExample =
+filesystemExample hello =
     op "fs-example" (deps [run mkFileContents configObj]) id
   where
     mkFileContents :: Track' (FS.FileContents Text, FS.Directory)
     mkFileContents = Track FS.filecontents >*< Track FS.dir
 
     configObj = (contents,directory)
-    contents = FS.FileContents "./example-dir/file1" "hello world\n"
+    contents = FS.FileContents "./example-dir/file1" (hello <> "\n")
     directory = FS.Directory "./example-dir"
 
 bashHelloExample =
@@ -181,7 +180,7 @@ dnsService =
 remoteDNS :: Op
 remoteDNS =
   using (cabalBinUpload microDNS) $ \remotepath ->
-    Ssh.call Debian.ssh (Track $ const realNoop) cheddarSSH remotepath
+    Ssh.call Debian.ssh (Track $ const realNoop) cheddarSSH remotepath [] ""
 
 remoteDNSFile :: Op
 remoteDNSFile =
@@ -222,6 +221,13 @@ httpPostExample manager =
     call1 :: Maybe Web.Call
     call1 = Web.Call manager <$> parseUrlThrow "http://dicioccio.fr/index.html"
 
+distantCallExample selfpath = 
+    self `bindTracked` recurse
+  where
+    self = Self.uploadSelf "tmp" cheddarSelf selfpath
+    recurse s = Self.callSelf s CLI.Up directive
+    directive = DistantCall "hello world"
+
 demoOps selfpath httpManager n =
   [ Demo.collatz [x | x <- [1 .. n], odd x]
   , sshKeysExample
@@ -229,13 +235,17 @@ demoOps selfpath httpManager n =
   , tlsCertsExample
   , gitRepoExample
   , packagesExample
-  , filesystemExample
+  , filesystemExample "hello demo"
   , bashHelloExample
   , rsyncCopyExample
-  , opGraph $ Self.uploadSelf "tmp" cheddarSelf selfpath
   -- , acmeExample
   , httpPostExample httpManager
   , dnsService
+  , opGraph (distantCallExample selfpath)
+  ]
+
+demoDistantCallOps w =
+  [ filesystemExample w
   ]
 
 -------------------------------------------------------------------------------
@@ -288,16 +298,18 @@ cabalRepoBuild dirname target binname remote branch subdir =
 data Spec
   = DemoSpec { specCollatz :: Int }
   | BuildSpec { specBuildName :: Text }
+  | DistantCall { distantCallWord :: Text }
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
 
-program :: FilePath -> Manager -> Track' Spec
+program :: Self.SelfPath -> Manager -> Track' Spec
 program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
    specOp (DemoSpec k) =  demoOps selfpath httpManager k
    specOp (BuildSpec k) = buildOps k
+   specOp (DistantCall k) =  demoDistantCallOps k
   
    optimizedDeps :: Op -> Op
    optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs
@@ -333,5 +345,5 @@ main = do
   let opts = info parseRecord desc
   cmd <- execParser opts
   manager <- newManager defaultManagerSettings
-  selfpath <- readSymbolicLink "/proc/self/exe"
-  CLI.execCommand configure (program selfpath manager) cmd
+  selfpath <- Self.readSelfPath_linux
+  CLI.execCommandOrSeed configure (program selfpath manager) cmd

@@ -23,7 +23,14 @@
 
 ```
 sudo useradd -G sudo -m salmon
-echo "salmon ALL=(ALL:ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/salmon-noprompt
+
+# enable calling
 sudo mkdir /home/salmon/.ssh
 sudo nc -l -p 1234 > /home/salmon/.ssh/authorized_keys
+
+# (to-consider) add some stable dir for the receiving filepaths
+mkdir /home/salmon/tmp
+
+# (optional) enable running sudo commands
+echo "salmon ALL=(ALL:ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/salmon-noprompt
 ```

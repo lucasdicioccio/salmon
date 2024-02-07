@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
-
+{-# LANGUAGE LambdaCase #-}
 
 module Salmon.Builtin.CommandLine where
 
@@ -23,14 +23,21 @@ import Salmon.Builtin.Extension
 data Command seed
   = Config seed
   | Run BaseCommand
-  deriving (Generic, Show)
+  deriving (Eq, Ord, Generic, Show)
 
 data BaseCommand
   = Up
   | Down
   | Tree
   | DAG
-  deriving (Generic, Show, Read)
+  deriving (Eq, Ord, Generic, Show, Read)
+
+argForBaseCommand :: BaseCommand -> Text
+argForBaseCommand = \case
+  Up -> "up"
+  Down -> "down"
+  Tree -> "tree"
+  DAG -> "dag"
 
 instance (ParseRecord seed) => ParseRecord (Command seed) where
   parseRecord =
@@ -53,13 +60,13 @@ instance ParseRecord BaseCommand
 instance ParseField BaseCommand
 instance ParseFields BaseCommand
 
-execCommand
+execCommandOrSeed
   :: forall directive seed. (ToJSON directive, FromJSON directive)
   => Configure' seed directive
   -> Track' directive
   -> Command seed
   -> IO ()
-execCommand genBase traceBase cmd = void $ do
+execCommandOrSeed genBase traceBase cmd = void $ do
   case cmd of
     (Run Up) -> do
       withGraph (UpDown.upTree nat)
@@ -71,6 +78,30 @@ execCommand genBase traceBase cmd = void $ do
       withGraph (Dot.printCograph . (runIdentity . expand))
     Config seed -> do
       LBysteString.putStr $ encode $ runIdentity $ gen genBase seed
+  where
+    nat = pure . runIdentity
+    withGraph cont = do
+      jsonbody <- LBysteString.getContents
+      case eitherDecode jsonbody of
+        Left err -> putStrLn ("failed to json-parse graph: " <> err)
+        Right a -> do
+          cont (run traceBase a)
+
+execBaseCommand
+  :: forall directive seed. (FromJSON directive)
+  => Track' directive
+  -> BaseCommand
+  -> IO ()
+execBaseCommand traceBase cmd = void $ do
+  case cmd of
+    (Up) -> do
+      withGraph (UpDown.upTree nat)
+    (Down) -> do
+      withGraph (UpDown.downTree nat) 
+    (Tree) -> do
+      withGraph (Help.printHelpCograph . (runIdentity . expand))
+    (DAG) -> do
+      withGraph (Dot.printCograph . (runIdentity . expand))
   where
     nat = pure . runIdentity
     withGraph cont = do

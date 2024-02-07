@@ -2,6 +2,7 @@ module Salmon.Builtin.Nodes.Binary
   ( Binary
   , Command(..)
   , withBinary
+  , withBinaryStdin
   , untrackedExec
   ) where
 
@@ -12,6 +13,7 @@ import Salmon.Builtin.Nodes.Filesystem
 
 import Control.Monad (void)
 import Data.Text (Text)
+import Data.ByteString (ByteString)
 import qualified Data.Text as Text
 import GHC.TypeLits (Symbol)
 
@@ -33,10 +35,16 @@ data Command (wellKnownName :: Symbol) arg =
 -- dependencies from the binary provider.
 withBinary :: Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
 withBinary t cmd arg consumeIO =
-  let mk a = (untrackedExec cmd a, Binary)
+  let mk a = (untrackedExec cmd a "", Binary)
   in
   tracking t mk arg consumeIO
 
-untrackedExec :: Command x a -> a -> IO ()
-untrackedExec binary arg =
-  void $ readCreateProcessWithExitCode (prepare binary arg) ""
+withBinaryStdin :: Track' (Binary x) -> Command x arg -> arg -> ByteString -> (IO () -> Op) -> Op
+withBinaryStdin t cmd arg stdin consumeIO =
+  let mk a = (untrackedExec cmd a stdin, Binary)
+  in
+  tracking t mk arg consumeIO
+
+untrackedExec :: Command x a -> a -> ByteString -> IO ()
+untrackedExec binary arg dat =
+  void $ readCreateProcessWithExitCode (prepare binary arg) dat
