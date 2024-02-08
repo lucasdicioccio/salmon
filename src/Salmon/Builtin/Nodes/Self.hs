@@ -8,6 +8,7 @@ import Data.ByteString.Lazy (toStrict)
 import GHC.Generics (Generic)
 import Data.Text (Text)
 import System.FilePath ((</>), takeFileName)
+import qualified Data.Text as Text
 
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
@@ -60,3 +61,18 @@ callSelf self base directive =
     cmdArgs = ["run", CLI.argForBaseCommand base]
     cmdStdin = toStrict $ encode directive
     callOverSSH = Ssh.call Debian.ssh ignoreTrack sshRemote self.selfRemotePath cmdArgs cmdStdin
+
+callSelfAsSudo
+  :: forall directive. (ToJSON directive, FromJSON directive)
+  => Self
+  -> CLI.BaseCommand
+  -> directive
+  -> Tracked' (RemoteCall directive)
+callSelfAsSudo self base directive =
+    Tracked (Track $ \_ -> op "call-oneself:sudo" (deps [callOverSSH]) id) rc
+  where
+    rc = RemoteCall base directive
+    sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
+    cmdArgs = [Text.pack self.selfRemotePath, "run", CLI.argForBaseCommand base]
+    cmdStdin = toStrict $ encode directive
+    callOverSSH = Ssh.call Debian.ssh ignoreTrack sshRemote "sudo" cmdArgs cmdStdin

@@ -31,3 +31,9 @@ rsync = installWith "rsync"
 
 ssh :: Installer "ssh"
 ssh = installWith "ssh-client"
+
+systemctl :: Installer "systemctl"
+systemctl = installWith "systemd"
+
+sudo :: Installer "sudo"
+sudo = installWith "sudo"

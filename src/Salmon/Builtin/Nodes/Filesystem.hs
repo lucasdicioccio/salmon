@@ -77,6 +77,20 @@ instance EncodeFileContents String where
 
 -------------------------------------------------------------------------------
 
+fileCopy :: FilePath -> FilePath -> Op
+fileCopy src tgt =
+  op "file-copy" (deps [enclosingdir]) $ \actions -> actions {
+      help = Text.pack $ "mv " <> src <> tgt
+    , ref = dotRef $ Text.pack $ "file-copy:" <> src <> " " <> tgt
+    , up = copyFile src tgt
+    , down = removeFile tgt
+    }
+  where
+    enclosingdir :: Op
+    enclosingdir = dir (Directory $ takeDirectory tgt)
+
+-------------------------------------------------------------------------------
+
 data File (sym :: Symbol)
   = PreExisting FilePath
   | Generated (Track' FilePath) FilePath

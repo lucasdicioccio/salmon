@@ -39,6 +39,7 @@ import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Bash as Bash
+import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
@@ -171,30 +172,20 @@ acmeExample =
               pure ()
             _ -> pure ()
 
-    dnsTodo = placeholder "DNS" "a dns server on which we can add known records" `inject` dnsService
+    dnsTodo = placeholder "DNS" "a dns server on which we can add known records"
 
-dnsService :: Op
-dnsService =
-  op "dns-service" (deps [remoteDNS, remoteDNSFile, remoteDNSSecretFile]) id
 
-remoteDNS :: Op
-remoteDNS =
+remoteDnsSetup selfpath =
   using (cabalBinUpload microDNS) $ \remotepath ->
-    Ssh.call Debian.ssh (Track $ const realNoop) cheddarSSH remotepath [] ""
-
-remoteDNSFile :: Op
-remoteDNSFile =
-  Rsync.sendFile Debian.rsync file cheddarRsync distpath
+    op "remote-dns-setup" (deps [opGraph $ gorec remotepath]) id
   where
-    distpath = "tmp/microdns.zone"
-    file = FS.Generated (Track dnsZoneFile) "tmp/microdns.zone"
-
-remoteDNSSecretFile :: Op
-remoteDNSSecretFile =
-  Rsync.sendFile Debian.rsync file cheddarRsync distpath
-  where
-    distpath = "tmp/microdns.secret"
-    file = FS.Generated (Track dnsSecretFile) "tmp/microdns.secret"
+    gorec remotepath = self `bindTracked` recurse remotepath
+    self = Self.uploadSelf "tmp" cheddarSelf selfpath
+    recurse remotepath s =
+      let 
+        setup = MicroDNSSetup remotepath
+      in
+      Self.callSelfAsSudo s CLI.Up (RunningLocalDNS setup)
 
 dnsZoneFile :: FilePath -> Op
 dnsZoneFile path =
@@ -228,6 +219,74 @@ distantCallExample selfpath =
     recurse s = Self.callSelf s CLI.Up directive
     directive = DistantCall "hello world"
 
+systemdMicroDNSExample arg =
+    Systemd.systemdService Debian.systemctl trackConfig config
+  where
+    trackConfig :: Track' Systemd.Config
+    trackConfig = Track $ \cfg ->
+      let
+          execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
+          copybin = FS.fileCopy (localBinPath arg) execPath
+      in
+      op "setup-systemd-for-microdns" (deps [copybin, localDnsSetup, webInterfaceCert]) id
+
+    webInterfaceCert :: Op
+    webInterfaceCert =
+      op "cert-setup" (deps [cert]) id
+      where
+        domain = Certs.Domain dnsApex
+        csr = Certs.SigningRequest domain key csrPath "cert.csr"
+        ssReq = Certs.SelfSigned pemPath csr
+        cert = Certs.selfSign Debian.openssl ssReq
+
+    localDnsSetup :: Op
+    localDnsSetup =
+      op "dns-setup" (deps [localDNSZoneFile, localDNSSecretFile]) id
+      where
+        localDNSZoneFile = dnsZoneFile zoneFile
+        localDNSSecretFile = dnsSecretFile hmacSecretFile
+
+    config :: Systemd.Config
+    config = Systemd.Config tgt unit service install
+
+    tgt :: Systemd.UnitTarget
+    tgt = "salmon-demo.service"
+
+    key :: Certs.Key
+    key = Certs.Key Certs.RSA4096 "/opt/rundir/microdns" "signing-key.rsa4096.key"
+
+    hmacSecretFile,zoneFile,keyPath,csrPath,pemPath :: FilePath
+    hmacSecretFile = "/opt/rundir/microdns/microdns.secret"
+    zoneFile = "/opt/rundir/microdns/microdns.zone"
+    pemPath = "/opt/rundir/microdns/cert.pem"
+    csrPath = "/opt/rundir/microdns/cert.csr"
+    keyPath = Certs.keyPath key
+
+    unit :: Systemd.Unit
+    unit = Systemd.Unit "a demo Salmon" "network-online.target"
+
+    service :: Systemd.Service
+    service = Systemd.Service Systemd.Simple "root" "root" "007" start Systemd.OnFailure Systemd.Process "/opt/rundir/microdns"
+
+    dnsApex :: Text
+    dnsApex = "dyn.dicioccio.fr"
+
+    start :: Systemd.Start
+    start =
+      Systemd.Start "/opt/builds/bin/microdns"
+        [ "tls"
+        , "--webPort", "3355"
+        , "--dnsPort", "53"
+        , "--dnsApex", dnsApex
+        , "--webHmacSecretFile", Text.pack hmacSecretFile
+        , "--zoneFile", Text.pack zoneFile
+        , "--certFile", Text.pack pemPath
+        , "--keyFile", Text.pack keyPath
+        ]
+
+    install :: Systemd.Install
+    install = Systemd.Install "multi-user.target"
+
 demoOps selfpath httpManager n =
   [ Demo.collatz [x | x <- [1 .. n], odd x]
   , sshKeysExample
@@ -240,8 +299,9 @@ demoOps selfpath httpManager n =
   , rsyncCopyExample
   -- , acmeExample
   , httpPostExample httpManager
-  , dnsService
   , opGraph (distantCallExample selfpath)
+  -- setup dns at a distance
+  , remoteDnsSetup selfpath
   ]
 
 demoDistantCallOps w =
@@ -295,10 +355,20 @@ cabalRepoBuild dirname target binname remote branch subdir =
     mkrepo = Track $ Git.repo git
 
 -------------------------------------------------------------------------------
+
+data MicroDNSSetup
+  = MicroDNSSetup
+  { localBinPath :: FilePath
+  }
+  deriving (Generic)
+instance FromJSON MicroDNSSetup
+instance ToJSON MicroDNSSetup
+
 data Spec
   = DemoSpec { specCollatz :: Int }
   | BuildSpec { specBuildName :: Text }
   | DistantCall { distantCallWord :: Text }
+  | RunningLocalDNS MicroDNSSetup
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -310,6 +380,8 @@ program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (de
    specOp (DemoSpec k) =  demoOps selfpath httpManager k
    specOp (BuildSpec k) = buildOps k
    specOp (DistantCall k) =  demoDistantCallOps k
+   specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg ]
+  -- , systemdExample `inject` localDnsSetup `inject` tlsCertsExample
   
    optimizedDeps :: Op -> Op
    optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs

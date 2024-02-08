@@ -34,3 +34,8 @@ mkdir /home/salmon/tmp
 # (optional) enable running sudo commands
 echo "salmon ALL=(ALL:ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/salmon-noprompt
 ```
+
+
+- run locally as non root
+
+chown to root then chmod u+s
