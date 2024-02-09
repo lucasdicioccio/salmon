@@ -174,18 +174,49 @@ acmeExample =
 
     dnsTodo = placeholder "DNS" "a dns server on which we can add known records"
 
-
 remoteDnsSetup selfpath =
-  using (cabalBinUpload microDNS) $ \remotepath ->
-    op "remote-dns-setup" (deps [opGraph $ gorec remotepath]) id
+  using (cabalBinUpload microDNS cheddarRsync) $ \remotepath ->
+    let
+      setup = MicroDNSSetup remotepath remotePem remoteKey
+    in
+    op "remote-dns-setup" (depSequence setup) id
   where
-    gorec remotepath = self `bindTracked` recurse remotepath
+    depSequence setup = deps [opGraph (continueRemotely setup) `inject` uploadCert `inject` uploadKey]
+
+    -- recursive call
+    continueRemotely setup = self `bindTracked` recurse setup
+
+    recurse setup selfref =
+      Self.callSelfAsSudo selfref CLI.Up (RunningLocalDNS setup)
+
+    -- upload self
     self = Self.uploadSelf "tmp" cheddarSelf selfpath
-    recurse remotepath s =
-      let 
-        setup = MicroDNSSetup remotepath
-      in
-      Self.callSelfAsSudo s CLI.Up (RunningLocalDNS setup)
+
+    -- upload certificate and key
+    remotePem  = "tmp/microdns.pem"
+    remoteKey  = "tmp/microdns.key"
+
+    upload gen localpath distpath =
+      Rsync.sendFile Debian.rsync (FS.Generated gen localpath) cheddarRsync distpath
+
+    uploadCert =
+      upload selfSignedCert pemPath remotePem
+      where
+        selfSignedCert =
+          Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p csr)
+
+    uploadKey =
+      upload selfSigningKey keyPath remoteKey
+      where
+        selfSigningKey =
+          Track $ const $ Certs.tlsKey Debian.openssl key
+
+    domain = Certs.Domain "box.dicioccio.fr"
+    key = Certs.Key Certs.RSA4096 "./certs/box.dicioccio.fr/microdns/keys" "signing-key.rsa4096.key"
+    csr = Certs.SigningRequest domain key csrPath "cert.csr"
+    pemPath = "./certs/box.dicioccio.fr/microdns/self-signed/cert.pem"
+    csrPath = "./certs/box.dicioccio.fr/microdns/self-signed/csr"
+    keyPath = Certs.keyPath key
 
 dnsZoneFile :: FilePath -> Op
 dnsZoneFile path =
@@ -193,7 +224,10 @@ dnsZoneFile path =
   where
     contents =
       Text.unlines
-        [ "CAA dicioccio.fr. \"issue\" \"letsencrypt\""
+        [ "CAA example.dyn.dicioccio.fr. \"issue\" \"letsencrypt\""
+        , "A dyn.dicioccio.fr. 163.172.53.34"
+        , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
+        , "TXT dyn.dicioccio.fr. \"microdns\""
         ]
 
 dnsSecretFile :: FilePath -> Op
@@ -201,7 +235,7 @@ dnsSecretFile path =
     FS.filecontents (FS.FileContents path contents)
   where
     contents :: Text
-    contents = "unsafe-1234!@#@!3eqe"
+    contents = "unsafe-1234!@#@!3eqel2129ce,Eeqe@x"
 
 httpPostExample manager =
     op "http" (deps $ catMaybes [ get1 ]) id
@@ -219,6 +253,7 @@ distantCallExample selfpath =
     recurse s = Self.callSelf s CLI.Up directive
     directive = DistantCall "hello world"
 
+systemdMicroDNSExample :: MicroDNSSetup -> Op
 systemdMicroDNSExample arg =
     Systemd.systemdService Debian.systemctl trackConfig config
   where
@@ -227,17 +262,10 @@ systemdMicroDNSExample arg =
       let
           execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
           copybin = FS.fileCopy (localBinPath arg) execPath
+          copypem = FS.fileCopy (localPemPath arg) pemPath
+          copykey = FS.fileCopy (localKeyPath arg) keyPath
       in
-      op "setup-systemd-for-microdns" (deps [copybin, localDnsSetup, webInterfaceCert]) id
-
-    webInterfaceCert :: Op
-    webInterfaceCert =
-      op "cert-setup" (deps [cert]) id
-      where
-        domain = Certs.Domain dnsApex
-        csr = Certs.SigningRequest domain key csrPath "cert.csr"
-        ssReq = Certs.SelfSigned pemPath csr
-        cert = Certs.selfSign Debian.openssl ssReq
+      op "setup-systemd-for-microdns" (deps [copybin, copypem, copykey, localDnsSetup]) id
 
     localDnsSetup :: Op
     localDnsSetup =
@@ -252,21 +280,20 @@ systemdMicroDNSExample arg =
     tgt :: Systemd.UnitTarget
     tgt = "salmon-demo.service"
 
-    key :: Certs.Key
-    key = Certs.Key Certs.RSA4096 "/opt/rundir/microdns" "signing-key.rsa4096.key"
-
-    hmacSecretFile,zoneFile,keyPath,csrPath,pemPath :: FilePath
+    hmacSecretFile,zoneFile,keyPath,pemPath :: FilePath
     hmacSecretFile = "/opt/rundir/microdns/microdns.secret"
     zoneFile = "/opt/rundir/microdns/microdns.zone"
     pemPath = "/opt/rundir/microdns/cert.pem"
-    csrPath = "/opt/rundir/microdns/cert.csr"
-    keyPath = Certs.keyPath key
+    keyPath = "/opt/rundir/microdns/cert.key"
 
     unit :: Systemd.Unit
     unit = Systemd.Unit "a demo Salmon" "network-online.target"
 
     service :: Systemd.Service
     service = Systemd.Service Systemd.Simple "root" "root" "007" start Systemd.OnFailure Systemd.Process "/opt/rundir/microdns"
+
+    domain :: Certs.Domain
+    domain = Certs.Domain "box.dicioccio.fr"
 
     dnsApex :: Text
     dnsApex = "dyn.dicioccio.fr"
@@ -315,13 +342,13 @@ buildOps _ =
   , kitchensink
   ]
 
-cabalBinUpload :: Tracked' FilePath -> Tracked' FilePath
-cabalBinUpload mkbin =
+cabalBinUpload :: Tracked' FilePath -> Rsync.Remote -> Tracked' FilePath
+cabalBinUpload mkbin remote =
     mkbin `bindTracked` go
   where
     go localpath =
        Tracked (Track $ const $ upload localpath) (remotePath localpath)
-    upload local = Rsync.sendFile Debian.rsync (FS.PreExisting local) cheddarRsync distpath
+    upload local = Rsync.sendFile Debian.rsync (FS.PreExisting local) remote distpath
     distpath = "tmp/"
     remotePath local = distpath  </> takeFileName local
 
@@ -359,6 +386,8 @@ cabalRepoBuild dirname target binname remote branch subdir =
 data MicroDNSSetup
   = MicroDNSSetup
   { localBinPath :: FilePath
+  , localPemPath :: FilePath
+  , localKeyPath :: FilePath
   }
   deriving (Generic)
 instance FromJSON MicroDNSSetup
@@ -381,7 +410,6 @@ program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (de
    specOp (BuildSpec k) = buildOps k
    specOp (DistantCall k) =  demoDistantCallOps k
    specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg ]
-  -- , systemdExample `inject` localDnsSetup `inject` tlsCertsExample
   
    optimizedDeps :: Op -> Op
    optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs
