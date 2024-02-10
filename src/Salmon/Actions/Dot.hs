@@ -12,7 +12,7 @@ module Salmon.Actions.Dot
 
 import GHC.Records
 import Data.Foldable (traverse_, toList)
-import Control.Comonad.Cofree (Cofree(..), hoistCofree)
+import Control.Comonad.Cofree (Cofree(..))
 
 import qualified Data.List as List
 import qualified Data.Maybe as Maybe

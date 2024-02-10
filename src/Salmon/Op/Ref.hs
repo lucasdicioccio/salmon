@@ -11,7 +11,7 @@ import qualified Data.Text as Text
 import Text.Printf (printf)
 
 newtype Ref = Ref { unRef :: Text }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 instance Semigroup Ref where
   r1 <> r2 = dotRef $ unRef r1 <> unRef r2

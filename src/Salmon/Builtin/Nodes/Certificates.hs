@@ -18,7 +18,8 @@ newtype Domain = Domain { getDomain :: Text }
   deriving (Show, Ord, Eq)
 
 data KeyType
-  = RSA4096
+  = RSA2048
+  | RSA4096
   deriving (Show, Ord, Eq)
 
 data Key
@@ -132,6 +133,7 @@ openssl = Command $ \cmd ->
   case cmd of
     (GenTLSKey kt filepath) ->
       case kt of
+        RSA2048 -> proc "openssl" ["genrsa", "-out", filepath, "2048"]
         RSA4096 -> proc "openssl" ["genrsa", "-out", filepath, "4096"]
 
     (GenCSR keyPath csrPath dom) ->

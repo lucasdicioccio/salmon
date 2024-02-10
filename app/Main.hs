@@ -10,7 +10,8 @@ import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
 import Data.Functor.Contravariant ((>$<))
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, encode)
+import qualified Data.ByteString.Lazy as LByteString
 import Options.Generic
 import Options.Applicative
 
@@ -179,7 +180,9 @@ remoteDnsSetup selfpath =
     let
       setup = MicroDNSSetup remotepath remotePem remoteKey
     in
-    op "remote-dns-setup" (depSequence setup) id
+    op "remote-dns-setup" (depSequence setup) $ \actions -> actions {
+      up = LByteString.putStr $ encode $ RunningLocalDNS setup
+    }
   where
     depSequence setup = deps [opGraph (continueRemotely setup) `inject` uploadCert `inject` uploadKey]
 
@@ -212,7 +215,7 @@ remoteDnsSetup selfpath =
           Track $ const $ Certs.tlsKey Debian.openssl key
 
     domain = Certs.Domain "box.dicioccio.fr"
-    key = Certs.Key Certs.RSA4096 "./certs/box.dicioccio.fr/microdns/keys" "signing-key.rsa4096.key"
+    key = Certs.Key Certs.RSA2048 "./certs/box.dicioccio.fr/microdns/keys" "signing-key.rsa2048.key"
     csr = Certs.SigningRequest domain key csrPath "cert.csr"
     pemPath = "./certs/box.dicioccio.fr/microdns/self-signed/cert.pem"
     csrPath = "./certs/box.dicioccio.fr/microdns/self-signed/csr"
@@ -228,6 +231,8 @@ dnsZoneFile path =
         , "A dyn.dicioccio.fr. 163.172.53.34"
         , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
         , "TXT dyn.dicioccio.fr. \"microdns\""
+        , "TXT dyn.dicioccio.fr. \"salmon\""
+        , "TXT dyn.dicioccio.fr. \"fish\""
         ]
 
 dnsSecretFile :: FilePath -> Op
@@ -300,7 +305,7 @@ systemdMicroDNSExample arg =
 
     start :: Systemd.Start
     start =
-      Systemd.Start "/opt/builds/bin/microdns"
+      Systemd.Start "/opt/rundir/microdns/bin/microdns"
         [ "tls"
         , "--webPort", "3355"
         , "--dnsPort", "53"
@@ -327,8 +332,6 @@ demoOps selfpath httpManager n =
   -- , acmeExample
   , httpPostExample httpManager
   , opGraph (distantCallExample selfpath)
-  -- setup dns at a distance
-  , remoteDnsSetup selfpath
   ]
 
 demoDistantCallOps w =
@@ -398,6 +401,7 @@ data Spec
   | BuildSpec { specBuildName :: Text }
   | DistantCall { distantCallWord :: Text }
   | RunningLocalDNS MicroDNSSetup
+  | CheddarMicroDNS
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -409,7 +413,8 @@ program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (de
    specOp (DemoSpec k) =  demoOps selfpath httpManager k
    specOp (BuildSpec k) = buildOps k
    specOp (DistantCall k) =  demoDistantCallOps k
-   specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg ]
+   specOp (CheddarMicroDNS) =  [remoteDnsSetup selfpath]
+   specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg]
   
    optimizedDeps :: Op -> Op
    optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs
@@ -418,6 +423,7 @@ program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (de
 data Seed
   = DemoSeed { seedCollatzNum :: Int }
   | BuildSeed { seedBuildName :: Text }
+  | CheddarSeed
 
 instance ParseRecord Seed where
   parseRecord =
@@ -427,9 +433,11 @@ instance ParseRecord Seed where
         subparser $ mconcat
           [ command "demo" (info demo (progDesc "runs demo"))
           , command "build" (info builds (progDesc "runs builds"))
+          , command "cheddar" (info cheddar (progDesc "runs cheddar"))
           ]
       demo = DemoSeed <$> option auto (long "n-collatz")
       builds = BuildSeed <$> strArgument (Options.Applicative.help "build-name")
+      cheddar = pure CheddarSeed
 
 configure :: Configure' Seed Spec
 configure = Configure $ pure . go 
@@ -437,6 +445,7 @@ configure = Configure $ pure . go
     go :: Seed -> Spec
     go (DemoSeed k) = DemoSpec k
     go (BuildSeed k) = BuildSpec k
+    go CheddarSeed = CheddarMicroDNS
 
 -------------------------------------------------------------------------------
 main :: IO ()

@@ -5,30 +5,53 @@ module Salmon.Actions.UpDown where
 
 import GHC.Records
 import Data.Foldable (traverse_, toList)
+import Control.Comonad.Cofree (Cofree(..))
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.IORef (IORef, newIORef, atomicModifyIORef')
 
 import Salmon.FoldBranch
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Actions
+import Salmon.Op.Ref
 
 upTree
-  :: ( Monad m
+  :: forall a m ext.
+     ( Monad m
      , HasField "up" ext (IO ())
+     , HasField "ref" ext Ref
      )
   => (forall a. m a -> IO a)
   -> OpGraph m (Actions ext)
   -> IO ()
 upTree nat graph = do
-    gr1 <- nat $ expand graph
-    let as = toList gr1 
-    traverse_ up $ reverse as
+    s <- newIORef (Set.empty)
+    runC s =<< nat (expand graph)
   where
-    up = upnode . node
-    upnode x =
+    runC :: IORef (Set Ref) -> Cofree Graph (OpGraph m (Actions ext)) -> IO ()
+    runC s (x :< Vertices gs) = traverse_ (runC s) gs >> upnode s x.node
+    runC s (x :< Overlay g1 g2) = runG s g1 >> runG s g2 >> upnode s x.node
+    runC s (x :< Connect g1 g2) = runG s g1 >> runG s g2 >> upnode s x.node
+
+    runG :: IORef (Set Ref) -> Graph (Cofree Graph (OpGraph m (Actions ext))) -> IO ()
+    runG s (Vertices gs) = traverse_ (runC s) gs
+    runG s (Overlay g1 g2) = traverse_ (runC s) g1 >> traverse_ (runC s) g2
+    runG s (Connect g1 g2) = traverse_ (runC s) g1 >> traverse_ (runC s) g2
+
+    upnode :: IORef (Set Ref) -> Actions ext -> IO ()
+    upnode s x =
       case x of
         Actionless -> pure ()
-        (Actions act) -> (print $ shorthand act) >> (extension act).up
+        (Actions act) -> do
+          got <- atomicModifyIORef' s (\set -> let r = act.extension.ref in (Set.insert r set, Set.member r set))
+          if got 
+          then do
+            print ("skip", act.shorthand)
+          else do
+            print ("do", act.shorthand)
+            act.extension.up
 
 downTree
   :: ( Monad m

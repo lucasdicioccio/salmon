@@ -1,5 +1,4 @@
 -- | todo: pass rsync in
--- | todo: add an ssh-call
 {-# LANGUAGE DeriveGeneric #-}
 module Salmon.Builtin.Nodes.Self where
 
