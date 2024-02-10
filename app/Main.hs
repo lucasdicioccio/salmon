@@ -214,11 +214,11 @@ remoteDnsSetup selfpath =
         selfSigningKey =
           Track $ const $ Certs.tlsKey Debian.openssl key
 
-    domain = Certs.Domain "box.dicioccio.fr"
-    key = Certs.Key Certs.RSA2048 "./certs/box.dicioccio.fr/microdns/keys" "signing-key.rsa2048.key"
+    domain = Certs.Domain "cheddar.local"
+    key = Certs.Key Certs.RSA4096 "./certs/cheddar.local/microdns/keys" "signing-key.rsa4096.key"
     csr = Certs.SigningRequest domain key csrPath "cert.csr"
-    pemPath = "./certs/box.dicioccio.fr/microdns/self-signed/cert.pem"
-    csrPath = "./certs/box.dicioccio.fr/microdns/self-signed/csr"
+    pemPath = "./certs/cheddar.local/microdns/self-signed/cert.pem"
+    csrPath = "./certs/cheddar.local/microdns/self-signed/csr"
     keyPath = Certs.keyPath key
 
 dnsZoneFile :: FilePath -> Op
@@ -298,7 +298,7 @@ systemdMicroDNSExample arg =
     service = Systemd.Service Systemd.Simple "root" "root" "007" start Systemd.OnFailure Systemd.Process "/opt/rundir/microdns"
 
     domain :: Certs.Domain
-    domain = Certs.Domain "box.dicioccio.fr"
+    domain = Certs.Domain "cheddar.local"
 
     dnsApex :: Text
     dnsApex = "dyn.dicioccio.fr"
