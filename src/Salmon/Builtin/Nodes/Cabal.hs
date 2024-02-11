@@ -48,7 +48,7 @@ cabalRun :: Command "cabal" CabalRun
 cabalRun = Command $ go
   where
     go (Build c) = (proc "cabal" ["build", Text.unpack c.cabalTarget]) { cwd = Just c.cabalDir }
-    go (Install c dir) = (proc "cabal" ["install", "--installdir=" <> dir, Text.unpack c.cabalTarget]) { cwd = Just c.cabalDir }
+    go (Install c dir) = (proc "cabal" ["install", "--install-method=copy", "--overwrite-policy=always", "--installdir=" <> dir, Text.unpack c.cabalTarget]) { cwd = Just c.cabalDir }
 
 data Instructions (s :: Symbol)
   = Instructions

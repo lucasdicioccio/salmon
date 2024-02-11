@@ -44,7 +44,7 @@ callSystemctl = Command go
  where
    go DaemonReload = proc "systemctl" ["daemon-reload"]
    go (Enable u) = proc "systemctl" ["enable", Text.unpack u]
-   go (Up u) = proc "systemctl" ["start", Text.unpack u]
+   go (Up u) = proc "systemctl" ["restart", Text.unpack u]
 
 -------------------------------------------------------------------------------
 
