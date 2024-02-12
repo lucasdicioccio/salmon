@@ -12,7 +12,6 @@ import qualified Data.Text as Text
 
 import System.FilePath ((</>))
 import System.Process.ListLike (CreateProcess, proc)
-import System.Process.ByteString (readCreateProcessWithExitCode)
 
 newtype Domain = Domain { getDomain :: Text }
   deriving (Show, Ord, Eq)

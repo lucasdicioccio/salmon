@@ -301,7 +301,7 @@ systemdMicroDNSExample arg =
     domain = Certs.Domain "cheddar.local"
 
     dnsApex :: Text
-    dnsApex = "dyn.dicioccio.fr"
+    dnsApex = "dyn.dicioccio.fr."
 
     start :: Systemd.Start
     start =
