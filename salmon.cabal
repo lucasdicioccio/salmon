@@ -134,5 +134,12 @@ executable srebox-salmon
                     , http-client
                     , http-client-tls
                     , filepath
+                    , crypton-x509
+                    , crypton-x509-store
+                    , crypton-x509-validation
+                    , crypton-connection
+                    , tls
+                    , base16-bytestring
+                    , cryptohash-sha256
     hs-source-dirs:   app
     default-language: Haskell2010

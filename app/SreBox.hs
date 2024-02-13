@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -12,19 +13,32 @@ import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTrack
 import Data.Functor.Contravariant ((>$<))
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy as LByteString
+import qualified Data.ByteString as ByteString
 import Options.Generic
 import Options.Applicative
 
-import Control.Monad (void)
+import Control.Monad (void,forM_)
 import Control.Concurrent (threadDelay)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
 import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2)
-import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow)
+import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow, method, requestHeaders )
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Dancer (DanceStep(..), showProof, showToken, showKeyAuth)
 import System.FilePath ((</>), takeFileName)
+import Network.HTTP.Client (Manager, Request, httpNoBody)
+import Network.HTTP.Client.TLS as Tls
+import Network.TLS as Tls
+import Network.TLS.Extra as Tls
+import Network.TLS (Shared(..),ClientParams(..))
+import Data.X509.CertificateStore as Crypton
+import Data.X509 as Crypton
+import Data.X509.Validation as Crypton
+import Network.Connection as Crypton
+import qualified Data.ByteString.Base16 as Base16
+import qualified Crypto.Hash.SHA256 as HMAC256
+import qualified Data.Text.Encoding as Text
 
 import qualified Salmon.Builtin.Nodes.Continuation as Continuation
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -43,13 +57,15 @@ import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Bash as Bash
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Web as Web
+import Salmon.Op.Ref (dotRef)
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
 
 boxSelf = Self.Remote "salmon" "box.dicioccio.fr"
 boxRsync = Rsync.Remote "salmon" "box.dicioccio.fr"
 
-setupDNS selfpath domainName =
+setupDNS :: Self.Remote -> Self.SelfPath -> Text -> Op
+setupDNS remote selfpath domainName =
   using (cabalBinUpload microDNS boxRsync) $ \remotepath ->
     let
       setup = MicroDNSSetup remotepath remotePem remoteKey remoteSecret
@@ -68,7 +84,7 @@ setupDNS selfpath domainName =
       Self.callSelfAsSudo selfref CLI.Up (RunningLocalDNS setup)
 
     -- upload self
-    self = Self.uploadSelf "tmp" boxSelf selfpath
+    self = Self.uploadSelf "tmp" remote selfpath
 
     -- upload certificate and key
     remotePem  = "tmp/microdns.pem"
@@ -217,6 +233,106 @@ cabalRepoBuild dirname target binname remote branch subdir =
     cabal = (Track $ \_ -> noop "preinstalled")
     mkrepo = Track $ Git.repo git
 
+domains :: [(Certs.Domain,Text)]
+domains =
+  [ 
+ -- (Certs.Domain "dicioccio.fr", "apex-challenge")
+    (Certs.Domain "phasein.dyn.dicioccio.fr", "_acme-challenge.phasein")
+  ]
+
+acmeSign :: (Certs.Domain, Text) -> Op
+acmeSign (domain, txtrecord) =
+    op "acme-sign" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) $ \actions -> actions {
+      ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
+    }
+  where
+    chall :: Track' Acme.Challenger
+    chall = adapt >$< f1 >*< f2
+
+    adapt c = (Acme.challengerRequest c, Acme.challengerAccount c)
+    f1 :: Track' Certs.SigningRequest
+    f1 = Track $ Certs.signingRequest Debian.openssl
+    f2 :: Track' Acme.Account
+    f2 = Track $ Acme.acmeAccount
+
+    challenger = Acme.Challenger acc csr pemdir pemname runAcmeDance
+    csr = Certs.SigningRequest domain domainKey csrpath "cert.csr"
+    acc = Acme.Account staging_letsencryptv2 accountKey mail
+    mail = Acme.Email "certmaster+salmon@dicioccio.fr"
+    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "staging-key"
+    pemdir = "./acme/certs"
+    pemname = mconcat [ "acme", "-staging-", Certs.getDomain domain, ".pem"]
+    csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
+    domainKey = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
+
+    runAcmeDance :: Continuation.Continue a (FilePath -> DanceStep -> IO ())
+    runAcmeDance = Continuation.Continue ignoreTrack handle
+      where
+        --TODO: extract
+        selfSignDir = "./certs/box.dicioccio.fr/microdns/self-signed/cert.pem"
+        secretPath = "./secrets/box.dicioccio.fr/microdns/shared-secret/secret.b64"
+
+        handle :: FilePath -> DanceStep -> IO ()
+        handle pemPath step =
+          case step of
+            Done _ cert -> do
+              print ("storing cert at", pemPath)
+              storeCert pemPath cert
+            Validation (tok,keyAuth,sha) -> do
+              print ("token (http01) is" :: Text, showToken tok)
+              print ("key authorization (http01) is" :: Text, showKeyAuth keyAuth)
+              print ("sha256 (dns01) is" :: Text, showProof sha)
+              print ("press enter to continue" :: Text)
+
+              sharedsecret <- ByteString.readFile $ secretPath
+              tlsManager <- makeTlsManagerForSelfSigned "box.dicioccio.fr" selfSignDir
+              baseReq <- parseUrlThrow $ "https://box.dicioccio.fr:65432/register/txt" </> Text.unpack txtrecord </> Text.unpack (showProof sha)
+              let hmac = Base16.encode $ HMAC256.hmac sharedsecret (Text.encodeUtf8 txtrecord)
+              let req = baseReq { method = "POST", requestHeaders = [("x-microdns-hmac", hmac)] }
+              forM_ tlsManager (httpNoBody $ req)
+              threadDelay 1000000
+              pure ()
+            _ -> pure ()
+
+makeTlsManagerForSelfSigned :: Tls.HostName -> FilePath -> IO (Maybe Manager)
+makeTlsManagerForSelfSigned hostname dir = do
+  certStore <- Crypton.readCertificateStore dir
+  case certStore of
+    Nothing -> pure Nothing
+    Just store -> do
+      let base = Tls.defaultParamsClient hostname ""
+      let tlsSetts = setStore store base
+      Just <$> Tls.newTlsManagerWith (Tls.mkManagerSettings (Crypton.TLSSettings tlsSetts) Nothing)
+  where
+    setStore
+      :: Crypton.CertificateStore
+      -> Tls.ClientParams
+      -> Tls.ClientParams
+    setStore store base
+      = base {
+        clientShared =
+          (base.clientShared) {
+            sharedCAStore = store
+          }
+      , clientSupported =
+          (base.clientSupported) {
+            supportedCiphers = Tls.ciphersuite_default
+          }
+      , clientHooks =
+          (base.clientHooks) {
+            onServerCertificate = Crypton.validate Crypton.HashSHA256 Crypton.defaultHooks relaxedChecks
+          }
+      }
+    relaxedChecks :: Crypton.ValidationChecks
+    relaxedChecks = Crypton.defaultChecks { checkLeafV3 = False }
+
+sreBox :: Self.SelfPath -> Text -> Op
+sreBox selfpath selfCertDomain =
+    op "sre-box" (deps allDeps) id
+  where 
+    dns = setupDNS boxSelf selfpath selfCertDomain
+    allDeps = fmap (\d -> acmeSign d `inject` dns) domains
+
 -------------------------------------------------------------------------------
 
 data MicroDNSSetup
@@ -242,7 +358,7 @@ program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (SreBox domainName) =  [setupDNS selfpath domainName] -- todo: kitchen-sink
+   specOp (SreBox domainName) =  [sreBox selfpath domainName]
    specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg]
   
    optimizedDeps :: Op -> Op
