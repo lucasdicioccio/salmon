@@ -385,7 +385,6 @@ cabalRepoBuild dirname target binname remote branch subdir =
     mkrepo = Track $ Git.repo git
 
 -------------------------------------------------------------------------------
-
 data MicroDNSSetup
   = MicroDNSSetup
   { localBinPath :: FilePath
@@ -420,7 +419,6 @@ program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (de
    optimizedDeps base =
      let pkgs = Debian.installAllDebsAtOnce base
      in Debian.removeSinglePackages base `inject` pkgs
-
 
 -------------------------------------------------------------------------------
 data Seed

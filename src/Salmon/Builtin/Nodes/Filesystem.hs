@@ -53,7 +53,6 @@ filecontents fcontents =
       ]
     , ref = dotRef $ Text.pack $ "file:" <> path
     , up = ByteString.writeFile path $ encodeFileContents fcontents.contents
-    , prelim = skipIfFileExists path
     , down = removeFile path
     }
   where
@@ -82,10 +81,22 @@ instance EncodeFileContents String where
 fileCopy :: FilePath -> FilePath -> Op
 fileCopy src tgt =
   op "file-copy" (deps [enclosingdir]) $ \actions -> actions {
-      help = Text.pack $ "mv " <> src <> tgt
+      help = Text.pack $ "copies " <> src <> tgt
     , ref = dotRef $ Text.pack $ "file-copy:" <> src <> " " <> tgt
     , up = copyFile src tgt
     , down = removeFile tgt
+    }
+  where
+    enclosingdir :: Op
+    enclosingdir = dir (Directory $ takeDirectory tgt)
+
+-------------------------------------------------------------------------------
+moveDirectory :: FilePath -> FilePath -> Op
+moveDirectory src tgt =
+  op "move-dir" (deps [enclosingdir]) $ \actions -> actions {
+      help = Text.pack $ "moves " <> src <> tgt
+    , ref = dotRef $ Text.pack $ "move-dir:" <> src <> " " <> tgt
+    , up = renameDirectory src tgt
     }
   where
     enclosingdir :: Op

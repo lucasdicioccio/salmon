@@ -13,12 +13,14 @@ import System.FilePath ((</>))
 import System.Process.ListLike (CreateProcess, proc)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 
+import Salmon.Op.Track
+
 data Remote = Remote { remoteUser :: Text , remoteHost :: Text }
   deriving (Show, Ord, Eq)
 
 sendFile :: Track' (Binary "rsync") -> File "source" -> Remote -> FilePath -> Op
-sendFile rsync script remote remotepath =
-  withFile script $ \filepath ->
+sendFile rsync src remote remotepath =
+  withFile src $ \filepath ->
   withBinary rsync rsyncRun (SendFile filepath remote  remotepath) $ \up -> 
     op "rsync:sendfile" nodeps $ \actions -> actions {
         help = "copies " <> Text.pack filepath <> " to " <> Text.pack remotepath <> " over rsync"
@@ -26,15 +28,27 @@ sendFile rsync script remote remotepath =
       , up = up
       }
 
-data Run = SendFile FilePath Remote FilePath
+sendDir :: Track' (Binary "rsync") -> Track' Directory -> Directory -> Remote -> FilePath -> Op
+sendDir rsync mkdir dir remote remotepath =
+  withBinary rsync rsyncRun (SendDir dirpath remote  remotepath) $ \up -> 
+    op "rsync:send-dir" (deps [run mkdir dir]) $ \actions -> actions {
+        help = "copies " <> Text.pack dirpath <> " to " <> Text.pack remotepath <> " over rsync"
+      , ref = dotRef $ "rsync-copy:" <> Text.pack (show (dirpath, remote))
+      , up = up
+      }
+  where
+    dirpath :: FilePath
+    dirpath = dir.directoryPath
+
+data Run
+  = SendFile FilePath Remote FilePath
+  | SendDir FilePath Remote FilePath
 
 rsyncRun :: Command "rsync" Run
-rsyncRun = Command $ \(SendFile src rem dst) ->
-  proc "rsync"
-    [ "--copy-links"
-    , src
-    , Text.unpack (loginAtHost rem) <> ":" <> dst
-    ]
+rsyncRun = Command $ \run ->
+  case run of
+    (SendFile src rem dst) -> proc "rsync" [ "--copy-links" , src , Text.unpack (loginAtHost rem) <> ":" <> dst ]
+    (SendDir src rem dst) -> proc "rsync" [ "--copy-links" , "--recursive", src , Text.unpack (loginAtHost rem) <> ":" <> dst ]
 
 loginAtHost :: Remote -> Text
 loginAtHost rem = mconcat [rem.remoteUser,"@",rem.remoteHost]

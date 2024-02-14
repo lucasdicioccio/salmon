@@ -8,6 +8,8 @@ import GHC.Generics (Generic)
 import Data.Text (Text)
 import System.FilePath ((</>), takeFileName)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.ByteString.Lazy as LByteString
 
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
@@ -15,6 +17,7 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Builtin.Extension
+import Salmon.Op.Ref
 import qualified Salmon.Builtin.CommandLine as CLI
 
 import System.Posix.Files (readSymbolicLink)
@@ -53,8 +56,9 @@ callSelf
   -> directive
   -> Tracked' (RemoteCall directive)
 callSelf self base directive =
-    Tracked (Track $ \_ -> op "call-oneself" (deps [callOverSSH]) id) rc
+    Tracked (Track $ \_ -> op "call-oneself" (deps [callOverSSH]) setRef) rc
   where
+    setRef actions = actions { ref = dotRef $ "call-self:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive) }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
     cmdArgs = ["run", CLI.argForBaseCommand base]
@@ -68,8 +72,9 @@ callSelfAsSudo
   -> directive
   -> Tracked' (RemoteCall directive)
 callSelfAsSudo self base directive =
-    Tracked (Track $ \_ -> op "call-oneself:sudo" (deps [callOverSSH]) id) rc
+    Tracked (Track $ \_ -> op "call-oneself:sudo" (deps [callOverSSH]) setRef) rc
   where
+    setRef actions = actions { ref = dotRef $ "call-self-sudo:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive) }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
     cmdArgs = [Text.pack self.selfRemotePath, "run", CLI.argForBaseCommand base]

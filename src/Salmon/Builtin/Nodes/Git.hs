@@ -75,3 +75,14 @@ repofile t r sub =
   where
     mkPath :: Track' FilePath
     mkPath = Track $ \_ -> run t r
+
+-- | Provides a Directory from an existing repository.
+repodir :: Track' Repo -> Repo -> FilePath -> Tracked' Directory
+repodir t r sub =
+  let
+    path = clonedir r </> sub
+  in Tracked mkPath (Directory path)
+
+  where
+    mkPath :: Track' a
+    mkPath = Track $ \_ -> run t r

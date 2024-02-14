@@ -64,6 +64,52 @@ import qualified Salmon.Builtin.CommandLine as CLI
 boxSelf = Self.Remote "salmon" "box.dicioccio.fr"
 boxRsync = Rsync.Remote "salmon" "box.dicioccio.fr"
 
+setupKS :: Track' (Certs.Domain, Text) -> Self.Remote -> Self.SelfPath -> Op
+setupKS mkCert remote selfpath =
+  using (Git.repodir cloneSite blogRepo "") $ \blogSrcDir ->
+  using (cabalBinUpload kitchenSink boxRsync) $ \remotepath ->
+    let
+      setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> "blog") "site-src"
+    in
+    op "remote-ks-setup" (depSequence blogSrcDir setup) $ \actions -> actions {
+      up = LByteString.putStr $ encode $ RunningLocalKitchenSinkBlog setup
+    }
+  where
+    cloneSite = Track $ Git.repo Debian.git
+    blogRepo = Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main")
+    depSequence blogSrcDir setup = deps [opGraph (continueRemotely setup) `inject` uploads blogSrcDir]
+    uploads blogSrcDir = op "uploads-ks" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
+
+    -- recursive call
+    continueRemotely setup = self `bindTracked` recurse setup
+
+    recurse setup selfref =
+      Self.callSelfAsSudo selfref CLI.Up (RunningLocalKitchenSinkBlog setup)
+
+    -- upload self
+    self = Self.uploadSelf "tmp" remote selfpath
+
+    -- upload sources
+    uploadSources blogSrcDir =
+      Rsync.sendDir Debian.rsync ignoreTrack blogSrcDir boxRsync remoteBlogDir
+
+    remoteBlogDir  = "tmp/ks-blog-src"
+
+    -- upload certificate and key
+    upload gen localpath distpath =
+      Rsync.sendFile Debian.rsync (FS.Generated gen localpath) boxRsync distpath
+
+    uploadCert = upload siteCert "./acme/certs/acme-production-dicioccio.fr.pem" remotePem
+    uploadKey = upload siteCert "./acme/keys/dicioccio.fr.rsa2048.key" remoteKey
+
+    siteCert = Track $ const $ run mkCert (Certs.Domain "dicioccio.fr", "apex-challenge")
+
+    remotePem  = "tmp/ks.pem"
+    remoteKey  = "tmp/ks.key"
+
+
+-------------------------------------------------------------------------------
+
 setupDNS :: Self.Remote -> Self.SelfPath -> Text -> Op
 setupDNS remote selfpath domainName =
   using (cabalBinUpload microDNS boxRsync) $ \remotepath ->
@@ -75,7 +121,7 @@ setupDNS remote selfpath domainName =
     }
   where
     depSequence setup = deps [opGraph (continueRemotely setup) `inject` uploads]
-    uploads = op "uploads" (deps [uploadCert, uploadKey, uploadSecret]) id
+    uploads = op "uploads-dns" (deps [uploadCert, uploadKey, uploadSecret]) id
 
     -- recursive call
     continueRemotely setup = self `bindTracked` recurse setup
@@ -129,7 +175,7 @@ dnsZoneFile path =
   where
     contents =
       Text.unlines
-        [ "CAA example.dyn.dicioccio.fr. \"issue\" \"letsencrypt\""
+        [ "caa example.dyn.dicioccio.fr. \"issue\" \"letsencrypt\""
         , "A dyn.dicioccio.fr. 163.172.53.34"
         , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
         , "TXT dyn.dicioccio.fr. \"microdns\""
@@ -142,18 +188,18 @@ dnsSecretFile path =
     Debian.openssl
     (Secrets.Secret Secrets.Base64 16 path)
 
-systemdMicroDNSExample :: MicroDNSSetup -> Op
-systemdMicroDNSExample arg =
+systemdMicroDNS :: MicroDNSSetup -> Op
+systemdMicroDNS arg =
     Systemd.systemdService Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
       let
           execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
-          copybin = FS.fileCopy (localBinPath arg) execPath
-          copypem = FS.fileCopy (localPemPath arg) pemPath
-          copykey = FS.fileCopy (localKeyPath arg) keyPath
-          copySecret = FS.fileCopy (localSecretPath arg) hmacSecretFile
+          copybin = FS.fileCopy (microdns_localBinPath arg) execPath
+          copypem = FS.fileCopy (microdns_localPemPath arg) pemPath
+          copykey = FS.fileCopy (microdns_localKeyPath arg) keyPath
+          copySecret = FS.fileCopy (microdns_localSecretPath arg) hmacSecretFile
       in
       op "setup-systemd-for-microdns" (deps [copybin, copypem, copykey, copySecret, localDnsSetup]) id
 
@@ -201,6 +247,65 @@ systemdMicroDNSExample arg =
     install = Systemd.Install "multi-user.target"
 
 -------------------------------------------------------------------------------
+systemdKitchenSinkBlog :: KitchenSinkBlogSetup -> Op
+systemdKitchenSinkBlog arg =
+    Systemd.systemdService Debian.systemctl trackConfig config
+  where
+    trackConfig :: Track' Systemd.Config
+    trackConfig = Track $ \cfg ->
+      let
+          execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
+          copybin = FS.fileCopy arg.ks_blog_localBinPath execPath
+          copypem = FS.fileCopy arg.ks_blog_localPemPath pemPath
+          copykey = FS.fileCopy arg.ks_blog_localKeyPath keyPath
+          movesrc = FS.moveDirectory arg.ks_blog_localSrcDir blogSrcDir
+      in
+      op "setup-systemd-for-ks" (deps [movesrc, copybin, copypem, copykey, localSetup]) id
+
+    localSetup :: Op
+    localSetup =
+      op "ks-setup" (deps [sysDeps]) id
+
+    sysDeps :: Op
+    sysDeps =
+      op "system" (deps [Debian.deb (Debian.Package "graphviz")]) id
+
+    config :: Systemd.Config
+    config = Systemd.Config tgt unit service install
+
+    tgt :: Systemd.UnitTarget
+    tgt = "salmon-ks.service"
+
+    blogSrcDir,keyPath,pemPath :: FilePath
+    pemPath = "/opt/rundir/ks/cert.pem"
+    keyPath = "/opt/rundir/ks/cert.key"
+    blogSrcDir = "/opt/rundir/ks/site"
+    blogSrcPath = blogSrcDir </> arg.ks_blog_subdir
+
+    unit :: Systemd.Unit
+    unit = Systemd.Unit "Kitchen-Sink from Salmon" "network-online.target"
+
+    service :: Systemd.Service
+    service = Systemd.Service Systemd.Simple "root" "root" "007" start Systemd.OnFailure Systemd.Process blogSrcDir
+
+    start :: Systemd.Start
+    start =
+      Systemd.Start "/opt/rundir/ks/bin/kitchen-sink"
+        [ "serve"
+        , "--servMode", "SERVE"
+        , "--httpPort", "80"
+        , "--httpsPort", "443"
+        , "--tlsCertFile", Text.pack pemPath
+        , "--tlsKeyFile", Text.pack keyPath
+        , "--outDir", "./out"
+        , "--srcDir", Text.pack blogSrcPath
+        ]
+
+    install :: Systemd.Install
+    install = Systemd.Install "multi-user.target"
+
+-------------------------------------------------------------------------------
+
 
 cabalBinUpload :: Tracked' FilePath -> Rsync.Remote -> Tracked' FilePath
 cabalBinUpload mkbin remote =
@@ -219,6 +324,14 @@ microDNS = cabalRepoBuild
   "https://github.com/lucasdicioccio/microdns.git"
   "main"
   ""
+
+kitchenSink = cabalRepoBuild
+  "ks"
+  "exe:kitchen-sink"
+  "kitchen-sink"
+  "https://github.com/kitchensink-tech/kitchensink.git"
+  "main"
+  "hs"
 
 -- builds a cabal repository
 cabalRepoBuild dirname target binname remote branch subdir = 
@@ -241,16 +354,18 @@ domains =
   , (Certs.Domain "localhost.dyn.dicioccio.fr", "_acme-challenge.localhost")
   ]
 
-acmeSign :: (Certs.Domain, Text) -> Op
-acmeSign (domain, txtrecord) =
+data DNSRunning = DNSRunning
+
+acmeSign :: Track' DNSRunning -> (Certs.Domain, Text) -> Op
+acmeSign mkDNS (domain, txtrecord) =
     op "acme-sign" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) $ \actions -> actions {
       ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
     }
   where
     chall :: Track' Acme.Challenger
-    chall = adapt >$< f1 >*< f2
+    chall = adapt >$< f1 >*< f2 >*< mkDNS
 
-    adapt c = (Acme.challengerRequest c, Acme.challengerAccount c)
+    adapt c = (Acme.challengerRequest c, (Acme.challengerAccount c, DNSRunning))
     f1 :: Track' Certs.SigningRequest
     f1 = Track $ Certs.signingRequest Debian.openssl
     f2 :: Track' Acme.Account
@@ -329,27 +444,42 @@ makeTlsManagerForSelfSigned hostname dir = do
 
 sreBox :: Self.SelfPath -> Text -> Op
 sreBox selfpath selfCertDomain =
-    op "sre-box" (deps allDeps) id
+    op "sre-box" (deps (ks : domainCerts)) id
   where 
-    dns = setupDNS boxSelf selfpath selfCertDomain
-    allDeps = fmap (\d -> acmeSign d `inject` dns) domains
+    dns = Track $ const $ setupDNS boxSelf selfpath selfCertDomain
+    domainCerts = fmap (\d -> acmeSign dns d) domains
+    cert = Track $ acmeSign dns
+    ks = setupKS cert boxSelf selfpath
 
 -------------------------------------------------------------------------------
 
 data MicroDNSSetup
   = MicroDNSSetup
-  { localBinPath :: FilePath
-  , localPemPath :: FilePath
-  , localKeyPath :: FilePath
-  , localSecretPath :: FilePath
+  { microdns_localBinPath :: FilePath
+  , microdns_localPemPath :: FilePath
+  , microdns_localKeyPath :: FilePath
+  , microdns_localSecretPath :: FilePath
   }
   deriving (Generic)
 instance FromJSON MicroDNSSetup
 instance ToJSON MicroDNSSetup
 
+data KitchenSinkBlogSetup
+  = KitchenSinkBlogSetup
+  { ks_blog_localBinPath :: FilePath
+  , ks_blog_localPemPath :: FilePath
+  , ks_blog_localKeyPath :: FilePath
+  , ks_blog_localSrcDir :: FilePath
+  , ks_blog_subdir :: FilePath
+  }
+  deriving (Generic)
+instance FromJSON KitchenSinkBlogSetup
+instance ToJSON KitchenSinkBlogSetup
+
 data Spec
   = SreBox Text
   | RunningLocalDNS MicroDNSSetup
+  | RunningLocalKitchenSinkBlog KitchenSinkBlogSetup
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -360,7 +490,8 @@ program selfpath httpManager =
   where
    specOp :: Spec -> [Op]
    specOp (SreBox domainName) =  [sreBox selfpath domainName]
-   specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg]
+   specOp (RunningLocalDNS arg) =  [systemdMicroDNS arg]
+   specOp (RunningLocalKitchenSinkBlog arg) =  [systemdKitchenSinkBlog arg]
   
    optimizedDeps :: Op -> Op
    optimizedDeps base =
