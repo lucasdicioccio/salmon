@@ -417,7 +417,10 @@ program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (de
    specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg]
   
    optimizedDeps :: Op -> Op
-   optimizedDeps base = let pkgs = Debian.installAllDebsAtOnce base in base `inject` pkgs
+   optimizedDeps base =
+     let pkgs = Debian.installAllDebsAtOnce base
+     in Debian.removeSinglePackages base `inject` pkgs
+
 
 -------------------------------------------------------------------------------
 data Seed

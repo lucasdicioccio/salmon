@@ -64,10 +64,23 @@ debs pkgs =
 
 -- | Returns a new Op collecting.
 installAllDebsAtOnce :: Op -> Op
-installAllDebsAtOnce root =
-  case NEList.nonEmpty (concatMap snd $ collectDynamics root) of
-    Just pkgs -> debs pkgs
-    Nothing -> realNoop
+installAllDebsAtOnce =
+    collectPackagesAsSet
+  where
+    collectPackagesAsSet :: Op -> Op
+    collectPackagesAsSet root =
+      case NEList.nonEmpty (concatMap snd $ collectDynamics root) of
+        Just pkgs -> debs pkgs
+        Nothing -> realNoop
+
+removeSinglePackages :: Op -> Op
+removeSinglePackages root
+  | null (packages root) = root { predecessors = fmap (fmap removeSinglePackages) root.predecessors }
+  | otherwise = realNoop { predecessors = fmap (fmap removeSinglePackages) root.predecessors }
+
+  where
+    packages :: Op -> [Package]
+    packages root = getDynamics root
 
 aptInstallProcess :: NEList.NonEmpty Package -> [(String,String)] -> CreateProcess
 aptInstallProcess pkgs baseEnv =
