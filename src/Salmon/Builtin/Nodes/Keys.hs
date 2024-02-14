@@ -2,6 +2,7 @@ module Salmon.Builtin.Nodes.Keys where
 
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Binary
@@ -33,6 +34,9 @@ privateKeyPath key = key.sshKeyDir </> Text.unpack key.sshKeyName
 publicKeyPath :: SSHKeyPair -> FilePath
 publicKeyPath key = key.sshKeyDir </> Text.unpack key.sshKeyName <> ".pub"
 
+publicCAKeyPath :: SSHKeyPair -> FilePath
+publicCAKeyPath key = key.sshKeyDir </> Text.unpack key.sshKeyName <> "-cert.pub"
+
 -------------------------------------------------------------------------------
 
 sshKey :: Track' (Binary "ssh-keygen") -> SSHKeyPair -> Op
@@ -44,6 +48,7 @@ sshKey bin key =
       [ "keeps keys around"
       ]
     , ref = dotRef $ "ssh:" <> Text.pack sshdir <> key.sshKeyName
+    , prelim = skipIfFileExists filepath
     , up = up
     }
   where
@@ -89,6 +94,7 @@ signKey bin ca kid keyToSign =
   op "ssh-ca-sign" (deps preds) $ \actions -> actions {
       help = "sign a SSH-key"
     , ref = dotRef $ "ssh-ca-sign:" <> Text.pack (show ca) <> kid.getIdentifier
+    , prelim = skipIfFileExists (publicCAKeyPath keyToSign)
     , up = up
     }
 
@@ -119,6 +125,7 @@ jwkKey key =
       help = "generate a jwk-key"
     , notes = [ "keeps keys around" ]
     , ref = dotRef $ "jwk:" <> Text.pack jwkdir <> key.jwkKeyName
+    , prelim = skipIfFileExists (jwkfilepath key)
     , up = up
     }
   where

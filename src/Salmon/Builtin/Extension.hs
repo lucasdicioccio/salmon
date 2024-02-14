@@ -18,6 +18,7 @@ import Salmon.Op.Actions
 import Salmon.Op.Track
 import Salmon.Op.Configure
 import Salmon.Actions.Dot (PlaceHolder(..))
+import Salmon.Actions.UpDown (Requirement(..))
 
 -- | Instanciate actions.
 type Actions' = Actions Extension
@@ -34,6 +35,7 @@ data Extension = Extension {
   , notes        :: [Note]
   , ref          :: Ref
   , up           :: IO ()
+  , prelim       :: IO Requirement
   , down         :: IO ()
   , check        :: IO ()
   , notify       :: IO ()
@@ -47,6 +49,7 @@ instance Semigroup Extension where
       (notes a <> notes b)
       (ref a <> ref b)
       (up a <> up b)
+      (prelim a <> prelim b)
       (down b <> down a)
       (check a <> check b)
       (notify b <> notify a)
@@ -88,6 +91,7 @@ noop short =
               noNotes
               ref
               skip
+              (pure Required)
               skip
               skip
               skip

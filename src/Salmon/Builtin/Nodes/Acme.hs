@@ -7,6 +7,7 @@ import System.FilePath ((</>))
 
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Builtin.Nodes.Continuation (Continue, withContinuation)
@@ -64,6 +65,7 @@ acmeChallenge_dns01 t chall =
     op "acme-challenge" (deps [run t chall, enclosingdir]) $ \actions -> actions {
         help = "sign a certificate with an ACME challenge"
       , ref = dotRef $ "acme:challenge:" <> Text.pack pemPath
+      , prelim = skipIfFileExists pemPath
       , up = up stepdance
       }
   where

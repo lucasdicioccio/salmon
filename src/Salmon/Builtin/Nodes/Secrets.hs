@@ -3,6 +3,7 @@ module Salmon.Builtin.Nodes.Secrets where
 
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary
 import Salmon.Builtin.Nodes.Filesystem as FS
@@ -32,6 +33,7 @@ sharedSecretFile bin sec =
     op "secret:gen" (deps [enclosingdir]) $ \actions -> actions {
       help = "generates a secret file for shared-secret"
     , ref = dotRef $ "gen-secret" <> Text.pack sec.secret_path
+    , prelim = skipIfFileExists sec.secret_path
     , up = up >> chompNewLines sec.secret_path
     }
   where

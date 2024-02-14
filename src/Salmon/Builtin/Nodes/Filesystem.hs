@@ -4,6 +4,7 @@
 module Salmon.Builtin.Nodes.Filesystem where
 
 import Salmon.Builtin.Extension
+import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Op.Ref
 
 import Salmon.Op.Track
@@ -52,6 +53,7 @@ filecontents fcontents =
       ]
     , ref = dotRef $ Text.pack $ "file:" <> path
     , up = ByteString.writeFile path $ encodeFileContents fcontents.contents
+    , prelim = skipIfFileExists path
     , down = removeFile path
     }
   where

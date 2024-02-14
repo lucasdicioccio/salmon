@@ -9,6 +9,7 @@ import Control.Comonad.Cofree (Cofree(..))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import System.Directory (doesFileExist)
 
 import Salmon.FoldBranch
 import Salmon.Op.Graph
@@ -17,10 +18,27 @@ import Salmon.Op.Eval
 import Salmon.Op.Actions
 import Salmon.Op.Ref
 
+data Requirement
+  = Required
+  | Skippable
+  deriving (Show, Ord, Eq)
+
+instance Semigroup Requirement where
+  Skippable <> Skippable = Skippable
+  _ <> _ = Required
+
+skipIfFileExists :: FilePath -> IO Requirement
+skipIfFileExists path = do
+  exists <- doesFileExist path
+  if exists
+  then pure Skippable
+  else pure Required
+
 upTree
   :: forall a m ext.
      ( Monad m
      , HasField "up" ext (IO ())
+     , HasField "prelim" ext (IO Requirement)
      , HasField "ref" ext Ref
      )
   => (forall a. m a -> IO a)
@@ -48,10 +66,15 @@ upTree nat graph = do
           got <- atomicModifyIORef' s (\set -> let r = act.extension.ref in (Set.insert r set, Set.member r set))
           if got 
           then do
-            print ("skip", act.shorthand)
+            print ("redundant", act.shorthand)
           else do
-            print ("do", act.shorthand)
-            act.extension.up
+            st <- act.extension.prelim
+            case st of
+              Skippable -> do
+                print ("skip", act.shorthand)
+              Required -> do
+                print ("do", act.shorthand)
+                act.extension.up
 
 downTree
   :: ( Monad m

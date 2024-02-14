@@ -2,6 +2,7 @@ module Salmon.Builtin.Nodes.Certificates where
 
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary
 import Salmon.Builtin.Nodes.Filesystem
@@ -60,6 +61,7 @@ tlsKey bin key =
       [ "does not delete keys on down"
       ]
     , ref = dotRef $ "openssl:" <> Text.pack path
+    , prelim = skipIfFileExists path
     , up = up
     }
   where
@@ -108,6 +110,7 @@ selfSign bin selfsigned =
   op "certificate-self-sign" (deps [signingRequest bin selfsigned.selfSignedRequest]) $ \actions -> actions {
       help = "self sign a certificate"
     , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath
+    , prelim = skipIfFileExists pempath
     , up = up
     }
   where
