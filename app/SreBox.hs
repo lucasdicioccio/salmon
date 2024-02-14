@@ -22,7 +22,7 @@ import Control.Concurrent (threadDelay)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
-import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2)
+import Acme.NotAJoke.LetsEncrypt (letsencryptv2)
 import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow, method, requestHeaders )
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Dancer (DanceStep(..), showProof, showToken, showKeyAuth)
@@ -235,9 +235,10 @@ cabalRepoBuild dirname target binname remote branch subdir =
 
 domains :: [(Certs.Domain,Text)]
 domains =
-  [ 
- -- (Certs.Domain "dicioccio.fr", "apex-challenge")
-    (Certs.Domain "phasein.dyn.dicioccio.fr", "_acme-challenge.phasein")
+  [ (Certs.Domain "dicioccio.fr", "apex-challenge")
+  , (Certs.Domain "phasein.dyn.dicioccio.fr", "_acme-challenge.phasein")
+  , (Certs.Domain "e-webhook.dyn.dicioccio.fr", "_acme-challenge.e-webhook")
+  , (Certs.Domain "localhost.dyn.dicioccio.fr", "_acme-challenge.localhost")
   ]
 
 acmeSign :: (Certs.Domain, Text) -> Op
@@ -257,11 +258,11 @@ acmeSign (domain, txtrecord) =
 
     challenger = Acme.Challenger acc csr pemdir pemname runAcmeDance
     csr = Certs.SigningRequest domain domainKey csrpath "cert.csr"
-    acc = Acme.Account staging_letsencryptv2 accountKey mail
+    acc = Acme.Account letsencryptv2 accountKey mail
     mail = Acme.Email "certmaster+salmon@dicioccio.fr"
-    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "staging-key"
+    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "production-key"
     pemdir = "./acme/certs"
-    pemname = mconcat [ "acme", "-staging-", Certs.getDomain domain, ".pem"]
+    pemname = mconcat [ "acme", "-production-", Certs.getDomain domain, ".pem"]
     csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
     domainKey = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
 
