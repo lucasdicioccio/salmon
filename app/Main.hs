@@ -81,6 +81,9 @@ cheddarSelf = Self.Remote "salmon" "cheddar.local"
 cheddarRsync = Rsync.Remote "salmon" "cheddar.local"
 cheddarSSH = Ssh.Remote "salmon" "cheddar.local"
 
+mkRemote :: Track' Ssh.Remote
+mkRemote = Track $ \r -> placeholder "remote" ("a remote at" <> Ssh.remoteHost r)
+
 tlsCertsExample =
     op "tls-certs" certsinfo id
   where
@@ -190,7 +193,7 @@ remoteDnsSetup selfpath =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo selfref CLI.Up (RunningLocalDNS setup)
+      Self.callSelfAsSudo mkRemote selfref CLI.Up (RunningLocalDNS setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" cheddarSelf selfpath

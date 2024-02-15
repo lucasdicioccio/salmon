@@ -60,6 +60,7 @@ library
                     , free
                     , mtl
                     , transformers
+                    , comonad
                     , contravariant
                     , hashable
                     , text

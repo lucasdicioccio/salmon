@@ -61,6 +61,9 @@ import Salmon.Op.Ref (dotRef)
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
 
+mkRemote :: Track' Ssh.Remote
+mkRemote = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)
+
 boxSelf = Self.Remote "salmon" "box.dicioccio.fr"
 boxRsync = Rsync.Remote "salmon" "box.dicioccio.fr"
 
@@ -84,7 +87,7 @@ setupKS mkCert remote selfpath =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo selfref CLI.Up (RunningLocalKitchenSinkBlog setup)
+      Self.callSelfAsSudo mkRemote selfref CLI.Up (RunningLocalKitchenSinkBlog setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" remote selfpath
@@ -127,7 +130,7 @@ setupDNS remote selfpath domainName =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo selfref CLI.Up (RunningLocalDNS setup)
+      Self.callSelfAsSudo mkRemote selfref CLI.Up (RunningLocalDNS setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" remote selfpath

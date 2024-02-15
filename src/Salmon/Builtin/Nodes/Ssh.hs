@@ -23,7 +23,7 @@ call ssh tRemote remote remotepath args stdin =
   withBinaryStdin ssh sshRun (Call remotepath remote args) stdin $ \up -> 
     op "ssh:call" (deps [run tRemote remote]) $ \actions -> actions {
         help = "calls " <>  Text.pack remotepath <> " on " <> remote.remoteHost
-      , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote))
+      , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote, args, stdin))
       , up = up
       }
 

@@ -56,7 +56,7 @@ callSelf
   -> directive
   -> Tracked' (RemoteCall directive)
 callSelf self base directive =
-    Tracked (Track $ \_ -> op "call-oneself" (deps [callOverSSH]) setRef) rc
+    Tracked (Track $ \_ -> callOverSSH) rc
   where
     setRef actions = actions { ref = dotRef $ "call-self:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive) }
     rc = RemoteCall base directive
@@ -67,16 +67,17 @@ callSelf self base directive =
 
 callSelfAsSudo
   :: forall directive. (ToJSON directive, FromJSON directive)
-  => Self
+  => Track' Ssh.Remote
+  -> Self
   -> CLI.BaseCommand
   -> directive
   -> Tracked' (RemoteCall directive)
-callSelfAsSudo self base directive =
-    Tracked (Track $ \_ -> op "call-oneself:sudo" (deps [callOverSSH]) setRef) rc
+callSelfAsSudo mkRemote self base directive =
+    Tracked (Track $ \_ -> callOverSSH) rc
   where
     setRef actions = actions { ref = dotRef $ "call-self-sudo:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive) }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
     cmdArgs = [Text.pack self.selfRemotePath, "run", CLI.argForBaseCommand base]
     cmdStdin = toStrict $ encode directive
-    callOverSSH = Ssh.call Debian.ssh ignoreTrack sshRemote "sudo" cmdArgs cmdStdin
+    callOverSSH = Ssh.call Debian.ssh mkRemote sshRemote "sudo" cmdArgs cmdStdin
