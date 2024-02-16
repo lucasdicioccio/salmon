@@ -1,7 +1,7 @@
 module Salmon.Builtin.Nodes.Ssh where
 
 import Salmon.Op.Ref
-import Salmon.Op.Track (run)
+import Salmon.Op.Track (Track(..),run)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Binary
@@ -40,4 +40,7 @@ sshRun = Command $ \(Call path rem args) ->
 
 loginAtHost :: Remote -> Text
 loginAtHost rem = mconcat [rem.remoteUser,"@",rem.remoteHost]
+
+preExistingRemoteMachine :: Track' Remote
+preExistingRemoteMachine = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)
 

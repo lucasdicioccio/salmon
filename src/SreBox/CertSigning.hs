@@ -42,15 +42,15 @@ import SreBox.MicroDNS
 
 data AcmeConfig
   = AcmeConfig
-  { account :: Acme.Account
-  , certdir :: FilePath
-  , pemName :: Certs.Domain -> Text
-  , csr     :: Certs.Domain -> Certs.SigningRequest
-  , dns     :: MicroDNSConfig
+  { acme_cfg_account :: Acme.Account
+  , acme_cfg_certdir :: FilePath
+  , acme_cfg_pemName :: Certs.Domain -> Text
+  , acme_cfg_csr     :: Certs.Domain -> Certs.SigningRequest
+  , acme_cfg_dns     :: MicroDNSConfig
   }
 
 acmeSign :: AcmeConfig -> Track' MicroDNSConfig -> (Certs.Domain, Text) -> Op
-acmeSign config mkDNS (domain, txtrecord) =
+acmeSign cfg mkDNS (domain, txtrecord) =
     op "acme-sign" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) $ \actions -> actions {
       ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
     }
@@ -58,15 +58,15 @@ acmeSign config mkDNS (domain, txtrecord) =
     chall :: Track' Acme.Challenger
     chall = adapt >$< f1 >*< f2 >*< mkDNS
 
-    adapt c = (Acme.challengerRequest c, (Acme.challengerAccount c, config.dns))
+    adapt c = (Acme.challengerRequest c, (Acme.challengerAccount c, cfg.acme_cfg_dns))
     f1 :: Track' Certs.SigningRequest
     f1 = Track $ Certs.signingRequest Debian.openssl
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 
-    challenger = Acme.Challenger config.account csr config.certdir pemname runAcmeDance
-    csr = config.csr domain
-    pemname = config.pemName domain
+    challenger = Acme.Challenger cfg.acme_cfg_account csr cfg.acme_cfg_certdir pemname runAcmeDance
+    csr = cfg.acme_cfg_csr domain
+    pemname = cfg.acme_cfg_pemName domain
 
     runAcmeDance :: Continuation.Continue a (FilePath -> DanceStep -> IO ())
     runAcmeDance = Continuation.Continue ignoreTrack handle
@@ -77,7 +77,7 @@ acmeSign config mkDNS (domain, txtrecord) =
             Done _ cert -> do
               storeCert pemPath cert
             Validation (tok,keyAuth,sha) -> do
-              config.dns.postTxtChallenge txtrecord sha
+              cfg.acme_cfg_dns.microdns_cfg_postTxtChallenge txtrecord sha
               threadDelay 1000000
               pure ()
             _ -> pure ()

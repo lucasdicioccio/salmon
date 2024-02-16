@@ -26,20 +26,20 @@ import SreBox.CabalBuilding
 
 data KitchenSinkBlogConfig
   = KitchenSinkBlogConfig {
-    repo :: Git.Repo
-  , sourceSubdir :: FilePath
-  , certSpec :: (Certs.Domain, Text)
-  , pemPath :: FilePath
-  , certPath :: FilePath
+    ks_cfg_repo :: Git.Repo
+  , ks_cfg_sourceSubdir :: FilePath
+  , ks_cfg_certSpec :: (Certs.Domain, Text)
+  , ks_cfg_pemPath :: FilePath
+  , ks_cfg_certPath :: FilePath
   }
 
 data KitchenSinkBlogSetup
   = KitchenSinkBlogSetup
-  { ks_blog_localBinPath :: FilePath
-  , ks_blog_localPemPath :: FilePath
-  , ks_blog_localKeyPath :: FilePath
-  , ks_blog_localSrcDir :: FilePath
-  , ks_blog_subdir :: FilePath
+  { ks_setup_localBinPath :: FilePath
+  , ks_setup_localPemPath :: FilePath
+  , ks_setup_localKeyPath :: FilePath
+  , ks_setup_localSrcDir :: FilePath
+  , ks_setup_subdir :: FilePath
   }
   deriving (Generic)
 instance FromJSON KitchenSinkBlogSetup
@@ -55,10 +55,10 @@ setupKS
   -> (KitchenSinkBlogSetup -> directive)
   -> Op
 setupKS mkRemote mkCert selfRemote selfpath cfg toSpec =
-  using (Git.repodir cloneSite cfg.repo "") $ \blogSrcDir ->
+  using (Git.repodir cloneSite cfg.ks_cfg_repo "") $ \blogSrcDir ->
   using (cabalBinUpload kitchenSink rsyncRemote) $ \remotepath ->
     let
-      setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> Text.unpack cfg.repo.repoLocalName) cfg.sourceSubdir
+      setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> Text.unpack cfg.ks_cfg_repo.repoLocalName) cfg.ks_cfg_sourceSubdir
     in
     op "remote-ks-setup" (depSequence blogSrcDir setup) id
   where
@@ -86,10 +86,10 @@ setupKS mkRemote mkCert selfRemote selfpath cfg toSpec =
     upload gen localpath distpath =
       Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
-    uploadCert = upload siteCert cfg.pemPath remotePem
-    uploadKey = upload siteCert cfg.certPath remoteKey
+    uploadCert = upload siteCert cfg.ks_cfg_pemPath remotePem
+    uploadKey = upload siteCert cfg.ks_cfg_certPath remoteKey
 
-    siteCert = Track $ const $ run mkCert cfg.certSpec
+    siteCert = Track $ const $ run mkCert cfg.ks_cfg_certSpec
 
     remotePem  = "tmp/ks.pem"
     remoteKey  = "tmp/ks.key"
@@ -102,10 +102,10 @@ systemdKitchenSinkBlog arg =
     trackConfig = Track $ \cfg ->
       let
           execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
-          copybin = FS.fileCopy arg.ks_blog_localBinPath execPath
-          copypem = FS.fileCopy arg.ks_blog_localPemPath pemPath
-          copykey = FS.fileCopy arg.ks_blog_localKeyPath keyPath
-          movesrc = FS.moveDirectory arg.ks_blog_localSrcDir blogSrcDir
+          copybin = FS.fileCopy arg.ks_setup_localBinPath execPath
+          copypem = FS.fileCopy arg.ks_setup_localPemPath pemPath
+          copykey = FS.fileCopy arg.ks_setup_localKeyPath keyPath
+          movesrc = FS.moveDirectory arg.ks_setup_localSrcDir blogSrcDir
       in
       op "setup-systemd-for-ks" (deps [movesrc, copybin, copypem, copykey, localSetup]) id
 
@@ -127,7 +127,7 @@ systemdKitchenSinkBlog arg =
     pemPath = "/opt/rundir/ks/cert.pem"
     keyPath = "/opt/rundir/ks/cert.key"
     blogSrcDir = "/opt/rundir/ks/site"
-    blogSrcPath = blogSrcDir </> arg.ks_blog_subdir
+    blogSrcPath = blogSrcDir </> arg.ks_setup_subdir
 
     unit :: Systemd.Unit
     unit = Systemd.Unit "Kitchen-Sink from Salmon" "network-online.target"

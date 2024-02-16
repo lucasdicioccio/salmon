@@ -40,26 +40,26 @@ type PortNumber = Int
 
 data MicroDNSConfig
   = MicroDNSConfig
-  { domainName :: DNSName
-  , apex :: DNSName
-  , portnum :: PortNumber
-  , postTxtChallenge :: Text -> ValidationProof -> IO ()
-  , key :: Certs.Key
-  , pemPath :: FilePath
-  , secretPath :: FilePath
-  , selfCsr :: Certs.SigningRequest
-  , zonefileContents :: Text
+  { microdns_cfg_domainName :: DNSName
+  , microdns_cfg_apex :: DNSName
+  , microdns_cfg_portnum :: PortNumber
+  , microdns_cfg_postTxtChallenge :: Text -> ValidationProof -> IO ()
+  , microdns_cfg_key :: Certs.Key
+  , microdns_cfg_pemPath :: FilePath
+  , microdns_cfg_secretPath :: FilePath
+  , microdns_cfg_selfCsr :: Certs.SigningRequest
+  , microdns_cfg_zonefileContents :: Text
   }
 
 data MicroDNSSetup
   = MicroDNSSetup
-  { microdns_localBinPath :: FilePath
-  , microdns_apex :: DNSName
-  , microdns_portnum :: PortNumber
-  , microdns_localPemPath :: FilePath
-  , microdns_localKeyPath :: FilePath
-  , microdns_localSecretPath :: FilePath
-  , microdns_zoneFileContents :: Text
+  { microdns_setup_localBinPath :: FilePath
+  , microdns_setup_apex :: DNSName
+  , microdns_setup_portnum :: PortNumber
+  , microdns_setup_localPemPath :: FilePath
+  , microdns_setup_localKeyPath :: FilePath
+  , microdns_setup_localSecretPath :: FilePath
+  , microdns_setup_zoneFileContents :: Text
   }
   deriving (Generic)
 instance FromJSON MicroDNSSetup
@@ -76,7 +76,7 @@ setupDNS
 setupDNS mkRemote selfRemote selfpath toSpec cfg =
   using (cabalBinUpload microDNS rsyncRemote) $ \remotepath ->
     let
-      setup = MicroDNSSetup remotepath cfg.apex cfg.portnum remotePem remoteKey remoteSecret cfg.zonefileContents
+      setup = MicroDNSSetup remotepath cfg.microdns_cfg_apex cfg.microdns_cfg_portnum remotePem remoteKey remoteSecret cfg.microdns_cfg_zonefileContents
     in
     opGraph (continueRemotely setup) `inject` configUploads
   where
@@ -103,19 +103,19 @@ setupDNS mkRemote selfRemote selfpath toSpec cfg =
       Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadCert =
-      upload selfSignedCert cfg.pemPath remotePem
+      upload selfSignedCert cfg.microdns_cfg_pemPath remotePem
       where
         selfSignedCert =
-          Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p cfg.selfCsr)
+          Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
 
     uploadKey =
-      upload selfSigningKey (Certs.keyPath cfg.key) remoteKey
+      upload selfSigningKey (Certs.keyPath cfg.microdns_cfg_key) remoteKey
       where
         selfSigningKey =
-          Track $ const $ Certs.tlsKey Debian.openssl cfg.key
+          Track $ const $ Certs.tlsKey Debian.openssl cfg.microdns_cfg_key
 
     uploadSecret =
-      upload sharedSecret cfg.secretPath remoteSecret
+      upload sharedSecret cfg.microdns_cfg_secretPath remoteSecret
       where
         sharedSecret =
           Track $ dnsSecretFile
@@ -137,10 +137,10 @@ systemdMicroDNS arg =
     trackConfig = Track $ \cfg ->
       let
           execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
-          copybin = FS.fileCopy (microdns_localBinPath arg) execPath
-          copypem = FS.fileCopy (microdns_localPemPath arg) pemPath
-          copykey = FS.fileCopy (microdns_localKeyPath arg) keyPath
-          copySecret = FS.fileCopy (microdns_localSecretPath arg) hmacSecretFile
+          copybin = FS.fileCopy (microdns_setup_localBinPath arg) execPath
+          copypem = FS.fileCopy (microdns_setup_localPemPath arg) pemPath
+          copykey = FS.fileCopy (microdns_setup_localKeyPath arg) keyPath
+          copySecret = FS.fileCopy (microdns_setup_localSecretPath arg) hmacSecretFile
       in
       op "setup-systemd-for-microdns" (deps [copybin, copypem, copykey, copySecret, localDnsSetup]) id
 
@@ -148,7 +148,7 @@ systemdMicroDNS arg =
     localDnsSetup =
       op "dns-setup" (deps [localDNSZoneFile]) id
       where
-        localDNSZoneFile = dnsZoneFile zoneFile arg.microdns_zoneFileContents
+        localDNSZoneFile = dnsZoneFile zoneFile arg.microdns_setup_zoneFileContents
 
     config :: Systemd.Config
     config = Systemd.Config tgt unit service install
@@ -172,9 +172,9 @@ systemdMicroDNS arg =
     start =
       Systemd.Start "/opt/rundir/microdns/bin/microdns"
         [ "tls"
-        , "--webPort", Text.pack (show arg.microdns_portnum)
+        , "--webPort", Text.pack (show arg.microdns_setup_portnum)
         , "--dnsPort", "53"
-        , "--dnsApex", arg.microdns_apex
+        , "--dnsApex", arg.microdns_setup_apex
         , "--webHmacSecretFile", Text.pack hmacSecretFile
         , "--zoneFile", Text.pack zoneFile
         , "--certFile", Text.pack pemPath

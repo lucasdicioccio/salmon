@@ -67,9 +67,6 @@ import SreBox.CertSigning
 import SreBox.MicroDNS
 import SreBox.KitchenSinkBlog
 
-preExistingRemoteMachine :: Track' Ssh.Remote
-preExistingRemoteMachine = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)
-
 boxSelf = Self.Remote "salmon" "box.dicioccio.fr"
 boxRsync = Rsync.Remote "salmon" "box.dicioccio.fr"
 
@@ -81,8 +78,8 @@ domains =
   , (Certs.Domain "localhost.dyn.dicioccio.fr", "_acme-challenge.localhost")
   ]
 
-acmeConfig :: Text -> Environment -> AcmeConfig
-acmeConfig selfCertDomain env =
+acmeConfig :: MicroDNSConfig -> Environment -> AcmeConfig
+acmeConfig dns env =
     AcmeConfig account certdir pemName csr dns
   where
     le = case env of
@@ -104,7 +101,10 @@ acmeConfig selfCertDomain env =
     pemName domain = mconcat [ "acme", envInfix, Certs.getDomain domain, ".pem"]
     csr domain = Certs.SigningRequest domain (domainKey domain) (csrpath domain) "cert.csr"
 
-    dns = MicroDNSConfig selfCertDomain dnsApex portnum postValidation dnsAdminKey dnsPemPath secretPath dnsCsr zonefile
+dnsConfig :: Text -> MicroDNSConfig
+dnsConfig selfCertDomain =
+    MicroDNSConfig selfCertDomain dnsApex portnum postValidation dnsAdminKey dnsPemPath secretPath dnsCsr zonefile
+  where
     portnum = 65432
     tlsDir x = "./certs" </> Text.unpack selfCertDomain </> x
     secretsDir x = "./secrets" </> Text.unpack selfCertDomain </> x
@@ -137,21 +137,26 @@ ksConfig =
       (Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main"))
       "site-src"
       (Certs.Domain "dicioccio.fr", "apex-challenge")
-      "./acme/certs/acme-production-dicioccio.fr.pem" 
-      "./acme/keys/dicioccio.fr.rsa2048.key" 
+      "./acme/certs/acme-production-dicioccio.fr.pem"
+      "./acme/keys/dicioccio.fr.rsa2048.key"
 
 sreBox :: Self.SelfPath -> Text -> Op
 sreBox selfpath selfCertDomain =
     op "sre-box" (deps (ks : domainCerts)) id
   where 
-    dns = Track $ setupDNS preExistingRemoteMachine boxSelf selfpath RunningLocalDNS
-    domainCerts = fmap (\d -> acmeSign (acmeConfig selfCertDomain Production) dns d) domains
-    cert = Track $ acmeSign (acmeConfig selfCertDomain Production) dns
-    ks = setupKS preExistingRemoteMachine cert boxSelf selfpath ksConfig RunningLocalKitchenSinkBlog
+    dns = dnsConfig selfCertDomain
+    acme = acmeConfig dns Production
 
+    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine boxSelf selfpath RunningLocalDNS
+    mkCert = Track $ acmeSign acme mkDNS
 
+    domainCerts :: [Op]
+    domainCerts = [acmeSign acme mkDNS domain | domain <- domains]
 
+    ks :: Op
+    ks = setupKS Ssh.preExistingRemoteMachine mkCert boxSelf selfpath ksConfig RunningLocalKitchenSinkBlog
 
+-------------------------------------------------------------------------------
 data Spec
   = SreBox Text
   | RunningLocalDNS MicroDNSSetup
