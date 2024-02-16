@@ -2,7 +2,6 @@
 
 module SreBox.MicroDNS where
 
-import Acme.NotAJoke.Api.Validation (ValidationProof)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import Data.X509 as Crypton
@@ -43,7 +42,7 @@ data MicroDNSConfig
   { microdns_cfg_domainName :: DNSName
   , microdns_cfg_apex :: DNSName
   , microdns_cfg_portnum :: PortNumber
-  , microdns_cfg_postTxtChallenge :: Text -> ValidationProof -> IO ()
+  , microdns_cfg_postTxt :: DNSName -> Text -> IO ()
   , microdns_cfg_key :: Certs.Key
   , microdns_cfg_pemPath :: FilePath
   , microdns_cfg_secretPath :: FilePath

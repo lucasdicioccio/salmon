@@ -4,7 +4,7 @@ module SreBox.CertSigning where
 
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Api.Validation (ValidationProof)
-import Acme.NotAJoke.Dancer (DanceStep(..))
+import Acme.NotAJoke.Dancer (DanceStep(..), showProof)
 import Control.Concurrent (threadDelay)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
@@ -77,7 +77,7 @@ acmeSign cfg mkDNS (domain, txtrecord) =
             Done _ cert -> do
               storeCert pemPath cert
             Validation (tok,keyAuth,sha) -> do
-              cfg.acme_cfg_dns.microdns_cfg_postTxtChallenge txtrecord sha
+              cfg.acme_cfg_dns.microdns_cfg_postTxt txtrecord (showProof sha)
               threadDelay 1000000
               pure ()
             _ -> pure ()

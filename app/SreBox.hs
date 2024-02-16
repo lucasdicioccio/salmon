@@ -113,7 +113,7 @@ dnsConfig selfCertDomain =
     secretPath = secretsDir "microdns/shared-secret/secret.b64"
     dnsAdminKey = Certs.Key Certs.RSA4096 (tlsDir "microdns/keys") "signing-key.rsa4096.key"
     dnsCsr = Certs.SigningRequest (Certs.Domain selfCertDomain) dnsAdminKey dnsCsrPath "cert.csr"
-    postTxtRecordURL txtrecord sha = mconcat ["https://", Text.unpack selfCertDomain, ":", show portnum, "/register/txt", Text.unpack txtrecord, "/", Text.unpack (showProof sha)]
+    postTxtRecordURL txtrecord val = mconcat ["https://", Text.unpack selfCertDomain, ":", show portnum, "/register/txt", Text.unpack txtrecord, "/", Text.unpack val]
     postValidation txtrecord sha = do
       sharedsecret <- ByteString.readFile $ secretPath
       tlsManager <- makeTlsManagerForSelfSigned selfCertDomain dnsPemPath
