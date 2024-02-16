@@ -22,7 +22,8 @@ import Control.Concurrent (threadDelay)
 import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
-import Acme.NotAJoke.LetsEncrypt (letsencryptv2)
+import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2, letsencryptv2)
+import Acme.NotAJoke.Api.Validation (ValidationProof)
 import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow, method, requestHeaders )
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Dancer (DanceStep(..), showProof, showToken, showKeyAuth)
@@ -113,11 +114,26 @@ setupKS mkCert remote selfpath =
 
 -------------------------------------------------------------------------------
 
-setupDNS :: Self.Remote -> Self.SelfPath -> Text -> Op
-setupDNS remote selfpath domainName =
+type DNSName = Text
+type PortNumber = Int
+
+data MicroDNSConfig
+  = MicroDNSConfig
+  { domainName :: DNSName
+  , portnum :: PortNumber
+  , postTxtChallenge :: Text -> ValidationProof -> IO ()
+  , key :: Certs.Key
+  , pemPath :: FilePath
+  , secretPath :: FilePath
+  , selfCsr :: Certs.SigningRequest
+  , zonefileContents :: Text
+  }
+
+setupDNS :: Self.Remote -> Self.SelfPath -> MicroDNSConfig -> Op
+setupDNS remote selfpath cfg =
   using (cabalBinUpload microDNS boxRsync) $ \remotepath ->
     let
-      setup = MicroDNSSetup remotepath remotePem remoteKey remoteSecret
+      setup = MicroDNSSetup remotepath cfg.portnum remotePem remoteKey remoteSecret cfg.zonefileContents
     in
     op "remote-dns-setup" (depSequence setup) $ \actions -> actions {
       up = LByteString.putStr $ encode $ RunningLocalDNS setup
@@ -144,46 +160,26 @@ setupDNS remote selfpath domainName =
       Rsync.sendFile Debian.rsync (FS.Generated gen localpath) boxRsync distpath
 
     uploadCert =
-      upload selfSignedCert pemPath remotePem
+      upload selfSignedCert cfg.pemPath remotePem
       where
         selfSignedCert =
-          Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p csr)
+          Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p cfg.selfCsr)
 
     uploadKey =
-      upload selfSigningKey keyPath remoteKey
+      upload selfSigningKey (Certs.keyPath cfg.key) remoteKey
       where
         selfSigningKey =
-          Track $ const $ Certs.tlsKey Debian.openssl key
+          Track $ const $ Certs.tlsKey Debian.openssl cfg.key
 
     uploadSecret =
-      upload sharedSecret secretPath remoteSecret
+      upload sharedSecret cfg.secretPath remoteSecret
       where
         sharedSecret =
           Track $ dnsSecretFile
 
-
-    domain = Certs.Domain domainName
-    tlsDir x = "./certs" </> Text.unpack domainName </> x
-    secretsDir x = "./secrets" </> Text.unpack domainName </> x
-    key = Certs.Key Certs.RSA4096 (tlsDir "microdns/keys") "signing-key.rsa4096.key"
-    csr = Certs.SigningRequest domain key csrPath "cert.csr"
-    pemPath = tlsDir "microdns/self-signed/cert.pem"
-    csrPath = tlsDir "microdns/self-signed/csr"
-    keyPath = Certs.keyPath key
-    secretPath = secretsDir "microdns/shared-secret/secret.b64"
-
-dnsZoneFile :: FilePath -> Op
-dnsZoneFile path =
+dnsZoneFile :: FilePath -> Text -> Op
+dnsZoneFile path contents =
     FS.filecontents (FS.FileContents path contents)
-  where
-    contents =
-      Text.unlines
-        [ "caa example.dyn.dicioccio.fr. \"issue\" \"letsencrypt\""
-        , "A dyn.dicioccio.fr. 163.172.53.34"
-        , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
-        , "TXT dyn.dicioccio.fr. \"microdns\""
-        , "TXT dyn.dicioccio.fr. \"salmon\""
-        ]
 
 dnsSecretFile :: FilePath -> Op
 dnsSecretFile path =
@@ -210,7 +206,7 @@ systemdMicroDNS arg =
     localDnsSetup =
       op "dns-setup" (deps [localDNSZoneFile]) id
       where
-        localDNSZoneFile = dnsZoneFile zoneFile
+        localDNSZoneFile = dnsZoneFile zoneFile arg.microdns_zoneFileContents
 
     config :: Systemd.Config
     config = Systemd.Config tgt unit service install
@@ -237,7 +233,7 @@ systemdMicroDNS arg =
     start =
       Systemd.Start "/opt/rundir/microdns/bin/microdns"
         [ "tls"
-        , "--webPort", "65432"
+        , "--webPort", Text.pack (show arg.microdns_portnum)
         , "--dnsPort", "53"
         , "--dnsApex", dnsApex
         , "--webHmacSecretFile", Text.pack hmacSecretFile
@@ -357,10 +353,70 @@ domains =
   , (Certs.Domain "localhost.dyn.dicioccio.fr", "_acme-challenge.localhost")
   ]
 
-data DNSRunning = DNSRunning
+data AcmeConfig
+  = AcmeConfig
+  { account :: Acme.Account
+  , certdir :: FilePath
+  , pemName :: Certs.Domain -> Text
+  , csr     :: Certs.Domain -> Certs.SigningRequest
+  , dns     :: MicroDNSConfig
+  }
 
-acmeSign :: Track' DNSRunning -> (Certs.Domain, Text) -> Op
-acmeSign mkDNS (domain, txtrecord) =
+data Environment
+  = Production
+  | Staging
+
+acmeConfig :: Text -> Environment -> AcmeConfig
+acmeConfig selfCertDomain env =
+    AcmeConfig account certdir pemName csr dns
+  where
+    le = case env of
+           Production -> letsencryptv2
+           Staging -> staging_letsencryptv2
+    envPrefix = case env of
+           Production -> "production-"
+           Staging -> "staging-"
+    envInfix = case env of
+           Production -> "-production-"
+           Staging -> "-staging-"
+
+    certdir = "./acme/certs"
+    account = Acme.Account le accountKey email
+    email = Acme.Email "certmaster+salmon@dicioccio.fr"
+    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" (envPrefix <> "key")
+    domainKey domain = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
+    csrpath domain = certdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
+    pemName domain = mconcat [ "acme", envInfix, Certs.getDomain domain, ".pem"]
+    csr domain = Certs.SigningRequest domain (domainKey domain) (csrpath domain) "cert.csr"
+
+    dns = MicroDNSConfig selfCertDomain portnum postValidation dnsAdminKey dnsPemPath secretPath dnsCsr zonefile
+    portnum = 65432
+    tlsDir x = "./certs" </> Text.unpack selfCertDomain </> x
+    secretsDir x = "./secrets" </> Text.unpack selfCertDomain </> x
+    dnsPemPath = tlsDir "microdns/self-signed/cert.pem"
+    dnsCsrPath = tlsDir "microdns/self-signed/csr"
+    secretPath = secretsDir "microdns/shared-secret/secret.b64"
+    dnsAdminKey = Certs.Key Certs.RSA4096 (tlsDir "microdns/keys") "signing-key.rsa4096.key"
+    dnsCsr = Certs.SigningRequest (Certs.Domain selfCertDomain) dnsAdminKey dnsCsrPath "cert.csr"
+    postTxtRecordURL txtrecord sha = mconcat ["https://", Text.unpack selfCertDomain, ":", show portnum, "/register/txt", Text.unpack txtrecord, "/", Text.unpack (showProof sha)]
+    postValidation txtrecord sha = do
+      sharedsecret <- ByteString.readFile $ secretPath
+      tlsManager <- makeTlsManagerForSelfSigned selfCertDomain dnsPemPath
+      baseReq <- parseUrlThrow $ postTxtRecordURL txtrecord sha
+      let hmac = Base16.encode $ HMAC256.hmac sharedsecret (Text.encodeUtf8 txtrecord)
+      let req = baseReq { method = "POST", requestHeaders = [("x-microdns-hmac", hmac)] }
+      forM_ tlsManager (httpNoBody $ req)
+    zonefile =
+      Text.unlines
+        [ "caa example.dyn.dicioccio.fr. \"issue\" \"letsencrypt\""
+        , "A dyn.dicioccio.fr. 163.172.53.34"
+        , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
+        , "TXT dyn.dicioccio.fr. \"microdns\""
+        , "TXT dyn.dicioccio.fr. \"salmon\""
+        ]
+
+acmeSign :: AcmeConfig -> Track' MicroDNSConfig -> (Certs.Domain, Text) -> Op
+acmeSign config mkDNS (domain, txtrecord) =
     op "acme-sign" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) $ \actions -> actions {
       ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
     }
@@ -368,61 +424,43 @@ acmeSign mkDNS (domain, txtrecord) =
     chall :: Track' Acme.Challenger
     chall = adapt >$< f1 >*< f2 >*< mkDNS
 
-    adapt c = (Acme.challengerRequest c, (Acme.challengerAccount c, DNSRunning))
+    adapt c = (Acme.challengerRequest c, (Acme.challengerAccount c, config.dns))
     f1 :: Track' Certs.SigningRequest
     f1 = Track $ Certs.signingRequest Debian.openssl
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 
-    challenger = Acme.Challenger acc csr pemdir pemname runAcmeDance
-    csr = Certs.SigningRequest domain domainKey csrpath "cert.csr"
-    acc = Acme.Account letsencryptv2 accountKey mail
-    mail = Acme.Email "certmaster+salmon@dicioccio.fr"
-    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" "production-key"
-    pemdir = "./acme/certs"
-    pemname = mconcat [ "acme", "-production-", Certs.getDomain domain, ".pem"]
-    csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
-    domainKey = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
+    challenger = Acme.Challenger config.account csr config.certdir pemname runAcmeDance
+    csr = config.csr domain
+    pemname = config.pemName domain
 
     runAcmeDance :: Continuation.Continue a (FilePath -> DanceStep -> IO ())
     runAcmeDance = Continuation.Continue ignoreTrack handle
       where
-        --TODO: extract
-        selfSignDir = "./certs/box.dicioccio.fr/microdns/self-signed/cert.pem"
-        secretPath = "./secrets/box.dicioccio.fr/microdns/shared-secret/secret.b64"
-
         handle :: FilePath -> DanceStep -> IO ()
         handle pemPath step =
           case step of
             Done _ cert -> do
-              print ("storing cert at", pemPath)
               storeCert pemPath cert
             Validation (tok,keyAuth,sha) -> do
-              print ("token (http01) is" :: Text, showToken tok)
-              print ("key authorization (http01) is" :: Text, showKeyAuth keyAuth)
-              print ("sha256 (dns01) is" :: Text, showProof sha)
-              print ("press enter to continue" :: Text)
-
-              sharedsecret <- ByteString.readFile $ secretPath
-              tlsManager <- makeTlsManagerForSelfSigned "box.dicioccio.fr" selfSignDir
-              baseReq <- parseUrlThrow $ "https://box.dicioccio.fr:65432/register/txt" </> Text.unpack txtrecord </> Text.unpack (showProof sha)
-              let hmac = Base16.encode $ HMAC256.hmac sharedsecret (Text.encodeUtf8 txtrecord)
-              let req = baseReq { method = "POST", requestHeaders = [("x-microdns-hmac", hmac)] }
-              forM_ tlsManager (httpNoBody $ req)
+              config.dns.postTxtChallenge txtrecord sha
               threadDelay 1000000
               pure ()
             _ -> pure ()
 
-makeTlsManagerForSelfSigned :: Tls.HostName -> FilePath -> IO (Maybe Manager)
+makeTlsManagerForSelfSigned :: DNSName -> FilePath -> IO (Maybe Manager)
 makeTlsManagerForSelfSigned hostname dir = do
   certStore <- Crypton.readCertificateStore dir
   case certStore of
     Nothing -> pure Nothing
     Just store -> do
-      let base = Tls.defaultParamsClient hostname ""
+      let base = Tls.defaultParamsClient tlshostname ""
       let tlsSetts = setStore store base
       Just <$> Tls.newTlsManagerWith (Tls.mkManagerSettings (Crypton.TLSSettings tlsSetts) Nothing)
   where
+    tlshostname :: Tls.HostName
+    tlshostname = Text.unpack hostname
+
     setStore
       :: Crypton.CertificateStore
       -> Tls.ClientParams
@@ -449,9 +487,9 @@ sreBox :: Self.SelfPath -> Text -> Op
 sreBox selfpath selfCertDomain =
     op "sre-box" (deps (ks : domainCerts)) id
   where 
-    dns = Track $ const $ setupDNS boxSelf selfpath selfCertDomain
-    domainCerts = fmap (\d -> acmeSign dns d) domains
-    cert = Track $ acmeSign dns
+    dns = Track $ setupDNS boxSelf selfpath
+    domainCerts = fmap (\d -> acmeSign (acmeConfig selfCertDomain Production) dns d) domains
+    cert = Track $ acmeSign (acmeConfig selfCertDomain Production) dns
     ks = setupKS cert boxSelf selfpath
 
 -------------------------------------------------------------------------------
@@ -459,9 +497,11 @@ sreBox selfpath selfCertDomain =
 data MicroDNSSetup
   = MicroDNSSetup
   { microdns_localBinPath :: FilePath
+  , microdns_portnum :: PortNumber
   , microdns_localPemPath :: FilePath
   , microdns_localKeyPath :: FilePath
   , microdns_localSecretPath :: FilePath
+  , microdns_zoneFileContents :: Text
   }
   deriving (Generic)
 instance FromJSON MicroDNSSetup
@@ -524,7 +564,7 @@ configure = Configure $ pure . go
 -------------------------------------------------------------------------------
 main :: IO ()
 main = do
-  let desc = fullDesc <> progDesc "Personal configurations." <> header "for box.dicioccio.fr"
+  let desc = fullDesc <> progDesc "Personal configurations." <> header "for dicioccio.fr"
   let opts = info parseRecord desc
   cmd <- execParser opts
   manager <- newManager defaultManagerSettings
