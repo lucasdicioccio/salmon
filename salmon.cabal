@@ -55,6 +55,9 @@ library
                    , Salmon.Builtin.Nodes.Ssh
                    , Salmon.Builtin.Nodes.Systemd
                    , Salmon.Builtin.Nodes.Web
+                   , SreBox.CabalBuilding
+                   , SreBox.CertSigning
+                   , SreBox.Environment
     build-depends:    base ^>=4.16.3.0
                     , containers
                     , free
@@ -76,6 +79,13 @@ library
                     , http-client-tls
                     , http-client
                     , unix
+                    , crypton-x509
+                    , crypton-x509-store
+                    , crypton-x509-validation
+                    , crypton-connection
+                    , tls
+                    , base16-bytestring
+                    , cryptohash-sha256
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions: KindSignatures
