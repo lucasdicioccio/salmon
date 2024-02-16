@@ -64,6 +64,7 @@ import qualified Salmon.Builtin.CommandLine as CLI
 import SreBox.Environment
 import SreBox.CabalBuilding
 import SreBox.CertSigning
+import SreBox.MicroDNS
 
 mkRemote :: Track' Ssh.Remote
 mkRemote = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)

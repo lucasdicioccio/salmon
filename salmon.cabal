@@ -58,6 +58,7 @@ library
                    , SreBox.CabalBuilding
                    , SreBox.CertSigning
                    , SreBox.Environment
+                   , SreBox.MicroDNS
     build-depends:    base ^>=4.16.3.0
                     , containers
                     , free
