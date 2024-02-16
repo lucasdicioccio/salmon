@@ -59,6 +59,7 @@ library
                    , SreBox.CertSigning
                    , SreBox.Environment
                    , SreBox.MicroDNS
+                   , SreBox.KitchenSinkBlog
     build-depends:    base ^>=4.16.3.0
                     , containers
                     , free

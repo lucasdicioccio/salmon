@@ -65,115 +65,13 @@ import SreBox.Environment
 import SreBox.CabalBuilding
 import SreBox.CertSigning
 import SreBox.MicroDNS
+import SreBox.KitchenSinkBlog
 
-mkRemote :: Track' Ssh.Remote
-mkRemote = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)
+preExistingRemoteMachine :: Track' Ssh.Remote
+preExistingRemoteMachine = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)
 
 boxSelf = Self.Remote "salmon" "box.dicioccio.fr"
 boxRsync = Rsync.Remote "salmon" "box.dicioccio.fr"
-
-setupKS :: Track' (Certs.Domain, Text) -> Self.Remote -> Self.SelfPath -> Op
-setupKS mkCert remote selfpath =
-  using (Git.repodir cloneSite blogRepo "") $ \blogSrcDir ->
-  using (cabalBinUpload kitchenSink boxRsync) $ \remotepath ->
-    let
-      setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> "blog") "site-src"
-    in
-    op "remote-ks-setup" (depSequence blogSrcDir setup) id
-  where
-    cloneSite = Track $ Git.repo Debian.git
-    blogRepo = Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main")
-    depSequence blogSrcDir setup = deps [opGraph (continueRemotely setup) `inject` uploads blogSrcDir]
-    uploads blogSrcDir = op "uploads-ks" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
-
-    -- recursive call
-    continueRemotely setup = self `bindTracked` recurse setup
-
-    recurse setup selfref =
-      Self.callSelfAsSudo mkRemote selfref CLI.Up (RunningLocalKitchenSinkBlog setup)
-
-    -- upload self
-    self = Self.uploadSelf "tmp" remote selfpath
-
-    -- upload sources
-    uploadSources blogSrcDir =
-      Rsync.sendDir Debian.rsync ignoreTrack blogSrcDir boxRsync remoteBlogDir
-
-    remoteBlogDir  = "tmp/ks-blog-src"
-
-    -- upload certificate and key
-    upload gen localpath distpath =
-      Rsync.sendFile Debian.rsync (FS.Generated gen localpath) boxRsync distpath
-
-    uploadCert = upload siteCert "./acme/certs/acme-production-dicioccio.fr.pem" remotePem
-    uploadKey = upload siteCert "./acme/keys/dicioccio.fr.rsa2048.key" remoteKey
-
-    siteCert = Track $ const $ run mkCert (Certs.Domain "dicioccio.fr", "apex-challenge")
-
-    remotePem  = "tmp/ks.pem"
-    remoteKey  = "tmp/ks.key"
-
-
-
--------------------------------------------------------------------------------
-systemdKitchenSinkBlog :: KitchenSinkBlogSetup -> Op
-systemdKitchenSinkBlog arg =
-    Systemd.systemdService Debian.systemctl trackConfig config
-  where
-    trackConfig :: Track' Systemd.Config
-    trackConfig = Track $ \cfg ->
-      let
-          execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
-          copybin = FS.fileCopy arg.ks_blog_localBinPath execPath
-          copypem = FS.fileCopy arg.ks_blog_localPemPath pemPath
-          copykey = FS.fileCopy arg.ks_blog_localKeyPath keyPath
-          movesrc = FS.moveDirectory arg.ks_blog_localSrcDir blogSrcDir
-      in
-      op "setup-systemd-for-ks" (deps [movesrc, copybin, copypem, copykey, localSetup]) id
-
-    localSetup :: Op
-    localSetup =
-      op "ks-setup" (deps [sysDeps]) id
-
-    sysDeps :: Op
-    sysDeps =
-      op "system" (deps [Debian.deb (Debian.Package "graphviz")]) id
-
-    config :: Systemd.Config
-    config = Systemd.Config tgt unit service install
-
-    tgt :: Systemd.UnitTarget
-    tgt = "salmon-ks.service"
-
-    blogSrcDir,keyPath,pemPath :: FilePath
-    pemPath = "/opt/rundir/ks/cert.pem"
-    keyPath = "/opt/rundir/ks/cert.key"
-    blogSrcDir = "/opt/rundir/ks/site"
-    blogSrcPath = blogSrcDir </> arg.ks_blog_subdir
-
-    unit :: Systemd.Unit
-    unit = Systemd.Unit "Kitchen-Sink from Salmon" "network-online.target"
-
-    service :: Systemd.Service
-    service = Systemd.Service Systemd.Simple "root" "root" "007" start Systemd.OnFailure Systemd.Process blogSrcDir
-
-    start :: Systemd.Start
-    start =
-      Systemd.Start "/opt/rundir/ks/bin/kitchen-sink"
-        [ "serve"
-        , "--servMode", "SERVE"
-        , "--httpPort", "80"
-        , "--httpsPort", "443"
-        , "--tlsCertFile", Text.pack pemPath
-        , "--tlsKeyFile", Text.pack keyPath
-        , "--outDir", "./out"
-        , "--srcDir", Text.pack blogSrcPath
-        ]
-
-    install :: Systemd.Install
-    install = Systemd.Install "multi-user.target"
-
--------------------------------------------------------------------------------
 
 domains :: [(Certs.Domain,Text)]
 domains =
@@ -233,27 +131,26 @@ acmeConfig selfCertDomain env =
         , "TXT dyn.dicioccio.fr. \"salmon\""
         ]
 
+ksConfig :: KitchenSinkBlogConfig
+ksConfig =
+    KitchenSinkBlogConfig
+      (Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main"))
+      "site-src"
+      (Certs.Domain "dicioccio.fr", "apex-challenge")
+      "./acme/certs/acme-production-dicioccio.fr.pem" 
+      "./acme/keys/dicioccio.fr.rsa2048.key" 
+
 sreBox :: Self.SelfPath -> Text -> Op
 sreBox selfpath selfCertDomain =
     op "sre-box" (deps (ks : domainCerts)) id
   where 
-    dns = Track $ setupDNS mkRemote boxSelf selfpath RunningLocalDNS
+    dns = Track $ setupDNS preExistingRemoteMachine boxSelf selfpath RunningLocalDNS
     domainCerts = fmap (\d -> acmeSign (acmeConfig selfCertDomain Production) dns d) domains
     cert = Track $ acmeSign (acmeConfig selfCertDomain Production) dns
-    ks = setupKS cert boxSelf selfpath
+    ks = setupKS preExistingRemoteMachine cert boxSelf selfpath ksConfig RunningLocalKitchenSinkBlog
 
 
-data KitchenSinkBlogSetup
-  = KitchenSinkBlogSetup
-  { ks_blog_localBinPath :: FilePath
-  , ks_blog_localPemPath :: FilePath
-  , ks_blog_localKeyPath :: FilePath
-  , ks_blog_localSrcDir :: FilePath
-  , ks_blog_subdir :: FilePath
-  }
-  deriving (Generic)
-instance FromJSON KitchenSinkBlogSetup
-instance ToJSON KitchenSinkBlogSetup
+
 
 data Spec
   = SreBox Text
