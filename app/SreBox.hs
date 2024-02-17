@@ -73,33 +73,73 @@ boxRsync = Rsync.Remote "salmon" "box.dicioccio.fr"
 domains :: [(Certs.Domain,Text)]
 domains =
   [ (Certs.Domain "dicioccio.fr", "apex-challenge")
-  , (Certs.Domain "phasein.dyn.dicioccio.fr", "_acme-challenge.phasein")
   , (Certs.Domain "e-webhook.dyn.dicioccio.fr", "_acme-challenge.e-webhook")
   , (Certs.Domain "localhost.dyn.dicioccio.fr", "_acme-challenge.localhost")
   ]
 
-acmeConfig :: MicroDNSConfig -> Environment -> AcmeConfig
-acmeConfig dns env =
-    AcmeConfig account certdir pemName csr dns
+data CertPrefs
+  = CertPrefs
+  { cert_key :: Certs.Key
+  , cert_csr :: Certs.SigningRequest
+  , cert_pem :: FilePath
+  }
+
+acmeCertPrefs :: Environment -> Certs.Domain -> CertPrefs
+acmeCertPrefs env domain =
+  CertPrefs
+    key
+    csr
+    pempath
   where
-    le = case env of
-           Production -> letsencryptv2
-           Staging -> staging_letsencryptv2
-    envPrefix = case env of
-           Production -> "production-"
-           Staging -> "staging-"
+    certdir = "./acme/certs"
+    keydir = "./acme/keys"
+
+    csrpath = certdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
+    csr = Certs.SigningRequest domain key csrpath "cert.csr"
+
+    pempath = certdir </> Text.unpack pemname
+    pemname = mconcat [ "acme", envInfix, Certs.getDomain domain, ".pem"]
+
+    key = Certs.Key Certs.RSA4096 keydir (Certs.getDomain domain <> ".rsa2048.key")
+
     envInfix = case env of
            Production -> "-production-"
            Staging -> "-staging-"
 
-    certdir = "./acme/certs"
-    account = Acme.Account le accountKey email
+data AccountPrefs
+  = AccountPrefs
+  { account_email :: Acme.Email
+  , account_key :: Keys.JWKKeyPair
+  }
+
+acmeAccountPrefs :: Environment -> AccountPrefs
+acmeAccountPrefs env =
+  AccountPrefs
+    email
+    key
+  where
     email = Acme.Email "certmaster+salmon@dicioccio.fr"
-    accountKey = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" (envPrefix <> "key")
-    domainKey domain = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
-    csrpath domain = certdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
-    pemName domain = mconcat [ "acme", envInfix, Certs.getDomain domain, ".pem"]
-    csr domain = Certs.SigningRequest domain (domainKey domain) (csrpath domain) "cert.csr"
+    keydir = "./jwk-keys"
+    key = Keys.JWKKeyPair Keys.RSA2048 "./jwk-keys" (envPrefix <> "key")
+
+    envPrefix = case env of
+           Production -> "production-"
+           Staging -> "staging-"
+
+
+acmeConfig :: MicroDNSConfig -> Environment -> AcmeConfig
+acmeConfig dns env =
+    AcmeConfig account pemPath csr dns
+  where
+    le = case env of
+           Production -> letsencryptv2
+           Staging -> staging_letsencryptv2
+    account = Acme.Account le accountKey email
+    email = (acmeAccountPrefs env).account_email
+    accountKey = (acmeAccountPrefs env).account_key
+    prefs domain = acmeCertPrefs env domain
+    pemPath domain = (prefs domain).cert_pem
+    csr domain = (prefs domain).cert_csr
 
 dnsConfig :: Text -> MicroDNSConfig
 dnsConfig selfCertDomain =
@@ -136,9 +176,13 @@ ksConfig =
     KitchenSinkBlogConfig
       (Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main"))
       "site-src"
-      (Certs.Domain "dicioccio.fr", "apex-challenge")
-      "./acme/certs/acme-production-dicioccio.fr.pem"
-      "./acme/keys/dicioccio.fr.rsa2048.key"
+      (domain, acmeChallengeDnsleaf)
+      (prefs.cert_pem)
+      (Certs.keyPath prefs.cert_key)
+  where
+    domain = Certs.Domain "dicioccio.fr"
+    acmeChallengeDnsleaf = "apex-challenge"
+    prefs = acmeCertPrefs Production domain
 
 sreBox :: Self.SelfPath -> Text -> Op
 sreBox selfpath selfCertDomain =

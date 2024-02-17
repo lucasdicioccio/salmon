@@ -19,6 +19,7 @@ import Network.TLS as Tls
 import Network.TLS.Extra as Tls
 import qualified Data.Text as Text
 import Data.Functor.Contravariant ((>$<))
+import System.FilePath ((</>))
 
 import Salmon.Builtin.Extension
 import Salmon.Op.OpGraph (inject)
@@ -43,8 +44,7 @@ import SreBox.MicroDNS
 data AcmeConfig
   = AcmeConfig
   { acme_cfg_account :: Acme.Account
-  , acme_cfg_certdir :: FilePath
-  , acme_cfg_pemName :: Certs.Domain -> Text
+  , acme_cfg_pemPath :: Certs.Domain -> FilePath
   , acme_cfg_csr     :: Certs.Domain -> Certs.SigningRequest
   , acme_cfg_dns     :: MicroDNSConfig
   }
@@ -64,9 +64,9 @@ acmeSign cfg mkDNS (domain, txtrecord) =
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 
-    challenger = Acme.Challenger cfg.acme_cfg_account csr cfg.acme_cfg_certdir pemname runAcmeDance
+    challenger = Acme.Challenger cfg.acme_cfg_account csr pempath runAcmeDance
     csr = cfg.acme_cfg_csr domain
-    pemname = cfg.acme_cfg_pemName domain
+    pempath = cfg.acme_cfg_pemPath domain
 
     runAcmeDance :: Continuation.Continue a (FilePath -> DanceStep -> IO ())
     runAcmeDance = Continuation.Continue ignoreTrack handle

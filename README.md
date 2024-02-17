@@ -39,3 +39,11 @@ echo "salmon ALL=(ALL:ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/salmon-nopro
 - run locally as non root
 
 chown to root then chmod u+s
+
+## useful findings
+
+- builtins: mostly atomic nodes, dags with small diameter
+- apps: combinations of builtins, many equivalent graphs may be valid
+- configs: user-provided choices (running in the commander machine)
+- setup: machine-rationalized (running inside a local machine)
+- prefs: conventions parametrized by domain, service

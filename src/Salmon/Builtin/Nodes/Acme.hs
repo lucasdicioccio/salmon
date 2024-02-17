@@ -3,7 +3,7 @@ module Salmon.Builtin.Nodes.Acme where
 import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.FilePath ((</>))
+import System.FilePath ((</>),takeDirectory)
 
 import Salmon.Op.Ref
 import Salmon.Op.Track
@@ -54,8 +54,7 @@ data Challenger
   = Challenger
   { challengerAccount :: Account
   , challengerRequest :: Cert.SigningRequest
-  , challengerPEMDir :: FilePath
-  , challengerPEMName :: Text
+  , challengerPEMPath :: FilePath
   , challengerContinuation :: Continue "dance" (FilePath -> DanceStep -> IO ())
   }
 
@@ -64,8 +63,8 @@ acmeChallenge_dns01 t chall =
   withContinuation chall.challengerContinuation $ \stepdance ->
     op "acme-challenge" (deps [run t chall, enclosingdir]) $ \actions -> actions {
         help = "sign a certificate with an ACME challenge"
-      , ref = dotRef $ "acme:challenge:" <> Text.pack pemPath
-      , prelim = skipIfFileExists pemPath
+      , ref = dotRef $ "acme:challenge:" <> Text.pack chall.challengerPEMPath
+      , prelim = skipIfFileExists chall.challengerPEMPath
       , up = up stepdance
       }
   where
@@ -73,10 +72,9 @@ acmeChallenge_dns01 t chall =
     acc = chall.challengerAccount
 
     enclosingdir :: Op
-    enclosingdir = FS.dir (FS.Directory chall.challengerPEMDir)
+    enclosingdir = FS.dir (FS.Directory $ takeDirectory chall.challengerPEMPath)
 
     contacts = [ "mailto:" <> getEmail acc.accountEmail ]
-    pemPath = chall.challengerPEMDir </> Text.unpack chall.challengerPEMName
 
     up stepdance = do
        jwk <- fromJust <$> loadJWKFile (jwkfilepath acc.accountKey)
@@ -90,4 +88,4 @@ acmeChallenge_dns01 t chall =
              (fetchAccount contacts)
              csr
              order
-             (stepdance pemPath)
+             (stepdance chall.challengerPEMPath)

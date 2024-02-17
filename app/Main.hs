@@ -144,7 +144,7 @@ acmeExample =
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 
-    challenger = Acme.Challenger acc csr pemdir pemname runAcmeDance
+    challenger = Acme.Challenger acc csr pempath runAcmeDance
     csr = Certs.SigningRequest domain domainKey csrpath "cert.csr"
     acc = Acme.Account staging_letsencryptv2 accountKey mail
     mail = Acme.Email "salmon+001@dicioccio.fr"
@@ -155,6 +155,7 @@ acmeExample =
     pemname = mconcat [ "acme", "staging", Certs.getDomain domain, ".pem"]
     csrpath =  pemdir <> "/" <> Text.unpack (Certs.getDomain domain) <> ".csr"
     domainKey = Certs.Key Certs.RSA4096 "./acme/keys" (Certs.getDomain domain <> ".rsa2048.key")
+    pempath = pemdir </> Text.unpack pemname
 
     runAcmeDance :: Continuation.Continue a (FilePath -> DanceStep -> IO ())
     runAcmeDance = Continuation.Continue (Track $ const dnsTodo) handle
