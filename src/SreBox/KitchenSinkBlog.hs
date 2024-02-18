@@ -60,12 +60,12 @@ setupKS mkRemote mkCert selfRemote selfpath cfg toSpec =
     let
       setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> Text.unpack cfg.ks_cfg_repo.repoLocalName) cfg.ks_cfg_sourceSubdir
     in
-    op "remote-ks-setup" (depSequence blogSrcDir setup) id
+    op "remote-ks-blog-setup" (depSequence blogSrcDir setup) id
   where
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
     cloneSite = Track $ Git.repo Debian.git
     depSequence blogSrcDir setup = deps [opGraph (continueRemotely setup) `inject` uploads blogSrcDir]
-    uploads blogSrcDir = op "uploads-ks" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
+    uploads blogSrcDir = op "uploads-ks-blog" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
 
     -- recursive call
     continueRemotely setup = self `bindTracked` recurse setup

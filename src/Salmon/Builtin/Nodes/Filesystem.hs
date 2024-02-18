@@ -4,7 +4,6 @@
 module Salmon.Builtin.Nodes.Filesystem where
 
 import Salmon.Builtin.Extension
-import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Op.Ref
 
 import Salmon.Op.Track
@@ -94,7 +93,7 @@ fileCopy src tgt =
 moveDirectory :: FilePath -> FilePath -> Op
 moveDirectory src tgt =
   op "move-dir" (deps [enclosingdir]) $ \actions -> actions {
-      help = Text.pack $ "moves " <> src <> tgt
+      help = Text.pack $ "moves " <> src <> " " <> tgt
     , ref = dotRef $ Text.pack $ "move-dir:" <> src <> " " <> tgt
     , up = renameDirectory src tgt
     }

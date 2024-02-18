@@ -11,7 +11,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 import System.FilePath ((</>))
-import System.Process.ListLike (CreateProcess, proc)
+import System.Process.ListLike (CreateProcess(..), proc)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 
 newtype Remote = Remote { getRemote :: Text }
@@ -29,11 +29,12 @@ clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
 -- | Clones a repository.
 repo :: Track' (Binary "git") -> Repo -> Op
 repo git r =
-  withBinary git gitclone (Clone remote branch (clonedir r)) $ \up -> 
+  withBinary git gitcommand (Clone remote branch (clonedir r)) $ \clone -> 
+  withBinary git gitcommand (Pull remote branch (clonedir r)) $ \pull -> 
     op "git-repo" (deps [enclosingdir]) $ \actions -> actions {
         help = "clones and force sync a repo"
       , ref = dotRef $ "repo:" <> Text.pack (clonedir r)
-      , up = up
+      , up = clone >> pull
       }
   where
 
@@ -49,19 +50,28 @@ repo git r =
     enclosingdir :: Op
     enclosingdir = dir (Directory cloneparentdir)
 
-data Clone = Clone Remote Branch FilePath
+data GitCommand
+  = Clone Remote Branch FilePath
+  | Pull Remote Branch FilePath
 
-gitclone :: Command "git" Clone
-gitclone = Command $ \(Clone repo branch localdir) ->
-  proc "git"
-    [ "clone"
-    , "-b"
-    , Text.unpack branch.getBranch
-    , "--depth"
-    , "1"
-    , Text.unpack repo.getRemote
-    , localdir
-    ]
+gitcommand :: Command "git" GitCommand
+gitcommand = Command $ \cmd -> case cmd of
+  (Clone repo branch localdir) ->
+    proc "git"
+      [ "clone"
+      , "-b"
+      , Text.unpack branch.getBranch
+      , "--depth"
+      , "1"
+      , Text.unpack repo.getRemote
+      , localdir
+      ]
+  (Pull repo branch dir) ->
+    (proc "git"
+      [ "pull"
+      , Text.unpack repo.getRemote
+      , Text.unpack branch.getBranch
+      ]) { cwd = Just dir }
 
 -------------------------------------------------------------------------------
 

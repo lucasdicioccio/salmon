@@ -33,10 +33,19 @@ microDNS = cabalRepoBuild
 
 kitchenSink :: Tracked' FilePath
 kitchenSink = cabalRepoBuild
-  "ks"
+  "kitchensink"
   "exe:kitchen-sink"
   "kitchen-sink"
   (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+  "main"
+  "hs"
+
+kitchenSink_dev :: Tracked' FilePath
+kitchenSink_dev = cabalRepoBuild
+  "kitchensink-dev"
+  "exe:kitchen-sink"
+  "kitchen-sink"
+  (Git.Remote "/home/lucasdicioccio/code/opensource/kitchen-sink")
   "main"
   "hs"
 
