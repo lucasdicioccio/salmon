@@ -1,4 +1,3 @@
-
 module Salmon.Builtin.Nodes.Debian.OS where
 
 import Salmon.Op.Track
@@ -37,3 +36,15 @@ systemctl = installWith "systemd"
 
 sudo :: Installer "sudo"
 sudo = installWith "sudo"
+
+postgres :: Installer "postgres"
+postgres = installWith "postgresql-12"
+
+psql :: Installer "psql"
+psql = installWith "postgresql-client-12"
+
+pg_ctl :: Installer "pg_ctl"
+pg_ctl = installWith "postgresql-client-12"
+
+pg_ctlcluster :: Installer "pg_ctlcluster"
+pg_ctlcluster = installWith "postgresql-common"

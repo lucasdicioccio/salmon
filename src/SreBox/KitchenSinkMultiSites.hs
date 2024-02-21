@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 
 module SreBox.KitchenSinkMultiSites where
 
@@ -6,10 +7,12 @@ import GHC.Generics (Generic)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LByteString
+import Data.Maybe (fromMaybe,catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import System.FilePath ((</>), takeDirectory)
+import Data.Foldable (toList)
 
 import Salmon.Op.Track
 import Salmon.Op.OpGraph (inject)
@@ -34,31 +37,63 @@ import KitchenSink.Engine.Config
 
 data KitchenSinkConfig
   = KitchenSinkConfig {
-    ks_cfg_fallback_stanza :: StanzaConfig
+    ks_cfg_fallback_stanza :: Maybe StanzaConfig
   , ks_cfg_services_stanzas :: [StanzaConfig]
   }
 
 ks_cfg_stanzas :: KitchenSinkConfig -> [StanzaConfig]
-ks_cfg_stanzas c = c.ks_cfg_fallback_stanza : c.ks_cfg_services_stanzas
+ks_cfg_stanzas c = toList c.ks_cfg_fallback_stanza <> c.ks_cfg_services_stanzas
+
+ks_cfg_site_stanzas :: KitchenSinkConfig -> [GitSiteStanzaConfig]
+ks_cfg_site_stanzas c = toList (f =<< c.ks_cfg_fallback_stanza) <> (catMaybes $ fmap f c.ks_cfg_services_stanzas)
+
+  where
+    f :: StanzaConfig -> Maybe GitSiteStanzaConfig
+    f (StanzaConfig_Site cfg) = Just cfg
+    f (StanzaConfig_Proxy _) = Nothing
 
 data StanzaConfig
-  = StanzaConfig {
+  = StanzaConfig_Site GitSiteStanzaConfig
+  | StanzaConfig_Proxy ProxyStanzaConfig
+
+viewPemPath :: StanzaConfig -> FilePath
+viewPemPath (StanzaConfig_Site cfg) = cfg.stanza_cfg_pemPath
+viewPemPath (StanzaConfig_Proxy cfg) = cfg.stanza_cfg_pemPath
+
+viewKeyPath :: StanzaConfig -> FilePath
+viewKeyPath (StanzaConfig_Site cfg) = cfg.stanza_cfg_keyPath
+viewKeyPath (StanzaConfig_Proxy cfg) = cfg.stanza_cfg_keyPath
+
+viewCertSpec :: StanzaConfig -> (Certs.Domain,Text)
+viewCertSpec (StanzaConfig_Site cfg) = cfg.stanza_cfg_certSpec
+viewCertSpec (StanzaConfig_Proxy cfg) = cfg.stanza_cfg_certSpec
+
+data ProxyStanzaConfig
+  = ProxyStanzaConfig {
+    stanza_cfg_certSpec :: (Certs.Domain, Text)
+  , stanza_cfg_keyPath :: FilePath
+  , stanza_cfg_pemPath :: FilePath
+  , stanza_cfg_ks_proxy_config :: ApiProxyConfig
+  }
+
+data GitSiteStanzaConfig
+  = GitSiteStanzaConfig {
     stanza_cfg_certSpec :: (Certs.Domain, Text)
   , stanza_cfg_title :: Text
   , stanza_cfg_keyPath :: FilePath
   , stanza_cfg_pemPath :: FilePath
-  -- todo: generalize source to presence/absence of api-proxy-configs, non-git configs
   , stanza_cfg_repo :: Git.Repo
   , stanza_cfg_sourceSubdir :: FilePath
   , stanza_cfg_dhallSubdir :: FilePath
   , stanza_cfg_ks_proxy_config :: ApiProxyConfig
+  , stanza_cfg_ks_linked_sites :: [LinkedSite]
   }
 
 data KitchenSinkSetup
   = KitchenSinkSetup
   { ks_setup_localBinPath :: FilePath
   , ks_setup_localUploadRoot :: FilePath
-  , ks_setup_fallback_stanza :: StanzaSetup
+  , ks_setup_fallback_stanza :: Maybe StanzaSetup
   , ks_setup_services_stanzas :: [StanzaSetup]
   }
   deriving (Generic)
@@ -68,32 +103,70 @@ instance ToJSON KitchenSinkSetup
 data StanzaSetup
   = StanzaSetup {
     stanza_setup_domain :: Text
-  , stanza_setup_title :: Text
   , stanza_setup_dir :: FilePath
   , stanza_setup_keyPath :: FilePath
   , stanza_setup_pemPath :: FilePath
-  , stanza_setup_sourceDir :: FilePath
-  , stanza_setup_subdir :: FilePath
-  , stanza_setup_dhall_subdir :: FilePath
   , stanza_setup_ks_proxy_config :: ApiProxyConfig
+  , stanza_setup_site :: Maybe SiteSetup
   }
   deriving (Generic)
 instance FromJSON StanzaSetup
 instance ToJSON StanzaSetup
 
+data SiteSetup 
+  = SiteSetup {
+    site_setup_title :: Text
+  , site_setup_sourceDir :: FilePath
+  , site_setup_subdir :: FilePath
+  , site_setup_dhall_subdir :: FilePath
+  , site_setup_ks_linked_sites :: [LinkedSite]
+  }
+  deriving (Generic)
+instance FromJSON SiteSetup
+instance ToJSON SiteSetup
+
 configToSetup :: StanzaConfig -> StanzaSetup
-configToSetup cfg =
+configToSetup s =
+  case s of
+    StanzaConfig_Site cfg -> fst (gitConfigToSetup cfg)
+    StanzaConfig_Proxy cfg -> proxyConfigToSetup cfg
+
+proxyConfigToSetup :: ProxyStanzaConfig -> StanzaSetup
+proxyConfigToSetup cfg =
   StanzaSetup
     dom
-    title
     remoteStanzaDir
     keypath
     pempath
-    sourcedir
-    subdir
-    dhalldir
     proxy
+    Nothing
   where
+    dom = Certs.getDomain . fst $ cfg.stanza_cfg_certSpec
+    remoteStanzaDir = "tmp/ks" </> Text.unpack dom
+    pempath  = remoteStanzaDir </> "ks.pem"
+    keypath  = remoteStanzaDir </> "ks.key"
+    proxy = cfg.stanza_cfg_ks_proxy_config
+    linkedSites = []
+
+
+gitConfigToSetup :: GitSiteStanzaConfig -> (StanzaSetup, SiteSetup)
+gitConfigToSetup cfg =
+   (ss, siteSetup)
+  where
+    ss = StanzaSetup
+        dom
+        remoteStanzaDir
+        keypath
+        pempath
+        proxy
+        (Just siteSetup)
+
+    siteSetup = SiteSetup
+        title
+        sourcedir
+        subdir
+        dhalldir
+        linkedSites
     dom = Certs.getDomain . fst $ cfg.stanza_cfg_certSpec
     title = cfg.stanza_cfg_title
     remoteStanzaDir = "tmp/ks" </> Text.unpack dom
@@ -103,11 +176,10 @@ configToSetup cfg =
     subdir = cfg.stanza_cfg_sourceSubdir
     dhalldir = cfg.stanza_cfg_dhallSubdir
     proxy = cfg.stanza_cfg_ks_proxy_config
-
+    linkedSites = cfg.stanza_cfg_ks_linked_sites
 
 ks_setup_stanzas :: KitchenSinkSetup -> [StanzaSetup]
-ks_setup_stanzas c = c.ks_setup_fallback_stanza : c.ks_setup_services_stanzas
-
+ks_setup_stanzas c = toList c.ks_setup_fallback_stanza <> c.ks_setup_services_stanzas
 
 setupKS
   :: (FromJSON directive, ToJSON directive)
@@ -126,7 +198,7 @@ setupKS mkRemote mkCerts cloneKitchenSink selfRemote selfpath cfg toSpec =
     in
     op "remote-ks-setup" (depSequence setup) id
   where
-    fallback = configToSetup cfg.ks_cfg_fallback_stanza
+    fallback = configToSetup <$> cfg.ks_cfg_fallback_stanza
     services = configToSetup <$> cfg.ks_cfg_services_stanzas
     uploadRoot = "tmp/ks-multisites"
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
@@ -134,7 +206,9 @@ setupKS mkRemote mkCerts cloneKitchenSink selfRemote selfpath cfg toSpec =
     depSequence setup = deps [ finalize setup `inject` uploads ]
     -- upload sites
     uploads = op "uploads-ks" (deps stanzaUploads) id
-    stanzaUploads = stanzaUpload mkCerts rsyncRemote <$> ks_cfg_stanzas cfg
+    stanzaUploads =  srcUploads <> certUploads
+    srcUploads = stanzaUploadSources rsyncRemote <$> ks_cfg_site_stanzas cfg
+    certUploads = stanzaUploadCerts mkCerts rsyncRemote <$> ks_cfg_stanzas cfg
     -- upload self
     self = Self.uploadSelf "tmp" selfRemote selfpath
     -- recursive call
@@ -142,16 +216,36 @@ setupKS mkRemote mkCerts cloneKitchenSink selfRemote selfpath cfg toSpec =
     recurse setup selfref =
       Self.callSelfAsSudo mkRemote selfref CLI.Up (toSpec setup)
 
-stanzaUpload
+stanzaUploadCerts
   :: Track' (Certs.Domain, Text)
   -> Rsync.Remote
   -> StanzaConfig
   -> Op
-stanzaUpload mkCerts rsyncRemote cfg =
-  using (Git.repodir cloneSite cfg.stanza_cfg_repo "") $ \repoDir ->
-    op "uploads-ks-stanza" (deps [uploadCert, uploadKey, uploadSources repoDir]) setRef `inject` mkRemoteDir
+stanzaUploadCerts mkCerts rsyncRemote cfg =
+    op "uploads-ks-stanza-certs" (deps [uploadCert, uploadKey]) setRef `inject` mkRemoteDir
   where
     setup = configToSetup cfg
+    setRef actions = actions { ref = dotRef $ "uploads-ks-stanza" <> setup.stanza_setup_domain }
+    sshRemote = (\(Rsync.Remote a b) -> Ssh.Remote a b) rsyncRemote
+    mkRemoteDir = Ssh.call Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
+
+    -- upload certificate and key
+    upload gen localpath distpath =
+      Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
+
+    uploadCert = upload siteCert (viewPemPath cfg) setup.stanza_setup_pemPath
+    uploadKey = upload siteCert (viewKeyPath cfg) setup.stanza_setup_keyPath
+    siteCert = Track $ const $ run mkCerts (viewCertSpec cfg)
+
+stanzaUploadSources
+  :: Rsync.Remote
+  -> GitSiteStanzaConfig
+  -> Op
+stanzaUploadSources rsyncRemote cfg =
+  using (Git.repodir cloneSite cfg.stanza_cfg_repo "") $ \repoDir ->
+    op "uploads-ks-stanza-src" (deps [uploadSources repoDir]) setRef `inject` mkRemoteDir
+  where
+    (setup,site) = gitConfigToSetup cfg
     setRef actions = actions { ref = dotRef $ "uploads-ks-stanza" <> setup.stanza_setup_domain }
     sshRemote = (\(Rsync.Remote a b) -> Ssh.Remote a b) rsyncRemote
     mkRemoteDir = Ssh.call Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
@@ -159,19 +253,19 @@ stanzaUpload mkCerts rsyncRemote cfg =
     cloneSite = Track $ Git.repo Debian.git
     -- upload sources
     uploadSources repoDir =
-      Rsync.sendDir Debian.rsync ignoreTrack (FS.Directory (FS.directoryPath repoDir <> "/")) rsyncRemote setup.stanza_setup_sourceDir
-
-    -- upload certificate and key
-    upload gen localpath distpath =
-      Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
-
-    uploadCert = upload siteCert cfg.stanza_cfg_pemPath setup.stanza_setup_pemPath
-    uploadKey = upload siteCert cfg.stanza_cfg_keyPath setup.stanza_setup_keyPath
-
-    siteCert = Track $ const $ run mkCerts cfg.stanza_cfg_certSpec
+      Rsync.sendDir Debian.rsync ignoreTrack (FS.Directory (FS.directoryPath repoDir <> "/")) rsyncRemote site.site_setup_sourceDir
 
 ksRunDir :: FilePath
 ksRunDir = "/opt/rundir/ks-multisite"
+
+lastResortPemPath :: FilePath
+lastResortPemPath = ksRunDir </> "last-resort-cert/cert.pem"
+
+lastResortKey :: Certs.Key
+lastResortKey = Certs.Key Certs.RSA2048 (ksRunDir </> "last-resort-cert") "key.pem"
+
+lastResortKeyPath :: FilePath
+lastResortKeyPath = Certs.keyPath lastResortKey
 
 ksConfigPath :: FilePath
 ksConfigPath = ksRunDir </> "kitchen-sink.config.json"
@@ -179,13 +273,15 @@ ksConfigPath = ksRunDir </> "kitchen-sink.config.json"
 stanzaPath :: FilePath -> StanzaSetup -> FilePath
 stanzaPath sub ss = ksRunDir </> "services" </> Text.unpack ss.stanza_setup_domain </> sub
 
-siteSrcDir,siteSrcPath,keyPath,pemPath,siteExecRoot,siteDhallRoot :: StanzaSetup -> FilePath
+siteSrcDir,keyPath,pemPath,siteExecRoot :: StanzaSetup -> FilePath
 pemPath = stanzaPath "cert.pem"
 keyPath = stanzaPath "cert.key"
 siteSrcDir = stanzaPath "src"
 siteExecRoot = siteSrcDir
-siteSrcPath ss = siteSrcDir ss </> ss.stanza_setup_subdir
-siteDhallRoot ss = siteSrcDir ss </> ss.stanza_setup_dhall_subdir
+
+siteSrcPath,siteDhallRoot :: StanzaSetup -> SiteSetup -> FilePath
+siteSrcPath ss site = siteSrcDir ss </> site.site_setup_subdir
+siteDhallRoot ss site = siteSrcDir ss </> site.site_setup_dhall_subdir
 
 systemdKitchenSink :: KitchenSinkSetup -> Op
 systemdKitchenSink setup =
@@ -201,7 +297,7 @@ systemdKitchenSink setup =
 
     localSetup :: Op
     localSetup =
-      op "ks-setup" (deps [sysDeps, ksconfigFile, prepareStanzas]) id
+      op "ks-setup" (deps [lastResortCert, sysDeps, ksconfigFile, prepareStanzas]) id
 
     prepareStanzas :: Op
     prepareStanzas =
@@ -212,11 +308,22 @@ systemdKitchenSink setup =
       let
           copypem = FS.fileCopy ss.stanza_setup_pemPath (pemPath ss)
           copykey = FS.fileCopy ss.stanza_setup_keyPath (keyPath ss)
-          movesrc = FS.moveDirectory ss.stanza_setup_sourceDir (siteSrcDir ss)
+          movesrc =
+            maybe
+              realNoop
+              (\site -> FS.moveDirectory site.site_setup_sourceDir (siteSrcDir ss))
+              ss.stanza_setup_site
+
       in
       op "ks-setup-stanza" (deps [movesrc, copypem, copykey]) $ \actions  -> actions {
         ref = dotRef $ "prepare-ks-stanza" <> ss.stanza_setup_domain
       }
+
+    lastResortCert :: Op
+    lastResortCert =
+      case setup.ks_setup_fallback_stanza of
+        Just _ -> realNoop
+        Nothing -> Certs.selfSign Debian.openssl (Certs.SelfSigned lastResortPemPath (Certs.SigningRequest (Certs.Domain "kitchen-sink.local") lastResortKey "tmp/ks-multisites-self-cert/csr" "cert.csr"))
 
     sysDeps :: Op
     sysDeps =
@@ -244,8 +351,8 @@ systemdKitchenSink setup =
         , "--configFile", Text.pack ksConfigPath
         , "--httpPort", "80"
         , "--httpsPort", "443"
-        , "--tlsCertFile", Text.pack (pemPath setup.ks_setup_fallback_stanza)
-        , "--tlsKeyFile", Text.pack (keyPath setup.ks_setup_fallback_stanza)
+        , "--tlsCertFile", Text.pack (fromMaybe lastResortPemPath $ pemPath <$> setup.ks_setup_fallback_stanza)
+        , "--tlsKeyFile", Text.pack (fromMaybe lastResortKeyPath $ keyPath <$> setup.ks_setup_fallback_stanza)
         ]
 
     install :: Systemd.Install
@@ -255,7 +362,7 @@ ksConfigContents :: KitchenSinkSetup -> MultiSiteConfig
 ksConfigContents setup =
     MultiSiteConfig
       (stanza <$> setup.ks_setup_services_stanzas)
-      (FallbackSite $ stanza setup.ks_setup_fallback_stanza)
+      (maybe FallbackWithOminousError (FallbackSite . stanza) setup.ks_setup_fallback_stanza)
   where
     domain :: StanzaSetup -> Text
     domain ss = ss.stanza_setup_domain
@@ -267,17 +374,22 @@ ksConfigContents setup =
     tls ss = TLSStanza Nothing (CertificateFileSource (CertificateFiles (pemPath ss) (keyPath ss)))
 
     site :: StanzaSetup -> SourceStanza
-    site ss =
-      KitchenSinkDirectorySource
-      $ KitchenSinkDirectorySourceStanza
-          (siteSrcPath ss)
-          (siteInfo ss)
-          (Just $ siteDhallRoot ss)
-          (Just $ siteExecRoot ss)
+    site ss = case ss.stanza_setup_site of
+      Nothing -> NoFiles
+      Just site -> 
+          KitchenSinkDirectorySource
+          $ KitchenSinkDirectorySourceStanza
+              (siteSrcPath ss site)
+              (siteInfo ss site)
+              (Just $ siteDhallRoot ss site)
+              (Just $ siteExecRoot ss)
 
-    siteInfo :: StanzaSetup -> SiteInfo
-    siteInfo ss =
-      SiteInfo ss.stanza_setup_title (url ss) Nothing Nothing
+    linkedSites :: SiteSetup -> [LinkedSite]
+    linkedSites ss = ss.site_setup_ks_linked_sites
+
+    siteInfo :: StanzaSetup -> SiteSetup -> SiteInfo
+    siteInfo ss site =
+      SiteInfo site.site_setup_title (url ss) Nothing (Just $ linkedSites site)
 
     proxy :: StanzaSetup -> ApiProxyConfig
     proxy ss = ss.stanza_setup_ks_proxy_config

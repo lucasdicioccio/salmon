@@ -40,6 +40,7 @@ import qualified Data.ByteString.Base16 as Base16
 import qualified Crypto.Hash.SHA256 as HMAC256
 import qualified Data.Text.Encoding as Text
 import qualified KitchenSink.Engine.Config as KS
+import qualified KitchenSink.Engine.SiteConfig as KS
 
 import qualified Salmon.Builtin.Nodes.Continuation as Continuation
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -51,6 +52,7 @@ import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Self as Self
@@ -80,7 +82,6 @@ data AccountPrefs
   { account_email :: Acme.Email
   , account_key :: Keys.JWKKeyPair
   }
-
 
 domains :: [(Certs.Domain,Text)]
 domains =
@@ -184,44 +185,42 @@ ksBlogConfig =
     acmeChallengeDnsleaf = "apex-challenge"
     prefs = acmeCertPrefs Production domain
 
-ksMultiConfig :: KSMulti.KitchenSinkConfig
-ksMultiConfig =
-    KSMulti.KitchenSinkConfig
-      fallback
-      sites
-  where
-    sites = [dicioccioDotFr, kitchenSinkBlog]
-    fallback :: KSMulti.StanzaConfig
-    fallback = dicioccioDotFr
-
 kitchenSinkBlog :: KSMulti.StanzaConfig
 kitchenSinkBlog =
   ksBlogStanza
     (Certs.Domain "kitchensink.dyn.dicioccio.fr")
-    "The Kitchen Sink Blog Generator"
     "_acme-challenge.kitchensink"
+    "The Kitchen Sink Blog Generator"
     (Git.Repo "./git-repos/" "kitchensink" (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git") (Git.Branch "main"))
     "website-src"
     ""
     (KS.SlashApiProxyList
-     [ KS.SlashApiProxyDirective
-         KS.UseHTTPS
-         "/api/github-proxy"
-         (KS.RewritePrefixHost "/repos/kitchensink-tech/kitchensink" "api.github.com")
-         "api.github.com"
-         443
-     ])
+      [ KS.SlashApiProxyDirective
+          KS.UseHTTPS
+          "/api/github-proxy"
+          (KS.RewritePrefixHost "/repos/kitchensink-tech/kitchensink" "api.github.com")
+          "api.github.com"
+          443
+      ]
+    )
+    [ KS.LinkedSite "https://dicioccio.fr" "kitchen-sink" "Lucas' blog"
+    , KS.LinkedSite "https://en.wikipedia.org/" "website" "The English Wikipedia"
+    ]
 
 dicioccioDotFr :: KSMulti.StanzaConfig
 dicioccioDotFr =
   ksBlogStanza
     (Certs.Domain "dicioccio.fr")
-    ("Lucas DiCioccio's Blog")
     "apex-challenge"
+    ("Lucas DiCioccio's Blog")
     (Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main"))
     "site-src"
     ""
     KS.NoProxying
+    [ KS.LinkedSite "https://kitchensink-tech.github.io" "kitchen-sink" "KitchenSink website"
+    , KS.LinkedSite "https://en.wikipedia.org/" "website" "The English Wikipedia"
+    , KS.LinkedSite "https://github.com/" "website" "GitHub"
+    ]
 
 ksBlogStanza
   :: Certs.Domain
@@ -231,21 +230,77 @@ ksBlogStanza
   -> FilePath
   -> FilePath
   -> KS.ApiProxyConfig
+  -> [KS.LinkedSite]
   -> KSMulti.StanzaConfig
-ksBlogStanza domain title txt repo subdir dhalldir proxy =
+ksBlogStanza domain txt title repo subdir dhalldir proxy linkessites =
   let prefs = acmeCertPrefs Production domain in
-  KSMulti.StanzaConfig 
-    (domain, txt)
-    title
-    (Certs.keyPath prefs.cert_key)
-    prefs.cert_pem
-    repo
-    subdir
-    dhalldir
-    proxy
+  KSMulti.StanzaConfig_Site
+    $ KSMulti.GitSiteStanzaConfig 
+        (domain, txt)
+        title
+        (Certs.keyPath prefs.cert_key)
+        prefs.cert_pem
+        repo
+        subdir
+        dhalldir
+        proxy
+        linkessites
+
+ksPureProxyStanza
+  :: Certs.Domain
+  -> DNSName
+  -> KS.ApiProxyConfig
+  -> KSMulti.StanzaConfig
+ksPureProxyStanza domain txt proxy =
+  let prefs = acmeCertPrefs Production domain in
+  KSMulti.StanzaConfig_Proxy
+    $ KSMulti.ProxyStanzaConfig
+        (domain, txt)
+        (Certs.keyPath prefs.cert_key)
+        prefs.cert_pem
+        proxy
+
+phaseInOnCheddar :: KSMulti.StanzaConfig
+phaseInOnCheddar =
+  ksPureProxyStanza
+    (Certs.Domain "phasein.dyn.dicioccio.fr")
+    "_acme-challenge.phasein"
+    (KS.SlashApiProxyList
+      [ KS.SlashApiProxyDirective
+          KS.UsePlainText
+          ""
+          KS.NoRewrite
+          "localhost"
+          7776
+      ]
+    )
+
+eWebhook :: KSMulti.StanzaConfig
+eWebhook =
+  ksPureProxyStanza
+    (Certs.Domain "e-webhook.dyn.dicioccio.fr")
+    "_acme-challenge.e-webhook"
+    (KS.SlashApiProxyList
+      [ KS.SlashApiProxyDirective
+          KS.UsePlainText
+          "/private"
+          KS.DropPrefix
+          "lucasdicioccio-ThinkPad-T490.home"
+          8083
+      , KS.SlashApiProxyDirective
+          KS.UsePlainText
+          "/webhook"
+          KS.DropPrefix
+          "lucasdicioccio-ThinkPad-T490.home"
+          8087
+      ]
+    )
 
 boxSelf :: Environment -> Self.Remote
 boxSelf _ = Self.Remote "salmon" "box.dicioccio.fr"
+
+cheddarSelf :: Environment -> Self.Remote
+cheddarSelf _ = Self.Remote "salmon" "cheddar.local"
 
 sreBox :: Environment -> Self.SelfPath -> Text -> Op
 sreBox env selfpath selfCertDomain =
@@ -266,9 +321,54 @@ sreBox env selfpath selfCertDomain =
     ksmulti :: Op
     ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (boxSelf env) selfpath ksMultiConfig RunningLocalKitchenSink
 
+    ksMultiConfig :: KSMulti.KitchenSinkConfig
+    ksMultiConfig = KSMulti.KitchenSinkConfig (Just dicioccioDotFr) [dicioccioDotFr, kitchenSinkBlog]
+
+cheddarBox :: Environment -> Self.SelfPath -> Text -> Op
+cheddarBox env selfpath selfCertDomain =
+    op "cheddar-box" (deps [ ksmulti ] ) id
+  where 
+    dns = dnsConfig selfCertDomain
+    acme = acmeConfig dns env
+
+    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath RunningLocalDNS
+    mkCert = Track $ acmeSign acme mkDNS
+
+    cloneKS :: Tracked' FilePath
+    cloneKS = case env of Production -> kitchenSink ; Staging -> kitchenSink_dev
+
+    ksmulti :: Op
+    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (cheddarSelf env) selfpath ksMultiConfig RunningLocalKitchenSink
+
+    ksMultiConfig :: KSMulti.KitchenSinkConfig
+    ksMultiConfig = KSMulti.KitchenSinkConfig (Just eWebhook) [phaseInOnCheddar,eWebhook]
+
+-------------------------------------------------------------------------------
+localDev :: Op
+localDev =
+  op "pg-dev" (deps [acls `inject` basics]) id
+
+  where
+    basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1]) id
+    cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
+    db1 = Postgres.database cluster Debian.psql d1
+    d1 = Postgres.Database "salmon_demo01"
+    u1 = Postgres.User "salmon_user01"
+    u2 = Postgres.User "salmon_user02"
+    user1 = Postgres.user cluster Debian.psql u1 (Postgres.Password "unsafe")
+    user2 = Postgres.user cluster Debian.psql u2 (Postgres.Password "unsafe")
+    group = Postgres.group cluster Debian.psql (Postgres.Group "salmon_role01")
+    acls = op "grants" (deps [acl1, acl2]) id
+    acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
+    acl2 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u2) [Postgres.CONNECT])
+    migrate1 = Postgres.adminScript Debian.psql (FS.Generated genMigration1 "./migrations/test01.sql")
+    genMigration1 = Track $ \path -> FS.filecontents (FS.FileContents path ("CREATE EXTENSION \"uuid-ossp\";" :: Text))
+
 -------------------------------------------------------------------------------
 data Spec
-  = SreBox Text
+  = LocalDev
+  | SreBox Text
+  | CheddarBox Text
   | RunningLocalDNS MicroDNSSetup
   | RunningLocalKitchenSinkBlog KSBlog.KitchenSinkBlogSetup
   | RunningLocalKitchenSink KSMulti.KitchenSinkSetup
@@ -281,7 +381,9 @@ program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
+   specOp (LocalDev) =  [localDev]
    specOp (SreBox domainName) =  [sreBox Production selfpath domainName]
+   specOp (CheddarBox domainName) =  [cheddarBox Production selfpath domainName]
    specOp (RunningLocalDNS arg) =  [systemdMicroDNS arg]
    specOp (RunningLocalKitchenSinkBlog arg) =  [KSBlog.systemdKitchenSinkBlog arg]
    specOp (RunningLocalKitchenSink arg) =  [KSMulti.systemdKitchenSink arg]
@@ -294,6 +396,8 @@ program selfpath httpManager =
 -------------------------------------------------------------------------------
 data Seed
   = SreBoxSeed { boxDomain :: Text }
+  | CheddarBoxSeed { boxDomain :: Text }
+  | LocalDevSeed
 
 instance ParseRecord Seed where
   parseRecord =
@@ -302,14 +406,20 @@ instance ParseRecord Seed where
       combo =
         subparser $ mconcat
           [ command "sre-box" (info sreBox (progDesc "configures SRE box"))
+          , command "cheddar" (info cheddarBox (progDesc "configures cheddar"))
+          , command "localdev" (info localdev (progDesc "configures local stuff (for dev)"))
           ]
       sreBox = SreBoxSeed <$> strArgument (Options.Applicative.help "domain")
+      cheddarBox = CheddarBoxSeed <$> strArgument (Options.Applicative.help "domain")
+      localdev = pure LocalDevSeed
 
 configure :: Configure' Seed Spec
 configure = Configure $ pure . go 
   where
     go :: Seed -> Spec
     go (SreBoxSeed d) = SreBox d
+    go (CheddarBoxSeed d) = CheddarBox d
+    go (LocalDevSeed) = LocalDev
 
 -------------------------------------------------------------------------------
 main :: IO ()

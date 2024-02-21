@@ -123,6 +123,7 @@ op short pred f =
 placeholder :: ShortHand -> Text -> Op
 placeholder short t = op short nodeps $ \actions -> actions {
     dynamics = [ toDyn $ PlaceHolder t ]
+  , ref = dotRef $ short <> t
   }
 
 

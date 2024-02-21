@@ -1,5 +1,6 @@
 module Salmon.Builtin.Nodes.Binary
   ( Binary
+  , justInstall
   , Command(..)
   , withBinary
   , withBinaryStdin
@@ -24,6 +25,9 @@ import System.Process.ByteString (readCreateProcessWithExitCode)
 --
 -- This proxy cannot be constructed directly.
 data Binary (wellKnownName :: Symbol) = Binary
+
+justInstall :: Track' (Binary sym) -> Op
+justInstall t = run t Binary
 
 -- | A command declares using a command.
 data Command (wellKnownName :: Symbol) arg =
