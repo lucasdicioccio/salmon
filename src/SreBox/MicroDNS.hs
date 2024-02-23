@@ -2,8 +2,13 @@
 
 module SreBox.MicroDNS where
 
+import qualified Crypto.Hash.SHA256 as HMAC256
 import Data.Aeson (FromJSON, ToJSON)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Base16 as Base16
+import Data.CaseInsensitive (CI)
 import Data.Text (Text)
+import qualified Data.Text.Encoding as Text
 import Data.X509 as Crypton
 import Data.X509.CertificateStore as Crypton
 import Data.X509.Validation as Crypton
@@ -218,3 +223,9 @@ makeTlsManagerForSelfSigned hostname dir = do
     relaxedChecks :: Crypton.ValidationChecks
     relaxedChecks = Crypton.defaultChecks { checkLeafV3 = False }
 
+hmacHashedPart :: ByteString -> Text -> ByteString
+hmacHashedPart sharedsecret txtrecord =
+  Base16.encode $ HMAC256.hmac sharedsecret (Text.encodeUtf8 txtrecord)
+
+hmacHeader :: ByteString -> Text -> (CI ByteString, ByteString)
+hmacHeader s t = ("x-microdns-hmac", hmacHashedPart s t)

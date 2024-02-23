@@ -114,10 +114,11 @@ grant psql acl =
 adminScript :: Track' (Binary "psql") -> File "psql-script" -> Op
 adminScript psql file =
   withFile file $ \path ->
-  withBinary psql psqlAdminRun_Sudo (Script path) $ \up ->
-  op "pg-script" nodeps $ \actions -> actions {
-    ref = dotRef $ "pg-script:" <> Text.pack path
+  withBinary psql psqlAdminRun_Sudo (AdminScript path) $ \up ->
+  op "pg-adming-script" nodeps $ \actions -> actions {
+    ref = dotRef $ "pg-admin-script:" <> Text.pack path
   , up = up
+  , help = "runs " <> Text.pack path
   }
 
 -- | commands to bootstrap PG roles and dbs as admin
@@ -127,7 +128,7 @@ data PsqlAdmin
   | CreateUser RoleName Password
   | CreateGroup RoleName
   | Grant AccessRight
-  | Script FilePath
+  | AdminScript FilePath
 
 -- | todo: workaround sudo hack with some calling preference
 -- - we'll need to request more than a Track' (Binary "psql") but some more complex logic
@@ -135,8 +136,8 @@ data PsqlAdmin
 psqlAdminRun_Sudo :: Command "psql" PsqlAdmin
 psqlAdminRun_Sudo = Command go
   where
-    go (Script path) =
-      proc "sudo" [ "-u", "postgres", "psql",  "-c", "-f", path ]
+    go (AdminScript path) =
+      proc "sudo" [ "-u", "postgres", "psql", "-f", path ]
     go (CreateDB name) =
       proc "sudo" [ "-u", "postgres", "psql",  "-c", unwords [ "CREATE DATABASE" , Text.unpack name ] ]
     go (CreateUser name pass) =
@@ -177,3 +178,59 @@ psqlAdminRun_Sudo = Command go
 
     commaList :: [Text] -> Text
     commaList = Text.intercalate ","
+
+
+-------------------------------------------------------------------------------
+
+data ConnString pass = ConnString {
+    connstring_server :: Server
+  , connstring_user :: User
+  , connstring_user_pass :: pass
+  , connstring_db :: Database
+  } deriving (Functor)
+
+withPassword :: Password -> ConnString a -> ConnString Password
+withPassword pass c = const pass <$> c
+
+userScript
+  :: Track' (Binary "psql")
+  -> Track' (ConnString Password)
+  -> ConnString Password
+  -> File "psql-script"
+  -> Op
+userScript psql mksetup c@(ConnString server user pass db) file =
+  withFile file $ \path ->
+  withBinary psql (psqlUserRun c) (UserScript path) $ \up ->
+  op "pg-script" (deps [run mksetup c]) $ \actions -> actions {
+    ref = dotRef $ "pg-script:" <> Text.pack path
+  , up = up
+  , help = "runs " <> Text.pack path
+  }
+
+data PsqlUser
+  = UserScript FilePath
+
+psqlUserRun :: ConnString Password -> Command "psql" PsqlUser
+psqlUserRun (ConnString server user pass db) = Command go
+  where
+    connstring :: String
+    connstring =
+      mconcat
+        ["postgresql://"
+        , Text.unpack user.userRole
+        , ":"
+        , Text.unpack $ pass.revealPassword
+        , "@"
+        , Text.unpack server.serverHost
+        , ":"
+        , show server.serverPort
+        , "/"
+        , Text.unpack db.getDatabase
+        ]
+
+    go (UserScript path) =
+      proc "psql"
+        [ connstring
+        , "-f"
+        , path
+        ]

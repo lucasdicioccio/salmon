@@ -444,7 +444,7 @@ instance ParseRecord Seed where
       builds = BuildSeed <$> strArgument (Options.Applicative.help "build-name")
       cheddar = pure CheddarSeed
 
-configure :: Configure' Seed Spec
+configure :: Configure IO Seed Spec
 configure = Configure $ pure . go 
   where
     go :: Seed -> Spec

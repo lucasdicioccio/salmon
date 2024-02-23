@@ -29,6 +29,7 @@ library
                    , Salmon.Op.Track
                    , Salmon.Op.Configure
                    , Salmon.Op.Ref
+                   , Salmon.Op.G
                    , Salmon.FoldBranch
                    , Salmon.Actions.Help
                    , Salmon.Actions.UpDown
@@ -37,6 +38,7 @@ library
                    , Salmon.Actions.Notify
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine
+                   , Salmon.Builtin.Migrations
                    , Salmon.Builtin.Nodes.Acme
                    , Salmon.Builtin.Nodes.Bash
                    , Salmon.Builtin.Nodes.Binary
@@ -56,6 +58,7 @@ library
                    , Salmon.Builtin.Nodes.Ssh
                    , Salmon.Builtin.Nodes.Systemd
                    , Salmon.Builtin.Nodes.Web
+                   , SreBox.PostgresMigrations
                    , SreBox.CabalBuilding
                    , SreBox.CertSigning
                    , SreBox.Environment
@@ -67,6 +70,7 @@ library
                     , free
                     , mtl
                     , transformers
+                    , case-insensitive
                     , comonad
                     , contravariant
                     , hashable

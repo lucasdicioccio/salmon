@@ -61,8 +61,6 @@ type Track' a = Track Identity Actions' a
 
 type Tracked' a = Tracked Identity Actions' a
 
-type Configure' seed a = Configure Identity seed a
-
 evalDeps :: Op -> Cofree Graph Op
 evalDeps = runIdentity . expand
 

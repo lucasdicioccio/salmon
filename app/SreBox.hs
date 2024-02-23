@@ -7,7 +7,7 @@
 module Main where
 
 -- to-re-export
-import Salmon.Op.OpGraph (inject)
+import Salmon.Op.OpGraph (inject, node)
 import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
 import Data.Functor.Contravariant ((>$<))
@@ -22,7 +22,6 @@ import Data.Maybe (catMaybes)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
 import Acme.NotAJoke.LetsEncrypt (staging_letsencryptv2, letsencryptv2)
-import Acme.NotAJoke.Api.Validation (ValidationProof)
 import Network.HTTP.Client (Manager, newManager, defaultManagerSettings, parseUrlThrow, method, requestHeaders )
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Dancer (DanceStep(..), showProof, showToken, showKeyAuth)
@@ -32,16 +31,11 @@ import Network.HTTP.Client.TLS as Tls
 import Network.TLS as Tls
 import Network.TLS.Extra as Tls
 import Network.TLS (Shared(..),ClientParams(..))
-import Data.X509.CertificateStore as Crypton
-import Data.X509 as Crypton
-import Data.X509.Validation as Crypton
-import Network.Connection as Crypton
-import qualified Data.ByteString.Base16 as Base16
-import qualified Crypto.Hash.SHA256 as HMAC256
 import qualified Data.Text.Encoding as Text
 import qualified KitchenSink.Engine.Config as KS
 import qualified KitchenSink.Engine.SiteConfig as KS
 
+import Salmon.Op.G (G(..))
 import qualified Salmon.Builtin.Nodes.Continuation as Continuation
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Acme as Acme
@@ -61,6 +55,7 @@ import qualified Salmon.Builtin.Nodes.Bash as Bash
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
+import Salmon.Builtin.Migrations as Migrations
 import qualified Salmon.Builtin.CommandLine as CLI
 
 import SreBox.Environment
@@ -69,6 +64,7 @@ import SreBox.CertSigning
 import SreBox.MicroDNS
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
+import qualified SreBox.PostgresMigrations as PGMigrate
 
 data CertPrefs
   = CertPrefs
@@ -158,8 +154,7 @@ dnsConfig selfCertDomain =
       sharedsecret <- ByteString.readFile $ secretPath
       tlsManager <- makeTlsManagerForSelfSigned selfCertDomain dnsPemPath
       baseReq <- parseUrlThrow $ postTxtRecordURL txtrecord sha
-      let hmac = Base16.encode $ HMAC256.hmac sharedsecret (Text.encodeUtf8 txtrecord)
-      let req = baseReq { method = "POST", requestHeaders = [("x-microdns-hmac", hmac)] }
+      let req = baseReq { method = "POST", requestHeaders = [hmacHeader sharedsecret txtrecord] }
       forM_ tlsManager (httpNoBody $ req)
     dnsApex = "dyn.dicioccio.fr."
     zonefile =
@@ -168,6 +163,7 @@ dnsConfig selfCertDomain =
         , "A dyn.dicioccio.fr. 163.172.53.34"
         , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
         , "A kitchensink.dyn.dicioccio.fr. 163.172.53.34"
+        , "CNAME chouette.dyn.dicioccio.fr. cheddar.dyn.dicioccio.fr"
         , "TXT dyn.dicioccio.fr. \"microdns\""
         , "TXT dyn.dicioccio.fr. \"salmon\""
         ]
@@ -205,6 +201,21 @@ kitchenSinkBlog =
     )
     [ KS.LinkedSite "https://dicioccio.fr" "kitchen-sink" "Lucas' blog"
     , KS.LinkedSite "https://en.wikipedia.org/" "website" "The English Wikipedia"
+    ]
+
+chouetteBlog :: KSMulti.StanzaConfig
+chouetteBlog =
+  ksBlogStanza
+    (Certs.Domain "chouette.dyn.dicioccio.fr")
+    "_acme-challenge.chouette"
+    "Des idees sur la trace de la Chouette d'or."
+    (Git.Repo "./git-repos/" "blog" (Git.Remote "git@github.com:lucasdicioccio/blog.git") (Git.Branch "main"))
+    "chouette-src"
+    ""
+    KS.NoProxying
+    [ KS.LinkedSite "https://dicioccio.fr" "kitchen-sink" "Lucas' blog"
+    , KS.LinkedSite "https://en.wikipedia.org/" "website" "The English Wikipedia"
+    , KS.LinkedSite "https://fr.wikipedia.org/" "website" "Wikipedia en Francais"
     ]
 
 dicioccioDotFr :: KSMulti.StanzaConfig
@@ -322,7 +333,7 @@ sreBox env selfpath selfCertDomain =
     ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (boxSelf env) selfpath ksMultiConfig RunningLocalKitchenSink
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
-    ksMultiConfig = KSMulti.KitchenSinkConfig (Just dicioccioDotFr) [dicioccioDotFr, kitchenSinkBlog]
+    ksMultiConfig = KSMulti.KitchenSinkConfig (Just dicioccioDotFr) [dicioccioDotFr, kitchenSinkBlog ]
 
 cheddarBox :: Environment -> Self.SelfPath -> Text -> Op
 cheddarBox env selfpath selfCertDomain =
@@ -341,22 +352,24 @@ cheddarBox env selfpath selfCertDomain =
     ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (cheddarSelf env) selfpath ksMultiConfig RunningLocalKitchenSink
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
-    ksMultiConfig = KSMulti.KitchenSinkConfig (Just eWebhook) [phaseInOnCheddar,eWebhook]
+    ksMultiConfig = KSMulti.KitchenSinkConfig (Just eWebhook) [phaseInOnCheddar,eWebhook] -- , chouetteBlog]
 
 -------------------------------------------------------------------------------
-localDev :: Op
-localDev =
-  op "pg-dev" (deps [acls `inject` basics]) id
+localDev :: G PGMigrate.MigrationFile -> Op
+localDev inputMigrations =
+  op "pg-dev" (deps [demoTables `inject` acls `inject` basics]) id
 
   where
-    basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1]) id
+    basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1, migrate2]) id
     cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
     db1 = Postgres.database cluster Debian.psql d1
     d1 = Postgres.Database "salmon_demo01"
     u1 = Postgres.User "salmon_user01"
     u2 = Postgres.User "salmon_user02"
-    user1 = Postgres.user cluster Debian.psql u1 (Postgres.Password "unsafe")
-    user2 = Postgres.user cluster Debian.psql u2 (Postgres.Password "unsafe")
+    pass1 = Postgres.Password "unsafe"
+    pass2 = Postgres.Password "unsafe"
+    user1 = Postgres.user cluster Debian.psql u1 pass1
+    user2 = Postgres.user cluster Debian.psql u2 pass2
     group = Postgres.group cluster Debian.psql (Postgres.Group "salmon_role01")
     acls = op "grants" (deps [acl1, acl2]) id
     acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
@@ -364,9 +377,16 @@ localDev =
     migrate1 = Postgres.adminScript Debian.psql (FS.Generated genMigration1 "./migrations/test01.sql")
     genMigration1 = Track $ \path -> FS.filecontents (FS.FileContents path ("CREATE EXTENSION \"uuid-ossp\";" :: Text))
 
+    demoTables = op "pg-tables" (deps [tableA]) id
+    connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
+    tableA = Postgres.userScript Debian.psql ignoreTrack connstring  (FS.Generated genMigration2 "./migrations/test02.sql")
+    genMigration2 = Track $ \path -> FS.filecontents (FS.FileContents path ("CREATE TABLE users(id serial, name text)":: Text))
+
+    migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
+
 -------------------------------------------------------------------------------
 data Spec
-  = LocalDev
+  = LocalDev (G PGMigrate.MigrationFile)
   | SreBox Text
   | CheddarBox Text
   | RunningLocalDNS MicroDNSSetup
@@ -381,7 +401,7 @@ program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (LocalDev) =  [localDev]
+   specOp (LocalDev m) =  [localDev m]
    specOp (SreBox domainName) =  [sreBox Production selfpath domainName]
    specOp (CheddarBox domainName) =  [cheddarBox Production selfpath domainName]
    specOp (RunningLocalDNS arg) =  [systemdMicroDNS arg]
@@ -413,13 +433,18 @@ instance ParseRecord Seed where
       cheddarBox = CheddarBoxSeed <$> strArgument (Options.Applicative.help "domain")
       localdev = pure LocalDevSeed
 
-configure :: Configure' Seed Spec
-configure = Configure $ pure . go 
+configure :: Configure IO Seed Spec
+configure = Configure go 
   where
-    go :: Seed -> Spec
-    go (SreBoxSeed d) = SreBox d
-    go (CheddarBoxSeed d) = CheddarBox d
-    go (LocalDevSeed) = LocalDev
+    go :: Seed -> IO Spec
+    go (SreBoxSeed d) = pure $ SreBox d
+    go (CheddarBoxSeed d) = pure $ CheddarBox d
+    go (LocalDevSeed) = do
+      let reader =
+            Migrations.addFilePrefix "migrations/src"
+            $ PGMigrate.defaultMigrationReader 
+      m <- Migrations.loadMigrations reader "foo1.toto"
+      pure $ LocalDev (G $ fmap node m)
 
 -------------------------------------------------------------------------------
 main :: IO ()

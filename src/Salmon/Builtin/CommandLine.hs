@@ -60,9 +60,13 @@ instance ParseRecord BaseCommand
 instance ParseField BaseCommand
 instance ParseFields BaseCommand
 
+-- | Function to combine a configuration system (based on a seed).
+-- todo: consider adding some non-det when the graph depends not just on a seed but also on reading a variable in the directive
+-- - either at the configure step: then the seed must contain enough to build the ops
+-- - either in the expand phase from the directive
 execCommandOrSeed
   :: forall directive seed. (ToJSON directive, FromJSON directive)
-  => Configure' seed directive
+  => Configure IO seed directive
   -> Track' directive
   -> Command seed
   -> IO ()
@@ -77,7 +81,8 @@ execCommandOrSeed genBase traceBase cmd = void $ do
     (Run DAG) -> do
       withGraph (Dot.printCograph . (runIdentity . expand))
     Config seed -> do
-      LBysteString.putStr $ encode $ runIdentity $ gen genBase seed
+      dir <- gen genBase seed
+      LBysteString.putStr $ encode dir
   where
     nat = pure . runIdentity
     withGraph cont = do
@@ -87,6 +92,8 @@ execCommandOrSeed genBase traceBase cmd = void $ do
         Right a -> do
           cont (run traceBase a)
 
+-- | Function to build a main reading a base command and a directive from
+-- stdin.
 execBaseCommand
   :: forall directive seed. (FromJSON directive)
   => Track' directive
