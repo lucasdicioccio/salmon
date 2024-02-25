@@ -495,7 +495,8 @@ localDev inputMigrations =
 -------------------------------------------------------------------------------
 data Spec
   --- todo: three local entrypoints
-  = LocalDev (G PGMigrate.MigrationFile)
+  = Batch [Spec]
+  | LocalDev (G PGMigrate.MigrationFile)
   | SreBox Text
   | CheddarBox Text
   --- services running
@@ -513,6 +514,7 @@ program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
+   specOp (Batch xs) = concatMap specOp xs
    specOp (LocalDev m) = [localDev m]
    specOp (SreBox domainName) = [sreBox Production selfpath domainName]
    specOp (CheddarBox domainName) = [cheddarBox Production selfpath domainName]
