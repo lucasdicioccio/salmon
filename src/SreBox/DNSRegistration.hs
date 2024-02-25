@@ -9,13 +9,71 @@ import qualified Data.Text as Text
 
 
 import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Track
 import Salmon.Builtin.Extension
+import qualified Salmon.Builtin.CommandLine as CLI
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.CronTask as CronTask
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
-import SreBox.MicroDNS (DNSName)
+import qualified Salmon.Builtin.Nodes.Rsync as Rsync
+import qualified Salmon.Builtin.Nodes.Self as Self
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
+import SreBox.MicroDNS (MicroDNSConfig(..),DNSName,selfSignedCert,sharedToken)
 
+data RegisteredMachineConfig
+  = RegisteredMachineConfig
+  { registration_machineName :: DNSName
+  , registration_cfg_local_token_path :: FilePath
+  --
+  , registration_cfg_task_script :: FilePath
+  , registration_cfg_task_data_path_token :: FilePath
+  , registration_cfg_task_data_path_pem :: FilePath
+  }
+
+setupRegistration
+  :: forall directive.
+     (FromJSON directive, ToJSON directive)
+  => Track' Ssh.Remote
+  -> Self.SelfPath
+  -> Self.Remote
+  -> MicroDNSConfig
+  -> RegisteredMachineConfig
+  -> (RegisteredMachineSetup -> directive)
+  -> Op
+setupRegistration mkRemote selfpath selfRemote dns cfg toSpec =
+    op "registration" (deps [opGraph remoteRegistration, uploadPem, uploadToken]) id
+  where
+    rsyncRemote :: Rsync.Remote
+    rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
+
+    tmpTokenPath :: FilePath
+    tmpTokenPath = "tmp/registration.token"
+
+    uploadToken =
+      Rsync.sendFile Debian.rsync (FS.Generated mkToken cfg.registration_cfg_local_token_path) rsyncRemote tmpTokenPath
+
+    tmpPemPath :: FilePath
+    tmpPemPath = "tmp/registration.pem"
+
+    uploadPem =
+      Rsync.sendFile Debian.rsync (FS.Generated (selfSignedCert dns) dns.microdns_cfg_pemPath) rsyncRemote tmpPemPath
+
+    mkToken :: Track' FilePath
+    mkToken = Track $ \tokenPath ->
+      sharedToken dns.microdns_cfg_secretPath cfg.registration_machineName tokenPath
+
+    self = Self.uploadSelf "tmp" selfRemote selfpath
+    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo mkRemote ref CLI.Up (toSpec regSetup)
+
+    regSetup =
+      RegisteredMachineSetup
+        cfg.registration_machineName
+        tmpTokenPath
+        tmpPemPath
+        (cfg.registration_cfg_task_script)
+        (cfg.registration_cfg_task_data_path_token)
+        (cfg.registration_cfg_task_data_path_pem)
 
 data RegisteredMachineSetup
   = RegisteredMachineSetup

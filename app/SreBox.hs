@@ -67,6 +67,7 @@ import SreBox.Environment
 import SreBox.CabalBuilding as CabalBuilding
 import SreBox.CertSigning
 import SreBox.MicroDNS
+import qualified SreBox.DNSRegistration as DNSRegistration
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
 import qualified SreBox.PostgresMigrations as PGMigrate
@@ -131,7 +132,7 @@ microDNSCertPrefs dom =
     csrPath = tlsDir "microdns/self-signed/csr"
     csr = Certs.SigningRequest dom key csrPath "cert.csr"
     key = Certs.Key Certs.RSA4096 (tlsDir "microdns/keys") "signing-key.rsa4096.key"
-    
+
 
 acmeAccountPrefs :: Environment -> AccountPrefs
 acmeAccountPrefs env =
@@ -203,7 +204,16 @@ acmeConfig dns env =
 
 dnsConfig :: Text -> MicroDNSConfig
 dnsConfig selfCertDomain =
-    MicroDNSConfig selfCertDomain dnsApex portnum postValidation certPrefs.cert_key certPrefs.cert_pem secretPrefs.secret_path certPrefs.cert_csr zonefile
+    MicroDNSConfig
+      selfCertDomain
+      dnsApex
+      portnum
+      postValidation
+      certPrefs.cert_key
+      certPrefs.cert_pem
+      secretPrefs.secret_path
+      certPrefs.cert_csr
+      zonefile
   where
     secretPrefs = microDNSSecretPrefs (Certs.Domain selfCertDomain)
     certPrefs = microDNSCertPrefs (Certs.Domain selfCertDomain)
@@ -305,7 +315,7 @@ ksBlogStanza
 ksBlogStanza domain txt title repo subdir dhalldir proxy linkessites =
   let prefs = acmeCertPrefs Production domain in
   KSMulti.StanzaConfig_Site
-    $ KSMulti.GitSiteStanzaConfig 
+    $ KSMulti.GitSiteStanzaConfig
         (domain, txt)
         title
         (Certs.keyPath prefs.cert_key)
@@ -375,11 +385,11 @@ cheddarSelf _ = Self.Remote "salmon" "cheddar.local"
 sreBox :: Environment -> Self.SelfPath -> Text -> Op
 sreBox env selfpath selfCertDomain =
     op "sre-box" (deps (ksmulti : domainCerts)) id
-  where 
+  where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
 
-    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath RunningLocalDNS
+    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath AuthoritativeDNS
     mkCert = Track $ acmeSign acme mkDNS
 
     domainCerts :: [Op]
@@ -389,7 +399,7 @@ sreBox env selfpath selfCertDomain =
     cloneKS = case env of Production -> kitchenSink ; Staging -> kitchenSink_dev
 
     ksmulti :: Op
-    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (boxSelf env) selfpath ksMultiConfig RunningLocalKitchenSink
+    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (boxSelf env) selfpath ksMultiConfig KitchenSinkService
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
     ksMultiConfig = KSMulti.KitchenSinkConfig (Just dicioccioDotFr) [dicioccioDotFr, kitchenSinkBlog ]
@@ -397,53 +407,57 @@ sreBox env selfpath selfCertDomain =
 cheddarBox :: Environment -> Self.SelfPath -> Text -> Op
 cheddarBox env selfpath selfCertDomain =
     op "cheddar-box" (deps [ ksmulti, registration ] ) id
-  where 
+  where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
 
-    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath RunningLocalDNS
+    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath AuthoritativeDNS
     mkCert = Track $ acmeSign acme mkDNS
 
     cloneKS :: Tracked' FilePath
     cloneKS = case env of Production -> kitchenSink ; Staging -> kitchenSink_dev
 
     ksmulti :: Op
-    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (cheddarSelf env) selfpath ksMultiConfig RunningLocalKitchenSink
+    ksmulti =
+      KSMulti.setupKS
+        Ssh.preExistingRemoteMachine
+        mkCert
+        cloneKS
+        (cheddarSelf env)
+        selfpath
+        ksMultiConfig
+        KitchenSinkService
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
-    ksMultiConfig = KSMulti.KitchenSinkConfig (Just eWebhook) [phaseInOnCheddar,eWebhook] -- , chouetteBlog]
-
-    -- todo: move below as a RegistrationConfig that depends on the MicroDNSConfig
-    secretPrefs = microDNSSecretPrefs (Certs.Domain selfCertDomain)
-    tokenPrefs = microDNSTokensPrefs (Certs.Domain selfCertDomain) machineName
+    ksMultiConfig =
+      KSMulti.KitchenSinkConfig
+        (Just eWebhook)
+        [ phaseInOnCheddar
+        , eWebhook
+        , chouetteBlog
+        ]
 
     machineName :: DNSName
     machineName = "cheddar"
+    tokenPrefs = microDNSTokensPrefs (Certs.Domain selfCertDomain) machineName
+    registrationConfig =
+      let prefs = taskPrefs env "auto-register-dns" in
+      DNSRegistration.RegisteredMachineConfig
+        machineName
+        tokenPrefs.secret_path
+        (prefs.task_script)
+        (prefs.task_data_path $ Text.unpack machineName <> ".microdns-token")
+        (prefs.task_data_path "microdns.self-signed-cert.pem")
 
-    rsyncRemote :: Rsync.Remote
-    rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
-
-    tmpTokenPath :: FilePath
-    tmpTokenPath = "tmp/registration.token"
-
-    uploadToken =
-      Rsync.sendFile Debian.rsync (FS.Generated mkToken tokenPrefs.secret_path) rsyncRemote tmpTokenPath
-
-    tmpPemPath :: FilePath
-    tmpPemPath = "tmp/registration.pem"
-
-    uploadPem =
-      Rsync.sendFile Debian.rsync (FS.Generated (selfSignedCert dns) dns.microdns_cfg_pemPath) rsyncRemote tmpPemPath
-
-    mkToken :: Track' FilePath
-    mkToken = Track $ \tokenPath -> sharedToken secretPrefs.secret_path machineName tokenPath
-
-    selfRemote = cheddarSelf env
-    self = Self.uploadSelf "tmp" selfRemote selfpath
+    registration :: Op
     registration =
-      op "registration" (deps [opGraph remoteRegistration, uploadPem, uploadToken]) id
-    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine ref CLI.Up (RegisterMachine (RegisteredMachineSetup  machineName tmpTokenPath tmpPemPath))
-
+      DNSRegistration.setupRegistration
+        Ssh.preExistingRemoteMachine
+        selfpath
+        (cheddarSelf env)
+        dns
+        registrationConfig
+        RegisterMachine
 
 -------------------------------------------------------------------------------
 localDev :: G PGMigrate.MigrationFile -> Op
@@ -479,79 +493,16 @@ localDev inputMigrations =
     prest = op "pg-postgrest" (deps [opGraph CabalBuilding.postgrest]) id
 
 -------------------------------------------------------------------------------
-data RegisteredMachineSetup
-  = RegisteredMachineSetup
-  { registration_name :: DNSName
-  , registration_token_tmppath :: FilePath
-  , registration_pem_tmppath :: FilePath
-  } deriving (Generic)
-
-instance FromJSON RegisteredMachineSetup
-instance ToJSON RegisteredMachineSetup
-
-registerMachine :: RegisteredMachineSetup -> Op
-registerMachine setup =
-    op "enrolled-machine" (deps [autoregister, movetoken, movepem, Binary.justInstall Debian.curl]) id
-  where
-    prefs = taskPrefs Production "auto-register"
-    tokenPath = prefs.task_data_path "microdns-token"
-    pemPath = prefs.task_data_path "microdns.self-signed-cert.pem"
-
-    movetoken :: Op
-    movetoken =
-      FS.fileCopy setup.registration_token_tmppath tokenPath
-
-    movepem :: Op
-    movepem =
-      FS.fileCopy setup.registration_pem_tmppath pemPath
-
-    scriptcontents :: Text
-    scriptcontents = autoregisterscript setup
-
-    autoregister :: Op
-    autoregister =
-      let
-        task =
-          CronTask.CronTask
-            "register-dns"
-            CronTask.everyMinute
-            "bash"
-            [ Text.pack prefs.task_script
-            , Text.pack tokenPath
-            , setup.registration_name
-            , Text.pack pemPath
-            ]
-      in
-      CronTask.crontask ignoreTrack task `inject` FS.filecontents (FS.FileContents prefs.task_script scriptcontents)
-
-autoregisterscript :: RegisteredMachineSetup -> Text
-autoregisterscript setup =
-  Text.unlines
-  [ "#!/bin/bash"
-  , ""
-  , "hmacpath=$1"
-  , "regname=$2"
-  , "pempath=$3"
-  , ""
-  , "hmac=`cat ${hmacpath}`"
-  , "curl -XPOST \\"
-  , "  --cacert \"${pempath}\"\\"
-  , "  -H \"x-microdns-hmac: ${hmac}\" \\"
-  , "  \"https://box.dicioccio.fr:65432/register/auto/${regname}\""
-  ]
-
--------------------------------------------------------------------------------
 data Spec
   --- todo: three local entrypoints
   = LocalDev (G PGMigrate.MigrationFile)
   | SreBox Text
   | CheddarBox Text
-  --- local configs for remote hosts
-  | RegisterMachine RegisteredMachineSetup
   --- services running
-  | RunningLocalDNS MicroDNSSetup
-  | RunningLocalKitchenSinkBlog KSBlog.KitchenSinkBlogSetup
-  | RunningLocalKitchenSink KSMulti.KitchenSinkSetup
+  | RegisterMachine DNSRegistration.RegisteredMachineSetup
+  | AuthoritativeDNS MicroDNSSetup
+  | SingleKintchensinkBlog KSBlog.KitchenSinkBlogSetup
+  | KitchenSinkService KSMulti.KitchenSinkSetup
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -565,11 +516,11 @@ program selfpath httpManager =
    specOp (LocalDev m) = [localDev m]
    specOp (SreBox domainName) = [sreBox Production selfpath domainName]
    specOp (CheddarBox domainName) = [cheddarBox Production selfpath domainName]
-   specOp (RegisterMachine arg) = [registerMachine arg]
-   specOp (RunningLocalDNS arg) = [systemdMicroDNS arg]
-   specOp (RunningLocalKitchenSinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
-   specOp (RunningLocalKitchenSink arg) = [KSMulti.systemdKitchenSink arg]
-  
+   specOp (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
+   specOp (AuthoritativeDNS arg) = [systemdMicroDNS arg]
+   specOp (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
+   specOp (KitchenSinkService arg) = [KSMulti.systemdKitchenSink arg]
+
    optimizedDeps :: Op -> Op
    optimizedDeps base =
      let pkgs = Debian.installAllDebsAtOnce base
@@ -596,7 +547,7 @@ instance ParseRecord Seed where
       localdev = pure LocalDevSeed
 
 configure :: Configure IO Seed Spec
-configure = Configure go 
+configure = Configure go
   where
     go :: Seed -> IO Spec
     go (SreBoxSeed d) = pure $ SreBox d
@@ -604,7 +555,7 @@ configure = Configure go
     go (LocalDevSeed) = do
       let reader =
             Migrations.addFilePrefix "migrations/src"
-            $ PGMigrate.defaultMigrationReader 
+            $ PGMigrate.defaultMigrationReader
       m <- Migrations.loadMigrations reader "foo1.toto"
       pure $ LocalDev (G $ fmap node m)
 
