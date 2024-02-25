@@ -8,6 +8,7 @@
 - configs are differents from conventions (parametric configs)
 - local and remote behave differently: split specs and configs
 - inversion of control is blurry: the path where a script runs is a mix of concerns, an input to some recipes and a constraints of others
+- distinction between configuring a host, and configuring a service in a host
 
 ## default CommandLine
 

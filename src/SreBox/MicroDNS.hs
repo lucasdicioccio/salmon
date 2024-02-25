@@ -5,6 +5,7 @@ module SreBox.MicroDNS where
 import qualified Crypto.Hash.SHA256 as HMAC256
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base16 as Base16
 import Data.CaseInsensitive (CI)
 import Data.Text (Text)
@@ -19,6 +20,8 @@ import Network.HTTP.Client.TLS as Tls
 import Network.TLS as Tls
 import Network.TLS.Extra as Tls
 import qualified Data.Text as Text
+import System.Directory
+import System.FilePath
 
 import Salmon.Builtin.Extension
 import Salmon.Op.OpGraph (inject)
@@ -107,16 +110,10 @@ setupDNS mkRemote selfRemote selfpath toSpec cfg =
       Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadCert =
-      upload selfSignedCert cfg.microdns_cfg_pemPath remotePem
-      where
-        selfSignedCert =
-          Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
+      upload (selfSignedCert cfg) cfg.microdns_cfg_pemPath remotePem
 
     uploadKey =
-      upload selfSigningKey (Certs.keyPath cfg.microdns_cfg_key) remoteKey
-      where
-        selfSigningKey =
-          Track $ const $ Certs.tlsKey Debian.openssl cfg.microdns_cfg_key
+      upload (selfSigningKey cfg) (Certs.keyPath cfg.microdns_cfg_key) remoteKey
 
     uploadSecret =
       upload sharedSecret cfg.microdns_cfg_secretPath remoteSecret
@@ -224,9 +221,31 @@ makeTlsManagerForSelfSigned hostname dir = do
     relaxedChecks :: Crypton.ValidationChecks
     relaxedChecks = Crypton.defaultChecks { checkLeafV3 = False }
 
+sharedToken :: FilePath -> Text -> FilePath -> Op
+sharedToken secret_path hashedpart token_path =
+  op "microdns-token" (deps [prepareSecret, enclosingdir]) $ \actions -> actions {
+    help = "store token"
+  , up = do
+      sharedsecret <- ByteString.readFile secret_path
+      ByteString.writeFile token_path $ hmacHashedPart sharedsecret hashedpart
+  }
+  where
+    enclosingdir :: Op
+    enclosingdir = FS.dir (FS.Directory $ takeDirectory token_path)
+    prepareSecret :: Op
+    prepareSecret = dnsSecretFile secret_path
+
 hmacHashedPart :: ByteString -> Text -> ByteString
 hmacHashedPart sharedsecret txtrecord =
   Base16.encode $ HMAC256.hmac sharedsecret (Text.encodeUtf8 txtrecord)
 
 hmacHeader :: ByteString -> Text -> (CI ByteString, ByteString)
 hmacHeader s t = ("x-microdns-hmac", hmacHashedPart s t)
+
+selfSignedCert :: MicroDNSConfig -> Track' FilePath
+selfSignedCert cfg =
+  Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
+
+selfSigningKey :: MicroDNSConfig -> Track' FilePath
+selfSigningKey cfg =
+  Track $ const $ Certs.tlsKey Debian.openssl cfg.microdns_cfg_key

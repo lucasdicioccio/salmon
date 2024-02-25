@@ -4,9 +4,12 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE DataKinds #-}
 module Main where
 
 -- to-re-export
+import GHC.TypeLits (Symbol)
 import Salmon.Op.OpGraph (inject, node)
 import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
@@ -42,6 +45,7 @@ import qualified Salmon.Builtin.Nodes.Acme as Acme
 import qualified Salmon.Builtin.Nodes.Demo as Demo
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import qualified Salmon.Builtin.Nodes.Keys as Keys
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.CronTask as CronTask
 import qualified Salmon.Builtin.Nodes.Git as Git
@@ -83,6 +87,7 @@ data AccountPrefs
 data TaskPrefs
   = TaskPrefs
   { task_script :: FilePath
+  , task_data_path :: FilePath -> FilePath
   }
 
 domains :: [(Certs.Domain,Text)]
@@ -114,6 +119,20 @@ acmeCertPrefs env domain =
            Production -> "-production-"
            Staging -> "-staging-"
 
+microDNSCertPrefs :: Certs.Domain -> CertPrefs
+microDNSCertPrefs dom =
+  CertPrefs
+    key
+    csr
+    pempath
+  where
+    tlsDir x = "./certs" </> Text.unpack (Certs.getDomain dom) </> x
+    pempath = tlsDir "microdns/self-signed/cert.pem"
+    csrPath = tlsDir "microdns/self-signed/csr"
+    csr = Certs.SigningRequest dom key csrPath "cert.csr"
+    key = Certs.Key Certs.RSA4096 (tlsDir "microdns/keys") "signing-key.rsa4096.key"
+    
+
 acmeAccountPrefs :: Environment -> AccountPrefs
 acmeAccountPrefs env =
   AccountPrefs
@@ -128,17 +147,45 @@ acmeAccountPrefs env =
            Production -> "production-"
            Staging -> "staging-"
 
-type TaskFileName = String
+type TaskName = String
 
-taskPrefs :: Environment -> TaskFileName -> TaskPrefs
+taskPrefs :: Environment -> TaskName -> TaskPrefs
 taskPrefs env name =
   TaskPrefs
     script
+    dataitem
   where
-    script = "/opt/tasks" </> envInfix </> name
+    dir = "/opt/tasks" </> envInfix </> name
+    script = dir </> "task.sh"
+    dataitem sub = dir </> "data" </> sub
     envInfix = case env of
            Production -> "production"
            Staging -> "staging"
+
+data SecretPrefs (a :: Symbol)
+  = SecretPrefs
+  { secret_path :: FilePath
+  }
+
+microDNSSecretPrefs :: Certs.Domain -> SecretPrefs "microdns-shared-secret"
+microDNSSecretPrefs dom =
+  SecretPrefs
+    path
+  where
+    secretsDir :: FilePath -> FilePath
+    secretsDir x = "./secrets" </> Text.unpack (Certs.getDomain dom) </> x
+    path :: FilePath
+    path = secretsDir "microdns/shared-secret/secret.b64"
+
+microDNSTokensPrefs :: Certs.Domain -> DNSName -> SecretPrefs "microdns-token"
+microDNSTokensPrefs dom sub =
+  SecretPrefs
+    path
+  where
+    secretsDir :: FilePath -> FilePath
+    secretsDir x = "./tokens" </> Text.unpack (Certs.getDomain dom) </> x
+    path :: FilePath
+    path = secretsDir ("microdns" </> Text.unpack sub)
 
 acmeConfig :: MicroDNSConfig -> Environment -> AcmeConfig
 acmeConfig dns env =
@@ -156,21 +203,15 @@ acmeConfig dns env =
 
 dnsConfig :: Text -> MicroDNSConfig
 dnsConfig selfCertDomain =
-    MicroDNSConfig selfCertDomain dnsApex portnum postValidation dnsAdminKey dnsPemPath secretPath dnsCsr zonefile
+    MicroDNSConfig selfCertDomain dnsApex portnum postValidation certPrefs.cert_key certPrefs.cert_pem secretPrefs.secret_path certPrefs.cert_csr zonefile
   where
+    secretPrefs = microDNSSecretPrefs (Certs.Domain selfCertDomain)
+    certPrefs = microDNSCertPrefs (Certs.Domain selfCertDomain)
     portnum = 65432
-    -- todo: use some prefs here
-    tlsDir x = "./certs" </> Text.unpack selfCertDomain </> x
-    secretsDir x = "./secrets" </> Text.unpack selfCertDomain </> x
-    dnsPemPath = tlsDir "microdns/self-signed/cert.pem"
-    dnsCsrPath = tlsDir "microdns/self-signed/csr"
-    secretPath = secretsDir "microdns/shared-secret/secret.b64"
-    dnsAdminKey = Certs.Key Certs.RSA4096 (tlsDir "microdns/keys") "signing-key.rsa4096.key"
-    dnsCsr = Certs.SigningRequest (Certs.Domain selfCertDomain) dnsAdminKey dnsCsrPath "cert.csr"
     postTxtRecordURL txtrecord val = mconcat ["https://", Text.unpack selfCertDomain, ":", show portnum, "/register/txt/", Text.unpack txtrecord, "/", Text.unpack val]
     postValidation txtrecord sha = do
-      sharedsecret <- ByteString.readFile $ secretPath
-      tlsManager <- makeTlsManagerForSelfSigned selfCertDomain dnsPemPath
+      sharedsecret <- ByteString.readFile $ secretPrefs.secret_path
+      tlsManager <- makeTlsManagerForSelfSigned selfCertDomain certPrefs.cert_pem
       baseReq <- parseUrlThrow $ postTxtRecordURL txtrecord sha
       let req = baseReq { method = "POST", requestHeaders = [hmacHeader sharedsecret txtrecord] }
       forM_ tlsManager (httpNoBody $ req)
@@ -355,7 +396,7 @@ sreBox env selfpath selfCertDomain =
 
 cheddarBox :: Environment -> Self.SelfPath -> Text -> Op
 cheddarBox env selfpath selfCertDomain =
-    op "cheddar-box" (deps [ ksmulti ] ) id
+    op "cheddar-box" (deps [ ksmulti, registration ] ) id
   where 
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
@@ -371,6 +412,38 @@ cheddarBox env selfpath selfCertDomain =
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
     ksMultiConfig = KSMulti.KitchenSinkConfig (Just eWebhook) [phaseInOnCheddar,eWebhook] -- , chouetteBlog]
+
+    -- todo: move below as a RegistrationConfig that depends on the MicroDNSConfig
+    secretPrefs = microDNSSecretPrefs (Certs.Domain selfCertDomain)
+    tokenPrefs = microDNSTokensPrefs (Certs.Domain selfCertDomain) machineName
+
+    machineName :: DNSName
+    machineName = "cheddar"
+
+    rsyncRemote :: Rsync.Remote
+    rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
+
+    tmpTokenPath :: FilePath
+    tmpTokenPath = "tmp/registration.token"
+
+    uploadToken =
+      Rsync.sendFile Debian.rsync (FS.Generated mkToken tokenPrefs.secret_path) rsyncRemote tmpTokenPath
+
+    tmpPemPath :: FilePath
+    tmpPemPath = "tmp/registration.pem"
+
+    uploadPem =
+      Rsync.sendFile Debian.rsync (FS.Generated (selfSignedCert dns) dns.microdns_cfg_pemPath) rsyncRemote tmpPemPath
+
+    mkToken :: Track' FilePath
+    mkToken = Track $ \tokenPath -> sharedToken secretPrefs.secret_path machineName tokenPath
+
+    selfRemote = cheddarSelf env
+    self = Self.uploadSelf "tmp" selfRemote selfpath
+    registration =
+      op "registration" (deps [opGraph remoteRegistration, uploadPem, uploadToken]) id
+    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine ref CLI.Up (RegisterMachine (RegisteredMachineSetup  machineName tmpTokenPath tmpPemPath))
+
 
 -------------------------------------------------------------------------------
 localDev :: G PGMigrate.MigrationFile -> Op
@@ -406,29 +479,76 @@ localDev inputMigrations =
     prest = op "pg-postgrest" (deps [opGraph CabalBuilding.postgrest]) id
 
 -------------------------------------------------------------------------------
-crons :: Environment -> Op
-crons env = op "cron-tasks" (deps [autoregister]) id
+data RegisteredMachineSetup
+  = RegisteredMachineSetup
+  { registration_name :: DNSName
+  , registration_token_tmppath :: FilePath
+  , registration_pem_tmppath :: FilePath
+  } deriving (Generic)
+
+instance FromJSON RegisteredMachineSetup
+instance ToJSON RegisteredMachineSetup
+
+registerMachine :: RegisteredMachineSetup -> Op
+registerMachine setup =
+    op "enrolled-machine" (deps [autoregister, movetoken, movepem, Binary.justInstall Debian.curl]) id
   where
+    prefs = taskPrefs Production "auto-register"
+    tokenPath = prefs.task_data_path "microdns-token"
+    pemPath = prefs.task_data_path "microdns.self-signed-cert.pem"
+
+    movetoken :: Op
+    movetoken =
+      FS.fileCopy setup.registration_token_tmppath tokenPath
+
+    movepem :: Op
+    movepem =
+      FS.fileCopy setup.registration_pem_tmppath pemPath
+
+    scriptcontents :: Text
+    scriptcontents = autoregisterscript setup
+
     autoregister :: Op
     autoregister =
       let
-        prefs = taskPrefs env "auto-register.sh"
-        task = CronTask.CronTask "register-dns" CronTask.everyMinute "bash" [Text.pack prefs.task_script]
+        task =
+          CronTask.CronTask
+            "register-dns"
+            CronTask.everyMinute
+            "bash"
+            [ Text.pack prefs.task_script
+            , Text.pack tokenPath
+            , setup.registration_name
+            , Text.pack pemPath
+            ]
       in
-      CronTask.crontask ignoreTrack task `inject` FS.filecontents (FS.FileContents prefs.task_script autoregisterscript)
+      CronTask.crontask ignoreTrack task `inject` FS.filecontents (FS.FileContents prefs.task_script scriptcontents)
 
-autoregisterscript :: Text
-autoregisterscript =
+autoregisterscript :: RegisteredMachineSetup -> Text
+autoregisterscript setup =
   Text.unlines
   [ "#!/bin/bash"
-  , "echo hello"
+  , ""
+  , "hmacpath=$1"
+  , "regname=$2"
+  , "pempath=$3"
+  , ""
+  , "hmac=`cat ${hmacpath}`"
+  , "curl -XPOST \\"
+  , "  --cacert \"${pempath}\"\\"
+  , "  -H \"x-microdns-hmac: ${hmac}\" \\"
+  , "  \"https://box.dicioccio.fr:65432/register/auto/${regname}\""
   ]
 
 -------------------------------------------------------------------------------
 data Spec
+  --- todo: three local entrypoints
   = LocalDev (G PGMigrate.MigrationFile)
   | SreBox Text
   | CheddarBox Text
+  --- local configs for remote hosts
+  | RegisterMachine RegisteredMachineSetup
+  --- services running
   | RunningLocalDNS MicroDNSSetup
   | RunningLocalKitchenSinkBlog KSBlog.KitchenSinkBlogSetup
   | RunningLocalKitchenSink KSMulti.KitchenSinkSetup
@@ -436,17 +556,19 @@ data Spec
 instance FromJSON Spec
 instance ToJSON Spec
 
+
 program :: Self.SelfPath -> Manager -> Track' Spec
 program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (LocalDev m) =  [localDev m, crons Staging]
-   specOp (SreBox domainName) =  [sreBox Production selfpath domainName]
-   specOp (CheddarBox domainName) =  [cheddarBox Production selfpath domainName]
-   specOp (RunningLocalDNS arg) =  [systemdMicroDNS arg]
-   specOp (RunningLocalKitchenSinkBlog arg) =  [KSBlog.systemdKitchenSinkBlog arg]
-   specOp (RunningLocalKitchenSink arg) =  [KSMulti.systemdKitchenSink arg]
+   specOp (LocalDev m) = [localDev m]
+   specOp (SreBox domainName) = [sreBox Production selfpath domainName]
+   specOp (CheddarBox domainName) = [cheddarBox Production selfpath domainName]
+   specOp (RegisterMachine arg) = [registerMachine arg]
+   specOp (RunningLocalDNS arg) = [systemdMicroDNS arg]
+   specOp (RunningLocalKitchenSinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
+   specOp (RunningLocalKitchenSink arg) = [KSMulti.systemdKitchenSink arg]
   
    optimizedDeps :: Op -> Op
    optimizedDeps base =

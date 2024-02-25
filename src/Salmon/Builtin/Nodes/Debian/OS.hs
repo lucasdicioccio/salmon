@@ -48,3 +48,7 @@ pg_ctl = installWith "postgresql-client-12"
 
 pg_ctlcluster :: Installer "pg_ctlcluster"
 pg_ctlcluster = installWith "postgresql-common"
+
+curl :: Installer "curl-keygen"
+curl = installWith "curl"
+
