@@ -232,7 +232,6 @@ dnsConfig selfCertDomain =
         , "A dyn.dicioccio.fr. 163.172.53.34"
         , "A localhost.dyn.dicioccio.fr. 127.0.0.1"
         , "A kitchensink.dyn.dicioccio.fr. 163.172.53.34"
-        , "CNAME chouette.dyn.dicioccio.fr. cheddar.dyn.dicioccio.fr"
         , "TXT dyn.dicioccio.fr. \"microdns\""
         , "TXT dyn.dicioccio.fr. \"salmon\""
         ]
@@ -406,7 +405,7 @@ sreBox env selfpath selfCertDomain =
 
 cheddarBox :: Environment -> Self.SelfPath -> Text -> Op
 cheddarBox env selfpath selfCertDomain =
-    op "cheddar-box" (deps [ ksmulti, registration ] ) id
+    op "cheddar-box" (deps [ ksmulti, registrations ] ) id
   where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
@@ -437,11 +436,16 @@ cheddarBox env selfpath selfCertDomain =
         , chouetteBlog
         ]
 
-    machineName :: DNSName
-    machineName = "cheddar"
-    tokenPrefs = microDNSTokensPrefs (Certs.Domain selfCertDomain) machineName
-    registrationConfig =
+    registrations :: Op
+    registrations =
+      op "registration-tasks" (deps [registration name | name <- machineNames]) id
+
+    machineNames :: [DNSName]
+    machineNames = ["cheddar","chouette","e-webhook","phasein"]
+
+    registrationConfig machineName =
       let prefs = taskPrefs env "auto-register-dns" in
+      let tokenPrefs = microDNSTokensPrefs (Certs.Domain selfCertDomain) machineName in
       DNSRegistration.RegisteredMachineConfig
         machineName
         tokenPrefs.secret_path
@@ -449,7 +453,27 @@ cheddarBox env selfpath selfCertDomain =
         (prefs.task_data_path $ Text.unpack machineName <> ".microdns-token")
         (prefs.task_data_path "microdns.self-signed-cert.pem")
 
-    registration :: Op
+    registration :: DNSName -> Op
+    registration machineName =
+      DNSRegistration.setupRegistration
+        Ssh.preExistingRemoteMachine
+        selfpath
+        (cheddarSelf env)
+        dns
+        (registrationConfig machineName)
+        RegisterMachine
+
+-------------------------------------------------------------------------------
+laptop :: Self.SelfPath -> Op
+laptop selfpath =
+    op "laptop" (deps packages) id
+  where
+    packages = fmap (Debian.deb . Debian.Package) [ "tmux", "git", "curl", "watch", "tree", "jq", "vim" ]
+
+    selfCertDomain = "box.dicioccio.fr"
+    dns = dnsConfig selfCertDomain
+    machineName = "laptop"
+    env = Production
     registration =
       DNSRegistration.setupRegistration
         Ssh.preExistingRemoteMachine
@@ -458,6 +482,16 @@ cheddarBox env selfpath selfCertDomain =
         dns
         registrationConfig
         RegisterMachine
+    registrationConfig =
+      let prefs = taskPrefs env "auto-register-dns" in
+      let tokenPrefs = microDNSTokensPrefs (Certs.Domain selfCertDomain) machineName in
+      DNSRegistration.RegisteredMachineConfig
+        machineName
+        tokenPrefs.secret_path
+        (prefs.task_script)
+        (prefs.task_data_path $ Text.unpack machineName <> ".microdns-token")
+        (prefs.task_data_path "microdns.self-signed-cert.pem")
+
 
 -------------------------------------------------------------------------------
 localDev :: G PGMigrate.MigrationFile -> Op
@@ -465,7 +499,8 @@ localDev inputMigrations =
   op "pg-dev" (deps [dbstuff]) id
 
   where
-    dbstuff = op "pg-setup" (deps [demoTables `inject` acls `inject` basics]) id
+    dbstuff = op "pg-setup" (deps [prestDemo, demoTables `inject` acls `inject` basics]) id
+    prestDemo = op "pg-prest" (deps [prest]) id
     basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1, migrate2]) id
     cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
     db1 = Postgres.database cluster Debian.psql d1
@@ -493,13 +528,21 @@ localDev inputMigrations =
     prest = op "pg-postgrest" (deps [opGraph CabalBuilding.postgrest]) id
 
 -------------------------------------------------------------------------------
+data MachineSpec
+  = Cheddar
+  | Box
+  | Laptop
+  deriving (Generic)
+instance FromJSON MachineSpec
+instance ToJSON MachineSpec
+
 data Spec
-  --- todo: three local entrypoints
   = Batch [Spec]
+  -- dev for working out new recipes
   | LocalDev (G PGMigrate.MigrationFile)
-  | SreBox Text
-  | CheddarBox Text
-  --- services running
+  -- configure machines
+  | Machine MachineSpec Text
+  -- services running
   | RegisterMachine DNSRegistration.RegisteredMachineSetup
   | AuthoritativeDNS MicroDNSSetup
   | SingleKintchensinkBlog KSBlog.KitchenSinkBlogSetup
@@ -508,7 +551,6 @@ data Spec
 instance FromJSON Spec
 instance ToJSON Spec
 
-
 program :: Self.SelfPath -> Manager -> Track' Spec
 program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
@@ -516,8 +558,9 @@ program selfpath httpManager =
    specOp :: Spec -> [Op]
    specOp (Batch xs) = concatMap specOp xs
    specOp (LocalDev m) = [localDev m]
-   specOp (SreBox domainName) = [sreBox Production selfpath domainName]
-   specOp (CheddarBox domainName) = [cheddarBox Production selfpath domainName]
+   specOp (Machine Box domainName) = [sreBox Production selfpath domainName]
+   specOp (Machine Cheddar domainName) = [cheddarBox Production selfpath domainName]
+   specOp (Machine Laptop domainName) = [laptop selfpath]
    specOp (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
    specOp (AuthoritativeDNS arg) = [systemdMicroDNS arg]
    specOp (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
@@ -532,6 +575,7 @@ program selfpath httpManager =
 data Seed
   = SreBoxSeed { boxDomain :: Text }
   | CheddarBoxSeed { boxDomain :: Text }
+  | LaptopSeed
   | LocalDevSeed
 
 instance ParseRecord Seed where
@@ -542,18 +586,21 @@ instance ParseRecord Seed where
         subparser $ mconcat
           [ command "sre-box" (info sreBox (progDesc "configures SRE box"))
           , command "cheddar" (info cheddarBox (progDesc "configures cheddar"))
+          , command "laptop" (info laptop (progDesc "configures my local laptop"))
           , command "localdev" (info localdev (progDesc "configures local stuff (for dev)"))
           ]
       sreBox = SreBoxSeed <$> strArgument (Options.Applicative.help "domain")
       cheddarBox = CheddarBoxSeed <$> strArgument (Options.Applicative.help "domain")
       localdev = pure LocalDevSeed
+      laptop = pure LaptopSeed
 
 configure :: Configure IO Seed Spec
 configure = Configure go
   where
     go :: Seed -> IO Spec
-    go (SreBoxSeed d) = pure $ SreBox d
-    go (CheddarBoxSeed d) = pure $ CheddarBox d
+    go (LaptopSeed) = pure $ Machine Laptop "box.dicioccio.fr"
+    go (SreBoxSeed d) = pure $ Machine Box d
+    go (CheddarBoxSeed d) = pure $ Machine Cheddar d
     go (LocalDevSeed) = do
       let reader =
             Migrations.addFilePrefix "migrations/src"

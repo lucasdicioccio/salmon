@@ -48,7 +48,7 @@ setupRegistration mkRemote selfpath selfRemote dns cfg toSpec =
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
     tmpTokenPath :: FilePath
-    tmpTokenPath = "tmp/registration.token"
+    tmpTokenPath = "tmp/" <> Text.unpack cfg.registration_machineName <> "-registration.token"
 
     uploadToken =
       Rsync.sendFile Debian.rsync (FS.Generated mkToken cfg.registration_cfg_local_token_path) rsyncRemote tmpTokenPath
@@ -113,7 +113,8 @@ registerMachine setup =
       let
         task =
           CronTask.CronTask
-            "register-dns"
+            ("register-dns_" <> setup.registration_name)
+            "root"
             CronTask.everyMinute
             "bash"
             [ Text.pack taskScript

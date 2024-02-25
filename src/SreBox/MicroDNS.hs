@@ -24,6 +24,7 @@ import System.Directory
 import System.FilePath
 
 import Salmon.Builtin.Extension
+import Salmon.Op.Ref (dotRef)
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track (Track(..), (>*<), using, opGraph, bindTracked)
 import qualified Salmon.Builtin.CommandLine as CLI
@@ -224,7 +225,8 @@ makeTlsManagerForSelfSigned hostname dir = do
 sharedToken :: FilePath -> Text -> FilePath -> Op
 sharedToken secret_path hashedpart token_path =
   op "microdns-token" (deps [prepareSecret, enclosingdir]) $ \actions -> actions {
-    help = "store token"
+    help = "store token built from " <> Text.pack secret_path <> " at " <> Text.pack token_path
+  , ref = dotRef $ "microdns-token: " <> Text.pack token_path
   , up = do
       sharedsecret <- ByteString.readFile secret_path
       ByteString.writeFile token_path $ hmacHashedPart sharedsecret hashedpart

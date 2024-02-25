@@ -5,9 +5,11 @@ import Data.Text (Text)
 import System.FilePath ((</>), takeFileName)
 
 import Salmon.Builtin.Extension
+import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
@@ -25,6 +27,7 @@ cabalBinUpload mkbin remote =
 microDNS :: Tracked' FilePath
 microDNS = cabalRepoBuild
   "microdns"
+  realNoop
   "microdns"
   "microdns"
   (Git.Remote "https://github.com/lucasdicioccio/microdns.git")
@@ -34,6 +37,7 @@ microDNS = cabalRepoBuild
 kitchenSink :: Tracked' FilePath
 kitchenSink = cabalRepoBuild
   "kitchensink"
+  realNoop
   "exe:kitchen-sink"
   "kitchen-sink"
   (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
@@ -43,21 +47,23 @@ kitchenSink = cabalRepoBuild
 kitchenSink_dev :: Tracked' FilePath
 kitchenSink_dev = cabalRepoBuild
   "kitchensink-dev"
+  realNoop
   "exe:kitchen-sink"
   "kitchen-sink"
   (Git.Remote "/home/lucasdicioccio/code/opensource/kitchen-sink")
   "main"
   "hs"
 
--- TODO: inject a dep on libpq
 postgrest :: Tracked' FilePath
-postgrest = cabalRepoBuild
-  "postgrest"
-  "exe:postgrest"
-  "postgrest"
-  (Git.Remote "https://github.com/PostgREST/postgrest.git")
-  "main"
-  ""
+postgrest = 
+  cabalRepoBuild
+   "postgrest"
+   (Debian.deb $ Debian.Package "libpq-dev")
+   "exe:postgrest"
+   "postgrest"
+   (Git.Remote "https://github.com/PostgREST/postgrest.git")
+   "main"
+   ""
 
 type CloneDir = Text
 type CabalTarget = Text
@@ -66,9 +72,9 @@ type BranchName = Text
 type SubDir = FilePath -- subdir where we can cabal build
 
 -- builds a cabal repository
-cabalRepoBuild :: CloneDir -> CabalTarget -> CabalBinaryName -> Git.Remote -> BranchName -> SubDir -> Tracked' FilePath
-cabalRepoBuild dirname target binname remote branch subdir = 
-    Tracked (Track $ const op) binpath
+cabalRepoBuild :: CloneDir -> Op -> CabalTarget -> CabalBinaryName -> Git.Remote -> BranchName -> SubDir -> Tracked' FilePath
+cabalRepoBuild dirname sysdeps target binname remote branch subdir = 
+    Tracked (Track $ const $ op `inject` sysdeps) binpath
   where
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
            Cabal.install cabal (Cabal.Cabal repopath target) bindir

@@ -31,6 +31,7 @@ everyMinute = Schedule "*" "*" "*" "*" "*"
 data CronTask
   = CronTask
   { name :: Text
+  , user :: Text
   , schedule :: Schedule
   , command :: FilePath
   , commandArgs :: [Text]
@@ -67,6 +68,7 @@ crontask t task =
     renderTask task =
       Text.unwords
         [ renderSchedule task.schedule
+        , task.user
         , cmd
         , Text.unwords task.commandArgs
         ]

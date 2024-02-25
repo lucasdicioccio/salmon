@@ -41,7 +41,6 @@ tracking t f arg use =
   let (b,z) = f arg
   in use b `inject` run t z
 
-
 data Tracked m n a
   = Tracked
   { track :: Track m n a
