@@ -133,6 +133,7 @@ dnsSecretFile path =
   Secrets.sharedSecretFile
     Debian.openssl
     (Secrets.Secret Secrets.Base64 16 path)
+
 systemdMicroDNS :: MicroDNSSetup -> Op
 systemdMicroDNS arg =
     Systemd.systemdService Debian.systemctl trackConfig config

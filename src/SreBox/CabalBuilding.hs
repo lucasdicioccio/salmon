@@ -49,6 +49,16 @@ kitchenSink_dev = cabalRepoBuild
   "main"
   "hs"
 
+-- TODO: inject a dep on libpq
+postgrest :: Tracked' FilePath
+postgrest = cabalRepoBuild
+  "postgrest"
+  "exe:postgrest"
+  "postgrest"
+  (Git.Remote "https://github.com/PostgREST/postgrest.git")
+  "main"
+  ""
+
 type CloneDir = Text
 type CabalTarget = Text
 type CabalBinaryName = Text -- may vary from target when exe: or lib:  are prepended

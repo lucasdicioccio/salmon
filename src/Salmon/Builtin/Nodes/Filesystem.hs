@@ -14,7 +14,6 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as C8
 import System.Directory
 import System.FilePath
-import Salmon.Actions.Dot
 
 newtype Directory = Directory { directoryPath :: FilePath }
   deriving (Eq, Ord, Show)

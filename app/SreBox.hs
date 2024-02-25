@@ -43,6 +43,7 @@ import qualified Salmon.Builtin.Nodes.Demo as Demo
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.Certificates as Certs
+import qualified Salmon.Builtin.Nodes.CronTask as CronTask
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
@@ -59,7 +60,7 @@ import Salmon.Builtin.Migrations as Migrations
 import qualified Salmon.Builtin.CommandLine as CLI
 
 import SreBox.Environment
-import SreBox.CabalBuilding
+import SreBox.CabalBuilding as CabalBuilding
 import SreBox.CertSigning
 import SreBox.MicroDNS
 import qualified SreBox.KitchenSinkBlog as KSBlog
@@ -77,6 +78,11 @@ data AccountPrefs
   = AccountPrefs
   { account_email :: Acme.Email
   , account_key :: Keys.JWKKeyPair
+  }
+
+data TaskPrefs
+  = TaskPrefs
+  { task_script :: FilePath
   }
 
 domains :: [(Certs.Domain,Text)]
@@ -122,6 +128,17 @@ acmeAccountPrefs env =
            Production -> "production-"
            Staging -> "staging-"
 
+type TaskFileName = String
+
+taskPrefs :: Environment -> TaskFileName -> TaskPrefs
+taskPrefs env name =
+  TaskPrefs
+    script
+  where
+    script = "/opt/tasks" </> envInfix </> name
+    envInfix = case env of
+           Production -> "production"
+           Staging -> "staging"
 
 acmeConfig :: MicroDNSConfig -> Environment -> AcmeConfig
 acmeConfig dns env =
@@ -142,6 +159,7 @@ dnsConfig selfCertDomain =
     MicroDNSConfig selfCertDomain dnsApex portnum postValidation dnsAdminKey dnsPemPath secretPath dnsCsr zonefile
   where
     portnum = 65432
+    -- todo: use some prefs here
     tlsDir x = "./certs" </> Text.unpack selfCertDomain </> x
     secretsDir x = "./secrets" </> Text.unpack selfCertDomain </> x
     dnsPemPath = tlsDir "microdns/self-signed/cert.pem"
@@ -357,9 +375,10 @@ cheddarBox env selfpath selfCertDomain =
 -------------------------------------------------------------------------------
 localDev :: G PGMigrate.MigrationFile -> Op
 localDev inputMigrations =
-  op "pg-dev" (deps [demoTables `inject` acls `inject` basics]) id
+  op "pg-dev" (deps [dbstuff]) id
 
   where
+    dbstuff = op "pg-setup" (deps [demoTables `inject` acls `inject` basics]) id
     basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1, migrate2]) id
     cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
     db1 = Postgres.database cluster Debian.psql d1
@@ -384,6 +403,27 @@ localDev inputMigrations =
 
     migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
 
+    prest = op "pg-postgrest" (deps [opGraph CabalBuilding.postgrest]) id
+
+-------------------------------------------------------------------------------
+crons :: Environment -> Op
+crons env = op "cron-tasks" (deps [autoregister]) id
+  where
+    autoregister :: Op
+    autoregister =
+      let
+        prefs = taskPrefs env "auto-register.sh"
+        task = CronTask.CronTask "register-dns" CronTask.everyMinute "bash" [Text.pack prefs.task_script]
+      in
+      CronTask.crontask ignoreTrack task `inject` FS.filecontents (FS.FileContents prefs.task_script autoregisterscript)
+
+autoregisterscript :: Text
+autoregisterscript =
+  Text.unlines
+  [ "#!/bin/bash"
+  , "echo hello"
+  ]
+
 -------------------------------------------------------------------------------
 data Spec
   = LocalDev (G PGMigrate.MigrationFile)
@@ -401,7 +441,7 @@ program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (LocalDev m) =  [localDev m]
+   specOp (LocalDev m) =  [localDev m, crons Staging]
    specOp (SreBox domainName) =  [sreBox Production selfpath domainName]
    specOp (CheddarBox domainName) =  [cheddarBox Production selfpath domainName]
    specOp (RunningLocalDNS arg) =  [systemdMicroDNS arg]
