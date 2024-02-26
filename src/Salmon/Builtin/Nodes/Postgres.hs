@@ -189,6 +189,21 @@ data ConnString pass = ConnString {
   , connstring_db :: Database
   } deriving (Functor)
 
+connstring :: ConnString Password -> Text
+connstring (ConnString server user pass db) =
+  mconcat
+    ["postgresql://"
+    , user.userRole
+    , ":"
+    , pass.revealPassword
+    , "@"
+    , server.serverHost
+    , ":"
+    , Text.pack $ show server.serverPort
+    , "/"
+    , db.getDatabase
+    ]
+
 withPassword :: Password -> ConnString a -> ConnString Password
 withPassword pass c = const pass <$> c
 
@@ -211,26 +226,11 @@ data PsqlUser
   = UserScript FilePath
 
 psqlUserRun :: ConnString Password -> Command "psql" PsqlUser
-psqlUserRun (ConnString server user pass db) = Command go
+psqlUserRun c = Command go
   where
-    connstring :: String
-    connstring =
-      mconcat
-        ["postgresql://"
-        , Text.unpack user.userRole
-        , ":"
-        , Text.unpack $ pass.revealPassword
-        , "@"
-        , Text.unpack server.serverHost
-        , ":"
-        , show server.serverPort
-        , "/"
-        , Text.unpack db.getDatabase
-        ]
-
     go (UserScript path) =
       proc "psql"
-        [ connstring
+        [ Text.unpack $ connstring c
         , "-f"
         , path
         ]

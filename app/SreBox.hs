@@ -71,6 +71,7 @@ import qualified SreBox.DNSRegistration as DNSRegistration
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
 import qualified SreBox.PostgresMigrations as PGMigrate
+import qualified SreBox.Postgrest as Postgrest
 
 data CertPrefs
   = CertPrefs
@@ -494,10 +495,9 @@ laptop selfpath =
 
 
 -------------------------------------------------------------------------------
-localDev :: G PGMigrate.MigrationFile -> Op
-localDev inputMigrations =
-  op "pg-dev" (deps [dbstuff]) id
-
+localDev :: Self.SelfPath -> G PGMigrate.MigrationFile -> Op
+localDev selfpath inputMigrations =
+    op "pg-dev" (deps [dbstuff]) id
   where
     dbstuff = op "pg-setup" (deps [prestDemo, demoTables `inject` acls `inject` basics]) id
     prestDemo = op "pg-prest" (deps [prest]) id
@@ -525,7 +525,22 @@ localDev inputMigrations =
 
     migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
 
-    prest = op "pg-postgrest" (deps [opGraph CabalBuilding.postgrest]) id
+    prest = op "pg-postgrest" (deps [setupPrest]) id
+
+    setupPrest =
+      Postgrest.setupPostgrest 
+        Ssh.preExistingRemoteMachine
+        (cheddarSelf Production)
+        selfpath
+        PostgrestService
+        prestConfig
+
+    prestConfig =
+      Postgrest.PostgrestConfig
+        3000
+        u1
+        connstring
+        "./configs/posgtrest/postgres.config"
 
 -------------------------------------------------------------------------------
 data MachineSpec
@@ -547,6 +562,7 @@ data Spec
   | AuthoritativeDNS MicroDNSSetup
   | SingleKintchensinkBlog KSBlog.KitchenSinkBlogSetup
   | KitchenSinkService KSMulti.KitchenSinkSetup
+  | PostgrestService Postgrest.PostgrestSetup
   deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -557,7 +573,7 @@ program selfpath httpManager =
   where
    specOp :: Spec -> [Op]
    specOp (Batch xs) = concatMap specOp xs
-   specOp (LocalDev m) = [localDev m]
+   specOp (LocalDev m) = [localDev selfpath m]
    specOp (Machine Box domainName) = [sreBox Production selfpath domainName]
    specOp (Machine Cheddar domainName) = [cheddarBox Production selfpath domainName]
    specOp (Machine Laptop domainName) = [laptop selfpath]
@@ -565,6 +581,7 @@ program selfpath httpManager =
    specOp (AuthoritativeDNS arg) = [systemdMicroDNS arg]
    specOp (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
    specOp (KitchenSinkService arg) = [KSMulti.systemdKitchenSink arg]
+   specOp (PostgrestService arg) = [Postgrest.systemdPostgrest arg]
 
    optimizedDeps :: Op -> Op
    optimizedDeps base =
