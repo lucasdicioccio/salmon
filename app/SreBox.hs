@@ -59,7 +59,8 @@ import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
-import qualified Salmon.Builtin.Nodes.Bash as Bash
+import qualified Salmon.Builtin.Nodes.User as User
+import qualified Salmon.Builtin.Nodes.Web as Web
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
@@ -502,6 +503,63 @@ laptop selfpath =
 
 
 -------------------------------------------------------------------------------
+initialize :: Op
+initialize =
+    op "initialize" (deps [sudoerfile, tmpdir `inject` sudoUser]) id
+  where
+    sudoerfile :: Op
+    sudoerfile =
+      FS.filecontents
+        (FS.FileContents "/etc/sudoers.d/salmon" sudoercontent)
+
+    sudoercontent :: Text
+    sudoercontent =
+      Text.unlines
+      [ Text.unwords
+        [ "salmon"
+        , "ALL=(ALL)"
+        , "NOPASSWD:"
+        , "ALL"
+        ]
+      ]
+
+    sudoUser :: Op
+    sudoUser = User.user Debian.useradd mkGroup (User.NewUser user [sudo])
+
+    mkGroup :: Track' User.Group
+    mkGroup = Track $ \grp -> User.group Debian.groupadd grp
+
+    user :: User.User
+    user = User.User "salmon"
+
+    sudo :: User.Group
+    sudo = User.Group "sudo"
+
+    tmpdir :: Op
+    tmpdir = FS.dir (FS.Directory "/home/salmon/tmp")
+
+-------------------------------------------------------------------------------
+setupPG :: Op
+setupPG =
+    op "pg-setup" (deps [dbstuff]) id
+  where
+    dbstuff = op "pg-setup" (deps [acls `inject` basics]) id
+    basics = op "pg-basics" (deps [db1, user1, user2, group]) id
+    cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
+    db1 = Postgres.database cluster Debian.psql d1
+    d1 = Postgres.Database "salmon_demo01"
+    u1 = Postgres.User "salmon_user01"
+    u2 = Postgres.User "salmon_user02"
+    pass1 = Postgres.Password "unsafe"
+    pass2 = Postgres.Password "unsafe"
+    user1 = Postgres.user cluster Debian.psql u1 pass1
+    user2 = Postgres.user cluster Debian.psql u2 pass2
+    group = Postgres.group cluster Debian.psql (Postgres.Group "salmon_role01")
+    acls = op "grants" (deps [acl1, acl2]) id
+    acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
+    acl2 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u2) [Postgres.CONNECT])
+
+-------------------------------------------------------------------------------
 localDev :: Self.SelfPath -> G PGMigrate.MigrationFile -> Op
 localDev selfpath inputMigrations =
     op "pg-dev" (deps [dbstuff]) id
@@ -532,7 +590,7 @@ localDev selfpath inputMigrations =
 
     -- migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
 
-    migrate3 = op "migrate-remotely" (deps [uploadmigrations]) id
+    migrate3 = op "migrate-remotely" (deps [remoteApply `inject` uploadsecret `inject` uploadmigrations]) id
 
     uploadmigrations =
       collapse "prev-migration" uploadmigrationFile (getCofreeGraph inputMigrations)
@@ -547,6 +605,27 @@ localDev selfpath inputMigrations =
         (FS.PreExisting m.path)
         (cheddarRsync env)
         (remoteMigrationPath m)
+    uploadsecret =
+      Rsync.sendFile
+        Debian.rsync
+        (FS.Generated (Track $ \path -> FS.filecontents (FS.FileContents path $ Postgres.revealPassword pass1)) "configs/pg-secret.txt")
+        (cheddarRsync env)
+        (remotePgSecretPath)
+
+    remotePgSecretPath :: FilePath
+    remotePgSecretPath = "tmp/connstring"
+
+    remoteMigrationPlan :: PGMigrate.MigrationPlan FilePath
+    remoteMigrationPlan =
+       PGMigrate.MigrationPlan
+         (Postgres.ConnString Postgres.localServer u1 remotePgSecretPath d1)
+         (G $ fmap (PGMigrate.MigrationFile . remoteMigrationPath) $ getCofreeGraph inputMigrations)
+
+    remoteApply :: Op
+    remoteApply =
+       let s = Self.uploadSelf "tmp" (cheddarSelf Production) selfpath
+       in
+       opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x CLI.Up (MigratePostgres remoteMigrationPlan)
     
 
     -- todo: move
@@ -575,11 +654,22 @@ data MachineSpec
 instance FromJSON MachineSpec
 instance ToJSON MachineSpec
 
+data InfectTarget
+  = InfectTarget
+  { infectUser :: Text
+  , infectHost :: Text
+  } deriving (Generic)
+instance FromJSON InfectTarget
+instance ToJSON InfectTarget
+
 data Spec
   = Batch [Spec]
   -- dev for working out new recipes
   | LocalDev (G PGMigrate.MigrationFile)
+  | SetupPG
   -- configure machines
+  | Initialize
+  -- scp+initialize | Infect InfectTarget
   | Machine MachineSpec Text
   | MigratePostgres (PGMigrate.MigrationPlan FilePath)
   -- services running
@@ -598,9 +688,11 @@ program selfpath httpManager =
   where
    specOp :: Spec -> [Op]
    specOp (LocalDev m) = [localDev selfpath m]
+   specOp (SetupPG) = [setupPG]
    -- meta
    specOp (Batch xs) = concatMap specOp xs
    -- machine
+   specOp (Initialize) = [initialize]
    specOp (Machine Box domainName) = [sreBox Production selfpath domainName]
    specOp (Machine Cheddar domainName) = [cheddarBox Production selfpath domainName]
    specOp (Machine Laptop domainName) = [laptop selfpath]

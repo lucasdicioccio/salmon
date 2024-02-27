@@ -52,3 +52,8 @@ pg_ctlcluster = installWith "postgresql-common"
 curl :: Installer "curl-keygen"
 curl = installWith "curl"
 
+useradd :: Installer "useradd"
+useradd = installWith "passwd"
+
+groupadd :: Installer "groupadd"
+groupadd = installWith "passwd"
