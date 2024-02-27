@@ -38,6 +38,7 @@ library
                    , Salmon.Actions.Notify
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine
+                   , Salmon.Builtin.Helpers
                    , Salmon.Builtin.Migrations
                    , Salmon.Builtin.Nodes.Acme
                    , Salmon.Builtin.Nodes.Bash

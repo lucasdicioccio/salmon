@@ -14,8 +14,11 @@ import Salmon.Op.OpGraph (inject, node)
 import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
 import Data.Functor.Contravariant ((>$<))
+import Data.Foldable (toList)
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as C8
+import qualified Data.ByteString.Base16 as Base16
 import Options.Generic
 import Options.Applicative
 
@@ -60,6 +63,7 @@ import qualified Salmon.Builtin.Nodes.Bash as Bash
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
+import Salmon.Builtin.Helpers (collapse)
 import Salmon.Builtin.Migrations as Migrations
 import qualified Salmon.Builtin.CommandLine as CLI
 
@@ -382,6 +386,9 @@ boxSelf _ = Self.Remote "salmon" "box.dicioccio.fr"
 cheddarSelf :: Environment -> Self.Remote
 cheddarSelf _ = Self.Remote "salmon" "cheddar.local"
 
+cheddarRsync :: Environment -> Rsync.Remote
+cheddarRsync _ = Rsync.Remote "salmon" "cheddar.local"
+
 sreBox :: Environment -> Self.SelfPath -> Text -> Op
 sreBox env selfpath selfCertDomain =
     op "sre-box" (deps (ksmulti : domainCerts)) id
@@ -501,7 +508,7 @@ localDev selfpath inputMigrations =
   where
     dbstuff = op "pg-setup" (deps [prestDemo, demoTables `inject` acls `inject` basics]) id
     prestDemo = op "pg-prest" (deps [prest]) id
-    basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1, migrate2]) id
+    basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1, migrate3]) id
     cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
     db1 = Postgres.database cluster Debian.psql d1
     d1 = Postgres.Database "salmon_demo01"
@@ -520,13 +527,30 @@ localDev selfpath inputMigrations =
 
     demoTables = op "pg-tables" (deps [tableA]) id
     connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
-    tableA = Postgres.userScript Debian.psql ignoreTrack connstring  (FS.Generated genMigration2 "./migrations/test02.sql")
+    tableA = Postgres.userScriptInMemoryPass Debian.psql ignoreTrack connstring  (FS.Generated genMigration2 "./migrations/test02.sql")
     genMigration2 = Track $ \path -> FS.filecontents (FS.FileContents path ("CREATE TABLE users(id serial, name text)":: Text))
 
-    migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
+    -- migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
 
+    migrate3 = op "migrate-remotely" (deps [uploadmigrations]) id
+
+    uploadmigrations =
+      collapse "prev-migration" uploadmigrationFile (getCofreeGraph inputMigrations)
+
+    env = Production
+    remoteMigrationPath :: PGMigrate.MigrationFile -> FilePath
+    remoteMigrationPath m = "tmp/migration-" <> (C8.unpack $ Base16.encode (C8.pack m.path))
+    uploadmigrationFile :: PGMigrate.MigrationFile -> Op
+    uploadmigrationFile m =
+      Rsync.sendFile
+        Debian.rsync
+        (FS.PreExisting m.path)
+        (cheddarRsync env)
+        (remoteMigrationPath m)
+    
+
+    -- todo: move
     prest = op "pg-postgrest" (deps [setupPrest]) id
-
     setupPrest =
       Postgrest.setupPostgrest 
         Ssh.preExistingRemoteMachine
@@ -557,6 +581,7 @@ data Spec
   | LocalDev (G PGMigrate.MigrationFile)
   -- configure machines
   | Machine MachineSpec Text
+  | MigratePostgres (PGMigrate.MigrationPlan FilePath)
   -- services running
   | RegisterMachine DNSRegistration.RegisteredMachineSetup
   | AuthoritativeDNS MicroDNSSetup
@@ -572,11 +597,16 @@ program selfpath httpManager =
     Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
   where
    specOp :: Spec -> [Op]
-   specOp (Batch xs) = concatMap specOp xs
    specOp (LocalDev m) = [localDev selfpath m]
+   -- meta
+   specOp (Batch xs) = concatMap specOp xs
+   -- machine
    specOp (Machine Box domainName) = [sreBox Production selfpath domainName]
    specOp (Machine Cheddar domainName) = [cheddarBox Production selfpath domainName]
    specOp (Machine Laptop domainName) = [laptop selfpath]
+   -- actions
+   specOp (MigratePostgres arg) = [PGMigrate.migrateG Debian.psql ignoreTrack arg.migration_connstring arg.migration_file]
+   -- services
    specOp (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
    specOp (AuthoritativeDNS arg) = [systemdMicroDNS arg]
    specOp (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]

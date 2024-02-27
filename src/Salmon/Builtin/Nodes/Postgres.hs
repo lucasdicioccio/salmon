@@ -1,8 +1,12 @@
-
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Salmon.Builtin.Nodes.Postgres where
 
+import GHC.Generics
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import System.Process.ListLike (CreateProcess(..), proc)
 
 import Salmon.Op.Ref
@@ -19,7 +23,9 @@ data Server
   = Server
   { serverHost :: Host
   , serverPort :: Port
-  }
+  } deriving (Generic)
+instance ToJSON Server
+instance FromJSON Server
 
 localServer :: Server
 localServer = Server "127.0.0.1" 5432
@@ -48,6 +54,7 @@ pgctlRun = Command go
 type DatabaseName = Text
 
 newtype Database = Database { getDatabase :: DatabaseName }
+  deriving (ToJSON, FromJSON)
 
 database :: Track' Server -> Track' (Binary "psql") -> Database -> Op
 database server psql db =
@@ -64,7 +71,8 @@ newtype Password = Password { revealPassword :: Text }
 instance Show Password where
   show _ = "<password>"
 
-data User = User { userRole :: RoleName }
+newtype User = User { userRole :: RoleName }
+  deriving (ToJSON, FromJSON)
 
 user :: Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
 user server psql user pwd =
@@ -187,7 +195,9 @@ data ConnString pass = ConnString {
   , connstring_user :: User
   , connstring_user_pass :: pass
   , connstring_db :: Database
-  } deriving (Functor)
+  } deriving (Generic,Functor)
+instance ToJSON a => ToJSON (ConnString a)
+instance FromJSON a => FromJSON (ConnString a)
 
 connstring :: ConnString Password -> Text
 connstring (ConnString server user pass db) =
@@ -204,16 +214,16 @@ connstring (ConnString server user pass db) =
     , db.getDatabase
     ]
 
-withPassword :: Password -> ConnString a -> ConnString Password
-withPassword pass c = const pass <$> c
+withPassword :: ConnString a -> Password -> ConnString Password
+withPassword c pass = const pass <$> c
 
-userScript
+userScriptInMemoryPass
   :: Track' (Binary "psql")
   -> Track' (ConnString Password)
   -> ConnString Password
   -> File "psql-script"
   -> Op
-userScript psql mksetup c@(ConnString server user pass db) file =
+userScriptInMemoryPass psql mksetup c@(ConnString server user pass db) file =
   withFile file $ \path ->
   withBinary psql (psqlUserRun c) (UserScript path) $ \up ->
   op "pg-script" (deps [run mksetup c]) $ \actions -> actions {
@@ -221,6 +231,24 @@ userScript psql mksetup c@(ConnString server user pass db) file =
   , up = up
   , help = "runs " <> Text.pack path
   }
+
+userScript
+  :: Track' (Binary "psql")
+  -> Track' (ConnString FilePath)
+  -> ConnString FilePath
+  -> File "psql-script"
+  -> Op
+userScript psql mksetup c@(ConnString server user passFile db) file =
+  withFile file $ \path ->
+  op "pg-script" (deps [run mksetup c, justInstall psql]) $ \actions -> actions {
+    ref = dotRef $ "pg-script:" <> Text.pack path
+  , up = do
+      up path =<< fmap Password (Text.readFile passFile)
+  , help = "runs " <> Text.pack path
+  }
+  where
+    up path pass = untrackedExec (psqlUserRun $ c `withPassword` pass) (UserScript path) ""
+
 
 data PsqlUser
   = UserScript FilePath

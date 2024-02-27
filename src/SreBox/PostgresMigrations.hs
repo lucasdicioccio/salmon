@@ -19,6 +19,7 @@ import Salmon.Op.Ref
 import Salmon.Op.G
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Migrations
+import Salmon.Builtin.Nodes.Debian.OS as Debian
 import Salmon.Builtin.Nodes.Binary
 import Salmon.Builtin.Nodes.Postgres
 import Salmon.Builtin.Nodes.Filesystem
@@ -51,8 +52,8 @@ defaultMigrationReader =
 
 migrateG
   :: Track' (Binary "psql")
-  -> Track' (ConnString Password)
-  -> ConnString Password
+  -> Track' (ConnString FilePath)
+  -> ConnString FilePath
   -> G MigrationFile
   -> Op
 migrateG psql mksetup connstring g = migrate psql mksetup connstring (coerce g)
@@ -60,8 +61,8 @@ migrateG psql mksetup connstring g = migrate psql mksetup connstring (coerce g)
 -- | A helper to turn a migration graph into an Op.
 migrate
   :: Track' (Binary "psql")
-  -> Track' (ConnString Password)
-  -> ConnString Password
+  -> Track' (ConnString FilePath)
+  -> ConnString FilePath
   -> Cofree Graph MigrationFile
   -> Op
 migrate psql mksetup connstring (m :< x) =
@@ -85,3 +86,17 @@ migrate psql mksetup connstring (m :< x) =
       op "migrate:deps" (deps [evalPred ('l':l) g1, evalPred ('r':l) g2]) (setref l)
     evalPred l (Connect g1 g2) =
       op "migrate:deps" (deps [evalPred ('l':l) g2 `inject` evalPred ('r':l) g1]) (setref l)
+
+-------------------------------------------------------------------------------
+
+data MigrationPlan a =
+  MigrationPlan
+  { migration_connstring :: ConnString a
+  , migration_file :: G MigrationFile
+  } deriving (Generic)
+instance ToJSON a => ToJSON (MigrationPlan a)
+instance FromJSON a => FromJSON (MigrationPlan a)
+
+migratePlan :: MigrationPlan FilePath -> Op
+migratePlan plan =
+  migrateG Debian.psql ignoreTrack plan.migration_connstring plan.migration_file

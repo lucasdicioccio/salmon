@@ -10,7 +10,7 @@ import qualified Data.Aeson.Types as Aeson
 import Salmon.Op.Graph (Graph)
 
 -- | Helper to provide Aeson instances for (Cofree Graph a).
-newtype G a = G (Cofree Graph a)
+newtype G a = G { getCofreeGraph :: (Cofree Graph a) }
 
 instance ToJSON a => ToJSON (G a) where
   toJSON (G (x :< p)) =
@@ -24,3 +24,4 @@ instance FromJSON a => FromJSON (G a) where
     obj <- o .: "node"
     preds <- o .: "preds" :: Aeson.Parser (Graph (G a))
     pure $ G $ obj :< fmap coerce preds
+
