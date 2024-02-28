@@ -33,11 +33,14 @@ import SreBox.Environment
 
 -------------------------------------------------------------------------------
 
+type ServiceName = Text
+
 type PortNumber = Int
 
 data PostgrestConfig
   = PostgrestConfig
-  { postgrest_cfg_portnum :: PortNumber
+  { postgrest_cfg_serviceName :: ServiceName
+  , postgrest_cfg_portnum :: PortNumber
   , postgrest_cfg_anonRole :: Postgres.User
   , postgrest_cfg_connectionString :: Postgres.ConnString Postgres.Password
   , postgrest_cfg_configPath :: FilePath
@@ -46,7 +49,8 @@ data PostgrestConfig
 
 data PostgrestSetup
   = PostgrestSetup
-  { postgrest_setup_localBinPath :: FilePath
+  { postgrest_setup_serviceName :: ServiceName
+  , postgrest_setup_localBinPath :: FilePath
   , postgrest_setup_localConfigPath :: FilePath
   }
   deriving (Generic)
@@ -64,14 +68,18 @@ setupPostgrest
 setupPostgrest mkRemote selfRemote selfpath toSpec cfg =
   using (cabalBinUpload postgrest rsyncRemote) $ \remotepath ->
     let
-      setup = PostgrestSetup remotepath remoteConfig
+      setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig
     in
     opGraph (continueRemotely setup) `inject` configUploads
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
-    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig]) id
+    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig]) $ \actions -> actions {
+      notes = [ "for service: " <> cfg.postgrest_cfg_serviceName
+              ]
+    , ref = dotRef $ "postgrest:uploads" <> cfg.postgrest_cfg_serviceName
+    }
 
     -- recursive call
     continueRemotely setup = self `bindTracked` recurse setup
@@ -83,7 +91,7 @@ setupPostgrest mkRemote selfRemote selfpath toSpec cfg =
     self = Self.uploadSelf "tmp" selfRemote selfpath
 
     -- upload config file
-    remoteConfig  = "tmp/postgrest.config"
+    remoteConfig  = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".config"
 
     upload gen localpath distpath =
       Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
@@ -124,29 +132,31 @@ renderConfig cfg =
     kv_int k v = Text.unwords [ k , "=", Text.pack $ show v ]
 
 systemdPostgrest :: PostgrestSetup -> Op
-systemdPostgrest arg =
+systemdPostgrest setup =
     Systemd.systemdService Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
       let
           execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
-          copybin = FS.fileCopy (postgrest_setup_localBinPath arg) execPath
-          copyConfig = FS.fileCopy (postgrest_setup_localConfigPath arg) configPath
+          copybin = FS.fileCopy (postgrest_setup_localBinPath setup) execPath
+          copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) configPath
       in
-      op "setup-systemd-for-postgrest" (deps [copybin, copyConfig]) id
+      op "setup-systemd-for-postgrest" (deps [copybin, copyConfig]) $ \actions -> actions {
+        ref = dotRef $ "postgrest:systemd" <> setup.postgrest_setup_serviceName
+      }
 
     config :: Systemd.Config
     config = Systemd.Config tgt unit service install
 
     tgt :: Systemd.UnitTarget
-    tgt = "salmon-postgrest.service"
+    tgt = "salmon-postgrest-" <> setup.postgrest_setup_serviceName <> ".service"
 
     configPath :: FilePath
-    configPath = "/opt/rundir/postgrest/config.txt"
+    configPath = "/opt/rundir/postgrest" </> Text.unpack setup.postgrest_setup_serviceName </> "config.txt"
 
     unit :: Systemd.Unit
-    unit = Systemd.Unit "Postgrest from Salmon" "network-online.target"
+    unit = Systemd.Unit (mconcat ["Postgrest from Salmon (", setup.postgrest_setup_serviceName, ")"]) "network-online.target"
 
     service :: Systemd.Service
     service = Systemd.Service Systemd.Simple "root" "root" "007" start Systemd.OnFailure Systemd.Process "/opt/rundir/postgrest"

@@ -82,6 +82,19 @@ user server psql user pwd =
   , up = up
   }
 
+userPassFile :: Track' Server -> Track' (Binary "psql") -> File "passfile" -> User -> Op
+userPassFile server psql genpass user =
+  withFile genpass $ \passfile ->
+  op "pg-user" (deps [ runningServer, justInstall psql ]) $ \actions -> actions {
+    ref = dotRef $ "pg-user:" <> user.userRole
+  , up = do
+      up =<< fmap Password (Text.readFile passfile)
+  }
+  where
+    runningServer = run server localServer
+    up pass = untrackedExec psqlAdminRun_Sudo (CreateUser user.userRole pass) ""
+
+
 data Group = Group { groupRole :: RoleName }
 
 group :: Track' Server -> Track' (Binary "psql") -> Group -> Op

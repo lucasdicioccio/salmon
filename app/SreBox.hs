@@ -539,111 +539,76 @@ initialize =
     tmpdir = FS.dir (FS.Directory "/home/salmon/tmp")
 
 -------------------------------------------------------------------------------
-setupPG :: Op
-setupPG =
+setupPG :: Postgres.ConnString FilePath -> Op
+setupPG connstring =
     op "pg-setup" (deps [dbstuff]) id
   where
     dbstuff = op "pg-setup" (deps [acls `inject` basics]) id
-    basics = op "pg-basics" (deps [db1, user1, user2, group]) id
+    basics = op "pg-basics" (deps [db1, user1]) id
     cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
     db1 = Postgres.database cluster Debian.psql d1
-    d1 = Postgres.Database "salmon_demo01"
-    u1 = Postgres.User "salmon_user01"
-    u2 = Postgres.User "salmon_user02"
-    pass1 = Postgres.Password "unsafe"
-    pass2 = Postgres.Password "unsafe"
-    user1 = Postgres.user cluster Debian.psql u1 pass1
-    user2 = Postgres.user cluster Debian.psql u2 pass2
-    group = Postgres.group cluster Debian.psql (Postgres.Group "salmon_role01")
-    acls = op "grants" (deps [acl1, acl2]) id
+    d1 = connstring.connstring_db
+    u1 = connstring.connstring_user
+    pass1 = connstring.connstring_user_pass
+    user1 = Postgres.userPassFile cluster Debian.psql (FS.PreExisting pass1) u1
+    acls = op "grants" (deps [acl1]) id
     acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
-    acl2 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u2) [Postgres.CONNECT])
 
 -------------------------------------------------------------------------------
 localDev :: Self.SelfPath -> G PGMigrate.MigrationFile -> Op
 localDev selfpath inputMigrations =
-    op "pg-dev" (deps [dbstuff]) id
+    op "pg-dev" (deps [prest2, prest1 `inject` migrate3]) id
   where
-    dbstuff = op "pg-setup" (deps [prestDemo, demoTables `inject` acls `inject` basics]) id
-    prestDemo = op "pg-prest" (deps [prest]) id
-    basics = op "pg-basics" (deps [db1, user1, user2, group, migrate1, migrate3]) id
-    cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
-    db1 = Postgres.database cluster Debian.psql d1
     d1 = Postgres.Database "salmon_demo01"
     u1 = Postgres.User "salmon_user01"
-    u2 = Postgres.User "salmon_user02"
     pass1 = Postgres.Password "unsafe"
-    pass2 = Postgres.Password "unsafe"
-    user1 = Postgres.user cluster Debian.psql u1 pass1
-    user2 = Postgres.user cluster Debian.psql u2 pass2
-    group = Postgres.group cluster Debian.psql (Postgres.Group "salmon_role01")
-    acls = op "grants" (deps [acl1, acl2]) id
-    acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
-    acl2 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u2) [Postgres.CONNECT])
-    migrate1 = Postgres.adminScript Debian.psql (FS.Generated genMigration1 "./migrations/test01.sql")
-    genMigration1 = Track $ \path -> FS.filecontents (FS.FileContents path ("CREATE EXTENSION \"uuid-ossp\";" :: Text))
-
-    demoTables = op "pg-tables" (deps [tableA]) id
     connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
-    tableA = Postgres.userScriptInMemoryPass Debian.psql ignoreTrack connstring  (FS.Generated genMigration2 "./migrations/test02.sql")
-    genMigration2 = Track $ \path -> FS.filecontents (FS.FileContents path ("CREATE TABLE users(id serial, name text)":: Text))
 
-    -- migrate2 = PGMigrate.migrateG Debian.psql ignoreTrack connstring inputMigrations
+    migrate3 =
+      PGMigrate.remoteMigrateSetup
+        pass1
+        (cheddarSelf Production)
+        selfpath
+        MigratePostgres 
+        (PGMigrate.RemoteMigrateConfig
+           inputMigrations
+           u1
+           d1)
 
-    migrate3 = op "migrate-remotely" (deps [remoteApply `inject` uploadsecret `inject` uploadmigrations]) id
-
-    uploadmigrations =
-      collapse "prev-migration" uploadmigrationFile (getCofreeGraph inputMigrations)
-
-    env = Production
-    remoteMigrationPath :: PGMigrate.MigrationFile -> FilePath
-    remoteMigrationPath m = "tmp/migration-" <> (C8.unpack $ Base16.encode (C8.pack m.path))
-    uploadmigrationFile :: PGMigrate.MigrationFile -> Op
-    uploadmigrationFile m =
-      Rsync.sendFile
-        Debian.rsync
-        (FS.PreExisting m.path)
-        (cheddarRsync env)
-        (remoteMigrationPath m)
-    uploadsecret =
-      Rsync.sendFile
-        Debian.rsync
-        (FS.Generated (Track $ \path -> FS.filecontents (FS.FileContents path $ Postgres.revealPassword pass1)) "configs/pg-secret.txt")
-        (cheddarRsync env)
-        (remotePgSecretPath)
-
-    remotePgSecretPath :: FilePath
-    remotePgSecretPath = "tmp/connstring"
-
-    remoteMigrationPlan :: PGMigrate.MigrationPlan FilePath
-    remoteMigrationPlan =
-       PGMigrate.MigrationPlan
-         (Postgres.ConnString Postgres.localServer u1 remotePgSecretPath d1)
-         (G $ fmap (PGMigrate.MigrationFile . remoteMigrationPath) $ getCofreeGraph inputMigrations)
-
-    remoteApply :: Op
-    remoteApply =
-       let s = Self.uploadSelf "tmp" (cheddarSelf Production) selfpath
-       in
-       opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x CLI.Up (MigratePostgres remoteMigrationPlan)
-    
-
-    -- todo: move
-    prest = op "pg-postgrest" (deps [setupPrest]) id
-    setupPrest =
+    prest1 = op "pg-postgrest-1" (deps [setupPrest1]) id
+    setupPrest1 =
       Postgrest.setupPostgrest 
         Ssh.preExistingRemoteMachine
         (cheddarSelf Production)
         selfpath
         PostgrestService
-        prestConfig
+        prestConfig1
 
-    prestConfig =
+    prestConfig1 =
       Postgrest.PostgrestConfig
-        3000
+        "demo-service-1"
+        3001
         u1
         connstring
-        "./configs/posgtrest/postgres.config"
+        "./configs/posgtrest/postgrest-1.config"
+
+
+    prest2 = op "pg-postgrest-2" (deps [setupPrest2]) id
+    setupPrest2 =
+      Postgrest.setupPostgrest 
+        Ssh.preExistingRemoteMachine
+        (cheddarSelf Production)
+        selfpath
+        PostgrestService
+        prestConfig2
+
+    prestConfig2 =
+      Postgrest.PostgrestConfig
+        "demo-service-2"
+        3002
+        u1
+        connstring
+        "./configs/posgtrest/postgrest-2.config"
 
 -------------------------------------------------------------------------------
 data MachineSpec
@@ -666,12 +631,11 @@ data Spec
   = Batch [Spec]
   -- dev for working out new recipes
   | LocalDev (G PGMigrate.MigrationFile)
-  | SetupPG
   -- configure machines
   | Initialize
-  -- scp+initialize | Infect InfectTarget
+  -- todo: | Infect InfectTarget
   | Machine MachineSpec Text
-  | MigratePostgres (PGMigrate.MigrationPlan FilePath)
+  | MigratePostgres (PGMigrate.RemoteMigrateSetup)
   -- services running
   | RegisterMachine DNSRegistration.RegisteredMachineSetup
   | AuthoritativeDNS MicroDNSSetup
@@ -688,7 +652,6 @@ program selfpath httpManager =
   where
    specOp :: Spec -> [Op]
    specOp (LocalDev m) = [localDev selfpath m]
-   specOp (SetupPG) = [setupPG]
    -- meta
    specOp (Batch xs) = concatMap specOp xs
    -- machine
@@ -697,7 +660,7 @@ program selfpath httpManager =
    specOp (Machine Cheddar domainName) = [cheddarBox Production selfpath domainName]
    specOp (Machine Laptop domainName) = [laptop selfpath]
    -- actions
-   specOp (MigratePostgres arg) = [PGMigrate.migrateG Debian.psql ignoreTrack arg.migration_connstring arg.migration_file]
+   specOp (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track setupPG) arg]
    -- services
    specOp (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
    specOp (AuthoritativeDNS arg) = [systemdMicroDNS arg]
