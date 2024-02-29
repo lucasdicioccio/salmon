@@ -4,6 +4,7 @@ module Salmon.Builtin.Nodes.Self where
 
 import Data.Aeson (ToJSON, FromJSON, encode)
 import Data.ByteString.Lazy (toStrict)
+import Data.Dynamic (toDyn)
 import GHC.Generics (Generic)
 import Data.Text (Text)
 import System.FilePath ((</>), takeFileName)
@@ -31,11 +32,11 @@ readSelfPath_linux = SelfPath <$> readSymbolicLink "/proc/self/exe"
 data Remote = Remote { remoteUser :: Text , remoteHost :: Text }
   deriving (Show, Ord, Eq)
 
-data Self = Self { selfRemote :: Remote, selfRemotePath :: FilePath }
+data RemoteSelf = RemoteSelf { selfRemote :: Remote, selfRemotePath :: FilePath }
 
-uploadSelf :: FilePath -> Remote -> SelfPath -> Tracked' Self
+uploadSelf :: FilePath -> Remote -> SelfPath -> Tracked' RemoteSelf
 uploadSelf remotedir remote path =
-    Tracked (Track $ \self -> op "copy-oneself" (deps [copy]) id) (Self remote selfpathOnRemote)
+    Tracked (Track $ \self -> op "copy-oneself" (deps [copy]) id) (RemoteSelf remote selfpathOnRemote)
   where
     selfpathOnRemote = remotedir  </> takeFileName (getSelfPath path)
     rsyncRemote = Rsync.Remote remote.remoteUser remote.remoteHost
@@ -49,16 +50,24 @@ data RemoteCall a
 instance ToJSON a => ToJSON (RemoteCall a)
 instance FromJSON a => FromJSON (RemoteCall a)
 
+-- | A record for dynamic remote-op.
+data RemoteOp = RemoteOp Op
+
 callSelf
   :: forall directive. (ToJSON directive, FromJSON directive)
-  => Self
+  => RemoteSelf
+  -> Track' directive
   -> CLI.BaseCommand
   -> directive
   -> Tracked' (RemoteCall directive)
-callSelf self base directive =
-    Tracked (Track $ \_ -> callOverSSH) rc
+callSelf self simulate base directive =
+    Tracked (Track $ \_ -> op "self-call" (deps [callOverSSH]) modActions) rc
   where
-    setRef actions = actions { ref = dotRef $ "call-self:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive) }
+    modActions actions =
+      actions {
+        ref = dotRef $ "call-self:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive)
+      , dynamics = [toDyn $ RemoteOp $ run simulate directive ]
+      }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
     cmdArgs = ["run", CLI.argForBaseCommand base]
@@ -68,14 +77,19 @@ callSelf self base directive =
 callSelfAsSudo
   :: forall directive. (ToJSON directive, FromJSON directive)
   => Track' Ssh.Remote
-  -> Self
+  -> RemoteSelf
+  -> Track' directive
   -> CLI.BaseCommand
   -> directive
   -> Tracked' (RemoteCall directive)
-callSelfAsSudo mkRemote self base directive =
-    Tracked (Track $ \_ -> callOverSSH) rc
+callSelfAsSudo mkRemote self simulate base directive =
+    Tracked (Track $ \_ -> op "self-call" (deps [callOverSSH]) modActions) rc
   where
-    setRef actions = actions { ref = dotRef $ "call-self-sudo:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive) }
+    modActions actions =
+      actions {
+        ref = dotRef $ "call-self-sudo:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive)
+      , dynamics = [toDyn $ RemoteOp $ run simulate directive ]
+      }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
     cmdArgs = [Text.pack self.selfRemotePath, "run", CLI.argForBaseCommand base]

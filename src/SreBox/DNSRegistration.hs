@@ -35,13 +35,14 @@ setupRegistration
   :: forall directive.
      (FromJSON directive, ToJSON directive)
   => Track' Ssh.Remote
+  -> Track' directive
   -> Self.SelfPath
   -> Self.Remote
   -> MicroDNSConfig
   -> RegisteredMachineConfig
   -> (RegisteredMachineSetup -> directive)
   -> Op
-setupRegistration mkRemote selfpath selfRemote dns cfg toSpec =
+setupRegistration mkRemote simulate selfpath selfRemote dns cfg toSpec =
     op "registration" (deps [opGraph remoteRegistration, uploadPem, uploadToken]) id
   where
     rsyncRemote :: Rsync.Remote
@@ -64,7 +65,7 @@ setupRegistration mkRemote selfpath selfRemote dns cfg toSpec =
       sharedToken dns.microdns_cfg_secretPath cfg.registration_machineName tokenPath
 
     self = Self.uploadSelf "tmp" selfRemote selfpath
-    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo mkRemote ref CLI.Up (toSpec regSetup)
+    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo mkRemote ref simulate CLI.Up (toSpec regSetup)
 
     regSetup =
       RegisteredMachineSetup

@@ -179,7 +179,7 @@ acmeExample =
 
     dnsTodo = placeholder "DNS" "a dns server on which we can add known records"
 
-remoteDnsSetup selfpath =
+remoteDnsSetup trackSelfDirective selfpath =
   using (cabalBinUpload microDNS cheddarRsync) $ \remotepath ->
     let
       setup = MicroDNSSetup remotepath remotePem remoteKey
@@ -194,7 +194,7 @@ remoteDnsSetup selfpath =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo mkRemote selfref CLI.Up (RunningLocalDNS setup)
+      Self.callSelfAsSudo mkRemote selfref trackSelfDirective CLI.Up (RunningLocalDNS setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" cheddarSelf selfpath
@@ -255,11 +255,11 @@ httpPostExample manager =
     call1 :: Maybe Web.Call
     call1 = Web.Call manager <$> parseUrlThrow "http://dicioccio.fr/index.html"
 
-distantCallExample selfpath = 
+distantCallExample selfpath trackSelfDirective = 
     self `bindTracked` recurse
   where
     self = Self.uploadSelf "tmp" cheddarSelf selfpath
-    recurse s = Self.callSelf s CLI.Up directive
+    recurse s = Self.callSelf s trackSelfDirective CLI.Up directive
     directive = DistantCall "hello world"
 
 systemdMicroDNSExample :: MicroDNSSetup -> Op
@@ -323,7 +323,7 @@ systemdMicroDNSExample arg =
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"
 
-demoOps selfpath httpManager n =
+demoOps trackSelfDirective selfpath httpManager n =
   [ Demo.collatz [x | x <- [1 .. n], odd x]
   , sshKeysExample
   , jwkKeysExample
@@ -335,7 +335,7 @@ demoOps selfpath httpManager n =
   , rsyncCopyExample
   -- , acmeExample
   , httpPostExample httpManager
-  , opGraph (distantCallExample selfpath)
+  , opGraph (distantCallExample selfpath trackSelfDirective)
   ]
 
 demoDistantCallOps w =
@@ -410,13 +410,16 @@ instance FromJSON Spec
 instance ToJSON Spec
 
 program :: Self.SelfPath -> Manager -> Track' Spec
-program selfpath httpManager = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
+program selfpath httpManager =
+   go
   where
+   go = Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
+
    specOp :: Spec -> [Op]
-   specOp (DemoSpec k) =  demoOps selfpath httpManager k
+   specOp (DemoSpec k) =  demoOps go selfpath httpManager k
    specOp (BuildSpec k) = buildOps k
    specOp (DistantCall k) =  demoDistantCallOps k
-   specOp (CheddarMicroDNS) =  [remoteDnsSetup selfpath]
+   specOp (CheddarMicroDNS) =  [remoteDnsSetup go selfpath]
    specOp (RunningLocalDNS arg) =  [systemdMicroDNSExample arg]
   
    optimizedDeps :: Op -> Op

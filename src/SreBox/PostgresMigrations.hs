@@ -2,8 +2,10 @@
 
 module SreBox.PostgresMigrations where
 
+import Control.Monad.Identity
 import Control.Comonad.Cofree (Cofree(..))
 import Data.ByteString.Char8 as C8
+import Data.Dynamic (toDyn)
 import qualified Data.ByteString.Base16 as Base16
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Coerce (coerce)
@@ -13,6 +15,8 @@ import System.FilePath ((</>))
 import qualified Data.Text as Text
 import GHC.Generics
 
+import qualified Salmon.Actions.UpDown as UpDown
+import qualified Salmon.Actions.Dot as Dot
 import Salmon.Op.OpGraph
 import Salmon.Op.Graph
 import Salmon.Op.Eval
@@ -110,9 +114,9 @@ migratePlan plan =
 
 -------------------------------------------------------------------------------
 
-data RemoteMigrateConfig
+data RemoteMigrateConfig t
   = RemoteMigrateConfig
-  { cfg_migrations :: G MigrationFile
+  { cfg_migrations :: t (G MigrationFile)
   , cfg_user :: User
   , cfg_database :: Database
   }
@@ -131,19 +135,22 @@ instance ToJSON RemoteMigrateSetup
 remoteMigrateSetup
   :: (FromJSON directive, ToJSON directive)
   => Password
+  -> Track' directive
   -> Self.Remote
   -> Self.SelfPath
   -> (RemoteMigrateSetup -> directive)
-  -> RemoteMigrateConfig
+  -> RemoteMigrateConfig Identity
   -> Op
-remoteMigrateSetup pass1 selfRemote selfpath toSpec cfg =
+remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
     op "migrate-remotely" (deps [remoteApply `inject` uploadsecret `inject` uploadmigrations]) id
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
+    migrations = runIdentity cfg.cfg_migrations
+
     uploadmigrations =
-      collapse "." uploadmigrationFile (getCofreeGraph cfg.cfg_migrations)
+      collapse "." uploadmigrationFile (getCofreeGraph migrations)
 
     dbname = getDatabase cfg.cfg_database
 
@@ -174,13 +181,76 @@ remoteMigrateSetup pass1 selfRemote selfpath toSpec cfg =
 
     remoteMigrationPlan :: G MigrationFile
     remoteMigrationPlan =
-         (G $ fmap (MigrationFile . remoteMigrationPath) $ getCofreeGraph cfg.cfg_migrations)
+         (G $ fmap (MigrationFile . remoteMigrationPath) $ getCofreeGraph migrations)
 
     remoteApply :: Op
     remoteApply =
        let s = Self.uploadSelf "tmp" selfRemote selfpath
        in
-       opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x CLI.Up (toSpec $ RemoteMigrateSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+       opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+
+remoteMigrateOpaqueSetup
+  :: (FromJSON directive, ToJSON directive)
+  => Password
+  -> Track' directive
+  -> Self.Remote
+  -> Self.SelfPath
+  -> (RemoteMigrateSetup -> directive)
+  -> RemoteMigrateConfig TrackedIO
+  -> Op
+remoteMigrateOpaqueSetup pass1 simulate selfRemote selfpath toSpec cfg =
+    op "migrate-remotely" (deps [opaquemigration `inject` uploadsecret]) id
+  where
+    rsyncRemote :: Rsync.Remote
+    rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
+
+    opaquemigration =
+      using (unwrapTIO cfg.cfg_migrations) $ \ioMigrations ->
+      op "opaque-migrate" nodeps $ \actions -> actions {
+        up = do
+          migrations <- ioMigrations
+          let uploads = collapse "." uploadmigrationFile (getCofreeGraph migrations)
+          let apply = remoteApply migrations
+          UpDown.upTree (pure . runIdentity) (apply `inject` uploads)
+      , dynamics = [toDyn $ Dot.OpaqueNode "migration"]
+      }
+
+    dbname = getDatabase cfg.cfg_database
+
+    remoteMigrationPath :: MigrationFile -> FilePath
+    remoteMigrationPath m = "tmp/migration-" <> Text.unpack dbname <> (C8.unpack $ Base16.encode (C8.pack m.path))
+
+    uploadmigrationFile :: MigrationFile -> Op
+    uploadmigrationFile m =
+      Rsync.sendFile
+        Debian.rsync
+        (FS.PreExisting m.path)
+        (rsyncRemote)
+        (remoteMigrationPath m)
+
+    tmpSecretPath :: FilePath
+    tmpSecretPath = Text.unpack $ "configs/pg-secret-" <> dbname<> ".txt"
+
+    uploadsecret :: Op
+    uploadsecret =
+      Rsync.sendFile
+        Debian.rsync
+        (FS.Generated (Track $ \path -> FS.filecontents (FS.FileContents path $ revealPassword pass1)) tmpSecretPath)
+        (rsyncRemote)
+        (remotePgSecretPath)
+
+    remotePgSecretPath :: FilePath
+    remotePgSecretPath = Text.unpack $ "tmp/connstring-" <> dbname
+
+    remoteMigrationPlan :: G MigrationFile -> G MigrationFile
+    remoteMigrationPlan migrations =
+         (G $ fmap (MigrationFile . remoteMigrationPath) $ getCofreeGraph migrations)
+
+    remoteApply :: G MigrationFile -> Op
+    remoteApply migrations =
+       let s = Self.uploadSelf "tmp" selfRemote selfpath
+       in
+       opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
 
 
 applyMigration

@@ -124,7 +124,6 @@ placeholder short t = op short nodeps $ \actions -> actions {
   , ref = dotRef $ short <> t
   }
 
-
 -- | Function to retrieve the dynamic objects of a given type.
 getDynamics :: Typeable a => Op -> [a]
 getDynamics o = catMaybes $ fmap fromDynamic $ concatMap dynamics exts
@@ -137,3 +136,7 @@ collectDynamics :: Typeable a => Op -> [(Op, [a])]
 collectDynamics root =
   let ops = toList (evalDeps root) in
   [(op, getDynamics op) | op <- ops]
+
+-- Utility to partially apply type in opaque continuation setup in conjuction
+-- with UpDown.upTree in defining a `up`.
+newtype TrackedIO a = TrackedIO { unwrapTIO :: Tracked' (IO a) }

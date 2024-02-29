@@ -47,6 +47,11 @@ data Tracked m n a
   , obj   :: a
   }
 
+-- | A pure tracked merely is the constructor with some initial trace.
+pureTracked :: Track m n a -> a -> Tracked m n a
+pureTracked = Tracked
+
+-- | Eval the OpGraph of a Tracked object.
 opGraph :: Tracked m n a -> OpGraph m n
 opGraph t = run t.track t.obj
 
@@ -64,6 +69,7 @@ bindTracked ta f = Tracked (Track $ const $ opGraph tb `inject` opGraph ta) b
   where
     tb@(Tracked _ b) = f ta.obj
 
+-- | A similar to `tracking` but for a Tracked object.
 using :: (Applicative m) => Tracked m n a -> (a -> OpGraph m n) -> OpGraph m n
 using tracked use =
     tracking tracked.track dup tracked.obj use

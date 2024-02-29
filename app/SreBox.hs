@@ -10,6 +10,7 @@ module Main where
 
 -- to-re-export
 import GHC.TypeLits (Symbol)
+import Salmon.Op.Ref (dotRef)
 import Salmon.Op.OpGraph (inject, node)
 import Salmon.Op.Configure (Configure(..))
 import Salmon.Op.Track (Track(..), (>*<), Tracked(..), using, opGraph, bindTracked)
@@ -77,6 +78,7 @@ import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
 import qualified SreBox.PostgresMigrations as PGMigrate
 import qualified SreBox.Postgrest as Postgrest
+import qualified SreBox.Initialize as Initialize
 
 data CertPrefs
   = CertPrefs
@@ -381,6 +383,31 @@ eWebhook =
       ]
     )
 
+pipeskouillouiApi :: Track' Spec -> Self.SelfPath -> Op
+pipeskouillouiApi simulate selfpath =
+    Postgrest.postgrestMigratedApi 
+      simulate
+      MigratePostgres
+      PostgrestService
+      selfpath
+      (cheddarSelf Production)
+      cfg
+  where
+    remote = Git.Remote "git@github.com:lucasdicioccio/blog.git"
+    branch = Git.Branch "main"
+    repo = Git.Repo "./git-repos/" "blog" remote branch
+    d1 = Postgres.Database "salmon_pipeskouillou"
+    u1 = Postgres.User "salmon_pipeskouillou_rw"
+    pass1 = Postgres.Password "qwwxeqe12341c2nkjndscjhb2131!"
+    connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
+    cfg = Postgrest.PostgrestMigratedApiConfig
+            "pipeskouillou"
+            3001
+            repo
+            "dbs/pipeskouillou/tip.sql"
+            ""
+            connstring
+
 boxSelf :: Environment -> Self.Remote
 boxSelf _ = Self.Remote "salmon" "box.dicioccio.fr"
 
@@ -390,14 +417,14 @@ cheddarSelf _ = Self.Remote "salmon" "cheddar.local"
 cheddarRsync :: Environment -> Rsync.Remote
 cheddarRsync _ = Rsync.Remote "salmon" "cheddar.local"
 
-sreBox :: Environment -> Self.SelfPath -> Text -> Op
-sreBox env selfpath selfCertDomain =
+sreBox :: Environment -> Self.SelfPath -> Track' Spec -> Text -> Op
+sreBox env selfpath simulate selfCertDomain =
     op "sre-box" (deps (ksmulti : domainCerts)) id
   where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
 
-    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath AuthoritativeDNS
+    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine simulate (boxSelf env) selfpath AuthoritativeDNS
     mkCert = Track $ acmeSign acme mkDNS
 
     domainCerts :: [Op]
@@ -407,19 +434,19 @@ sreBox env selfpath selfCertDomain =
     cloneKS = case env of Production -> kitchenSink ; Staging -> kitchenSink_dev
 
     ksmulti :: Op
-    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS (boxSelf env) selfpath ksMultiConfig KitchenSinkService
+    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS simulate (boxSelf env) selfpath ksMultiConfig KitchenSinkService
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
     ksMultiConfig = KSMulti.KitchenSinkConfig (Just dicioccioDotFr) [dicioccioDotFr, kitchenSinkBlog ]
 
-cheddarBox :: Environment -> Self.SelfPath -> Text -> Op
-cheddarBox env selfpath selfCertDomain =
-    op "cheddar-box" (deps [ ksmulti, registrations ] ) id
+cheddarBox :: Environment -> Self.SelfPath -> Track' Spec -> Text -> Op
+cheddarBox env selfpath simulate selfCertDomain =
+    op "cheddar-box" (deps [ ksmulti, registrations, pipeskouillouiApi simulate selfpath ] ) id
   where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
 
-    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine (boxSelf env) selfpath AuthoritativeDNS
+    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine simulate (boxSelf env) selfpath AuthoritativeDNS
     mkCert = Track $ acmeSign acme mkDNS
 
     cloneKS :: Tracked' FilePath
@@ -431,6 +458,7 @@ cheddarBox env selfpath selfCertDomain =
         Ssh.preExistingRemoteMachine
         mkCert
         cloneKS
+        simulate
         (cheddarSelf env)
         selfpath
         ksMultiConfig
@@ -466,6 +494,7 @@ cheddarBox env selfpath selfCertDomain =
     registration machineName =
       DNSRegistration.setupRegistration
         Ssh.preExistingRemoteMachine
+        simulate
         selfpath
         (cheddarSelf env)
         dns
@@ -473,8 +502,8 @@ cheddarBox env selfpath selfCertDomain =
         RegisterMachine
 
 -------------------------------------------------------------------------------
-laptop :: Self.SelfPath -> Op
-laptop selfpath =
+laptop :: Track' Spec -> Self.SelfPath -> Op
+laptop simulate selfpath =
     op "laptop" (deps packages) id
   where
     packages = fmap (Debian.deb . Debian.Package) [ "tmux", "git", "curl", "watch", "tree", "jq", "vim" ]
@@ -486,6 +515,7 @@ laptop selfpath =
     registration =
       DNSRegistration.setupRegistration
         Ssh.preExistingRemoteMachine
+        simulate
         selfpath
         (cheddarSelf env)
         dns
@@ -500,43 +530,6 @@ laptop selfpath =
         (prefs.task_script)
         (prefs.task_data_path $ Text.unpack machineName <> ".microdns-token")
         (prefs.task_data_path "microdns.self-signed-cert.pem")
-
-
--------------------------------------------------------------------------------
-initialize :: Op
-initialize =
-    op "initialize" (deps [sudoerfile, tmpdir `inject` sudoUser]) id
-  where
-    sudoerfile :: Op
-    sudoerfile =
-      FS.filecontents
-        (FS.FileContents "/etc/sudoers.d/salmon" sudoercontent)
-
-    sudoercontent :: Text
-    sudoercontent =
-      Text.unlines
-      [ Text.unwords
-        [ "salmon"
-        , "ALL=(ALL)"
-        , "NOPASSWD:"
-        , "ALL"
-        ]
-      ]
-
-    sudoUser :: Op
-    sudoUser = User.user Debian.useradd mkGroup (User.NewUser user [sudo])
-
-    mkGroup :: Track' User.Group
-    mkGroup = Track $ \grp -> User.group Debian.groupadd grp
-
-    user :: User.User
-    user = User.User "salmon"
-
-    sudo :: User.Group
-    sudo = User.Group "sudo"
-
-    tmpdir :: Op
-    tmpdir = FS.dir (FS.Directory "/home/salmon/tmp")
 
 -------------------------------------------------------------------------------
 setupPG :: Postgres.ConnString FilePath -> Op
@@ -555,60 +548,8 @@ setupPG connstring =
     acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
 
 -------------------------------------------------------------------------------
-localDev :: Self.SelfPath -> G PGMigrate.MigrationFile -> Op
-localDev selfpath inputMigrations =
-    op "pg-dev" (deps [prest2, prest1 `inject` migrate3]) id
-  where
-    d1 = Postgres.Database "salmon_demo01"
-    u1 = Postgres.User "salmon_user01"
-    pass1 = Postgres.Password "unsafe"
-    connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
-
-    migrate3 =
-      PGMigrate.remoteMigrateSetup
-        pass1
-        (cheddarSelf Production)
-        selfpath
-        MigratePostgres 
-        (PGMigrate.RemoteMigrateConfig
-           inputMigrations
-           u1
-           d1)
-
-    prest1 = op "pg-postgrest-1" (deps [setupPrest1]) id
-    setupPrest1 =
-      Postgrest.setupPostgrest 
-        Ssh.preExistingRemoteMachine
-        (cheddarSelf Production)
-        selfpath
-        PostgrestService
-        prestConfig1
-
-    prestConfig1 =
-      Postgrest.PostgrestConfig
-        "demo-service-1"
-        3001
-        u1
-        connstring
-        "./configs/posgtrest/postgrest-1.config"
-
-
-    prest2 = op "pg-postgrest-2" (deps [setupPrest2]) id
-    setupPrest2 =
-      Postgrest.setupPostgrest 
-        Ssh.preExistingRemoteMachine
-        (cheddarSelf Production)
-        selfpath
-        PostgrestService
-        prestConfig2
-
-    prestConfig2 =
-      Postgrest.PostgrestConfig
-        "demo-service-2"
-        3002
-        u1
-        connstring
-        "./configs/posgtrest/postgrest-2.config"
+localDev :: Track' Spec -> Self.SelfPath -> Op
+localDev simulate selfpath = noop "local-dev"
 
 -------------------------------------------------------------------------------
 data MachineSpec
@@ -619,18 +560,19 @@ data MachineSpec
 instance FromJSON MachineSpec
 instance ToJSON MachineSpec
 
-data InfectTarget
+data InfectTarget a
   = InfectTarget
   { infectUser :: Text
   , infectHost :: Text
+  , infectPulicKey :: a
   } deriving (Generic)
-instance FromJSON InfectTarget
-instance ToJSON InfectTarget
+instance FromJSON a => FromJSON (InfectTarget a)
+instance ToJSON a => ToJSON (InfectTarget a)
 
 data Spec
   = Batch [Spec]
   -- dev for working out new recipes
-  | LocalDev (G PGMigrate.MigrationFile)
+  | LocalDev
   -- configure machines
   | Initialize
   -- todo: | Infect InfectTarget
@@ -648,25 +590,31 @@ instance ToJSON Spec
 
 program :: Self.SelfPath -> Manager -> Track' Spec
 program selfpath httpManager =
-    Track $ \spec -> optimizedDeps $ op "program" (deps $ specOp spec) id
+   go 0
   where
-   specOp :: Spec -> [Op]
-   specOp (LocalDev m) = [localDev selfpath m]
+   go n = Track $ \spec ->
+     optimizedDeps $ op "program" (deps $ specOp (n+1) spec) $ \actions -> actions {
+       notes = [Text.pack $ "at depth " <> show n]
+     , ref = dotRef $ Text.pack $ "program:" <> show n
+     }
+
+   specOp :: Int -> Spec -> [Op]
+   specOp k (LocalDev) = [localDev (go k) selfpath]
    -- meta
-   specOp (Batch xs) = concatMap specOp xs
+   specOp k (Batch xs) = concatMap (specOp k) xs
    -- machine
-   specOp (Initialize) = [initialize]
-   specOp (Machine Box domainName) = [sreBox Production selfpath domainName]
-   specOp (Machine Cheddar domainName) = [cheddarBox Production selfpath domainName]
-   specOp (Machine Laptop domainName) = [laptop selfpath]
+   specOp k (Initialize) = [Initialize.initialize]
+   specOp k (Machine Box domainName) = [sreBox Production selfpath (go k) domainName]
+   specOp k (Machine Cheddar domainName) = [cheddarBox Production selfpath (go k) domainName]
+   specOp k (Machine Laptop domainName) = [laptop (go k) selfpath]
    -- actions
-   specOp (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track setupPG) arg]
+   specOp k (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track setupPG) arg]
    -- services
-   specOp (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
-   specOp (AuthoritativeDNS arg) = [systemdMicroDNS arg]
-   specOp (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
-   specOp (KitchenSinkService arg) = [KSMulti.systemdKitchenSink arg]
-   specOp (PostgrestService arg) = [Postgrest.systemdPostgrest arg]
+   specOp k (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
+   specOp k (AuthoritativeDNS arg) = [systemdMicroDNS arg]
+   specOp k (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
+   specOp k (KitchenSinkService arg) = [KSMulti.systemdKitchenSink arg]
+   specOp k (PostgrestService arg) = [Postgrest.systemdPostgrest arg]
 
    optimizedDeps :: Op -> Op
    optimizedDeps base =
@@ -703,12 +651,7 @@ configure = Configure go
     go (LaptopSeed) = pure $ Machine Laptop "box.dicioccio.fr"
     go (SreBoxSeed d) = pure $ Machine Box d
     go (CheddarBoxSeed d) = pure $ Machine Cheddar d
-    go (LocalDevSeed) = do
-      let reader =
-            Migrations.addFilePrefix "migrations/src"
-            $ PGMigrate.defaultMigrationReader
-      m <- Migrations.loadMigrations reader "foo1.toto"
-      pure $ LocalDev (G $ fmap node m)
+    go (LocalDevSeed) = pure $ LocalDev 
 
 -------------------------------------------------------------------------------
 main :: IO ()

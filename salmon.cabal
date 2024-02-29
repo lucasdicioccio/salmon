@@ -65,6 +65,7 @@ library
                    , SreBox.CabalBuilding
                    , SreBox.CertSigning
                    , SreBox.Environment
+                   , SreBox.Initialize
                    , SreBox.DNSRegistration
                    , SreBox.MicroDNS
                    , SreBox.KitchenSinkBlog

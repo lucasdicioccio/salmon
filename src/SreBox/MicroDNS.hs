@@ -76,12 +76,13 @@ instance ToJSON MicroDNSSetup
 setupDNS
   :: (FromJSON directive, ToJSON directive)
   => Track' Ssh.Remote
+  -> Track' directive
   -> Self.Remote
   -> Self.SelfPath
   -> (MicroDNSSetup -> directive)
   -> MicroDNSConfig
   -> Op
-setupDNS mkRemote selfRemote selfpath toSpec cfg =
+setupDNS mkRemote simulate selfRemote selfpath toSpec cfg =
   using (cabalBinUpload microDNS rsyncRemote) $ \remotepath ->
     let
       setup = MicroDNSSetup remotepath cfg.microdns_cfg_apex cfg.microdns_cfg_portnum remotePem remoteKey remoteSecret cfg.microdns_cfg_zonefileContents
@@ -97,7 +98,7 @@ setupDNS mkRemote selfRemote selfpath toSpec cfg =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo mkRemote selfref CLI.Up (toSpec setup)
+      Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" selfRemote selfpath

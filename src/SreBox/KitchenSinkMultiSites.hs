@@ -186,12 +186,13 @@ setupKS
   => Track' Ssh.Remote
   -> Track' (Certs.Domain, Text)
   -> Tracked' FilePath
+  -> Track' directive
   -> Self.Remote
   -> Self.SelfPath
   -> KitchenSinkConfig
   -> (KitchenSinkSetup -> directive)
   -> Op
-setupKS mkRemote mkCerts cloneKitchenSink selfRemote selfpath cfg toSpec =
+setupKS mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toSpec =
   using (cabalBinUpload cloneKitchenSink rsyncRemote) $ \remotepath ->
     let
       setup = KitchenSinkSetup remotepath uploadRoot fallback services
@@ -214,7 +215,7 @@ setupKS mkRemote mkCerts cloneKitchenSink selfRemote selfpath cfg toSpec =
     -- recursive call
     continueRemotely setup = self `bindTracked` recurse setup
     recurse setup selfref =
-      Self.callSelfAsSudo mkRemote selfref CLI.Up (toSpec setup)
+      Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
 
 stanzaUploadCerts
   :: Track' (Certs.Domain, Text)

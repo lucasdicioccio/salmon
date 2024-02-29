@@ -49,12 +49,13 @@ setupKS
   :: (FromJSON directive, ToJSON directive)
   => Track' Ssh.Remote
   -> Track' (Certs.Domain, Text)
+  -> Track' directive
   -> Self.Remote
   -> Self.SelfPath
   -> KitchenSinkBlogConfig
   -> (KitchenSinkBlogSetup -> directive)
   -> Op
-setupKS mkRemote mkCert selfRemote selfpath cfg toSpec =
+setupKS mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
   using (Git.repodir cloneSite cfg.ks_cfg_repo "") $ \blogSrcDir ->
   using (cabalBinUpload kitchenSink rsyncRemote) $ \remotepath ->
     let
@@ -71,7 +72,7 @@ setupKS mkRemote mkCert selfRemote selfpath cfg toSpec =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo mkRemote selfref CLI.Up (toSpec setup)
+      Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" selfRemote selfpath

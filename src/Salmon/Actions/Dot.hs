@@ -7,6 +7,7 @@ module Salmon.Actions.Dot
   ( printDigraph
   , printCograph
   , PlaceHolder(..)
+  , OpaqueNode(..)
   , DotGraphExt
   ) where
 
@@ -42,6 +43,8 @@ type DotGraphExt ext = (HasField "dynamics" ext [Dynamic], HasField "ref" ext Re
 
 data PlaceHolder = PlaceHolder Text
 
+data OpaqueNode = OpaqueNode Text
+
 hasPlaceholder
   :: DotGraphExt ext
   => ext
@@ -49,9 +52,17 @@ hasPlaceholder
 hasPlaceholder e =
   not $ null $ Maybe.catMaybes $ map (fromDynamic @PlaceHolder) e.dynamics
 
+hasOpaqueNode
+  :: DotGraphExt ext
+  => ext
+  -> Bool
+hasOpaqueNode e =
+  not $ null $ Maybe.catMaybes $ map (fromDynamic @OpaqueNode) e.dynamics
+
 dotNode :: DotGraphExt ext => Node ext -> Text
 dotNode Nothing = ""
 dotNode (Just (ref,name,ext))
+  | hasOpaqueNode ext = mconcat [ unRef ref, "[color=darkgreen;shape=egg;label=\"", dotEscape name, "\"];" ]
   | hasPlaceholder ext = mconcat [ unRef ref, "[color=grey;label=\"", dotEscape name, "\"];" ]
   | otherwise = mconcat [ unRef ref, "[label=\"", dotEscape name, "\"];" ]
 

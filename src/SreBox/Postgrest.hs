@@ -14,8 +14,9 @@ import System.FilePath
 
 import Salmon.Builtin.Extension
 import Salmon.Op.Ref (dotRef)
-import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Track (Track(..), (>*<), using, opGraph, bindTracked)
+import Salmon.Op.OpGraph (OpGraph(..),inject)
+import Salmon.Op.G (G(..))
+import Salmon.Op.Track (Track(..), (>*<), using, opGraph, bindTracked, Tracked(..))
 import qualified Salmon.Builtin.CommandLine as CLI
 import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.Continuation as Continuation
@@ -27,9 +28,12 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
+import qualified Salmon.Builtin.Migrations as Migrations
 
 import SreBox.CabalBuilding
 import SreBox.Environment
+import qualified SreBox.PostgresMigrations as PGMigrate
+import qualified Salmon.Builtin.Nodes.Git as Git
 
 -------------------------------------------------------------------------------
 
@@ -60,12 +64,13 @@ instance ToJSON PostgrestSetup
 setupPostgrest
   :: (FromJSON directive, ToJSON directive)
   => Track' Ssh.Remote
+  -> Track' directive
   -> Self.Remote
   -> Self.SelfPath
   -> (PostgrestSetup -> directive)
   -> PostgrestConfig
   -> Op
-setupPostgrest mkRemote selfRemote selfpath toSpec cfg =
+setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
   using (cabalBinUpload postgrest rsyncRemote) $ \remotepath ->
     let
       setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig
@@ -85,7 +90,7 @@ setupPostgrest mkRemote selfRemote selfpath toSpec cfg =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-      Self.callSelfAsSudo mkRemote selfref CLI.Up (toSpec setup)
+      Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
 
     -- upload self
     self = Self.uploadSelf "tmp" selfRemote selfpath
@@ -169,3 +174,79 @@ systemdPostgrest setup =
 
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"
+
+-------------------------------------------------------------------------------
+
+data PostgrestMigratedApiConfig
+  = PostgrestMigratedApiConfig {
+    pma_serviceName :: Text
+  , pma_apiPort :: Int
+  , pma_repo :: Git.Repo
+  , pma_migrationTip :: FilePath
+  , pma_migrationsPrefix :: FilePath
+  , pma_connstring :: Postgres.ConnString Postgres.Password
+  }
+
+postgrestMigratedApi
+  :: (FromJSON directive, ToJSON directive)
+  => Track' directive
+  -> (PGMigrate.RemoteMigrateSetup -> directive)
+  -> (PostgrestSetup -> directive)
+  -> Self.SelfPath
+  -> Self.Remote
+  -> PostgrestMigratedApiConfig
+  -> Op
+postgrestMigratedApi simulate toSpec1 toSpec2 selfpath remoteSelf cfg =
+    op "postgrest-api" (deps [prest `inject` migrate]) $ \actions -> actions {
+      ref = dotRef $ "prest-api" <> cfg.pma_serviceName
+    }
+  where
+    inputMigrations :: IO (G PGMigrate.MigrationFile)
+    inputMigrations =
+      let reader =
+            Migrations.addFilePrefix (Git.clonedir cfg.pma_repo </> cfg.pma_migrationsPrefix)
+              $ PGMigrate.defaultMigrationReader
+      in G . fmap node <$> Migrations.loadMigrations reader cfg.pma_migrationTip
+
+    d1 = cfg.pma_connstring.connstring_db
+    u1 = cfg.pma_connstring.connstring_user
+    pass1 = cfg.pma_connstring.connstring_user_pass
+    connstring = cfg.pma_connstring
+
+    cloneSource = Track $ const $ Git.repo Debian.git cfg.pma_repo
+
+    migrate =
+      PGMigrate.remoteMigrateOpaqueSetup
+        pass1
+        simulate
+        remoteSelf
+        selfpath
+        toSpec1
+        (PGMigrate.RemoteMigrateConfig
+           (TrackedIO $ Tracked cloneSource inputMigrations)
+           u1
+           d1)
+
+    prest = op "postgrest" (deps [setupPrest]) $ \actions -> actions {
+      ref = dotRef $ "prest-service" <> cfg.pma_serviceName
+    }
+
+    setupPrest =
+      setupPostgrest 
+        Ssh.preExistingRemoteMachine
+        simulate
+        remoteSelf
+        selfpath
+        toSpec2
+        prestConfig
+
+    serviceName = "postgrest-api-" <> cfg.pma_serviceName
+    prestConfigPath = Text.unpack $ mconcat ["./configs/posgtrest/postgrest-", cfg.pma_serviceName, ".config"]
+    prestConfig =
+      PostgrestConfig
+        serviceName
+        cfg.pma_apiPort
+        u1
+        connstring
+        prestConfigPath
+

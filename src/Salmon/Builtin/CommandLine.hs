@@ -91,29 +91,3 @@ execCommandOrSeed genBase traceBase cmd = void $ do
         Left err -> putStrLn ("failed to json-parse graph: " <> err)
         Right a -> do
           cont (run traceBase a)
-
--- | Function to build a main reading a base command and a directive from
--- stdin.
-execBaseCommand
-  :: forall directive seed. (FromJSON directive)
-  => Track' directive
-  -> BaseCommand
-  -> IO ()
-execBaseCommand traceBase cmd = void $ do
-  case cmd of
-    (Up) -> do
-      withGraph (UpDown.upTree nat)
-    (Down) -> do
-      withGraph (UpDown.downTree nat) 
-    (Tree) -> do
-      withGraph (Help.printHelpCograph . (runIdentity . expand))
-    (DAG) -> do
-      withGraph (Dot.printCograph . (runIdentity . expand))
-  where
-    nat = pure . runIdentity
-    withGraph cont = do
-      jsonbody <- LBysteString.getContents
-      case eitherDecode jsonbody of
-        Left err -> putStrLn ("failed to json-parse graph: " <> err)
-        Right a -> do
-          cont (run traceBase a)
