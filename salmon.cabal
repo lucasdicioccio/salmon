@@ -70,6 +70,7 @@ library
                    , SreBox.MicroDNS
                    , SreBox.KitchenSinkBlog
                    , SreBox.KitchenSinkMultiSites
+                   , SreBox.PostgresInit
                    , SreBox.Postgrest
     build-depends:    base ^>=4.16.3.0
                     , containers

@@ -76,6 +76,7 @@ import SreBox.MicroDNS
 import qualified SreBox.DNSRegistration as DNSRegistration
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
+import qualified SreBox.PostgresInit as PostgresInit
 import qualified SreBox.PostgresMigrations as PGMigrate
 import qualified SreBox.Postgrest as Postgrest
 import qualified SreBox.Initialize as Initialize
@@ -380,6 +381,12 @@ eWebhook =
           KS.DropPrefix
           "lucasdicioccio-ThinkPad-T490.home"
           8087
+      , KS.SlashApiProxyDirective
+          KS.UsePlainText
+          "/pipeskouillou"
+          KS.DropPrefix
+          "127.0.0.1"
+          2001
       ]
     )
 
@@ -402,7 +409,7 @@ pipeskouillouiApi simulate selfpath =
     connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
     cfg = Postgrest.PostgrestMigratedApiConfig
             "pipeskouillou"
-            3001
+            2001
             repo
             "dbs/pipeskouillou/tip.sql"
             ""
@@ -532,22 +539,6 @@ laptop simulate selfpath =
         (prefs.task_data_path "microdns.self-signed-cert.pem")
 
 -------------------------------------------------------------------------------
-setupPG :: Postgres.ConnString FilePath -> Op
-setupPG connstring =
-    op "pg-setup" (deps [dbstuff]) id
-  where
-    dbstuff = op "pg-setup" (deps [acls `inject` basics]) id
-    basics = op "pg-basics" (deps [db1, user1]) id
-    cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
-    db1 = Postgres.database cluster Debian.psql d1
-    d1 = connstring.connstring_db
-    u1 = connstring.connstring_user
-    pass1 = connstring.connstring_user_pass
-    user1 = Postgres.userPassFile cluster Debian.psql (FS.PreExisting pass1) u1
-    acls = op "grants" (deps [acl1]) id
-    acl1 = Postgres.grant Debian.psql (Postgres.AccessRight d1 (Postgres.UserRole u1) [Postgres.CONNECT, Postgres.CREATE])
-
--------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
 localDev simulate selfpath = noop "local-dev"
 
@@ -608,7 +599,7 @@ program selfpath httpManager =
    specOp k (Machine Cheddar domainName) = [cheddarBox Production selfpath (go k) domainName]
    specOp k (Machine Laptop domainName) = [laptop (go k) selfpath]
    -- actions
-   specOp k (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track setupPG) arg]
+   specOp k (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track PostgresInit.setupSingleUserPG) arg]
    -- services
    specOp k (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
    specOp k (AuthoritativeDNS arg) = [systemdMicroDNS arg]
