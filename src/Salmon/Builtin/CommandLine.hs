@@ -9,6 +9,7 @@ import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import Options.Generic
 import Options.Applicative
 
+import Salmon.Op.OpGraph
 import Salmon.Op.Eval
 import Salmon.Op.Track
 import Salmon.Op.Configure
@@ -79,15 +80,32 @@ execCommandOrSeed genBase traceBase cmd = void $ do
     (Run Tree) -> do
       withGraph (Help.printHelpCograph . (runIdentity . expand))
     (Run DAG) -> do
-      withGraph (Dot.printCograph . (runIdentity . expand))
+      withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
     Config seed -> do
       dir <- gen genBase seed
       LBysteString.putStr $ encode dir
   where
     nat = pure . runIdentity
+
+    withGraph :: (Op -> IO ()) -> IO ()
     withGraph cont = do
       jsonbody <- LBysteString.getContents
       case eitherDecode jsonbody of
         Left err -> putStrLn ("failed to json-parse graph: " <> err)
         Right a -> do
           cont (run traceBase a)
+
+injectRemoteSubgraphs :: Int -> Op -> Op
+injectRemoteSubgraphs lvl orig =
+  orig `overlaid` flattenAllRemoteCalls orig
+
+-- | A record for dynamic remote-op.
+data RemoteOp = RemoteOp { unRemote :: Op }
+
+flattenAllRemoteCalls :: Op -> Op
+flattenAllRemoteCalls root =
+    op "remote-call-details" (deps remoteCalls) id
+  where
+    remoteCalls = concatMap adapt $ collectDynamics root
+    adapt :: (Op, [RemoteOp]) -> [Op]
+    adapt (orig, remotes) = [ unRemote r | r <- remotes ]

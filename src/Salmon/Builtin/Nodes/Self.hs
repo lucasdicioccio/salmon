@@ -50,9 +50,6 @@ data RemoteCall a
 instance ToJSON a => ToJSON (RemoteCall a)
 instance FromJSON a => FromJSON (RemoteCall a)
 
--- | A record for dynamic remote-op.
-data RemoteOp = RemoteOp Op
-
 callSelf
   :: forall directive. (ToJSON directive, FromJSON directive)
   => RemoteSelf
@@ -66,7 +63,7 @@ callSelf self simulate base directive =
     modActions actions =
       actions {
         ref = dotRef $ "call-self:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive)
-      , dynamics = [toDyn $ RemoteOp $ run simulate directive ]
+      , dynamics = [toDyn $ CLI.RemoteOp $ run simulate directive ]
       }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
@@ -88,7 +85,7 @@ callSelfAsSudo mkRemote self simulate base directive =
     modActions actions =
       actions {
         ref = dotRef $ "call-self-sudo:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive)
-      , dynamics = [toDyn $ RemoteOp $ run simulate directive ]
+      , dynamics = [toDyn $ CLI.RemoteOp $ run simulate directive ]
       }
     rc = RemoteCall base directive
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
