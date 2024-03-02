@@ -76,7 +76,7 @@ import SreBox.MicroDNS
 import qualified SreBox.DNSRegistration as DNSRegistration
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
-import qualified SreBox.PostgresInit as PostgresInit
+import qualified SreBox.PostgresInit as PGInit
 import qualified SreBox.PostgresMigrations as PGMigrate
 import qualified SreBox.Postgrest as Postgrest
 import qualified SreBox.Initialize as Initialize
@@ -394,6 +394,7 @@ pipeskouillouiApi :: Track' Spec -> Self.SelfPath -> Op
 pipeskouillouiApi simulate selfpath =
     Postgrest.postgrestMigratedApi 
       simulate
+      InitPostgres
       MigratePostgres
       PostgrestService
       selfpath
@@ -405,6 +406,7 @@ pipeskouillouiApi simulate selfpath =
     repo = Git.Repo "./git-repos/" "blog" remote branch
     d1 = Postgres.Database "salmon_pipeskouillou"
     u1 = Postgres.User "salmon_pipeskouillou_rw"
+    g1 = Postgres.Group "salmon_pipeskouillou_ro"
     pass1 = Postgres.Password "qwwxeqe12341c2nkjndscjhb2131!"
     connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
     cfg = Postgrest.PostgrestMigratedApiConfig
@@ -414,6 +416,7 @@ pipeskouillouiApi simulate selfpath =
             "dbs/pipeskouillou/tip.sql"
             ""
             connstring
+            g1
 
 boxSelf :: Environment -> Self.Remote
 boxSelf _ = Self.Remote "salmon" "box.dicioccio.fr"
@@ -568,6 +571,7 @@ data Spec
   | Initialize
   -- todo: | Infect InfectTarget
   | Machine MachineSpec Text
+  | InitPostgres (PGInit.InitSetup FilePath)
   | MigratePostgres (PGMigrate.RemoteMigrateSetup)
   -- services running
   | RegisterMachine DNSRegistration.RegisteredMachineSetup
@@ -599,7 +603,8 @@ program selfpath httpManager =
    specOp k (Machine Cheddar domainName) = [cheddarBox Production selfpath (go k) domainName]
    specOp k (Machine Laptop domainName) = [laptop (go k) selfpath]
    -- actions
-   specOp k (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track PostgresInit.setupSingleUserPG) arg]
+   specOp k (InitPostgres arg) = [PGInit.setupPG $ PGInit.setupWithPreExistingPasswords arg]
+   specOp k (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track PGInit.setupSingleUserPG) arg]
    -- services
    specOp k (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
    specOp k (AuthoritativeDNS arg) = [systemdMicroDNS arg]

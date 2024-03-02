@@ -96,6 +96,9 @@ userPassFile server psql genpass user =
 
 
 data Group = Group { groupRole :: RoleName }
+  deriving (Generic)
+instance ToJSON Group
+instance FromJSON Group
 
 group :: Track' Server -> Track' (Binary "psql") -> Group -> Op
 group server psql group =
@@ -108,21 +111,30 @@ group server psql group =
 data Role
   = UserRole User
   | GroupRole Group
+  deriving (Generic)
+instance ToJSON Role
+instance FromJSON Role
 
 roleName :: Role -> RoleName
 roleName (UserRole u) = u.userRole
 roleName (GroupRole g) = g.groupRole
 
-data Right
+data PGRight
   = CREATE
   | CONNECT
+  deriving (Generic)
+instance ToJSON PGRight
+instance FromJSON PGRight
 
 data AccessRight
   = AccessRight 
   { access_database :: Database
   , access_role :: Role
-  , access_rights :: [Right]
+  , access_rights :: [PGRight]
   }
+  deriving (Generic)
+instance ToJSON AccessRight
+instance FromJSON AccessRight
 
 grant :: Track' (Binary "psql") -> AccessRight -> Op
 grant psql acl =
@@ -212,7 +224,7 @@ psqlAdminRun_Sudo = Command go
     quotePass :: Password -> String
     quotePass pwd = "'" <> Text.unpack pwd.revealPassword <> "'"
 
-    renderRight :: Right -> Text
+    renderRight :: PGRight -> Text
     renderRight CREATE = "CREATE"
     renderRight CONNECT = "CONNECT"
 

@@ -32,6 +32,7 @@ import qualified Salmon.Builtin.Migrations as Migrations
 
 import SreBox.CabalBuilding
 import SreBox.Environment
+import qualified SreBox.PostgresInit as PGInit
 import qualified SreBox.PostgresMigrations as PGMigrate
 import qualified Salmon.Builtin.Nodes.Git as Git
 
@@ -45,10 +46,10 @@ data PostgrestConfig
   = PostgrestConfig
   { postgrest_cfg_serviceName :: ServiceName
   , postgrest_cfg_portnum :: PortNumber
-  , postgrest_cfg_anonRole :: Postgres.User
+  , postgrest_cfg_anonRole :: Postgres.Group
   , postgrest_cfg_connectionString :: Postgres.ConnString Postgres.Password
   , postgrest_cfg_configPath :: FilePath
-  -- TODO: anon-role, schemas
+  -- TODO: schemas
   }
 
 data PostgrestSetup
@@ -110,7 +111,7 @@ setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
 renderConfig :: PostgrestConfig -> Text
 renderConfig cfg =
   Text.unlines
-  [ kv_text "db-anon-role" $ Postgres.userRole cfg.postgrest_cfg_anonRole
+  [ kv_text "db-anon-role" $ Postgres.groupRole cfg.postgrest_cfg_anonRole
   , kv_text "db-channel" "pgrst"
   , kv_bool "db-channel-enabled" True
   , kv_bool "db-config" True
@@ -185,19 +186,21 @@ data PostgrestMigratedApiConfig
   , pma_migrationTip :: FilePath
   , pma_migrationsPrefix :: FilePath
   , pma_connstring :: Postgres.ConnString Postgres.Password
+  , pma_fallback_role :: Postgres.Group
   }
 
 postgrestMigratedApi
   :: (FromJSON directive, ToJSON directive)
   => Track' directive
+  -> (PGInit.InitSetup FilePath -> directive)
   -> (PGMigrate.RemoteMigrateSetup -> directive)
   -> (PostgrestSetup -> directive)
   -> Self.SelfPath
   -> Self.Remote
   -> PostgrestMigratedApiConfig
   -> Op
-postgrestMigratedApi simulate toSpec1 toSpec2 selfpath remoteSelf cfg =
-    op "postgrest-api" (deps [prest `inject` migrate]) $ \actions -> actions {
+postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
+    op "postgrest-api" (deps [prest `inject` migrateDB `inject` initDB]) $ \actions -> actions {
       ref = dotRef $ "prest-api" <> cfg.pma_serviceName
     }
   where
@@ -212,10 +215,22 @@ postgrestMigratedApi simulate toSpec1 toSpec2 selfpath remoteSelf cfg =
     u1 = cfg.pma_connstring.connstring_user
     pass1 = cfg.pma_connstring.connstring_user_pass
     connstring = cfg.pma_connstring
+    g1 = cfg.pma_fallback_role
 
     cloneSource = Track $ const $ Git.repo Debian.git cfg.pma_repo
 
-    migrate =
+    initDB =
+      PGInit.remoteSetupPG
+        simulate
+        remoteSelf
+        selfpath
+        toSpec0
+        (PGInit.InitSetup
+          d1
+          [(u1, pass1, [Postgres.CONNECT, Postgres.CREATE], [g1])]
+          [(g1,[])])
+
+    migrateDB =
       PGMigrate.remoteMigrateOpaqueSetup
         pass1
         simulate
@@ -246,7 +261,7 @@ postgrestMigratedApi simulate toSpec1 toSpec2 selfpath remoteSelf cfg =
       PostgrestConfig
         serviceName
         cfg.pma_apiPort
-        u1
+        g1
         connstring
         prestConfigPath
 

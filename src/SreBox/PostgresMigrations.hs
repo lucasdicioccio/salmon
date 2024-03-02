@@ -172,7 +172,9 @@ remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
     uploadsecret =
       Rsync.sendFile
         Debian.rsync
-        (FS.Generated (Track $ \path -> FS.filecontents (FS.FileContents path $ revealPassword pass1)) tmpSecretPath)
+        (FS.Generated
+          (Track $ \path -> FS.filecontents (FS.FileContents path $ revealPassword pass1))
+          tmpSecretPath)
         (rsyncRemote)
         (remotePgSecretPath)
 
@@ -262,4 +264,4 @@ applyMigration psql mkConnstring setup =
     migrateG psql mkConnstring connstring setup.setup_migration
   where
     connstring =
-         ConnString localServer setup.setup_user setup.setup_tmp_secret_path setup.setup_database
+      ConnString localServer setup.setup_user setup.setup_tmp_secret_path setup.setup_database
