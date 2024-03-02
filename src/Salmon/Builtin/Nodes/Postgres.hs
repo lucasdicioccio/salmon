@@ -128,9 +128,20 @@ grant :: Track' (Binary "psql") -> AccessRight -> Op
 grant psql acl =
   withBinary psql psqlAdminRun_Sudo (Grant acl) $ \up ->
   op "pg-grant" nodeps $ \actions -> actions {
-    ref = dotRef $ "pg-group:" <> roleName acl.access_role
+    ref = dotRef $ "pg-grant:" <> roleName acl.access_role
   , up = up
   }
+
+groupMember :: Track' Server -> Track' (Binary "psql") -> Group -> Track' Role -> Role -> Op
+groupMember server psql g role u =
+  withBinary psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
+  op "pg-member" (deps [dbgroup, dbuser]) $ \actions -> actions {
+    ref = dotRef $ "pg-member:" <> g.groupRole <> (roleName u)
+  , up = up
+  }
+  where
+    dbgroup = group server psql g
+    dbuser = run role u
 
 adminScript :: Track' (Binary "psql") -> File "psql-script" -> Op
 adminScript psql file =
@@ -149,6 +160,7 @@ data PsqlAdmin
   | CreateUser RoleName Password
   | CreateGroup RoleName
   | Grant AccessRight
+  | GroupMembership RoleName RoleName
   | AdminScript FilePath
 
 -- | todo: workaround sudo hack with some calling preference
@@ -176,6 +188,13 @@ psqlAdminRun_Sudo = Command go
                   , unwords
                     [ "CREATE ROLE" 
                     , Text.unpack name
+                    ] 
+                  ]
+    go (GroupMembership g u) =
+      proc "sudo" [ "-u", "postgres", "psql",  "-c"
+                  , unwords
+                    [ "ALTER GROUP" , Text.unpack g
+                    , "ADD USER" , Text.unpack u
                     ] 
                   ]
     go (Grant acl) =
