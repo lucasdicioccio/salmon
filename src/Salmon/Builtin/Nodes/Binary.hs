@@ -5,6 +5,9 @@ module Salmon.Builtin.Nodes.Binary
   , withBinary
   , withBinaryStdin
   , untrackedExec
+  , CommandIO(..)
+  , withBinaryIO
+  , untrackedExecIO
   ) where
 
 import Salmon.Op.Track
@@ -17,7 +20,10 @@ import Data.Text (Text)
 import Data.ByteString (ByteString)
 import qualified Data.Text as Text
 import GHC.TypeLits (Symbol)
+import GHC.IO.Exception (ExitCode)
 
+import GHC.IO.Handle (Handle)
+import System.Process (createProcess, ProcessHandle)
 import System.Process.ListLike (CreateProcess, proc)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 
@@ -52,3 +58,25 @@ withBinaryStdin t cmd arg stdin consumeIO =
 untrackedExec :: Command x a -> a -> ByteString -> IO ()
 untrackedExec binary arg dat =
   void $ readCreateProcessWithExitCode (prepare binary arg) dat
+
+type RunningCommand = (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+
+-- | A more general Command where more side-effects are allowed to generate the command and more information is returned.
+-- we recommend using Command until this is no longer practical
+-- intended use case is to redirect inputs/outputs but the mechanism could be abused to significantly alter the command being run based on runtime info (i.e., best avoided)
+-- arg and ioarg allow to split a deterministic arg, which can be directly tracked, and an ioarg that will exist only when executing up/down effects
+data CommandIO (wellKnownName :: Symbol) arg ioarg =
+  CommandIO
+  { prepareIO :: arg -> ioarg -> IO CreateProcess 
+  }
+
+withBinaryIO :: Track' (Binary x) -> CommandIO x arg ioarg -> arg -> ((ioarg -> IO RunningCommand) -> Op) -> Op
+withBinaryIO t cmd arg consumeIO =
+  let mk a = (untrackedExecIO cmd a, Binary)
+  in
+  tracking t mk arg consumeIO
+
+untrackedExecIO :: CommandIO x a ioarg -> a -> (ioarg -> IO RunningCommand)
+untrackedExecIO binary arg = \ioarg -> do
+  p <- prepareIO binary arg ioarg
+  createProcess p

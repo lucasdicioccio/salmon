@@ -63,6 +63,7 @@ import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.User as User
 import qualified Salmon.Builtin.Nodes.Web as Web
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import qualified Salmon.Builtin.Nodes.WireGuard as Wireguard
 import qualified Salmon.Builtin.Nodes.Web as Web
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Helpers (collapse)
@@ -543,7 +544,15 @@ laptop simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = noop "local-dev"
+localDev simulate selfpath = op "local-dev" (deps [wg1, peer1]) id
+  where
+    privkey = Track $ Wireguard.privateKey Debian.wg 
+    pubkey privkeypath = Track $ \pubkeypath -> Wireguard.publicKey Debian.wg privkey privkeypath pubkeypath
+    wg_here = Wireguard.rfc1918_slash24 Wireguard.OneNineTwoOneSixEight16 11 2
+    netdev = Track $ \devname -> Wireguard.iface Debian.ip devname wg_here
+    wg1 = Wireguard.client Debian.wg privkey netdev "wg1" "wireguard/wg11.key.priv"
+    peer1 = Wireguard.peer Debian.wg (pubkey "wireguard/wg1.key.priv") netdev ignoreTrack "wg1" "wireguard/wg1.key.pub" Nothing  "0.0.0.0/0"
+
 
 -------------------------------------------------------------------------------
 data MachineSpec

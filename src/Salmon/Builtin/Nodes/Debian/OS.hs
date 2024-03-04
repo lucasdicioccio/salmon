@@ -57,3 +57,9 @@ useradd = installWith "passwd"
 
 groupadd :: Installer "groupadd"
 groupadd = installWith "passwd"
+
+ip :: Installer "ip"
+ip = installWith "iproute2"
+
+wg :: Installer "wg"
+wg = installWith "wireguard"
