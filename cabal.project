@@ -1,0 +1,30 @@
+packages: .
+
+source-repository-package
+  type: git
+  location: https://github.com/lucasdicioccio/acme-not-a-joke.git
+  tag: 00266b6d7ce85ad672720b810128508851d8cb2a
+
+source-repository-package
+    type: git
+    location: https://github.com/lucasdicioccio/prodapi.git
+    tag: 4504110a6a58d154bd3984b049e5d8121427311b
+    subdir: prodapi
+
+source-repository-package
+    type: git
+    location: https://github.com/lucasdicioccio/prodapi.git
+    tag: 4504110a6a58d154bd3984b049e5d8121427311b
+    subdir: prodapi-proxy
+
+source-repository-package
+    type: git
+    location: https://github.com/eskimor/purescript-bridge.git
+    tag: 5ee8778ff141ae6ad9a6057921ec4d49e067b6f0
+
+source-repository-package
+  type: git
+  location: https://github.com/kitchensink-tech/kitchensink.git
+  tag: 65ba79c5d7000c745930a681387421a6c4ade920
+  subdir: hs
+
