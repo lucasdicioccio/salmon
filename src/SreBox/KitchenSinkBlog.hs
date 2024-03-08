@@ -57,7 +57,7 @@ setupKS
   -> Op
 setupKS mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
   using (Git.repodir cloneSite cfg.ks_cfg_repo "") $ \blogSrcDir ->
-  using (cabalBinUpload kitchenSink rsyncRemote) $ \remotepath ->
+  using (cabalBinUpload (kitchenSink optBuildsBindir) rsyncRemote) $ \remotepath ->
     let
       setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> Text.unpack cfg.ks_cfg_repo.repoLocalName) cfg.ks_cfg_sourceSubdir
     in

@@ -24,9 +24,10 @@ cabalBinUpload mkbin remote =
     distpath = "tmp/"
     remotePath local = distpath  </> takeFileName local
 
-microDNS :: Tracked' FilePath
-microDNS = cabalRepoBuild
+microDNS :: BinaryDir -> Tracked' FilePath
+microDNS bindir = cabalRepoBuild
   "microdns"
+  bindir
   realNoop
   "microdns"
   "microdns"
@@ -34,9 +35,10 @@ microDNS = cabalRepoBuild
   "main"
   ""
 
-kitchenSink :: Tracked' FilePath
-kitchenSink = cabalRepoBuild
+kitchenSink :: BinaryDir -> Tracked' FilePath
+kitchenSink bindir = cabalRepoBuild
   "kitchensink"
+  bindir
   realNoop
   "exe:kitchen-sink"
   "kitchen-sink"
@@ -47,6 +49,7 @@ kitchenSink = cabalRepoBuild
 kitchenSink_dev :: Tracked' FilePath
 kitchenSink_dev = cabalRepoBuild
   "kitchensink-dev"
+  optBuildsBindir
   realNoop
   "exe:kitchen-sink"
   "kitchen-sink"
@@ -58,6 +61,7 @@ postgrest :: Tracked' FilePath
 postgrest = 
   cabalRepoBuild
    "postgrest"
+   optBuildsBindir
    (Debian.deb $ Debian.Package "libpq-dev")
    "exe:postgrest"
    "postgrest"
@@ -66,19 +70,31 @@ postgrest =
    ""
 
 type CloneDir = Text
+type BinaryDir = FilePath
 type CabalTarget = Text
 type CabalBinaryName = Text -- may vary from target when exe: or lib:  are prepended
 type BranchName = Text
 type SubDir = FilePath -- subdir where we can cabal build
 
+optBuildsBindir :: BinaryDir
+optBuildsBindir = "/opt/builds/bin"
+
 -- builds a cabal repository
-cabalRepoBuild :: CloneDir -> Op -> CabalTarget -> CabalBinaryName -> Git.Remote -> BranchName -> SubDir -> Tracked' FilePath
-cabalRepoBuild dirname sysdeps target binname remote branch subdir = 
+cabalRepoBuild
+  :: CloneDir
+  -> BinaryDir
+  -> Op
+  -> CabalTarget
+  -> CabalBinaryName
+  -> Git.Remote
+  -> BranchName
+  -> SubDir
+  -> Tracked' FilePath
+cabalRepoBuild dirname bindir sysdeps target binname remote branch subdir = 
     Tracked (Track $ const $ op `inject` sysdeps) binpath
   where
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
            Cabal.install cabal (Cabal.Cabal repopath target) bindir
-    bindir = "/opt/builds/bin"
     binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
     git = Debian.git

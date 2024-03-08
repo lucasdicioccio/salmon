@@ -83,7 +83,7 @@ setupDNS
   -> MicroDNSConfig
   -> Op
 setupDNS mkRemote simulate selfRemote selfpath toSpec cfg =
-  using (cabalBinUpload microDNS rsyncRemote) $ \remotepath ->
+  using (cabalBinUpload (microDNS optBuildsBindir) rsyncRemote) $ \remotepath ->
     let
       setup = MicroDNSSetup remotepath cfg.microdns_cfg_apex cfg.microdns_cfg_portnum remotePem remoteKey remoteSecret cfg.microdns_cfg_zonefileContents
     in

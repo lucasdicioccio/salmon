@@ -444,8 +444,7 @@ sreBox env selfpath simulate selfCertDomain =
     domainCerts = [acmeSign acme mkDNS domain | domain <- domains]
 
     cloneKS :: Tracked' FilePath
-    cloneKS = case env of Production -> kitchenSink ; Staging -> kitchenSink_dev
-
+    cloneKS = case env of Production -> kitchenSink optBuildsBindir ; Staging -> kitchenSink_dev
     ksmulti :: Op
     ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS simulate (boxSelf env) selfpath ksMultiConfig KitchenSinkService
 
@@ -463,7 +462,7 @@ cheddarBox env selfpath simulate selfCertDomain =
     mkCert = Track $ acmeSign acme mkDNS
 
     cloneKS :: Tracked' FilePath
-    cloneKS = case env of Production -> kitchenSink ; Staging -> kitchenSink_dev
+    cloneKS = case env of Production -> kitchenSink optBuildsBindir ; Staging -> kitchenSink_dev 
 
     ksmulti :: Op
     ksmulti =
