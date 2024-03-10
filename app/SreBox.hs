@@ -55,6 +55,7 @@ import qualified Salmon.Builtin.Nodes.CronTask as CronTask
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Netfilter as Netfilter
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
@@ -544,8 +545,9 @@ laptop simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [wg1, peer1]) id
+localDev simulate selfpath = op "local-dev" (deps [nftX, wgX]) id
   where
+    wgX = op "wg-x" (deps [wg1, peer1]) id
     privkey = Track $ Wireguard.privateKey Debian.wg 
     pubkey privkeypath = Track $ \pubkeypath -> Wireguard.publicKey Debian.wg privkey privkeypath pubkeypath
     wg_here = Wireguard.rfc1918_slash24 Wireguard.OneNineTwoOneSixEight16 11 2
@@ -553,6 +555,18 @@ localDev simulate selfpath = op "local-dev" (deps [wg1, peer1]) id
     wg1 = Wireguard.client Debian.wg privkey netdev "wg1" "wireguard/wg11.key.priv"
     peer1 = Wireguard.peer Debian.wg (pubkey "wireguard/wg1.key.priv") netdev ignoreTrack "wg1" "wireguard/wg1.key.pub" Nothing  "0.0.0.0/0"
 
+    nftX = op "nft-x" (deps [webports,dnsport `inject` ratelimDNS,sshport]) id
+    table = Netfilter.Table "filter" Netfilter.Inet
+    chain = Netfilter.Chain "input" table
+    webports = Netfilter.rule Debian.nft chain
+               (Netfilter.RawRule ["tcp", "dport", "{80,443}", "ct", "state", "new,established", "counter", "accept"])
+
+    dnsport = Netfilter.rule Debian.nft chain
+               (Netfilter.RawRule ["udp", "dport", "{53}", "accept"])
+    ratelimDNS = Netfilter.rule Debian.nft chain
+               (Netfilter.RawRule ["udp", "dport", "{53}", "limit", "rate", "over", "20/second", "drop"])
+    sshport = Netfilter.rule Debian.nft chain
+               (Netfilter.RawRule ["tcp", "dport", "{22}", "ct", "state", "new,established", "counter", "accept"])
 
 -------------------------------------------------------------------------------
 data MachineSpec

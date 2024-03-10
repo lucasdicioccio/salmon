@@ -63,3 +63,6 @@ ip = installWith "iproute2"
 
 wg :: Installer "wg"
 wg = installWith "wireguard"
+
+nft :: Installer "nft"
+nft = installWith "netfilter"
