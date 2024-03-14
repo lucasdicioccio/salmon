@@ -3,7 +3,7 @@ packages: .
 source-repository-package
   type: git
   location: https://github.com/lucasdicioccio/acme-not-a-joke.git
-  tag: 00266b6d7ce85ad672720b810128508851d8cb2a
+  tag: abccc90d4d0f767594f402475cd5e4106a707051
 
 source-repository-package
     type: git
