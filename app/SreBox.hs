@@ -547,13 +547,13 @@ laptop simulate selfpath =
 localDev :: Track' Spec -> Self.SelfPath -> Op
 localDev simulate selfpath = op "local-dev" (deps [nftX, wgX]) id
   where
-    wgX = op "wg-x" (deps [wg1, peer1]) id
+    wgX = op "wg-x" (deps [wg0,peer1]) id
     privkey = Track $ Wireguard.privateKey Debian.wg 
     pubkey privkeypath = Track $ \pubkeypath -> Wireguard.publicKey Debian.wg privkey privkeypath pubkeypath
-    wg_here = Wireguard.rfc1918_slash24 Wireguard.OneNineTwoOneSixEight16 11 2
+    wg_here = Wireguard.rfc1918_slash24 Wireguard.OneNineTwoOneSixEight16 7 2
     netdev = Track $ \devname -> Wireguard.iface Debian.ip devname wg_here
-    wg1 = Wireguard.client Debian.wg privkey netdev "wg1" "wireguard/wg11.key.priv"
-    peer1 = Wireguard.peer Debian.wg (pubkey "wireguard/wg1.key.priv") netdev ignoreTrack "wg1" "wireguard/wg1.key.pub" Nothing  "0.0.0.0/0"
+    wg0 = Wireguard.client Debian.wg privkey netdev "wg0" "wireguard/wg0.key.priv"
+    peer1 = Wireguard.peer Debian.wg (pubkey "wireguard/wg1.key.priv") netdev ignoreTrack "wg0" "wireguard/wg0.key.pub" Nothing  "0.0.0.0/0"
 
     nftX = op "nft-x" (deps [webports,dnsport `inject` ratelimDNS,sshport]) id
     table = Netfilter.Table "filter" Netfilter.Inet

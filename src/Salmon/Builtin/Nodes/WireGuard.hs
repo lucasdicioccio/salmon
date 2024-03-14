@@ -1,5 +1,6 @@
 module Salmon.Builtin.Nodes.WireGuard where
 
+import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Op.Ref
 import Salmon.Builtin.Extension
 import Salmon.Op.Track
@@ -35,6 +36,7 @@ privateKey wg path =
   op "wg-private-key" (deps [enclosingdir]) $ \actions -> actions {
     help = "privkey at " <> Text.pack path
   , ref = dotRef $ "wg:write-pk" <> Text.pack path
+  , prelim = skipIfFileExists path
   , up = withFile path WriteMode $ \h -> do
       (_,_,_,ph) <- writePK (PrivateKeyForWriting h)
       void $ waitForProcess ph
@@ -54,6 +56,7 @@ publicKey wg mkprivate private path =
   op "wg-public-key" (deps [run mkprivate private, enclosingdir]) $ \actions -> actions {
     help = "pubkey at " <> Text.pack path
   , ref = dotRef $ "wg:write-public-pk" <> Text.pack path
+  , prelim = skipIfFileExists path
   , up =
       withFile private ReadMode $ \hIn ->
       withFile path WriteMode $ \hOut -> do
