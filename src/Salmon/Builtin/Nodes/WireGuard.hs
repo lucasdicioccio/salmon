@@ -90,8 +90,11 @@ type Ipv4PrefixSize = Int
 data IpNet
   = Ipv4Cidr Ipv4 Ipv4PrefixSize
 
+nettxt :: IpNet -> Text
+nettxt (Ipv4Cidr ipv4 cidr) = ipv4 <> "/" <> Text.pack (show cidr)
+
 iptxt :: IpNet -> Text
-iptxt (Ipv4Cidr ipv4 cidr) = ipv4 <> "/" <> Text.pack (show cidr)
+iptxt (Ipv4Cidr ipv4 _) = ipv4
 
 data RFC1918
   = Ten8
@@ -147,7 +150,7 @@ ipcommand = Command $ \cmd -> case cmd of
   (SetWgAddr name ipnet) ->
     proc "ip"
       [ "address"
-      , "add", "dev", Text.unpack name, Text.unpack $ iptxt ipnet
+      , "add", "dev", Text.unpack name, Text.unpack $ nettxt ipnet
       ]
   (UpWg name) ->
     proc "ip"

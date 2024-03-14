@@ -63,6 +63,7 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.User as User
 import qualified Salmon.Builtin.Nodes.Web as Web
+import qualified Salmon.Builtin.Nodes.Routes as Routes
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.WireGuard as Wireguard
 import qualified Salmon.Builtin.Nodes.Web as Web
@@ -547,13 +548,16 @@ laptop simulate selfpath =
 localDev :: Track' Spec -> Self.SelfPath -> Op
 localDev simulate selfpath = op "local-dev" (deps [nftX, wgX]) id
   where
-    wgX = op "wg-x" (deps [wg0,peer1]) id
+    wgX = op "wg-x" (deps [wg0,routewg0,peer1]) id
     privkey = Track $ Wireguard.privateKey Debian.wg 
     pubkey privkeypath = Track $ \pubkeypath -> Wireguard.publicKey Debian.wg privkey privkeypath pubkeypath
     wg_here = Wireguard.rfc1918_slash24 Wireguard.OneNineTwoOneSixEight16 7 2
+    wg_there = Wireguard.rfc1918_slash24 Wireguard.OneNineTwoOneSixEight16 7 1
     netdev = Track $ \devname -> Wireguard.iface Debian.ip devname wg_here
     wg0 = Wireguard.client Debian.wg privkey netdev "wg0" "wireguard/wg0.key.priv"
     peer1 = Wireguard.peer Debian.wg (pubkey "wireguard/wg1.key.priv") netdev ignoreTrack "wg0" "wireguard/wg0.key.pub" Nothing  "0.0.0.0/0"
+
+    routewg0 = Routes.route Debian.ip (Routes.Route Routes.Default "wg0" (Wireguard.iptxt wg_there))
 
     nftX = op "nft-x" (deps [webports,dnsport `inject` ratelimDNS,sshport]) id
     table = Netfilter.Table "filter" Netfilter.Inet
