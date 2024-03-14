@@ -3,6 +3,7 @@
 
 module Salmon.Builtin.CommandLine where
 
+import Control.Monad (void)
 import Control.Monad.Identity
 import qualified Data.ByteString.Lazy as LBysteString
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)

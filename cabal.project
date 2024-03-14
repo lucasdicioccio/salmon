@@ -25,6 +25,6 @@ source-repository-package
 source-repository-package
   type: git
   location: https://github.com/kitchensink-tech/kitchensink.git
-  tag: 65ba79c5d7000c745930a681387421a6c4ade920
+  tag: 11ea9ca83cf4a35c24652c966758b5b954c75d27
   subdir: hs
 
