@@ -73,9 +73,9 @@ import Salmon.Builtin.Migrations as Migrations
 import qualified Salmon.Builtin.CommandLine as CLI
 
 import SreBox.Environment
-import SreBox.CabalBuilding as CabalBuilding
 import SreBox.CertSigning
 import SreBox.MicroDNS
+import qualified SreBox.CabalBuilding as CabalBuilding
 import qualified SreBox.DNSRegistration as DNSRegistration
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
@@ -444,7 +444,8 @@ sreBox env selfpath simulate selfCertDomain =
     domainCerts = [acmeSign acme mkDNS domain | domain <- domains]
 
     cloneKS :: Tracked' FilePath
-    cloneKS = case env of Production -> kitchenSink optBuildsBindir ; Staging -> kitchenSink_dev
+    cloneKS = case env of Production -> CabalBuilding.kitchenSink CabalBuilding.optBuildsBindir ; Staging -> CabalBuilding.kitchenSink_dev
+
     ksmulti :: Op
     ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS simulate (boxSelf env) selfpath ksMultiConfig KitchenSinkService
 
@@ -462,7 +463,7 @@ cheddarBox env selfpath simulate selfCertDomain =
     mkCert = Track $ acmeSign acme mkDNS
 
     cloneKS :: Tracked' FilePath
-    cloneKS = case env of Production -> kitchenSink optBuildsBindir ; Staging -> kitchenSink_dev 
+    cloneKS = case env of Production -> CabalBuilding.kitchenSink CabalBuilding.optBuildsBindir ; Staging -> CabalBuilding.kitchenSink_dev 
 
     ksmulti :: Op
     ksmulti =

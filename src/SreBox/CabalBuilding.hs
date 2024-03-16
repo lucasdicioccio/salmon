@@ -34,6 +34,7 @@ microDNS bindir = cabalRepoBuild
   (Git.Remote "https://github.com/lucasdicioccio/microdns.git")
   "main"
   ""
+  []
 
 kitchenSink :: BinaryDir -> Tracked' FilePath
 kitchenSink bindir = cabalRepoBuild
@@ -45,6 +46,7 @@ kitchenSink bindir = cabalRepoBuild
   (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
   "main"
   "hs"
+  []
 
 kitchenSink_dev :: Tracked' FilePath
 kitchenSink_dev = cabalRepoBuild
@@ -56,6 +58,7 @@ kitchenSink_dev = cabalRepoBuild
   (Git.Remote "/home/lucasdicioccio/code/opensource/kitchen-sink")
   "main"
   "hs"
+  []
 
 postgrest :: Tracked' FilePath
 postgrest = 
@@ -68,6 +71,7 @@ postgrest =
    (Git.Remote "https://github.com/PostgREST/postgrest.git")
    "main"
    ""
+   []
 
 type CloneDir = Text
 type BinaryDir = FilePath
@@ -89,12 +93,13 @@ cabalRepoBuild
   -> Git.Remote
   -> BranchName
   -> SubDir
+  -> Cabal.CabalFlags
   -> Tracked' FilePath
-cabalRepoBuild dirname bindir sysdeps target binname remote branch subdir = 
+cabalRepoBuild dirname bindir sysdeps target binname remote branch subdir flags = 
     Tracked (Track $ const $ op `inject` sysdeps) binpath
   where
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
-           Cabal.install cabal (Cabal.Cabal repopath target) bindir
+           Cabal.install cabal flags (Cabal.Cabal repopath target) bindir
     binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
     git = Debian.git

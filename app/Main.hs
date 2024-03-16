@@ -380,7 +380,7 @@ cabalRepoBuild dirname target binname remote branch subdir =
     Tracked (Track $ const op) binpath
   where
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
-           Cabal.install cabal (Cabal.Cabal repopath target) bindir
+           Cabal.install cabal [] (Cabal.Cabal repopath target) bindir
     bindir = "/opt/builds/bin"
     binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname (Git.Remote remote) (Git.Branch branch)
