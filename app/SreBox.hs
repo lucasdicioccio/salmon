@@ -54,6 +54,7 @@ import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.CronTask as CronTask
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
+import qualified Salmon.Builtin.Nodes.Debian.Debootstrap as Debootstrap
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Netfilter as Netfilter
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
@@ -555,7 +556,19 @@ laptop simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [pipeskouillouiApi simulate selfpath]) id
+localDev simulate selfpath = op "local-dev" (deps [deboostrap]) id
+  where
+    deboostrap :: Op
+    deboostrap =
+      Debootstrap.rootTree
+        Debian.debootstrap
+        (Debootstrap.RootTree
+           Debootstrap.Stable
+           "images/debian-stable"
+           [])
+
+wgStuff :: Track' Spec -> Self.SelfPath -> Op
+wgStuff simulate selfpath = op "wg-stuff" (deps []) id
   where
     wgX = op "wg-x" (deps [wg0,routewg0,peer1]) id
     privkey = Track $ Wireguard.privateKey Debian.wg 

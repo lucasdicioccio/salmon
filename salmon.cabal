@@ -47,6 +47,7 @@ library
                    , Salmon.Builtin.Nodes.Certificates
                    , Salmon.Builtin.Nodes.Continuation
                    , Salmon.Builtin.Nodes.CronTask
+                   , Salmon.Builtin.Nodes.Debian.Debootstrap
                    , Salmon.Builtin.Nodes.Debian.Package
                    , Salmon.Builtin.Nodes.Debian.OS
                    , Salmon.Builtin.Nodes.Demo

@@ -66,3 +66,6 @@ wg = installWith "wireguard"
 
 nft :: Installer "nft"
 nft = installWith "netfilter"
+
+debootstrap :: Installer "debootstrap"
+debootstrap = installWith "debootstrap"
