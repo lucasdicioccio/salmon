@@ -1,48 +1,49 @@
 module Salmon.Builtin.Nodes.Ssh where
 
-import Salmon.Op.Ref
-import Salmon.Op.Track (Track(..),run)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Filesystem
+import Salmon.Op.Ref
+import Salmon.Op.Track (Track (..), run)
 
 import Control.Monad (void)
-import Data.Text (Text)
 import Data.ByteString (ByteString)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
 import System.FilePath ((</>))
-import System.Process.ListLike (CreateProcess, proc)
 import System.Process.ByteString (readCreateProcessWithExitCode)
+import System.Process.ListLike (CreateProcess, proc)
 
-data Remote = Remote { remoteUser :: Text , remoteHost :: Text }
-  deriving (Show, Ord, Eq)
+data Remote = Remote {remoteUser :: Text, remoteHost :: Text}
+    deriving (Show, Ord, Eq)
 
 call :: Track' (Binary "ssh") -> Track' Remote -> Remote -> FilePath -> [Text] -> ByteString -> Op
 call ssh tRemote remote remotepath args stdin =
-  withBinaryStdin ssh sshRun (Call remotepath remote args) stdin $ \up -> 
-    op "ssh:call" (deps [run tRemote remote]) $ \actions -> actions {
-        help = "calls " <>  Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> Text.decodeUtf8 stdin
-      , notes = Text.pack remotepath : args
-      , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote, args, stdin))
-      , up = up
-      }
+    withBinaryStdin ssh sshRun (Call remotepath remote args) stdin $ \up ->
+        op "ssh:call" (deps [run tRemote remote]) $ \actions ->
+            actions
+                { help = "calls " <> Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> Text.decodeUtf8 stdin
+                , notes = Text.pack remotepath : args
+                , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote, args, stdin))
+                , up = up
+                }
 
 data Run = Call FilePath Remote [Text]
 
 sshRun :: Command "ssh" Run
 sshRun = Command $ \(Call path rem args) ->
-  proc "ssh"
-    (  [ Text.unpack (loginAtHost rem)
-       , path
-       ]
-     <> map Text.unpack args
-    )
+    proc
+        "ssh"
+        ( [ Text.unpack (loginAtHost rem)
+          , path
+          ]
+            <> map Text.unpack args
+        )
 
 loginAtHost :: Remote -> Text
-loginAtHost rem = mconcat [rem.remoteUser,"@",rem.remoteHost]
+loginAtHost rem = mconcat [rem.remoteUser, "@", rem.remoteHost]
 
 preExistingRemoteMachine :: Track' Remote
 preExistingRemoteMachine = Track $ \r -> placeholder "remote" ("a remote at" <> r.remoteHost)
-

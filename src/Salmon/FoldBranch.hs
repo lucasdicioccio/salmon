@@ -1,14 +1,14 @@
-
 module Salmon.FoldBranch where
 
-import Control.Comonad.Cofree (Cofree(..))
+import Control.Comonad.Cofree (Cofree (..))
 
-foldBranch
-  :: forall t item accum. (Functor t)
-  => (accum -> item -> accum)
-  -> accum
-  -> Cofree t item
-  -> Cofree t accum
+foldBranch ::
+    forall t item accum.
+    (Functor t) =>
+    (accum -> item -> accum) ->
+    accum ->
+    Cofree t item ->
+    Cofree t accum
 foldBranch f pfx (x :< xs) =
     path :< subtree
   where

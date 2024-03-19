@@ -1,49 +1,49 @@
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Salmon.Actions.UpDown where
 
-import GHC.Records
-import Data.Foldable (traverse_, toList)
-import Control.Comonad.Cofree (Cofree(..))
+import Control.Comonad.Cofree (Cofree (..))
+import Data.Foldable (toList, traverse_)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import GHC.Records
 import System.Directory (doesFileExist)
 
 import Salmon.FoldBranch
+import Salmon.Op.Actions
+import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
-import Salmon.Op.Eval
-import Salmon.Op.Actions
 import Salmon.Op.Ref
 
 data Requirement
-  = Required
-  | Skippable
-  deriving (Show, Ord, Eq)
+    = Required
+    | Skippable
+    deriving (Show, Ord, Eq)
 
 instance Semigroup Requirement where
-  Skippable <> Skippable = Skippable
-  _ <> _ = Required
+    Skippable <> Skippable = Skippable
+    _ <> _ = Required
 
 skipIfFileExists :: FilePath -> IO Requirement
 skipIfFileExists path = do
-  exists <- doesFileExist path
-  if exists
-  then pure Skippable
-  else pure Required
+    exists <- doesFileExist path
+    if exists
+        then pure Skippable
+        else pure Required
 
-upTree
-  :: forall a m ext.
-     ( Monad m
-     , HasField "up" ext (IO ())
-     , HasField "prelim" ext (IO Requirement)
-     , HasField "ref" ext Ref
-     )
-  => (forall a. m a -> IO a)
-  -> OpGraph m (Actions ext)
-  -> IO ()
+upTree ::
+    forall a m ext.
+    ( Monad m
+    , HasField "up" ext (IO ())
+    , HasField "prelim" ext (IO Requirement)
+    , HasField "ref" ext Ref
+    ) =>
+    (forall a. m a -> IO a) ->
+    OpGraph m (Actions ext) ->
+    IO ()
 upTree nat graph = do
     s <- newIORef (Set.empty)
     runC s =<< nat (expand graph)
@@ -60,36 +60,36 @@ upTree nat graph = do
 
     upnode :: IORef (Set Ref) -> Actions ext -> IO ()
     upnode s x =
-      case x of
-        Actionless -> pure ()
-        (Actions act) -> do
-          got <- atomicModifyIORef' s (\set -> let r = act.extension.ref in (Set.insert r set, Set.member r set))
-          if got 
-          then do
-            print ("redundant", act.shorthand)
-          else do
-            st <- act.extension.prelim
-            case st of
-              Skippable -> do
-                print ("skip", act.shorthand)
-              Required -> do
-                print ("do", act.shorthand)
-                act.extension.up
+        case x of
+            Actionless -> pure ()
+            (Actions act) -> do
+                got <- atomicModifyIORef' s (\set -> let r = act.extension.ref in (Set.insert r set, Set.member r set))
+                if got
+                    then do
+                        print ("redundant", act.shorthand)
+                    else do
+                        st <- act.extension.prelim
+                        case st of
+                            Skippable -> do
+                                print ("skip", act.shorthand)
+                            Required -> do
+                                print ("do", act.shorthand)
+                                act.extension.up
 
-downTree
-  :: ( Monad m
-     , HasField "down" ext (IO ())
-     )
-  => (forall a. m a -> IO a)
-  -> OpGraph m (Actions ext)
-  -> IO ()
+downTree ::
+    ( Monad m
+    , HasField "down" ext (IO ())
+    ) =>
+    (forall a. m a -> IO a) ->
+    OpGraph m (Actions ext) ->
+    IO ()
 downTree nat graph = do
     gr1 <- nat $ expand graph
-    let as = toList gr1 
+    let as = toList gr1
     traverse_ down as
   where
     down = downnode . node
     downnode x =
-      case x of
-        Actionless -> pure ()
-        (Actions act) -> (extension act).down
+        case x of
+            Actionless -> pure ()
+            (Actions act) -> (extension act).down

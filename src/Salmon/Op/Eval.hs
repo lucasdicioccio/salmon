@@ -1,4 +1,5 @@
 {-# LANGUAGE ApplicativeDo #-}
+
 module Salmon.Op.Eval where
 
 import Control.Comonad.Cofree (Cofree, unfoldM)
@@ -13,5 +14,5 @@ expand = unfoldM expandOne
 -- | Expands a single node.
 expandOne :: (Applicative m) => OpGraph m node -> m (OpGraph m node, (Graph (OpGraph m node)))
 expandOne op = do
-  preds <- op.predecessors
-  pure (op, preds)
+    preds <- op.predecessors
+    pure (op, preds)

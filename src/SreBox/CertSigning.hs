@@ -4,10 +4,12 @@ module SreBox.CertSigning where
 
 import Acme.NotAJoke.Api.Certificate (storeCert)
 import Acme.NotAJoke.Api.Validation (ValidationProof)
-import Acme.NotAJoke.Dancer (DanceStep(..), showProof)
+import Acme.NotAJoke.Dancer (DanceStep (..), showProof)
 import Control.Concurrent (threadDelay)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Functor.Contravariant ((>$<))
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.X509 as Crypton
 import Data.X509.CertificateStore as Crypton
 import Data.X509.Validation as Crypton
@@ -17,15 +19,10 @@ import Network.HTTP.Client (Manager, Request, httpNoBody)
 import Network.HTTP.Client.TLS as Tls
 import Network.TLS as Tls
 import Network.TLS.Extra as Tls
-import qualified Data.Text as Text
-import Data.Functor.Contravariant ((>$<))
 import System.FilePath ((</>))
 
-import Salmon.Builtin.Extension
-import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Ref (dotRef)
-import Salmon.Op.Track (Track(..), (>*<), using, opGraph, bindTracked)
 import qualified Salmon.Builtin.CommandLine as CLI
+import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Acme as Acme
 import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.Continuation as Continuation
@@ -36,24 +33,28 @@ import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Track (Track (..), bindTracked, opGraph, using, (>*<))
 
 import SreBox.CabalBuilding
 import SreBox.Environment
 import SreBox.MicroDNS
 
 data AcmeConfig
-  = AcmeConfig
-  { acme_cfg_account :: Acme.Account
-  , acme_cfg_pemPath :: Certs.Domain -> FilePath
-  , acme_cfg_csr     :: Certs.Domain -> Certs.SigningRequest
-  , acme_cfg_dns     :: MicroDNSConfig
-  }
+    = AcmeConfig
+    { acme_cfg_account :: Acme.Account
+    , acme_cfg_pemPath :: Certs.Domain -> FilePath
+    , acme_cfg_csr :: Certs.Domain -> Certs.SigningRequest
+    , acme_cfg_dns :: MicroDNSConfig
+    }
 
 acmeSign :: AcmeConfig -> Track' MicroDNSConfig -> (Certs.Domain, Text) -> Op
 acmeSign cfg mkDNS (domain, txtrecord) =
-    op "acme-sign" (deps [ Acme.acmeChallenge_dns01 chall challenger ]) $ \actions -> actions {
-      ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
-    }
+    op "acme-sign" (deps [Acme.acmeChallenge_dns01 chall challenger]) $ \actions ->
+        actions
+            { ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
+            }
   where
     chall :: Track' Acme.Challenger
     chall = adapt >$< f1 >*< f2 >*< mkDNS
@@ -73,11 +74,11 @@ acmeSign cfg mkDNS (domain, txtrecord) =
       where
         handle :: FilePath -> DanceStep -> IO ()
         handle pemPath step =
-          case step of
-            Done _ cert -> do
-              storeCert pemPath cert
-            Validation (tok,keyAuth,sha) -> do
-              cfg.acme_cfg_dns.microdns_cfg_postTxt txtrecord (showProof sha)
-              threadDelay 1000000
-              pure ()
-            _ -> pure ()
+            case step of
+                Done _ cert -> do
+                    storeCert pemPath cert
+                Validation (tok, keyAuth, sha) -> do
+                    cfg.acme_cfg_dns.microdns_cfg_postTxt txtrecord (showProof sha)
+                    threadDelay 1000000
+                    pure ()
+                _ -> pure ()

@@ -1,24 +1,25 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
 module Salmon.Builtin.Extension where
 
-import Control.Monad.Identity
 import Control.Comonad.Cofree
-import Data.Maybe (catMaybes)
-import Data.Foldable (toList)
-import Data.Text (Text)
+import Control.Monad.Identity
 import Data.Dynamic (Dynamic, Typeable, fromDynamic, toDyn)
+import Data.Foldable (toList)
+import Data.Maybe (catMaybes)
+import Data.Text (Text)
 
-import Salmon.Op.Ref (Ref, dotRef)
+import Salmon.Actions.Dot (PlaceHolder (..))
+import Salmon.Actions.UpDown (Requirement (..))
+import Salmon.Op.Actions
+import Salmon.Op.Configure
+import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
-import Salmon.Op.Eval
-import Salmon.Op.Actions
+import Salmon.Op.Ref (Ref, dotRef)
 import Salmon.Op.Track
-import Salmon.Op.Configure
-import Salmon.Actions.Dot (PlaceHolder(..))
-import Salmon.Actions.UpDown (Requirement(..))
 
 -- | Instanciate actions.
 type Actions' = Actions Extension
@@ -30,30 +31,30 @@ type Help = Text
 type Note = Text
 
 -- | Our demo extension.
-data Extension = Extension {
-    help         :: Help
-  , notes        :: [Note]
-  , ref          :: Ref
-  , up           :: IO ()
-  , prelim       :: IO Requirement
-  , down         :: IO ()
-  , check        :: IO ()
-  , notify       :: IO ()
-  , dynamics     :: [Dynamic]
-}
+data Extension = Extension
+    { help :: Help
+    , notes :: [Note]
+    , ref :: Ref
+    , up :: IO ()
+    , prelim :: IO Requirement
+    , down :: IO ()
+    , check :: IO ()
+    , notify :: IO ()
+    , dynamics :: [Dynamic]
+    }
 
 instance Semigroup Extension where
-  a <> b =
-    Extension
-      (help a <> "|" <> help b)
-      (notes a <> notes b)
-      (ref a <> ref b)
-      (up a <> up b)
-      (prelim a <> prelim b)
-      (down b <> down a)
-      (check a <> check b)
-      (notify b <> notify a)
-      (dynamics a <> dynamics b)
+    a <> b =
+        Extension
+            (help a <> "|" <> help b)
+            (notes a <> notes b)
+            (ref a <> ref b)
+            (up a <> up b)
+            (prelim a <> prelim b)
+            (down b <> down a)
+            (check a <> check b)
+            (notify b <> notify a)
+            (dynamics a <> dynamics b)
 
 type Op = OpGraph Identity Actions'
 
@@ -68,33 +69,33 @@ nodeps :: Identity (Graph Op)
 nodeps = pure $ Vertices []
 
 deps :: [Op] -> Identity (Graph Op)
-deps xs = pure $ Vertices  xs
+deps xs = pure $ Vertices xs
 
 realNoop :: Op
 realNoop =
-  OpGraph nodeps Actionless
+    OpGraph nodeps Actionless
 
 ignoreTrack :: Track' a
 ignoreTrack = Track (const realNoop)
 
 noop :: ShortHand -> Op
 noop short =
-  OpGraph
-    nodeps
-    ( Actions
-      $ Act
-          short
-          $ Extension
-              noHelp
-              noNotes
-              ref
-              skip
-              (pure Required)
-              skip
-              skip
-              skip
-              noDynamics
-     )
+    OpGraph
+        nodeps
+        ( Actions
+            $ Act
+                short
+            $ Extension
+                noHelp
+                noNotes
+                ref
+                skip
+                (pure Required)
+                skip
+                skip
+                skip
+                noDynamics
+        )
   where
     noHelp :: Help
     noHelp = ""
@@ -113,30 +114,31 @@ noop short =
 
 op :: ShortHand -> Identity (Graph Op) -> (Extension -> Extension) -> Op
 op short pred f =
-  -- complicated implementation to say that we apply the modifier on Extension on top of a noop
-  let baseOp = (noop short) { predecessors = pred }
-      baseNode = node baseOp
-  in baseOp { node = fmap f baseNode }
+    -- complicated implementation to say that we apply the modifier on Extension on top of a noop
+    let baseOp = (noop short){predecessors = pred}
+        baseNode = node baseOp
+     in baseOp{node = fmap f baseNode}
 
 placeholder :: ShortHand -> Text -> Op
-placeholder short t = op short nodeps $ \actions -> actions {
-    dynamics = [ toDyn $ PlaceHolder t ]
-  , ref = dotRef $ short <> t
-  }
+placeholder short t = op short nodeps $ \actions ->
+    actions
+        { dynamics = [toDyn $ PlaceHolder t]
+        , ref = dotRef $ short <> t
+        }
 
 -- | Function to retrieve the dynamic objects of a given type.
-getDynamics :: Typeable a => Op -> [a]
+getDynamics :: (Typeable a) => Op -> [a]
 getDynamics o = catMaybes $ fmap fromDynamic $ concatMap dynamics exts
   where
     exts :: [Extension]
     exts = toList o.node -- uses the foldable instance of 'Actions' which is like a Maybe
 
 -- | Collect all ops with a given dynamic type. This can be used to perform analyses on whole graphs.
-collectDynamics :: Typeable a => Op -> [(Op, [a])]
+collectDynamics :: (Typeable a) => Op -> [(Op, [a])]
 collectDynamics root =
-  let ops = toList (evalDeps root) in
-  [(op, getDynamics op) | op <- ops]
+    let ops = toList (evalDeps root)
+     in [(op, getDynamics op) | op <- ops]
 
 -- Utility to partially apply type in opaque continuation setup in conjuction
 -- with UpDown.upTree in defining a `up`.
-newtype TrackedIO a = TrackedIO { unwrapTIO :: Tracked' (IO a) }
+newtype TrackedIO a = TrackedIO {unwrapTIO :: Tracked' (IO a)}
