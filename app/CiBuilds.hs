@@ -76,6 +76,28 @@ salmon p = CabalBuilding.cabalRepoBuild
   ""
   [Cabal.AllowNewer]
 
+fourmolu p = CabalBuilding.cabalRepoBuild
+  "fourmolu"
+  (p.bindir "fourmolu")
+  (realNoop)
+  "exe:fourmolu"
+  "fourmolu"
+  (Git.Remote "https://github.com/fourmolu/fourmolu.git")
+  "main"
+  ""
+  []
+
+mustache p = CabalBuilding.cabalRepoBuild
+  "mustache"
+  (p.bindir "mustache")
+  (realNoop)
+  "mustache"
+  "haskell-mustache"
+  (Git.Remote "https://github.com/JustusAdam/mustache.git")
+  "master"
+  ""
+  []
+
 duckling p = CabalBuilding.cabalRepoBuild
   "duckling"
   (p.bindir "duckling")
@@ -96,6 +118,8 @@ data HaskellBuild
   | ProdAPI
   | Salmon
   | PostgREST
+  | Fourmolu
+  | Mustache
   | Duckling
   deriving (Generic)
 instance FromJSON HaskellBuild
@@ -127,6 +151,8 @@ program =
    specOp k (HaskellBuild h ProdAPI) = [opGraph $ prodapi (homedir h)]
    specOp k (HaskellBuild h Salmon) = [opGraph $ salmon (homedir h)]
    specOp k (HaskellBuild h PostgREST) = [opGraph $ postgrest (homedir h)]
+   specOp k (HaskellBuild h Mustache) = [opGraph $ mustache (homedir h)]
+   specOp k (HaskellBuild h Fourmolu) = [opGraph $ fourmolu (homedir h)]
    specOp k (HaskellBuild h Duckling) = [opGraph $ duckling (homedir h)]
 
    optimizedDeps :: Op -> Op
@@ -158,6 +184,8 @@ configure = Configure go
     go (BuildSeed h "prodapi:hs") = pure $  HaskellBuild h ProdAPI
     go (BuildSeed h "salmon:hs") = pure $  HaskellBuild h Salmon
     go (BuildSeed h "postgrest:hs") = pure $  HaskellBuild h PostgREST
+    go (BuildSeed h "mustache:hs") = pure $  HaskellBuild h Mustache
+    go (BuildSeed h "fourmolu:hs") = pure $  HaskellBuild h Fourmolu
     go (BuildSeed h "duckling:hs") = pure $  HaskellBuild h Duckling
     go (BuildSeed h ":all") =
       pure $ Batch
@@ -166,6 +194,8 @@ configure = Configure go
         , HaskellBuild h ProdAPI
         , HaskellBuild h Salmon
         , HaskellBuild h PostgREST
+        , HaskellBuild h Mustache
+        , HaskellBuild h Fourmolu
         , HaskellBuild h Duckling
         ]
 
