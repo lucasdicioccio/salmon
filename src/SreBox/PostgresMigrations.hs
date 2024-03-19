@@ -13,6 +13,7 @@ import Data.Maybe (catMaybes)
 import Data.List (stripPrefix)
 import System.FilePath ((</>))
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import GHC.Generics
 
 import qualified Salmon.Actions.UpDown as UpDown
@@ -30,6 +31,7 @@ import Salmon.Builtin.Nodes.Binary
 import Salmon.Builtin.Nodes.Postgres
 import Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
+import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.CommandLine as CLI
@@ -119,6 +121,7 @@ data RemoteMigrateConfig t
   { cfg_migrations :: t (G MigrationFile)
   , cfg_user :: User
   , cfg_database :: Database
+  , cfg_password :: FilePath
   }
 
 data RemoteMigrateSetup
@@ -165,16 +168,11 @@ remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
         (rsyncRemote)
         (remoteMigrationPath m)
 
-    tmpSecretPath :: FilePath
-    tmpSecretPath = Text.unpack $ "configs/pg-secret-" <> dbname<> ".txt"
-
     uploadsecret :: Op
     uploadsecret =
       Rsync.sendFile
         Debian.rsync
-        (FS.Generated
-          (Track $ \path -> FS.filecontents (FS.FileContents path $ revealPassword pass1))
-          tmpSecretPath)
+        (FS.Generated pgPassword cfg.cfg_password)
         (rsyncRemote)
         (remotePgSecretPath)
 
@@ -193,14 +191,13 @@ remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
 
 remoteMigrateOpaqueSetup
   :: (FromJSON directive, ToJSON directive)
-  => Password
-  -> Track' directive
+  => Track' directive
   -> Self.Remote
   -> Self.SelfPath
   -> (RemoteMigrateSetup -> directive)
   -> RemoteMigrateConfig TrackedIO
   -> Op
-remoteMigrateOpaqueSetup pass1 simulate selfRemote selfpath toSpec cfg =
+remoteMigrateOpaqueSetup simulate selfRemote selfpath toSpec cfg =
     op "migrate-remotely" (deps [opaquemigration `inject` uploadsecret]) id
   where
     rsyncRemote :: Rsync.Remote
@@ -230,14 +227,11 @@ remoteMigrateOpaqueSetup pass1 simulate selfRemote selfpath toSpec cfg =
         (rsyncRemote)
         (remoteMigrationPath m)
 
-    tmpSecretPath :: FilePath
-    tmpSecretPath = Text.unpack $ "configs/pg-secret-" <> dbname<> ".txt"
-
     uploadsecret :: Op
     uploadsecret =
       Rsync.sendFile
         Debian.rsync
-        (FS.Generated (Track $ \path -> FS.filecontents (FS.FileContents path $ revealPassword pass1)) tmpSecretPath)
+        (FS.Generated pgPassword cfg.cfg_password)
         (rsyncRemote)
         (remotePgSecretPath)
 
@@ -265,3 +259,24 @@ applyMigration psql mkConnstring setup =
   where
     connstring =
       ConnString localServer setup.setup_user setup.setup_tmp_secret_path setup.setup_database
+
+pgPassword :: Track' FilePath
+pgPassword = Track $ \path ->
+  Secrets.sharedSecretFile
+    Debian.openssl
+    (Secrets.Secret Secrets.Hex 48 path)
+
+pgConnstringFile :: ConnString FilePath -> Track' FilePath
+pgConnstringFile conn =
+  Track $ \cstringpath ->
+  op "pg-connstring" (deps [run pgPassword passFile]) $ \actions -> actions {
+    ref = dotRef $ "connstring: " <> Text.pack cstringpath
+  , help = "store connection string at " <> Text.pack cstringpath
+  , up = do
+     pass <- readPassword passFile
+     let contents = connstring (withPassword conn pass)
+     Text.writeFile cstringpath contents
+  }
+  where
+    passFile :: FilePath
+    passFile = conn.connstring_user_pass

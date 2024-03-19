@@ -180,6 +180,15 @@ data SecretPrefs (a :: Symbol)
   { secret_path :: FilePath
   }
 
+pgSecretPrefs :: Text -> Postgres.User -> SecretPrefs "pg-users"
+pgSecretPrefs machine u =
+  SecretPrefs
+    path
+  where
+    path :: FilePath
+    path = "./secrets/pg/" </> Text.unpack machine </> Text.unpack (Postgres.userRole u)
+  
+
 microDNSSecretPrefs :: Certs.Domain -> SecretPrefs "microdns-shared-secret"
 microDNSSecretPrefs dom =
   SecretPrefs
@@ -410,8 +419,8 @@ pipeskouillouiApi simulate selfpath =
     d1 = Postgres.Database "salmon_pipeskouillou"
     u1 = Postgres.User "salmon_pipeskouillou_rw"
     g1 = Postgres.Group "salmon_pipeskouillou_ro"
-    pass1 = Postgres.Password "qwwxeqe12341c2nkjndscjhb2131!"
-    connstring = Postgres.ConnString Postgres.localServer u1 pass1 d1
+    secret = pgSecretPrefs "cheddar" u1
+    connstring = Postgres.ConnString Postgres.localServer u1 secret.secret_path d1
     cfg = Postgrest.PostgrestMigratedApiConfig
             "pipeskouillou"
             2001
@@ -546,7 +555,7 @@ laptop simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [nftX, wgX]) id
+localDev simulate selfpath = op "local-dev" (deps [pipeskouillouiApi simulate selfpath]) id
   where
     wgX = op "wg-x" (deps [wg0,routewg0,peer1]) id
     privkey = Track $ Wireguard.privateKey Debian.wg 

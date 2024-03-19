@@ -47,7 +47,7 @@ data PostgrestConfig
   { postgrest_cfg_serviceName :: ServiceName
   , postgrest_cfg_portnum :: PortNumber
   , postgrest_cfg_anonRole :: Postgres.Group
-  , postgrest_cfg_connectionString :: Postgres.ConnString Postgres.Password
+  , postgrest_cfg_connectionString :: Postgres.ConnString FilePath
   , postgrest_cfg_configPath :: FilePath
   -- TODO: schemas
   }
@@ -57,6 +57,7 @@ data PostgrestSetup
   { postgrest_setup_serviceName :: ServiceName
   , postgrest_setup_localBinPath :: FilePath
   , postgrest_setup_localConfigPath :: FilePath
+  , postgrest_setup_localSecretPath :: FilePath
   }
   deriving (Generic)
 instance FromJSON PostgrestSetup
@@ -74,14 +75,14 @@ setupPostgrest
 setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
   using (cabalBinUpload postgrest rsyncRemote) $ \remotepath ->
     let
-      setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig
+      setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig remoteConnstring
     in
     opGraph (continueRemotely setup) `inject` configUploads
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
-    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig]) $ \actions -> actions {
+    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig, uploadConnStringFile]) $ \actions -> actions {
       notes = [ "for service: " <> cfg.postgrest_cfg_serviceName
               ]
     , ref = dotRef $ "postgrest:uploads" <> cfg.postgrest_cfg_serviceName
@@ -98,18 +99,27 @@ setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
 
     -- upload config file
     remoteConfig  = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".config"
+    remoteConnstring  = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".connstring"
 
     upload gen localpath distpath =
       Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadConfig =
-      upload makeConcfig cfg.postgrest_cfg_configPath remoteConfig
+      upload makeConfig cfg.postgrest_cfg_configPath remoteConfig
       where
-        makeConcfig =
-          Track $ \path -> FS.filecontents (FS.FileContents path (renderConfig cfg))
+        -- make config using remote filepaths as contents
+        makeConfig =
+          Track $ \path -> FS.filecontents (FS.FileContents path (renderConfig cfg (connstringPath cfg.postgrest_cfg_serviceName)))
 
-renderConfig :: PostgrestConfig -> Text
-renderConfig cfg =
+    uploadConnStringFile =
+      upload makeConnstring connstringFilePath remoteConnstring
+      where
+        makeConnstring = PGMigrate.pgConnstringFile (cfg.postgrest_cfg_connectionString)
+
+    connstringFilePath = Text.unpack $ mconcat ["./configs/posgtrest/postgrest-", cfg.postgrest_cfg_serviceName, ".connstring"]
+
+renderConfig :: PostgrestConfig -> FilePath -> Text
+renderConfig cfg remoteConnstringFilePath =
   Text.unlines
   [ kv_text "db-anon-role" $ Postgres.groupRole cfg.postgrest_cfg_anonRole
   , kv_text "db-channel" "pgrst"
@@ -120,7 +130,7 @@ renderConfig cfg =
   , kv_bool "db-prepared-statements" True
   , kv_text "db-schemas" "public"
   , kv_text "db-tx-end" "commit"
-  , kv_text "db-uri" (Postgres.connstring cfg.postgrest_cfg_connectionString)
+  , kv_text "db-uri" (Text.pack $ '@':remoteConnstringFilePath)
   , kv_text "jwt-role-claim-key" ".role"
   -- todo: , kv_text "# jwt-secret" "@filepath"
   , kv_bool "jwt-secret-is-base64" False
@@ -146,9 +156,10 @@ systemdPostgrest setup =
       let
           execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
           copybin = FS.fileCopy (postgrest_setup_localBinPath setup) execPath
-          copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) configPath
+          copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) cpath
+          copySecret = FS.fileCopy (postgrest_setup_localSecretPath setup) spath
       in
-      op "setup-systemd-for-postgrest" (deps [copybin, copyConfig]) $ \actions -> actions {
+      op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, copySecret]) $ \actions -> actions {
         ref = dotRef $ "postgrest:systemd" <> setup.postgrest_setup_serviceName
       }
 
@@ -157,9 +168,6 @@ systemdPostgrest setup =
 
     tgt :: Systemd.UnitTarget
     tgt = "salmon-postgrest-" <> setup.postgrest_setup_serviceName <> ".service"
-
-    configPath :: FilePath
-    configPath = "/opt/rundir/postgrest" </> Text.unpack setup.postgrest_setup_serviceName </> "config.txt"
 
     unit :: Systemd.Unit
     unit = Systemd.Unit (mconcat ["Postgrest from Salmon (", setup.postgrest_setup_serviceName, ")"]) "network-online.target"
@@ -170,11 +178,27 @@ systemdPostgrest setup =
     start :: Systemd.Start
     start =
       Systemd.Start "/opt/rundir/postgrest/bin/postgrest"
-        [ Text.pack configPath
+        [ Text.pack cpath
         ]
+
+    cpath :: FilePath
+    cpath = configPath setup.postgrest_setup_serviceName
+
+    spath :: FilePath
+    spath = connstringPath setup.postgrest_setup_serviceName
 
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"
+
+-------------------------------------------------------------------------------
+
+configPath :: ServiceName -> FilePath
+configPath name =
+  "/opt/rundir/postgrest" </> Text.unpack name </> "config.txt"
+
+connstringPath :: ServiceName -> FilePath
+connstringPath name =
+  "/opt/rundir/postgrest" </> Text.unpack name </> "connstring.connstring"
 
 -------------------------------------------------------------------------------
 
@@ -185,7 +209,7 @@ data PostgrestMigratedApiConfig
   , pma_repo :: Git.Repo
   , pma_migrationTip :: FilePath
   , pma_migrationsPrefix :: FilePath
-  , pma_connstring :: Postgres.ConnString Postgres.Password
+  , pma_connstring :: Postgres.ConnString FilePath
   , pma_fallback_role :: Postgres.Group
   }
 
@@ -200,7 +224,7 @@ postgrestMigratedApi
   -> PostgrestMigratedApiConfig
   -> Op
 postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
-    op "postgrest-api" (deps [prest `inject` migrateDB `inject` initDB]) $ \actions -> actions {
+    op "postgrest-api" (deps [prest `inject` migrateDBWithUser1 `inject` initDB]) $ \actions -> actions {
       ref = dotRef $ "prest-api" <> cfg.pma_serviceName
     }
   where
@@ -213,7 +237,6 @@ postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
 
     d1 = cfg.pma_connstring.connstring_db
     u1 = cfg.pma_connstring.connstring_user
-    pass1 = cfg.pma_connstring.connstring_user_pass
     connstring = cfg.pma_connstring
     g1 = cfg.pma_fallback_role
 
@@ -227,12 +250,11 @@ postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
         toSpec0
         (PGInit.InitSetup
           d1
-          [(u1, pass1, [Postgres.CONNECT, Postgres.CREATE], [g1])]
+          [(u1, cfg.pma_connstring.connstring_user_pass, [Postgres.CONNECT, Postgres.CREATE], [g1])]
           [(g1,[])])
 
-    migrateDB =
+    migrateDBWithUser1 =
       PGMigrate.remoteMigrateOpaqueSetup
-        pass1
         simulate
         remoteSelf
         selfpath
@@ -240,7 +262,8 @@ postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
         (PGMigrate.RemoteMigrateConfig
            (TrackedIO $ Tracked cloneSource inputMigrations)
            u1
-           d1)
+           d1
+           cfg.pma_connstring.connstring_user_pass)
 
     prest = op "postgrest" (deps [setupPrest]) $ \actions -> actions {
       ref = dotRef $ "prest-service" <> cfg.pma_serviceName

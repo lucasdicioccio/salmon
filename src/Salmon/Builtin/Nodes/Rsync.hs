@@ -21,16 +21,16 @@ data Remote = Remote { remoteUser :: Text , remoteHost :: Text }
 sendFile :: Track' (Binary "rsync") -> File "source" -> Remote -> FilePath -> Op
 sendFile rsync src remote remotepath =
   withFile src $ \filepath ->
-  withBinary rsync rsyncRun (SendFile filepath remote  remotepath) $ \up -> 
+  withBinary rsync rsyncRun (SendFile filepath remote  remotepath) $ \up ->
     op "rsync:sendfile" nodeps $ \actions -> actions {
         help = "copies " <> Text.pack filepath <> " to " <> Text.pack remotepath <> " over rsync"
-      , ref = dotRef $ "rsync-copy:" <> Text.pack (show (filepath, remote))
+      , ref = dotRef $ "rsync-copy:" <> Text.pack (show (filepath, remotepath, remote))
       , up = up
       }
 
 sendDir :: Track' (Binary "rsync") -> Track' Directory -> Directory -> Remote -> FilePath -> Op
 sendDir rsync mkdir dir remote remotepath =
-  withBinary rsync rsyncRun (SendDir dirpath remote  remotepath) $ \up -> 
+  withBinary rsync rsyncRun (SendDir dirpath remote  remotepath) $ \up ->
     op "rsync:send-dir" (deps [run mkdir dir]) $ \actions -> actions {
         help = "copies " <> Text.pack dirpath <> " to " <> Text.pack remotepath <> " over rsync"
       , ref = dotRef $ "rsync-copy:" <> Text.pack (show (dirpath, remote))
