@@ -1,10 +1,12 @@
 module Salmon.Builtin.Nodes.Git where
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import Data.Text (Text)
@@ -14,6 +16,13 @@ import System.FilePath ((</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
 
+-------------------------------------------------------------------------------
+data Report
+    = CloneRepo !Repo !Binary.Report
+    | PullRepo !Repo !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 newtype Remote = Remote {getRemote :: Text}
     deriving (Eq, Ord, Show)
 
@@ -27,25 +36,27 @@ clonedir :: Repo -> FilePath
 clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
 
 -- | Clones a repository.
-repo :: Track' (Binary "git") -> Repo -> Op
-repo git r =
-    withBinary git gitcommand (Clone remote branch (clonedir r)) $ \clone ->
-        withBinary git gitcommand (Pull remote branch (clonedir r)) $ \pull ->
+repo :: Reporter Report -> Track' (Binary "git") -> Repo -> Op
+repo r git repository =
+    withBinary r1' git gitcommand (Clone remote branch (clonedir repository)) $ \clone ->
+        withBinary r2' git gitcommand (Pull remote branch (clonedir repository)) $ \pull ->
             op "git-repo" (deps [enclosingdir]) $ \actions ->
                 actions
                     { help = "clones and force sync a repo"
-                    , ref = dotRef $ "repo:" <> Text.pack (clonedir r)
+                    , ref = dotRef $ "repo:" <> Text.pack (clonedir repository)
                     , up = clone >> pull
                     }
   where
+    r1' = contramap (CloneRepo repository) r
+    r2' = contramap (PullRepo repository) r
     cloneparentdir :: FilePath
-    cloneparentdir = r.repoClonedir
+    cloneparentdir = repository.repoClonedir
 
     remote :: Remote
-    remote = r.repoRemote
+    remote = repository.repoRemote
 
     branch :: Branch
-    branch = r.repoBranch
+    branch = repository.repoBranch
 
     enclosingdir :: Op
     enclosingdir = dir (Directory cloneparentdir)

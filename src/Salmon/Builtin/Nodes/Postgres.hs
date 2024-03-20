@@ -11,11 +11,28 @@ import GHC.Generics
 import System.Process.ListLike (CreateProcess (..), proc)
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall, untrackedExec, withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem (File, withFile)
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
+-------------------------------------------------------------------------------
+-- todo: collapse PsqlAdmin commands as a single constructor
+data Report
+    = PGStartLocalCluster !Binary.Report
+    | PGCreateDatabase !Database !Binary.Report
+    | PGCreateUser !User !Binary.Report
+    | PGSetUserPass !User !Binary.Report
+    | PGCreateGroup !Group !Binary.Report
+    | PGGrant !AccessRight !Binary.Report
+    | PGGroupMembership !Group !Role !Binary.Report
+    | PGScript !FilePath !Binary.Report
+    | PGAdminScript !FilePath !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 type Host = Text
 type Port = Int
 
@@ -38,15 +55,17 @@ type Version = Int
 hardcodedVersion :: Version
 hardcodedVersion = 12
 
-pgLocalCluster :: Track' (Binary "postgres") -> Track' (Binary "pg_ctlcluster") -> Server -> Op
-pgLocalCluster pg pgctl server =
-    withBinary pgctl pgctlRun (Start hardcodedVersion server.serverPort) $ \start ->
+pgLocalCluster :: Reporter Report -> Track' (Binary "postgres") -> Track' (Binary "pg_ctlcluster") -> Server -> Op
+pgLocalCluster r pg pgctl server =
+    withBinary r' pgctl pgctlRun (Start hardcodedVersion server.serverPort) $ \start ->
         op "pg-server" (deps [justInstall pg]) $ \actions ->
             actions
                 { notes = ["default server"]
                 , help = Text.unwords ["start pg cluster"]
                 , up = start
                 }
+  where
+    r' = contramap PGStartLocalCluster r
 
 data PgCtl
     = Start Version Port
@@ -59,17 +78,19 @@ pgctlRun = Command go
 type DatabaseName = Text
 
 newtype Database = Database {getDatabase :: DatabaseName}
-    deriving (ToJSON, FromJSON)
+    deriving (Show, ToJSON, FromJSON)
 
-database :: Track' Server -> Track' (Binary "psql") -> Database -> Op
-database server psql db =
-    withBinary psql psqlAdminRun_Sudo (CreateDB db.getDatabase) $ \up ->
+database :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Database -> Op
+database r server psql db =
+    withBinary r' psql psqlAdminRun_Sudo (CreateDB db.getDatabase) $ \up ->
         op "pg-database" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-db:" <> db.getDatabase
                 , up = up
                 , help = Text.unwords ["create db", db.getDatabase]
                 }
+  where
+    r' = contramap (PGCreateDatabase db) r
 
 type RoleName = Text
 
@@ -82,20 +103,22 @@ instance Show Password where
     show _ = "<password>"
 
 newtype User = User {userRole :: RoleName}
-    deriving (ToJSON, FromJSON)
+    deriving (Show, ToJSON, FromJSON)
 
-user :: Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
-user server psql user pwd =
-    withBinary psql psqlAdminRun_Sudo (CreateUser user.userRole pwd) $ \up ->
+user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
+user r server psql user pwd =
+    withBinary r' psql psqlAdminRun_Sudo (CreateUser user.userRole pwd) $ \up ->
         op "pg-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-user:" <> user.userRole
                 , help = Text.unwords ["create user", user.userRole]
                 , up = up
                 }
+  where
+    r' = contramap (PGCreateUser user) r
 
-userPassFile :: Track' Server -> Track' (Binary "psql") -> File "passfile" -> User -> Op
-userPassFile server psql genpass user =
+userPassFile :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> File "passfile" -> User -> Op
+userPassFile r server psql genpass user =
     withFile genpass $ \passfile ->
         op "pg-user" (deps [runningServer, justInstall psql]) $ \actions ->
             actions
@@ -105,28 +128,31 @@ userPassFile server psql genpass user =
                     up =<< fmap Password (Text.readFile passfile)
                 }
   where
+    r' = contramap (PGSetUserPass user) r
     runningServer = run server localServer
-    up pass = untrackedExec psqlAdminRun_Sudo (CreateUser user.userRole pass) ""
+    up pass = untrackedExec r' psqlAdminRun_Sudo (CreateUser user.userRole pass) ""
 
 data Group = Group {groupRole :: RoleName}
-    deriving (Generic)
+    deriving (Show, Generic)
 instance ToJSON Group
 instance FromJSON Group
 
-group :: Track' Server -> Track' (Binary "psql") -> Group -> Op
-group server psql group =
-    withBinary psql psqlAdminRun_Sudo (CreateGroup group.groupRole) $ \up ->
+group :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Op
+group r server psql group =
+    withBinary r' psql psqlAdminRun_Sudo (CreateGroup group.groupRole) $ \up ->
         op "pg-group" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-group:" <> group.groupRole
                 , up = up
                 , help = Text.unwords ["creates group", group.groupRole]
                 }
+  where
+    r' = contramap (PGCreateGroup group) r
 
 data Role
     = UserRole User
     | GroupRole Group
-    deriving (Generic)
+    deriving (Show, Generic)
 instance ToJSON Role
 instance FromJSON Role
 
@@ -137,7 +163,7 @@ roleName (GroupRole g) = g.groupRole
 data PGRight
     = CREATE
     | CONNECT
-    deriving (Generic)
+    deriving (Show, Generic)
 instance ToJSON PGRight
 instance FromJSON PGRight
 
@@ -147,13 +173,13 @@ data AccessRight
     , access_role :: Role
     , access_rights :: [PGRight]
     }
-    deriving (Generic)
+    deriving (Show, Generic)
 instance ToJSON AccessRight
 instance FromJSON AccessRight
 
-grant :: Track' (Binary "psql") -> Track' Role -> AccessRight -> Op
-grant psql role acl =
-    withBinary psql psqlAdminRun_Sudo (Grant acl) $ \up ->
+grant :: Reporter Report -> Track' (Binary "psql") -> Track' Role -> AccessRight -> Op
+grant r psql role acl =
+    withBinary r' psql psqlAdminRun_Sudo (Grant acl) $ \up ->
         op "pg-grant" (deps [dbrole]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-grant:" <> roleName acl.access_role
@@ -161,11 +187,12 @@ grant psql role acl =
                 , help = Text.unwords ["grant", roleName acl.access_role]
                 }
   where
+    r' = contramap (PGGrant acl) r
     dbrole = run role acl.access_role
 
-groupMember :: Track' Server -> Track' (Binary "psql") -> Group -> Track' Role -> Role -> Op
-groupMember server psql g role u =
-    withBinary psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
+groupMember :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Track' Role -> Role -> Op
+groupMember r server psql g role u =
+    withBinary r' psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
         op "pg-member" (deps [dbgroup, dbuser]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-member:" <> g.groupRole <> (roleName u)
@@ -173,19 +200,22 @@ groupMember server psql g role u =
                 , help = Text.unwords ["add", roleName u, "to", g.groupRole]
                 }
   where
-    dbgroup = group server psql g
+    r' = contramap (PGGroupMembership g u) r
+    dbgroup = group r server psql g
     dbuser = run role u
 
-adminScript :: Track' (Binary "psql") -> File "psql-script" -> Op
-adminScript psql file =
+adminScript :: Reporter Report -> Track' (Binary "psql") -> File "psql-script" -> Op
+adminScript r psql file =
     withFile file $ \path ->
-        withBinary psql psqlAdminRun_Sudo (AdminScript path) $ \up ->
+        withBinary (r' path) psql psqlAdminRun_Sudo (AdminScript path) $ \up ->
             op "pg-adming-script" nodeps $ \actions ->
                 actions
                     { ref = dotRef $ "pg-admin-script:" <> Text.pack path
                     , up = up
                     , help = Text.unwords ["runs pg script", Text.pack path]
                     }
+  where
+    r' path = contramap (PGAdminScript path) r
 
 {- | commands to bootstrap PG roles and dbs as admin
 expected to run as user "postgres" in Debian to handle the nopassword initial state
@@ -311,28 +341,32 @@ withPassword :: ConnString a -> Password -> ConnString Password
 withPassword c pass = const pass <$> c
 
 userScriptInMemoryPass ::
+    Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString Password) ->
     ConnString Password ->
     File "psql-script" ->
     Op
-userScriptInMemoryPass psql mksetup c@(ConnString server user pass db) file =
+userScriptInMemoryPass r psql mksetup c@(ConnString server user pass db) file =
     withFile file $ \path ->
-        withBinary psql (psqlUserRun c) (UserScript path) $ \up ->
+        withBinary (r' path) psql (psqlUserRun c) (UserScript path) $ \up ->
             op "pg-script" (deps [run mksetup c]) $ \actions ->
                 actions
                     { ref = dotRef $ "pg-script:" <> Text.pack path
                     , up = up
                     , help = Text.unwords ["runs pg script", Text.pack path]
                     }
+  where
+    r' path = contramap (PGScript path) r
 
 userScript ::
+    Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString FilePath) ->
     ConnString FilePath ->
     File "psql-script" ->
     Op
-userScript psql mksetup c@(ConnString server user passFile db) file =
+userScript r psql mksetup c@(ConnString server user passFile db) file =
     withFile file $ \path ->
         op "pg-script" (deps [run mksetup c, justInstall psql]) $ \actions ->
             actions
@@ -342,7 +376,8 @@ userScript psql mksetup c@(ConnString server user passFile db) file =
                 , help = Text.unwords ["runs pg script", Text.pack path]
                 }
   where
-    up path pass = untrackedExec (psqlUserRun $ c `withPassword` pass) (UserScript path) ""
+    r' path = contramap (PGScript path) r
+    up path pass = untrackedExec (r' path) (psqlUserRun $ c `withPassword` pass) (UserScript path) ""
 
 data PsqlUser
     = UserScript FilePath

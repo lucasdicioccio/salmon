@@ -5,21 +5,32 @@ import qualified Data.Text as Text
 import System.FilePath ((</>))
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
+
 import System.Process.ListLike (CreateProcess, proc)
 
+-------------------------------------------------------------------------------
+data Report
+    = CallSystemCtl !SystemCtlCall !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
+
 systemdService ::
+    Reporter Report ->
     Track' (Binary "systemctl") ->
     Track' Config ->
     Config ->
     Op
-systemdService systemctl t cfg =
-    withBinary systemctl callSystemctl DaemonReload $ \reload ->
-        withBinary systemctl callSystemctl (Enable cfg.config_target) $ \enable ->
-            withBinary systemctl callSystemctl (Up cfg.config_target) $ \up ->
+systemdService r systemctl t cfg =
+    withCommand DaemonReload $ \reload ->
+        withCommand (Enable cfg.config_target) $ \enable ->
+            withCommand (Up cfg.config_target) $ \up ->
                 op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
                     actions
                         { help = "installs a systemd-unit and up it"
@@ -27,6 +38,9 @@ systemdService systemctl t cfg =
                         , up = reload >> enable >> up
                         }
   where
+    r' cmd = contramap (CallSystemCtl cmd) r
+    withCommand cmd f =
+        withBinary (r' cmd) systemctl callSystemctl cmd f
     unitPath :: FilePath
     unitPath = "/etc/systemd/system" </> Text.unpack cfg.config_target
 
@@ -37,6 +51,7 @@ data SystemCtlCall
     = DaemonReload
     | Enable UnitTarget
     | Up UnitTarget
+    deriving (Show)
 
 callSystemctl :: Command "systemctl" SystemCtlCall
 callSystemctl = Command go

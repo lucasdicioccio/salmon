@@ -1,14 +1,20 @@
 module Salmon.Builtin.Nodes.Routes where
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 import System.Process.ListLike (proc)
+
+-------------------------------------------------------------------------------
+data Report
+    = RunIp !IpCommand !Binary.Report
 
 -------------------------------------------------------------------------------
 
@@ -28,19 +34,22 @@ data DestinationNetwork
     | RawNetwork Text
 
 route ::
+    Reporter Report ->
     Track' (Binary "ip") ->
     Route ->
     Op
-route ip r =
-    withBinary ip ipcommand (AddRoute r) $ \addroute ->
+route r ip netroute =
+    withBinary r' ip ipcommand cmd $ \addroute ->
         op "ip-route" nodeps $ \actions ->
             actions
-                { help = mconcat ["route ", dst, " via ", r.routeDevice, "(", r.routeVia, ")"]
-                , ref = dotRef $ "ip-route" <> r.routeDevice <> r.routeVia
+                { help = mconcat ["route ", dst, " via ", netroute.routeDevice, "(", netroute.routeVia, ")"]
+                , ref = dotRef $ "ip-route" <> netroute.routeDevice <> netroute.routeVia
                 , up = addroute
                 }
   where
-    dst = case r.routeDestination of Default -> "default"; RawNetwork dst -> dst
+    cmd = AddRoute netroute
+    r' = contramap (RunIp cmd) r
+    dst = case netroute.routeDestination of Default -> "default"; RawNetwork dst -> dst
 
 data IpCommand
     = AddRoute Route

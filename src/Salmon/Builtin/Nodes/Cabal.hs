@@ -4,10 +4,12 @@
 module Salmon.Builtin.Nodes.Cabal where
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -17,6 +19,13 @@ import System.FilePath ((</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, cwd, proc)
 
+-------------------------------------------------------------------------------
+data Report
+    = CabalBuild !Cabal !Binary.Report
+    | CabalInstall !Cabal !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 data Cabal = Cabal {cabalDir :: FilePath, cabalTarget :: Text}
     deriving (Eq, Ord, Show)
 
@@ -29,19 +38,21 @@ data CabalRun
     = Build CabalFlags Cabal
     | Install CabalFlags Cabal FilePath
 
-build :: Track' (Binary "cabal") -> CabalFlags -> Cabal -> Op
-build cabal flags c =
-    withBinary cabal cabalRun (Build flags c) $ \up ->
+build :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> Op
+build r cabal flags c =
+    withBinary r' cabal cabalRun (Build flags c) $ \up ->
         op "cabal-build" nodeps $ \actions ->
             actions
                 { help = "cabal builds a target"
                 , ref = dotRef $ "cabal:build:" <> (Text.pack (show c))
                 , up = up
                 }
+  where
+    r' = contramap (CabalBuild c) r
 
-install :: Track' (Binary "cabal") -> CabalFlags -> Cabal -> FilePath -> Op
-install cabal flags c installdir =
-    withBinary cabal cabalRun (Install flags c installdir) $ \up ->
+install :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> FilePath -> Op
+install r cabal flags c installdir =
+    withBinary r' cabal cabalRun (Install flags c installdir) $ \up ->
         op "cabal-install" previous $ \actions ->
             actions
                 { help = "cabal builds a target"
@@ -49,6 +60,7 @@ install cabal flags c installdir =
                 , up = up
                 }
   where
+    r' = contramap (CabalInstall c) r
     previous = deps [dir (Directory installdir)]
 
 cabalRun :: Command "cabal" CabalRun
@@ -77,12 +89,13 @@ data Installed (s :: Symbol)
     { installation_path :: FilePath
     }
 
-installed :: Instructions a -> Tracked' (Installed a)
-installed instr =
+installed :: Reporter Report -> Instructions a -> Tracked' (Installed a)
+installed r instr =
     Tracked (Track $ const op) obj
   where
     op =
         install
+            r
             instr.instructions_binary
             instr.instructions_cabal_flags
             instr.instructions_cabal

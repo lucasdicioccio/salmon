@@ -16,7 +16,19 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
+import Salmon.Reporter
 import qualified SreBox.PostgresMigrations as PGMigrate
+
+-------------------------------------------------------------------------------
+data Report
+    = InitPostgres !Postgres.Report
+    | UploadSelf !Self.Report
+    | CallSelf !Self.Report
+    | UploadSecret !Postgres.User !Rsync.Report
+    | RunMigration !PGMigrate.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 {- | A PG setup definition where:
 * groups and users have rights
@@ -42,23 +54,23 @@ setupWithPreExistingPasswords setup =
         setup.init_setup_groups
 
 -- | generate a db with a given sets of users, all having some rights
-setupPG :: InitSetup (FS.File "passfile") -> Op
-setupPG setup =
+setupPG :: Reporter Report -> InitSetup (FS.File "passfile") -> Op
+setupPG r setup =
     op "pg-setup" (deps [memberships, groupAcls, userAcls `inject` basics]) id
   where
     basics = op "pg-basics" (deps [users `inject` groups `inject` db]) id
-    cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
-    db = Postgres.database cluster Debian.psql setup.init_setup_database
+    cluster = Track $ Postgres.pgLocalCluster (contramap InitPostgres r) Debian.postgres Debian.pg_ctlcluster
+    db = Postgres.database (contramap InitPostgres r) cluster Debian.psql setup.init_setup_database
 
     groups = op "pg-groups" (deps $ fmap group setup.init_setup_groups) id
 
     group (g, _) =
-        Postgres.group cluster Debian.psql g
+        Postgres.group (contramap InitPostgres r) cluster Debian.psql g
 
     users = op "pg-users" (deps $ fmap user setup.init_setup_users) id
 
     user (u, pass, _, _) =
-        Postgres.userPassFile cluster Debian.psql pass u
+        Postgres.userPassFile (contramap InitPostgres r) cluster Debian.psql pass u
 
     -- we force all users to be created before any group membership
     trackuserFromMembershipByCreatingAllUsers = Track $ const users
@@ -69,6 +81,7 @@ setupPG setup =
       where
         acl (u, _, rights, _) =
             Postgres.grant
+                (contramap InitPostgres r)
                 Debian.psql
                 trackuserFromAclsByCreatingAllUsers
                 (Postgres.AccessRight setup.init_setup_database (Postgres.UserRole u) rights)
@@ -77,6 +90,7 @@ setupPG setup =
       where
         acl (g, rights) =
             Postgres.grant
+                (contramap InitPostgres r)
                 Debian.psql
                 trackgroupsFromAclsByCreatingAllGroups
                 (Postgres.AccessRight setup.init_setup_database (Postgres.GroupRole g) rights)
@@ -85,6 +99,7 @@ setupPG setup =
       where
         membership u g =
             Postgres.groupMember
+                (contramap InitPostgres r)
                 cluster
                 Debian.psql
                 g
@@ -92,27 +107,28 @@ setupPG setup =
                 (Postgres.UserRole u)
 
 -- | typical setup with a single connection account
-setupSingleUserPG :: Postgres.ConnString FilePath -> Op
-setupSingleUserPG connstring =
-    setupPG setup
+setupSingleUserPG :: Reporter Report -> Postgres.ConnString FilePath -> Op
+setupSingleUserPG r connstring =
+    setupPG r setup
   where
     setup = InitSetup d1 users []
     users = [(u1, FS.PreExisting pass1, [Postgres.CONNECT, Postgres.CREATE], [])]
 
-    cluster = Track $ Postgres.pgLocalCluster Debian.postgres Debian.pg_ctlcluster
+    cluster = Track $ Postgres.pgLocalCluster (contramap InitPostgres r) Debian.postgres Debian.pg_ctlcluster
     d1 = connstring.connstring_db
     u1 = connstring.connstring_user
     pass1 = connstring.connstring_user_pass
 
 remoteSetupPG ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' directive ->
     Self.Remote ->
     Self.SelfPath ->
     (InitSetup FilePath -> directive) ->
     InitSetup FilePath ->
     Op
-remoteSetupPG simulate selfRemote selfpath toSpec cfg =
+remoteSetupPG r simulate selfRemote selfpath toSpec cfg =
     op "init-remotely" (deps [remoteInit `inject` uploadSecrets]) id
   where
     rsyncRemote :: Rsync.Remote
@@ -126,8 +142,8 @@ remoteSetupPG simulate selfRemote selfpath toSpec cfg =
 
     remoteInit :: Op
     remoteInit =
-        let s = Self.uploadSelf "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec remoteSetup)
+        let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec remoteSetup)
 
     uploadSecrets :: Op
     uploadSecrets = op "pg-init-secrets" (deps [uploaduserSecret u p | (u, p, _, _) <- cfg.init_setup_users]) id
@@ -135,9 +151,10 @@ remoteSetupPG simulate selfRemote selfpath toSpec cfg =
     uploaduserSecret :: Postgres.User -> FilePath -> Op
     uploaduserSecret u pass =
         Rsync.sendFile
+            (contramap (UploadSecret u) r)
             Debian.rsync
             ( FS.Generated
-                PGMigrate.pgPassword
+                (PGMigrate.pgPassword (contramap RunMigration r))
                 pass
             )
             (rsyncRemote)

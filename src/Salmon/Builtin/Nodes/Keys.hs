@@ -2,10 +2,12 @@ module Salmon.Builtin.Nodes.Keys where
 
 import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import qualified Crypto.JOSE.JWK as JWK
@@ -18,6 +20,12 @@ import qualified Data.Text as Text
 import System.FilePath ((</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
+
+data Report
+    = MakeSshKey !SSHKeyPair Binary.Report
+    | SignKeyReport !SSHKeyPair Binary.Report
+
+-------------------------------------------------------------------------------
 
 data KeyType
     = RSA2048
@@ -39,9 +47,9 @@ publicCAKeyPath key = key.sshKeyDir </> Text.unpack key.sshKeyName <> "-cert.pub
 
 -------------------------------------------------------------------------------
 
-sshKey :: Track' (Binary "ssh-keygen") -> SSHKeyPair -> Op
-sshKey bin key =
-    withBinary bin sshkeygen (Keygen (key.sshKeyType, filepath)) $ \up ->
+sshKey :: Reporter Report -> Track' (Binary "ssh-keygen") -> SSHKeyPair -> Op
+sshKey r bin key =
+    withBinary r' bin sshkeygen (Keygen (key.sshKeyType, filepath)) $ \up ->
         op "ssh-key" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generate an ssh-key"
@@ -53,6 +61,8 @@ sshKey bin key =
                 , up = up
                 }
   where
+    r' :: Reporter Binary.Report
+    r' = contramap (MakeSshKey key) r
     filename :: FilePath
     filename = Text.unpack key.sshKeyName
 
@@ -83,13 +93,14 @@ data SSHCertificateAuthority = SSHCertificateAuthority {sshcaKey :: SSHKeyPair}
 -------------------------------------------------------------------------------
 
 signKey ::
+    Reporter Report ->
     Track' (Binary "ssh-keygen") ->
     SSHCertificateAuthority ->
     KeyIdentifier ->
     SSHKeyPair ->
     Op
-signKey bin ca kid keyToSign =
-    withBinary bin sshsign (SignKey (ca, kid, (privateKeyPath keyToSign))) $ \up ->
+signKey r bin ca kid keyToSign =
+    withBinary r' bin sshsign (SignKey (ca, kid, (privateKeyPath keyToSign))) $ \up ->
         op "ssh-ca-sign" (deps preds) $ \actions ->
             actions
                 { help = "sign a SSH-key"
@@ -98,9 +109,10 @@ signKey bin ca kid keyToSign =
                 , up = up
                 }
   where
+    r' = contramap (SignKeyReport keyToSign) r
     preds =
-        [ sshKey bin keyToSign
-        , sshKey bin ca.sshcaKey
+        [ sshKey r bin keyToSign
+        , sshKey r bin ca.sshcaKey
         ]
 
 newtype SignKey = SignKey (SSHCertificateAuthority, KeyIdentifier, FilePath)

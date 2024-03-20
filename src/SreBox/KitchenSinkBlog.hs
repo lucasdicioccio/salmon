@@ -21,8 +21,24 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
+import Salmon.Reporter
 
-import SreBox.CabalBuilding
+import SreBox.CabalBuilding (cabalBinUpload, kitchenSink, optBuildsBindir)
+import qualified SreBox.CabalBuilding as CabalBuilding
+
+-------------------------------------------------------------------------------
+data Report
+    = Upload !CabalBuilding.Report
+    | Build !CabalBuilding.Report
+    | Clone !Git.Report
+    | CallSelf !Self.Report
+    | UploadSelf !Self.Report
+    | UploadSources !Rsync.Report
+    | UploadCert !Rsync.Report
+    | SetupSystemd !Systemd.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data KitchenSinkBlogConfig
     = KitchenSinkBlogConfig
@@ -47,6 +63,7 @@ instance ToJSON KitchenSinkBlogSetup
 
 setupKS ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' Ssh.Remote ->
     Track' (Certs.Domain, Text) ->
     Track' directive ->
@@ -55,16 +72,16 @@ setupKS ::
     KitchenSinkBlogConfig ->
     (KitchenSinkBlogSetup -> directive) ->
     Op
-setupKS mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
+setupKS r mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
     using (Git.repodir cloneSite cfg.ks_cfg_repo "") $ \blogSrcDir ->
-        using (cabalBinUpload (kitchenSink optBuildsBindir) rsyncRemote) $ \remotepath ->
+        using (cabalBinUpload (contramap Upload r) (kitchenSink (contramap Build r) optBuildsBindir) rsyncRemote) $ \remotepath ->
             let
                 setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> Text.unpack cfg.ks_cfg_repo.repoLocalName) cfg.ks_cfg_sourceSubdir
              in
                 op "remote-ks-blog-setup" (depSequence blogSrcDir setup) id
   where
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
-    cloneSite = Track $ Git.repo Debian.git
+    cloneSite = Track $ Git.repo (contramap Clone r) Debian.git
     depSequence blogSrcDir setup = deps [opGraph (continueRemotely setup) `inject` uploads blogSrcDir]
     uploads blogSrcDir = op "uploads-ks-blog" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
 
@@ -72,20 +89,20 @@ setupKS mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-        Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
+        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
 
     -- upload self
-    self = Self.uploadSelf "tmp" selfRemote selfpath
+    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
 
     -- upload sources
     uploadSources blogSrcDir =
-        Rsync.sendDir Debian.rsync ignoreTrack blogSrcDir rsyncRemote remoteBlogDir
+        Rsync.sendDir (contramap UploadSources r) Debian.rsync ignoreTrack blogSrcDir rsyncRemote remoteBlogDir
 
     remoteBlogDir = "tmp/ks-blog-src"
 
     -- upload certificate and key
     upload gen localpath distpath =
-        Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
+        Rsync.sendFile (contramap UploadCert r) Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadCert = upload siteCert cfg.ks_cfg_pemPath remotePem
     uploadKey = upload siteCert cfg.ks_cfg_certPath remoteKey
@@ -95,9 +112,9 @@ setupKS mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
     remotePem = "tmp/ks.pem"
     remoteKey = "tmp/ks.key"
 
-systemdKitchenSinkBlog :: KitchenSinkBlogSetup -> Op
-systemdKitchenSinkBlog arg =
-    Systemd.systemdService Debian.systemctl trackConfig config
+systemdKitchenSinkBlog :: Reporter Report -> KitchenSinkBlogSetup -> Op
+systemdKitchenSinkBlog r arg =
+    Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->

@@ -13,20 +13,32 @@ import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
+import Salmon.Reporter
 
-cabalBinUpload :: Tracked' FilePath -> Rsync.Remote -> Tracked' FilePath
-cabalBinUpload mkbin remote =
+-------------------------------------------------------------------------------
+data Report
+    = Upload !FilePath !Rsync.Report
+    | CallCabal !CabalTarget !Cabal.Report
+    | CallGit !CabalTarget !Git.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
+
+cabalBinUpload :: Reporter Report -> Tracked' FilePath -> Rsync.Remote -> Tracked' FilePath
+cabalBinUpload r mkbin remote =
     mkbin `bindTracked` go
   where
     go localpath =
         Tracked (Track $ const $ upload localpath) (remotePath localpath)
-    upload local = Rsync.sendFile Debian.rsync (FS.PreExisting local) remote distpath
+    upload local = Rsync.sendFile (r' local) Debian.rsync (FS.PreExisting local) remote distpath
+    r' local = contramap (Upload local) r
     distpath = "tmp/"
     remotePath local = distpath </> takeFileName local
 
-microDNS :: BinaryDir -> Tracked' FilePath
-microDNS bindir =
+microDNS :: Reporter Report -> BinaryDir -> Tracked' FilePath
+microDNS r bindir =
     cabalRepoBuild
+        r
         "microdns"
         bindir
         realNoop
@@ -37,9 +49,10 @@ microDNS bindir =
         ""
         []
 
-kitchenSink :: BinaryDir -> Tracked' FilePath
-kitchenSink bindir =
+kitchenSink :: Reporter Report -> BinaryDir -> Tracked' FilePath
+kitchenSink r bindir =
     cabalRepoBuild
+        r
         "kitchensink"
         bindir
         realNoop
@@ -50,9 +63,10 @@ kitchenSink bindir =
         "hs"
         []
 
-kitchenSink_dev :: Tracked' FilePath
-kitchenSink_dev =
+kitchenSink_dev :: Reporter Report -> Tracked' FilePath
+kitchenSink_dev r =
     cabalRepoBuild
+        r
         "kitchensink-dev"
         optBuildsBindir
         realNoop
@@ -63,9 +77,10 @@ kitchenSink_dev =
         "hs"
         []
 
-postgrest :: Tracked' FilePath
-postgrest =
+postgrest :: Reporter Report -> Tracked' FilePath
+postgrest r =
     cabalRepoBuild
+        r
         "postgrest"
         optBuildsBindir
         (Debian.deb $ Debian.Package "libpq-dev")
@@ -88,6 +103,7 @@ optBuildsBindir = "/opt/builds/bin"
 
 -- builds a cabal repository
 cabalRepoBuild ::
+    Reporter Report ->
     CloneDir ->
     BinaryDir ->
     Op ->
@@ -98,13 +114,13 @@ cabalRepoBuild ::
     SubDir ->
     Cabal.CabalFlags ->
     Tracked' FilePath
-cabalRepoBuild dirname bindir sysdeps target binname remote branch subdir flags =
+cabalRepoBuild r dirname bindir sysdeps target binname remote branch subdir flags =
     Tracked (Track $ const $ op `inject` sysdeps) binpath
   where
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
-        Cabal.install cabal flags (Cabal.Cabal repopath target) bindir
+        Cabal.install (contramap (CallCabal target) r) cabal flags (Cabal.Cabal repopath target) bindir
     binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
-    mkrepo = Track $ Git.repo git
+    mkrepo = Track $ Git.repo (contramap (CallGit target) r) git

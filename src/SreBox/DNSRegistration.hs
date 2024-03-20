@@ -18,7 +18,21 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
+import Salmon.Reporter
 import SreBox.MicroDNS (DNSName, MicroDNSConfig (..), selfSignedCert, sharedToken)
+import qualified SreBox.MicroDNS as MicroDNS
+
+-------------------------------------------------------------------------------
+data Report
+    = UploadToken !Rsync.Report
+    | UploadPEM !Rsync.Report
+    | SelfSign !MicroDNS.Report
+    | MakeToken !MicroDNS.Report
+    | UploadSelf !Self.Report
+    | CallSelf !Self.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data RegisteredMachineConfig
     = RegisteredMachineConfig
@@ -33,6 +47,7 @@ data RegisteredMachineConfig
 setupRegistration ::
     forall directive.
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' Ssh.Remote ->
     Track' directive ->
     Self.SelfPath ->
@@ -41,7 +56,7 @@ setupRegistration ::
     RegisteredMachineConfig ->
     (RegisteredMachineSetup -> directive) ->
     Op
-setupRegistration mkRemote simulate selfpath selfRemote dns cfg toSpec =
+setupRegistration r mkRemote simulate selfpath selfRemote dns cfg toSpec =
     op "registration" (deps [opGraph remoteRegistration, uploadPem, uploadToken]) id
   where
     rsyncRemote :: Rsync.Remote
@@ -51,20 +66,20 @@ setupRegistration mkRemote simulate selfpath selfRemote dns cfg toSpec =
     tmpTokenPath = "tmp/" <> Text.unpack cfg.registration_machineName <> "-registration.token"
 
     uploadToken =
-        Rsync.sendFile Debian.rsync (FS.Generated mkToken cfg.registration_cfg_local_token_path) rsyncRemote tmpTokenPath
+        Rsync.sendFile (contramap UploadToken r) Debian.rsync (FS.Generated mkToken cfg.registration_cfg_local_token_path) rsyncRemote tmpTokenPath
 
     tmpPemPath :: FilePath
     tmpPemPath = "tmp/registration.pem"
 
     uploadPem =
-        Rsync.sendFile Debian.rsync (FS.Generated (selfSignedCert dns) dns.microdns_cfg_pemPath) rsyncRemote tmpPemPath
+        Rsync.sendFile (contramap UploadPEM r) Debian.rsync (FS.Generated (selfSignedCert (contramap SelfSign r) dns) dns.microdns_cfg_pemPath) rsyncRemote tmpPemPath
 
     mkToken :: Track' FilePath
     mkToken = Track $ \tokenPath ->
-        sharedToken dns.microdns_cfg_secretPath cfg.registration_machineName tokenPath
+        sharedToken (contramap MakeToken r) dns.microdns_cfg_secretPath cfg.registration_machineName tokenPath
 
-    self = Self.uploadSelf "tmp" selfRemote selfpath
-    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo mkRemote ref simulate CLI.Up (toSpec regSetup)
+    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+    remoteRegistration = self `bindTracked` \ref -> Self.callSelfAsSudo (contramap CallSelf r) mkRemote ref simulate CLI.Up (toSpec regSetup)
 
     regSetup =
         RegisteredMachineSetup

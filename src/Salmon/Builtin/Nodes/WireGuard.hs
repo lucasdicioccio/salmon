@@ -2,10 +2,12 @@ module Salmon.Builtin.Nodes.WireGuard where
 
 import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), CommandIO (..), justInstall, untrackedExec, withBinary, withBinaryIO)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import System.IO (IOMode (ReadMode, WriteMode), withFile)
 
@@ -19,6 +21,11 @@ import System.FilePath (takeDirectory, (</>))
 import System.Process (StdStream (UseHandle), waitForProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
+
+-------------------------------------------------------------------------------
+data Report
+    = RunWg !WgCommand !Binary.Report
+    | RunIp !IpCommand !Binary.Report
 
 -------------------------------------------------------------------------------
 newtype PrivateKeyForWriting = PrivateKeyForWriting {getWritePkHandle :: Handle}
@@ -124,19 +131,24 @@ rfc1918_slash24 rfc n m =
 type WgName = Text
 
 iface ::
+    Reporter Report ->
     Track' (Binary "ip") ->
     WgName ->
     IpNet ->
     Op
-iface ip wg net =
-    withBinary ip ipcommand (AddWg wg) $ \addwg ->
-        withBinary ip ipcommand (SetWgAddr wg net) $ \setAddr ->
-            withBinary ip ipcommand (UpWg wg) $ \activate ->
+iface r ip wg net =
+    withCommand (AddWg wg) $ \addwg ->
+        withCommand (SetWgAddr wg net) $ \setAddr ->
+            withCommand (UpWg wg) $ \activate ->
                 op "wireguard-iface" nodeps $ \actions ->
                     actions
                         { ref = dotRef $ "wg-iface" <> wg
                         , up = addwg >> setAddr >> activate
                         }
+  where
+    r' cmd = contramap (RunIp cmd) r
+    withCommand cmd f =
+        withBinary (r' cmd) ip ipcommand cmd f
 
 data IpCommand
     = AddWg WgName
@@ -184,6 +196,7 @@ type AllowedIps = Text
 type PortNum = Int
 
 server ::
+    Reporter Report ->
     Track' (Binary "wg") ->
     Track' FilePath ->
     Track' WgName ->
@@ -191,33 +204,40 @@ server ::
     FilePath ->
     PortNum ->
     Op
-server wg key iface wgname privateKeyPath port =
-    withBinary wg wgcommand (SetupServer wgname port privateKeyPath) $ \config ->
+server r wg key iface wgname privateKeyPath port =
+    withBinary r' wg wgcommand cmd $ \config ->
         op "wireguard-server" (deps [run key privateKeyPath, run iface wgname]) $ \actions ->
             actions
                 { ref = dotRef $ "wg-server" <> wgname
                 , up = config
                 }
+  where
+    cmd = SetupServer wgname port privateKeyPath
+    r' = contramap (RunWg cmd) r
 
 client ::
+    Reporter Report ->
     Track' (Binary "wg") ->
     Track' FilePath ->
     Track' WgName ->
     WgName ->
     FilePath ->
     Op
-client wg key iface wgname privatekeyPath =
+client r wg key iface wgname privatekeyPath =
     op "wireguard-client" (deps [justInstall wg, pk, netdev]) $ \actions ->
         actions
             { ref = dotRef $ "wg-client" <> wgname <> Text.pack privatekeyPath
             , up = do
-                untrackedExec wgcommand (SetupClient wgname privatekeyPath) ""
+                let cmd = SetupClient wgname privatekeyPath
+                untrackedExec (r' cmd) wgcommand cmd ""
             }
   where
+    r' cmd = contramap (RunWg cmd) r
     pk = run key privatekeyPath
     netdev = run iface wgname
 
 peer ::
+    Reporter Report ->
     Track' (Binary "wg") ->
     Track' FilePath ->
     Track' WgName ->
@@ -227,16 +247,18 @@ peer ::
     Maybe Endpoint ->
     AllowedIps ->
     Op
-peer wg key iface endpoint wgname publicKeyPath ep ips =
+peer r wg key iface endpoint wgname publicKeyPath ep ips =
     op "wireguard-peer" (deps [justInstall wg, pk, netdev, peersetup]) $ \actions ->
         actions
             { ref = dotRef $ "wg-peer" <> wgname <> Text.pack publicKeyPath
             , up = do
                 pkey <- Text.strip <$> Text.readFile publicKeyPath
                 print (wgname, publicKeyPath, pkey)
-                untrackedExec wgcommand (AddPeer wgname pkey ep ips) ""
+                let cmd = AddPeer wgname pkey ep ips
+                untrackedExec (r' cmd) wgcommand cmd ""
             }
   where
+    r' cmd = contramap (RunWg cmd) r
     pk = run key publicKeyPath
     netdev = run iface wgname
     peersetup = maybe realNoop (run endpoint) ep

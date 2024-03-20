@@ -22,10 +22,11 @@ import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Helpers (collapse)
 import Salmon.Builtin.Migrations
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import Salmon.Builtin.Nodes.Debian.OS as Debian
 import Salmon.Builtin.Nodes.Filesystem as FS
-import Salmon.Builtin.Nodes.Postgres
+import Salmon.Builtin.Nodes.Postgres (ConnString (..), Database (..), Password, User, connstring, localServer, readPassword, userScript, withPassword)
+import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Self as Self
@@ -36,6 +37,19 @@ import Salmon.Op.Graph
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
+
+-------------------------------------------------------------------------------
+data Report
+    = ApplyMigration !FilePath !Postgres.Report
+    | UploadFile !Rsync.Report
+    | UploadSecretFile !Rsync.Report
+    | UploadSelf !Self.Report
+    | CallSelf !Self.Report
+    | CreatePassword !Secrets.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data MigrationFile
     = MigrationFile
@@ -65,29 +79,32 @@ defaultMigrationReader =
     prefix = "-- migrate.after: "
 
 migrateG ::
+    Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString FilePath) ->
     ConnString FilePath ->
     G MigrationFile ->
     Op
-migrateG psql mksetup connstring g = migrate psql mksetup connstring (coerce g)
+migrateG r psql mksetup connstring g = migrate r psql mksetup connstring (coerce g)
 
 -- | A helper to turn a migration graph into an Op.
 migrate ::
+    Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString FilePath) ->
     ConnString FilePath ->
     Cofree Graph MigrationFile ->
     Op
-migrate psql mksetup connstring (m :< x) =
+migrate r psql mksetup connstring (m :< x) =
     let
         current, pred :: Op
-        current = userScript psql mksetup connstring (PreExisting m.path)
+        current = userScript r' psql mksetup connstring (PreExisting m.path)
         pred = evalPred "" x
      in
         current `inject` pred
   where
-    gorec = migrate psql mksetup connstring
+    r' = contramap (ApplyMigration m.path) r
+    gorec = migrate r psql mksetup connstring
     setref lineage actions =
         actions{ref = dotRef $ Text.pack $ m.path <> " " <> lineage}
 
@@ -112,9 +129,9 @@ data MigrationPlan a
 instance (ToJSON a) => ToJSON (MigrationPlan a)
 instance (FromJSON a) => FromJSON (MigrationPlan a)
 
-migratePlan :: MigrationPlan FilePath -> Op
-migratePlan plan =
-    migrateG Debian.psql ignoreTrack plan.migration_connstring plan.migration_file
+migratePlan :: Reporter Report -> MigrationPlan FilePath -> Op
+migratePlan r plan =
+    migrateG r Debian.psql ignoreTrack plan.migration_connstring plan.migration_file
 
 -------------------------------------------------------------------------------
 
@@ -139,6 +156,7 @@ instance ToJSON RemoteMigrateSetup
 
 remoteMigrateSetup ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Password ->
     Track' directive ->
     Self.Remote ->
@@ -146,7 +164,7 @@ remoteMigrateSetup ::
     (RemoteMigrateSetup -> directive) ->
     RemoteMigrateConfig Identity ->
     Op
-remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
+remoteMigrateSetup r pass1 simulate selfRemote selfpath toSpec cfg =
     op "migrate-remotely" (deps [remoteApply `inject` uploadsecret `inject` uploadmigrations]) id
   where
     rsyncRemote :: Rsync.Remote
@@ -165,6 +183,7 @@ remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
     uploadmigrationFile :: MigrationFile -> Op
     uploadmigrationFile m =
         Rsync.sendFile
+            (contramap UploadFile r)
             Debian.rsync
             (FS.PreExisting m.path)
             (rsyncRemote)
@@ -173,8 +192,9 @@ remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
     uploadsecret :: Op
     uploadsecret =
         Rsync.sendFile
+            (contramap UploadSecretFile r)
             Debian.rsync
-            (FS.Generated pgPassword cfg.cfg_password)
+            (FS.Generated (pgPassword r) cfg.cfg_password)
             (rsyncRemote)
             (remotePgSecretPath)
 
@@ -187,18 +207,19 @@ remoteMigrateSetup pass1 simulate selfRemote selfpath toSpec cfg =
 
     remoteApply :: Op
     remoteApply =
-        let s = Self.uploadSelf "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+        let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
 
 remoteMigrateOpaqueSetup ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' directive ->
     Self.Remote ->
     Self.SelfPath ->
     (RemoteMigrateSetup -> directive) ->
     RemoteMigrateConfig TrackedIO ->
     Op
-remoteMigrateOpaqueSetup simulate selfRemote selfpath toSpec cfg =
+remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
     op "migrate-remotely" (deps [opaquemigration `inject` uploadsecret]) id
   where
     rsyncRemote :: Rsync.Remote
@@ -224,6 +245,7 @@ remoteMigrateOpaqueSetup simulate selfRemote selfpath toSpec cfg =
     uploadmigrationFile :: MigrationFile -> Op
     uploadmigrationFile m =
         Rsync.sendFile
+            (contramap UploadFile r)
             Debian.rsync
             (FS.PreExisting m.path)
             (rsyncRemote)
@@ -232,8 +254,9 @@ remoteMigrateOpaqueSetup simulate selfRemote selfpath toSpec cfg =
     uploadsecret :: Op
     uploadsecret =
         Rsync.sendFile
+            (contramap UploadSecretFile r)
             Debian.rsync
-            (FS.Generated pgPassword cfg.cfg_password)
+            (FS.Generated (pgPassword r) cfg.cfg_password)
             (rsyncRemote)
             (remotePgSecretPath)
 
@@ -246,30 +269,32 @@ remoteMigrateOpaqueSetup simulate selfRemote selfpath toSpec cfg =
 
     remoteApply :: G MigrationFile -> Op
     remoteApply migrations =
-        let s = Self.uploadSelf "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+        let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
 
 applyMigration ::
+    Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString FilePath) ->
     RemoteMigrateSetup ->
     Op
-applyMigration psql mkConnstring setup =
-    migrateG psql mkConnstring connstring setup.setup_migration
+applyMigration r psql mkConnstring setup =
+    migrateG r psql mkConnstring connstring setup.setup_migration
   where
     connstring =
         ConnString localServer setup.setup_user setup.setup_tmp_secret_path setup.setup_database
 
-pgPassword :: Track' FilePath
-pgPassword = Track $ \path ->
+pgPassword :: Reporter Report -> Track' FilePath
+pgPassword r = Track $ \path ->
     Secrets.sharedSecretFile
+        (contramap CreatePassword r)
         Debian.openssl
         (Secrets.Secret Secrets.Hex 48 path)
 
-pgConnstringFile :: ConnString FilePath -> Track' FilePath
-pgConnstringFile conn =
+pgConnstringFile :: Reporter Report -> ConnString FilePath -> Track' FilePath
+pgConnstringFile r conn =
     Track $ \cstringpath ->
-        op "pg-connstring" (deps [run pgPassword passFile]) $ \actions ->
+        op "pg-connstring" (deps [run (pgPassword r) passFile]) $ \actions ->
             actions
                 { ref = dotRef $ "connstring: " <> Text.pack cstringpath
                 , help = "store connection string at " <> Text.pack cstringpath

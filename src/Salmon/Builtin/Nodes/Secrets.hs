@@ -2,10 +2,12 @@ module Salmon.Builtin.Nodes.Secrets where
 
 import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
@@ -15,9 +17,17 @@ import qualified Data.Text as Text
 import System.FilePath (takeDirectory, (</>))
 import System.Process.ListLike (CreateProcess, proc)
 
+-------------------------------------------------------------------------------
+data Report
+    = Generate !Secret !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
+
 data SecretType
     = Base64
     | Hex
+    deriving (Show)
 
 data Secret
     = Secret
@@ -25,10 +35,11 @@ data Secret
     , secret_bytes :: Int
     , secret_path :: FilePath
     }
+    deriving (Show)
 
-sharedSecretFile :: Track' (Binary "openssl") -> Secret -> Op
-sharedSecretFile bin sec =
-    withBinary bin openssl (GenRandom sec) $ \up -> do
+sharedSecretFile :: Reporter Report -> Track' (Binary "openssl") -> Secret -> Op
+sharedSecretFile r bin sec =
+    withBinary r' bin openssl (GenRandom sec) $ \up -> do
         op "secret:gen" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generates a secret file for shared-secret"
@@ -37,6 +48,7 @@ sharedSecretFile bin sec =
                 , up = up >> chompNewLines sec.secret_path
                 }
   where
+    r' = contramap (Generate sec) r
     enclosingdir :: Op
     enclosingdir = FS.dir (FS.Directory $ takeDirectory sec.secret_path)
 

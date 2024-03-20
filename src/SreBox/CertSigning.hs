@@ -36,10 +36,18 @@ import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
 import Salmon.Op.Track (Track (..), bindTracked, opGraph, using, (>*<))
+import Salmon.Reporter
 
-import SreBox.CabalBuilding
 import SreBox.Environment
-import SreBox.MicroDNS
+import SreBox.MicroDNS (MicroDNSConfig (..))
+import qualified SreBox.MicroDNS as MicroDNS
+
+-------------------------------------------------------------------------------
+data Report
+    = PrepareCSR !Certs.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data AcmeConfig
     = AcmeConfig
@@ -49,8 +57,8 @@ data AcmeConfig
     , acme_cfg_dns :: MicroDNSConfig
     }
 
-acmeSign :: AcmeConfig -> Track' MicroDNSConfig -> (Certs.Domain, Text) -> Op
-acmeSign cfg mkDNS (domain, txtrecord) =
+acmeSign :: Reporter Report -> AcmeConfig -> Track' MicroDNSConfig -> (Certs.Domain, Text) -> Op
+acmeSign r cfg mkDNS (domain, txtrecord) =
     op "acme-sign" (deps [Acme.acmeChallenge_dns01 chall challenger]) $ \actions ->
         actions
             { ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
@@ -61,7 +69,7 @@ acmeSign cfg mkDNS (domain, txtrecord) =
 
     adapt c = (Acme.challengerRequest c, (Acme.challengerAccount c, cfg.acme_cfg_dns))
     f1 :: Track' Certs.SigningRequest
-    f1 = Track $ Certs.signingRequest Debian.openssl
+    f1 = Track $ Certs.signingRequest (contramap PrepareCSR r) Debian.openssl
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 

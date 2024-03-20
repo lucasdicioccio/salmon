@@ -21,6 +21,7 @@ import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
 import Salmon.Op.Track (Track (..), opGraph)
+import Salmon.Reporter
 import qualified SreBox.CabalBuilding as CabalBuilding
 import System.FilePath ((</>))
 
@@ -39,12 +40,13 @@ homedir h =
         h </> "ci" </> x
 
 -------------------------------------------------------------------------------
-microDNS p = CabalBuilding.microDNS (p.bindir "microdns")
+microDNS p = CabalBuilding.microDNS reportPrint (p.bindir "microdns")
 
-kitchenSink p = CabalBuilding.kitchenSink (p.bindir "kitchen-sink")
+kitchenSink p = CabalBuilding.kitchenSink reportPrint (p.bindir "kitchen-sink")
 
 postgrest p =
     CabalBuilding.cabalRepoBuild
+        reportPrint
         "postgrest"
         (p.bindir "postgrest")
         (Debian.deb $ Debian.Package "libpq-dev")
@@ -57,6 +59,7 @@ postgrest p =
 
 prodapi p =
     CabalBuilding.cabalRepoBuild
+        reportPrint
         "prodapi"
         (p.bindir "prodapi")
         realNoop
@@ -69,6 +72,7 @@ prodapi p =
 
 salmon p =
     CabalBuilding.cabalRepoBuild
+        reportPrint
         "salmon"
         (p.bindir "salmon")
         realNoop
@@ -81,6 +85,7 @@ salmon p =
 
 fourmolu p =
     CabalBuilding.cabalRepoBuild
+        reportPrint
         "fourmolu"
         (p.bindir "fourmolu")
         (realNoop)
@@ -93,6 +98,7 @@ fourmolu p =
 
 mustache p =
     CabalBuilding.cabalRepoBuild
+        reportPrint
         "mustache"
         (p.bindir "mustache")
         (realNoop)
@@ -105,6 +111,7 @@ mustache p =
 
 duckling p =
     CabalBuilding.cabalRepoBuild
+        reportPrint
         "duckling"
         (p.bindir "duckling")
         (Debian.deb $ Debian.Package "libpcre3-dev")

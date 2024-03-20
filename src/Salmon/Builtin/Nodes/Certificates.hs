@@ -2,10 +2,12 @@ module Salmon.Builtin.Nodes.Certificates where
 
 import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import Data.Text (Text)
@@ -13,6 +15,13 @@ import qualified Data.Text as Text
 
 import System.FilePath ((</>))
 import System.Process.ListLike (CreateProcess, proc)
+
+-------------------------------------------------------------------------------
+data Report
+    = RunOpenSSLCommand !OpenSSLCommand !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 newtype Domain = Domain {getDomain :: Text}
     deriving (Show, Ord, Eq)
@@ -52,9 +61,9 @@ data SelfSigned
     }
     deriving (Show, Ord, Eq)
 
-tlsKey :: Track' (Binary "openssl") -> Key -> Op
-tlsKey bin key =
-    withBinary bin openssl (GenTLSKey key.keyType path) $ \up -> do
+tlsKey :: Reporter Report -> Track' (Binary "openssl") -> Key -> Op
+tlsKey r bin key =
+    withBinary r' bin openssl cmd $ \up -> do
         op "certificate-key" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generate a certificate-key"
@@ -66,6 +75,8 @@ tlsKey bin key =
                 , up = up
                 }
   where
+    cmd = GenTLSKey key.keyType path
+    r' = contramap (RunOpenSSLCommand cmd) r
     path :: FilePath
     path = keyPath key
 
@@ -75,17 +86,21 @@ tlsKey bin key =
 keyPath :: Key -> FilePath
 keyPath key = key.keyDir </> Text.unpack key.keyName
 
-signingRequest :: Track' (Binary "openssl") -> SigningRequest -> Op
-signingRequest bin req =
-    withBinary bin openssl (GenCSR kpath csrpath dom) $ \makeCSR ->
-        withBinary bin openssl (ConvertCSR2DER csrpath derpath) $ \convert ->
-            op "certificate-csr" (deps [enclosingdir, tlsKey bin req.certKey]) $ \actions ->
+signingRequest :: Reporter Report -> Track' (Binary "openssl") -> SigningRequest -> Op
+signingRequest r bin req =
+    withCommand (GenCSR kpath csrpath dom) $ \makeCSR ->
+        withCommand (ConvertCSR2DER csrpath derpath) $ \convert ->
+            op "certificate-csr" (deps [enclosingdir, tlsKey r bin req.certKey]) $ \actions ->
                 actions
                     { help = "generate a certificate signing request"
                     , ref = dotRef $ "openssl:csr:" <> Text.pack csrpath
                     , up = void $ makeCSR >> convert
                     }
   where
+    r' cmd = contramap (RunOpenSSLCommand cmd) r
+    withCommand cmd f =
+        withBinary (r' cmd) bin openssl cmd f
+
     kpath :: FilePath
     kpath = keyPath req.certKey
 
@@ -104,10 +119,10 @@ signingRequest bin req =
     dom :: Domain
     dom = req.certDomain
 
-selfSign :: Track' (Binary "openssl") -> SelfSigned -> Op
-selfSign bin selfsigned =
-    withBinary bin openssl (SignCSR csr key pempath) $ \up ->
-        op "certificate-self-sign" (deps [signingRequest bin selfsigned.selfSignedRequest]) $ \actions ->
+selfSign :: Reporter Report -> Track' (Binary "openssl") -> SelfSigned -> Op
+selfSign r bin selfsigned =
+    withBinary r' bin openssl cmd $ \up ->
+        op "certificate-self-sign" (deps [signingRequest r bin selfsigned.selfSignedRequest]) $ \actions ->
             actions
                 { help = "self sign a certificate"
                 , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath
@@ -115,6 +130,8 @@ selfSign bin selfsigned =
                 , up = up
                 }
   where
+    cmd = SignCSR csr key pempath
+    r' = contramap (RunOpenSSLCommand cmd) r
     key :: FilePath
     key = keyPath selfsigned.selfSignedRequest.certKey
 
@@ -124,13 +141,14 @@ selfSign bin selfsigned =
     pempath :: FilePath
     pempath = selfsigned.selfSignedPEMPath
 
-data OpenSSL
+data OpenSSLCommand
     = GenCSR FilePath FilePath Domain
     | ConvertCSR2DER FilePath FilePath
     | SignCSR FilePath FilePath FilePath
     | GenTLSKey KeyType FilePath
+    deriving (Show)
 
-openssl :: Command "openssl" OpenSSL
+openssl :: Command "openssl" OpenSSLCommand
 openssl = Command $ \cmd ->
     case cmd of
         (GenTLSKey kt filepath) ->

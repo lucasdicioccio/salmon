@@ -29,12 +29,27 @@ import Salmon.Op.G (G (..))
 import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Ref (dotRef)
 import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, opGraph, using, (>*<))
+import Salmon.Reporter
 
 import qualified Salmon.Builtin.Nodes.Git as Git
-import SreBox.CabalBuilding
+import SreBox.CabalBuilding (cabalBinUpload, postgrest)
+import qualified SreBox.CabalBuilding as CabalBuilding
 import SreBox.Environment
 import qualified SreBox.PostgresInit as PGInit
 import qualified SreBox.PostgresMigrations as PGMigrate
+
+-------------------------------------------------------------------------------
+data Report
+    = Build !CabalBuilding.Report
+    | Upload !CabalBuilding.Report
+    | CallSelf !Self.Report
+    | UploadSelf !Self.Report
+    | UploadFile !Rsync.Report
+    | GetSources !Git.Report
+    | InitializeDB !PGInit.Report
+    | Migration !PGMigrate.Report
+    | SetupSystemd !Systemd.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 
@@ -65,6 +80,7 @@ instance ToJSON PostgrestSetup
 
 setupPostgrest ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' Ssh.Remote ->
     Track' directive ->
     Self.Remote ->
@@ -72,8 +88,8 @@ setupPostgrest ::
     (PostgrestSetup -> directive) ->
     PostgrestConfig ->
     Op
-setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
-    using (cabalBinUpload postgrest rsyncRemote) $ \remotepath ->
+setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
+    using (cabalBinUpload (contramap Upload r) (postgrest (contramap Build r)) rsyncRemote) $ \remotepath ->
         let
             setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig remoteConnstring
          in
@@ -94,17 +110,17 @@ setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-        Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
+        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
 
     -- upload self
-    self = Self.uploadSelf "tmp" selfRemote selfpath
+    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
 
     -- upload config file
     remoteConfig = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".config"
     remoteConnstring = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".connstring"
 
     upload gen localpath distpath =
-        Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
+        Rsync.sendFile (contramap UploadFile r) Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadConfig =
         upload makeConfig cfg.postgrest_cfg_configPath remoteConfig
@@ -116,7 +132,7 @@ setupPostgrest mkRemote simulate selfRemote selfpath toSpec cfg =
     uploadConnStringFile =
         upload makeConnstring connstringFilePath remoteConnstring
       where
-        makeConnstring = PGMigrate.pgConnstringFile (cfg.postgrest_cfg_connectionString)
+        makeConnstring = PGMigrate.pgConnstringFile (contramap Migration r) (cfg.postgrest_cfg_connectionString)
 
     connstringFilePath = Text.unpack $ mconcat ["./configs/posgtrest/postgrest-", cfg.postgrest_cfg_serviceName, ".connstring"]
 
@@ -148,9 +164,9 @@ renderConfig cfg remoteConnstringFilePath =
     kv_bool k v = Text.unwords [k, "=", if v then "true" else "false"]
     kv_int k v = Text.unwords [k, "=", Text.pack $ show v]
 
-systemdPostgrest :: PostgrestSetup -> Op
-systemdPostgrest setup =
-    Systemd.systemdService Debian.systemctl trackConfig config
+systemdPostgrest :: Reporter Report -> PostgrestSetup -> Op
+systemdPostgrest r setup =
+    Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
@@ -218,6 +234,7 @@ data PostgrestMigratedApiConfig
 
 postgrestMigratedApi ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' directive ->
     (PGInit.InitSetup FilePath -> directive) ->
     (PGMigrate.RemoteMigrateSetup -> directive) ->
@@ -226,7 +243,7 @@ postgrestMigratedApi ::
     Self.Remote ->
     PostgrestMigratedApiConfig ->
     Op
-postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
+postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
     op "postgrest-api" (deps [prest `inject` migrateDBWithUser1 `inject` initDB]) $ \actions ->
         actions
             { ref = dotRef $ "prest-api" <> cfg.pma_serviceName
@@ -244,10 +261,11 @@ postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
     connstring = cfg.pma_connstring
     g1 = cfg.pma_fallback_role
 
-    cloneSource = Track $ const $ Git.repo Debian.git cfg.pma_repo
+    cloneSource = Track $ const $ Git.repo (contramap GetSources r) Debian.git cfg.pma_repo
 
     initDB =
         PGInit.remoteSetupPG
+            (contramap InitializeDB r)
             simulate
             remoteSelf
             selfpath
@@ -260,6 +278,7 @@ postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
 
     migrateDBWithUser1 =
         PGMigrate.remoteMigrateOpaqueSetup
+            (contramap Migration r)
             simulate
             remoteSelf
             selfpath
@@ -278,6 +297,7 @@ postgrestMigratedApi simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
 
     setupPrest =
         setupPostgrest
+            r
             Ssh.preExistingRemoteMachine
             simulate
             remoteSelf

@@ -47,6 +47,8 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Web as Web
 
+import Salmon.Reporter
+
 filesystemExample hello =
     op "fs-example" (deps [run mkFileContents configObj]) id
   where
@@ -60,7 +62,7 @@ filesystemExample hello =
 bashHelloExample =
     op "bash-hello" (deps [go]) id
   where
-    go = Bash.run Debian.bash script
+    go = Bash.run silent Debian.bash script
     script = FS.Generated mkBashScript "./example-script/hello.sh"
     mkBashScript :: Track' FilePath
     mkBashScript = Track $ \path -> FS.filecontents $ FS.FileContents path body
@@ -70,7 +72,7 @@ bashHelloExample =
 rsyncCopyExample =
     op "rsync-exampe" (deps [uploadExample]) id
   where
-    uploadExample = Rsync.sendFile Debian.rsync payload remote remotedir
+    uploadExample = Rsync.sendFile silent Debian.rsync payload remote remotedir
     payload = FS.Generated mkHelloWorld "./example-rsync/rsync-salmon-demo.txt"
     mkHelloWorld :: Track' FilePath
     mkHelloWorld = Track $ \path -> FS.filecontents $ FS.FileContents path body
@@ -96,9 +98,9 @@ tlsCertsExample =
     openssl = Debian.openssl
     certsinfo =
         deps
-            [ Certs.tlsKey openssl key
-            , Certs.signingRequest openssl csr
-            , Certs.selfSign openssl ssReq
+            [ Certs.tlsKey silent openssl key
+            , Certs.signingRequest silent openssl csr
+            , Certs.selfSign silent openssl ssReq
             ]
 
 jwkKeysExample =
@@ -116,15 +118,15 @@ sshKeysExample =
     ssh = Debian.sshClient
     keys =
         deps
-            [ Keys.signKey ssh caKey (Keys.KeyIdentifier "key0") key0
-            , Keys.signKey ssh caKey (Keys.KeyIdentifier "key1") key1
+            [ Keys.signKey silent ssh caKey (Keys.KeyIdentifier "key0") key0
+            , Keys.signKey silent ssh caKey (Keys.KeyIdentifier "key1") key1
             ]
     caKey = Keys.SSHCertificateAuthority $ Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/ca" "certificate-auth"
     key0 = Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/keys" "node1"
     key1 = Keys.SSHKeyPair Keys.ED25519 "./ssh-keys/keys" "node2"
 
 gitRepoExample =
-    Git.repo git (Git.Repo "./git-repos/" "ks" remote branch)
+    Git.repo silent git (Git.Repo "./git-repos/" "ks" remote branch)
   where
     remote = Git.Remote "git@github.com:kitchensink-tech/kitchensink.git"
     branch = Git.Branch "main"
@@ -145,7 +147,7 @@ acmeExample =
 
     adapt c = (Acme.challengerRequest c, Acme.challengerAccount c)
     f1 :: Track' Certs.SigningRequest
-    f1 = Track $ Certs.signingRequest Debian.openssl
+    f1 = Track $ Certs.signingRequest silent Debian.openssl
     f2 :: Track' Acme.Account
     f2 = Track $ Acme.acmeAccount
 
@@ -200,29 +202,29 @@ remoteDnsSetup trackSelfDirective selfpath =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-        Self.callSelfAsSudo mkRemote selfref trackSelfDirective CLI.Up (RunningLocalDNS setup)
+        Self.callSelfAsSudo silent mkRemote selfref trackSelfDirective CLI.Up (RunningLocalDNS setup)
 
     -- upload self
-    self = Self.uploadSelf "tmp" cheddarSelf selfpath
+    self = Self.uploadSelf silent "tmp" cheddarSelf selfpath
 
     -- upload certificate and key
     remotePem = "tmp/microdns.pem"
     remoteKey = "tmp/microdns.key"
 
     upload gen localpath distpath =
-        Rsync.sendFile Debian.rsync (FS.Generated gen localpath) cheddarRsync distpath
+        Rsync.sendFile silent Debian.rsync (FS.Generated gen localpath) cheddarRsync distpath
 
     uploadCert =
         upload selfSignedCert pemPath remotePem
       where
         selfSignedCert =
-            Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p csr)
+            Track $ \p -> Certs.selfSign silent Debian.openssl (Certs.SelfSigned p csr)
 
     uploadKey =
         upload selfSigningKey keyPath remoteKey
       where
         selfSigningKey =
-            Track $ const $ Certs.tlsKey Debian.openssl key
+            Track $ const $ Certs.tlsKey silent Debian.openssl key
 
     domain = Certs.Domain "cheddar.local"
     key = Certs.Key Certs.RSA4096 "./certs/cheddar.local/microdns/keys" "signing-key.rsa4096.key"
@@ -264,13 +266,13 @@ httpPostExample manager =
 distantCallExample selfpath trackSelfDirective =
     self `bindTracked` recurse
   where
-    self = Self.uploadSelf "tmp" cheddarSelf selfpath
-    recurse s = Self.callSelf s trackSelfDirective CLI.Up directive
+    self = Self.uploadSelf silent "tmp" cheddarSelf selfpath
+    recurse s = Self.callSelf silent s trackSelfDirective CLI.Up directive
     directive = DistantCall "hello world"
 
 systemdMicroDNSExample :: MicroDNSSetup -> Op
 systemdMicroDNSExample arg =
-    Systemd.systemdService Debian.systemctl trackConfig config
+    Systemd.systemdService silent Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
@@ -370,7 +372,7 @@ cabalBinUpload mkbin remote =
   where
     go localpath =
         Tracked (Track $ const $ upload localpath) (remotePath localpath)
-    upload local = Rsync.sendFile Debian.rsync (FS.PreExisting local) remote distpath
+    upload local = Rsync.sendFile silent Debian.rsync (FS.PreExisting local) remote distpath
     distpath = "tmp/"
     remotePath local = distpath </> takeFileName local
 
@@ -397,13 +399,13 @@ cabalRepoBuild dirname target binname remote branch subdir =
     Tracked (Track $ const op) binpath
   where
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
-        Cabal.install cabal [] (Cabal.Cabal repopath target) bindir
+        Cabal.install silent cabal [] (Cabal.Cabal repopath target) bindir
     bindir = "/opt/builds/bin"
     binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname (Git.Remote remote) (Git.Branch branch)
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
-    mkrepo = Track $ Git.repo git
+    mkrepo = Track $ Git.repo silent git
 
 -------------------------------------------------------------------------------
 data MicroDNSSetup

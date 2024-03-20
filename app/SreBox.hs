@@ -72,18 +72,38 @@ import qualified Salmon.Builtin.Nodes.User as User
 import qualified Salmon.Builtin.Nodes.Web as Web
 import qualified Salmon.Builtin.Nodes.WireGuard as Wireguard
 import Salmon.Op.G (G (..))
+import Salmon.Reporter
 
 import qualified SreBox.CabalBuilding as CabalBuilding
-import SreBox.CertSigning
+import SreBox.CertSigning (AcmeConfig (..), acmeSign)
+import qualified SreBox.CertSigning as CertSigning
 import qualified SreBox.DNSRegistration as DNSRegistration
 import SreBox.Environment
 import qualified SreBox.Initialize as Initialize
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
-import SreBox.MicroDNS
+import SreBox.MicroDNS (DNSName, MicroDNSConfig (..), MicroDNSSetup, hmacHeader, makeTlsManagerForSelfSigned, setupDNS)
+import qualified SreBox.MicroDNS as MicroDNS
 import qualified SreBox.PostgresInit as PGInit
 import qualified SreBox.PostgresMigrations as PGMigrate
 import qualified SreBox.Postgrest as Postgrest
+
+-------------------------------------------------------------------------------
+data Report
+    = SreBoxDNS !MicroDNS.Report
+    | SreBoxCerts !CertSigning.Report
+    | SreBoxKS !KSMulti.Report
+    | BuildKS !CabalBuilding.Report
+    | DomainCert !CertSigning.Report
+    | CheddarBoxDNS !MicroDNS.Report
+    | CheddarBoxDNSRegistration !DNSRegistration.Report
+    | CheddarBoxCerts !CertSigning.Report
+    | CheddarBoxKS !KSMulti.Report
+    | LaptopDNSRegistration !DNSRegistration.Report
+    | Pipeskouilloui !Postgrest.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data CertPrefs
     = CertPrefs
@@ -407,9 +427,10 @@ eWebhook =
             ]
         )
 
-pipeskouillouiApi :: Track' Spec -> Self.SelfPath -> Op
-pipeskouillouiApi simulate selfpath =
+pipeskouillouiApi :: Reporter Report -> Track' Spec -> Self.SelfPath -> Op
+pipeskouillouiApi r simulate selfpath =
     Postgrest.postgrestMigratedApi
+        (contramap Pipeskouilloui r)
         simulate
         InitPostgres
         MigratePostgres
@@ -445,44 +466,45 @@ cheddarSelf _ = Self.Remote "salmon" "cheddar.local"
 cheddarRsync :: Environment -> Rsync.Remote
 cheddarRsync _ = Rsync.Remote "salmon" "cheddar.local"
 
-sreBox :: Environment -> Self.SelfPath -> Track' Spec -> Text -> Op
-sreBox env selfpath simulate selfCertDomain =
+sreBox :: Reporter Report -> Environment -> Self.SelfPath -> Track' Spec -> Text -> Op
+sreBox r env selfpath simulate selfCertDomain =
     op "sre-box" (deps (ksmulti : domainCerts)) id
   where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
 
-    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine simulate (boxSelf env) selfpath AuthoritativeDNS
-    mkCert = Track $ acmeSign acme mkDNS
+    mkDNS = Track $ setupDNS (contramap SreBoxDNS r) Ssh.preExistingRemoteMachine simulate (boxSelf env) selfpath AuthoritativeDNS
+    mkCert = Track $ acmeSign (contramap SreBoxCerts r) acme mkDNS
 
     domainCerts :: [Op]
-    domainCerts = [acmeSign acme mkDNS domain | domain <- domains]
+    domainCerts = [acmeSign (contramap DomainCert r) acme mkDNS domain | domain <- domains]
 
     cloneKS :: Tracked' FilePath
-    cloneKS = case env of Production -> CabalBuilding.kitchenSink CabalBuilding.optBuildsBindir; Staging -> CabalBuilding.kitchenSink_dev
+    cloneKS = case env of Production -> CabalBuilding.kitchenSink (contramap BuildKS r) CabalBuilding.optBuildsBindir; Staging -> CabalBuilding.kitchenSink_dev (contramap BuildKS r)
 
     ksmulti :: Op
-    ksmulti = KSMulti.setupKS Ssh.preExistingRemoteMachine mkCert cloneKS simulate (boxSelf env) selfpath ksMultiConfig KitchenSinkService
+    ksmulti = KSMulti.setupKS (contramap SreBoxKS r) Ssh.preExistingRemoteMachine mkCert cloneKS simulate (boxSelf env) selfpath ksMultiConfig KitchenSinkService
 
     ksMultiConfig :: KSMulti.KitchenSinkConfig
     ksMultiConfig = KSMulti.KitchenSinkConfig (Just dicioccioDotFr) [dicioccioDotFr, kitchenSinkBlog]
 
-cheddarBox :: Environment -> Self.SelfPath -> Track' Spec -> Text -> Op
-cheddarBox env selfpath simulate selfCertDomain =
-    op "cheddar-box" (deps [ksmulti, registrations, pipeskouillouiApi simulate selfpath]) id
+cheddarBox :: Reporter Report -> Environment -> Self.SelfPath -> Track' Spec -> Text -> Op
+cheddarBox r env selfpath simulate selfCertDomain =
+    op "cheddar-box" (deps [ksmulti, registrations, pipeskouillouiApi r simulate selfpath]) id
   where
     dns = dnsConfig selfCertDomain
     acme = acmeConfig dns env
 
-    mkDNS = Track $ setupDNS Ssh.preExistingRemoteMachine simulate (boxSelf env) selfpath AuthoritativeDNS
-    mkCert = Track $ acmeSign acme mkDNS
+    mkDNS = Track $ setupDNS (contramap CheddarBoxDNS r) Ssh.preExistingRemoteMachine simulate (boxSelf env) selfpath AuthoritativeDNS
+    mkCert = Track $ acmeSign (contramap CheddarBoxCerts r) acme mkDNS
 
     cloneKS :: Tracked' FilePath
-    cloneKS = case env of Production -> CabalBuilding.kitchenSink CabalBuilding.optBuildsBindir; Staging -> CabalBuilding.kitchenSink_dev
+    cloneKS = case env of Production -> CabalBuilding.kitchenSink (contramap BuildKS r) CabalBuilding.optBuildsBindir; Staging -> CabalBuilding.kitchenSink_dev (contramap BuildKS r)
 
     ksmulti :: Op
     ksmulti =
         KSMulti.setupKS
+            (contramap CheddarBoxKS r)
             Ssh.preExistingRemoteMachine
             mkCert
             cloneKS
@@ -521,6 +543,7 @@ cheddarBox env selfpath simulate selfCertDomain =
     registration :: DNSName -> Op
     registration machineName =
         DNSRegistration.setupRegistration
+            (contramap CheddarBoxDNSRegistration r)
             Ssh.preExistingRemoteMachine
             simulate
             selfpath
@@ -530,8 +553,8 @@ cheddarBox env selfpath simulate selfCertDomain =
             RegisterMachine
 
 -------------------------------------------------------------------------------
-laptop :: Track' Spec -> Self.SelfPath -> Op
-laptop simulate selfpath =
+laptop :: Reporter Report -> Track' Spec -> Self.SelfPath -> Op
+laptop r simulate selfpath =
     op "laptop" (deps packages) id
   where
     packages = fmap (Debian.deb . Debian.Package) ["tmux", "git", "curl", "watch", "tree", "jq", "vim"]
@@ -542,6 +565,7 @@ laptop simulate selfpath =
     env = Production
     registration =
         DNSRegistration.setupRegistration
+            (contramap LaptopDNSRegistration r)
             Ssh.preExistingRemoteMachine
             simulate
             selfpath
@@ -566,6 +590,7 @@ localDev simulate selfpath = op "local-dev" (deps [deboostrap]) id
     deboostrap :: Op
     deboostrap =
         Debootstrap.rootTree
+            reportPrint
             Debian.debootstrap
             ( Debootstrap.RootTree
                 Debootstrap.Stable
@@ -573,6 +598,7 @@ localDev simulate selfpath = op "local-dev" (deps [deboostrap]) id
                 []
             )
 
+{-
 wgStuff :: Track' Spec -> Self.SelfPath -> Op
 wgStuff simulate selfpath = op "wg-stuff" (deps []) id
   where
@@ -611,6 +637,7 @@ wgStuff simulate selfpath = op "wg-stuff" (deps []) id
             Debian.nft
             chain
             (Netfilter.RawRule ["tcp", "dport", "{22}", "ct", "state", "new,established", "counter", "accept"])
+-}
 
 -------------------------------------------------------------------------------
 data MachineSpec
@@ -667,20 +694,21 @@ program selfpath httpManager =
     -- meta
     specOp k (Batch xs) = concatMap (specOp k) xs
     -- machine
-    specOp k (Initialize) = [Initialize.initialize]
-    specOp k (Machine Box domainName) = [sreBox Production selfpath (go k) domainName]
-    specOp k (Machine Cheddar domainName) = [cheddarBox Production selfpath (go k) domainName]
-    specOp k (Machine Laptop domainName) = [laptop (go k) selfpath]
+    specOp k (Initialize) = [Initialize.initialize reportPrint]
+    specOp k (Machine Box domainName) = [sreBox reportPrint Production selfpath (go k) domainName]
+    specOp k (Machine Cheddar domainName) = [cheddarBox reportPrint Production selfpath (go k) domainName]
+    specOp k (Machine Laptop domainName) = [laptop reportPrint (go k) selfpath]
     -- actions
-    specOp k (InitPostgres arg) = [PGInit.setupPG $ PGInit.setupWithPreExistingPasswords arg]
-    specOp k (MigratePostgres arg) = [PGMigrate.applyMigration Debian.psql (Track PGInit.setupSingleUserPG) arg]
+    specOp k (InitPostgres arg) = [PGInit.setupPG reportPrint $ PGInit.setupWithPreExistingPasswords arg]
+    specOp k (MigratePostgres arg) = [PGMigrate.applyMigration reportPrint Debian.psql mkPgInit arg]
     -- services
     specOp k (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
-    specOp k (AuthoritativeDNS arg) = [systemdMicroDNS arg]
-    specOp k (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog arg]
-    specOp k (KitchenSinkService arg) = [KSMulti.systemdKitchenSink arg]
-    specOp k (PostgrestService arg) = [Postgrest.systemdPostgrest arg]
+    specOp k (AuthoritativeDNS arg) = [MicroDNS.systemdMicroDNS reportPrint arg]
+    specOp k (SingleKintchensinkBlog arg) = [KSBlog.systemdKitchenSinkBlog reportPrint arg]
+    specOp k (KitchenSinkService arg) = [KSMulti.systemdKitchenSink reportPrint arg]
+    specOp k (PostgrestService arg) = [Postgrest.systemdPostgrest reportPrint arg]
 
+    mkPgInit = Track (PGInit.setupSingleUserPG reportPrint)
     optimizedDeps :: Op -> Op
     optimizedDeps base =
         let pkgs = Debian.installAllDebsAtOnce base

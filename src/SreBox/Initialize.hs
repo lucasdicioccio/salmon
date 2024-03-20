@@ -9,9 +9,10 @@ import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.User as User
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
+import Salmon.Reporter
 
-initialize :: Op
-initialize =
+initialize :: Reporter User.Report -> Op
+initialize r =
     op "initialize" (deps [sudoerfile, tmpdir `inject` sudoUser]) id
   where
     sudoerfile :: Op
@@ -31,10 +32,10 @@ initialize =
             ]
 
     sudoUser :: Op
-    sudoUser = User.user Debian.useradd mkGroup (User.NewUser user [sudo])
+    sudoUser = User.user r Debian.useradd mkGroup (User.NewUser user [sudo])
 
     mkGroup :: Track' User.Group
-    mkGroup = Track $ \grp -> User.group Debian.groupadd grp
+    mkGroup = Track $ \grp -> User.group r Debian.groupadd grp
 
     user :: User.User
     user = User.User "salmon"

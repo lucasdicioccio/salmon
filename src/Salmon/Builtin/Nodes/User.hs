@@ -1,10 +1,12 @@
 module Salmon.Builtin.Nodes.User where
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import Data.Text (Text)
@@ -15,21 +17,31 @@ import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
 
 -------------------------------------------------------------------------------
+data Report
+    = RunGroupAdd !GroupAddCommand !Binary.Report
+    | RunUserAdd !UserAddCommand !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 newtype Group = Group {groupName :: Text}
 
-group :: Track' (Binary "groupadd") -> Group -> Op
-group groupadd grp =
-    withBinary groupadd runGroupAdd (AddGroup grp.groupName) $ \add ->
+group :: Reporter Report -> Track' (Binary "groupadd") -> Group -> Op
+group r groupadd grp =
+    withBinary r' groupadd runGroupAdd cmd $ \add ->
         op "group" nodeps $ \actions ->
             actions
                 { help = "creates a system group"
                 , ref = dotRef $ "group:" <> groupName grp
                 , up = add
                 }
+  where
+    cmd = AddGroup grp.groupName
+    r' = contramap (RunGroupAdd cmd) r
 
 data GroupAddCommand
     = AddGroup Text
+    deriving (Show)
 
 runGroupAdd :: Command "groupadd" GroupAddCommand
 runGroupAdd = Command go
@@ -46,9 +58,9 @@ newtype User = User {userName :: Text}
 
 data NewUser = NewUser {newUser :: User, groups :: [Group]}
 
-user :: Track' (Binary "useradd") -> Track' Group -> NewUser -> Op
-user useradd grp nu =
-    withBinary useradd runUserAdd (AddUser nu.newUser.userName (fmap groupName nu.groups)) $ \add ->
+user :: Reporter Report -> Track' (Binary "useradd") -> Track' Group -> NewUser -> Op
+user r useradd grp nu =
+    withBinary r' useradd runUserAdd cmd $ \add ->
         op "user" (deps userGroups) $ \actions ->
             actions
                 { help = "creates a system user"
@@ -56,6 +68,9 @@ user useradd grp nu =
                 , up = add
                 }
   where
+    cmd = AddUser nu.newUser.userName (fmap groupName nu.groups)
+    r' = contramap (RunUserAdd cmd) r
+
     userGroups :: [Op]
     userGroups = groupForUser : fmap (run grp) (groups nu)
 
@@ -64,6 +79,7 @@ user useradd grp nu =
 
 data UserAddCommand
     = AddUser Text [Text]
+    deriving (Show)
 
 runUserAdd :: Command "useradd" UserAddCommand
 runUserAdd = Command go

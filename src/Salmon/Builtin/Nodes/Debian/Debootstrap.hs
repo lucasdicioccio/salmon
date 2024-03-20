@@ -2,10 +2,12 @@ module Salmon.Builtin.Nodes.Debian.Debootstrap where
 
 import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import Data.Text (Text)
@@ -17,6 +19,12 @@ import System.Process.ListLike (CreateProcess (..), proc)
 
 import Salmon.Builtin.Nodes.Debian.Package (Package (..))
 
+-------------------------------------------------------------------------------
+data Report
+    = RunDebootstrap !DebootstrapCommand !Binary.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 data Suite
     = Stable
     | OldStable
@@ -36,11 +44,12 @@ data RootTree
     deriving (Show)
 
 rootTree ::
+    Reporter Report ->
     Track' (Binary "debootstrap") ->
     RootTree ->
     Op
-rootTree boot root =
-    withBinary boot debootstrapCommand (MakeRoot root.includes root.suite root.path) $ \up ->
+rootTree r boot root =
+    withBinary r' boot debootstrapCommand cmd $ \up ->
         op "debootstrap" (deps [rootdir]) $ \actions ->
             actions
                 { help = Text.unwords ["debootstraps", Text.pack (show root.suite), "at", Text.pack root.path]
@@ -49,6 +58,8 @@ rootTree boot root =
                 , up = up
                 }
   where
+    r' = contramap (RunDebootstrap cmd) r
+    cmd = MakeRoot root.includes root.suite root.path
     rootdir :: Op
     rootdir = dir (Directory root.path)
     etcIssues :: FilePath
@@ -56,6 +67,7 @@ rootTree boot root =
 
 data DebootstrapCommand
     = MakeRoot Includes Suite FilePath
+    deriving (Show)
 
 debootstrapCommand :: Command "debootstrap" DebootstrapCommand
 debootstrapCommand = Command $ \cmd -> case cmd of

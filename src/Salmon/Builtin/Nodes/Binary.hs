@@ -8,12 +8,14 @@ module Salmon.Builtin.Nodes.Binary (
     CommandIO (..),
     withBinaryIO,
     untrackedExecIO,
+    Report (..),
 ) where
 
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.OpGraph
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import Control.Monad (void)
 import Data.ByteString (ByteString)
@@ -26,6 +28,15 @@ import GHC.IO.Handle (Handle)
 import System.Process (ProcessHandle, createProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
+
+-------------------------------------------------------------------------------
+
+data Report
+    = CommandStart !CreateProcess
+    | CommandStopped !CreateProcess !ExitCode !ByteString !ByteString
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 {- | A proxy type to pass binaries around.
 
@@ -45,19 +56,22 @@ data Command (wellKnownName :: Symbol) arg
 {- | Captures the property that, to use a binary one needs to inherit the
 dependencies from the binary provider.
 -}
-withBinary :: Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
-withBinary t cmd arg consumeIO =
-    let mk a = (untrackedExec cmd a "", Binary)
+withBinary :: Reporter Report -> Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
+withBinary r t cmd arg consumeIO =
+    let mk a = (untrackedExec r cmd a "", Binary)
      in tracking t mk arg consumeIO
 
-withBinaryStdin :: Track' (Binary x) -> Command x arg -> arg -> ByteString -> (IO () -> Op) -> Op
-withBinaryStdin t cmd arg stdin consumeIO =
-    let mk a = (untrackedExec cmd a stdin, Binary)
+withBinaryStdin :: Reporter Report -> Track' (Binary x) -> Command x arg -> arg -> ByteString -> (IO () -> Op) -> Op
+withBinaryStdin r t cmd arg stdin consumeIO =
+    let mk a = (untrackedExec r cmd a stdin, Binary)
      in tracking t mk arg consumeIO
 
-untrackedExec :: Command x a -> a -> ByteString -> IO ()
-untrackedExec binary arg dat =
-    void $ readCreateProcessWithExitCode (prepare binary arg) dat
+untrackedExec :: Reporter Report -> Command x a -> a -> ByteString -> IO ()
+untrackedExec r binary arg dat = do
+    let p = prepare binary arg
+    runReporter r (CommandStart p)
+    (code, out, err) <- readCreateProcessWithExitCode p dat
+    runReporter r (CommandStopped p code out err)
 
 type RunningCommand = (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
 

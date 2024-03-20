@@ -28,12 +28,29 @@ import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
 import Salmon.Op.Track
+import Salmon.Reporter
 
-import SreBox.CabalBuilding
+import SreBox.CabalBuilding (cabalBinUpload)
+import qualified SreBox.CabalBuilding as CabalBuilding
 
 import KitchenSink.Engine.Config
 import KitchenSink.Engine.MultiSiteConfig
 import KitchenSink.Engine.SiteConfig
+
+-------------------------------------------------------------------------------
+data Report
+    = Build !CabalBuilding.Report
+    | UploadSelf !Self.Report
+    | CallSelf !Self.Report
+    | MakeRemoteDir !Ssh.Report
+    | UploadCert !Rsync.Report
+    | CloneSources !Git.Report
+    | UploadSources !Rsync.Report
+    | SetupSystemd !Systemd.Report
+    | PrepareLastResortCert !Certs.Report
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data KitchenSinkConfig
     = KitchenSinkConfig
@@ -183,6 +200,7 @@ ks_setup_stanzas c = toList c.ks_setup_fallback_stanza <> c.ks_setup_services_st
 
 setupKS ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' Ssh.Remote ->
     Track' (Certs.Domain, Text) ->
     Tracked' FilePath ->
@@ -192,8 +210,8 @@ setupKS ::
     KitchenSinkConfig ->
     (KitchenSinkSetup -> directive) ->
     Op
-setupKS mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toSpec =
-    using (cabalBinUpload cloneKitchenSink rsyncRemote) $ \remotepath ->
+setupKS r mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toSpec =
+    using (cabalBinUpload (contramap Build r) cloneKitchenSink rsyncRemote) $ \remotepath ->
         let
             setup = KitchenSinkSetup remotepath uploadRoot fallback services
          in
@@ -208,53 +226,55 @@ setupKS mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toSpe
     -- upload sites
     uploads = op "uploads-ks" (deps stanzaUploads) id
     stanzaUploads = srcUploads <> certUploads
-    srcUploads = stanzaUploadSources rsyncRemote <$> ks_cfg_site_stanzas cfg
-    certUploads = stanzaUploadCerts mkCerts rsyncRemote <$> ks_cfg_stanzas cfg
+    srcUploads = stanzaUploadSources r rsyncRemote <$> ks_cfg_site_stanzas cfg
+    certUploads = stanzaUploadCerts r mkCerts rsyncRemote <$> ks_cfg_stanzas cfg
     -- upload self
-    self = Self.uploadSelf "tmp" selfRemote selfpath
+    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
     -- recursive call
     continueRemotely setup = self `bindTracked` recurse setup
     recurse setup selfref =
-        Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
+        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
 
 stanzaUploadCerts ::
+    Reporter Report ->
     Track' (Certs.Domain, Text) ->
     Rsync.Remote ->
     StanzaConfig ->
     Op
-stanzaUploadCerts mkCerts rsyncRemote cfg =
+stanzaUploadCerts r mkCerts rsyncRemote cfg =
     op "uploads-ks-stanza-certs" (deps [uploadCert, uploadKey]) setRef `inject` mkRemoteDir
   where
     setup = configToSetup cfg
     setRef actions = actions{ref = dotRef $ "uploads-ks-stanza" <> setup.stanza_setup_domain}
     sshRemote = (\(Rsync.Remote a b) -> Ssh.Remote a b) rsyncRemote
-    mkRemoteDir = Ssh.call Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
+    mkRemoteDir = Ssh.call (contramap MakeRemoteDir r) Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
 
     -- upload certificate and key
     upload gen localpath distpath =
-        Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
+        Rsync.sendFile (contramap UploadCert r) Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadCert = upload siteCert (viewPemPath cfg) setup.stanza_setup_pemPath
     uploadKey = upload siteCert (viewKeyPath cfg) setup.stanza_setup_keyPath
     siteCert = Track $ const $ run mkCerts (viewCertSpec cfg)
 
 stanzaUploadSources ::
+    Reporter Report ->
     Rsync.Remote ->
     GitSiteStanzaConfig ->
     Op
-stanzaUploadSources rsyncRemote cfg =
+stanzaUploadSources r rsyncRemote cfg =
     using (Git.repodir cloneSite cfg.stanza_cfg_repo "") $ \repoDir ->
         op "uploads-ks-stanza-src" (deps [uploadSources repoDir]) setRef `inject` mkRemoteDir
   where
     (setup, site) = gitConfigToSetup cfg
     setRef actions = actions{ref = dotRef $ "uploads-ks-stanza" <> setup.stanza_setup_domain}
     sshRemote = (\(Rsync.Remote a b) -> Ssh.Remote a b) rsyncRemote
-    mkRemoteDir = Ssh.call Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
+    mkRemoteDir = Ssh.call (contramap MakeRemoteDir r) Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
 
-    cloneSite = Track $ Git.repo Debian.git
+    cloneSite = Track $ Git.repo (contramap CloneSources r) Debian.git
     -- upload sources
     uploadSources repoDir =
-        Rsync.sendDir Debian.rsync ignoreTrack (FS.Directory (FS.directoryPath repoDir <> "/")) rsyncRemote site.site_setup_sourceDir
+        Rsync.sendDir (contramap UploadSources r) Debian.rsync ignoreTrack (FS.Directory (FS.directoryPath repoDir <> "/")) rsyncRemote site.site_setup_sourceDir
 
 ksRunDir :: FilePath
 ksRunDir = "/opt/rundir/ks-multisite"
@@ -284,9 +304,9 @@ siteSrcPath, siteDhallRoot :: StanzaSetup -> SiteSetup -> FilePath
 siteSrcPath ss site = siteSrcDir ss </> site.site_setup_subdir
 siteDhallRoot ss site = siteSrcDir ss </> site.site_setup_dhall_subdir
 
-systemdKitchenSink :: KitchenSinkSetup -> Op
-systemdKitchenSink setup =
-    Systemd.systemdService Debian.systemctl trackConfig systemdConfig
+systemdKitchenSink :: Reporter Report -> KitchenSinkSetup -> Op
+systemdKitchenSink r setup =
+    Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig systemdConfig
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
@@ -324,7 +344,7 @@ systemdKitchenSink setup =
     lastResortCert =
         case setup.ks_setup_fallback_stanza of
             Just _ -> realNoop
-            Nothing -> Certs.selfSign Debian.openssl (Certs.SelfSigned lastResortPemPath (Certs.SigningRequest (Certs.Domain "kitchen-sink.local") lastResortKey "tmp/ks-multisites-self-cert/csr" "cert.csr"))
+            Nothing -> Certs.selfSign (contramap PrepareLastResortCert r) Debian.openssl (Certs.SelfSigned lastResortPemPath (Certs.SigningRequest (Certs.Domain "kitchen-sink.local") lastResortKey "tmp/ks-multisites-self-cert/csr" "cert.csr"))
 
     sysDeps :: Op
     sysDeps =

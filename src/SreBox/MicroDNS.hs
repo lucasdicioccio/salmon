@@ -37,9 +37,23 @@ import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
 import Salmon.Op.Track (Track (..), bindTracked, opGraph, using, (>*<))
+import Salmon.Reporter
 
-import SreBox.CabalBuilding
+import SreBox.CabalBuilding (cabalBinUpload, microDNS, optBuildsBindir)
+import qualified SreBox.CabalBuilding as CabalBuilding
 import SreBox.Environment
+
+-------------------------------------------------------------------------------
+data Report
+    = Build !CabalBuilding.Report
+    | Upload !CabalBuilding.Report
+    | CallSelf !Self.Report
+    | UploadSelf !Self.Report
+    | UploadFile !Rsync.Report
+    | GenSecret !Secrets.Report
+    | SetupSystemd !Systemd.Report
+    | SelfSign !Certs.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 
@@ -75,6 +89,7 @@ instance ToJSON MicroDNSSetup
 
 setupDNS ::
     (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
     Track' Ssh.Remote ->
     Track' directive ->
     Self.Remote ->
@@ -82,8 +97,8 @@ setupDNS ::
     (MicroDNSSetup -> directive) ->
     MicroDNSConfig ->
     Op
-setupDNS mkRemote simulate selfRemote selfpath toSpec cfg =
-    using (cabalBinUpload (microDNS optBuildsBindir) rsyncRemote) $ \remotepath ->
+setupDNS r mkRemote simulate selfRemote selfpath toSpec cfg =
+    using (cabalBinUpload (contramap Upload r) (microDNS (contramap Build r) optBuildsBindir) rsyncRemote) $ \remotepath ->
         let
             setup = MicroDNSSetup remotepath cfg.microdns_cfg_apex cfg.microdns_cfg_portnum remotePem remoteKey remoteSecret cfg.microdns_cfg_zonefileContents
          in
@@ -98,10 +113,10 @@ setupDNS mkRemote simulate selfRemote selfpath toSpec cfg =
     continueRemotely setup = self `bindTracked` recurse setup
 
     recurse setup selfref =
-        Self.callSelfAsSudo mkRemote selfref simulate CLI.Up (toSpec setup)
+        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
 
     -- upload self
-    self = Self.uploadSelf "tmp" selfRemote selfpath
+    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
 
     -- upload certificate and key
     remotePem = "tmp/microdns.pem"
@@ -109,33 +124,34 @@ setupDNS mkRemote simulate selfRemote selfpath toSpec cfg =
     remoteSecret = "tmp/microdns.shared-secret"
 
     upload gen localpath distpath =
-        Rsync.sendFile Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
+        Rsync.sendFile (contramap UploadFile r) Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
 
     uploadCert =
-        upload (selfSignedCert cfg) cfg.microdns_cfg_pemPath remotePem
+        upload (selfSignedCert r cfg) cfg.microdns_cfg_pemPath remotePem
 
     uploadKey =
-        upload (selfSigningKey cfg) (Certs.keyPath cfg.microdns_cfg_key) remoteKey
+        upload (selfSigningKey r cfg) (Certs.keyPath cfg.microdns_cfg_key) remoteKey
 
     uploadSecret =
         upload sharedSecret cfg.microdns_cfg_secretPath remoteSecret
       where
         sharedSecret =
-            Track $ dnsSecretFile
+            Track $ dnsSecretFile r
 
 dnsZoneFile :: FilePath -> Text -> Op
 dnsZoneFile path contents =
     FS.filecontents (FS.FileContents path contents)
 
-dnsSecretFile :: FilePath -> Op
-dnsSecretFile path =
+dnsSecretFile :: Reporter Report -> FilePath -> Op
+dnsSecretFile r path =
     Secrets.sharedSecretFile
+        (contramap GenSecret r)
         Debian.openssl
         (Secrets.Secret Secrets.Base64 16 path)
 
-systemdMicroDNS :: MicroDNSSetup -> Op
-systemdMicroDNS arg =
-    Systemd.systemdService Debian.systemctl trackConfig config
+systemdMicroDNS :: Reporter Report -> MicroDNSSetup -> Op
+systemdMicroDNS r arg =
+    Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
@@ -231,8 +247,8 @@ makeTlsManagerForSelfSigned hostname dir = do
     relaxedChecks :: Crypton.ValidationChecks
     relaxedChecks = Crypton.defaultChecks{checkLeafV3 = False}
 
-sharedToken :: FilePath -> Text -> FilePath -> Op
-sharedToken secret_path hashedpart token_path =
+sharedToken :: Reporter Report -> FilePath -> Text -> FilePath -> Op
+sharedToken r secret_path hashedpart token_path =
     op "microdns-token" (deps [prepareSecret, enclosingdir]) $ \actions ->
         actions
             { help = "store token built from " <> Text.pack secret_path <> " at " <> Text.pack token_path
@@ -245,7 +261,7 @@ sharedToken secret_path hashedpart token_path =
     enclosingdir :: Op
     enclosingdir = FS.dir (FS.Directory $ takeDirectory token_path)
     prepareSecret :: Op
-    prepareSecret = dnsSecretFile secret_path
+    prepareSecret = dnsSecretFile r secret_path
 
 hmacHashedPart :: ByteString -> Text -> ByteString
 hmacHashedPart sharedsecret txtrecord =
@@ -254,10 +270,10 @@ hmacHashedPart sharedsecret txtrecord =
 hmacHeader :: ByteString -> Text -> (CI ByteString, ByteString)
 hmacHeader s t = ("x-microdns-hmac", hmacHashedPart s t)
 
-selfSignedCert :: MicroDNSConfig -> Track' FilePath
-selfSignedCert cfg =
-    Track $ \p -> Certs.selfSign Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
+selfSignedCert :: Reporter Report -> MicroDNSConfig -> Track' FilePath
+selfSignedCert r cfg =
+    Track $ \p -> Certs.selfSign (contramap SelfSign r) Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
 
-selfSigningKey :: MicroDNSConfig -> Track' FilePath
-selfSigningKey cfg =
-    Track $ const $ Certs.tlsKey Debian.openssl cfg.microdns_cfg_key
+selfSigningKey :: Reporter Report -> MicroDNSConfig -> Track' FilePath
+selfSigningKey r cfg =
+    Track $ const $ Certs.tlsKey (contramap SelfSign r) Debian.openssl cfg.microdns_cfg_key

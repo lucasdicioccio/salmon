@@ -1,10 +1,12 @@
 module Salmon.Builtin.Nodes.Netfilter where
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Ref
 import Salmon.Op.Track
+import Salmon.Reporter
 
 import System.IO (IOMode (ReadMode, WriteMode), withFile)
 
@@ -19,6 +21,10 @@ import System.FilePath (takeDirectory, (</>))
 import System.Process (StdStream (UseHandle), waitForProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
+
+-------------------------------------------------------------------------------
+data Report
+    = RunNftCommand !NftCommand !Binary.Report
 
 -------------------------------------------------------------------------------
 
@@ -50,9 +56,9 @@ data NftCommand
     | AddChain Chain
     | AddRule Chain Rule
 
-table :: Track' (Binary "nft") -> Table -> Op
-table nft t =
-    withBinary nft nftcommand cmd $ \add ->
+table :: Reporter Report -> Track' (Binary "nft") -> Table -> Op
+table r nft t =
+    withBinary r' nft nftcommand cmd $ \add ->
         op "nft-table" nodeps $ \actions ->
             actions
                 { help = "creates an Netfilter table"
@@ -61,12 +67,13 @@ table nft t =
                 , dynamics = [toDyn cmd]
                 }
   where
+    r' = contramap (RunNftCommand cmd) r
     cmd = AddTable t
 
-chain :: Track' (Binary "nft") -> Chain -> Op
-chain nft c =
-    withBinary nft nftcommand cmd $ \add ->
-        op "nft-chain" (deps [table nft c.chainTable]) $ \actions ->
+chain :: Reporter Report -> Track' (Binary "nft") -> Chain -> Op
+chain r nft c =
+    withBinary r' nft nftcommand cmd $ \add ->
+        op "nft-chain" (deps [table r nft c.chainTable]) $ \actions ->
             actions
                 { help = "creates an Netfilter chain"
                 , ref = dotRef $ "nft-chain:" <> c.chainTable.tableName <> c.chainName
@@ -74,20 +81,22 @@ chain nft c =
                 , dynamics = [toDyn cmd]
                 }
   where
+    r' = contramap (RunNftCommand cmd) r
     cmd = AddChain c
 
-rule :: Track' (Binary "nft") -> Chain -> Rule -> Op
-rule nft c r =
-    withBinary nft nftcommand cmd $ \add ->
-        op "nft-rule" (deps [chain nft c]) $ \actions ->
+rule :: Reporter Report -> Track' (Binary "nft") -> Chain -> Rule -> Op
+rule r nft c nftrule =
+    withBinary r' nft nftcommand cmd $ \add ->
+        op "nft-rule" (deps [chain r nft c]) $ \actions ->
             actions
                 { help = "creates an Netfilter rule"
-                , ref = dotRef $ "nft-rule:" <> c.chainTable.tableName <> c.chainName <> textual r
+                , ref = dotRef $ "nft-rule:" <> c.chainTable.tableName <> c.chainName <> textual nftrule
                 , up = add
                 , dynamics = [toDyn cmd]
                 }
   where
-    cmd = AddRule c r
+    r' = contramap (RunNftCommand cmd) r
+    cmd = AddRule c nftrule
     textual :: Rule -> Text
     textual (RawRule txts) = Text.unwords txts
 
