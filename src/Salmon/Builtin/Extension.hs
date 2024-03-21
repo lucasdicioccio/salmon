@@ -10,6 +10,7 @@ import Data.Dynamic (Dynamic, Typeable, fromDynamic, toDyn)
 import Data.Foldable (toList)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 import Salmon.Actions.Dot (PlaceHolder (..))
 import Salmon.Actions.UpDown (Requirement (..))
@@ -42,6 +43,15 @@ data Extension = Extension
     , notify :: IO ()
     , dynamics :: [Dynamic]
     }
+
+instance Show Extension where
+    show ext =
+        Text.unpack $
+            Text.unwords
+                [ "["
+                , ext.help
+                , "]"
+                ]
 
 instance Semigroup Extension where
     a <> b =

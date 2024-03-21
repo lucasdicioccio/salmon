@@ -47,6 +47,7 @@ data Report
     | UploadSelf !Self.Report
     | CallSelf !Self.Report
     | CreatePassword !Secrets.Report
+    | Continuation !(UpDown.Report Extension)
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -233,7 +234,7 @@ remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
                         migrations <- ioMigrations
                         let uploads = collapse "." uploadmigrationFile (getCofreeGraph migrations)
                         let apply = remoteApply migrations
-                        UpDown.upTree (pure . runIdentity) (apply `inject` uploads)
+                        UpDown.upTree (contramap Continuation r) (pure . runIdentity) (apply `inject` uploads)
                     , dynamics = [toDyn $ Dot.OpaqueNode "migration"]
                     }
 

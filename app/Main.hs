@@ -483,4 +483,4 @@ main = do
     cmd <- execParser opts
     manager <- newManager defaultManagerSettings
     selfpath <- Self.readSelfPath_linux
-    CLI.execCommandOrSeed configure (program selfpath manager) cmd
+    CLI.execCommandOrSeed reportPrint configure (program selfpath manager) cmd

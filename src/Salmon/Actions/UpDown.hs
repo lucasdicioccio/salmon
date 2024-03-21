@@ -17,6 +17,16 @@ import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
+import Salmon.Reporter
+
+-------------------------------------------------------------------------------
+data Report ext
+    = Redundant !(Act ext)
+    | Skip !(Act ext)
+    | Eval !(Act ext)
+    deriving (Show)
+
+-------------------------------------------------------------------------------
 
 data Requirement
     = Required
@@ -41,39 +51,40 @@ upTree ::
     , HasField "prelim" ext (IO Requirement)
     , HasField "ref" ext Ref
     ) =>
+    Reporter (Report ext) ->
     (forall a. m a -> IO a) ->
     OpGraph m (Actions ext) ->
     IO ()
-upTree nat graph = do
+upTree r nat graph = do
     s <- newIORef (Set.empty)
     runC s =<< nat (expand graph)
   where
     runC :: IORef (Set Ref) -> Cofree Graph (OpGraph m (Actions ext)) -> IO ()
-    runC s (x :< Vertices gs) = traverse_ (runC s) gs >> upnode s x.node
-    runC s (x :< Overlay g1 g2) = runG s g1 >> runG s g2 >> upnode s x.node
-    runC s (x :< Connect g1 g2) = runG s g1 >> runG s g2 >> upnode s x.node
+    runC s (x :< Vertices gs) = traverse_ (runC s) gs >> upnode s x
+    runC s (x :< Overlay g1 g2) = runG s g1 >> runG s g2 >> upnode s x
+    runC s (x :< Connect g1 g2) = runG s g1 >> runG s g2 >> upnode s x
 
     runG :: IORef (Set Ref) -> Graph (Cofree Graph (OpGraph m (Actions ext))) -> IO ()
     runG s (Vertices gs) = traverse_ (runC s) gs
     runG s (Overlay g1 g2) = traverse_ (runC s) g1 >> traverse_ (runC s) g2
     runG s (Connect g1 g2) = traverse_ (runC s) g1 >> traverse_ (runC s) g2
 
-    upnode :: IORef (Set Ref) -> Actions ext -> IO ()
+    upnode :: IORef (Set Ref) -> (OpGraph m (Actions ext)) -> IO ()
     upnode s x =
-        case x of
+        case x.node of
             Actionless -> pure ()
             (Actions act) -> do
-                got <- atomicModifyIORef' s (\set -> let r = act.extension.ref in (Set.insert r set, Set.member r set))
+                got <- atomicModifyIORef' s (\set -> let aref = act.extension.ref in (Set.insert aref set, Set.member aref set))
                 if got
                     then do
-                        print ("redundant", act.shorthand)
+                        runReporter r (Redundant act)
                     else do
                         st <- act.extension.prelim
                         case st of
                             Skippable -> do
-                                print ("skip", act.shorthand)
+                                runReporter r (Skip act)
                             Required -> do
-                                print ("do", act.shorthand)
+                                runReporter r (Eval act)
                                 act.extension.up
 
 downTree ::

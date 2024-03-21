@@ -19,8 +19,8 @@ import Salmon.Actions.Check as Check
 import Salmon.Actions.Dot as Dot
 import Salmon.Actions.Help as Help
 import Salmon.Actions.UpDown as UpDown
-
 import Salmon.Builtin.Extension
+import Salmon.Reporter
 
 data Command seed
     = Config seed
@@ -29,7 +29,6 @@ data Command seed
 
 data BaseCommand
     = Up
-    | Down
     | Tree
     | DAG
     deriving (Eq, Ord, Generic, Show, Read)
@@ -37,7 +36,6 @@ data BaseCommand
 argForBaseCommand :: BaseCommand -> Text
 argForBaseCommand = \case
     Up -> "up"
-    Down -> "down"
     Tree -> "tree"
     DAG -> "dag"
 
@@ -72,16 +70,15 @@ todo: consider adding some non-det when the graph depends not just on a seed but
 execCommandOrSeed ::
     forall directive seed.
     (ToJSON directive, FromJSON directive) =>
+    Reporter (UpDown.Report Extension) ->
     Configure IO seed directive ->
     Track' directive ->
     Command seed ->
     IO ()
-execCommandOrSeed genBase traceBase cmd = void $ do
+execCommandOrSeed r genBase traceBase cmd = void $ do
     case cmd of
         (Run Up) -> do
-            withGraph (UpDown.upTree nat)
-        (Run Down) -> do
-            withGraph (UpDown.downTree nat)
+            withGraph (UpDown.upTree r nat)
         (Run Tree) -> do
             withGraph (Help.printHelpCograph . (runIdentity . expand))
         (Run DAG) -> do
