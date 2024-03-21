@@ -14,6 +14,7 @@ module Salmon.Builtin.Nodes.Binary (
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.OpGraph
+import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
 
@@ -34,6 +35,7 @@ import System.Process.ListLike (CreateProcess, proc)
 data Report
     = CommandStart !CreateProcess
     | CommandStopped !CreateProcess !ExitCode !ByteString !ByteString
+    | Referred !(Maybe Act') !Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -58,13 +60,15 @@ dependencies from the binary provider.
 -}
 withBinary :: Reporter Report -> Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
 withBinary r t cmd arg consumeIO =
-    let mk a = (untrackedExec r cmd a "", Binary)
-     in tracking t mk arg consumeIO
+    withBinaryStdin r t cmd arg "" consumeIO
 
 withBinaryStdin :: Reporter Report -> Track' (Binary x) -> Command x arg -> arg -> ByteString -> (IO () -> Op) -> Op
 withBinaryStdin r t cmd arg stdin consumeIO =
-    let mk a = (untrackedExec r cmd a stdin, Binary)
-     in tracking t mk arg consumeIO
+    -- we use laziness here so that the Ref we add as Referral is the Ref from the enclosed Op (which has a circular dep itself)
+    let mk a = (untrackedExec r' cmd a stdin, Binary)
+        r' = contramap (Referred (opAct ret)) r
+        ret = tracking t mk arg consumeIO
+     in ret
 
 untrackedExec :: Reporter Report -> Command x a -> a -> ByteString -> IO ()
 untrackedExec r binary arg dat = do

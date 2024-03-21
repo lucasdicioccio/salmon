@@ -19,7 +19,7 @@ import Salmon.Op.Configure
 import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
-import Salmon.Op.Ref (Ref, dotRef)
+import Salmon.Op.Ref (Ref, dotRef, unRef)
 import Salmon.Op.Track
 
 -- | Instanciate actions.
@@ -49,6 +49,8 @@ instance Show Extension where
         Text.unpack $
             Text.unwords
                 [ "["
+                , unRef ext.ref
+                , ":"
                 , ext.help
                 , "]"
                 ]
@@ -152,3 +154,11 @@ collectDynamics root =
 -- Utility to partially apply type in opaque continuation setup in conjuction
 -- with UpDown.upTree in defining a `up`.
 newtype TrackedIO a = TrackedIO {unwrapTIO :: Tracked' (IO a)}
+
+type Act' = Act Extension
+
+opAct :: Op -> Maybe (Act Extension)
+opAct x =
+    case x.node of
+        Actionless -> Nothing
+        Actions a -> Just a
