@@ -73,7 +73,7 @@ data PostgrestSetup
     { postgrest_setup_serviceName :: ServiceName
     , postgrest_setup_localBinPath :: FilePath
     , postgrest_setup_localConfigPath :: FilePath
-    , postgrest_setup_localSecretPath :: FilePath
+    , postgrest_setup_localConnstringPath :: FilePath
     }
     deriving (Generic)
 instance FromJSON PostgrestSetup
@@ -179,7 +179,7 @@ systemdPostgrest r setup =
             execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
             copybin = FS.fileCopy (postgrest_setup_localBinPath setup) execPath
             copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) cpath
-            copySecret = FS.fileCopy (postgrest_setup_localSecretPath setup) spath
+            copySecret = FS.fileCopy (postgrest_setup_localConnstringPath setup) spath
          in
             op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, generateJwtSecret, copySecret]) $ \actions ->
                 actions
@@ -244,7 +244,8 @@ data PostgrestMigratedApiConfig
     , pma_repo :: Git.Repo
     , pma_migrationTip :: FilePath
     , pma_migrationsPrefix :: FilePath
-    , pma_connstring :: Postgres.ConnString FilePath
+    , pma_migrate_connstring :: Postgres.ConnString FilePath
+    , pma_setrole_connstring :: Postgres.ConnString FilePath
     , pma_fallback_role :: Postgres.Group
     }
 
@@ -260,7 +261,7 @@ postgrestMigratedApi ::
     PostgrestMigratedApiConfig ->
     Op
 postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
-    op "postgrest-api" (deps [prest `inject` migrateDBWithUser1 `inject` initDB]) $ \actions ->
+    op "postgrest-api" (deps [prest `inject` migrateDBWithUser `inject` initDB]) $ \actions ->
         actions
             { ref = dotRef $ "prest-api" <> cfg.pma_serviceName
             }
@@ -272,10 +273,10 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
                     PGMigrate.defaultMigrationReader
          in G . fmap node <$> Migrations.loadMigrations reader cfg.pma_migrationTip
 
-    d1 = cfg.pma_connstring.connstring_db
-    u1 = cfg.pma_connstring.connstring_user
-    connstring = cfg.pma_connstring
-    g1 = cfg.pma_fallback_role
+    exposedDatabase = cfg.pma_migrate_connstring.connstring_db
+    migrateUser = cfg.pma_migrate_connstring.connstring_user
+    setroleUser = cfg.pma_setrole_connstring.connstring_user
+    anonRoleGroup = cfg.pma_fallback_role
 
     cloneSource = Track $ const $ Git.repo (contramap GetSources r) Debian.git cfg.pma_repo
 
@@ -287,12 +288,15 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
             selfpath
             toSpec0
             ( PGInit.InitSetup
-                d1
-                [(u1, cfg.pma_connstring.connstring_user_pass, [Postgres.CONNECT, Postgres.CREATE], [g1])]
-                [(g1, [])]
+                exposedDatabase
+                [ (migrateUser, cfg.pma_migrate_connstring.connstring_user_pass, [Postgres.CONNECT, Postgres.CREATE], [])
+                , (setroleUser, cfg.pma_setrole_connstring.connstring_user_pass, [Postgres.CONNECT], [anonRoleGroup])
+                ]
+                [ (anonRoleGroup, [])
+                ]
             )
 
-    migrateDBWithUser1 =
+    migrateDBWithUser =
         PGMigrate.remoteMigrateOpaqueSetup
             (contramap Migration r)
             simulate
@@ -301,9 +305,9 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
             toSpec1
             ( PGMigrate.RemoteMigrateConfig
                 (TrackedIO $ Tracked cloneSource inputMigrations)
-                u1
-                d1
-                cfg.pma_connstring.connstring_user_pass
+                migrateUser
+                exposedDatabase
+                cfg.pma_migrate_connstring.connstring_user_pass
             )
 
     prest = op "postgrest" (deps [setupPrest]) $ \actions ->
@@ -327,6 +331,6 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
         PostgrestConfig
             serviceName
             cfg.pma_apiPort
-            g1
-            connstring
+            anonRoleGroup
+            cfg.pma_setrole_connstring
             prestConfigPath

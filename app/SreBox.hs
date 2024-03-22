@@ -445,8 +445,11 @@ pipeskouillouiApi r simulate selfpath =
     d1 = Postgres.Database "salmon_pipeskouillou"
     u1 = Postgres.User "salmon_pipeskouillou_rw"
     g1 = Postgres.Group "salmon_pipeskouillou_ro"
-    secret = pgSecretPrefs "cheddar" u1
-    connstring = Postgres.ConnString Postgres.localServer u1 secret.secret_path d1
+    u2 = Postgres.User "salmon_pipeskouillou_auth"
+    secretU1 = pgSecretPrefs "cheddar" u1
+    secretU2 = pgSecretPrefs "cheddar" u2
+    connstringMigrate = Postgres.ConnString Postgres.localServer u1 secretU1.secret_path d1
+    connstringAuthent = Postgres.ConnString Postgres.localServer u2 secretU2.secret_path d1
     cfg =
         Postgrest.PostgrestMigratedApiConfig
             "pipeskouillou"
@@ -454,7 +457,8 @@ pipeskouillouiApi r simulate selfpath =
             repo
             "dbs/pipeskouillou/tip.sql"
             ""
-            connstring
+            connstringMigrate
+            connstringAuthent
             g1
 
 boxSelf :: Environment -> Self.Remote
