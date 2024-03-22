@@ -49,6 +49,7 @@ data Report
     | InitializeDB !PGInit.Report
     | Migration !PGMigrate.Report
     | SetupSystemd !Systemd.Report
+    | GenerateJWTSecret !Secrets.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -127,7 +128,11 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
       where
         -- make config using remote filepaths as contents
         makeConfig =
-            Track $ \path -> FS.filecontents (FS.FileContents path (renderConfig cfg (connstringPath cfg.postgrest_cfg_serviceName)))
+            Track $ \path ->
+                let connectionString = connstringPath cfg.postgrest_cfg_serviceName
+                    jwtSigningKey = jwtSigningKeyPath cfg.postgrest_cfg_serviceName
+                 in FS.filecontents $
+                        (FS.FileContents path (renderConfig cfg jwtSigningKey connectionString))
 
     uploadConnStringFile =
         upload makeConnstring connstringFilePath remoteConnstring
@@ -136,8 +141,8 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
 
     connstringFilePath = Text.unpack $ mconcat ["./configs/posgtrest/postgrest-", cfg.postgrest_cfg_serviceName, ".connstring"]
 
-renderConfig :: PostgrestConfig -> FilePath -> Text
-renderConfig cfg remoteConnstringFilePath =
+renderConfig :: PostgrestConfig -> FilePath -> FilePath -> Text
+renderConfig cfg secretFilePath connstringFilePath =
     Text.unlines
         [ kv_text "db-anon-role" $ Postgres.groupRole cfg.postgrest_cfg_anonRole
         , kv_text "db-channel" "pgrst"
@@ -148,10 +153,10 @@ renderConfig cfg remoteConnstringFilePath =
         , kv_bool "db-prepared-statements" True
         , kv_text "db-schemas" "public"
         , kv_text "db-tx-end" "commit"
-        , kv_text "db-uri" (Text.pack $ '@' : remoteConnstringFilePath)
+        , kv_text "db-uri" (Text.pack $ '@' : connstringFilePath)
         , kv_text "jwt-role-claim-key" ".role"
-        , -- todo: , kv_text "# jwt-secret" "@filepath"
-          kv_bool "jwt-secret-is-base64" False
+        , kv_text "jwt-secret" (Text.pack $ '@' : secretFilePath)
+        , kv_bool "jwt-secret-is-base64" True
         , kv_text "log-level" "error"
         , kv_text "openapi-mode" "follow-privileges"
         , kv_text "openapi-server-proxy-uri" ""
@@ -176,7 +181,7 @@ systemdPostgrest r setup =
             copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) cpath
             copySecret = FS.fileCopy (postgrest_setup_localSecretPath setup) spath
          in
-            op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, copySecret]) $ \actions ->
+            op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, generateJwtSecret, copySecret]) $ \actions ->
                 actions
                     { ref = dotRef $ "postgrest:systemd" <> setup.postgrest_setup_serviceName
                     }
@@ -209,6 +214,13 @@ systemdPostgrest r setup =
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"
 
+    generateJwtSecret :: Op
+    generateJwtSecret =
+        Secrets.sharedSecretFile
+            (contramap GenerateJWTSecret r)
+            Debian.openssl
+            (Secrets.Secret Secrets.Base64 32 (jwtSigningKeyPath setup.postgrest_setup_serviceName))
+
 -------------------------------------------------------------------------------
 
 configPath :: ServiceName -> FilePath
@@ -218,6 +230,10 @@ configPath name =
 connstringPath :: ServiceName -> FilePath
 connstringPath name =
     "/opt/rundir/postgrest" </> Text.unpack name </> "connstring.connstring"
+
+jwtSigningKeyPath :: ServiceName -> FilePath
+jwtSigningKeyPath name =
+    "/opt/rundir/postgrest" </> Text.unpack name </> "jwt-shared-secret"
 
 -------------------------------------------------------------------------------
 
