@@ -589,7 +589,52 @@ laptop r simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [deboostrap]) id
+localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
+  where
+    blogrepo :: Git.Repo
+    blogrepo = 
+        (Git.Repo "./git-repos/" "kitchensink" remoteToCloneFrom (Git.Branch "main"))
+
+    remoteToCloneFrom = Git.Remote "https://github.com/kitchensink-tech/kitchensink.git"
+    remoteToPushTo = Git.Remote "/home/lucas/tmp/ks.git"
+    
+    pushTheBlog :: Op
+    pushTheBlog =
+      Git.push reportPrint Debian.git mkrepo blogrepo remoteToPushTo (Git.RemoteName "localclone") changes
+
+    salmonAuthor :: Git.Author
+    salmonAuthor = Git.Author "salmon hello <salmon@dicioccio.fr>"
+
+    commitSomeChange :: Op
+    commitSomeChange =
+      Git.commit reportPrint Debian.git mkrepo ignoreTrack blogrepo salmonAuthor message makeChanges
+        where
+          message :: Git.CommitMessage
+          message = Git.CommitMessage (Git.Headline "hello from salmon") ""
+
+    makeChanges :: Op
+    makeChanges =
+      Git.addfiles reportPrint Debian.git mkrepo blogrepo [salmonHelloFile]
+
+    salmonHelloFile :: FS.File "change"
+    salmonHelloFile = FS.Generated mkContent "./git-repos/kitchensink/salmon.json" 
+      where
+        mkContent :: Track' FilePath
+        mkContent = Track $ \path -> FS.filecontents (FS.FileContents path helloText)
+        helloText :: Text
+        helloText = "hello from Salmon"
+
+    changes :: Op
+    changes = op "changes-to-push" (deps [tagTheBlog `inject` commitSomeChange]) id
+
+    tagTheBlog :: Op
+    tagTheBlog =
+      Git.tag reportPrint Debian.git mkrepo blogrepo (Git.TagName "salmon-test-001") Nothing
+
+    mkrepo :: Track' Git.Repo
+    mkrepo = Track $ \r -> Git.repo reportPrint Debian.git r
+
+{-
   where
     deboostrap :: Op
     deboostrap =
@@ -602,7 +647,6 @@ localDev simulate selfpath = op "local-dev" (deps [deboostrap]) id
                 []
             )
 
-{-
 wgStuff :: Track' Spec -> Self.SelfPath -> Op
 wgStuff simulate selfpath = op "wg-stuff" (deps []) id
   where

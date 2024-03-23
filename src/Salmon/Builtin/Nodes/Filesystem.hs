@@ -112,6 +112,14 @@ data File (sym :: Symbol)
     = PreExisting FilePath
     | Generated (Track' FilePath) FilePath
 
+getFilePath :: File a -> FilePath
+getFilePath (PreExisting path) = path
+getFilePath (Generated _ path) = path
+
+fileOp :: File a -> Op
+fileOp (PreExisting path) = noop "pre-existing-file"
+fileOp (Generated t path) = run t path
+
 withFile :: File a -> (FilePath -> Op) -> Op
 withFile (PreExisting path) f = f path
 withFile (Generated mkp path) f = tracking mkp (\x -> (x, x)) path f
