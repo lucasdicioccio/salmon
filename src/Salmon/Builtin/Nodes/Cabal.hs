@@ -40,24 +40,24 @@ data CabalRun
 
 build :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> Op
 build r cabal flags c =
-    withBinary r' cabal cabalRun (Build flags c) $ \up ->
+    withBinary cabal cabalRun (Build flags c) $ \up ->
         op "cabal-build" nodeps $ \actions ->
             actions
                 { help = "cabal builds a target"
                 , ref = dotRef $ "cabal:build:" <> (Text.pack (show c))
-                , up = up
+                , up = up r'
                 }
   where
     r' = contramap (CabalBuild c) r
 
 install :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> FilePath -> Op
 install r cabal flags c installdir =
-    withBinary r' cabal cabalRun (Install flags c installdir) $ \up ->
+    withBinary cabal cabalRun (Install flags c installdir) $ \up ->
         op "cabal-install" previous $ \actions ->
             actions
                 { help = "cabal builds a target"
                 , ref = dotRef $ "cabal:install:" <> (Text.pack (show c))
-                , up = up
+                , up = up r'
                 }
   where
     r' = contramap (CabalInstall c) r

@@ -35,7 +35,7 @@ import System.Process.ListLike (CreateProcess, proc)
 data Report
     = CommandStart !CreateProcess
     | CommandStopped !CreateProcess !ExitCode !ByteString !ByteString
-    | Referred !(Maybe Act') !Report
+    | Requested !(Maybe Act') !Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -58,20 +58,27 @@ data Command (wellKnownName :: Symbol) arg
 {- | Captures the property that, to use a binary one needs to inherit the
 dependencies from the binary provider.
 -}
-withBinary :: Reporter Report -> Track' (Binary x) -> Command x arg -> arg -> (IO () -> Op) -> Op
-withBinary r t cmd arg consumeIO =
-    withBinaryStdin r t cmd arg "" consumeIO
+withBinary :: Track' (Binary x) -> Command x arg -> arg -> ((Reporter Report -> IO ()) -> Op) -> Op
+withBinary t cmd arg consumeIO =
+    withBinaryStdin t cmd arg "" consumeIO
 
-withBinaryStdin :: Reporter Report -> Track' (Binary x) -> Command x arg -> arg -> ByteString -> (IO () -> Op) -> Op
-withBinaryStdin r t cmd arg stdin consumeIO =
+withBinaryStdin :: Track' (Binary x) -> Command x arg -> arg -> ByteString -> ((Reporter Report -> IO ()) -> Op) -> Op
+withBinaryStdin t cmd arg stdin consumeIO =
     -- we use laziness here so that the Ref we add as Referral is the Ref from the enclosed Op (which has a circular dep itself)
-    let mk a = (untrackedExec r' cmd a stdin, Binary)
-        r' = contramap (Referred (opAct ret)) r
-        ret = tracking t mk arg consumeIO
+    let mk a = (untrackedExec cmd a stdin, Binary)
+        -- wrap consumer by capturing the reporter being passed around
+        fconsume :: (Reporter Report -> IO ()) -> Op
+        fconsume f =
+            let
+                g :: Reporter Report -> IO ()
+                g r = f (contramap (Requested (opAct ret)) r)
+             in
+                consumeIO g
+        ret = tracking t mk arg fconsume
      in ret
 
-untrackedExec :: Reporter Report -> Command x a -> a -> ByteString -> IO ()
-untrackedExec r binary arg dat = do
+untrackedExec :: Command x a -> a -> ByteString -> (Reporter Report -> IO ())
+untrackedExec binary arg dat = \r -> do
     let p = prepare binary arg
     runReporter r (CommandStart p)
     (code, out, err) <- readCreateProcessWithExitCode p dat

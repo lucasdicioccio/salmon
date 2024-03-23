@@ -57,12 +57,12 @@ hardcodedVersion = 12
 
 pgLocalCluster :: Reporter Report -> Track' (Binary "postgres") -> Track' (Binary "pg_ctlcluster") -> Server -> Op
 pgLocalCluster r pg pgctl server =
-    withBinary r' pgctl pgctlRun (Start hardcodedVersion server.serverPort) $ \start ->
+    withBinary pgctl pgctlRun (Start hardcodedVersion server.serverPort) $ \start ->
         op "pg-server" (deps [justInstall pg]) $ \actions ->
             actions
                 { notes = ["default server"]
                 , help = Text.unwords ["start pg cluster"]
-                , up = start
+                , up = start r'
                 }
   where
     r' = contramap PGStartLocalCluster r
@@ -82,11 +82,11 @@ newtype Database = Database {getDatabase :: DatabaseName}
 
 database :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Database -> Op
 database r server psql db =
-    withBinary r' psql psqlAdminRun_Sudo (CreateDB db.getDatabase) $ \up ->
+    withBinary psql psqlAdminRun_Sudo (CreateDB db.getDatabase) $ \up ->
         op "pg-database" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-db:" <> db.getDatabase
-                , up = up
+                , up = up r'
                 , help = Text.unwords ["create db", db.getDatabase]
                 }
   where
@@ -107,12 +107,12 @@ newtype User = User {userRole :: RoleName}
 
 user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
 user r server psql user pwd =
-    withBinary r' psql psqlAdminRun_Sudo (CreateUser user.userRole pwd) $ \up ->
+    withBinary psql psqlAdminRun_Sudo (CreateUser user.userRole pwd) $ \up ->
         op "pg-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-user:" <> user.userRole
                 , help = Text.unwords ["create user", user.userRole]
-                , up = up
+                , up = up r'
                 }
   where
     r' = contramap (PGCreateUser user) r
@@ -130,7 +130,7 @@ userPassFile r server psql genpass user =
   where
     r' = contramap (PGSetUserPass user) r
     runningServer = run server localServer
-    up pass = untrackedExec r' psqlAdminRun_Sudo (CreateUser user.userRole pass) ""
+    up pass = untrackedExec psqlAdminRun_Sudo (CreateUser user.userRole pass) "" r'
 
 data Group = Group {groupRole :: RoleName}
     deriving (Show, Generic)
@@ -139,11 +139,11 @@ instance FromJSON Group
 
 group :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Op
 group r server psql group =
-    withBinary r' psql psqlAdminRun_Sudo (CreateGroup group.groupRole) $ \up ->
+    withBinary psql psqlAdminRun_Sudo (CreateGroup group.groupRole) $ \up ->
         op "pg-group" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-group:" <> group.groupRole
-                , up = up
+                , up = up r'
                 , help = Text.unwords ["creates group", group.groupRole]
                 }
   where
@@ -179,11 +179,11 @@ instance FromJSON AccessRight
 
 grant :: Reporter Report -> Track' (Binary "psql") -> Track' Role -> AccessRight -> Op
 grant r psql role acl =
-    withBinary r' psql psqlAdminRun_Sudo (Grant acl) $ \up ->
+    withBinary psql psqlAdminRun_Sudo (Grant acl) $ \up ->
         op "pg-grant" (deps [dbrole]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-grant:" <> roleName acl.access_role
-                , up = up
+                , up = up r'
                 , help = Text.unwords ["grant", roleName acl.access_role]
                 }
   where
@@ -192,11 +192,11 @@ grant r psql role acl =
 
 groupMember :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Track' Role -> Role -> Op
 groupMember r server psql g role u =
-    withBinary r' psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
+    withBinary psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
         op "pg-member" (deps [dbgroup, dbuser]) $ \actions ->
             actions
                 { ref = dotRef $ "pg-member:" <> g.groupRole <> (roleName u)
-                , up = up
+                , up = up r'
                 , help = Text.unwords ["add", roleName u, "to", g.groupRole]
                 }
   where
@@ -207,11 +207,11 @@ groupMember r server psql g role u =
 adminScript :: Reporter Report -> Track' (Binary "psql") -> File "psql-script" -> Op
 adminScript r psql file =
     withFile file $ \path ->
-        withBinary (r' path) psql psqlAdminRun_Sudo (AdminScript path) $ \up ->
+        withBinary psql psqlAdminRun_Sudo (AdminScript path) $ \up ->
             op "pg-adming-script" nodeps $ \actions ->
                 actions
                     { ref = dotRef $ "pg-admin-script:" <> Text.pack path
-                    , up = up
+                    , up = up (r' path)
                     , help = Text.unwords ["runs pg script", Text.pack path]
                     }
   where
@@ -349,11 +349,11 @@ userScriptInMemoryPass ::
     Op
 userScriptInMemoryPass r psql mksetup c@(ConnString server user pass db) file =
     withFile file $ \path ->
-        withBinary (r' path) psql (psqlUserRun c) (UserScript path) $ \up ->
+        withBinary psql (psqlUserRun c) (UserScript path) $ \up ->
             op "pg-script" (deps [run mksetup c]) $ \actions ->
                 actions
                     { ref = dotRef $ "pg-script:" <> Text.pack path
-                    , up = up
+                    , up = up (r' path)
                     , help = Text.unwords ["runs pg script", Text.pack path]
                     }
   where
@@ -377,7 +377,7 @@ userScript r psql mksetup c@(ConnString server user passFile db) file =
                 }
   where
     r' path = contramap (PGScript path) r
-    up path pass = untrackedExec (r' path) (psqlUserRun $ c `withPassword` pass) (UserScript path) ""
+    up path pass = untrackedExec (psqlUserRun $ c `withPassword` pass) (UserScript path) "" (r' path)
 
 data PsqlUser
     = UserScript FilePath

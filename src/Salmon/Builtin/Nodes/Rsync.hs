@@ -31,24 +31,24 @@ sendFile :: Reporter Report -> Track' (Binary "rsync") -> File "source" -> Remot
 sendFile r rsync src remote remotepath =
     withFile src $ \filepath ->
         let cmd = (SendFile filepath remote remotepath)
-         in withBinary (r' cmd) rsync rsyncRun cmd $ \up ->
+         in withBinary rsync rsyncRun cmd $ \up ->
                 op "rsync:sendfile" nodeps $ \actions ->
                     actions
                         { help = "copies " <> Text.pack filepath <> " to " <> Text.pack remotepath <> " over rsync"
                         , ref = dotRef $ "rsync-copy:" <> Text.pack (show (filepath, remotepath, remote))
-                        , up = up
+                        , up = up (r' cmd)
                         }
   where
     r' cmd = contramap (RunRsyncCommand cmd) r
 
 sendDir :: Reporter Report -> Track' (Binary "rsync") -> Track' Directory -> Directory -> Remote -> FilePath -> Op
 sendDir r rsync mkdir dir remote remotepath =
-    withBinary r' rsync rsyncRun cmd $ \up ->
+    withBinary rsync rsyncRun cmd $ \up ->
         op "rsync:send-dir" (deps [run mkdir dir]) $ \actions ->
             actions
                 { help = "copies " <> Text.pack dirpath <> " to " <> Text.pack remotepath <> " over rsync"
                 , ref = dotRef $ "rsync-copy:" <> Text.pack (show (dirpath, remote))
-                , up = up
+                , up = up r'
                 }
   where
     cmd = SendDir dirpath remote remotepath

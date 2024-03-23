@@ -58,12 +58,12 @@ data NftCommand
 
 table :: Reporter Report -> Track' (Binary "nft") -> Table -> Op
 table r nft t =
-    withBinary r' nft nftcommand cmd $ \add ->
+    withBinary nft nftcommand cmd $ \add ->
         op "nft-table" nodeps $ \actions ->
             actions
                 { help = "creates an Netfilter table"
                 , ref = dotRef $ "nft-table:" <> t.tableName
-                , up = add
+                , up = add r'
                 , dynamics = [toDyn cmd]
                 }
   where
@@ -72,12 +72,12 @@ table r nft t =
 
 chain :: Reporter Report -> Track' (Binary "nft") -> Chain -> Op
 chain r nft c =
-    withBinary r' nft nftcommand cmd $ \add ->
+    withBinary nft nftcommand cmd $ \add ->
         op "nft-chain" (deps [table r nft c.chainTable]) $ \actions ->
             actions
                 { help = "creates an Netfilter chain"
                 , ref = dotRef $ "nft-chain:" <> c.chainTable.tableName <> c.chainName
-                , up = add
+                , up = add r'
                 , dynamics = [toDyn cmd]
                 }
   where
@@ -86,12 +86,12 @@ chain r nft c =
 
 rule :: Reporter Report -> Track' (Binary "nft") -> Chain -> Rule -> Op
 rule r nft c nftrule =
-    withBinary r' nft nftcommand cmd $ \add ->
+    withBinary nft nftcommand cmd $ \add ->
         op "nft-rule" (deps [chain r nft c]) $ \actions ->
             actions
                 { help = "creates an Netfilter rule"
                 , ref = dotRef $ "nft-rule:" <> c.chainTable.tableName <> c.chainName <> textual nftrule
-                , up = add
+                , up = add r'
                 , dynamics = [toDyn cmd]
                 }
   where

@@ -49,7 +49,7 @@ publicCAKeyPath key = key.sshKeyDir </> Text.unpack key.sshKeyName <> "-cert.pub
 
 sshKey :: Reporter Report -> Track' (Binary "ssh-keygen") -> SSHKeyPair -> Op
 sshKey r bin key =
-    withBinary r' bin sshkeygen (Keygen (key.sshKeyType, filepath)) $ \up ->
+    withBinary bin sshkeygen (Keygen (key.sshKeyType, filepath)) $ \up ->
         op "ssh-key" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generate an ssh-key"
@@ -58,7 +58,7 @@ sshKey r bin key =
                     ]
                 , ref = dotRef $ "ssh:" <> Text.pack sshdir <> key.sshKeyName
                 , prelim = skipIfFileExists filepath
-                , up = up
+                , up = up r'
                 }
   where
     r' :: Reporter Binary.Report
@@ -100,13 +100,13 @@ signKey ::
     SSHKeyPair ->
     Op
 signKey r bin ca kid keyToSign =
-    withBinary r' bin sshsign (SignKey (ca, kid, (privateKeyPath keyToSign))) $ \up ->
+    withBinary bin sshsign (SignKey (ca, kid, (privateKeyPath keyToSign))) $ \up ->
         op "ssh-ca-sign" (deps preds) $ \actions ->
             actions
                 { help = "sign a SSH-key"
                 , ref = dotRef $ "ssh-ca-sign:" <> Text.pack (show ca) <> kid.getIdentifier
                 , prelim = skipIfFileExists (publicCAKeyPath keyToSign)
-                , up = up
+                , up = up r'
                 }
   where
     r' = contramap (SignKeyReport keyToSign) r

@@ -38,13 +38,13 @@ clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
 -- | Clones a repository.
 repo :: Reporter Report -> Track' (Binary "git") -> Repo -> Op
 repo r git repository =
-    withBinary r1' git gitcommand (Clone remote branch (clonedir repository)) $ \clone ->
-        withBinary r2' git gitcommand (Pull remote branch (clonedir repository)) $ \pull ->
+    withBinary git gitcommand (Clone remote branch (clonedir repository)) $ \clone ->
+        withBinary git gitcommand (Pull remote branch (clonedir repository)) $ \pull ->
             op "git-repo" (deps [enclosingdir]) $ \actions ->
                 actions
                     { help = "clones and force sync a repo"
                     , ref = dotRef $ "repo:" <> Text.pack (clonedir repository)
-                    , up = clone >> pull
+                    , up = clone r1' >> pull r2'
                     }
   where
     r1' = contramap (CloneRepo repository) r

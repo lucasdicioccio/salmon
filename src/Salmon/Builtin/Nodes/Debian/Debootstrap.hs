@@ -49,13 +49,13 @@ rootTree ::
     RootTree ->
     Op
 rootTree r boot root =
-    withBinary r' boot debootstrapCommand cmd $ \up ->
+    withBinary boot debootstrapCommand cmd $ \up ->
         op "debootstrap" (deps [rootdir]) $ \actions ->
             actions
                 { help = Text.unwords ["debootstraps", Text.pack (show root.suite), "at", Text.pack root.path]
                 , ref = dotRef $ "debootstrap:" <> Text.pack root.path
                 , prelim = skipIfFileExists etcIssues
-                , up = up
+                , up = up r'
                 }
   where
     r' = contramap (RunDebootstrap cmd) r

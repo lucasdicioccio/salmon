@@ -39,13 +39,13 @@ data Secret
 
 sharedSecretFile :: Reporter Report -> Track' (Binary "openssl") -> Secret -> Op
 sharedSecretFile r bin sec =
-    withBinary r' bin openssl (GenRandom sec) $ \up -> do
+    withBinary bin openssl (GenRandom sec) $ \up -> do
         op "secret:gen" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generates a secret file for shared-secret"
                 , ref = dotRef $ "gen-secret" <> Text.pack sec.secret_path
                 , prelim = skipIfFileExists sec.secret_path
-                , up = up >> chompNewLines sec.secret_path
+                , up = up r' >> chompNewLines sec.secret_path
                 }
   where
     r' = contramap (Generate sec) r

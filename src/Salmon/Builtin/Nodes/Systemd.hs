@@ -40,7 +40,11 @@ systemdService r systemctl t cfg =
   where
     r' cmd = contramap (CallSystemCtl cmd) r
     withCommand cmd f =
-        withBinary (r' cmd) systemctl callSystemctl cmd f
+        let
+            g :: (Reporter Binary.Report -> IO ()) -> Op
+            g callbin = f (callbin (r' cmd))
+         in
+            withBinary systemctl callSystemctl cmd g
     unitPath :: FilePath
     unitPath = "/etc/systemd/system" </> Text.unpack cfg.config_target
 

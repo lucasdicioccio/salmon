@@ -30,13 +30,13 @@ data Remote = Remote {remoteUser :: Text, remoteHost :: Text}
 
 call :: Reporter Report -> Track' (Binary "ssh") -> Track' Remote -> Remote -> FilePath -> [Text] -> ByteString -> Op
 call r ssh tRemote remote remotepath args stdin =
-    withBinaryStdin r' ssh sshRun cmd stdin $ \up ->
+    withBinaryStdin ssh sshRun cmd stdin $ \up ->
         op "ssh:call" (deps [run tRemote remote]) $ \actions ->
             actions
                 { help = "calls " <> Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> Text.decodeUtf8 stdin
                 , notes = Text.pack remotepath : args
                 , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote, args, stdin))
-                , up = up
+                , up = up r'
                 }
   where
     cmd = Call remotepath remote args

@@ -147,8 +147,13 @@ iface r ip wg net =
                         }
   where
     r' cmd = contramap (RunIp cmd) r
+    withCommand :: IpCommand -> (IO () -> Op) -> Op
     withCommand cmd f =
-        withBinary (r' cmd) ip ipcommand cmd f
+        let
+            g :: (Reporter Binary.Report -> IO ()) -> Op
+            g callbin = f (callbin (r' cmd))
+         in
+            withBinary ip ipcommand cmd g
 
 data IpCommand
     = AddWg WgName
@@ -205,11 +210,11 @@ server ::
     PortNum ->
     Op
 server r wg key iface wgname privateKeyPath port =
-    withBinary r' wg wgcommand cmd $ \config ->
+    withBinary wg wgcommand cmd $ \config ->
         op "wireguard-server" (deps [run key privateKeyPath, run iface wgname]) $ \actions ->
             actions
                 { ref = dotRef $ "wg-server" <> wgname
-                , up = config
+                , up = config r'
                 }
   where
     cmd = SetupServer wgname port privateKeyPath
@@ -229,7 +234,7 @@ client r wg key iface wgname privatekeyPath =
             { ref = dotRef $ "wg-client" <> wgname <> Text.pack privatekeyPath
             , up = do
                 let cmd = SetupClient wgname privatekeyPath
-                untrackedExec (r' cmd) wgcommand cmd ""
+                untrackedExec wgcommand cmd "" (r' cmd)
             }
   where
     r' cmd = contramap (RunWg cmd) r
@@ -255,7 +260,7 @@ peer r wg key iface endpoint wgname publicKeyPath ep ips =
                 pkey <- Text.strip <$> Text.readFile publicKeyPath
                 print (wgname, publicKeyPath, pkey)
                 let cmd = AddPeer wgname pkey ep ips
-                untrackedExec (r' cmd) wgcommand cmd ""
+                untrackedExec wgcommand cmd "" (r' cmd)
             }
   where
     r' cmd = contramap (RunWg cmd) r

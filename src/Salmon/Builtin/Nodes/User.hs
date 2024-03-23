@@ -28,12 +28,12 @@ newtype Group = Group {groupName :: Text}
 
 group :: Reporter Report -> Track' (Binary "groupadd") -> Group -> Op
 group r groupadd grp =
-    withBinary r' groupadd runGroupAdd cmd $ \add ->
+    withBinary groupadd runGroupAdd cmd $ \add ->
         op "group" nodeps $ \actions ->
             actions
                 { help = "creates a system group"
                 , ref = dotRef $ "group:" <> groupName grp
-                , up = add
+                , up = add r'
                 }
   where
     cmd = AddGroup grp.groupName
@@ -60,12 +60,12 @@ data NewUser = NewUser {newUser :: User, groups :: [Group]}
 
 user :: Reporter Report -> Track' (Binary "useradd") -> Track' Group -> NewUser -> Op
 user r useradd grp nu =
-    withBinary r' useradd runUserAdd cmd $ \add ->
+    withBinary useradd runUserAdd cmd $ \add ->
         op "user" (deps userGroups) $ \actions ->
             actions
                 { help = "creates a system user"
                 , ref = dotRef $ "user" <> nu.newUser.userName
-                , up = add
+                , up = add r'
                 }
   where
     cmd = AddUser nu.newUser.userName (fmap groupName nu.groups)

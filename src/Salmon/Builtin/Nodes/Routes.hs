@@ -39,12 +39,12 @@ route ::
     Route ->
     Op
 route r ip netroute =
-    withBinary r' ip ipcommand cmd $ \addroute ->
+    withBinary ip ipcommand cmd $ \addroute ->
         op "ip-route" nodeps $ \actions ->
             actions
                 { help = mconcat ["route ", dst, " via ", netroute.routeDevice, "(", netroute.routeVia, ")"]
                 , ref = dotRef $ "ip-route" <> netroute.routeDevice <> netroute.routeVia
-                , up = addroute
+                , up = addroute r'
                 }
   where
     cmd = AddRoute netroute

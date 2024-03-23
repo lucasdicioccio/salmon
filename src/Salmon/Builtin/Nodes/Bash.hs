@@ -26,12 +26,12 @@ run :: Reporter Report -> Track' (Binary "bash") -> File "script" -> Op
 run r bash script =
     withFile script $ \filepath ->
         let cmd = BashCommand filepath
-         in withBinary (r' cmd) bash bashrun cmd $ \up ->
+         in withBinary bash bashrun cmd $ \up ->
                 op "bash-run" nodeps $ \actions ->
                     actions
                         { help = "runs a bash command"
                         , ref = dotRef $ "bash-run:" <> Text.pack filepath
-                        , up = up
+                        , up = up (r' cmd)
                         }
   where
     r' cmd = contramap (RunBash cmd) r

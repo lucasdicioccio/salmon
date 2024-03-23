@@ -63,7 +63,7 @@ data SelfSigned
 
 tlsKey :: Reporter Report -> Track' (Binary "openssl") -> Key -> Op
 tlsKey r bin key =
-    withBinary r' bin openssl cmd $ \up -> do
+    withBinary bin openssl cmd $ \up -> do
         op "certificate-key" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generate a certificate-key"
@@ -72,7 +72,7 @@ tlsKey r bin key =
                     ]
                 , ref = dotRef $ "openssl:" <> Text.pack path
                 , prelim = skipIfFileExists path
-                , up = up
+                , up = up r'
                 }
   where
     cmd = GenTLSKey key.keyType path
@@ -99,7 +99,11 @@ signingRequest r bin req =
   where
     r' cmd = contramap (RunOpenSSLCommand cmd) r
     withCommand cmd f =
-        withBinary (r' cmd) bin openssl cmd f
+        let
+            g :: (Reporter Binary.Report -> IO ()) -> Op
+            g callbin = f (callbin (r' cmd))
+         in
+            withBinary bin openssl cmd g
 
     kpath :: FilePath
     kpath = keyPath req.certKey
@@ -121,13 +125,13 @@ signingRequest r bin req =
 
 selfSign :: Reporter Report -> Track' (Binary "openssl") -> SelfSigned -> Op
 selfSign r bin selfsigned =
-    withBinary r' bin openssl cmd $ \up ->
+    withBinary bin openssl cmd $ \up ->
         op "certificate-self-sign" (deps [signingRequest r bin selfsigned.selfSignedRequest]) $ \actions ->
             actions
                 { help = "self sign a certificate"
                 , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath
                 , prelim = skipIfFileExists pempath
-                , up = up
+                , up = up r'
                 }
   where
     cmd = SignCSR csr key pempath
