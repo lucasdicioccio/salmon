@@ -1,6 +1,19 @@
 # Salmon
 
 
+# Idea
+
+There is a continuum between
+- building one-off tools that do one thing (e.g., apply pg-migrations)
+- either one tool that does many thing (e.g., turnup a dev environment, push to prod)
+- or some in-between (e.g., ci-tool that expect repositories)
+
+In general the tunability goes in opposite direction:
+- one-off tools have behavior that is highly tunable, configuration drives most of the behavior
+- do-everything tools are undissociable with their configuration (e.g., configure _my laptop_, generate secret then ssh vs. ssh then generate secret)
+
+Goal of Salmon: address both needs, still provide good re-usability, good reporting of logs and so on.
+
 ## design
 
 - DAG interleaving of trees

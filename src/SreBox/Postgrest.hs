@@ -254,7 +254,7 @@ postgrestMigratedApi ::
     Reporter Report ->
     Track' directive ->
     (PGInit.InitSetup FilePath -> directive) ->
-    (PGMigrate.RemoteMigrateSetup -> directive) ->
+    (PGMigrate.MigrationSetup -> directive) ->
     (PostgrestSetup -> directive) ->
     Self.SelfPath ->
     Self.Remote ->

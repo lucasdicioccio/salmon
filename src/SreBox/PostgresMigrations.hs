@@ -144,17 +144,6 @@ data RemoteMigrateConfig t
     , cfg_password :: FilePath
     }
 
-data RemoteMigrateSetup
-    = RemoteMigrateSetup
-    { setup_migration :: G MigrationFile
-    , setup_user :: User
-    , setup_database :: Database
-    , setup_tmp_secret_path :: FilePath
-    }
-    deriving (Generic)
-instance FromJSON RemoteMigrateSetup
-instance ToJSON RemoteMigrateSetup
-
 remoteMigrateSetup ::
     (FromJSON directive, ToJSON directive) =>
     Reporter Report ->
@@ -162,7 +151,7 @@ remoteMigrateSetup ::
     Track' directive ->
     Self.Remote ->
     Self.SelfPath ->
-    (RemoteMigrateSetup -> directive) ->
+    (MigrationSetup -> directive) ->
     RemoteMigrateConfig Identity ->
     Op
 remoteMigrateSetup r pass1 simulate selfRemote selfpath toSpec cfg =
@@ -209,7 +198,7 @@ remoteMigrateSetup r pass1 simulate selfRemote selfpath toSpec cfg =
     remoteApply :: Op
     remoteApply =
         let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ MigrationSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
 
 remoteMigrateOpaqueSetup ::
     (FromJSON directive, ToJSON directive) =>
@@ -217,7 +206,7 @@ remoteMigrateOpaqueSetup ::
     Track' directive ->
     Self.Remote ->
     Self.SelfPath ->
-    (RemoteMigrateSetup -> directive) ->
+    (MigrationSetup -> directive) ->
     RemoteMigrateConfig TrackedIO ->
     Op
 remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
@@ -271,13 +260,24 @@ remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
     remoteApply :: G MigrationFile -> Op
     remoteApply migrations =
         let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ RemoteMigrateSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ MigrationSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+
+data MigrationSetup
+    = MigrationSetup
+    { setup_migration :: G MigrationFile
+    , setup_user :: User
+    , setup_database :: Database
+    , setup_tmp_secret_path :: FilePath
+    }
+    deriving (Generic)
+instance FromJSON MigrationSetup
+instance ToJSON MigrationSetup
 
 applyMigration ::
     Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString FilePath) ->
-    RemoteMigrateSetup ->
+    MigrationSetup ->
     Op
 applyMigration r psql mkConnstring setup =
     migrateG r psql mkConnstring connstring setup.setup_migration
