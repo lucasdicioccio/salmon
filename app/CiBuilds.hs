@@ -70,6 +70,32 @@ prodapi p =
         ""
         []
 
+acmeNotAJoke p =
+    CabalBuilding.cabalRepoBuild
+        reportPrint
+        "acme-not-a-joke"
+        (p.bindir "acme-not-a-joke")
+        realNoop
+        "acme-not-a-joke"
+        "acme-not-a-joke"
+        (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
+        "main"
+        ""
+        []
+
+minizincProcess p =
+    CabalBuilding.cabalRepoBuild
+        reportPrint
+        "minizinc-process"
+        (p.bindir "minizinc-process")
+        realNoop
+        "minizinc-process"
+        "minizinc-process"
+        (Git.Remote "https://github.com/lucasdicioccio/minizinc-process.git")
+        "master"
+        ""
+        []
+
 salmon p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -143,6 +169,8 @@ data HaskellBuild
     | MicroDNS
     | ProdAPI
     | Salmon
+    | AcmeNotAJoke
+    | MinizincProcess
     | PostgREST
     | Fourmolu
     | Mustache
@@ -178,6 +206,8 @@ program =
     specOp k (HaskellBuild h KitchenSink) = [opGraph $ kitchenSink (homedir h)]
     specOp k (HaskellBuild h ProdAPI) = [opGraph $ prodapi (homedir h)]
     specOp k (HaskellBuild h Salmon) = [opGraph $ salmon (homedir h)]
+    specOp k (HaskellBuild h MinizincProcess) = [opGraph $ minizincProcess (homedir h)]
+    specOp k (HaskellBuild h AcmeNotAJoke) = [opGraph $ acmeNotAJoke (homedir h)]
     specOp k (HaskellBuild h PostgREST) = [opGraph $ postgrest (homedir h)]
     specOp k (HaskellBuild h Mustache) = [opGraph $ mustache (homedir h)]
     specOp k (HaskellBuild h SwarmRoot) = [opGraph $ swarmRoot (homedir h)]
@@ -215,23 +245,26 @@ configure = Configure go
     go (BuildSeed h "microdns:hs") = pure $ HaskellBuild h MicroDNS
     go (BuildSeed h "prodapi:hs") = pure $ HaskellBuild h ProdAPI
     go (BuildSeed h "salmon:hs") = pure $ HaskellBuild h Salmon
+    go (BuildSeed h "minizinc-process:hs") = pure $ HaskellBuild h MinizincProcess
+    go (BuildSeed h "acme-not-a-joke:hs") = pure $ HaskellBuild h AcmeNotAJoke
     go (BuildSeed h "postgrest:hs") = pure $ HaskellBuild h PostgREST
     go (BuildSeed h "mustache:hs") = pure $ HaskellBuild h Mustache
     go (BuildSeed h "swarmroot:hs") = pure $ HaskellBuild h SwarmRoot
     go (BuildSeed h "fourmolu:hs") = pure $ HaskellBuild h Fourmolu
     go (BuildSeed h "duckling:hs") = pure $ HaskellBuild h Duckling
-    go (BuildSeed h ":all") =
+    go (BuildSeed h ":mine") =
         pure $
             Batch
-                [ HaskellBuild h MicroDNS
+                [ HaskellBuild h ProdAPI
+                , HaskellBuild h AcmeNotAJoke
+                , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
-                , HaskellBuild h ProdAPI
                 , HaskellBuild h Salmon
+                , HaskellBuild h MinizincProcess
+                , -- not mine but still key
+                  HaskellBuild h Mustache
                 , HaskellBuild h PostgREST
-                , HaskellBuild h Mustache
-                , HaskellBuild h SwarmRoot
                 , HaskellBuild h Fourmolu
-                , HaskellBuild h Duckling
                 ]
 
 -------------------------------------------------------------------------------
