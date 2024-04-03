@@ -80,8 +80,11 @@ reportPick split (ReporterM f1) (ReporterM f2) = ReporterM $ \a ->
 
 -- | Filter by dynamically testing values.
 {-# INLINEABLE reportIf #-}
-reportIf :: (Applicative m) => (a -> Bool) -> ReporterM m a -> ReporterM m a
-reportIf predicate t = reportPick (\x -> if predicate x then Right x else Left ()) silent t
+reportIf :: forall m a. (Applicative m) => (a -> Bool) -> ReporterM m a -> ReporterM m a
+reportIf predicate t = reportPick f silent t
+  where
+    f :: a -> Either () a
+    f x = if predicate x then Right x else Left ()
 
 -- | A reporter that prints emitted events.
 reportPrint :: (MonadIO m, Show a) => ReporterM m a

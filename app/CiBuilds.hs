@@ -12,7 +12,7 @@ import Options.Applicative (command, execParser, fullDesc, header, help, helper,
 import Options.Generic (Generic, ParseRecord (..))
 
 import qualified Salmon.Builtin.CommandLine as CLI
-import Salmon.Builtin.Extension (Op, Track', deps, notes, op, realNoop, ref)
+import Salmon.Builtin.Extension (Extension, Op, Track', Tracked', deps, ignoreTrack, notes, op, realNoop, ref)
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
@@ -20,11 +20,12 @@ import qualified Salmon.Builtin.Nodes.Git as Git
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
-import Salmon.Op.Track (Track (..), opGraph)
+import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, opGraph)
 import Salmon.Reporter
 import qualified SreBox.CabalBuilding as CabalBuilding
 import System.FilePath ((</>))
 
+-------------------------------------------------------------------------------
 data Prefs
     = Prefs
     { bindir :: FilePath -> FilePath
@@ -40,10 +41,81 @@ homedir h =
         h </> "ci" </> x
 
 -------------------------------------------------------------------------------
-microDNS p = CabalBuilding.microDNS reportPrint (p.bindir "microdns")
+successfulBuildTag :: CabalBuilding.CloneDir -> Git.Remote -> Git.Remote -> CabalBuilding.BranchName -> Op
+successfulBuildTag dirname remoteForCloning remoteForTagging branch =
+    dopush
+  where
+    dopush :: Op
+    dopush =
+        Git.push
+            reportPrint
+            Debian.git
+            mktherepo
+            therepo
+            remoteForTagging
+            (Git.RemoteName "salmon-tag-remote")
+            (op "changes-to-push" (deps [dotag]) id)
 
-kitchenSink p = CabalBuilding.kitchenSink reportPrint (p.bindir "kitchen-sink")
+    dotag :: Op
+    dotag =
+        Git.tag
+            reportPrint
+            Debian.git
+            mktherepo
+            therepo
+            (Git.TagName "salmon-build")
+            (Just "successul build")
 
+    mktherepo :: Track' Git.Repo
+    mktherepo = ignoreTrack
+
+    therepo :: Git.Repo
+    therepo = Git.Repo "./git-repos/" dirname remoteForCloning (Git.Branch branch)
+
+reportWithTag :: CabalBuilding.CloneDir -> Git.Remote -> Git.Remote -> CabalBuilding.BranchName -> Reporter CabalBuilding.Report
+reportWithTag dirname remoteForCloning remoteForTagging branch =
+    reportBoth reportPrint applyTagOnSuccess
+  where
+    applyTagOnSuccess :: Reporter CabalBuilding.Report
+    applyTagOnSuccess = reportIf CabalBuilding.isBuildSuccess applyTag
+
+    applyTag :: Reporter CabalBuilding.Report
+    applyTag = contramap (const mkTag) (CLI.updownOnReport reportPrint)
+
+    mkTag :: Op
+    mkTag =
+        successfulBuildTag
+            dirname
+            remoteForCloning
+            remoteForTagging
+            branch
+
+-------------------------------------------------------------------------------
+microdns :: Prefs -> Tracked' FilePath
+microdns p =
+    CabalBuilding.microDNS r (p.bindir "microdns")
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "microdns"
+            (Git.Remote "https://github.com/lucasdicioccio/microdns.git")
+            (Git.Remote "git@github.com:lucasdicioccio/microdns.git")
+            "main"
+
+kitchenSink :: Prefs -> Tracked' FilePath
+kitchenSink p =
+    CabalBuilding.kitchenSink r (p.bindir "kitchen-sink")
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "kitchensink"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
+            "main"
+
+postgrest :: Prefs -> Tracked' FilePath
 postgrest p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -57,45 +129,92 @@ postgrest p =
         ""
         []
 
+prodapi :: Prefs -> Op
 prodapi p =
-    CabalBuilding.cabalRepoBuild
-        reportPrint
+    CabalBuilding.cabalRepoOnlyBuild
+        r
         "prodapi"
         (p.bindir "prodapi")
         realNoop
         "prodapi"
-        "prodapi-example-exe"
         (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
         "master"
         ""
         []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
 
+acmeNotAJoke :: Prefs -> Op
 acmeNotAJoke p =
-    CabalBuilding.cabalRepoBuild
-        reportPrint
+    CabalBuilding.cabalRepoOnlyBuild
+        r
         "acme-not-a-joke"
         (p.bindir "acme-not-a-joke")
         realNoop
-        "acme-not-a-joke"
         "acme-not-a-joke"
         (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
         "main"
         ""
         []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "acme-not-a-joke"
+            (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
+            (Git.Remote "git@github.com:lucasdicioccio/acme-not-a-joke.git")
+            "main"
 
+minizincProcess :: Prefs -> Op
 minizincProcess p =
-    CabalBuilding.cabalRepoBuild
-        reportPrint
+    CabalBuilding.cabalRepoOnlyBuild
+        r
         "minizinc-process"
         (p.bindir "minizinc-process")
         realNoop
-        "minizinc-process"
         "minizinc-process"
         (Git.Remote "https://github.com/lucasdicioccio/minizinc-process.git")
         "master"
         ""
         []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "minizinc-process"
+            (Git.Remote "https://github.com/lucasdicioccio/minizinc-process.git")
+            (Git.Remote "git@github.com:lucasdicioccio/minizinc-process.git")
+            "master"
 
+sqq :: Prefs -> Tracked' FilePath
+sqq p =
+    CabalBuilding.cabalRepoBuild
+        r
+        "sqq"
+        (p.bindir "sqq")
+        (Debian.deb $ Debian.Package "sqlite3-dev")
+        "sqq"
+        "sqq"
+        (Git.Remote "https://github.com/lucasdicioccio/sqq.git")
+        "main"
+        ""
+        []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "sqq"
+            (Git.Remote "https://github.com/lucasdicioccio/sqq.git")
+            (Git.Remote "git@github.com:lucasdicioccio/sqq.git")
+            "master"
+
+salmon :: Prefs -> Tracked' FilePath
 salmon p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -103,12 +222,21 @@ salmon p =
         (p.bindir "salmon")
         realNoop
         "salmon"
-        "srebox-salmon"
+        "exe:cibuilds-salmon"
         (Git.Remote "https://github.com/lucasdicioccio/salmon.git")
         "master"
         ""
         [Cabal.AllowNewer]
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            "salmon"
+            (Git.Remote "https://github.com/lucasdicioccio/salmon.git")
+            (Git.Remote "git@github.com:lucasdicioccio/salmon.git")
+            "master"
 
+fourmolu :: Prefs -> Tracked' FilePath
 fourmolu p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -122,6 +250,7 @@ fourmolu p =
         ""
         []
 
+swarmRoot :: Prefs -> Tracked' FilePath
 swarmRoot p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -135,6 +264,7 @@ swarmRoot p =
         ""
         []
 
+mustache :: Prefs -> Tracked' FilePath
 mustache p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -148,6 +278,7 @@ mustache p =
         ""
         []
 
+duckling :: Prefs -> Tracked' FilePath
 duckling p =
     CabalBuilding.cabalRepoBuild
         reportPrint
@@ -171,6 +302,7 @@ data HaskellBuild
     | Salmon
     | AcmeNotAJoke
     | MinizincProcess
+    | Sqq
     | PostgREST
     | Fourmolu
     | Mustache
@@ -202,12 +334,13 @@ program =
     -- meta
     specOp k (Batch xs) = concatMap (specOp k) xs
     -- machine
-    specOp k (HaskellBuild h MicroDNS) = [opGraph $ microDNS (homedir h)]
+    specOp k (HaskellBuild h MicroDNS) = [opGraph $ microdns (homedir h)]
     specOp k (HaskellBuild h KitchenSink) = [opGraph $ kitchenSink (homedir h)]
-    specOp k (HaskellBuild h ProdAPI) = [opGraph $ prodapi (homedir h)]
+    specOp k (HaskellBuild h ProdAPI) = [prodapi (homedir h)]
     specOp k (HaskellBuild h Salmon) = [opGraph $ salmon (homedir h)]
-    specOp k (HaskellBuild h MinizincProcess) = [opGraph $ minizincProcess (homedir h)]
-    specOp k (HaskellBuild h AcmeNotAJoke) = [opGraph $ acmeNotAJoke (homedir h)]
+    specOp k (HaskellBuild h MinizincProcess) = [minizincProcess (homedir h)]
+    specOp k (HaskellBuild h Sqq) = [opGraph $ sqq (homedir h)]
+    specOp k (HaskellBuild h AcmeNotAJoke) = [acmeNotAJoke (homedir h)]
     specOp k (HaskellBuild h PostgREST) = [opGraph $ postgrest (homedir h)]
     specOp k (HaskellBuild h Mustache) = [opGraph $ mustache (homedir h)]
     specOp k (HaskellBuild h SwarmRoot) = [opGraph $ swarmRoot (homedir h)]
@@ -246,6 +379,7 @@ configure = Configure go
     go (BuildSeed h "prodapi:hs") = pure $ HaskellBuild h ProdAPI
     go (BuildSeed h "salmon:hs") = pure $ HaskellBuild h Salmon
     go (BuildSeed h "minizinc-process:hs") = pure $ HaskellBuild h MinizincProcess
+    go (BuildSeed h "sqq:hs") = pure $ HaskellBuild h Sqq
     go (BuildSeed h "acme-not-a-joke:hs") = pure $ HaskellBuild h AcmeNotAJoke
     go (BuildSeed h "postgrest:hs") = pure $ HaskellBuild h PostgREST
     go (BuildSeed h "mustache:hs") = pure $ HaskellBuild h Mustache
@@ -261,10 +395,26 @@ configure = Configure go
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
-                , -- not mine but still key
-                  HaskellBuild h Mustache
+                , HaskellBuild h Sqq
+                ]
+    go (BuildSeed h ":important") =
+        pure $
+            Batch
+                [ HaskellBuild h ProdAPI
+                , HaskellBuild h AcmeNotAJoke
+                , HaskellBuild h MicroDNS
+                , HaskellBuild h KitchenSink
+                , HaskellBuild h Salmon
+                , HaskellBuild h MinizincProcess
+                , HaskellBuild h Mustache
                 , HaskellBuild h PostgREST
                 , HaskellBuild h Fourmolu
+                ]
+    go (BuildSeed h ":fun") =
+        pure $
+            Batch
+                [ HaskellBuild h SwarmRoot
+                , HaskellBuild h Duckling
                 ]
 
 -------------------------------------------------------------------------------

@@ -9,6 +9,7 @@ module Salmon.Builtin.Nodes.Binary (
     withBinaryIO,
     untrackedExecIO,
     Report (..),
+    isCommandSuccessful,
 ) where
 
 import Salmon.Builtin.Extension
@@ -22,7 +23,7 @@ import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import GHC.IO.Exception (ExitCode)
+import GHC.IO.Exception (ExitCode (..))
 import GHC.TypeLits (Symbol)
 
 import GHC.IO.Handle (Handle)
@@ -37,6 +38,13 @@ data Report
     | CommandStopped !CreateProcess !ExitCode !ByteString !ByteString
     | Requested !(Maybe Act') !Report
     deriving (Show)
+
+isCommandSuccessful :: Report -> Bool
+isCommandSuccessful r = case r of
+    (CommandStart _) -> False
+    (CommandStopped _ ExitSuccess _ _) -> True
+    (CommandStopped _ _ _ _) -> False
+    (Requested _ child) -> isCommandSuccessful child
 
 -------------------------------------------------------------------------------
 

@@ -5,6 +5,7 @@ import qualified Data.Text as Text
 import System.FilePath (takeFileName, (</>))
 
 import Salmon.Builtin.Extension
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
@@ -21,6 +22,14 @@ data Report
     | CallCabal !CabalTarget !Cabal.Report
     | CallGit !CabalTarget !Git.Report
     deriving (Show)
+
+isBuildSuccess :: Report -> Bool
+isBuildSuccess r = case r of
+    (CallCabal _ (Cabal.CabalBuild _ cmd)) ->
+        Binary.isCommandSuccessful cmd
+    (CallCabal _ (Cabal.CabalInstall _ cmd)) ->
+        Binary.isCommandSuccessful cmd
+    otherwise -> False
 
 -------------------------------------------------------------------------------
 
@@ -101,7 +110,7 @@ type SubDir = FilePath -- subdir where we can cabal build
 optBuildsBindir :: BinaryDir
 optBuildsBindir = "/opt/builds/bin"
 
--- builds a cabal repository
+-- builds a binary in a cabal repository
 cabalRepoBuild ::
     Reporter Report ->
     CloneDir ->
@@ -120,6 +129,28 @@ cabalRepoBuild r dirname bindir sysdeps target binname remote branch subdir flag
     op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
         Cabal.install (contramap (CallCabal target) r) cabal flags (Cabal.Cabal repopath target) bindir
     binpath = bindir </> Text.unpack binname
+    repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
+    git = Debian.git
+    cabal = (Track $ \_ -> noop "preinstalled")
+    mkrepo = Track $ Git.repo (contramap (CallGit target) r) git
+
+-- builds a library in a cabal repository
+cabalRepoOnlyBuild ::
+    Reporter Report ->
+    CloneDir ->
+    BinaryDir ->
+    Op ->
+    CabalTarget ->
+    Git.Remote ->
+    BranchName ->
+    SubDir ->
+    Cabal.CabalFlags ->
+    Op
+cabalRepoOnlyBuild r dirname bindir sysdeps target remote branch subdir flags =
+    op `inject` sysdeps
+  where
+    op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
+        Cabal.build (contramap (CallCabal target) r) cabal flags (Cabal.Cabal repopath target)
     repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
