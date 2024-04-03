@@ -5,9 +5,10 @@
 module Salmon.Op.OpGraph where
 
 import Data.Functor.Classes
+import Data.Kind (Type)
 import Salmon.Op.Graph
 
-data OpGraph (meval :: * -> *) node = OpGraph
+data OpGraph (meval :: Type -> Type) node = OpGraph
     { predecessors :: meval (Graph (OpGraph meval node))
     , node :: node
     }
