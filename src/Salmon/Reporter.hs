@@ -6,6 +6,7 @@ module Salmon.Reporter (
     silent,
     reportIf,
     reportBoth,
+    reportPick,
 
     -- * common utilities
     reportPrint,
@@ -80,7 +81,7 @@ reportPick split (ReporterM f1) (ReporterM f2) = ReporterM $ \a ->
 -- | Filter by dynamically testing values.
 {-# INLINEABLE reportIf #-}
 reportIf :: (Applicative m) => (a -> Bool) -> ReporterM m a -> ReporterM m a
-reportIf predicate t = reportPick (\x -> if predicate x then Left () else Right x) silent t
+reportIf predicate t = reportPick (\x -> if predicate x then Right x else Left ()) silent t
 
 -- | A reporter that prints emitted events.
 reportPrint :: (MonadIO m, Show a) => ReporterM m a
