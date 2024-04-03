@@ -420,6 +420,12 @@ eWebhook =
                 8087
             , KS.SlashApiProxyDirective
                 KS.UsePlainText
+                "/qwerty"
+                KS.DropPrefix
+                "lucasdicioccio-ThinkPad-T490.home"
+                7777
+            , KS.SlashApiProxyDirective
+                KS.UsePlainText
                 "/pipeskouillou"
                 KS.DropPrefix
                 "127.0.0.1"
