@@ -97,6 +97,14 @@ execCommandOrSeed r genBase traceBase cmd = void $ do
             Right a -> do
                 cont (run traceBase a)
 
+updownOnReport ::
+    Reporter (UpDown.Report Extension) ->
+    Reporter Op
+updownOnReport r =
+    ReporterM $ \op -> UpDown.upTree r nat op
+  where
+    nat = pure . runIdentity
+
 injectRemoteSubgraphs :: Int -> Op -> Op
 injectRemoteSubgraphs lvl orig =
     orig `overlaid` flattenAllRemoteCalls orig
