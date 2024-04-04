@@ -41,8 +41,15 @@ homedir h =
         h </> "ci" </> x
 
 -------------------------------------------------------------------------------
-successfulBuildTag :: CabalBuilding.CloneDir -> Git.Remote -> Git.Remote -> CabalBuilding.BranchName -> Op
-successfulBuildTag dirname remoteForCloning remoteForTagging branch =
+successfulBuildTag ::
+    Git.TagName ->
+    Text ->
+    CabalBuilding.CloneDir ->
+    Git.Remote ->
+    Git.Remote ->
+    CabalBuilding.BranchName ->
+    Op
+successfulBuildTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
     dopush
   where
     dopush :: Op
@@ -63,8 +70,8 @@ successfulBuildTag dirname remoteForCloning remoteForTagging branch =
             Debian.git
             mktherepo
             therepo
-            (Git.TagName "salmon-build")
-            (Just "successul build")
+            tag
+            (Just tagtxt)
 
     mktherepo :: Track' Git.Repo
     mktherepo = ignoreTrack
@@ -72,8 +79,15 @@ successfulBuildTag dirname remoteForCloning remoteForTagging branch =
     therepo :: Git.Repo
     therepo = Git.Repo "./git-repos/" dirname remoteForCloning (Git.Branch branch)
 
-reportWithTag :: CabalBuilding.CloneDir -> Git.Remote -> Git.Remote -> CabalBuilding.BranchName -> Reporter CabalBuilding.Report
-reportWithTag dirname remoteForCloning remoteForTagging branch =
+reportWithTag ::
+    Git.TagName ->
+    CabalBuilding.CloneDir ->
+    CabalBuilding.CloneDir ->
+    Git.Remote ->
+    Git.Remote ->
+    CabalBuilding.BranchName ->
+    Reporter CabalBuilding.Report
+reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
     reportBoth reportPrint applyTagOnSuccess
   where
     applyTagOnSuccess :: Reporter CabalBuilding.Report
@@ -85,10 +99,18 @@ reportWithTag dirname remoteForCloning remoteForTagging branch =
     mkTag :: Op
     mkTag =
         successfulBuildTag
+            tag
+            tagtxt
             dirname
             remoteForCloning
             remoteForTagging
             branch
+
+defaultTag :: Git.TagName
+defaultTag = Git.TagName "salmon-build"
+
+defaultTagText :: Text
+defaultTagText = "successful build"
 
 -------------------------------------------------------------------------------
 microdns :: Prefs -> Tracked' FilePath
@@ -98,6 +120,8 @@ microdns p =
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
             "microdns"
             (Git.Remote "https://github.com/lucasdicioccio/microdns.git")
             (Git.Remote "git@github.com:lucasdicioccio/microdns.git")
@@ -110,6 +134,32 @@ kitchenSink p =
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
+            "kitchensink"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
+            "main"
+
+kitchenSink_bridge :: Prefs -> Tracked' FilePath
+kitchenSink_bridge p =
+    CabalBuilding.cabalRepoBuild
+        r
+        "kitchensink"
+        (p.bindir "kitchen-sink")
+        realNoop
+        "kitchen-sink-purescript-bridge"
+        "kitchen-sink-purescript-bridge"
+        (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+        "main"
+        "hs"
+        []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-kitchensink-bridge")
+            defaultTagText
             "kitchensink"
             (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
             (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
@@ -129,6 +179,33 @@ postgrest p =
         ""
         []
 
+protolens :: Prefs -> Op
+protolens p =
+    CabalBuilding.cabalRepoOnlyBuild
+        reportPrint
+        "protolens"
+        (p.bindir "protolens")
+        realNoop
+        "proto-lens"
+        (Git.Remote "https://github.com/google/proto-lens.git")
+        "master"
+        ""
+        []
+
+protolens_protoc :: Prefs -> Tracked' FilePath
+protolens_protoc p =
+    CabalBuilding.cabalRepoBuild
+        reportPrint
+        "protolens"
+        (p.bindir "protolens")
+        realNoop
+        "proto-lens-protoc"
+        "proto-lens-protoc"
+        (Git.Remote "https://github.com/google/proto-lens.git")
+        "master"
+        ""
+        []
+
 prodapi :: Prefs -> Op
 prodapi p =
     CabalBuilding.cabalRepoOnlyBuild
@@ -145,6 +222,77 @@ prodapi p =
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
+
+prodapi_proxy :: Prefs -> Op
+prodapi_proxy p =
+    CabalBuilding.cabalRepoOnlyBuild
+        r
+        "prodapi"
+        (p.bindir "prodapi")
+        realNoop
+        "prodapi-proxy"
+        (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+        "master"
+        ""
+        []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-prodapi-proxy")
+            defaultTagText
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
+
+prodapi_userauth :: Prefs -> Op
+prodapi_userauth p =
+    CabalBuilding.cabalRepoOnlyBuild
+        r
+        "prodapi"
+        (p.bindir "prodapi")
+        realNoop
+        "prodapi-userauth"
+        (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+        "master"
+        ""
+        []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-prodapi-userauth")
+            defaultTagText
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
+
+prodapi_gen :: Prefs -> Op
+prodapi_gen p =
+    CabalBuilding.cabalRepoOnlyBuild
+        r
+        "prodapi"
+        (p.bindir "prodapi")
+        realNoop
+        "prodapi-gen"
+        (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+        "master"
+        ""
+        []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-prodapi-gen")
+            defaultTagText
             "prodapi"
             (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
             (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
@@ -166,6 +314,8 @@ acmeNotAJoke p =
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
             "acme-not-a-joke"
             (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
             (Git.Remote "git@github.com:lucasdicioccio/acme-not-a-joke.git")
@@ -178,7 +328,7 @@ minizincProcess p =
         "minizinc-process"
         (p.bindir "minizinc-process")
         realNoop
-        "minizinc-process"
+        "all"
         (Git.Remote "https://github.com/lucasdicioccio/minizinc-process.git")
         "master"
         ""
@@ -187,9 +337,80 @@ minizincProcess p =
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
             "minizinc-process"
             (Git.Remote "https://github.com/lucasdicioccio/minizinc-process.git")
             (Git.Remote "git@github.com:lucasdicioccio/minizinc-process.git")
+            "master"
+
+grpcNative_warp :: Prefs -> Op
+grpcNative_warp p =
+    CabalBuilding.cabalRepoOnlyBuild
+        reportPrint
+        "http2-grpc-haskell"
+        (p.bindir "http2-grpc-haskell")
+        realNoop
+        "all"
+        (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
+        "master"
+        "warp-grpc"
+        [Cabal.AllowNewer]
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-warp")
+            defaultTagText
+            "http2-grpc-haskell"
+            (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
+            (Git.Remote "git@github.com:haskell-grpc-native/http2-grpc-haskell.git")
+            "master"
+
+grpcNative_client :: Prefs -> Op
+grpcNative_client p =
+    CabalBuilding.cabalRepoOnlyBuild
+        reportPrint
+        "http2-grpc-haskell"
+        (p.bindir "http2-grpc-haskell")
+        realNoop
+        "http2-client-grpc"
+        (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
+        "master"
+        "http2-client-grpc"
+        [Cabal.AllowNewer]
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-client")
+            defaultTagText
+            "http2-grpc-haskell"
+            (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
+            (Git.Remote "git@github.com:haskell-grpc-native/http2-grpc-haskell.git")
+            "master"
+
+http2Client :: Prefs -> Op
+http2Client p =
+    CabalBuilding.cabalRepoOnlyBuild
+        r
+        "http2-client"
+        (p.bindir "http2-client")
+        realNoop
+        "all"
+        (Git.Remote "https://github.com/haskell-grpc-native/http2-client.git")
+        "master"
+        ""
+        []
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            defaultTag
+            defaultTagText
+            "http2-client"
+            (Git.Remote "https://github.com/haskell-grpc-native/http2-client.git")
+            (Git.Remote "git@github.com:haskell-grpc-native/http2-client.git")
             "master"
 
 sqq :: Prefs -> Tracked' FilePath
@@ -209,10 +430,12 @@ sqq p =
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
             "sqq"
             (Git.Remote "https://github.com/lucasdicioccio/sqq.git")
             (Git.Remote "git@github.com:lucasdicioccio/sqq.git")
-            "master"
+            "main"
 
 salmon :: Prefs -> Tracked' FilePath
 salmon p =
@@ -226,11 +449,13 @@ salmon p =
         (Git.Remote "https://github.com/lucasdicioccio/salmon.git")
         "master"
         ""
-        [Cabal.AllowNewer]
+        []
   where
     r :: Reporter CabalBuilding.Report
     r =
         reportWithTag
+            defaultTag
+            defaultTagText
             "salmon"
             (Git.Remote "https://github.com/lucasdicioccio/salmon.git")
             (Git.Remote "git@github.com:lucasdicioccio/salmon.git")
@@ -297,13 +522,22 @@ type BinDir = FilePath
 
 data HaskellBuild
     = KitchenSink
+    | KitchenSinkBridge
     | MicroDNS
     | ProdAPI
+    | ProdAPIUserAuth
+    | ProdAPIProxy
+    | ProdAPIGen
     | Salmon
     | AcmeNotAJoke
     | MinizincProcess
     | Sqq
+    | Http2Client
+    | GrpcNativeClient
+    | GrpcNativeWarp
     | PostgREST
+    | ProtoLens
+    | ProtoLensProtoc
     | Fourmolu
     | Mustache
     | SwarmRoot
@@ -336,12 +570,21 @@ program =
     -- machine
     specOp k (HaskellBuild h MicroDNS) = [opGraph $ microdns (homedir h)]
     specOp k (HaskellBuild h KitchenSink) = [opGraph $ kitchenSink (homedir h)]
+    specOp k (HaskellBuild h KitchenSinkBridge) = [opGraph $ kitchenSink_bridge (homedir h)]
     specOp k (HaskellBuild h ProdAPI) = [prodapi (homedir h)]
+    specOp k (HaskellBuild h ProdAPIUserAuth) = [prodapi_userauth (homedir h)]
+    specOp k (HaskellBuild h ProdAPIProxy) = [prodapi_proxy (homedir h)]
+    specOp k (HaskellBuild h ProdAPIGen) = [prodapi_gen (homedir h)]
     specOp k (HaskellBuild h Salmon) = [opGraph $ salmon (homedir h)]
     specOp k (HaskellBuild h MinizincProcess) = [minizincProcess (homedir h)]
+    specOp k (HaskellBuild h Http2Client) = [http2Client (homedir h)]
+    specOp k (HaskellBuild h GrpcNativeClient) = [grpcNative_client (homedir h)]
+    specOp k (HaskellBuild h GrpcNativeWarp) = [grpcNative_warp (homedir h)]
     specOp k (HaskellBuild h Sqq) = [opGraph $ sqq (homedir h)]
     specOp k (HaskellBuild h AcmeNotAJoke) = [acmeNotAJoke (homedir h)]
     specOp k (HaskellBuild h PostgREST) = [opGraph $ postgrest (homedir h)]
+    specOp k (HaskellBuild h ProtoLens) = [protolens (homedir h)]
+    specOp k (HaskellBuild h ProtoLensProtoc) = [opGraph $ protolens_protoc (homedir h)]
     specOp k (HaskellBuild h Mustache) = [opGraph $ mustache (homedir h)]
     specOp k (HaskellBuild h SwarmRoot) = [opGraph $ swarmRoot (homedir h)]
     specOp k (HaskellBuild h Fourmolu) = [opGraph $ fourmolu (homedir h)]
@@ -375,40 +618,80 @@ configure = Configure go
   where
     go :: Seed -> IO Spec
     go (BuildSeed h "kitchensink:hs") = pure $ HaskellBuild h KitchenSink
+    go (BuildSeed h "kitchensink:bridge:hs") = pure $ HaskellBuild h KitchenSinkBridge
     go (BuildSeed h "microdns:hs") = pure $ HaskellBuild h MicroDNS
     go (BuildSeed h "prodapi:hs") = pure $ HaskellBuild h ProdAPI
+    go (BuildSeed h "prodapi:proxy:hs") = pure $ HaskellBuild h ProdAPIProxy
+    go (BuildSeed h "prodapi:userauth:hs") = pure $ HaskellBuild h ProdAPIUserAuth
+    go (BuildSeed h "prodapi:gen:hs") = pure $ HaskellBuild h ProdAPIGen
     go (BuildSeed h "salmon:hs") = pure $ HaskellBuild h Salmon
     go (BuildSeed h "minizinc-process:hs") = pure $ HaskellBuild h MinizincProcess
     go (BuildSeed h "sqq:hs") = pure $ HaskellBuild h Sqq
+    go (BuildSeed h "http2-client:hs") = pure $ HaskellBuild h Http2Client
+    go (BuildSeed h "grpc-native-client:hs") = pure $ HaskellBuild h GrpcNativeClient
+    go (BuildSeed h "grpc-native-warp:hs") = pure $ HaskellBuild h GrpcNativeWarp
     go (BuildSeed h "acme-not-a-joke:hs") = pure $ HaskellBuild h AcmeNotAJoke
     go (BuildSeed h "postgrest:hs") = pure $ HaskellBuild h PostgREST
+    go (BuildSeed h "protolens:hs") = pure $ HaskellBuild h ProtoLens
+    go (BuildSeed h "protolens-protoc:hs") = pure $ HaskellBuild h ProtoLensProtoc
     go (BuildSeed h "mustache:hs") = pure $ HaskellBuild h Mustache
     go (BuildSeed h "swarmroot:hs") = pure $ HaskellBuild h SwarmRoot
     go (BuildSeed h "fourmolu:hs") = pure $ HaskellBuild h Fourmolu
     go (BuildSeed h "duckling:hs") = pure $ HaskellBuild h Duckling
+    go (BuildSeed h ":grpc") =
+        pure $
+            Batch
+                [ HaskellBuild h Http2Client
+                , HaskellBuild h GrpcNativeClient
+                , HaskellBuild h GrpcNativeWarp
+                , HaskellBuild h ProtoLens
+                , HaskellBuild h ProtoLensProtoc
+                ]
+    go (BuildSeed h ":prodapi") =
+        pure $
+            Batch
+                [ HaskellBuild h ProdAPI
+                , HaskellBuild h ProdAPIUserAuth
+                , HaskellBuild h ProdAPIProxy
+                , HaskellBuild h ProdAPIGen
+                ]
     go (BuildSeed h ":mine") =
         pure $
             Batch
                 [ HaskellBuild h ProdAPI
+                , HaskellBuild h ProdAPIUserAuth
+                , HaskellBuild h ProdAPIProxy
+                , HaskellBuild h ProdAPIGen
                 , HaskellBuild h AcmeNotAJoke
                 , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
+                , HaskellBuild h KitchenSinkBridge
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Sqq
+                , HaskellBuild h Http2Client
                 ]
     go (BuildSeed h ":important") =
         pure $
             Batch
                 [ HaskellBuild h ProdAPI
+                , HaskellBuild h ProdAPIUserAuth
+                , HaskellBuild h ProdAPIProxy
+                , HaskellBuild h ProdAPIGen
                 , HaskellBuild h AcmeNotAJoke
                 , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
+                , HaskellBuild h KitchenSinkBridge
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Mustache
                 , HaskellBuild h PostgREST
+                , HaskellBuild h ProtoLens
+                , HaskellBuild h ProtoLensProtoc
                 , HaskellBuild h Fourmolu
+                , HaskellBuild h Http2Client
+                , HaskellBuild h GrpcNativeClient
+                , HaskellBuild h GrpcNativeWarp
                 ]
     go (BuildSeed h ":fun") =
         pure $

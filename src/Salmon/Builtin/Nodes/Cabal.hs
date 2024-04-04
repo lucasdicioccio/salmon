@@ -73,7 +73,7 @@ cabalRun = Command $ go
     extraArgs xs = fmap extraArg xs
 
     extraArg :: Flag -> String
-    extraArg AllowNewer = "--allow-newer=true"
+    extraArg AllowNewer = "--allow-newer"
 
 data Instructions (s :: Symbol)
     = Instructions
