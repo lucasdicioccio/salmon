@@ -15,7 +15,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.TypeLits (Symbol)
 
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, cwd, proc)
 
@@ -23,6 +23,7 @@ import System.Process.ListLike (CreateProcess, cwd, proc)
 data Report
     = CabalBuild !Cabal !Binary.Report
     | CabalInstall !Cabal !Binary.Report
+    | CabalSDist !Cabal !Binary.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -37,6 +38,7 @@ data Flag
 data CabalRun
     = Build CabalFlags Cabal
     | Install CabalFlags Cabal FilePath
+    | SDist Cabal FilePath
 
 build :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> Op
 build r cabal flags c =
@@ -63,11 +65,27 @@ install r cabal flags c installdir =
     r' = contramap (CabalInstall c) r
     previous = deps [dir (Directory installdir)]
 
+sdist :: Reporter Report -> Track' (Binary "cabal") -> Cabal -> FilePath -> Op
+sdist r cabal c pkgpath =
+    withBinary cabal cabalRun (SDist c pkgpath) $ \up ->
+        op "cabal-sdist" (deps [enclosingdir]) $ \actions ->
+            actions
+                { help = "cabal sdist a package"
+                , ref = dotRef $ "cabal:sdist:" <> (Text.pack pkgpath)
+                , up = up r'
+                }
+  where
+    r' = contramap (CabalSDist c) r
+    enclosingdir :: Op
+    enclosingdir = dir (Directory $ takeDirectory pkgpath)
+
+
 cabalRun :: Command "cabal" CabalRun
 cabalRun = Command $ go
   where
     go (Build flags c) = (proc "cabal" (["build", Text.unpack c.cabalTarget] <> (extraArgs flags))){cwd = Just c.cabalDir}
     go (Install flags c dir) = (proc "cabal" (["install", "--install-method=copy", "--overwrite-policy=always", "--installdir=" <> dir, Text.unpack c.cabalTarget] <> (extraArgs flags))){cwd = Just c.cabalDir}
+    go (SDist c path) = (proc "cabal" ["stdist", "--output-directory=" <> path, Text.unpack c.cabalTarget]){cwd = Just c.cabalDir}
 
     extraArgs :: CabalFlags -> [String]
     extraArgs xs = fmap extraArg xs
