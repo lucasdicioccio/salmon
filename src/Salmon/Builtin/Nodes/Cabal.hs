@@ -24,6 +24,7 @@ data Report
     = CabalBuild !Cabal !Binary.Report
     | CabalInstall !Cabal !Binary.Report
     | CabalSDist !Cabal !Binary.Report
+    | CabalUpload !CandidateStatus !FilePath !Binary.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -39,6 +40,12 @@ data CabalRun
     = Build CabalFlags Cabal
     | Install CabalFlags Cabal FilePath
     | SDist Cabal FilePath
+    | Upload CandidateStatus FilePath
+
+data CandidateStatus
+  = Candidate
+  | Public
+  deriving (Show, Ord, Eq)
 
 build :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> Op
 build r cabal flags c =
@@ -79,6 +86,30 @@ sdist r cabal c pkgpath =
     enclosingdir :: Op
     enclosingdir = dir (Directory $ takeDirectory pkgpath)
 
+upload :: Reporter Report -> Track' (Binary "cabal") -> Track' FilePath -> FilePath -> Op
+upload r cabal mkTarfile path =
+    withBinary cabal cabalRun (Upload Candidate path) $ \up ->
+        op "cabal-upload" (deps [run mkTarfile path]) $ \actions ->
+            actions
+                { help = "cabal uploads a package"
+                , ref = dotRef $ "cabal:upload:" <> Text.pack path
+                , up = up r'
+                }
+  where
+    r' = contramap (CabalUpload Candidate path) r
+
+publish :: Reporter Report -> Track' (Binary "cabal") -> Track' FilePath -> FilePath -> Op
+publish r cabal mkTarfile path =
+    withBinary cabal cabalRun (Upload Public path) $ \up ->
+        op "cabal-publishes" (deps [run mkTarfile path]) $ \actions ->
+            actions
+                { help = "cabal uploads a package"
+                , ref = dotRef $ "cabal:upload:" <> Text.pack path
+                , up = up r'
+                }
+  where
+    r' = contramap (CabalUpload Public path) r
+
 
 cabalRun :: Command "cabal" CabalRun
 cabalRun = Command $ go
@@ -86,6 +117,8 @@ cabalRun = Command $ go
     go (Build flags c) = (proc "cabal" (["build", Text.unpack c.cabalTarget] <> (extraArgs flags))){cwd = Just c.cabalDir}
     go (Install flags c dir) = (proc "cabal" (["install", "--install-method=copy", "--overwrite-policy=always", "--installdir=" <> dir, Text.unpack c.cabalTarget] <> (extraArgs flags))){cwd = Just c.cabalDir}
     go (SDist c path) = (proc "cabal" ["stdist", "--output-directory=" <> path, Text.unpack c.cabalTarget]){cwd = Just c.cabalDir}
+    go (Upload Candidate path) = (proc "cabal" ["upload", path])
+    go (Upload Public path) = (proc "cabal" ["upload", "--publish", path])
 
     extraArgs :: CabalFlags -> [String]
     extraArgs xs = fmap extraArg xs
