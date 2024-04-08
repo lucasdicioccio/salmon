@@ -15,6 +15,7 @@ import System.Process.ListLike (proc)
 -------------------------------------------------------------------------------
 data Report
     = RunIp !IpCommand !Binary.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 
@@ -28,10 +29,12 @@ data Route
     , routeDevice :: DevName
     , routeVia :: GatewayAddr
     }
+    deriving (Show)
 
 data DestinationNetwork
     = Default
     | RawNetwork Text
+    deriving (Show)
 
 route ::
     Reporter Report ->
@@ -53,6 +56,7 @@ route r ip netroute =
 
 data IpCommand
     = AddRoute Route
+    deriving (Show)
 
 ipcommand :: Command "ip" IpCommand
 ipcommand = Command $ \cmd -> case cmd of

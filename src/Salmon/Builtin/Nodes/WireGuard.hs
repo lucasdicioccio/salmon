@@ -26,6 +26,7 @@ import System.Process.ListLike (CreateProcess (..), proc)
 data Report
     = RunWg !WgCommand !Binary.Report
     | RunIp !IpCommand !Binary.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 newtype PrivateKeyForWriting = PrivateKeyForWriting {getWritePkHandle :: Handle}
@@ -98,6 +99,7 @@ type Ipv4PrefixSize = Int
 
 data IpNet
     = Ipv4Cidr Ipv4 Ipv4PrefixSize
+    deriving (Show)
 
 nettxt :: IpNet -> Text
 nettxt (Ipv4Cidr ipv4 cidr) = ipv4 <> "/" <> Text.pack (show cidr)
@@ -159,6 +161,7 @@ data IpCommand
     = AddWg WgName
     | SetWgAddr WgName IpNet
     | UpWg WgName
+    deriving (Show)
 
 ipcommand :: Command "ip" IpCommand
 ipcommand = Command $ \cmd -> case cmd of
@@ -272,6 +275,7 @@ data WgCommand
     = SetupServer WgName PortNum FilePath
     | SetupClient WgName FilePath
     | AddPeer WgName B64PubKey (Maybe Endpoint) AllowedIps
+    deriving (Show)
 
 wgcommand :: Command "wg" WgCommand
 wgcommand = Command $ \cmd -> case cmd of
