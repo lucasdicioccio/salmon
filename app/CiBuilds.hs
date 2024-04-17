@@ -179,6 +179,19 @@ postgrest p =
         ""
         []
 
+proto3wire :: Prefs -> Op
+proto3wire p =
+    CabalBuilding.cabalRepoOnlyBuild
+        reportPrint
+        "proto3-wire"
+        (p.bindir "proto3-wire")
+        realNoop
+        "proto3-wire"
+        (Git.Remote "https://github.com/awakesecurity/proto3-wire.git")
+        "master"
+        ""
+        [Cabal.AllowNewer]
+
 protolens :: Prefs -> Op
 protolens p =
     CabalBuilding.cabalRepoOnlyBuild
@@ -202,6 +215,20 @@ protolens_protoc p =
         "proto-lens-protoc"
         "proto-lens-protoc"
         (Git.Remote "https://github.com/google/proto-lens.git")
+        "master"
+        ""
+        []
+
+unix_default :: Prefs -> Tracked' FilePath
+unix_default p =
+    CabalBuilding.cabalRepoBuild
+        reportPrint
+        "unix"
+        (p.bindir "unix")
+        realNoop
+        "unix"
+        "unix"
+        (Git.Remote "https://github.com/haskell/unix.git")
         "master"
         ""
         []
@@ -361,6 +388,29 @@ grpcNative_warp p =
     r =
         reportWithTag
             (Git.TagName "salmon-build-warp")
+            defaultTagText
+            "http2-grpc-haskell"
+            (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
+            (Git.Remote "git@github.com:haskell-grpc-native/http2-grpc-haskell.git")
+            "master"
+
+grpcNative_types :: Prefs -> Op
+grpcNative_types p =
+    CabalBuilding.cabalRepoOnlyBuild
+        reportPrint
+        "http2-grpc-haskell"
+        (p.bindir "http2-grpc-haskell")
+        realNoop
+        "http2-client-grpc"
+        (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
+        "master"
+        "http2-grpc-types"
+        [Cabal.AllowNewer]
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-build-types")
             defaultTagText
             "http2-grpc-haskell"
             (Git.Remote "https://github.com/haskell-grpc-native/http2-grpc-haskell.git")
@@ -534,10 +584,13 @@ data HaskellBuild
     | Sqq
     | Http2Client
     | GrpcNativeClient
+    | GrpcNativeTypes
     | GrpcNativeWarp
     | PostgREST
+    | Proto3Wire
     | ProtoLens
     | ProtoLensProtoc
+    | UnixDefault
     | Fourmolu
     | Mustache
     | SwarmRoot
@@ -579,12 +632,15 @@ program =
     specOp k (HaskellBuild h MinizincProcess) = [minizincProcess (homedir h)]
     specOp k (HaskellBuild h Http2Client) = [http2Client (homedir h)]
     specOp k (HaskellBuild h GrpcNativeClient) = [grpcNative_client (homedir h)]
+    specOp k (HaskellBuild h GrpcNativeTypes) = [grpcNative_types (homedir h)]
     specOp k (HaskellBuild h GrpcNativeWarp) = [grpcNative_warp (homedir h)]
     specOp k (HaskellBuild h Sqq) = [opGraph $ sqq (homedir h)]
     specOp k (HaskellBuild h AcmeNotAJoke) = [acmeNotAJoke (homedir h)]
     specOp k (HaskellBuild h PostgREST) = [opGraph $ postgrest (homedir h)]
+    specOp k (HaskellBuild h Proto3Wire) = [proto3wire (homedir h)]
     specOp k (HaskellBuild h ProtoLens) = [protolens (homedir h)]
     specOp k (HaskellBuild h ProtoLensProtoc) = [opGraph $ protolens_protoc (homedir h)]
+    specOp k (HaskellBuild h UnixDefault) = [opGraph $ unix_default (homedir h)]
     specOp k (HaskellBuild h Mustache) = [opGraph $ mustache (homedir h)]
     specOp k (HaskellBuild h SwarmRoot) = [opGraph $ swarmRoot (homedir h)]
     specOp k (HaskellBuild h Fourmolu) = [opGraph $ fourmolu (homedir h)]
@@ -628,12 +684,15 @@ configure = Configure go
     go (BuildSeed h "minizinc-process:hs") = pure $ HaskellBuild h MinizincProcess
     go (BuildSeed h "sqq:hs") = pure $ HaskellBuild h Sqq
     go (BuildSeed h "http2-client:hs") = pure $ HaskellBuild h Http2Client
+    go (BuildSeed h "grpc-native-types:hs") = pure $ HaskellBuild h GrpcNativeTypes
     go (BuildSeed h "grpc-native-client:hs") = pure $ HaskellBuild h GrpcNativeClient
     go (BuildSeed h "grpc-native-warp:hs") = pure $ HaskellBuild h GrpcNativeWarp
     go (BuildSeed h "acme-not-a-joke:hs") = pure $ HaskellBuild h AcmeNotAJoke
     go (BuildSeed h "postgrest:hs") = pure $ HaskellBuild h PostgREST
+    go (BuildSeed h "proto3-wire:hs") = pure $ HaskellBuild h Proto3Wire
     go (BuildSeed h "protolens:hs") = pure $ HaskellBuild h ProtoLens
     go (BuildSeed h "protolens-protoc:hs") = pure $ HaskellBuild h ProtoLensProtoc
+    go (BuildSeed h "unix-default:hs") = pure $ HaskellBuild h UnixDefault
     go (BuildSeed h "mustache:hs") = pure $ HaskellBuild h Mustache
     go (BuildSeed h "swarmroot:hs") = pure $ HaskellBuild h SwarmRoot
     go (BuildSeed h "fourmolu:hs") = pure $ HaskellBuild h Fourmolu
@@ -642,9 +701,11 @@ configure = Configure go
         pure $
             Batch
                 [ HaskellBuild h Http2Client
+                , HaskellBuild h GrpcNativeTypes
                 , HaskellBuild h GrpcNativeClient
                 , HaskellBuild h GrpcNativeWarp
                 , HaskellBuild h ProtoLens
+                , HaskellBuild h Proto3Wire
                 , HaskellBuild h ProtoLensProtoc
                 ]
     go (BuildSeed h ":prodapi") =
@@ -686,10 +747,13 @@ configure = Configure go
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Mustache
                 , HaskellBuild h PostgREST
+                , HaskellBuild h Proto3Wire
                 , HaskellBuild h ProtoLens
                 , HaskellBuild h ProtoLensProtoc
+                , HaskellBuild h UnixDefault
                 , HaskellBuild h Fourmolu
                 , HaskellBuild h Http2Client
+                , HaskellBuild h GrpcNativeTypes
                 , HaskellBuild h GrpcNativeClient
                 , HaskellBuild h GrpcNativeWarp
                 ]
