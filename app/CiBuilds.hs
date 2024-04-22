@@ -29,16 +29,21 @@ import System.FilePath ((</>))
 data Prefs
     = Prefs
     { bindir :: FilePath -> FilePath
+    , sdistdir :: FilePath -> FilePath
     }
 
 homedir :: BinDir -> Prefs
 homedir h =
     Prefs
         bindir
+        sdistdir
   where
     bindir :: FilePath -> FilePath
     bindir x =
         h </> "ci" </> x
+    sdistdir :: FilePath -> FilePath
+    sdistdir x =
+        h </> "sdist" </> x
 
 -------------------------------------------------------------------------------
 successfulBuildTag ::
@@ -91,7 +96,7 @@ reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
     reportBoth reportPrint applyTagOnSuccess
   where
     applyTagOnSuccess :: Reporter CabalBuilding.Report
-    applyTagOnSuccess = reportIf CabalBuilding.isBuildSuccess applyTag
+    applyTagOnSuccess = reportIf (\x -> CabalBuilding.isBuildSuccess x || CabalBuilding.isReleaseSuccess x) applyTag
 
     applyTag :: Reporter CabalBuilding.Report
     applyTag = contramap (const mkTag) (CLI.updownOnReport reportPrint)
@@ -319,6 +324,28 @@ prodapi_gen p =
     r =
         reportWithTag
             (Git.TagName "salmon-build-prodapi-gen")
+            defaultTagText
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
+
+prodapi__publish :: Prefs -> CabalBuilding.VersionString -> Op
+prodapi__publish p v =
+    CabalBuilding.publishHackage
+        r
+        "prodapi"
+        (p.sdistdir "prodapi")
+        "prodapi"
+        v
+        (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+        "master"
+        ""
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-published-prodapi")
             defaultTagText
             "prodapi"
             (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
@@ -602,6 +629,7 @@ instance ToJSON HaskellBuild
 data Spec
     = Batch [Spec]
     | HaskellBuild BinDir HaskellBuild
+    | HaskellPublish CabalBuilding.VersionString BinDir HaskellBuild
     deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -645,6 +673,8 @@ program =
     specOp k (HaskellBuild h SwarmRoot) = [opGraph $ swarmRoot (homedir h)]
     specOp k (HaskellBuild h Fourmolu) = [opGraph $ fourmolu (homedir h)]
     specOp k (HaskellBuild h Duckling) = [opGraph $ duckling (homedir h)]
+    --
+    specOp k (HaskellPublish v h ProdAPI) = [prodapi__publish (homedir h) v]
 
     optimizedDeps :: Op -> Op
     optimizedDeps base =
@@ -654,6 +684,7 @@ program =
 -------------------------------------------------------------------------------
 data Seed
     = BuildSeed {binroot :: BinDir, buildName :: Text}
+    | ReleaseSeed {sdistroot :: BinDir, buildName :: Text, versionString :: Text}
 
 instance ParseRecord Seed where
     parseRecord =
@@ -663,11 +694,17 @@ instance ParseRecord Seed where
             subparser $
                 mconcat
                     [ command "build" (info build (progDesc "makes a build"))
+                    , command "release" (info release (progDesc "makes a release"))
                     ]
         build =
             BuildSeed
                 <$> strArgument (Options.Applicative.help "bin-root")
                 <*> strArgument (Options.Applicative.help "build-name")
+        release =
+            ReleaseSeed
+                <$> strArgument (Options.Applicative.help "sdist-root")
+                <*> strArgument (Options.Applicative.help "build-name")
+                <*> strArgument (Options.Applicative.help "version")
 
 configure :: Configure IO Seed Spec
 configure = Configure go
@@ -763,6 +800,8 @@ configure = Configure go
                 [ HaskellBuild h SwarmRoot
                 , HaskellBuild h Duckling
                 ]
+    go (ReleaseSeed h "prodapi:publish" v) =
+        pure $ HaskellPublish v h ProdAPI
 
 -------------------------------------------------------------------------------
 main :: IO ()

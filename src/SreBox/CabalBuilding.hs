@@ -31,6 +31,12 @@ isBuildSuccess r = case r of
         Binary.isCommandSuccessful cmd
     otherwise -> False
 
+isReleaseSuccess :: Report -> Bool
+isReleaseSuccess r = case r of
+    (CallCabal _ (Cabal.CabalUpload Cabal.Public _ cmd)) ->
+        Binary.isCommandSuccessful cmd
+    otherwise -> False
+
 -------------------------------------------------------------------------------
 
 cabalBinUpload :: Reporter Report -> Tracked' FilePath -> Rsync.Remote -> Tracked' FilePath
@@ -102,6 +108,7 @@ postgrest r =
 
 type CloneDir = Text
 type BinaryDir = FilePath
+type SDistDir = FilePath
 type CabalTarget = Text
 type CabalBinaryName = Text -- may vary from target when exe: or lib:  are prepended
 type BranchName = Text
@@ -155,3 +162,30 @@ cabalRepoOnlyBuild r dirname bindir sysdeps target remote branch subdir flags =
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
     mkrepo = Track $ Git.repo (contramap (CallGit target) r) git
+
+type VersionString = Text
+
+-- publishes a package on Hackage
+publishHackage ::
+    Reporter Report ->
+    CloneDir ->
+    SDistDir ->
+    CabalTarget ->
+    VersionString ->
+    Git.Remote ->
+    BranchName ->
+    SubDir ->
+    Op
+publishHackage r dirname sdistdir target version remote branch subdir =
+    uploadOp
+  where
+    tgzOp = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
+        Cabal.sdist r' cabal (Cabal.Cabal repopath target) sdistdir
+    r' = contramap (CallCabal target) r
+    uploadOp = Cabal.upload r' cabal (Track $ const tgzOp) tgzpath
+    repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
+    git = Debian.git
+    cabal = (Track $ \_ -> noop "preinstalled")
+    mkrepo = Track $ Git.repo (contramap (CallGit target) r) git
+    tgzpath = sdistdir </> tgzname
+    tgzname = Text.unpack $ mconcat [target, "-", version, ".tar.gz"]
