@@ -132,6 +132,29 @@ microdns p =
             (Git.Remote "git@github.com:lucasdicioccio/microdns.git")
             "main"
 
+microdns__publish :: Prefs -> CabalBuilding.VersionString -> Op
+microdns__publish p v =
+    CabalBuilding.publishHackage
+        r
+        "microdns"
+        (p.sdistdir "microdns")
+        "microdns"
+        "."
+        v
+        (Git.Remote "https://github.com/lucasdicioccio/microdns.git")
+        "master"
+        ""
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-published-microdns")
+            defaultTagText
+            "microdns"
+            (Git.Remote "https://github.com/lucasdicioccio/microdns.git")
+            (Git.Remote "git@github.com:lucasdicioccio/microdns.git")
+            "main"
+
 kitchenSink :: Prefs -> Tracked' FilePath
 kitchenSink p =
     CabalBuilding.kitchenSink r (p.bindir "kitchen-sink")
@@ -337,6 +360,7 @@ prodapi__publish p v =
         "prodapi"
         (p.sdistdir "prodapi")
         "prodapi"
+        "prodapi"
         v
         (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
         "master"
@@ -346,6 +370,52 @@ prodapi__publish p v =
     r =
         reportWithTag
             (Git.TagName "salmon-published-prodapi")
+            defaultTagText
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
+
+prodapi_proxy__publish :: Prefs -> CabalBuilding.VersionString -> Op
+prodapi_proxy__publish p v =
+    CabalBuilding.publishHackage
+        r
+        "prodapi"
+        (p.sdistdir "prodapi")
+        "prodapi-proxy"
+        "prodapi-proxy"
+        v
+        (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+        "master"
+        ""
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-published-prodapi-proxy")
+            defaultTagText
+            "prodapi"
+            (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+            (Git.Remote "git@github.com:lucasdicioccio/prodapi.git")
+            "master"
+
+prodapi_userauth__publish :: Prefs -> CabalBuilding.VersionString -> Op
+prodapi_userauth__publish p v =
+    CabalBuilding.publishHackage
+        r
+        "prodapi"
+        (p.sdistdir "prodapi")
+        "prodapi-userauth"
+        "prodapi-userauth"
+        v
+        (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
+        "master"
+        ""
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-published-prodapi-userauth")
             defaultTagText
             "prodapi"
             (Git.Remote "https://github.com/lucasdicioccio/prodapi.git")
@@ -369,6 +439,29 @@ acmeNotAJoke p =
     r =
         reportWithTag
             defaultTag
+            defaultTagText
+            "acme-not-a-joke"
+            (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
+            (Git.Remote "git@github.com:lucasdicioccio/acme-not-a-joke.git")
+            "main"
+
+acmeNotAJoke__publish :: Prefs -> CabalBuilding.VersionString -> Op
+acmeNotAJoke__publish p v =
+    CabalBuilding.publishHackage
+        r
+        "acme-not-a-joke"
+        (p.sdistdir "acme-not-a-joke")
+        "acme-not-a-joke"
+        "."
+        v
+        (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
+        "master"
+        ""
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportWithTag
+            (Git.TagName "salmon-published-acme-not-a-joke")
             defaultTagText
             "acme-not-a-joke"
             (Git.Remote "https://github.com/lucasdicioccio/acme-not-a-joke.git")
@@ -675,6 +768,10 @@ program =
     specOp k (HaskellBuild h Duckling) = [opGraph $ duckling (homedir h)]
     --
     specOp k (HaskellPublish v h ProdAPI) = [prodapi__publish (homedir h) v]
+    specOp k (HaskellPublish v h ProdAPIProxy) = [prodapi_proxy__publish (homedir h) v]
+    specOp k (HaskellPublish v h ProdAPIUserAuth) = [prodapi_userauth__publish (homedir h) v]
+    specOp k (HaskellPublish v h MicroDNS) = [microdns__publish (homedir h) v]
+    specOp k (HaskellPublish v h AcmeNotAJoke) = [acmeNotAJoke__publish (homedir h) v]
 
     optimizedDeps :: Op -> Op
     optimizedDeps base =
@@ -802,6 +899,14 @@ configure = Configure go
                 ]
     go (ReleaseSeed h "prodapi:publish" v) =
         pure $ HaskellPublish v h ProdAPI
+    go (ReleaseSeed h "prodapi-userauth:publish" v) =
+        pure $ HaskellPublish v h ProdAPIUserAuth
+    go (ReleaseSeed h "prodapi-proxy:publish" v) =
+        pure $ HaskellPublish v h ProdAPIProxy
+    go (ReleaseSeed h "microdns:publish" v) =
+        pure $ HaskellPublish v h MicroDNS
+    go (ReleaseSeed h "acme-not-a-joke:publish" v) =
+        pure $ HaskellPublish v h AcmeNotAJoke
 
 -------------------------------------------------------------------------------
 main :: IO ()

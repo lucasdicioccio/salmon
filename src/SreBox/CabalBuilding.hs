@@ -110,6 +110,7 @@ type CloneDir = Text
 type BinaryDir = FilePath
 type SDistDir = FilePath
 type CabalTarget = Text
+type SDistTarget = Text
 type CabalBinaryName = Text -- may vary from target when exe: or lib:  are prepended
 type BranchName = Text
 type SubDir = FilePath -- subdir where we can cabal build
@@ -170,13 +171,14 @@ publishHackage ::
     Reporter Report ->
     CloneDir ->
     SDistDir ->
+    SDistTarget ->
     CabalTarget ->
     VersionString ->
     Git.Remote ->
     BranchName ->
     SubDir ->
     Op
-publishHackage r dirname sdistdir target version remote branch subdir =
+publishHackage r dirname sdistdir sdisttarget target version remote branch subdir =
     uploadOp
   where
     tgzOp = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
@@ -188,4 +190,4 @@ publishHackage r dirname sdistdir target version remote branch subdir =
     cabal = (Track $ \_ -> noop "preinstalled")
     mkrepo = Track $ Git.repo (contramap (CallGit target) r) git
     tgzpath = sdistdir </> tgzname
-    tgzname = Text.unpack $ mconcat [target, "-", version, ".tar.gz"]
+    tgzname = Text.unpack $ mconcat [sdisttarget, "-", version, ".tar.gz"]
