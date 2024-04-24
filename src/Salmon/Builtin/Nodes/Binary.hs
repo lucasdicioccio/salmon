@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Salmon.Builtin.Nodes.Binary (
     Binary,
     justInstall,
@@ -9,6 +11,7 @@ module Salmon.Builtin.Nodes.Binary (
     withBinaryIO,
     untrackedExecIO,
     Report (..),
+    pattern CommandSuccess,
     isCommandSuccessful,
 ) where
 
@@ -38,6 +41,9 @@ data Report
     | CommandStopped !CreateProcess !ExitCode !ByteString !ByteString
     | Requested !(Maybe Act') !Report
     deriving (Show)
+
+pattern CommandSuccess out err <-
+    CommandStopped _ ExitSuccess out err
 
 isCommandSuccessful :: Report -> Bool
 isCommandSuccessful r = case r of
