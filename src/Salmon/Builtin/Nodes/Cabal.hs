@@ -23,6 +23,7 @@ import System.Process.ListLike (CreateProcess, cwd, proc)
 data Report
     = CabalBuild !Cabal !Binary.Report
     | CabalInstall !Cabal !Binary.Report
+    | CabalTest !Cabal !Binary.Report
     | CabalSDist !Cabal !Binary.Report
     | CabalUpload !CandidateStatus !FilePath !Binary.Report
     deriving (Show)
@@ -38,6 +39,7 @@ data Flag
 
 data CabalRun
     = Build CabalFlags Cabal
+    | Test Cabal
     | Install CabalFlags Cabal FilePath
     | SDist Cabal FilePath
     | Upload CandidateStatus FilePath
@@ -70,6 +72,19 @@ install r cabal flags c installdir =
                 }
   where
     r' = contramap (CabalInstall c) r
+    previous = deps [dir (Directory installdir)]
+
+test :: Reporter Report -> Track' (Binary "cabal") -> CabalFlags -> Cabal -> FilePath -> Op
+test r cabal flags c installdir =
+    withBinary cabal cabalRun (Test c) $ \up ->
+        op "cabal-test" previous $ \actions ->
+            actions
+                { help = "cabal tests a target"
+                , ref = dotRef $ "cabal:test:" <> (Text.pack (show c))
+                , up = up r'
+                }
+  where
+    r' = contramap (CabalTest c) r
     previous = deps [dir (Directory installdir)]
 
 sdist :: Reporter Report -> Track' (Binary "cabal") -> Cabal -> FilePath -> Op
@@ -114,6 +129,7 @@ cabalRun :: Command "cabal" CabalRun
 cabalRun = Command $ go
   where
     go (Build flags c) = (proc "cabal" (["build", Text.unpack c.cabalTarget] <> (extraArgs flags))){cwd = Just c.cabalDir}
+    go (Test c) = (proc "cabal" ["test", Text.unpack c.cabalTarget]){cwd = Just c.cabalDir}
     go (Install flags c dir) = (proc "cabal" (["install", "--install-method=copy", "--overwrite-policy=always", "--installdir=" <> dir, Text.unpack c.cabalTarget] <> (extraArgs flags))){cwd = Just c.cabalDir}
     go (SDist c path) = (proc "cabal" ["sdist", "--output-directory=" <> path, Text.unpack c.cabalTarget]){cwd = Just c.cabalDir}
     go (Upload Candidate path) = (proc "cabal" ["upload", path])
