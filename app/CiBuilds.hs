@@ -17,6 +17,7 @@ import qualified Salmon.Builtin.Nodes.Cabal as Cabal
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Git as Git
+import qualified Salmon.Builtin.Nodes.Spago as Spago
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
@@ -111,6 +112,33 @@ reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
             remoteForTagging
             branch
 
+reportSpagoWithTag ::
+    Git.TagName ->
+    CabalBuilding.CloneDir ->
+    CabalBuilding.CloneDir ->
+    Git.Remote ->
+    Git.Remote ->
+    CabalBuilding.BranchName ->
+    Reporter Spago.Report
+reportSpagoWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
+    reportBoth reportPrint applyTagOnSuccess
+  where
+    applyTagOnSuccess :: Reporter Spago.Report
+    applyTagOnSuccess = reportIf (\x -> Spago.isBuildSuccess x) applyTag
+
+    applyTag :: Reporter Spago.Report
+    applyTag = contramap (const mkTag) (CLI.updownOnReport reportPrint)
+
+    mkTag :: Op
+    mkTag =
+        successfulBuildTag
+            tag
+            tagtxt
+            dirname
+            remoteForCloning
+            remoteForTagging
+            branch
+
 defaultTag :: Git.TagName
 defaultTag = Git.TagName "salmon-build"
 
@@ -187,6 +215,34 @@ kitchenSink_bridge p =
     r =
         reportWithTag
             (Git.TagName "salmon-build-kitchensink-bridge")
+            defaultTagText
+            "kitchensink"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
+            "main"
+
+kitchenSink_searchbox :: Prefs -> Op
+kitchenSink_searchbox p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/kitchensink/purs/search-box"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "kitchensink"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-kitchensink-searchbox")
             defaultTagText
             "kitchensink"
             (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
@@ -693,6 +749,7 @@ type BinDir = FilePath
 data HaskellBuild
     = KitchenSink
     | KitchenSinkBridge
+    | KitchenSinkSearchBox
     | MicroDNS
     | ProdAPI
     | ProdAPIUserAuth
@@ -745,6 +802,7 @@ program =
     specOp k (HaskellBuild h MicroDNS) = [opGraph $ microdns (homedir h)]
     specOp k (HaskellBuild h KitchenSink) = [opGraph $ kitchenSink (homedir h)]
     specOp k (HaskellBuild h KitchenSinkBridge) = [opGraph $ kitchenSink_bridge (homedir h)]
+    specOp k (HaskellBuild h KitchenSinkSearchBox) = [kitchenSink_searchbox (homedir h)]
     specOp k (HaskellBuild h ProdAPI) = [prodapi (homedir h)]
     specOp k (HaskellBuild h ProdAPIUserAuth) = [prodapi_userauth (homedir h)]
     specOp k (HaskellBuild h ProdAPIProxy) = [prodapi_proxy (homedir h)]
@@ -809,6 +867,7 @@ configure = Configure go
     go :: Seed -> IO Spec
     go (BuildSeed h "kitchensink:hs") = pure $ HaskellBuild h KitchenSink
     go (BuildSeed h "kitchensink:bridge:hs") = pure $ HaskellBuild h KitchenSinkBridge
+    go (BuildSeed h "kitchensink:searchbox:purs") = pure $ HaskellBuild h KitchenSinkSearchBox
     go (BuildSeed h "microdns:hs") = pure $ HaskellBuild h MicroDNS
     go (BuildSeed h "prodapi:hs") = pure $ HaskellBuild h ProdAPI
     go (BuildSeed h "prodapi:proxy:hs") = pure $ HaskellBuild h ProdAPIProxy
@@ -861,6 +920,7 @@ configure = Configure go
                 , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h KitchenSinkBridge
+                , HaskellBuild h KitchenSinkSearchBox
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Sqq
@@ -877,6 +937,7 @@ configure = Configure go
                 , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h KitchenSinkBridge
+                , HaskellBuild h KitchenSinkSearchBox
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Mustache

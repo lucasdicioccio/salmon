@@ -22,6 +22,12 @@ data Report
     | SpagoBundle !Spago !FilePath !Binary.Report
     deriving (Show)
 
+isBuildSuccess :: Report -> Bool
+isBuildSuccess r = case r of
+    (SpagoBuild _ cmd) ->
+        Binary.isCommandSuccessful cmd
+    otherwise -> False
+
 -------------------------------------------------------------------------------
 data Spago = Spago {spagoDir :: FilePath}
     deriving (Eq, Ord, Show)
