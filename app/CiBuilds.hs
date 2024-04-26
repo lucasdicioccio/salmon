@@ -283,6 +283,90 @@ kitchenSink_searchbox p =
             (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
             "main"
 
+halogen_echarts_simple :: Prefs -> Op
+halogen_echarts_simple p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/ps-halogen-echarts-simple"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "ps-halogen-echarts-simple"
+            (Git.Remote "https://github.com/lucasdicioccio/purescript-halogen-echarts-simple.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build")
+            defaultTagText
+            "ps-halogen-echarts-simple"
+            (Git.Remote "https://github.com/lucasdicioccio/purescript-halogen-echarts-simple.git")
+            (Git.Remote "git@github.com:lucasdicioccio/purescript-halogen-echarts-simple.git")
+            "main"
+
+echarts_simple :: Prefs -> Op
+echarts_simple p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/ps-echarts-simple"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "ps-echarts-simple"
+            (Git.Remote "https://github.com/lucasdicioccio/purescript-echarts-simple.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build")
+            defaultTagText
+            "ps-echarts-simple"
+            (Git.Remote "https://github.com/lucasdicioccio/purescript-echarts-simple.git")
+            (Git.Remote "git@github.com:lucasdicioccio/purescript-echarts-simple.git")
+            "main"
+
+humdrum :: Prefs -> Op
+humdrum p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/ps-humdrum"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "ps-humdrum"
+            (Git.Remote "https://github.com/lucasdicioccio/purescript-humdrum.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build")
+            defaultTagText
+            "ps-humdrum"
+            (Git.Remote "https://github.com/lucasdicioccio/purescript-humdrum.git")
+            (Git.Remote "git@github.com:lucasdicioccio/purescript-humdrum.git")
+            "main"
+
 postgrest :: Prefs -> Tracked' FilePath
 postgrest p =
     CabalBuilding.cabalRepoBuild
@@ -781,7 +865,10 @@ duckling p =
 type BinDir = FilePath
 
 data PureScriptBuild
-    = KitchenSinkSearchBox
+    = EchartsSimple
+    | HalogenEchartsSimple
+    | Humdrum
+    | KitchenSinkSearchBox
     | KitchenSinkGraphExplorer
     deriving (Generic)
 instance FromJSON PureScriptBuild
@@ -865,6 +952,9 @@ program =
     specOp k (HaskellBuild h Fourmolu) = [opGraph $ fourmolu (homedir h)]
     specOp k (HaskellBuild h Duckling) = [opGraph $ duckling (homedir h)]
     --
+    specOp k (PureScriptBuild h EchartsSimple) = [echarts_simple (homedir h)]
+    specOp k (PureScriptBuild h HalogenEchartsSimple) = [halogen_echarts_simple (homedir h)]
+    specOp k (PureScriptBuild h Humdrum) = [humdrum (homedir h)]
     specOp k (PureScriptBuild h KitchenSinkSearchBox) = [kitchenSink_searchbox (homedir h)]
     specOp k (PureScriptBuild h KitchenSinkGraphExplorer) = [kitchenSink_graphexplorer (homedir h)]
     --
@@ -925,6 +1015,9 @@ configure = Configure go
     go (BuildSeed h "grpc-native-client:hs") = pure $ HaskellBuild h GrpcNativeClient
     go (BuildSeed h "grpc-native-warp:hs") = pure $ HaskellBuild h GrpcNativeWarp
     go (BuildSeed h "acme-not-a-joke:hs") = pure $ HaskellBuild h AcmeNotAJoke
+    go (BuildSeed h "echarts-simple:purs") = pure $ PureScriptBuild h EchartsSimple
+    go (BuildSeed h "halogen-echarts-simple:purs") = pure $ PureScriptBuild h HalogenEchartsSimple
+    go (BuildSeed h "humdrum:purs") = pure $ PureScriptBuild h Humdrum
     go (BuildSeed h "postgrest:hs") = pure $ HaskellBuild h PostgREST
     go (BuildSeed h "proto3-wire:hs") = pure $ HaskellBuild h Proto3Wire
     go (BuildSeed h "protolens:hs") = pure $ HaskellBuild h ProtoLens
@@ -970,6 +1063,9 @@ configure = Configure go
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Sqq
                 , HaskellBuild h Http2Client
+                , PureScriptBuild h EchartsSimple
+                , PureScriptBuild h HalogenEchartsSimple
+                , PureScriptBuild h Humdrum
                 ]
     go (BuildSeed h ":important") =
         pure $
@@ -997,6 +1093,9 @@ configure = Configure go
                 , HaskellBuild h GrpcNativeTypes
                 , HaskellBuild h GrpcNativeClient
                 , HaskellBuild h GrpcNativeWarp
+                , PureScriptBuild h EchartsSimple
+                , PureScriptBuild h Humdrum
+                , PureScriptBuild h HalogenEchartsSimple
                 ]
     go (BuildSeed h ":fun") =
         pure $
