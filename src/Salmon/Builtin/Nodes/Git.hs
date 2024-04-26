@@ -34,7 +34,9 @@ data Report
 newtype Remote = Remote {getRemote :: Text}
     deriving (Eq, Ord, Show)
 
-newtype Branch = Branch {getBranch :: Text}
+type BranchName = Text
+
+newtype Branch = Branch {getBranch :: BranchName}
     deriving (Eq, Ord, Show)
 
 data Repo = Repo {repoClonedir :: FilePath, repoLocalName :: Text, repoRemote :: Remote, repoBranch :: Branch}

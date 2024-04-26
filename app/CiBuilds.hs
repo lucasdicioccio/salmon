@@ -2,10 +2,12 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
 import Data.Aeson (FromJSON, ToJSON, encode)
+import Data.Functor.Contravariant (Predicate (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Options.Applicative (command, execParser, fullDesc, header, help, helper, info, progDesc, strArgument, subparser, (<**>))
@@ -47,15 +49,15 @@ homedir h =
         h </> "sdist" </> x
 
 -------------------------------------------------------------------------------
-successfulBuildTag ::
+pushNewTag ::
     Git.TagName ->
     Text ->
     CabalBuilding.CloneDir ->
     Git.Remote ->
     Git.Remote ->
-    CabalBuilding.BranchName ->
+    Git.BranchName ->
     Op
-successfulBuildTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
+pushNewTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
     dopush
   where
     dopush :: Op
@@ -86,31 +88,46 @@ successfulBuildTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
     therepo = Git.Repo "./git-repos/" dirname remoteForCloning (Git.Branch branch)
 
 reportWithTag ::
+    forall buildReport.
     Git.TagName ->
     CabalBuilding.CloneDir ->
     CabalBuilding.CloneDir ->
     Git.Remote ->
     Git.Remote ->
-    CabalBuilding.BranchName ->
-    Reporter CabalBuilding.Report
-reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
-    reportBoth reportPrint applyTagOnSuccess
+    Git.BranchName ->
+    Predicate buildReport ->
+    Reporter buildReport
+reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch predicate =
+    reportWhen predicate applyTag
   where
-    applyTagOnSuccess :: Reporter CabalBuilding.Report
-    applyTagOnSuccess = reportIf (\x -> CabalBuilding.isBuildSuccess x || CabalBuilding.isReleaseSuccess x) applyTag
-
-    applyTag :: Reporter CabalBuilding.Report
+    applyTag :: Reporter buildReport
     applyTag = contramap (const mkTag) (CLI.updownOnReport reportPrint)
 
     mkTag :: Op
     mkTag =
-        successfulBuildTag
+        pushNewTag
             tag
             tagtxt
             dirname
             remoteForCloning
             remoteForTagging
             branch
+
+reportCabalWithTag ::
+    Git.TagName ->
+    CabalBuilding.CloneDir ->
+    CabalBuilding.CloneDir ->
+    Git.Remote ->
+    Git.Remote ->
+    Git.BranchName ->
+    Reporter CabalBuilding.Report
+reportCabalWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
+    reportBoth
+        reportPrint
+        (reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch predicate)
+  where
+    predicate :: Predicate CabalBuilding.Report
+    predicate = Predicate $ \x -> (CabalBuilding.isBuildSuccess x || CabalBuilding.isReleaseSuccess x)
 
 reportSpagoWithTag ::
     Git.TagName ->
@@ -118,26 +135,15 @@ reportSpagoWithTag ::
     CabalBuilding.CloneDir ->
     Git.Remote ->
     Git.Remote ->
-    CabalBuilding.BranchName ->
+    Git.BranchName ->
     Reporter Spago.Report
 reportSpagoWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch =
-    reportBoth reportPrint applyTagOnSuccess
+    reportBoth
+        reportPrint
+        (reportWithTag tag tagtxt dirname remoteForCloning remoteForTagging branch predicate)
   where
-    applyTagOnSuccess :: Reporter Spago.Report
-    applyTagOnSuccess = reportIf (\x -> Spago.isBuildSuccess x) applyTag
-
-    applyTag :: Reporter Spago.Report
-    applyTag = contramap (const mkTag) (CLI.updownOnReport reportPrint)
-
-    mkTag :: Op
-    mkTag =
-        successfulBuildTag
-            tag
-            tagtxt
-            dirname
-            remoteForCloning
-            remoteForTagging
-            branch
+    predicate :: Predicate Spago.Report
+    predicate = Predicate Spago.isBuildSuccess
 
 defaultTag :: Git.TagName
 defaultTag = Git.TagName "salmon-build"
@@ -152,7 +158,7 @@ microdns p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "microdns"
@@ -175,7 +181,7 @@ microdns__publish p v =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-published-microdns")
             defaultTagText
             "microdns"
@@ -189,7 +195,7 @@ kitchenSink p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "kitchensink"
@@ -213,7 +219,7 @@ kitchenSink_bridge p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-kitchensink-bridge")
             defaultTagText
             "kitchensink"
@@ -332,7 +338,7 @@ prodapi p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "prodapi"
@@ -355,7 +361,7 @@ prodapi_proxy p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-prodapi-proxy")
             defaultTagText
             "prodapi"
@@ -378,7 +384,7 @@ prodapi_userauth p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-prodapi-userauth")
             defaultTagText
             "prodapi"
@@ -401,7 +407,7 @@ prodapi_gen p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-prodapi-gen")
             defaultTagText
             "prodapi"
@@ -424,7 +430,7 @@ prodapi__publish p v =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-published-prodapi")
             defaultTagText
             "prodapi"
@@ -447,7 +453,7 @@ prodapi_proxy__publish p v =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-published-prodapi-proxy")
             defaultTagText
             "prodapi"
@@ -470,7 +476,7 @@ prodapi_userauth__publish p v =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-published-prodapi-userauth")
             defaultTagText
             "prodapi"
@@ -493,7 +499,7 @@ acmeNotAJoke p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "acme-not-a-joke"
@@ -516,7 +522,7 @@ acmeNotAJoke__publish p v =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-published-acme-not-a-joke")
             defaultTagText
             "acme-not-a-joke"
@@ -539,7 +545,7 @@ minizincProcess p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "minizinc-process"
@@ -562,7 +568,7 @@ grpcNative_warp p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-warp")
             defaultTagText
             "http2-grpc-haskell"
@@ -585,7 +591,7 @@ grpcNative_types p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-types")
             defaultTagText
             "http2-grpc-haskell"
@@ -608,7 +614,7 @@ grpcNative_client p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             (Git.TagName "salmon-build-client")
             defaultTagText
             "http2-grpc-haskell"
@@ -631,7 +637,7 @@ http2Client p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "http2-client"
@@ -655,7 +661,7 @@ sqq p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "sqq"
@@ -679,7 +685,7 @@ salmon p =
   where
     r :: Reporter CabalBuilding.Report
     r =
-        reportWithTag
+        reportCabalWithTag
             defaultTag
             defaultTagText
             "salmon"

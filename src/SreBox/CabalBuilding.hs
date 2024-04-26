@@ -112,7 +112,6 @@ type SDistDir = FilePath
 type CabalTarget = Text
 type SDistTarget = Text
 type CabalBinaryName = Text -- may vary from target when exe: or lib:  are prepended
-type BranchName = Text
 type SubDir = FilePath -- subdir where we can cabal build
 
 optBuildsBindir :: BinaryDir
@@ -127,7 +126,7 @@ cabalRepoBuild ::
     CabalTarget ->
     CabalBinaryName ->
     Git.Remote ->
-    BranchName ->
+    Git.BranchName ->
     SubDir ->
     Cabal.CabalFlags ->
     Tracked' FilePath
@@ -150,7 +149,7 @@ cabalRepoOnlyBuild ::
     Op ->
     CabalTarget ->
     Git.Remote ->
-    BranchName ->
+    Git.BranchName ->
     SubDir ->
     Cabal.CabalFlags ->
     Op
@@ -175,7 +174,7 @@ publishHackage ::
     CabalTarget ->
     VersionString ->
     Git.Remote ->
-    BranchName ->
+    Git.BranchName ->
     SubDir ->
     Op
 publishHackage r dirname sdistdir sdisttarget target version remote branch subdir =

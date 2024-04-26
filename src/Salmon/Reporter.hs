@@ -5,6 +5,7 @@ module Salmon.Reporter (
     ReporterM (..),
     silent,
     reportIf,
+    reportWhen,
     reportBoth,
     reportPick,
 
@@ -85,6 +86,12 @@ reportIf predicate t = reportPick f silent t
   where
     f :: a -> Either () a
     f x = if predicate x then Right x else Left ()
+
+-- | Like @reportIf@ but using a @Predicate@.
+{-# INLINEABLE reportWhen #-}
+reportWhen :: forall m a. (Applicative m) => Predicate a -> ReporterM m a -> ReporterM m a
+reportWhen (Predicate predicate) t =
+    reportIf predicate t
 
 -- | A reporter that prints emitted events.
 reportPrint :: (MonadIO m, Show a) => ReporterM m a
