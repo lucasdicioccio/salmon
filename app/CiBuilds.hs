@@ -780,11 +780,16 @@ duckling p =
 -------------------------------------------------------------------------------
 type BinDir = FilePath
 
+data PureScriptBuild
+    = KitchenSinkSearchBox
+    | KitchenSinkGraphExplorer
+    deriving (Generic)
+instance FromJSON PureScriptBuild
+instance ToJSON PureScriptBuild
+
 data HaskellBuild
     = KitchenSink
     | KitchenSinkBridge
-    | KitchenSinkSearchBox
-    | KitchenSinkGraphExplorer
     | MicroDNS
     | ProdAPI
     | ProdAPIUserAuth
@@ -814,6 +819,7 @@ instance ToJSON HaskellBuild
 data Spec
     = Batch [Spec]
     | HaskellBuild BinDir HaskellBuild
+    | PureScriptBuild BinDir PureScriptBuild
     | HaskellPublish CabalBuilding.VersionString BinDir HaskellBuild
     deriving (Generic)
 instance FromJSON Spec
@@ -837,8 +843,6 @@ program =
     specOp k (HaskellBuild h MicroDNS) = [opGraph $ microdns (homedir h)]
     specOp k (HaskellBuild h KitchenSink) = [opGraph $ kitchenSink (homedir h)]
     specOp k (HaskellBuild h KitchenSinkBridge) = [opGraph $ kitchenSink_bridge (homedir h)]
-    specOp k (HaskellBuild h KitchenSinkSearchBox) = [kitchenSink_searchbox (homedir h)]
-    specOp k (HaskellBuild h KitchenSinkGraphExplorer) = [kitchenSink_graphexplorer (homedir h)]
     specOp k (HaskellBuild h ProdAPI) = [prodapi (homedir h)]
     specOp k (HaskellBuild h ProdAPIUserAuth) = [prodapi_userauth (homedir h)]
     specOp k (HaskellBuild h ProdAPIProxy) = [prodapi_proxy (homedir h)]
@@ -860,6 +864,9 @@ program =
     specOp k (HaskellBuild h SwarmRoot) = [opGraph $ swarmRoot (homedir h)]
     specOp k (HaskellBuild h Fourmolu) = [opGraph $ fourmolu (homedir h)]
     specOp k (HaskellBuild h Duckling) = [opGraph $ duckling (homedir h)]
+    --
+    specOp k (PureScriptBuild h KitchenSinkSearchBox) = [kitchenSink_searchbox (homedir h)]
+    specOp k (PureScriptBuild h KitchenSinkGraphExplorer) = [kitchenSink_graphexplorer (homedir h)]
     --
     specOp k (HaskellPublish v h ProdAPI) = [prodapi__publish (homedir h) v]
     specOp k (HaskellPublish v h ProdAPIProxy) = [prodapi_proxy__publish (homedir h) v]
@@ -903,8 +910,8 @@ configure = Configure go
     go :: Seed -> IO Spec
     go (BuildSeed h "kitchensink:hs") = pure $ HaskellBuild h KitchenSink
     go (BuildSeed h "kitchensink:bridge:hs") = pure $ HaskellBuild h KitchenSinkBridge
-    go (BuildSeed h "kitchensink:searchbox:purs") = pure $ HaskellBuild h KitchenSinkSearchBox
-    go (BuildSeed h "kitchensink:graphexplorer:purs") = pure $ HaskellBuild h KitchenSinkGraphExplorer
+    go (BuildSeed h "kitchensink:searchbox:purs") = pure $ PureScriptBuild h KitchenSinkSearchBox
+    go (BuildSeed h "kitchensink:graphexplorer:purs") = pure $ PureScriptBuild h KitchenSinkGraphExplorer
     go (BuildSeed h "microdns:hs") = pure $ HaskellBuild h MicroDNS
     go (BuildSeed h "prodapi:hs") = pure $ HaskellBuild h ProdAPI
     go (BuildSeed h "prodapi:proxy:hs") = pure $ HaskellBuild h ProdAPIProxy
@@ -957,8 +964,8 @@ configure = Configure go
                 , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h KitchenSinkBridge
-                , HaskellBuild h KitchenSinkSearchBox
-                , HaskellBuild h KitchenSinkGraphExplorer
+                , PureScriptBuild h KitchenSinkSearchBox
+                , PureScriptBuild h KitchenSinkGraphExplorer
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Sqq
@@ -975,8 +982,8 @@ configure = Configure go
                 , HaskellBuild h MicroDNS
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h KitchenSinkBridge
-                , HaskellBuild h KitchenSinkSearchBox
-                , HaskellBuild h KitchenSinkGraphExplorer
+                , PureScriptBuild h KitchenSinkSearchBox
+                , PureScriptBuild h KitchenSinkGraphExplorer
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Mustache
