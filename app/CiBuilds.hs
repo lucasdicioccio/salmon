@@ -227,6 +227,34 @@ kitchenSink_bridge p =
             (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
             "main"
 
+kitchenSink_graphexplorer :: Prefs -> Op
+kitchenSink_graphexplorer p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/kitchensink/purs/graphexplorer"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "kitchensink"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-kitchensink-graphexplorer")
+            defaultTagText
+            "kitchensink"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Remote "git@github.com:kitchensink-tech/kitchensink.git")
+            "main"
+
 kitchenSink_searchbox :: Prefs -> Op
 kitchenSink_searchbox p =
     build `inject` clone
@@ -756,6 +784,7 @@ data HaskellBuild
     = KitchenSink
     | KitchenSinkBridge
     | KitchenSinkSearchBox
+    | KitchenSinkGraphExplorer
     | MicroDNS
     | ProdAPI
     | ProdAPIUserAuth
@@ -809,6 +838,7 @@ program =
     specOp k (HaskellBuild h KitchenSink) = [opGraph $ kitchenSink (homedir h)]
     specOp k (HaskellBuild h KitchenSinkBridge) = [opGraph $ kitchenSink_bridge (homedir h)]
     specOp k (HaskellBuild h KitchenSinkSearchBox) = [kitchenSink_searchbox (homedir h)]
+    specOp k (HaskellBuild h KitchenSinkGraphExplorer) = [kitchenSink_graphexplorer (homedir h)]
     specOp k (HaskellBuild h ProdAPI) = [prodapi (homedir h)]
     specOp k (HaskellBuild h ProdAPIUserAuth) = [prodapi_userauth (homedir h)]
     specOp k (HaskellBuild h ProdAPIProxy) = [prodapi_proxy (homedir h)]
@@ -874,6 +904,7 @@ configure = Configure go
     go (BuildSeed h "kitchensink:hs") = pure $ HaskellBuild h KitchenSink
     go (BuildSeed h "kitchensink:bridge:hs") = pure $ HaskellBuild h KitchenSinkBridge
     go (BuildSeed h "kitchensink:searchbox:purs") = pure $ HaskellBuild h KitchenSinkSearchBox
+    go (BuildSeed h "kitchensink:graphexplorer:purs") = pure $ HaskellBuild h KitchenSinkGraphExplorer
     go (BuildSeed h "microdns:hs") = pure $ HaskellBuild h MicroDNS
     go (BuildSeed h "prodapi:hs") = pure $ HaskellBuild h ProdAPI
     go (BuildSeed h "prodapi:proxy:hs") = pure $ HaskellBuild h ProdAPIProxy
@@ -927,6 +958,7 @@ configure = Configure go
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h KitchenSinkBridge
                 , HaskellBuild h KitchenSinkSearchBox
+                , HaskellBuild h KitchenSinkGraphExplorer
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Sqq
@@ -944,6 +976,7 @@ configure = Configure go
                 , HaskellBuild h KitchenSink
                 , HaskellBuild h KitchenSinkBridge
                 , HaskellBuild h KitchenSinkSearchBox
+                , HaskellBuild h KitchenSinkGraphExplorer
                 , HaskellBuild h Salmon
                 , HaskellBuild h MinizincProcess
                 , HaskellBuild h Mustache
