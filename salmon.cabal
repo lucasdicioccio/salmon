@@ -61,6 +61,7 @@ library
                    , Salmon.Builtin.Nodes.Routes
                    , Salmon.Builtin.Nodes.Self
                    , Salmon.Builtin.Nodes.Secrets
+                   , Salmon.Builtin.Nodes.Spago
                    , Salmon.Builtin.Nodes.Ssh
                    , Salmon.Builtin.Nodes.Systemd
                    , Salmon.Builtin.Nodes.Web

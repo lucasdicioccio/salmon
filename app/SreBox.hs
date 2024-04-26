@@ -66,6 +66,7 @@ import qualified Salmon.Builtin.Nodes.Routes as Routes
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Self as Self
+import qualified Salmon.Builtin.Nodes.Spago as Spago
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.User as User
@@ -595,8 +596,13 @@ laptop r simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
+localDev simulate selfpath = op "local-dev" (deps [makejs]) id
   where
+    makejs = Spago.bundleApp reportPrint ignoreTrack s "Main" "./toto.js"
+    -- s = Spago.Spago "./git-repos/blog/purescript/halogen-demo"
+    -- s = Spago.Spago "./git-repos/blog/purescript/halogen-demo"
+    s = Spago.Spago "./git-repos/blog/purescript/babywordgame"
+
     blogrepo :: Git.Repo
     blogrepo =
         Git.Repo
@@ -604,6 +610,8 @@ localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
             "blog"
             (Git.Remote "git@github.com:lucasdicioccio/blog.git")
             (Git.Branch "main")
+
+{-
 
     remoteToCloneFrom, remoteToPushTo :: Git.Remote
     remoteToCloneFrom = blogrepo.repoRemote
@@ -645,7 +653,6 @@ localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
     mkrepo :: Track' Git.Repo
     mkrepo = Track $ \r -> Git.repo reportPrint Debian.git r
 
-{-
   where
     deboostrap :: Op
     deboostrap =
