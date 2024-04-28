@@ -766,7 +766,7 @@ program selfpath httpManager =
     specOp k (Machine Laptop domainName) = [laptop reportPrint (go k) selfpath]
     -- actions
     specOp k (InitPostgres arg) = [PGInit.setupPG reportPrint $ PGInit.setupWithPreExistingPasswords arg]
-    specOp k (MigratePostgres arg) = [PGMigrate.applyMigration reportPrint Debian.psql mkPgInit arg]
+    specOp k (MigratePostgres arg) = [PGMigrate.applyUserScriptMigration reportPrint Debian.psql mkPgInit arg]
     -- services
     specOp k (RegisterMachine arg) = [DNSRegistration.registerMachine arg]
     specOp k (AuthoritativeDNS arg) = [MicroDNS.systemdMicroDNS reportPrint arg]

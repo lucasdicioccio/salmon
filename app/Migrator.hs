@@ -38,13 +38,31 @@ loadMigrations root tip =
                 PGMigrate.defaultMigrationReader
      in G . fmap node <$> Migrations.loadMigrations reader tip
 
-prepare :: FilePath -> FilePath -> Text -> Text -> FilePath -> IO PGMigrate.MigrationSetup
+prepare ::
+    FilePath ->
+    FilePath ->
+    Text ->
+    Text ->
+    FilePath ->
+    IO PGMigrate.MigrationSetup
 prepare root tip dbname migrateusername passfile =
     PGMigrate.MigrationSetup
         <$> loadMigrations root tip
         <*> pure (Postgres.User migrateusername)
         <*> pure (Postgres.Database dbname)
         <*> pure passfile
+
+migrateSuperUser :: PGMigrate.MigrationSetup -> Op
+migrateSuperUser arg =
+    runMigration
+  where
+    runMigration :: Op
+    runMigration =
+        PGMigrate.applyAdminScriptMigration
+            reportPrint
+            Debian.psql
+            (Track $ PGInit.setupNakedPG reportPrint)
+            arg
 
 migrate :: PGMigrate.MigrationSetup -> Op
 migrate arg =
@@ -64,16 +82,15 @@ migrate arg =
 
     runMigration :: Op
     runMigration =
-        PGMigrate.applyMigration
+        PGMigrate.applyUserScriptMigration
             reportPrint
             Debian.psql
             initPg
             arg
 
 -------------------------------------------------------------------------------
--- todo: multiple tips to run schema and data (and roles?) migrations side-by-side
 data Spec
-    = Migrate PGMigrate.MigrationSetup
+    = Migrate {migrateAsSuperUser :: PGMigrate.MigrationSetup, migrateAsOwner :: PGMigrate.MigrationSetup}
     deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -91,7 +108,7 @@ program =
 
     specOp :: Int -> Spec -> [Op]
     -- meta
-    specOp k (Migrate setup) = [migrate setup]
+    specOp k (Migrate setup1 setup2) = [migrate setup2 `inject` migrateSuperUser setup1]
 
     optimizedDeps :: Op -> Op
     optimizedDeps base =
@@ -101,7 +118,9 @@ program =
 -------------------------------------------------------------------------------
 data Seed
     = Seed
-    { migrateRoot :: FilePath
+    { migrateRoot_superuser :: FilePath
+    , migrateTip_superuser :: FilePath
+    , migrateRoot :: FilePath
     , migrateTip :: FilePath
     , migrateDatabase :: Text
     , migrateUser :: Text
@@ -119,18 +138,22 @@ instance ParseRecord Seed where
                     ]
         build =
             Seed
-                <$> strArgument (Options.Applicative.help "root of migration files")
-                <*> strArgument (Options.Applicative.help "tip of migration files")
+                <$> strArgument (Options.Applicative.help "root of migration files [superuser]")
+                <*> strArgument (Options.Applicative.help "tip of migration files [superuser]")
+                <*> strArgument (Options.Applicative.help "root of migration files [db-owner]")
+                <*> strArgument (Options.Applicative.help "tip of migration files [db-owner]")
                 <*> strArgument (Options.Applicative.help "dbname")
-                <*> strArgument (Options.Applicative.help "username")
+                <*> strArgument (Options.Applicative.help "username [db-owner]")
                 <*> strArgument (Options.Applicative.help "passfile")
 
 configure :: Configure IO Seed Spec
 configure = Configure go
   where
     go :: Seed -> IO Spec
-    go (Seed root tip dbname username passfile) =
-        Migrate <$> prepare root tip dbname username passfile
+    go (Seed root1 tip1 root2 tip2 dbname username passfile) =
+        Migrate
+            <$> prepare root1 tip1 dbname username passfile
+            <*> prepare root2 tip2 dbname username passfile
 
 -------------------------------------------------------------------------------
 main :: IO ()

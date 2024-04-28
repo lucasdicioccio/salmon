@@ -119,6 +119,16 @@ setupSingleUserPG r connstring =
     u1 = connstring.connstring_user
     pass1 = connstring.connstring_user_pass
 
+setupNakedPG :: Reporter Report -> Postgres.DatabaseName -> Op
+setupNakedPG r dbname =
+    Postgres.database
+        (contramap InitPostgres r)
+        cluster
+        Debian.psql
+        (Postgres.Database dbname)
+  where
+    cluster = Track $ Postgres.pgLocalCluster (contramap InitPostgres r) Debian.postgres Debian.pg_ctlcluster
+
 remoteSetupPG ::
     (FromJSON directive, ToJSON directive) =>
     Reporter Report ->

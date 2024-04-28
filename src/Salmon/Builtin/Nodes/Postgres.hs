@@ -204,11 +204,17 @@ groupMember r server psql g role u =
     dbgroup = group r server psql g
     dbuser = run role u
 
-adminScript :: Reporter Report -> Track' (Binary "psql") -> File "psql-script" -> Op
-adminScript r psql file =
+adminScript ::
+    Reporter Report ->
+    Track' (Binary "psql") ->
+    Track' DatabaseName ->
+    DatabaseName ->
+    File "psql-script" ->
+    Op
+adminScript r psql mkdb dbname file =
     withFile file $ \path ->
-        withBinary psql psqlAdminRun_Sudo (AdminScript path) $ \up ->
-            op "pg-adming-script" nodeps $ \actions ->
+        withBinary psql psqlAdminRun_Sudo (AdminScript dbname path) $ \up ->
+            op "pg-admin-script" (deps [run mkdb dbname]) $ \actions ->
                 actions
                     { ref = dotRef $ "pg-admin-script:" <> Text.pack path
                     , up = up (r' path)
@@ -226,7 +232,7 @@ data PsqlAdmin
     | CreateGroup RoleName
     | Grant AccessRight
     | GroupMembership RoleName RoleName
-    | AdminScript FilePath
+    | AdminScript DatabaseName FilePath
 
 {- | todo: workaround sudo hack with some calling preference
 - we'll need to request more than a Track' (Binary "psql") but some more complex logic
@@ -235,8 +241,8 @@ with sudo, the user, and the right binary
 psqlAdminRun_Sudo :: Command "psql" PsqlAdmin
 psqlAdminRun_Sudo = Command go
   where
-    go (AdminScript path) =
-        proc "sudo" ["-u", "postgres", "psql", "-f", path]
+    go (AdminScript name path) =
+        proc "sudo" ["-u", "postgres", "psql", "-f", path, Text.unpack name]
     go (CreateDB name) =
         proc "sudo" ["-u", "postgres", "psql", "-c", unwords ["CREATE DATABASE", Text.unpack name]]
     go (CreateUser name pass) =

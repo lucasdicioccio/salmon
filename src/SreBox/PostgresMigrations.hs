@@ -25,7 +25,7 @@ import Salmon.Builtin.Migrations
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import Salmon.Builtin.Nodes.Debian.OS as Debian
 import Salmon.Builtin.Nodes.Filesystem as FS
-import Salmon.Builtin.Nodes.Postgres (ConnString (..), Database (..), Password, User, connstring, localServer, readPassword, userScript, withPassword)
+import Salmon.Builtin.Nodes.Postgres (ConnString (..), Database (..), DatabaseName, Password, User, adminScript, connstring, localServer, readPassword, userScript, withPassword)
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
@@ -79,33 +79,43 @@ defaultMigrationReader =
     prefix :: C8.ByteString
     prefix = "-- migrate.after: "
 
+data MigrateStyle
+    = MigrateUserScript (Track' (ConnString FilePath)) (ConnString FilePath)
+    | MigrateAdminScript (Track' DatabaseName) DatabaseName
+
 migrateG ::
     Reporter Report ->
     Track' (Binary "psql") ->
-    Track' (ConnString FilePath) ->
-    ConnString FilePath ->
+    MigrateStyle ->
     G MigrationFile ->
     Op
-migrateG r psql mksetup connstring g = migrate r psql mksetup connstring (coerce g)
+migrateG r psql style g =
+    migrate r psql style (coerce g)
 
 -- | A helper to turn a migration graph into an Op.
 migrate ::
     Reporter Report ->
     Track' (Binary "psql") ->
-    Track' (ConnString FilePath) ->
-    ConnString FilePath ->
+    MigrateStyle ->
     Cofree Graph MigrationFile ->
     Op
-migrate r psql mksetup connstring (m :< x) =
+migrate r psql style (m :< x) =
     let
-        current, pred :: Op
-        current = userScript r' psql mksetup connstring (PreExisting m.path)
+        current :: Op
+        current =
+            case style of
+                MigrateUserScript mksetup connstring ->
+                    userScript r' psql mksetup connstring (PreExisting m.path)
+                MigrateAdminScript mksetup dbname ->
+                    adminScript r' psql mksetup dbname (PreExisting m.path)
+
+        pred :: Op
         pred = evalPred "" x
      in
         current `inject` pred
   where
     r' = contramap (ApplyMigration m.path) r
-    gorec = migrate r psql mksetup connstring
+    gorec = migrate r psql style
     setref lineage actions =
         actions{ref = dotRef $ Text.pack $ m.path <> " " <> lineage}
 
@@ -129,10 +139,6 @@ data MigrationPlan a
     deriving (Generic)
 instance (ToJSON a) => ToJSON (MigrationPlan a)
 instance (FromJSON a) => FromJSON (MigrationPlan a)
-
-migratePlan :: Reporter Report -> MigrationPlan FilePath -> Op
-migratePlan r plan =
-    migrateG r Debian.psql ignoreTrack plan.migration_connstring plan.migration_file
 
 -------------------------------------------------------------------------------
 
@@ -273,17 +279,29 @@ data MigrationSetup
 instance FromJSON MigrationSetup
 instance ToJSON MigrationSetup
 
-applyMigration ::
+applyUserScriptMigration ::
     Reporter Report ->
     Track' (Binary "psql") ->
     Track' (ConnString FilePath) ->
     MigrationSetup ->
     Op
-applyMigration r psql mkConnstring setup =
-    migrateG r psql mkConnstring connstring setup.setup_migration
+applyUserScriptMigration r psql mkConnstring setup =
+    migrateG r psql style setup.setup_migration
   where
+    style = MigrateUserScript mkConnstring connstring
     connstring =
         ConnString localServer setup.setup_user setup.setup_tmp_secret_path setup.setup_database
+
+applyAdminScriptMigration ::
+    Reporter Report ->
+    Track' (Binary "psql") ->
+    Track' DatabaseName ->
+    MigrationSetup ->
+    Op
+applyAdminScriptMigration r psql mkdb setup =
+    migrateG r psql style setup.setup_migration
+  where
+    style = MigrateAdminScript mkdb (setup.setup_database.getDatabase)
 
 pgPassword :: Reporter Report -> Track' FilePath
 pgPassword r = Track $ \path ->
