@@ -367,6 +367,174 @@ humdrum p =
             (Git.Remote "git@github.com:lucasdicioccio/purescript-humdrum.git")
             "main"
 
+halogendemo :: Prefs -> Op
+halogendemo p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/blog/purescript/halogen-demo"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-halogendemo")
+            defaultTagText
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "main"
+
+halogenechartsdemo :: Prefs -> Op
+halogenechartsdemo p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/blog/purescript/halogen-echarts-demo/"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-halogenechartsdemo")
+            defaultTagText
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "main"
+
+prometheusmonitor :: Prefs -> Op
+prometheusmonitor p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/blog/purescript/prometheus-monitor"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-prometheus-monitor")
+            defaultTagText
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "main"
+
+tradeoffs :: Prefs -> Op
+tradeoffs p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/blog/purescript/tradeoffs"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-tradeoffs")
+            defaultTagText
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "main"
+
+scopeexplorer :: Prefs -> Op
+scopeexplorer p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/blog/purescript/scope-explorer"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-scope-explorer")
+            defaultTagText
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "main"
+
+babywordsgame :: Prefs -> Op
+babywordsgame p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/blog/purescript/babywordgame"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build-babywordsgame")
+            defaultTagText
+            "blog"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "main"
+
 postgrest :: Prefs -> Tracked' FilePath
 postgrest p =
     CabalBuilding.cabalRepoBuild
@@ -874,6 +1042,17 @@ data PureScriptBuild
 instance FromJSON PureScriptBuild
 instance ToJSON PureScriptBuild
 
+data PersonalBuild
+    = HalogenDemo
+    | HalogenEchartsDemo
+    | BabyWordsGame
+    | PrometheusMonitor
+    | ScopeExplorer
+    | Tradeoffs
+    deriving (Generic)
+instance FromJSON PersonalBuild
+instance ToJSON PersonalBuild
+
 data HaskellBuild
     = KitchenSink
     | KitchenSinkBridge
@@ -907,6 +1086,7 @@ data Spec
     = Batch [Spec]
     | HaskellBuild BinDir HaskellBuild
     | PureScriptBuild BinDir PureScriptBuild
+    | PersonalBuild BinDir PersonalBuild
     | HaskellPublish CabalBuilding.VersionString BinDir HaskellBuild
     deriving (Generic)
 instance FromJSON Spec
@@ -957,6 +1137,13 @@ program =
     specOp k (PureScriptBuild h Humdrum) = [humdrum (homedir h)]
     specOp k (PureScriptBuild h KitchenSinkSearchBox) = [kitchenSink_searchbox (homedir h)]
     specOp k (PureScriptBuild h KitchenSinkGraphExplorer) = [kitchenSink_graphexplorer (homedir h)]
+    --
+    specOp k (PersonalBuild h HalogenDemo) = [halogendemo (homedir h)]
+    specOp k (PersonalBuild h HalogenEchartsDemo) = [halogenechartsdemo (homedir h)]
+    specOp k (PersonalBuild h BabyWordsGame) = [babywordsgame (homedir h)]
+    specOp k (PersonalBuild h PrometheusMonitor) = [prometheusmonitor (homedir h)]
+    specOp k (PersonalBuild h ScopeExplorer) = [scopeexplorer (homedir h)]
+    specOp k (PersonalBuild h Tradeoffs) = [tradeoffs (homedir h)]
     --
     specOp k (HaskellPublish v h ProdAPI) = [prodapi__publish (homedir h) v]
     specOp k (HaskellPublish v h ProdAPIProxy) = [prodapi_proxy__publish (homedir h) v]
@@ -1027,6 +1214,12 @@ configure = Configure go
     go (BuildSeed h "swarmroot:hs") = pure $ HaskellBuild h SwarmRoot
     go (BuildSeed h "fourmolu:hs") = pure $ HaskellBuild h Fourmolu
     go (BuildSeed h "duckling:hs") = pure $ HaskellBuild h Duckling
+    go (BuildSeed h "halogen-demo:purs") = pure $ PersonalBuild h HalogenDemo
+    go (BuildSeed h "halogenecharts-demo:purs") = pure $ PersonalBuild h HalogenEchartsDemo
+    go (BuildSeed h "babywordsgame:purs") = pure $ PersonalBuild h BabyWordsGame
+    go (BuildSeed h "prometheus-monitor:purs") = pure $ PersonalBuild h PrometheusMonitor
+    go (BuildSeed h "scope-explorer:purs") = pure $ PersonalBuild h ScopeExplorer
+    go (BuildSeed h "tradeoffs:purs") = pure $ PersonalBuild h Tradeoffs
     go (BuildSeed h ":grpc") =
         pure $
             Batch
@@ -1066,6 +1259,12 @@ configure = Configure go
                 , PureScriptBuild h EchartsSimple
                 , PureScriptBuild h HalogenEchartsSimple
                 , PureScriptBuild h Humdrum
+                , PersonalBuild h HalogenDemo
+                , PersonalBuild h HalogenEchartsDemo
+                , PersonalBuild h BabyWordsGame
+                , PersonalBuild h ScopeExplorer
+                , PersonalBuild h PrometheusMonitor
+                , PersonalBuild h Tradeoffs
                 ]
     go (BuildSeed h ":important") =
         pure $
@@ -1096,6 +1295,7 @@ configure = Configure go
                 , PureScriptBuild h EchartsSimple
                 , PureScriptBuild h Humdrum
                 , PureScriptBuild h HalogenEchartsSimple
+                , PersonalBuild h PrometheusMonitor
                 ]
     go (BuildSeed h ":fun") =
         pure $
