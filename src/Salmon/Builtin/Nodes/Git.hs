@@ -81,6 +81,7 @@ gitDLcommand = Command $ \cmd -> case cmd of
         proc
             "git"
             [ "clone"
+            , "--recurse-submodules"
             , "-b"
             , Text.unpack branch.getBranch
             , "--depth"
