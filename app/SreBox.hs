@@ -18,7 +18,8 @@ import qualified Data.ByteString.Char8 as C8
 import Data.Foldable (toList)
 import Data.Functor.Contravariant ((>$<))
 import GHC.TypeLits (Symbol)
-import Options.Applicative
+import Options.Applicative hiding (help)
+import qualified Options.Applicative
 import Options.Generic
 import System.Process.ListLike (cwd, proc)
 
@@ -597,25 +598,71 @@ laptop r simulate selfpath =
                     (prefs.task_data_path "microdns.self-signed-cert.pem")
 
 -------------------------------------------------------------------------------
-localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
+data GithubSite
+    = GithubSite
+    { ghSiteBuildDir :: FilePath
+    , ghSiteName :: Text
+    , ghSiteSourceRepo :: Git.Repo
+    , ghSiteSourceRepoSubDir :: FilePath
+    , ghSiteRepo :: Git.Repo
+    , ghSiteAuthor :: Git.Author
+    , ghSiteCommitMessage :: Git.CommitMessage
+    , ghSiteTagName :: Git.TagName
+    }
+
+kitchensinkSite :: Track' Spec -> Self.SelfPath -> Op
+kitchensinkSite simulate selfpath =
+    githubSite simulate selfpath site
   where
-    callks :: Binary.Command "ks" (FilePath, FilePath, FilePath, FilePath)
-    callks =
-        Binary.Command $ \(path, builddir, srcdir, outdir) -> (proc path ["produce", "--outDir", outdir, "--srcDir", srcdir]){cwd = Just builddir}
+    site :: GithubSite
+    site =
+        GithubSite
+            "/home/lucasdicioccio/ci"
+            "kitchensink"
+            blogsourcerepo
+            "site-src"
+            blogrepo
+            (Git.Author "salmon automation <salmon@dicioccio.fr>")
+            message
+            tag
 
-    localKSPath :: FilePath
-    localKSPath = "/home/lucasdicioccio/ci/bin/ks"
+    blogsourcerepo :: Git.Repo
+    blogsourcerepo =
+        Git.Repo
+            "/home/lucasdicioccio/ci/pipeline/git-repos/"
+            "ks-site-src"
+            (Git.Remote "https://github.com/kitchensink-tech/kitchensink.git")
+            (Git.Branch "main")
 
-    buildtheblog :: FilePath -> Op
-    buildtheblog outdir =
-        using (CabalBuilding.kitchenSink reportPrint localKSPath) $ \kspath ->
-            using (Git.repodir mkrepo blogsourcerepo "") $ \srcdir ->
-                Binary.withBinary ignoreTrack callks (kspath, srcdir.directoryPath, srcdir.directoryPath </> "site-src", outdir) $ \buildBlog ->
-                    op "build-the-blog-with-ks" nodeps $ \actions ->
-                        actions
-                            { up = buildBlog reportPrint
-                            }
+    blogrepo :: Git.Repo
+    blogrepo =
+        Git.Repo
+            "/home/lucasdicioccio/ci/pipeline/git-repos/"
+            "ks-site-out"
+            (Git.Remote "git@github.com:kitchensink-tech/kitchensink-tech.github.io.git")
+            (Git.Branch "main")
+
+    message :: Git.CommitMessage
+    message = Git.CommitMessage (Git.Headline "auto-build from salmon") ""
+
+    tag :: Git.TagName
+    tag = Git.TagName "salmon-gen"
+
+personalBlogBackupSite :: Track' Spec -> Self.SelfPath -> Op
+personalBlogBackupSite simulate selfpath =
+    githubSite simulate selfpath site
+  where
+    site :: GithubSite
+    site =
+        GithubSite
+            "/home/lucasdicioccio/ci"
+            "blog"
+            blogsourcerepo
+            "site-src"
+            blogrepo
+            (Git.Author "salmon automation <salmon@dicioccio.fr>")
+            message
+            tag
 
     blogsourcerepo :: Git.Repo
     blogsourcerepo =
@@ -633,6 +680,42 @@ localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
             (Git.Remote "git@github.com:lucasdicioccio/lucasdicioccio.github.io.git")
             (Git.Branch "main")
 
+    message :: Git.CommitMessage
+    message = Git.CommitMessage (Git.Headline "auto-build from salmon") ""
+
+    tag :: Git.TagName
+    tag = Git.TagName "salmon-gen"
+
+githubSite :: Track' Spec -> Self.SelfPath -> GithubSite -> Op
+githubSite simulate selfpath ghSite =
+    op "github-site" (deps [pushTheBlog]) $ \actions ->
+        actions
+            { help = mconcat ["builds a KitchenSink-generated GitHub site for ", ghSite.ghSiteName]
+            , ref = dotRef $ "gh-site:" <> ghSite.ghSiteName
+            }
+  where
+    callks :: Binary.Command "ks" (FilePath, FilePath, FilePath, FilePath)
+    callks =
+        Binary.Command $ \(path, builddir, srcdir, outdir) -> (proc path ["produce", "--outDir", outdir, "--srcDir", srcdir]){cwd = Just builddir}
+
+    localKSPath :: FilePath
+    localKSPath = ghSite.ghSiteBuildDir </> "ci/bin/ks"
+
+    buildtheblog :: FilePath -> Op
+    buildtheblog outdir =
+        using (CabalBuilding.kitchenSink reportPrint localKSPath) $ \kspath ->
+            using (Git.repodir mkrepo ghSite.ghSiteSourceRepo "") $ \srcdir ->
+                let ksargs = (kspath, srcdir.directoryPath, srcdir.directoryPath </> "site-src", outdir)
+                 in Binary.withBinary ignoreTrack callks ksargs $ \buildBlog ->
+                        op "build-the-blog-with-ks" nodeps $ \actions ->
+                            actions
+                                { up = buildBlog reportPrint
+                                , ref = dotRef $ "gh-site:build:" <> (Text.pack $ show ksargs)
+                                }
+
+    blogrepo :: Git.Repo
+    blogrepo = ghSite.ghSiteRepo
+
     remoteToCloneFrom, remoteToPushTo :: Git.Remote
     remoteToCloneFrom = blogrepo.repoRemote
     remoteToPushTo = blogrepo.repoRemote
@@ -642,14 +725,11 @@ localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
         Git.push reportPrint Debian.git mkrepo blogrepo remoteToPushTo (Git.RemoteName "localclone") changes
 
     salmonAuthor :: Git.Author
-    salmonAuthor = Git.Author "salmon automation <salmon@dicioccio.fr>"
+    salmonAuthor = ghSite.ghSiteAuthor
 
     commitSomeChange :: Op
     commitSomeChange =
-        Git.commit reportPrint Debian.git mkrepo ignoreTrack blogrepo salmonAuthor message makeChanges
-      where
-        message :: Git.CommitMessage
-        message = Git.CommitMessage (Git.Headline "auto-build from salmon") ""
+        Git.commit reportPrint Debian.git mkrepo ignoreTrack blogrepo salmonAuthor ghSite.ghSiteCommitMessage makeChanges
 
     makeChanges :: Op
     makeChanges =
@@ -662,14 +742,20 @@ localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
         mkContent = Track $ \path -> buildtheblog path
 
     changes :: Op
-    changes = op "changes-to-push" (deps [tagTheBlog `inject` commitSomeChange]) id
+    changes = op "changes-to-push" (deps [tagTheBlog `inject` commitSomeChange]) $ \actions ->
+        actions
+            { ref = dotRef $ "gh-site:changes:" <> ghSite.ghSiteName
+            }
 
     tagTheBlog :: Op
     tagTheBlog =
-        Git.tag reportPrint Debian.git mkrepo blogrepo (Git.TagName "salmon-gen") Nothing
+        Git.tag reportPrint Debian.git mkrepo blogrepo ghSite.ghSiteTagName Nothing
 
     mkrepo :: Track' Git.Repo
     mkrepo = Track $ \r -> Git.repoFull reportPrint Debian.git r
+
+localDev :: Track' Spec -> Self.SelfPath -> Op
+localDev simulate selfpath = op "local-dev" nodeps id
 
 {-
   where
@@ -733,6 +819,13 @@ data MachineSpec
 instance FromJSON MachineSpec
 instance ToJSON MachineSpec
 
+data StaticSiteSpec
+    = PersonalBlogBackup
+    | KitchenSinkBlogSite
+    deriving (Generic)
+instance FromJSON StaticSiteSpec
+instance ToJSON StaticSiteSpec
+
 data InfectTarget a
     = InfectTarget
     { infectUser :: Text
@@ -759,6 +852,8 @@ data Spec
     | SingleKintchensinkBlog KSBlog.KitchenSinkBlogSetup
     | KitchenSinkService KSMulti.KitchenSinkSetup
     | PostgrestService Postgrest.PostgrestSetup
+    | -- sites
+      StaticSite StaticSiteSpec
     deriving (Generic)
 instance FromJSON Spec
 instance ToJSON Spec
@@ -778,6 +873,9 @@ program selfpath httpManager =
     specOp k (LocalDev) = [localDev (go k) selfpath]
     -- meta
     specOp k (Batch xs) = concatMap (specOp k) xs
+    -- staticsite
+    specOp k (StaticSite PersonalBlogBackup) = [personalBlogBackupSite (go k) selfpath]
+    specOp k (StaticSite KitchenSinkBlogSite) = [kitchensinkSite (go k) selfpath]
     -- machine
     specOp k (Initialize) = [Initialize.initialize reportPrint]
     specOp k (Machine Box domainName) = [sreBox reportPrint Production selfpath (go k) domainName]
@@ -805,6 +903,7 @@ data Seed
     | CheddarBoxSeed {boxDomain :: Text}
     | LaptopSeed
     | LocalDevSeed
+    | BlogSeed {blogName :: Text}
 
 instance ParseRecord Seed where
     parseRecord =
@@ -817,11 +916,13 @@ instance ParseRecord Seed where
                     , command "cheddar" (info cheddarBox (progDesc "configures cheddar"))
                     , command "laptop" (info laptop (progDesc "configures my local laptop"))
                     , command "localdev" (info localdev (progDesc "configures local stuff (for dev)"))
+                    , command "ks-blog" (info ksblog (progDesc "generates a kitchensink blog"))
                     ]
         sreBox = SreBoxSeed <$> strArgument (Options.Applicative.help "domain")
         cheddarBox = CheddarBoxSeed <$> strArgument (Options.Applicative.help "domain")
         localdev = pure LocalDevSeed
         laptop = pure LaptopSeed
+        ksblog = BlogSeed <$> strArgument (Options.Applicative.help "site-name")
 
 configure :: Configure IO Seed Spec
 configure = Configure go
@@ -831,6 +932,9 @@ configure = Configure go
     go (SreBoxSeed d) = pure $ Machine Box d
     go (CheddarBoxSeed d) = pure $ Machine Cheddar d
     go (LocalDevSeed) = pure $ LocalDev
+    go (BlogSeed "personal") = pure $ StaticSite PersonalBlogBackup
+    go (BlogSeed "kitchen-sink") = pure $ StaticSite KitchenSinkBlogSite
+    go (BlogSeed _) = error "expecting a blog-name: personal|kitchen-sink"
 
 -------------------------------------------------------------------------------
 main :: IO ()

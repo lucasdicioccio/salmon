@@ -150,19 +150,21 @@ addfiles ::
     Op
 addfiles _ _ _ _ [] = noop "git-add-nothing"
 addfiles r git mkrepo repository files =
-    withBinary git gitModCommand (AddFiles (clonedir repository) paths) $ \up ->
+    withBinary git gitModCommand (AddFiles repodir paths) $ \up ->
         op "git-add" (deps filechanges) $ \actions ->
             actions
                 { help = Text.unwords ["add", Text.pack (show (length files)), "in repo", repository.repoLocalName]
                 , notes = fmap Text.pack paths
-                , ref = dotRef $ "git-add:" <> Text.pack (concat paths)
+                , ref = dotRef $ "git-add:" <> Text.pack (repodir <> concat paths)
                 , up = up (contramap (AddFileChanges repository paths) r)
                 }
   where
     filechanges :: [Op]
     filechanges = fmap (\x -> fileOp x `inject` run mkrepo repository) files
     paths :: [FilePath]
-    paths = fmap (\x -> makeRelative (clonedir repository) (getFilePath x)) files
+    paths = fmap (\x -> makeRelative repodir (getFilePath x)) files
+    repodir :: FilePath
+    repodir = clonedir repository
 
 commit ::
     Reporter Report ->
