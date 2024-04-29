@@ -83,6 +83,7 @@ import SreBox.CertSigning (AcmeConfig (..), acmeSign)
 import qualified SreBox.CertSigning as CertSigning
 import qualified SreBox.DNSRegistration as DNSRegistration
 import SreBox.Environment
+import qualified SreBox.GeneratedSite as GeneratedSite
 import qualified SreBox.Initialize as Initialize
 import qualified SreBox.KitchenSinkBlog as KSBlog
 import qualified SreBox.KitchenSinkMultiSites as KSMulti
@@ -598,25 +599,13 @@ laptop r simulate selfpath =
                     (prefs.task_data_path "microdns.self-signed-cert.pem")
 
 -------------------------------------------------------------------------------
-data GithubSite
-    = GithubSite
-    { ghSiteBuildDir :: FilePath
-    , ghSiteName :: Text
-    , ghSiteSourceRepo :: Git.Repo
-    , ghSiteSourceRepoSubDir :: FilePath
-    , ghSiteRepo :: Git.Repo
-    , ghSiteAuthor :: Git.Author
-    , ghSiteCommitMessage :: Git.CommitMessage
-    , ghSiteTagName :: Git.TagName
-    }
-
 kitchensinkSite :: Track' Spec -> Self.SelfPath -> Op
 kitchensinkSite simulate selfpath =
-    githubSite simulate selfpath site
+    GeneratedSite.generateKitchenSinkSite reportPrint site
   where
-    site :: GithubSite
+    site :: GeneratedSite.GenKitchenSinkSite
     site =
-        GithubSite
+        GeneratedSite.GenKitchenSinkSite
             "/home/lucasdicioccio/ci"
             "kitchensink"
             blogsourcerepo
@@ -650,11 +639,11 @@ kitchensinkSite simulate selfpath =
 
 personalBlogBackupSite :: Track' Spec -> Self.SelfPath -> Op
 personalBlogBackupSite simulate selfpath =
-    githubSite simulate selfpath site
+    GeneratedSite.generateKitchenSinkSite reportPrint site
   where
-    site :: GithubSite
+    site :: GeneratedSite.GenKitchenSinkSite
     site =
-        GithubSite
+        GeneratedSite.GenKitchenSinkSite
             "/home/lucasdicioccio/ci"
             "blog"
             blogsourcerepo
@@ -685,74 +674,6 @@ personalBlogBackupSite simulate selfpath =
 
     tag :: Git.TagName
     tag = Git.TagName "salmon-gen"
-
-githubSite :: Track' Spec -> Self.SelfPath -> GithubSite -> Op
-githubSite simulate selfpath ghSite =
-    op "github-site" (deps [pushTheBlog]) $ \actions ->
-        actions
-            { help = mconcat ["builds a KitchenSink-generated GitHub site for ", ghSite.ghSiteName]
-            , ref = dotRef $ "gh-site:" <> ghSite.ghSiteName
-            }
-  where
-    callks :: Binary.Command "ks" (FilePath, FilePath, FilePath, FilePath)
-    callks =
-        Binary.Command $ \(path, builddir, srcdir, outdir) -> (proc path ["produce", "--outDir", outdir, "--srcDir", srcdir]){cwd = Just builddir}
-
-    localKSPath :: FilePath
-    localKSPath = ghSite.ghSiteBuildDir </> "ci/bin/ks"
-
-    buildtheblog :: FilePath -> Op
-    buildtheblog outdir =
-        using (CabalBuilding.kitchenSink reportPrint localKSPath) $ \kspath ->
-            using (Git.repodir mkrepo ghSite.ghSiteSourceRepo "") $ \srcdir ->
-                let ksargs = (kspath, srcdir.directoryPath, srcdir.directoryPath </> "site-src", outdir)
-                 in Binary.withBinary ignoreTrack callks ksargs $ \buildBlog ->
-                        op "build-the-blog-with-ks" nodeps $ \actions ->
-                            actions
-                                { up = buildBlog reportPrint
-                                , ref = dotRef $ "gh-site:build:" <> (Text.pack $ show ksargs)
-                                }
-
-    blogrepo :: Git.Repo
-    blogrepo = ghSite.ghSiteRepo
-
-    remoteToCloneFrom, remoteToPushTo :: Git.Remote
-    remoteToCloneFrom = blogrepo.repoRemote
-    remoteToPushTo = blogrepo.repoRemote
-
-    pushTheBlog :: Op
-    pushTheBlog =
-        Git.push reportPrint Debian.git mkrepo blogrepo remoteToPushTo (Git.RemoteName "localclone") changes
-
-    salmonAuthor :: Git.Author
-    salmonAuthor = ghSite.ghSiteAuthor
-
-    commitSomeChange :: Op
-    commitSomeChange =
-        Git.commit reportPrint Debian.git mkrepo ignoreTrack blogrepo salmonAuthor ghSite.ghSiteCommitMessage makeChanges
-
-    makeChanges :: Op
-    makeChanges =
-        Git.addfiles reportPrint Debian.git mkrepo blogrepo [wholecontent]
-
-    wholecontent :: FS.File "change"
-    wholecontent = FS.Generated mkContent (Git.clonedir blogrepo)
-      where
-        mkContent :: Track' FilePath
-        mkContent = Track $ \path -> buildtheblog path
-
-    changes :: Op
-    changes = op "changes-to-push" (deps [tagTheBlog `inject` commitSomeChange]) $ \actions ->
-        actions
-            { ref = dotRef $ "gh-site:changes:" <> ghSite.ghSiteName
-            }
-
-    tagTheBlog :: Op
-    tagTheBlog =
-        Git.tag reportPrint Debian.git mkrepo blogrepo ghSite.ghSiteTagName Nothing
-
-    mkrepo :: Track' Git.Repo
-    mkrepo = Track $ \r -> Git.repoFull reportPrint Debian.git r
 
 localDev :: Track' Spec -> Self.SelfPath -> Op
 localDev simulate selfpath = op "local-dev" nodeps id
