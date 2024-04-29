@@ -231,6 +231,7 @@ executable srebox-salmon
                     , text
                     , optparse-applicative
                     , optparse-generic
+                    , process-extras
                     , aeson
                     , bytestring
                     , acme-not-a-joke

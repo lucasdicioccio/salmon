@@ -20,6 +20,8 @@ import Data.Functor.Contravariant ((>$<))
 import GHC.TypeLits (Symbol)
 import Options.Applicative
 import Options.Generic
+import System.Process.ListLike (cwd, proc)
+
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject, node)
 import Salmon.Op.Ref (dotRef)
@@ -596,22 +598,40 @@ laptop r simulate selfpath =
 
 -------------------------------------------------------------------------------
 localDev :: Track' Spec -> Self.SelfPath -> Op
-localDev simulate selfpath = op "local-dev" (deps [makejs]) id
+localDev simulate selfpath = op "local-dev" (deps [pushTheBlog]) id
   where
-    makejs = Spago.bundleApp reportPrint ignoreTrack s "Main" "./toto.js"
-    -- s = Spago.Spago "./git-repos/blog/purescript/halogen-demo"
-    -- s = Spago.Spago "./git-repos/blog/purescript/halogen-demo"
-    s = Spago.Spago "./git-repos/blog/purescript/babywordgame"
+    callks :: Binary.Command "ks" (FilePath, FilePath, FilePath, FilePath)
+    callks =
+        Binary.Command $ \(path, builddir, srcdir, outdir) -> (proc path ["produce", "--outDir", outdir, "--srcDir", srcdir]){cwd = Just builddir}
+
+    localKSPath :: FilePath
+    localKSPath = "/home/lucasdicioccio/ci/bin/ks"
+
+    buildtheblog :: FilePath -> Op
+    buildtheblog outdir =
+        using (CabalBuilding.kitchenSink reportPrint localKSPath) $ \kspath ->
+            using (Git.repodir mkrepo blogsourcerepo "") $ \srcdir ->
+                Binary.withBinary ignoreTrack callks (kspath, srcdir.directoryPath, srcdir.directoryPath </> "site-src", outdir) $ \buildBlog ->
+                    op "build-the-blog-with-ks" nodeps $ \actions ->
+                        actions
+                            { up = buildBlog reportPrint
+                            }
+
+    blogsourcerepo :: Git.Repo
+    blogsourcerepo =
+        Git.Repo
+            "/home/lucasdicioccio/ci/pipeline/git-repos/"
+            "blog-src"
+            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            (Git.Branch "main")
 
     blogrepo :: Git.Repo
     blogrepo =
         Git.Repo
-            "./git-repos/"
-            "blog"
-            (Git.Remote "git@github.com:lucasdicioccio/blog.git")
+            "/home/lucasdicioccio/ci/pipeline/git-repos/"
+            "blog-out"
+            (Git.Remote "git@github.com:lucasdicioccio/lucasdicioccio.github.io.git")
             (Git.Branch "main")
-
-{-
 
     remoteToCloneFrom, remoteToPushTo :: Git.Remote
     remoteToCloneFrom = blogrepo.repoRemote
@@ -622,37 +642,36 @@ localDev simulate selfpath = op "local-dev" (deps [makejs]) id
         Git.push reportPrint Debian.git mkrepo blogrepo remoteToPushTo (Git.RemoteName "localclone") changes
 
     salmonAuthor :: Git.Author
-    salmonAuthor = Git.Author "salmon hello <salmon@dicioccio.fr>"
+    salmonAuthor = Git.Author "salmon automation <salmon@dicioccio.fr>"
 
     commitSomeChange :: Op
     commitSomeChange =
         Git.commit reportPrint Debian.git mkrepo ignoreTrack blogrepo salmonAuthor message makeChanges
       where
         message :: Git.CommitMessage
-        message = Git.CommitMessage (Git.Headline "hello from salmon") ""
+        message = Git.CommitMessage (Git.Headline "auto-build from salmon") ""
 
     makeChanges :: Op
     makeChanges =
-        Git.addfiles reportPrint Debian.git mkrepo blogrepo [salmonHelloFile]
+        Git.addfiles reportPrint Debian.git mkrepo blogrepo [wholecontent]
 
-    salmonHelloFile :: FS.File "change"
-    salmonHelloFile = FS.Generated mkContent (Git.clonedir blogrepo </> "salmon.txt")
+    wholecontent :: FS.File "change"
+    wholecontent = FS.Generated mkContent (Git.clonedir blogrepo)
       where
         mkContent :: Track' FilePath
-        mkContent = Track $ \path -> FS.filecontents (FS.FileContents path helloText)
-        helloText :: Text
-        helloText = "hello from Salmon"
+        mkContent = Track $ \path -> buildtheblog path
 
     changes :: Op
     changes = op "changes-to-push" (deps [tagTheBlog `inject` commitSomeChange]) id
 
     tagTheBlog :: Op
     tagTheBlog =
-        Git.tag reportPrint Debian.git mkrepo blogrepo (Git.TagName "salmon-test-001") Nothing
+        Git.tag reportPrint Debian.git mkrepo blogrepo (Git.TagName "salmon-gen") Nothing
 
     mkrepo :: Track' Git.Repo
-    mkrepo = Track $ \r -> Git.repo reportPrint Debian.git r
+    mkrepo = Track $ \r -> Git.repoFull reportPrint Debian.git r
 
+{-
   where
     deboostrap :: Op
     deboostrap =

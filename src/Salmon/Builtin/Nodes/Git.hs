@@ -48,7 +48,7 @@ clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
 -- | Clones a repository.
 repo :: Reporter Report -> Track' (Binary "git") -> Repo -> Op
 repo r git repository =
-    withBinary git gitDLcommand (Clone remote branch (clonedir repository)) $ \clone ->
+    withBinary git gitDLcommand (Clone Shallow remote branch (clonedir repository)) $ \clone ->
         withBinary git gitDLcommand (Pull remote branch (clonedir repository)) $ \pull ->
             op "git-repo" (deps [enclosingdir]) $ \actions ->
                 actions
@@ -71,13 +71,42 @@ repo r git repository =
     enclosingdir :: Op
     enclosingdir = dir (Directory cloneparentdir)
 
+repoFull :: Reporter Report -> Track' (Binary "git") -> Repo -> Op
+repoFull r git repository =
+    withBinary git gitDLcommand (Clone Full remote branch (clonedir repository)) $ \clone ->
+        withBinary git gitDLcommand (Pull remote branch (clonedir repository)) $ \pull ->
+            op "git-repo" (deps [enclosingdir]) $ \actions ->
+                actions
+                    { help = "clones and force sync a repo"
+                    , ref = dotRef $ "repo:" <> Text.pack (clonedir repository)
+                    , up = clone r1' >> pull r2'
+                    }
+  where
+    r1' = contramap (CloneRepo repository) r
+    r2' = contramap (PullRepo repository) r
+    cloneparentdir :: FilePath
+    cloneparentdir = repository.repoClonedir
+
+    remote :: Remote
+    remote = repository.repoRemote
+
+    branch :: Branch
+    branch = repository.repoBranch
+
+    enclosingdir :: Op
+    enclosingdir = dir (Directory cloneparentdir)
+
+data CloneDepth
+    = Shallow
+    | Full
+
 data GitDownloadCommand
-    = Clone Remote Branch FilePath
+    = Clone CloneDepth Remote Branch FilePath
     | Pull Remote Branch FilePath
 
 gitDLcommand :: Command "git" GitDownloadCommand
 gitDLcommand = Command $ \cmd -> case cmd of
-    (Clone repo branch localdir) ->
+    (Clone Shallow repo branch localdir) ->
         proc
             "git"
             [ "clone"
@@ -86,6 +115,16 @@ gitDLcommand = Command $ \cmd -> case cmd of
             , Text.unpack branch.getBranch
             , "--depth"
             , "1"
+            , Text.unpack repo.getRemote
+            , localdir
+            ]
+    (Clone Full repo branch localdir) ->
+        proc
+            "git"
+            [ "clone"
+            , "--recurse-submodules"
+            , "-b"
+            , Text.unpack branch.getBranch
             , Text.unpack repo.getRemote
             , localdir
             ]
