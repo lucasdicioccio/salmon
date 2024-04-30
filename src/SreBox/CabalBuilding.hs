@@ -12,6 +12,7 @@ import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Git as Git
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
+import qualified Salmon.Builtin.Nodes.Upx as Upx
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -19,6 +20,7 @@ import Salmon.Reporter
 -------------------------------------------------------------------------------
 data Report
     = Upload !FilePath !Rsync.Report
+    | Packing !Text !Upx.Report
     | CallCabal !CabalTarget !Cabal.Report
     | CallGit !CabalTarget !Git.Report
     deriving (Show)
@@ -133,13 +135,15 @@ cabalRepoBuild ::
 cabalRepoBuild r dirname bindir sysdeps target binname remote branch subdir flags =
     Tracked (Track $ const $ op `inject` sysdeps) binpath
   where
-    op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath ->
-        Cabal.install (contramap (CallCabal target) r) cabal flags (Cabal.Cabal repopath target) bindir
+    op = FS.withFile (Git.repofile mkrepo repo subdir) $ \repopath -> upxpack `inject` localInstall repopath
+
+    localInstall repopath = Cabal.install (contramap (CallCabal target) r) cabal flags (Cabal.Cabal repopath target) bindir
     binpath = bindir </> Text.unpack binname
     repo = Git.Repo "./git-repos/" dirname remote (Git.Branch branch)
     git = Debian.git
     cabal = (Track $ \_ -> noop "preinstalled")
     mkrepo = Track $ Git.repo (contramap (CallGit target) r) git
+    upxpack = Upx.pack (contramap (Packing binname) r) Debian.upx binpath
 
 -- builds a library in a cabal repository
 cabalRepoOnlyBuild ::

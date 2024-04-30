@@ -69,3 +69,6 @@ nft = installWith "netfilter"
 
 debootstrap :: Installer "debootstrap"
 debootstrap = installWith "debootstrap"
+
+upx :: Installer "upx"
+upx = installWith "upx-ucl"

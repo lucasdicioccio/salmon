@@ -65,6 +65,7 @@ library
                    , Salmon.Builtin.Nodes.Spago
                    , Salmon.Builtin.Nodes.Ssh
                    , Salmon.Builtin.Nodes.Systemd
+                   , Salmon.Builtin.Nodes.Upx
                    , Salmon.Builtin.Nodes.Web
                    , Salmon.Builtin.Nodes.WireGuard
                    , Salmon.Reporter
