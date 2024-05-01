@@ -451,6 +451,34 @@ prometheusmonitor p =
             (Git.Remote "git@github.com:lucasdicioccio/blog.git")
             "main"
 
+postgrestTable :: Prefs -> Op
+postgrestTable p =
+    build `inject` clone
+  where
+    build = Spago.build r ignoreTrack spago
+    clone = Git.repo reportPrint Debian.git ksrepo
+
+    spago :: Spago.Spago
+    spago = Spago.Spago "./git-repos/postgrest-table"
+
+    ksrepo :: Git.Repo
+    ksrepo =
+        Git.Repo
+            "./git-repos/"
+            "postgrest-table"
+            (Git.Remote "git@github.com:lucasdicioccio/postgrest-table.git")
+            (Git.Branch "master")
+
+    r :: Reporter Spago.Report
+    r =
+        reportSpagoWithTag
+            (Git.TagName "salmon-build")
+            defaultTagText
+            "postgrest-table"
+            (Git.Remote "git@github.com:lucasdicioccio/postgrest-table.git")
+            (Git.Remote "git@github.com:lucasdicioccio/postgrest-table.git")
+            "master"
+
 tradeoffs :: Prefs -> Op
 tradeoffs p =
     build `inject` clone
@@ -1047,6 +1075,7 @@ data PersonalBuild
     | HalogenEchartsDemo
     | BabyWordsGame
     | PrometheusMonitor
+    | PostgrestTable
     | ScopeExplorer
     | Tradeoffs
     deriving (Generic)
@@ -1142,6 +1171,7 @@ program =
     specOp k (PersonalBuild h HalogenEchartsDemo) = [halogenechartsdemo (homedir h)]
     specOp k (PersonalBuild h BabyWordsGame) = [babywordsgame (homedir h)]
     specOp k (PersonalBuild h PrometheusMonitor) = [prometheusmonitor (homedir h)]
+    specOp k (PersonalBuild h PostgrestTable) = [postgrestTable (homedir h)]
     specOp k (PersonalBuild h ScopeExplorer) = [scopeexplorer (homedir h)]
     specOp k (PersonalBuild h Tradeoffs) = [tradeoffs (homedir h)]
     --
@@ -1218,6 +1248,7 @@ configure = Configure go
     go (BuildSeed h "halogenecharts-demo:purs") = pure $ PersonalBuild h HalogenEchartsDemo
     go (BuildSeed h "babywordsgame:purs") = pure $ PersonalBuild h BabyWordsGame
     go (BuildSeed h "prometheus-monitor:purs") = pure $ PersonalBuild h PrometheusMonitor
+    go (BuildSeed h "postgrest-table:purs") = pure $ PersonalBuild h PostgrestTable
     go (BuildSeed h "scope-explorer:purs") = pure $ PersonalBuild h ScopeExplorer
     go (BuildSeed h "tradeoffs:purs") = pure $ PersonalBuild h Tradeoffs
     go (BuildSeed h ":grpc") =
@@ -1264,6 +1295,7 @@ configure = Configure go
                 , PersonalBuild h BabyWordsGame
                 , PersonalBuild h ScopeExplorer
                 , PersonalBuild h PrometheusMonitor
+                , PersonalBuild h PostgrestTable
                 , PersonalBuild h Tradeoffs
                 ]
     go (BuildSeed h ":important") =
@@ -1296,6 +1328,7 @@ configure = Configure go
                 , PureScriptBuild h Humdrum
                 , PureScriptBuild h HalogenEchartsSimple
                 , PersonalBuild h PrometheusMonitor
+                , PersonalBuild h PostgrestTable
                 ]
     go (BuildSeed h ":fun") =
         pure $
