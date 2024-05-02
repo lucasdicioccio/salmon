@@ -838,6 +838,29 @@ acmeNotAJoke__publish p v =
             (Git.Remote "git@github.com:lucasdicioccio/acme-not-a-joke.git")
             "main"
 
+http2client__publish :: Prefs -> CabalBuilding.VersionString -> Op
+http2client__publish p v =
+    CabalBuilding.publishHackage
+        r
+        "http2-client"
+        (p.sdistdir "http2-client")
+        "http2-client"
+        "."
+        v
+        (Git.Remote "https://github.com/haskell-grpc-native/http2-client.git")
+        "master"
+        ""
+  where
+    r :: Reporter CabalBuilding.Report
+    r =
+        reportCabalWithTag
+            (Git.TagName "salmon-published-http2-client")
+            defaultTagText
+            "http2-client"
+            (Git.Remote "https://github.com/haskell-grpc-native/http2-client.git")
+            (Git.Remote "git@github.com:haskell-grpc-native/http2-client.git")
+            "master"
+
 minizincProcess :: Prefs -> Op
 minizincProcess p =
     CabalBuilding.cabalRepoOnlyBuild
@@ -1180,6 +1203,7 @@ program =
     specOp k (HaskellPublish v h ProdAPIUserAuth) = [prodapi_userauth__publish (homedir h) v]
     specOp k (HaskellPublish v h MicroDNS) = [microdns__publish (homedir h) v]
     specOp k (HaskellPublish v h AcmeNotAJoke) = [acmeNotAJoke__publish (homedir h) v]
+    specOp k (HaskellPublish v h Http2Client) = [http2client__publish (homedir h) v]
 
     optimizedDeps :: Op -> Op
     optimizedDeps base =
@@ -1346,6 +1370,8 @@ configure = Configure go
         pure $ HaskellPublish v h MicroDNS
     go (ReleaseSeed h "acme-not-a-joke:publish" v) =
         pure $ HaskellPublish v h AcmeNotAJoke
+    go (ReleaseSeed h "http2-client:publish" v) =
+        pure $ HaskellPublish v h Http2Client
 
 -------------------------------------------------------------------------------
 main :: IO ()
