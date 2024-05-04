@@ -1,4 +1,4 @@
-packages: .
+packages: salmon-core salmon-ops salmon-ops-recipes salmon-apps
 
 source-repository-package
   type: git
