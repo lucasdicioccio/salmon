@@ -154,9 +154,13 @@ data RemoteMigrateConfig t
     , cfg_password :: FilePath
     }
 
+defaultRemoteMigrationDir :: DatabaseName -> FilePath
+defaultRemoteMigrationDir dbname =
+    "tmp/migrations" </> Text.unpack dbname
+
 defaultRemoteMigrationPath :: DatabaseName -> MigrationFile -> FilePath
 defaultRemoteMigrationPath dbname m =
-    "tmp/migrations" </> Text.unpack dbname </> shafile <> ".sql"
+    defaultRemoteMigrationDir dbname </> shafile <> ".sql"
   where
     shafile = C8.unpack $ Base16.encode $ SHA256.hash (C8.pack m.path)
 
@@ -223,7 +227,7 @@ remoteMigrateSetup uniquename r pass1 simulate selfRemote selfpath toSpec cfg =
     remoteApply :: Op
     remoteApply =
         let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ MigrationSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+         in trackedGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ MigrationSetup remoteMigrationPlan cfg.cfg_user cfg.cfg_database remotePgSecretPath)
 
 remoteMigrateOpaqueSetup ::
     (FromJSON directive, ToJSON directive) =>
@@ -292,7 +296,7 @@ remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
     remoteApply :: G MigrationFile -> Op
     remoteApply migrations =
         let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ MigrationSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
+         in trackedGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec $ MigrationSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath)
 
 data MigrationSetup
     = MigrationSetup

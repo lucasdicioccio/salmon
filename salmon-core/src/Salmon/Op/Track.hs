@@ -53,20 +53,20 @@ pureTracked :: Track m n a -> a -> Tracked m n a
 pureTracked = Tracked
 
 -- | Eval the OpGraph of a Tracked object.
-opGraph :: Tracked m n a -> OpGraph m n
-opGraph t = run t.track t.obj
+trackedGraph :: Tracked m n a -> OpGraph m n
+trackedGraph t = run t.track t.obj
 
 -- | a quasi-functor which records all dependencies at the point of mapping
 mapTracked :: (a -> b) -> Tracked m n a -> Tracked m n b
-mapTracked f t = Tracked (Track $ const $ opGraph t) (f t.obj)
+mapTracked f t = Tracked (Track $ const $ trackedGraph t) (f t.obj)
 
 -- | a quasi-applicative which records all combined dependencies at the point of mapping
 apTracked :: (Applicative m) => Tracked m n (a -> b) -> Tracked m n a -> Tracked m n b
-apTracked tf ta = Tracked (Track $ const $ opGraph tf `overlaid` opGraph ta) (tf.obj ta.obj)
+apTracked tf ta = Tracked (Track $ const $ trackedGraph tf `overlaid` trackedGraph ta) (tf.obj ta.obj)
 
 -- | a quasi-monad which records previous dependencies as predecessors before binding
 bindTracked :: (Applicative m) => Tracked m n a -> (a -> Tracked m n b) -> Tracked m n b
-bindTracked ta f = Tracked (Track $ const $ opGraph tb `inject` opGraph ta) b
+bindTracked ta f = Tracked (Track $ const $ trackedGraph tb `inject` trackedGraph ta) b
   where
     tb@(Tracked _ b) = f ta.obj
 

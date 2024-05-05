@@ -153,7 +153,7 @@ remoteSetupPG r simulate selfRemote selfpath toSpec cfg =
     remoteInit :: Op
     remoteInit =
         let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in opGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec remoteSetup)
+         in trackedGraph $ s `bindTracked` \x -> Self.callSelfAsSudo (contramap CallSelf r) Ssh.preExistingRemoteMachine x simulate CLI.Up (toSpec remoteSetup)
 
     uploadSecrets :: Op
     uploadSecrets = op "pg-init-secrets" (deps [uploaduserSecret u p | (u, p, _, _) <- cfg.init_setup_users]) id

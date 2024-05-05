@@ -25,7 +25,7 @@ import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.G (G (..))
 import Salmon.Op.OpGraph (inject, node)
 import Salmon.Op.Ref (dotRef)
-import Salmon.Op.Track (Track (..), opGraph)
+import Salmon.Op.Track (Track (..))
 import Salmon.Reporter
 
 import System.FilePath ((</>))

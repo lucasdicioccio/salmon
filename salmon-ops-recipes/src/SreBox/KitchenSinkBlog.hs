@@ -82,7 +82,7 @@ setupKS r mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
   where
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
     cloneSite = Track $ Git.repo (contramap Clone r) Debian.git
-    depSequence blogSrcDir setup = deps [opGraph (continueRemotely setup) `inject` uploads blogSrcDir]
+    depSequence blogSrcDir setup = deps [trackedGraph (continueRemotely setup) `inject` uploads blogSrcDir]
     uploads blogSrcDir = op "uploads-ks-blog" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
 
     -- recursive call

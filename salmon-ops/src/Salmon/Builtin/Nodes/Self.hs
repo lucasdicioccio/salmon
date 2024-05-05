@@ -20,7 +20,7 @@ import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Op.Ref
-import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, opGraph, using, (>*<))
+import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, trackedGraph, using, (>*<))
 import Salmon.Reporter
 
 import System.Posix.Files (readSymbolicLink)
@@ -110,3 +110,15 @@ callSelfAsSudo r mkRemote self simulate base directive =
     cmdStdin = toStrict $ encode directive
     callOverSSH = Ssh.call r' Debian.ssh mkRemote sshRemote "sudo" cmdArgs cmdStdin
     r' = contramap RunSsh r
+
+remoteDir ::
+    forall directive.
+    (ToJSON directive, FromJSON directive) =>
+    Reporter Report ->
+    RemoteSelf ->
+    Track' directive ->
+    (FilePath -> directive) ->
+    FilePath ->
+    Op
+remoteDir r self simulate mkpath path =
+    trackedGraph $ callSelf r self simulate CLI.Up (mkpath path)

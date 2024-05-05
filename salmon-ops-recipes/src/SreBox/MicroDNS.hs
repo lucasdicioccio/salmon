@@ -36,7 +36,7 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (dotRef)
-import Salmon.Op.Track (Track (..), bindTracked, opGraph, using, (>*<))
+import Salmon.Op.Track (Track (..), bindTracked, trackedGraph, using, (>*<))
 import Salmon.Reporter
 
 import SreBox.CabalBuilding (cabalBinUpload, microDNS, optBuildsBindir)
@@ -102,7 +102,7 @@ setupDNS r mkRemote simulate selfRemote selfpath toSpec cfg =
         let
             setup = MicroDNSSetup remotepath cfg.microdns_cfg_apex cfg.microdns_cfg_portnum remotePem remoteKey remoteSecret cfg.microdns_cfg_zonefileContents
          in
-            opGraph (continueRemotely setup) `inject` configUploads
+            trackedGraph (continueRemotely setup) `inject` configUploads
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote

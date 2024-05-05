@@ -57,7 +57,7 @@ setupRegistration ::
     (RegisteredMachineSetup -> directive) ->
     Op
 setupRegistration r mkRemote simulate selfpath selfRemote dns cfg toSpec =
-    op "registration" (deps [opGraph remoteRegistration, uploadPem, uploadToken]) id
+    op "registration" (deps [trackedGraph remoteRegistration, uploadPem, uploadToken]) id
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote

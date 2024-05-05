@@ -28,7 +28,7 @@ import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.G (G (..))
 import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Ref (dotRef)
-import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, opGraph, using, (>*<))
+import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, trackedGraph, using, (>*<))
 import Salmon.Reporter
 
 import qualified Salmon.Builtin.Nodes.Git as Git
@@ -94,7 +94,7 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
         let
             setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig remoteConnstring
          in
-            opGraph (continueRemotely setup) `inject` configUploads
+            trackedGraph (continueRemotely setup) `inject` configUploads
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
@@ -306,7 +306,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
             toSpec1
             ( PGMigrate.RemoteMigrateConfig
                 (TrackedIO $ Tracked cloneSource inputMigrations)
-                (PGMigrate.defaultRemoteMigrationPath cfg.pma_serviceName)
+                (PGMigrate.defaultRemoteMigrationPath exposedDatabase.getDatabase)
                 migrateUser
                 exposedDatabase
                 cfg.pma_migrate_connstring.connstring_user_pass

@@ -221,7 +221,7 @@ setupKS r mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toS
     services = configToSetup <$> cfg.ks_cfg_services_stanzas
     uploadRoot = "tmp/ks-multisites"
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
-    finalize setup = opGraph (continueRemotely setup)
+    finalize setup = trackedGraph (continueRemotely setup)
     depSequence setup = deps [finalize setup `inject` uploads]
     -- upload sites
     uploads = op "uploads-ks" (deps stanzaUploads) id
