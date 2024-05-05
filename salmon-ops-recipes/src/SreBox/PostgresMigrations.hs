@@ -2,8 +2,10 @@
 
 module SreBox.PostgresMigrations where
 
+import Control.Comonad (extract)
 import Control.Comonad.Cofree (Cofree (..))
 import Control.Monad.Identity
+import Crypto.Hash.SHA256 as SHA256
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString.Base16 as Base16
 import Data.ByteString.Char8 as C8
@@ -11,6 +13,7 @@ import Data.Coerce (coerce)
 import Data.Dynamic (toDyn)
 import Data.List (stripPrefix)
 import Data.Maybe (catMaybes)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import GHC.Generics
@@ -145,13 +148,21 @@ instance (FromJSON a) => FromJSON (MigrationPlan a)
 data RemoteMigrateConfig t
     = RemoteMigrateConfig
     { cfg_migrations :: t (G MigrationFile)
+    , cfg_remoteMigrationPath :: MigrationFile -> FilePath
     , cfg_user :: User
     , cfg_database :: Database
     , cfg_password :: FilePath
     }
 
+defaultRemoteMigrationPath :: DatabaseName -> MigrationFile -> FilePath
+defaultRemoteMigrationPath dbname m =
+    "tmp/migrations" </> Text.unpack dbname </> shafile <> ".sql"
+  where
+    shafile = C8.unpack $ Base16.encode $ SHA256.hash (C8.pack m.path)
+
 remoteMigrateSetup ::
     (FromJSON directive, ToJSON directive) =>
+    Text ->
     Reporter Report ->
     Password ->
     Track' directive ->
@@ -160,9 +171,17 @@ remoteMigrateSetup ::
     (MigrationSetup -> directive) ->
     RemoteMigrateConfig Identity ->
     Op
-remoteMigrateSetup r pass1 simulate selfRemote selfpath toSpec cfg =
-    op "migrate-remotely" (deps [remoteApply `inject` uploadsecret `inject` uploadmigrations]) id
+remoteMigrateSetup uniquename r pass1 simulate selfRemote selfpath toSpec cfg =
+    op "migrate-remotely" (deps [remoteApply `inject` uploadsecret `inject` uploadmigrations]) $ \actions ->
+        actions
+            { help = Text.unwords ["remotely apply the migration", uniquename]
+            , ref = dotRef $ "remote-migrate:" <> uniquename <> Text.pack migrationSum
+            }
   where
+    -- a folding of the whole migration graph paths
+    migrationSum :: String
+    migrationSum = foldMap path (migrations.getCofreeGraph)
+
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
@@ -174,7 +193,7 @@ remoteMigrateSetup r pass1 simulate selfRemote selfpath toSpec cfg =
     dbname = getDatabase cfg.cfg_database
 
     remoteMigrationPath :: MigrationFile -> FilePath
-    remoteMigrationPath m = "tmp/migration-" <> Text.unpack dbname <> (C8.unpack $ Base16.encode (C8.pack m.path))
+    remoteMigrationPath = cfg.cfg_remoteMigrationPath
 
     uploadmigrationFile :: MigrationFile -> Op
     uploadmigrationFile m =
@@ -208,6 +227,7 @@ remoteMigrateSetup r pass1 simulate selfRemote selfpath toSpec cfg =
 
 remoteMigrateOpaqueSetup ::
     (FromJSON directive, ToJSON directive) =>
+    Text ->
     Reporter Report ->
     Track' directive ->
     Self.Remote ->
@@ -215,8 +235,12 @@ remoteMigrateOpaqueSetup ::
     (MigrationSetup -> directive) ->
     RemoteMigrateConfig TrackedIO ->
     Op
-remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
-    op "migrate-remotely" (deps [opaquemigration `inject` uploadsecret]) id
+remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
+    op "migrate-remotely" (deps [opaquemigration `inject` uploadsecret]) $ \actions ->
+        actions
+            { help = Text.unwords ["remotely apply the (opaque) migration", uniquename]
+            , ref = dotRef $ "remote-migrate:" <> uniquename
+            }
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
@@ -225,7 +249,8 @@ remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
         using (unwrapTIO cfg.cfg_migrations) $ \ioMigrations ->
             op "opaque-migrate" nodeps $ \actions ->
                 actions
-                    { up = do
+                    { ref = dotRef $ "opaque-migration:" <> uniquename
+                    , up = do
                         migrations <- ioMigrations
                         let uploads = collapse "." uploadmigrationFile (getCofreeGraph migrations)
                         let apply = remoteApply migrations
@@ -233,10 +258,11 @@ remoteMigrateOpaqueSetup r simulate selfRemote selfpath toSpec cfg =
                     , dynamics = [toDyn $ Dot.OpaqueNode "migration"]
                     }
 
+    dbname :: Text
     dbname = getDatabase cfg.cfg_database
 
     remoteMigrationPath :: MigrationFile -> FilePath
-    remoteMigrationPath m = "tmp/migration-" <> Text.unpack dbname <> (C8.unpack $ Base16.encode (C8.pack m.path))
+    remoteMigrationPath = cfg.cfg_remoteMigrationPath
 
     uploadmigrationFile :: MigrationFile -> Op
     uploadmigrationFile m =
@@ -296,7 +322,7 @@ applyAdminScriptMigration ::
     Reporter Report ->
     Track' (Binary "psql") ->
     Track' DatabaseName ->
-    MigrationSetup ->
+    MigrationSetup -> -- TODO: no user required for admin
     Op
 applyAdminScriptMigration r psql mkdb setup =
     migrateG r psql style setup.setup_migration

@@ -298,6 +298,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
 
     migrateDBWithUser =
         PGMigrate.remoteMigrateOpaqueSetup
+            cfg.pma_serviceName
             (contramap Migration r)
             simulate
             remoteSelf
@@ -305,6 +306,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
             toSpec1
             ( PGMigrate.RemoteMigrateConfig
                 (TrackedIO $ Tracked cloneSource inputMigrations)
+                (PGMigrate.defaultRemoteMigrationPath cfg.pma_serviceName)
                 migrateUser
                 exposedDatabase
                 cfg.pma_migrate_connstring.connstring_user_pass

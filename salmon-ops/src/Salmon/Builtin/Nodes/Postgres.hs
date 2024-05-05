@@ -8,12 +8,15 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import GHC.Generics
+import System.FilePath
 import System.Process.ListLike (CreateProcess (..), proc)
 
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall, untrackedExec, withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem (File, withFile)
+import qualified Salmon.Builtin.Nodes.Filesystem as FS
+import Salmon.Op.OpGraph
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -30,6 +33,7 @@ data Report
     | PGGroupMembership !Group !Role !Binary.Report
     | PGScript !FilePath !Binary.Report
     | PGAdminScript !FilePath !Binary.Report
+    | PGChmod !FilePath !Binary.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -213,15 +217,23 @@ adminScript ::
     Op
 adminScript r psql mkdb dbname file =
     withFile file $ \path ->
-        withBinary psql psqlAdminRun_Sudo (AdminScript dbname path) $ \up ->
-            op "pg-admin-script" (deps [run mkdb dbname]) $ \actions ->
-                actions
-                    { ref = dotRef $ "pg-admin-script:" <> Text.pack path
-                    , up = up (r' path)
-                    , help = Text.unwords ["runs pg script", Text.pack path]
-                    }
+        let accessiblePath = adminDir </> path
+         in withBinary psql psqlAdminRun_Sudo (ChmodAdminScript accessiblePath) $ \chmod ->
+                withBinary psql psqlAdminRun_Sudo (AdminScript dbname accessiblePath) $ \up ->
+                    op "pg-admin-script" (deps [run mkdb dbname, FS.fileCopy path accessiblePath `inject` enclosingdir]) $ \actions ->
+                        actions
+                            { ref = dotRef $ "pg-admin-script:" <> Text.pack path
+                            , up = chmod (r1 accessiblePath) >> up (r2 accessiblePath)
+                            , help = Text.unwords ["runs pg script", Text.pack path]
+                            }
   where
-    r' path = contramap (PGAdminScript path) r
+    adminDir :: FilePath
+    adminDir = "/opt/salmon/postgres/migrations/admin"
+    enclosingdir :: Op
+    enclosingdir = FS.dir (FS.Directory adminDir)
+
+    r1 path = contramap (PGChmod path) r
+    r2 path = contramap (PGAdminScript path) r
 
 {- | commands to bootstrap PG roles and dbs as admin
 expected to run as user "postgres" in Debian to handle the nopassword initial state
@@ -233,14 +245,17 @@ data PsqlAdmin
     | Grant AccessRight
     | GroupMembership RoleName RoleName
     | AdminScript DatabaseName FilePath
+    | ChmodAdminScript FilePath
 
-{- | todo: workaround sudo hack with some calling preference
+{- | todo: workaround chmod and sudo hack with some calling preference
 - we'll need to request more than a Track' (Binary "psql") but some more complex logic
 with sudo, the user, and the right binary
 -}
 psqlAdminRun_Sudo :: Command "psql" PsqlAdmin
 psqlAdminRun_Sudo = Command go
   where
+    go (ChmodAdminScript path) =
+        proc "chmod" ["a+r", path]
     go (AdminScript name path) =
         proc "sudo" ["-u", "postgres", "psql", "-f", path, Text.unpack name]
     go (CreateDB name) =
