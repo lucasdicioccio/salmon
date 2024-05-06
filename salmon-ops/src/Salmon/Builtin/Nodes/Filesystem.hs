@@ -6,8 +6,10 @@ module Salmon.Builtin.Nodes.Filesystem where
 import Salmon.Builtin.Extension
 import Salmon.Op.Ref
 
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as C8
+import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.TypeLits (Symbol)
@@ -77,6 +79,9 @@ instance EncodeFileContents ByteString.ByteString where
 
 instance EncodeFileContents String where
     encodeFileContents = C8.pack
+
+instance EncodeFileContents Aeson.Value where
+    encodeFileContents = LBytestring.toStrict . Aeson.encode
 
 -------------------------------------------------------------------------------
 
