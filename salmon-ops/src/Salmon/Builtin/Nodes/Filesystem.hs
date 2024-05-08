@@ -13,6 +13,7 @@ import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.TypeLits (Symbol)
+import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
 import System.Directory
 import System.FilePath
@@ -55,7 +56,7 @@ filecontents fcontents =
                 [ "depends on the enclosing directory"
                 ]
             , ref = dotRef $ Text.pack $ "file:" <> path
-            , up = ByteString.writeFile path $ encodeFileContents fcontents.contents
+            , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
             , down = removeFile path
             }
   where
@@ -69,19 +70,22 @@ filecontents fcontents =
 The Text instance encodes contents in UTF8.
 -}
 class EncodeFileContents a where
-    encodeFileContents :: a -> ByteString.ByteString
+    encodeFileContents :: a -> IO ByteString.ByteString
 
 instance EncodeFileContents Text.Text where
-    encodeFileContents = Text.encodeUtf8
+    encodeFileContents = pure . Text.encodeUtf8
 
 instance EncodeFileContents ByteString.ByteString where
-    encodeFileContents = id
+    encodeFileContents = pure . id
 
 instance EncodeFileContents String where
-    encodeFileContents = C8.pack
+    encodeFileContents = pure . C8.pack
 
 instance EncodeFileContents Aeson.Value where
-    encodeFileContents = LBytestring.toStrict . Aeson.encode
+    encodeFileContents = pure . LBytestring.toStrict . Aeson.encode
+
+instance (EncodeFileContents a) => EncodeFileContents (IO a) where
+    encodeFileContents ioX = ioX >>= encodeFileContents
 
 -------------------------------------------------------------------------------
 
@@ -112,6 +116,32 @@ moveDirectory src tgt =
     enclosingdir = dir (Directory $ takeDirectory tgt)
 
 -------------------------------------------------------------------------------
+replaceDirectory :: FilePath -> FilePath -> FilePath -> Op
+replaceDirectory src tgt trash =
+    op "replace-dir" (deps [delete3 `inject` move2 `inject` move1]) $ \actions ->
+        actions
+            { help = Text.pack $ "replace " <> src <> " " <> tgt
+            , ref = dotRef $ Text.pack $ "replace-dir:" <> src <> " " <> tgt
+            }
+  where
+    move1 :: Op
+    move1 = moveDirectory tgt trash
+    move2 :: Op
+    move2 = moveDirectory src tgt
+    delete3 :: Op
+    delete3 = destroyDirectory trash
+
+-------------------------------------------------------------------------------
+destroyDirectory :: FilePath -> Op
+destroyDirectory trash =
+    op "delete-dir" nodeps $ \actions ->
+        actions
+            { help = Text.pack $ "recursively trashes" <> trash
+            , ref = dotRef $ Text.pack $ "delete-dir:" <> trash
+            , up = removeDirectoryRecursive trash
+            }
+
+-------------------------------------------------------------------------------
 
 data File (sym :: Symbol)
     = PreExisting FilePath
@@ -122,9 +152,9 @@ getFilePath (PreExisting path) = path
 getFilePath (Generated _ path) = path
 
 fileOp :: File a -> Op
-fileOp (PreExisting path) = noop "pre-existing-file"
+fileOp (PreExisting path) = placeholder "pre-existing-file" (Text.pack path)
 fileOp (Generated t path) = run t path
 
 withFile :: File a -> (FilePath -> Op) -> Op
-withFile (PreExisting path) f = f path
+withFile file@(PreExisting path) f = f path `inject` fileOp file
 withFile (Generated mkp path) f = tracking mkp (\x -> (x, x)) path f

@@ -304,6 +304,9 @@ siteSrcPath, siteDhallRoot :: StanzaSetup -> SiteSetup -> FilePath
 siteSrcPath ss site = siteSrcDir ss </> site.site_setup_subdir
 siteDhallRoot ss site = siteSrcDir ss </> site.site_setup_dhall_subdir
 
+siteTrashDir :: StanzaSetup -> FilePath
+siteTrashDir = stanzaPath "old"
+
 systemdKitchenSink :: Reporter Report -> KitchenSinkSetup -> Op
 systemdKitchenSink r setup =
     Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig systemdConfig
@@ -332,7 +335,7 @@ systemdKitchenSink r setup =
             movesrc =
                 maybe
                     realNoop
-                    (\site -> FS.moveDirectory site.site_setup_sourceDir (siteSrcDir ss))
+                    (\site -> FS.replaceDirectory site.site_setup_sourceDir (siteSrcDir ss) (siteTrashDir ss))
                     ss.stanza_setup_site
          in
             op "ks-setup-stanza" (deps [movesrc, copypem, copykey]) $ \actions ->
