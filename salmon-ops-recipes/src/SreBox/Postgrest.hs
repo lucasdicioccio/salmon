@@ -49,7 +49,6 @@ data Report
     | InitializeDB !PGInit.Report
     | Migration !PGMigrate.Report
     | SetupSystemd !Systemd.Report
-    | GenerateJWTSecret !Secrets.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -74,6 +73,7 @@ data PostgrestSetup
     , postgrest_setup_localBinPath :: FilePath
     , postgrest_setup_localConfigPath :: FilePath
     , postgrest_setup_localConnstringPath :: FilePath
+    , postgrest_setup_localJwtSecretPath :: FilePath
     }
     deriving (Generic)
 instance FromJSON PostgrestSetup
@@ -87,19 +87,22 @@ setupPostgrest ::
     Self.Remote ->
     Self.SelfPath ->
     (PostgrestSetup -> directive) ->
+    Track' FilePath ->
+    FilePath ->
+    FilePaths ->
     PostgrestConfig ->
     Op
-setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
+setupPostgrest r mkRemote simulate selfRemote selfpath toSpec makeJwt jwtFilePath paths cfg =
     using (cabalBinUpload (contramap Upload r) (postgrest (contramap Build r)) rsyncRemote) $ \remotepath ->
         let
-            setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig remoteConnstring
+            setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig remoteConnstring remoteJwtSecret
          in
             trackedGraph (continueRemotely setup) `inject` configUploads
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
-    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig, uploadConnStringFile]) $ \actions ->
+    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig, uploadConnStringFile, uploadJwtFile]) $ \actions ->
         actions
             { notes =
                 [ "for service: " <> cfg.postgrest_cfg_serviceName
@@ -119,6 +122,7 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
     -- upload config file
     remoteConfig = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".config"
     remoteConnstring = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".connstring"
+    remoteJwtSecret = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".shared-secret"
 
     upload gen localpath distpath =
         Rsync.sendFile (contramap UploadFile r) Debian.rsync (FS.Generated gen localpath) rsyncRemote distpath
@@ -129,8 +133,8 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
         -- make config using remote filepaths as contents
         makeConfig =
             Track $ \path ->
-                let connectionString = connstringPath cfg.postgrest_cfg_serviceName
-                    jwtSigningKey = jwtSigningKeyPath cfg.postgrest_cfg_serviceName
+                let connectionString = paths.connstringPath cfg.postgrest_cfg_serviceName
+                    jwtSigningKey = paths.jwtSigningKeyPath cfg.postgrest_cfg_serviceName
                  in FS.filecontents $
                         (FS.FileContents path (renderConfig cfg jwtSigningKey connectionString))
 
@@ -139,7 +143,11 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec cfg =
       where
         makeConnstring = PGMigrate.pgConnstringFile (contramap Migration r) (cfg.postgrest_cfg_connectionString)
 
-    connstringFilePath = Text.unpack $ mconcat ["./configs/posgtrest/postgrest-", cfg.postgrest_cfg_serviceName, ".connstring"]
+    connstringFilePath =
+        Text.unpack $ mconcat ["./configs/posgtrest/postgrest-", cfg.postgrest_cfg_serviceName, ".connstring"]
+
+    uploadJwtFile =
+        upload makeJwt jwtFilePath remoteJwtSecret
 
 renderConfig :: PostgrestConfig -> FilePath -> FilePath -> Text
 renderConfig cfg secretFilePath connstringFilePath =
@@ -169,8 +177,8 @@ renderConfig cfg secretFilePath connstringFilePath =
     kv_bool k v = Text.unwords [k, "=", if v then "true" else "false"]
     kv_int k v = Text.unwords [k, "=", Text.pack $ show v]
 
-systemdPostgrest :: Reporter Report -> PostgrestSetup -> Op
-systemdPostgrest r setup =
+systemdPostgrest :: Reporter Report -> FilePaths -> PostgrestSetup -> Op
+systemdPostgrest r paths setup =
     Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
@@ -179,9 +187,10 @@ systemdPostgrest r setup =
             execPath = Systemd.start_path $ Systemd.service_execStart $ Systemd.config_service $ cfg
             copybin = FS.fileCopy (postgrest_setup_localBinPath setup) execPath
             copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) cpath
-            copySecret = FS.fileCopy (postgrest_setup_localConnstringPath setup) spath
+            copyConnstringSecret = FS.fileCopy (postgrest_setup_localConnstringPath setup) sconnstringpath
+            copyJwtSecret = FS.fileCopy (postgrest_setup_localJwtSecretPath setup) sjwtpath
          in
-            op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, generateJwtSecret, copySecret]) $ \actions ->
+            op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, copyJwtSecret, copyConnstringSecret]) $ \actions ->
                 actions
                     { ref = dotRef $ "postgrest:systemd" <> setup.postgrest_setup_serviceName
                     }
@@ -206,34 +215,41 @@ systemdPostgrest r setup =
             ]
 
     cpath :: FilePath
-    cpath = configPath setup.postgrest_setup_serviceName
+    cpath = paths.configPath setup.postgrest_setup_serviceName
 
-    spath :: FilePath
-    spath = connstringPath setup.postgrest_setup_serviceName
+    sconnstringpath :: FilePath
+    sconnstringpath = paths.connstringPath setup.postgrest_setup_serviceName
+
+    sjwtpath :: FilePath
+    sjwtpath = paths.jwtSigningKeyPath setup.postgrest_setup_serviceName
 
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"
 
-    generateJwtSecret :: Op
-    generateJwtSecret =
-        Secrets.sharedSecretFile
-            (contramap GenerateJWTSecret r)
-            Debian.openssl
-            (Secrets.Secret Secrets.Base64 32 (jwtSigningKeyPath setup.postgrest_setup_serviceName))
-
 -------------------------------------------------------------------------------
 
-configPath :: ServiceName -> FilePath
-configPath name =
-    "/opt/rundir/postgrest" </> Text.unpack name </> "config.txt"
+data FilePaths
+    = FilePaths
+    { configPath :: ServiceName -> FilePath
+    , connstringPath :: ServiceName -> FilePath
+    , jwtSigningKeyPath :: ServiceName -> FilePath
+    }
 
-connstringPath :: ServiceName -> FilePath
-connstringPath name =
-    "/opt/rundir/postgrest" </> Text.unpack name </> "connstring.connstring"
+defaultFilePaths :: FilePaths
+defaultFilePaths =
+    FilePaths
+        configPath
+        connstringPath
+        jwtSigningKeyPath
+  where
+    configPath name =
+        "/opt/rundir/postgrest" </> Text.unpack name </> "config.txt"
 
-jwtSigningKeyPath :: ServiceName -> FilePath
-jwtSigningKeyPath name =
-    "/opt/rundir/postgrest" </> Text.unpack name </> "jwt-shared-secret"
+    connstringPath name =
+        "/opt/rundir/postgrest" </> Text.unpack name </> "connstring.connstring"
+
+    jwtSigningKeyPath name =
+        "/opt/rundir/postgrest" </> Text.unpack name </> "jwt-shared-secret"
 
 -------------------------------------------------------------------------------
 
@@ -258,9 +274,12 @@ postgrestMigratedApi ::
     (PostgrestSetup -> directive) ->
     Self.SelfPath ->
     Self.Remote ->
+    Track' FilePath ->
+    FilePath ->
+    FilePaths ->
     PostgrestMigratedApiConfig ->
     Op
-postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg =
+postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJwt jwtPath paths cfg =
     op "postgrest-api" (deps [prest `inject` migrateDBWithUser `inject` initDB]) $ \actions ->
         actions
             { ref = dotRef $ "prest-api" <> cfg.pma_serviceName
@@ -325,6 +344,9 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf cfg 
             remoteSelf
             selfpath
             toSpec2
+            mkJwt
+            jwtPath
+            paths
             prestConfig
 
     serviceName = "postgrest-api-" <> cfg.pma_serviceName
