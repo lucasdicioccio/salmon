@@ -9,7 +9,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import GHC.Records
-import System.Directory (doesFileExist)
+import System.Directory (doesDirectoryExist, doesFileExist)
 
 import Salmon.FoldBranch
 import Salmon.Op.Actions
@@ -36,6 +36,13 @@ data Requirement
 instance Semigroup Requirement where
     Skippable <> Skippable = Skippable
     _ <> _ = Required
+
+skipIfDirectoryIsMissing :: FilePath -> IO Requirement
+skipIfDirectoryIsMissing path = do
+    exists <- doesDirectoryExist path
+    if not exists
+        then pure Skippable
+        else pure Required
 
 skipIfFileExists :: FilePath -> IO Requirement
 skipIfFileExists path = do

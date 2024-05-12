@@ -146,7 +146,7 @@ render_service s =
         ]
   where
     render_type :: ServiceType -> Text
-    render_type Simple = "Simple"
+    render_type Simple = "simple"
 
     render_start :: Start -> Text
     render_start s = Text.unwords (Text.pack s.start_path : s.start_args)

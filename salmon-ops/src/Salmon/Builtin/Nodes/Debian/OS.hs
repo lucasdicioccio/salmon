@@ -75,3 +75,6 @@ upx = installWith "upx-ucl"
 
 tar :: Installer "tar"
 tar = installWith "tar"
+
+minizinc :: Installer "minizinc"
+minizinc = installWith "minizinc"

@@ -123,7 +123,7 @@ systemdKitchenSinkBlog r arg =
             copybin = FS.fileCopy arg.ks_setup_localBinPath execPath
             copypem = FS.fileCopy arg.ks_setup_localPemPath pemPath
             copykey = FS.fileCopy arg.ks_setup_localKeyPath keyPath
-            movesrc = FS.moveDirectory arg.ks_setup_localSrcDir blogSrcDir
+            movesrc = FS.replaceDirectory arg.ks_setup_localSrcDir blogSrcDir "tmp/trash-src"
          in
             op "setup-systemd-for-ks" (deps [movesrc, copybin, copypem, copykey, localSetup]) id
 

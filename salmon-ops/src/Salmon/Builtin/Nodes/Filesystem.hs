@@ -13,6 +13,7 @@ import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.TypeLits (Symbol)
+import Salmon.Actions.UpDown (skipIfDirectoryIsMissing)
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
 import System.Directory
@@ -25,7 +26,7 @@ dir :: Directory -> Op
 dir directory =
     op "directory" nodeps $ \actions ->
         actions
-            { help = Text.pack $ "ensures " <> path <> "exists, including subdirs"
+            { help = Text.pack $ "ensures " <> path <> " exists, including subdirs"
             , notes =
                 [ "create dir recursively"
                 , "does not delete contents of the directory"
@@ -51,7 +52,7 @@ filecontents :: (EncodeFileContents a) => FileContents a -> Op
 filecontents fcontents =
     op "file-contents" (deps [enclosingdir]) $ \actions ->
         actions
-            { help = Text.pack $ "writes " <> path <> "with some contents"
+            { help = Text.pack $ "writes " <> path <> " with some contents"
             , notes =
                 [ "depends on the enclosing directory"
                 ]
@@ -93,7 +94,7 @@ fileCopy :: FilePath -> FilePath -> Op
 fileCopy src tgt =
     op "file-copy" (deps [enclosingdir]) $ \actions ->
         actions
-            { help = Text.pack $ "copies " <> src <> tgt
+            { help = Text.pack $ "copies " <> src <> " " <> tgt
             , ref = dotRef $ Text.pack $ "file-copy:" <> src <> " " <> tgt
             , up = copyFile src tgt
             , down = removeFile tgt
@@ -103,14 +104,15 @@ fileCopy src tgt =
     enclosingdir = dir (Directory $ takeDirectory tgt)
 
 -------------------------------------------------------------------------------
-moveDirectory :: FilePath -> FilePath -> Op
-moveDirectory src tgt =
+moveDirectory :: FilePath -> FilePath -> (Extension -> Extension) -> Op
+moveDirectory src tgt modActions =
     op "move-dir" (deps [enclosingdir]) $ \actions ->
-        actions
-            { help = Text.pack $ "moves " <> src <> " " <> tgt
-            , ref = dotRef $ Text.pack $ "move-dir:" <> src <> " " <> tgt
-            , up = renameDirectory src tgt
-            }
+        modActions $
+            actions
+                { help = Text.pack $ "moves " <> src <> " " <> tgt
+                , ref = dotRef $ Text.pack $ "move-dir:" <> src <> " " <> tgt
+                , up = renameDirectory src tgt
+                }
   where
     enclosingdir :: Op
     enclosingdir = dir (Directory $ takeDirectory tgt)
@@ -125,9 +127,10 @@ replaceDirectory src tgt trash =
             }
   where
     move1 :: Op
-    move1 = moveDirectory tgt trash
+    move1 = moveDirectory tgt trash $ \actions ->
+        actions{prelim = skipIfDirectoryIsMissing tgt}
     move2 :: Op
-    move2 = moveDirectory src tgt
+    move2 = moveDirectory src tgt id
     delete3 :: Op
     delete3 = destroyDirectory trash
 
@@ -136,9 +139,10 @@ destroyDirectory :: FilePath -> Op
 destroyDirectory trash =
     op "delete-dir" nodeps $ \actions ->
         actions
-            { help = Text.pack $ "recursively trashes" <> trash
+            { help = Text.pack $ "recursively trashes " <> trash
             , ref = dotRef $ Text.pack $ "delete-dir:" <> trash
             , up = removeDirectoryRecursive trash
+            , prelim = skipIfDirectoryIsMissing trash
             }
 
 -------------------------------------------------------------------------------
