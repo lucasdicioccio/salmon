@@ -27,15 +27,17 @@ isInstallSuccess r = case r of
         Binary.isCommandSuccessful cmd
 
 -------------------------------------------------------------------------------
-data Npm = Npm {spagoDir :: FilePath}
+data Npm = Npm {npmDir :: FilePath}
     deriving (Eq, Ord, Show)
 
+-------------------------------------------------------------------------------
 data NpmRun
     = Install Npm
 
+-------------------------------------------------------------------------------
 install :: Reporter Report -> Track' (Binary "npm") -> Npm -> Op
-install r spago s =
-    withBinary spago npmRun (Install s) $ \up ->
+install r npm s =
+    withBinary npm npmRun (Install s) $ \up ->
         op "npm-install" nodeps $ \actions ->
             actions
                 { help = "npm installs a project"
@@ -45,8 +47,8 @@ install r spago s =
   where
     r' = contramap (NpmInstall s) r
 
+-------------------------------------------------------------------------------
 npmRun :: Command "npm" NpmRun
 npmRun = Command $ go
   where
-    go (Install c) = (proc "npm" ["install"]){cwd = Just c.spagoDir}
-
+    go (Install c) = (proc "npm" ["install"]){cwd = Just c.npmDir}

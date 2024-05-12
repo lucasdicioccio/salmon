@@ -72,3 +72,6 @@ debootstrap = installWith "debootstrap"
 
 upx :: Installer "upx"
 upx = installWith "upx-ucl"
+
+tar :: Installer "tar"
+tar = installWith "tar"
