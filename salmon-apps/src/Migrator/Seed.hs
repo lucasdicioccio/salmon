@@ -1,7 +1,8 @@
 module Migrator.Seed where
 
 import Data.Text (Text)
-import Options.Applicative (command, help, helper, info, progDesc, strArgument, subparser, (<**>))
+import Options.Applicative (command, commandGroup, fullDesc, header, help, helper, info, long, progDesc, strOption, subparser, (<**>))
+
 import Options.Generic (ParseRecord (..))
 
 data Seed
@@ -22,14 +23,33 @@ instance ParseRecord Seed where
         combo =
             subparser $
                 mconcat
-                    [ command "migrate" (info build (progDesc "migrates sql file"))
+                    [ commandGroup "pg"
+                    , command
+                        "migrate"
+                        (info build (header "Migrate" <> fullDesc <> progDesc description))
                     ]
+        description :: String
+        description =
+            unlines
+                [ "Migrates PostgreSQL files on a Debian-like."
+                , ""
+                , "Assumes two sets of migrations: admin and user."
+                , "Admin migrations run first as the `postgres` system user."
+                , "User migrations run with a user-name and a password (in a password file)."
+                ]
         build =
             Seed
-                <$> strArgument (Options.Applicative.help "root of migration files [superuser]")
-                <*> strArgument (Options.Applicative.help "tip of migration files [superuser]")
-                <*> strArgument (Options.Applicative.help "root of migration files [db-owner]")
-                <*> strArgument (Options.Applicative.help "tip of migration files [db-owner]")
-                <*> strArgument (Options.Applicative.help "dbname")
-                <*> strArgument (Options.Applicative.help "username [db-owner]")
-                <*> strArgument (Options.Applicative.help "passfile")
+                <$> strOption
+                    (long "admin-root" <> Options.Applicative.help "root of migration files [superuser]")
+                <*> strOption
+                    (long "admin-tip" <> Options.Applicative.help "tip of migration files [superuser]")
+                <*> strOption
+                    (long "user-root" <> Options.Applicative.help "root of migration files [db-owner]")
+                <*> strOption
+                    (long "user-tip" <> Options.Applicative.help "tip of migration files [db-owner]")
+                <*> strOption
+                    (long "db" <> Options.Applicative.help "dbname")
+                <*> strOption
+                    (long "db-user" <> Options.Applicative.help "username [db-owner]")
+                <*> strOption
+                    (long "db-passfile" <> Options.Applicative.help "passfile")

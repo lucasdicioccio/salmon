@@ -17,8 +17,8 @@ import Salmon.Op.Track (Track (..))
 import Salmon.Reporter
 
 import Migrator.Ops
-import Migrator.Spec
 import Migrator.Seed
+import Migrator.Spec
 
 main :: IO ()
 main = do
@@ -55,5 +55,3 @@ configure = Configure go
         Migrate
             <$> prepare root1 tip1 dbname username passfile
             <*> prepare root2 tip2 dbname username passfile
-
-
