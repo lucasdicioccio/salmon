@@ -3,13 +3,13 @@ name:               salmon-apps
 version:            0.1.0.0
 
 -- A short (one-line) description of the package.
--- synopsis:
+synopsis: A set of utilities built with Salmon at their core.
 
 -- A longer description of the package.
--- description:
+description: Tools useful for operating systems, and which benefit from specialized implementations configured via external files.
 
 -- A URL where users can report bugs.
--- bug-reports:
+bug-reports: https://github.com/lucasdicioccio/salmon/issues
 
 -- The license under which the package is released.
 -- license:
@@ -21,14 +21,14 @@ maintainer:         lucas@dicioccio.fr
 -- category:
 extra-source-files: CHANGELOG.md
 
-executable salmon-migrator
-    main-is:          Migrator.hs
+library
+    exposed-modules:
+                    Migrator
+    other-modules:
+                    Migrator.Ops
+                    Migrator.Seed
+                    Migrator.Spec
 
-    -- Modules included in this executable, other than Main.
-    -- other-modules:
-
-    -- LANGUAGE extensions used by modules in this package.
-    -- other-extensions:
     build-depends:    base >=4.16.3.0
                     , aeson
                     , bytestring
@@ -39,5 +39,19 @@ executable salmon-migrator
                     , salmon-ops
                     , salmon-ops-recipes
                     , text
+    ghc-options:   -Wall
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+executable salmon-migrator
+    main-is:          MigratorApp.hs
+
+    -- Modules included in this executable, other than Main.
+    -- other-modules:
+
+    -- LANGUAGE extensions used by modules in this package.
+    -- other-extensions:
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
     hs-source-dirs:   app
     default-language: Haskell2010
