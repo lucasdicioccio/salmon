@@ -28,7 +28,15 @@ data Report
 data Remote = Remote {remoteUser :: Text, remoteHost :: Text}
     deriving (Show, Ord, Eq)
 
-call :: Reporter Report -> Track' (Binary "ssh") -> Track' Remote -> Remote -> FilePath -> [Text] -> ByteString -> Op
+call ::
+    Reporter Report ->
+    Track' (Binary "ssh") ->
+    Track' Remote ->
+    Remote ->
+    FilePath ->
+    [Text] ->
+    ByteString ->
+    Op
 call r ssh tRemote remote remotepath args stdin =
     withBinaryStdin ssh sshRun cmd stdin $ \up ->
         op "ssh:call" (deps [run tRemote remote]) $ \actions ->

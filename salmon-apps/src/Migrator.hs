@@ -51,7 +51,7 @@ configure :: Configure IO Seed Spec
 configure = Configure go
   where
     go :: Seed -> IO Spec
-    go (Seed root1 tip1 root2 tip2 dbname username passfile) =
+    go (Seed root1 tip1 root2 tip2 dbname username passfile extrausers) =
         Migrate
-            <$> prepare root1 tip1 dbname username passfile
-            <*> prepare root2 tip2 dbname username passfile
+            <$> prepare root1 tip1 dbname username extrausers passfile
+            <*> prepare root2 tip2 dbname username extrausers passfile

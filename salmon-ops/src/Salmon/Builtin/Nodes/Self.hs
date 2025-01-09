@@ -50,7 +50,13 @@ uploadSelf r remotedir remote path =
   where
     selfpathOnRemote = remotedir </> takeFileName (getSelfPath path)
     rsyncRemote = Rsync.Remote remote.remoteUser remote.remoteHost
-    copy = Rsync.sendFile r' Debian.rsync (FS.PreExisting $ getSelfPath path) rsyncRemote selfpathOnRemote
+    copy =
+        Rsync.sendFile
+            r'
+            Debian.rsync
+            (FS.PreExisting $ getSelfPath path)
+            rsyncRemote
+            selfpathOnRemote
     r' = contramap RunRsync r
 
 data RemoteCall a
@@ -66,12 +72,13 @@ callSelf ::
     forall directive.
     (ToJSON directive, FromJSON directive) =>
     Reporter Report ->
+    Track' Ssh.Remote ->
     RemoteSelf ->
     Track' directive ->
     CLI.BaseCommand ->
     directive ->
     Tracked' (RemoteCall directive)
-callSelf r self simulate base directive =
+callSelf r mkRemote self simulate base directive =
     Tracked (Track $ \_ -> op "self-call" (deps [callOverSSH]) modActions) rc
   where
     modActions actions =
@@ -83,7 +90,7 @@ callSelf r self simulate base directive =
     sshRemote = Ssh.Remote self.selfRemote.remoteUser self.selfRemote.remoteHost
     cmdArgs = ["run", CLI.argForBaseCommand base]
     cmdStdin = toStrict $ encode directive
-    callOverSSH = Ssh.call r' Debian.ssh ignoreTrack sshRemote self.selfRemotePath cmdArgs cmdStdin
+    callOverSSH = Ssh.call r' Debian.ssh mkRemote sshRemote self.selfRemotePath cmdArgs cmdStdin
     r' = contramap RunSsh r
 
 callSelfAsSudo ::
@@ -121,4 +128,4 @@ remoteDir ::
     FilePath ->
     Op
 remoteDir r self simulate mkpath path =
-    trackedGraph $ callSelf r self simulate CLI.Up (mkpath path)
+    trackedGraph $ callSelf r ignoreTrack self simulate CLI.Up (mkpath path)

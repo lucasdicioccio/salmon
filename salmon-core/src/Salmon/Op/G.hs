@@ -1,3 +1,6 @@
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveFunctor #-}
+
 module Salmon.Op.G where
 
 import Control.Comonad.Cofree (Cofree (..))
@@ -10,6 +13,7 @@ import Salmon.Op.Graph (Graph)
 
 -- | Helper to provide Aeson instances for (Cofree Graph a).
 newtype G a = G {getCofreeGraph :: (Cofree Graph a)}
+    deriving (Functor, Foldable)
 
 instance (ToJSON a) => ToJSON (G a) where
     toJSON (G (x :< p)) =

@@ -270,7 +270,7 @@ postgrestMigratedApi ::
     Reporter Report ->
     Track' directive ->
     (PGInit.InitSetup FilePath -> directive) ->
-    (PGMigrate.MigrationSetup -> directive) ->
+    (Either PGMigrate.PrepareRemoteMigrationSetup PGMigrate.MigrationSetup -> directive) ->
     (PostgrestSetup -> directive) ->
     Self.SelfPath ->
     Self.Remote ->
@@ -308,6 +308,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
             toSpec0
             ( PGInit.InitSetup
                 exposedDatabase
+                (migrateUser, cfg.pma_migrate_connstring.connstring_user_pass)
                 [ (migrateUser, cfg.pma_migrate_connstring.connstring_user_pass, [Postgres.CONNECT, Postgres.CREATE], [])
                 , (setroleUser, cfg.pma_setrole_connstring.connstring_user_pass, [Postgres.CONNECT], [anonRoleGroup])
                 ]
@@ -329,6 +330,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
                 migrateUser
                 exposedDatabase
                 cfg.pma_migrate_connstring.connstring_user_pass
+                []
             )
 
     prest = op "postgrest" (deps [setupPrest]) $ \actions ->

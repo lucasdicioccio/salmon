@@ -31,6 +31,7 @@ data Report
     | PGCreateGroup !Group !Binary.Report
     | PGGrant !AccessRight !Binary.Report
     | PGGroupMembership !Group !Role !Binary.Report
+    | PGDatabaseOwnership !Database !Role !Binary.Report
     | PGScript !FilePath !Binary.Report
     | PGAdminScript !FilePath !Binary.Report
     | PGChmod !FilePath !Binary.Report
@@ -194,6 +195,27 @@ grant r psql role acl =
     r' = contramap (PGGrant acl) r
     dbrole = run role acl.access_role
 
+databaseOnwership ::
+    Reporter Report ->
+    Track' Server ->
+    Track' (Binary "psql") ->
+    Track' Database ->
+    Database ->
+    Track' Role ->
+    Role ->
+    Op
+databaseOnwership r server psql mkdb db role u =
+    withBinary psql psqlAdminRun_Sudo (DatabaseOwnership db.getDatabase (roleName u)) $ \up ->
+        op "pg-member" (deps [run mkdb db, dbuser]) $ \actions ->
+            actions
+                { ref = dotRef $ "pg-ownership:" <> db.getDatabase <> (roleName u)
+                , up = up r'
+                , help = Text.unwords ["grant", db.getDatabase, "ownership to", roleName u]
+                }
+  where
+    r' = contramap (PGDatabaseOwnership db u) r
+    dbuser = run role u
+
 groupMember :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Track' Role -> Role -> Op
 groupMember r server psql g role u =
     withBinary psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
@@ -245,6 +267,7 @@ data PsqlAdmin
     | Grant AccessRight
     | GroupMembership RoleName RoleName
     | AdminScript DatabaseName FilePath
+    | DatabaseOwnership DatabaseName RoleName
     | ChmodAdminScript FilePath
 
 {- | todo: workaround chmod and sudo hack with some calling preference
@@ -299,6 +322,20 @@ psqlAdminRun_Sudo = Command go
                 [ "ALTER GROUP"
                 , Text.unpack g
                 , "ADD USER"
+                , Text.unpack u
+                ]
+            ]
+    go (DatabaseOwnership d u) =
+        proc
+            "sudo"
+            [ "-u"
+            , "postgres"
+            , "psql"
+            , "-c"
+            , unwords
+                [ "ALTER DATABASE"
+                , Text.unpack d
+                , "OWNER TO"
                 , Text.unpack u
                 ]
             ]
