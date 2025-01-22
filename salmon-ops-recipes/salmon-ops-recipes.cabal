@@ -34,6 +34,7 @@ library
                    , SreBox.KitchenSinkMultiSites
                    , SreBox.PostgresInit
                    , SreBox.Postgrest
+                   , SreBox.JWTSigning
     build-depends:    base >=4.16.3.0
                     , acme-not-a-joke
                     , aeson
@@ -56,6 +57,7 @@ library
                     , http-client
                     , http-client-tls
                     , jose
+                    , jose-jwt
                     , kitchen-sink
                     , mtl
                     , optparse-applicative

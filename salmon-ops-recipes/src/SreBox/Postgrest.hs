@@ -73,7 +73,7 @@ data PostgrestSetup
     , postgrest_setup_localBinPath :: FilePath
     , postgrest_setup_localConfigPath :: FilePath
     , postgrest_setup_localConnstringPath :: FilePath
-    , postgrest_setup_localJwtSecretPath :: FilePath
+    , postgrest_setup_localJwtKeySecretPath :: FilePath
     }
     deriving (Generic)
 instance FromJSON PostgrestSetup
@@ -93,22 +93,35 @@ setupPostgrest ::
     PostgrestConfig ->
     Op
 setupPostgrest r mkRemote simulate selfRemote selfpath toSpec makeJwt jwtFilePath paths cfg =
-    using (cabalBinUpload (contramap Upload r) (postgrest (contramap Build r)) rsyncRemote) $ \remotepath ->
+    using uploadbuiltfile $ \remotepath ->
         let
-            setup = PostgrestSetup cfg.postgrest_cfg_serviceName remotepath remoteConfig remoteConnstring remoteJwtSecret
+            setup =
+                PostgrestSetup
+                    cfg.postgrest_cfg_serviceName
+                    remotepath
+                    remoteConfig
+                    remoteConnstring
+                    remoteJwtSecret
          in
             trackedGraph (continueRemotely setup) `inject` configUploads
   where
+    uploadbuiltfile =
+        cabalBinUpload
+            (contramap Upload r)
+            (postgrest (contramap Build r))
+            rsyncRemote
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
 
-    configUploads = op "uploads-postgrest-configs" (deps [uploadConfig, uploadConnStringFile, uploadJwtFile]) $ \actions ->
-        actions
-            { notes =
-                [ "for service: " <> cfg.postgrest_cfg_serviceName
-                ]
-            , ref = dotRef $ "postgrest:uploads" <> cfg.postgrest_cfg_serviceName
-            }
+    configUploads =
+        let opdeps = deps [uploadConfig, uploadConnStringFile, uploadJwtFile]
+         in op "uploads-postgrest-configs" opdeps $ \actions ->
+                actions
+                    { notes =
+                        [ "for service: " <> cfg.postgrest_cfg_serviceName
+                        ]
+                    , ref = dotRef $ "postgrest:uploads" <> cfg.postgrest_cfg_serviceName
+                    }
 
     -- recursive call
     continueRemotely setup = self `bindTracked` recurse setup
@@ -188,9 +201,9 @@ systemdPostgrest r paths setup =
             copybin = FS.fileCopy (postgrest_setup_localBinPath setup) execPath
             copyConfig = FS.fileCopy (postgrest_setup_localConfigPath setup) cpath
             copyConnstringSecret = FS.fileCopy (postgrest_setup_localConnstringPath setup) sconnstringpath
-            copyJwtSecret = FS.fileCopy (postgrest_setup_localJwtSecretPath setup) sjwtpath
+            copyJwtKeySecret = FS.fileCopy (postgrest_setup_localJwtKeySecretPath setup) sjwtpath
          in
-            op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, copyJwtSecret, copyConnstringSecret]) $ \actions ->
+            op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, copyJwtKeySecret, copyConnstringSecret]) $ \actions ->
                 actions
                     { ref = dotRef $ "postgrest:systemd" <> setup.postgrest_setup_serviceName
                     }
@@ -263,6 +276,7 @@ data PostgrestMigratedApiConfig
     , pma_migrate_connstring :: Postgres.ConnString FilePath
     , pma_setrole_connstring :: Postgres.ConnString FilePath
     , pma_fallback_role :: Postgres.Group
+    , pma_token_protected_roles :: [Postgres.Group]
     }
 
 postgrestMigratedApi ::
@@ -296,6 +310,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
     migrateUser = cfg.pma_migrate_connstring.connstring_user
     setroleUser = cfg.pma_setrole_connstring.connstring_user
     anonRoleGroup = cfg.pma_fallback_role
+    extraNonAnonRoleGroups = cfg.pma_token_protected_roles
 
     cloneSource = Track $ const $ Git.repo (contramap GetSources r) Debian.git cfg.pma_repo
 
@@ -310,7 +325,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
                 exposedDatabase
                 (migrateUser, cfg.pma_migrate_connstring.connstring_user_pass)
                 [ (migrateUser, cfg.pma_migrate_connstring.connstring_user_pass, [Postgres.CONNECT, Postgres.CREATE], [])
-                , (setroleUser, cfg.pma_setrole_connstring.connstring_user_pass, [Postgres.CONNECT], [anonRoleGroup])
+                , (setroleUser, cfg.pma_setrole_connstring.connstring_user_pass, [Postgres.CONNECT], anonRoleGroup : extraNonAnonRoleGroups)
                 ]
                 [ (anonRoleGroup, [])
                 ]

@@ -262,6 +262,7 @@ remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
                 s `bindTracked` \x ->
                     Self.callSelf
                         (contramap CallSelf r)
+                        Ssh.preExistingRemoteMachine
                         x
                         simulate
                         CLI.Up
