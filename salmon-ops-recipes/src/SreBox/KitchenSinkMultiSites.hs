@@ -383,6 +383,8 @@ systemdKitchenSink r setup =
             , Text.pack (fromMaybe lastResortPemPath $ pemPath <$> setup.ks_setup_fallback_stanza)
             , "--tlsKeyFile"
             , Text.pack (fromMaybe lastResortKeyPath $ keyPath <$> setup.ks_setup_fallback_stanza)
+            , "--proxyingTimeout"
+            , "300000000" -- 300sec
             ]
 
     install :: Systemd.Install
