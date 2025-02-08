@@ -9,8 +9,14 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Functor.Classes
 import GHC.Generics
 
--- from alga but with [a] for slightly more compact writing of the empty|vertex|unconnected-overlays
--- todo play with t instead of Graph, though could be recovered via a (Fix Graph)
+{- Graph is an algebraic graph from the alga paper.
+
+   We depart from the alga paper by using a single constructor named `Vertices
+[a]` which is isomorphic to the branches `empty | vertex | unconnected-overlay`
+in Alga. This small digression allows us to be more compact.
+
+-- todo: consider playing with t instead of Graph as recursion could be recovered via a (Fix GraphF)
+-}
 data Graph a
     = Vertices [a]
     | Connect (Graph a) (Graph a)

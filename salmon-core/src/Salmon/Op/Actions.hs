@@ -7,17 +7,7 @@ module Salmon.Op.Actions where
 
 import Data.Text (Text)
 
--- | A name for something.
-type ShortHand = Text
-
--- | Base action bag of function.
-data Act extension = Act
-    { shorthand :: ShortHand
-    , extension :: extension
-    }
-    deriving (Show, Functor, Foldable, Traversable)
-
-{- | Actions are bundles of effects ongoing in a given monad m.
+{- | Actions are bundles of named effects ongoing in a given monad.
 
 A special action name Actionless is a noop and allows to define
 a Monoid on a decorated bag of structures.
@@ -44,3 +34,13 @@ instance (Semigroup e) => Semigroup (Actions e) where
 -- | The mempty is Actionless
 instance (Semigroup e) => Monoid (Actions e) where
     mempty = Actionless
+
+-- | A name for something.
+type ShortHand = Text
+
+-- | Base action bag of function.
+data Act extension = Act
+    { shorthand :: ShortHand
+    , extension :: extension
+    }
+    deriving (Show, Functor, Foldable, Traversable)

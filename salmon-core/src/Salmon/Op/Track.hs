@@ -12,6 +12,16 @@ import Salmon.Op.OpGraph
 
 infixr 5 >*<
 
+-------------------------------------------------------------------------------
+
+{- | A Track is a promise to make an OpGraph by consuming a given item.
+
+In Salmon, a Track is a mechanism to say "yeah, if you need an database, I have a way to get you one".
+Track has nice properties, by virtue of being a Contravariant and Divisible functor.
+
+Track also has nice combinators, by virtue of producing an OpGraph, which is a
+complex comonadic-ish object with combinators.
+-}
 newtype Track m n a
     = Track {run :: a -> OpGraph m n}
 

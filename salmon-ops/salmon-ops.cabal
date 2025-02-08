@@ -60,6 +60,8 @@ library
                    , Salmon.Builtin.Nodes.Upx
                    , Salmon.Builtin.Nodes.Web
                    , Salmon.Builtin.Nodes.WireGuard
+                   , Salmon.Op.Configure
+                   , Salmon.Op.Ref
                    , Salmon.Reporter
     build-depends:    base >=4.16.3.0
                     , acme-not-a-joke
@@ -70,6 +72,7 @@ library
                     , directory
                     , filepath
                     , free
+                    , hashable
                     , http-client
                     , http-client-tls
                     , jose

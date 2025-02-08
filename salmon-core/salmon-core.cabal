@@ -27,8 +27,6 @@ library
                    , Salmon.Op.Actions
                    , Salmon.Op.Eval
                    , Salmon.Op.Track
-                   , Salmon.Op.Configure
-                   , Salmon.Op.Ref
                    , Salmon.Op.G
                    , Salmon.FoldBranch
     build-depends:    base >=4.16.3.0
@@ -37,7 +35,6 @@ library
                     , containers
                     , contravariant
                     , free
-                    , hashable
                     , text
     hs-source-dirs:   src
     default-language: Haskell2010
