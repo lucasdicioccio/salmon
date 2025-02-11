@@ -7,6 +7,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Foldable (toList)
+import qualified Data.List as List
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -56,6 +57,7 @@ data KitchenSinkConfig
     = KitchenSinkConfig
     { ks_cfg_fallback_stanza :: Maybe StanzaConfig
     , ks_cfg_services_stanzas :: [StanzaConfig]
+    , ks_cfg_variables :: [(Text, Text)]
     }
 
 ks_cfg_stanzas :: KitchenSinkConfig -> [StanzaConfig]
@@ -111,6 +113,7 @@ data KitchenSinkSetup
     , ks_setup_localUploadRoot :: FilePath
     , ks_setup_fallback_stanza :: Maybe StanzaSetup
     , ks_setup_services_stanzas :: [StanzaSetup]
+    , ks_setup_variables :: [(Text, Text)]
     }
     deriving (Generic)
 instance FromJSON KitchenSinkSetup
@@ -213,7 +216,7 @@ setupKS ::
 setupKS r mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toSpec =
     using (cabalBinUpload (contramap Build r) cloneKitchenSink rsyncRemote) $ \remotepath ->
         let
-            setup = KitchenSinkSetup remotepath uploadRoot fallback services
+            setup = KitchenSinkSetup remotepath uploadRoot fallback services cfg.ks_cfg_variables
          in
             op "remote-ks-setup" (depSequence setup) id
   where
@@ -372,20 +375,31 @@ systemdKitchenSink r setup =
     start =
         Systemd.Start
             "/opt/rundir/ks/bin/kitchen-sink"
-            [ "multisite"
-            , "--configFile"
-            , Text.pack ksConfigPath
-            , "--httpPort"
-            , "80"
-            , "--httpsPort"
-            , "443"
-            , "--tlsCertFile"
-            , Text.pack (fromMaybe lastResortPemPath $ pemPath <$> setup.ks_setup_fallback_stanza)
-            , "--tlsKeyFile"
-            , Text.pack (fromMaybe lastResortKeyPath $ keyPath <$> setup.ks_setup_fallback_stanza)
-            , "--proxyingTimeout"
-            , "300000000" -- 300sec
-            ]
+            ( [ "multisite"
+              , "--configFile"
+              , Text.pack ksConfigPath
+              , "--httpPort"
+              , "80"
+              , "--httpsPort"
+              , "443"
+              , "--tlsCertFile"
+              , Text.pack (fromMaybe lastResortPemPath $ pemPath <$> setup.ks_setup_fallback_stanza)
+              , "--tlsKeyFile"
+              , Text.pack (fromMaybe lastResortKeyPath $ keyPath <$> setup.ks_setup_fallback_stanza)
+              , "--proxyingTimeout"
+              , "300000000" -- 300sec
+              ]
+                <> varsArgs
+            )
+
+    varsArgs :: [Text.Text]
+    varsArgs =
+        let
+            keyvalues = [k <> "=" <> v | (k, v) <- setup.ks_setup_variables]
+            dashdashvars = List.repeat "--var"
+            pairs = List.zipWith (\a b -> [a, b]) dashdashvars keyvalues
+         in
+            mconcat pairs
 
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"

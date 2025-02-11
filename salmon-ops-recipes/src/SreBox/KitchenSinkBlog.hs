@@ -3,6 +3,7 @@
 module SreBox.KitchenSinkBlog where
 
 import Data.Aeson (FromJSON, ToJSON, encode)
+import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
@@ -47,6 +48,7 @@ data KitchenSinkBlogConfig
     , ks_cfg_certSpec :: (Certs.Domain, Text)
     , ks_cfg_pemPath :: FilePath
     , ks_cfg_certPath :: FilePath
+    , ks_cfg_variables :: [(Text, Text)]
     }
 
 data KitchenSinkBlogSetup
@@ -56,6 +58,7 @@ data KitchenSinkBlogSetup
     , ks_setup_localKeyPath :: FilePath
     , ks_setup_localSrcDir :: FilePath
     , ks_setup_subdir :: FilePath
+    , ks_setup_variables :: [(Text, Text)]
     }
     deriving (Generic)
 instance FromJSON KitchenSinkBlogSetup
@@ -76,7 +79,14 @@ setupKS r mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
     using (Git.repodir cloneSite cfg.ks_cfg_repo "") $ \blogSrcDir ->
         using (cabalBinUpload (contramap Upload r) (kitchenSink (contramap Build r) optBuildsBindir) rsyncRemote) $ \remotepath ->
             let
-                setup = KitchenSinkBlogSetup remotepath remotePem remoteKey (remoteBlogDir </> Text.unpack cfg.ks_cfg_repo.repoLocalName) cfg.ks_cfg_sourceSubdir
+                setup =
+                    KitchenSinkBlogSetup
+                        remotepath
+                        remotePem
+                        remoteKey
+                        (remoteBlogDir </> Text.unpack cfg.ks_cfg_repo.repoLocalName)
+                        cfg.ks_cfg_sourceSubdir
+                        cfg.ks_cfg_variables
              in
                 op "remote-ks-blog-setup" (depSequence blogSrcDir setup) id
   where
@@ -157,20 +167,31 @@ systemdKitchenSinkBlog r arg =
     start =
         Systemd.Start
             "/opt/rundir/ks/bin/kitchen-sink"
-            [ "serve"
-            , "--servMode"
-            , "SERVE"
-            , "--httpPort"
-            , "80"
-            , "--httpsPort"
-            , "443"
-            , "--tlsCertFile"
-            , Text.pack pemPath
-            , "--tlsKeyFile"
-            , Text.pack keyPath
-            , "--srcDir"
-            , Text.pack blogSrcPath
-            ]
+            ( [ "serve"
+              , "--servMode"
+              , "SERVE"
+              , "--httpPort"
+              , "80"
+              , "--httpsPort"
+              , "443"
+              , "--tlsCertFile"
+              , Text.pack pemPath
+              , "--tlsKeyFile"
+              , Text.pack keyPath
+              , "--srcDir"
+              , Text.pack blogSrcPath
+              ]
+                <> varsArgs
+            )
 
     install :: Systemd.Install
     install = Systemd.Install "multi-user.target"
+
+    varsArgs :: [Text.Text]
+    varsArgs =
+        let
+            keyvalues = [k <> "=" <> v | (k, v) <- arg.ks_setup_variables]
+            dashdashvars = List.repeat "--var"
+            pairs = List.zipWith (\a b -> [a, b]) dashdashvars keyvalues
+         in
+            mconcat pairs
