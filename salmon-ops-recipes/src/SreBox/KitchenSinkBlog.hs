@@ -168,8 +168,6 @@ systemdKitchenSinkBlog r arg =
             , Text.pack pemPath
             , "--tlsKeyFile"
             , Text.pack keyPath
-            , "--outDir"
-            , "./out"
             , "--srcDir"
             , Text.pack blogSrcPath
             ]
