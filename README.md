@@ -1,4 +1,4 @@
-# Salmon, a new approach to xyz-dependencies
+# Salmon, yet another approach to xyz-dependencies
 
 note: blog post in the making
 
