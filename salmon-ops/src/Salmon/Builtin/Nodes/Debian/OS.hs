@@ -37,14 +37,17 @@ systemctl = installWith "systemd"
 sudo :: Installer "sudo"
 sudo = installWith "sudo"
 
+podman :: Installer "podman"
+podman = installWith "podman"
+
 postgres :: Installer "postgres"
-postgres = installWith "postgresql-12"
+postgres = installWith "postgresql"
 
 psql :: Installer "psql"
-psql = installWith "postgresql-client-12"
+psql = installWith "postgresql-client"
 
 pg_ctl :: Installer "pg_ctl"
-pg_ctl = installWith "postgresql-client-12"
+pg_ctl = installWith "postgresql-client"
 
 pg_ctlcluster :: Installer "pg_ctlcluster"
 pg_ctlcluster = installWith "postgresql-common"

@@ -24,10 +24,14 @@ extra-source-files: CHANGELOG.md
 library
     exposed-modules:
                     Migrator
+                    Bootstrap
     other-modules:
                     Migrator.Ops
                     Migrator.Seed
                     Migrator.Spec
+                    Bootstrap.Ops
+                    Bootstrap.Seed
+                    Bootstrap.Spec
 
     build-depends:    base >=4.16.3.0
                     , aeson
@@ -52,6 +56,19 @@ library
 
 executable salmon-migrator
     main-is:          MigratorApp.hs
+
+    -- Modules included in this executable, other than Main.
+    -- other-modules:
+
+    -- LANGUAGE extensions used by modules in this package.
+    -- other-extensions:
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
+    hs-source-dirs:   app
+    default-language: Haskell2010
+
+executable salmon-bootstrap
+    main-is:          BootstrapApp.hs
 
     -- Modules included in this executable, other than Main.
     -- other-modules:

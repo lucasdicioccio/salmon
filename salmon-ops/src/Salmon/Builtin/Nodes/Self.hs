@@ -34,7 +34,10 @@ data Report
 -------------------------------------------------------------------------------
 
 newtype SelfPath = SelfPath {getSelfPath :: FilePath}
-    deriving (Show, Ord, Eq)
+    deriving (Show, Ord, Eq, Generic)
+
+instance ToJSON SelfPath
+instance FromJSON SelfPath
 
 readSelfPath_linux :: IO SelfPath
 readSelfPath_linux = SelfPath <$> readSymbolicLink "/proc/self/exe"

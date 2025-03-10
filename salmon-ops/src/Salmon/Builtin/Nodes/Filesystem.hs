@@ -162,3 +162,7 @@ fileOp (Generated t path) = run t path
 withFile :: File a -> (FilePath -> Op) -> Op
 withFile file@(PreExisting path) f = f path `inject` fileOp file
 withFile (Generated mkp path) f = tracking mkp (\x -> (x, x)) path f
+
+generateFileContents :: (EncodeFileContents a) => a -> FilePath -> File b
+generateFileContents c path =
+    Generated (Track $ \_ -> filecontents $ FileContents path c) path
