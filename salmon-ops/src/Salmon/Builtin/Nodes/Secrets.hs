@@ -26,6 +26,7 @@ data Report
 
 data SecretType
     = Base64
+    | Base64SafeUrl
     | Hex
     deriving (Show)
 
@@ -45,12 +46,17 @@ sharedSecretFile r bin sec =
                 { help = "generates a secret file for shared-secret"
                 , ref = dotRef $ "gen-secret" <> Text.pack sec.secret_path
                 , prelim = skipIfFileExists sec.secret_path
-                , up = up r' >> chompNewLines sec.secret_path
+                , up = up r' >> modifyInPlace sec.secret_path
                 }
   where
     r' = contramap (Generate sec) r
     enclosingdir :: Op
     enclosingdir = FS.dir (FS.Directory $ takeDirectory sec.secret_path)
+    modifyInPlace path =
+        case sec.secret_type of
+            Base64SafeUrl -> chompNewLines path >> safeUrlizeB64 path
+            Base64 -> chompNewLines path
+            Hex -> chompNewLines path
 
 data GenRandom
     = GenRandom Secret
@@ -60,9 +66,19 @@ openssl = Command $ \(GenRandom s) ->
     case s.secret_type of
         Hex -> proc "openssl" ["rand", "-hex", "-out", s.secret_path, show s.secret_bytes]
         Base64 -> proc "openssl" ["rand", "-base64", "-out", s.secret_path, show s.secret_bytes]
+        Base64SafeUrl -> proc "openssl" ["rand", "-base64", "-out", s.secret_path, show s.secret_bytes]
 
 chompNewLines :: FilePath -> IO ()
 chompNewLines path =
     ByteString.readFile path >>= ByteString.writeFile path . chomp
   where
     chomp = ByteString.filter ((/=) '\n')
+
+safeUrlizeB64 :: FilePath -> IO ()
+safeUrlizeB64 path =
+    ByteString.readFile path >>= ByteString.writeFile path . tr
+  where
+    tr = ByteString.map f
+    f '+' = '-'
+    f '/' = '_'
+    f x = x

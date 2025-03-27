@@ -8,6 +8,7 @@ import Data.Aeson as Aeson
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Base64.URL as B64Url
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Foldable (for_)
 import Data.Text (Text)
@@ -45,8 +46,9 @@ signHmac r secret jwtPayload jwtPath =
         keytxt <- ByteString.readFile sekret.secret_path
         let key = case sekret.secret_type of
                 Secrets.Base64 -> B64.decodeLenient keytxt
+                Secrets.Base64SafeUrl -> B64Url.decodeLenient keytxt
                 Secrets.Hex -> keytxt
         print key
-        let jwt = Jose.hmacEncode Jose.HS512 key jwtPayload
+        let jwt = Jose.hmacEncode Jose.HS256 key jwtPayload
         for_ jwt $ \blob ->
             LByteString.writeFile jwtPath (Aeson.encode blob)
