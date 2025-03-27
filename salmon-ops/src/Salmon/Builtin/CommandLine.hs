@@ -44,7 +44,7 @@ instance (ParseRecord seed) => ParseRecord (Command seed) where
         combo <**> helper
       where
         combo =
-            subparser $
+            hsubparser $
                 mconcat
                     [ command "config" (info (Config <$> parseRecord) cfg)
                     , command "run" (info (Run <$> parseRecord) run)
