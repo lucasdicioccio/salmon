@@ -22,16 +22,13 @@ maintainer:         lucas@dicioccio.fr
 extra-source-files: CHANGELOG.md
 
 library
-    exposed-modules: SreBox.GeneratedSite
-                   , SreBox.PostgresMigrations
+    exposed-modules: SreBox.PostgresMigrations
                    , SreBox.CabalBuilding
                    , SreBox.CertSigning
                    , SreBox.Environment
                    , SreBox.Initialize
                    , SreBox.DNSRegistration
                    , SreBox.MicroDNS
-                   , SreBox.KitchenSinkBlog
-                   , SreBox.KitchenSinkMultiSites
                    , SreBox.PostgresInit
                    , SreBox.Postgrest
                    , SreBox.JWTSigning
@@ -58,7 +55,6 @@ library
                     , http-client-tls
                     , jose
                     , jose-jwt
-                    , kitchen-sink
                     , mtl
                     , optparse-applicative
                     , optparse-generic

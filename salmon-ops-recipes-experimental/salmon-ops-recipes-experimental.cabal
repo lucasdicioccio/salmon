@@ -1,0 +1,48 @@
+cabal-version:      2.4
+name:               salmon-ops-recipes-experimental
+version:            0.1.0.0
+
+-- A short (one-line) description of the package.
+synopsis: Experimental salmon-ops-recipes that pull in heavier, less stable dependencies.
+
+-- A longer description of the package.
+description: Home for recipes that depend on things that are hard to build or move
+             fast (e.g. the kitchen-sink engine), kept out of salmon-ops-recipes so
+             that the stable recipes stay quick and easy to build.
+
+-- A URL where users can report bugs.
+-- bug-reports:
+
+-- The license under which the package is released.
+-- license:
+author:             Lucas DiCioccio
+maintainer:         lucas@dicioccio.fr
+
+-- A copyright notice.
+-- copyright:
+-- category:
+extra-source-files: CHANGELOG.md
+
+library
+    exposed-modules: SreBox.GeneratedSite
+                   , SreBox.KitchenSinkBlog
+                   , SreBox.KitchenSinkMultiSites
+    build-depends:    base >=4.16.3.0
+                    , aeson
+                    , bytestring
+                    , filepath
+                    , kitchen-sink
+                    , process-extras
+                    , salmon-core
+                    , salmon-ops
+                    , salmon-ops-recipes
+                    , text
+    hs-source-dirs:   src
+    default-language: Haskell2010
+    default-extensions: KindSignatures
+                      , DataKinds
+                      , OverloadedStrings
+                      , DeriveFunctor
+                      , OverloadedRecordDot
+                      , TypeApplications
+                      , ScopedTypeVariables

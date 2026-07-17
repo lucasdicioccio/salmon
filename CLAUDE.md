@@ -17,17 +17,26 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   (`Salmon.Builtin.CommandLine`) that all salmon-based binaries use. Tries to stay light on
   cabal deps but allows heavier deps for genuinely deep tasks (e.g. cert generation/signing).
 - `salmon-ops-recipes` — higher-level, opinionated "recipes" built out of `salmon-ops` builtins
-  (e.g. `SreBox.PostgresMigrations`, `SreBox.CertSigning`, `SreBox.MicroDNS`,
-  `SreBox.KitchenSinkBlog`). This is where conventions get enforced (e.g. whether migrations
-  ship and run locally vs. via a remote connstring).
+  (e.g. `SreBox.PostgresMigrations`, `SreBox.CertSigning`, `SreBox.MicroDNS`). This is where
+  conventions get enforced (e.g. whether migrations ship and run locally vs. via a remote
+  connstring). Kept deliberately free of heavy/unstable dependencies.
+- `salmon-ops-recipes-experimental` — recipes that need heavier or less-stable dependencies:
+  `SreBox.KitchenSinkBlog`/`SreBox.KitchenSinkMultiSites` (pull in the `kitchen-sink` library) and
+  `SreBox.GeneratedSite` (builds/publishes kitchen-sink-generated sites via `SreBox.CabalBuilding`).
+  Split out of `salmon-ops-recipes` so that package's build stays fast; **not** part of the
+  default `cabal.project` package set — it's only built via `cabal.perso.project` (see below).
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
   see `Migrator.hs` / `MigratorApp.hs`).
 
-Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-recipes` ← `salmon-apps`.
+Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-recipes` ←
+`salmon-apps`, with `salmon-ops-recipes-experimental` branching off `salmon-ops-recipes` as an
+alternate, heavier leaf (nothing in the default package set depends on it).
 
 Some `source-repository-package` git dependencies in `cabal.project` point at the author's other
-repos (`acme-not-a-joke`, `prodapi`, `prodapi-proxy`, `purescript-bridge`, `kitchen-sink`) pinned
-by commit hash — these are not on Hackage.
+repos (`acme-not-a-joke`, `prodapi`, `prodapi-proxy`, `purescript-bridge`) pinned by commit hash —
+these are not on Hackage. `cabal.perso.project` (untracked, gitignored, alongside its
+`.perso.project.local`) carries an extra `kitchen-sink` source-repository-package entry and an
+extra `salmon-personal-apps` package used only by the author's personal, non-public binaries.
 
 ## Build
 
@@ -35,6 +44,9 @@ by commit hash — these are not on Hackage.
 cabal build all
 cabal build salmon-core salmon-ops salmon-ops-recipes salmon-apps   # individual packages
 cabal build salmon-migrator                                          # a single executable
+
+# the experimental/personal packages aren't in cabal.project's package set; build them via:
+cabal build --project-file=cabal.perso.project salmon-ops-recipes-experimental salmon-personal-apps
 ```
 
 There are no test-suite stanzas in any `.cabal` file currently — there is nothing to run with

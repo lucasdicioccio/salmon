@@ -22,9 +22,3 @@ source-repository-package
     location: https://github.com/eskimor/purescript-bridge.git
     tag: 5ee8778ff141ae6ad9a6057921ec4d49e067b6f0
 
-source-repository-package
-  type: git
-  location: https://github.com/kitchensink-tech/kitchensink.git
-  tag: e9b0f81776a75f295751adc0216a75a168a51263
-  subdir: hs
-
