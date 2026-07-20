@@ -26,6 +26,7 @@ import Salmon.FoldBranch
 import Salmon.Op.Actions
 import Salmon.Op.Eval
 import Salmon.Op.Graph
+import Salmon.Op.GraphFold (Branch (..), Shape (..), foldWithContext)
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
 
@@ -95,26 +96,28 @@ evalEdges ::
     (DotGraphExt ext) =>
     Cofree Graph (OpGraph m (Actions ext)) ->
     [Edge]
-evalEdges = go Nothing . fmap node
+evalEdges = foldWithContext Nothing onNode nextCtx . fmap node
   where
-    go :: Maybe (PrevConnectType, ext) -> Cofree Graph (Actions ext) -> [Edge]
-    go prev (a :< (Vertices d)) =
-        let set1 = [Edge (ct, V) (l.ref, r.ref) | r <- toList a, (ct, l) <- toList prev]
-            next = case a of Actionless -> prev; Actions (Act _ ext) -> Just (OV, ext)
-            set2 = concatMap (go next) d
-         in set1 <> set2
-    go prev (a :< (Overlay d1 d2)) =
-        let set1 = [Edge (ct, O) (l.ref, r.ref) | r <- toList a, (ct, l) <- toList prev]
-            next = case a of Actionless -> prev; Actions (Act _ ext) -> Just (OV, ext)
-            set2 = concatMap (go next) d1
-            set3 = concatMap (go next) d2
-         in set1 <> set2 <> set3
-    go prev (a :< (Connect d1 d2)) =
-        let set1 = [Edge (ct, C) (l.ref, r.ref) | r <- toList a, (ct, l) <- toList prev]
-            next k = case a of Actionless -> prev; Actions (Act _ ext) -> Just (k, ext)
-            set2 = concatMap (go $ next CL) d1
-            set3 = concatMap (go $ next CR) d2
-         in set1 <> set2 <> set3
+    onNode :: Maybe (PrevConnectType, ext) -> Shape -> Actions ext -> [Edge]
+    onNode prev shape a =
+        [Edge (ct, curOf shape) (l.ref, r.ref) | r <- toList a, (ct, l) <- toList prev]
+
+    curOf :: Shape -> CurConnectType
+    curOf SVertices = V
+    curOf SOverlay = O
+    curOf SConnect = C
+
+    nextCtx :: Maybe (PrevConnectType, ext) -> Branch -> Actions ext -> Maybe (PrevConnectType, ext)
+    nextCtx prev branch a = case a of
+        Actionless -> prev
+        Actions (Act _ ext) -> Just (branchToPrevCT branch, ext)
+
+    branchToPrevCT :: Branch -> PrevConnectType
+    branchToPrevCT FromVertices = OV
+    branchToPrevCT FromOverlayL = OV
+    branchToPrevCT FromOverlayR = OV
+    branchToPrevCT FromConnectL = CL
+    branchToPrevCT FromConnectR = CR
 
 -------------------------------------------------------------------------------
 

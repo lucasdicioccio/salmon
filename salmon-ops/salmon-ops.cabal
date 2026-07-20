@@ -94,3 +94,16 @@ library
                       , OverloadedRecordDot
                       , TypeApplications
                       , ScopedTypeVariables
+
+executable salmon-ops-dot-fixture
+    main-is:          DotFixture.hs
+    hs-source-dirs:   fixtures
+    build-depends:    base >=4.16.3.0
+                    , mtl
+                    , salmon-core
+                    , salmon-ops
+                    , text
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , ScopedTypeVariables

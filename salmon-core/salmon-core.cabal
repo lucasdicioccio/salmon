@@ -26,6 +26,7 @@ library
                    , Salmon.Op.OpGraph
                    , Salmon.Op.Actions
                    , Salmon.Op.Eval
+                   , Salmon.Op.GraphFold
                    , Salmon.Op.Track
                    , Salmon.Op.G
                    , Salmon.FoldBranch

@@ -3,7 +3,6 @@
 
 module Salmon.Actions.UpDown where
 
-import Control.Comonad.Cofree (Cofree (..))
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Set (Set)
@@ -15,6 +14,7 @@ import Salmon.FoldBranch
 import Salmon.Op.Actions
 import Salmon.Op.Eval
 import Salmon.Op.Graph
+import Salmon.Op.GraphFold (postOrderM_)
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
 import Salmon.Reporter
@@ -64,18 +64,8 @@ upTree ::
     IO ()
 upTree r nat graph = do
     s <- newIORef (Set.empty)
-    runC s =<< nat (expand graph)
+    postOrderM_ (upnode s) =<< nat (expand graph)
   where
-    runC :: IORef (Set Ref) -> Cofree Graph (OpGraph m (Actions ext)) -> IO ()
-    runC s (x :< Vertices gs) = traverse_ (runC s) gs >> upnode s x
-    runC s (x :< Overlay g1 g2) = runG s g1 >> runG s g2 >> upnode s x
-    runC s (x :< Connect g1 g2) = runG s g1 >> runG s g2 >> upnode s x
-
-    runG :: IORef (Set Ref) -> Graph (Cofree Graph (OpGraph m (Actions ext))) -> IO ()
-    runG s (Vertices gs) = traverse_ (runC s) gs
-    runG s (Overlay g1 g2) = traverse_ (runC s) g1 >> traverse_ (runC s) g2
-    runG s (Connect g1 g2) = traverse_ (runC s) g1 >> traverse_ (runC s) g2
-
     upnode :: IORef (Set Ref) -> (OpGraph m (Actions ext)) -> IO ()
     upnode s x =
         case x.node of
