@@ -81,6 +81,7 @@ test-suite salmon-ops-recipes-test
     other-modules:    Test.Harness
                     , Test.JWTSigningSpec
                     , Test.PodmanSpec
+                    , Test.PostgresInitSpec
     build-depends:    base
                     , aeson
                     , bytestring

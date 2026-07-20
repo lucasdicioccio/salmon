@@ -57,12 +57,16 @@ localServer = Server "127.0.0.1" 5432
 
 type Version = Int
 
-hardcodedVersion :: Version
-hardcodedVersion = 12
-
+{- | Which Debian package's default postgres major version ends up installed
+varies by release (e.g. 13 on bullseye, 15 on bookworm) and shifts over
+time, so we can't bake a version number in here — instead the started
+command detects, on the target machine at 'up' time, whichever cluster
+"postgresql-common" actually created (via @pg_lsclusters@) and starts that
+one. If several versions are installed, the highest one wins.
+-}
 pgLocalCluster :: Reporter Report -> Track' (Binary "postgres") -> Track' (Binary "pg_ctlcluster") -> Server -> Op
 pgLocalCluster r pg pgctl server =
-    withBinary pgctl pgctlRun (Start hardcodedVersion server.serverPort) $ \start ->
+    withBinary pgctl pgctlRun (Start server.serverPort) $ \start ->
         op "pg-server" (deps [justInstall pg]) $ \actions ->
             actions
                 { notes = ["default server"]
@@ -73,12 +77,21 @@ pgLocalCluster r pg pgctl server =
     r' = contramap PGStartLocalCluster r
 
 data PgCtl
-    = Start Version Port
+    = Start Port
 
 pgctlRun :: Command "pg_ctlcluster" PgCtl
 pgctlRun = Command go
   where
-    go (Start ver port) = proc "pg_ctlcluster" [show ver, "main", "start"]
+    go (Start _port) = proc "bash" ["-c", detectVersionAndStartMainCluster]
+
+{- | @pg_lsclusters@'s header-less output is one line per cluster:
+@Ver Cluster Port Status Owner DataDirectory LogFile@; sort numerically and
+take the highest version so a freshly-provisioned box with a single cluster
+just works, and a box with several installed versions picks the newest.
+-}
+detectVersionAndStartMainCluster :: String
+detectVersionAndStartMainCluster =
+    "set -e; version=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1); pg_ctlcluster \"$version\" main start"
 
 type DatabaseName = Text
 
