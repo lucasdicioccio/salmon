@@ -86,7 +86,7 @@ callSelf r mkRemote self simulate base directive =
   where
     modActions actions =
         actions
-            { ref = dotRef $ "call-self:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive)
+            { ref = mkRef "call-self" (encode directive)
             , dynamics = [toDyn $ CLI.RemoteOp $ run simulate directive]
             }
     rc = RemoteCall base directive
@@ -111,7 +111,7 @@ callSelfAsSudo r mkRemote self simulate base directive =
   where
     modActions actions =
         actions
-            { ref = dotRef $ "call-self-sudo:" <> Text.decodeUtf8 (LByteString.toStrict $ encode directive)
+            { ref = mkRef "call-self-sudo" (encode directive)
             , dynamics = [toDyn $ CLI.RemoteOp $ run simulate directive]
             }
     rc = RemoteCall base directive

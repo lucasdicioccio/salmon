@@ -21,7 +21,7 @@ call t call =
     op "http-call" (deps [run t call]) $ \actions ->
         actions
             { help = "performs an HTTP call"
-            , ref = dotRef $ "http:call:" <> Text.pack (show call.callRequest)
+            , ref = mkRef "http-call" (show call.callRequest)
             , up = up
             }
   where

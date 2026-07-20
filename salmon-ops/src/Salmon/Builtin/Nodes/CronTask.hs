@@ -45,7 +45,7 @@ crontask t task =
     op "crontask" (deps [run t task]) $ \actions ->
         actions
             { help = "setup " <> cmd <> " at " <> Text.pack path
-            , ref = dotRef $ Text.pack $ "crontask:" <> path
+            , ref = mkRef "crontask" path
             , up = up
             , down = removeFile path
             }

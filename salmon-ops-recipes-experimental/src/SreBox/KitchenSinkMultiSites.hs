@@ -27,7 +27,7 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track
 import Salmon.Reporter
 
@@ -248,7 +248,7 @@ stanzaUploadCerts r mkCerts rsyncRemote cfg =
     op "uploads-ks-stanza-certs" (deps [uploadCert, uploadKey]) setRef `inject` mkRemoteDir
   where
     setup = configToSetup cfg
-    setRef actions = actions{ref = dotRef $ "uploads-ks-stanza" <> setup.stanza_setup_domain}
+    setRef actions = actions{ref = mkRef "uploads-ks-stanza" setup.stanza_setup_domain}
     sshRemote = (\(Rsync.Remote a b) -> Ssh.Remote a b) rsyncRemote
     mkRemoteDir = Ssh.call (contramap MakeRemoteDir r) Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
 
@@ -270,7 +270,7 @@ stanzaUploadSources r rsyncRemote cfg =
         op "uploads-ks-stanza-src" (deps [uploadSources repoDir]) setRef `inject` mkRemoteDir
   where
     (setup, site) = gitConfigToSetup cfg
-    setRef actions = actions{ref = dotRef $ "uploads-ks-stanza" <> setup.stanza_setup_domain}
+    setRef actions = actions{ref = mkRef "uploads-ks-stanza" setup.stanza_setup_domain}
     sshRemote = (\(Rsync.Remote a b) -> Ssh.Remote a b) rsyncRemote
     mkRemoteDir = Ssh.call (contramap MakeRemoteDir r) Debian.ssh ignoreTrack sshRemote "mkdir" ["-p", Text.pack setup.stanza_setup_dir] ""
 
@@ -343,7 +343,7 @@ systemdKitchenSink r setup =
          in
             op "ks-setup-stanza" (deps [movesrc, copypem, copykey]) $ \actions ->
                 actions
-                    { ref = dotRef $ "prepare-ks-stanza" <> ss.stanza_setup_domain
+                    { ref = mkRef "prepare-ks-stanza" ss.stanza_setup_domain
                     }
 
     lastResortCert :: Op

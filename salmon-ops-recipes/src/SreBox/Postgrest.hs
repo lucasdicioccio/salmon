@@ -27,7 +27,7 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.G (G (..))
 import Salmon.Op.OpGraph (OpGraph (..), inject)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, trackedGraph, using, (>*<))
 import Salmon.Reporter
 
@@ -120,7 +120,7 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec makeJwt jwtFilePat
                     { notes =
                         [ "for service: " <> cfg.postgrest_cfg_serviceName
                         ]
-                    , ref = dotRef $ "postgrest:uploads" <> cfg.postgrest_cfg_serviceName
+                    , ref = mkRef "postgrest-uploads" cfg.postgrest_cfg_serviceName
                     }
 
     -- recursive call
@@ -205,7 +205,7 @@ systemdPostgrest r paths setup =
          in
             op "setup-systemd-for-postgrest" (deps [copybin, copyConfig, copyJwtKeySecret, copyConnstringSecret]) $ \actions ->
                 actions
-                    { ref = dotRef $ "postgrest:systemd" <> setup.postgrest_setup_serviceName
+                    { ref = mkRef "postgrest-systemd" setup.postgrest_setup_serviceName
                     }
 
     config :: Systemd.Config
@@ -296,7 +296,7 @@ postgrestMigratedApi ::
 postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJwt jwtPath paths cfg =
     op "postgrest-api" (deps [prest `inject` migrateDBWithUser `inject` initDB]) $ \actions ->
         actions
-            { ref = dotRef $ "prest-api" <> cfg.pma_serviceName
+            { ref = mkRef "prest-api" cfg.pma_serviceName
             }
   where
     inputMigrations :: IO (G PGMigrate.MigrationFile)
@@ -350,7 +350,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
 
     prest = op "postgrest" (deps [setupPrest]) $ \actions ->
         actions
-            { ref = dotRef $ "prest-service" <> cfg.pma_serviceName
+            { ref = mkRef "prest-service" cfg.pma_serviceName
             }
 
     setupPrest =

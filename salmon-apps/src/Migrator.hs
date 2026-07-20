@@ -12,7 +12,7 @@ import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter
 
@@ -35,7 +35,7 @@ program =
         optimizedDeps $ op "program" (deps $ specOp (n + 1) spec) $ \actions ->
             actions
                 { notes = [Text.pack $ "at depth " <> show n]
-                , ref = dotRef $ Text.pack $ "program:" <> show n
+                , ref = mkRef "program" n
                 }
 
     specOp :: Int -> Spec -> [Op]

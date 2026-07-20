@@ -90,7 +90,7 @@ database r server psql db =
     withBinary psql psqlAdminRun_Sudo (CreateDB db.getDatabase) $ \up ->
         op "pg-database" (deps [run server localServer]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-db:" <> db.getDatabase
+                { ref = mkRef "pg-db" db.getDatabase
                 , up = up r'
                 , help = Text.unwords ["create db", db.getDatabase]
                 }
@@ -115,7 +115,7 @@ user r server psql user pwd =
     withBinary psql psqlAdminRun_Sudo (CreateUser user.userRole pwd) $ \up ->
         op "pg-user" (deps [run server localServer]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-user:" <> user.userRole
+                { ref = mkRef "pg-user" user.userRole
                 , help = Text.unwords ["create user", user.userRole]
                 , up = up r'
                 }
@@ -127,7 +127,7 @@ userPassFile r server psql genpass user =
     withFile genpass $ \passfile ->
         op "pg-user" (deps [runningServer, justInstall psql]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-user:" <> user.userRole
+                { ref = mkRef "pg-user" user.userRole
                 , help = Text.unwords ["set user password for", user.userRole, "from file at", Text.pack passfile]
                 , up = do
                     up =<< fmap Password (Text.readFile passfile)
@@ -147,7 +147,7 @@ group r server psql group =
     withBinary psql psqlAdminRun_Sudo (CreateGroup group.groupRole) $ \up ->
         op "pg-group" (deps [run server localServer]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-group:" <> group.groupRole
+                { ref = mkRef "pg-group" group.groupRole
                 , up = up r'
                 , help = Text.unwords ["creates group", group.groupRole]
                 }
@@ -187,7 +187,7 @@ grant r psql role acl =
     withBinary psql psqlAdminRun_Sudo (Grant acl) $ \up ->
         op "pg-grant" (deps [dbrole]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-grant:" <> roleName acl.access_role
+                { ref = mkRef "pg-grant" (roleName acl.access_role)
                 , up = up r'
                 , help = Text.unwords ["grant", roleName acl.access_role]
                 }
@@ -208,7 +208,7 @@ databaseOnwership r server psql mkdb db role u =
     withBinary psql psqlAdminRun_Sudo (DatabaseOwnership db.getDatabase (roleName u)) $ \up ->
         op "pg-member" (deps [run mkdb db, dbuser]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-ownership:" <> db.getDatabase <> (roleName u)
+                { ref = mkRef "pg-ownership" (db.getDatabase, roleName u)
                 , up = up r'
                 , help = Text.unwords ["grant", db.getDatabase, "ownership to", roleName u]
                 }
@@ -221,7 +221,7 @@ groupMember r server psql g role u =
     withBinary psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
         op "pg-member" (deps [dbgroup, dbuser]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-member:" <> g.groupRole <> (roleName u)
+                { ref = mkRef "pg-member" (g.groupRole, roleName u)
                 , up = up r'
                 , help = Text.unwords ["add", roleName u, "to", g.groupRole]
                 }
@@ -244,7 +244,7 @@ adminScript r psql mkdb dbname file =
                 withBinary psql psqlAdminRun_Sudo (AdminScript dbname accessiblePath) $ \up ->
                     op "pg-admin-script" (deps [run mkdb dbname, FS.fileCopy path accessiblePath `inject` enclosingdir]) $ \actions ->
                         actions
-                            { ref = dotRef $ "pg-admin-script:" <> Text.pack path
+                            { ref = mkRef "pg-admin-script" path
                             , up = chmod (r1 accessiblePath) >> up (r2 accessiblePath)
                             , help = Text.unwords ["runs pg script", Text.pack path]
                             }
@@ -410,7 +410,7 @@ userScriptInMemoryPass r psql mksetup c@(ConnString server user pass db) file =
         withBinary psql (psqlUserRun c) (UserScript path) $ \up ->
             op "pg-script" (deps [run mksetup c]) $ \actions ->
                 actions
-                    { ref = dotRef $ "pg-script:" <> Text.pack path
+                    { ref = mkRef "pg-script" path
                     , up = up (r' path)
                     , help = Text.unwords ["runs pg script", Text.pack path]
                     }
@@ -428,7 +428,7 @@ userScript r psql mksetup c@(ConnString server user passFile db) file =
     withFile file $ \path ->
         op "pg-script" (deps [run mksetup c, justInstall psql]) $ \actions ->
             actions
-                { ref = dotRef $ "pg-script:" <> Text.pack path
+                { ref = mkRef "pg-script" path
                 , up = do
                     up path =<< fmap Password (Text.readFile passFile)
                 , help = Text.unwords ["runs pg script", Text.pack path]

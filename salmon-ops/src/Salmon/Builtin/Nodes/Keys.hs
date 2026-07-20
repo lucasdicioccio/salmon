@@ -56,7 +56,7 @@ sshKey r bin key =
                 , notes =
                     [ "keeps keys around"
                     ]
-                , ref = dotRef $ "ssh:" <> Text.pack sshdir <> key.sshKeyName
+                , ref = mkRef "ssh" (sshdir, key.sshKeyName)
                 , prelim = skipIfFileExists filepath
                 , up = up r'
                 }
@@ -104,7 +104,7 @@ signKey r bin ca kid keyToSign =
         op "ssh-ca-sign" (deps preds) $ \actions ->
             actions
                 { help = "sign a SSH-key"
-                , ref = dotRef $ "ssh-ca-sign:" <> Text.pack (show ca) <> kid.getIdentifier
+                , ref = mkRef "ssh-ca-sign" (show ca, kid.getIdentifier)
                 , prelim = skipIfFileExists (publicCAKeyPath keyToSign)
                 , up = up r'
                 }
@@ -134,7 +134,7 @@ jwkKey key =
         actions
             { help = "generate a jwk-key"
             , notes = ["keeps keys around"]
-            , ref = dotRef $ "jwk:" <> Text.pack jwkdir <> key.jwkKeyName
+            , ref = mkRef "jwk" (jwkdir, key.jwkKeyName)
             , prelim = skipIfFileExists (jwkfilepath key)
             , up = up
             }

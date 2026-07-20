@@ -39,7 +39,7 @@ acmeAccount acc =
     op "acme-account" (deps [jwkKey acc.accountKey]) $ \actions ->
         actions
             { help = "creates an account against an ACME provider"
-            , ref = dotRef $ "acme-account " <> getEmail acc.accountEmail
+            , ref = mkRef "acme-account" (getEmail acc.accountEmail)
             , up = up
             }
   where
@@ -64,7 +64,7 @@ acmeChallenge_dns01 t chall =
         op "acme-challenge" (deps [run t chall, enclosingdir]) $ \actions ->
             actions
                 { help = "sign a certificate with an ACME challenge"
-                , ref = dotRef $ "acme:challenge:" <> Text.pack chall.challengerPEMPath
+                , ref = mkRef "acme-challenge" chall.challengerPEMPath
                 , prelim = skipIfFileExists chall.challengerPEMPath
                 , up = up stepdance
                 }

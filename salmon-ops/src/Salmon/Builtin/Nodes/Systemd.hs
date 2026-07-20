@@ -34,7 +34,7 @@ systemdService r systemctl t cfg =
                 op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
                     actions
                         { help = "installs a systemd-unit and up it"
-                        , ref = dotRef $ "systemd:unit:" <> cfg.config_target
+                        , ref = mkRef "systemd-unit" cfg.config_target
                         , up = reload >> enable >> up
                         }
   where

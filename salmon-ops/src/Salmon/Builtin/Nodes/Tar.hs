@@ -53,7 +53,7 @@ create r tar t dirpath files =
         op "tar-create" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "creates a tar archive"
-                , ref = dotRef $ "tar:create:" <> (Text.pack t.tarPath)
+                , ref = mkRef "tar-create" t.tarPath
                 , up = up r'
                 }
   where
@@ -68,7 +68,7 @@ extract r tar t dirpath =
         op "tar-extract" (deps [extractiondir]) $ \actions ->
             actions
                 { help = "extracts a tar archive"
-                , ref = dotRef $ "tar:extract:" <> (Text.pack t.tarPath)
+                , ref = mkRef "tar-extract" t.tarPath
                 , up = up r'
                 }
   where

@@ -45,7 +45,7 @@ generateSite r genSite =
     op "github-site" (deps [pushTheBlog]) $ \actions ->
         actions
             { help = mconcat ["builds a KitchenSink-generated GitHub site for ", genSite.genSiteName]
-            , ref = dotRef $ "gh-site:" <> genSite.genSiteName
+            , ref = mkRef "gh-site" genSite.genSiteName
             }
   where
     r' = contramap (CallGit genSite.genSiteName) r
@@ -78,7 +78,7 @@ generateSite r genSite =
     changes :: Op
     changes = op "changes-to-push" (deps [tagTheBlog `inject` commitSomeChange]) $ \actions ->
         actions
-            { ref = dotRef $ "gh-site:changes:" <> genSite.genSiteName
+            { ref = mkRef "gh-site-changes" genSite.genSiteName
             }
 
     tagTheBlog :: Op
@@ -142,7 +142,7 @@ generateKitchenSinkSite r base =
                         op "gen-ks-site" nodeps $ \actions ->
                             actions
                                 { up = buildBlog (contramap (ProduceSite base.genKitchenSinkSiteName) r)
-                                , ref = dotRef $ "gen-ks-site:build:" <> (Text.pack $ show ksargs)
+                                , ref = mkRef "gen-ks-site-build" ksargs
                                 }
 
     mkrepo :: Track' Git.Repo

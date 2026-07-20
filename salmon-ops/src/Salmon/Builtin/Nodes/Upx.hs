@@ -31,7 +31,7 @@ pack r upx path =
         op "upx-pack" nodeps $ \actions ->
             actions
                 { help = "upx packs a binary"
-                , ref = dotRef $ "upx:pack:" <> (Text.pack path)
+                , ref = mkRef "upx-pack" path
                 , up = up r'
                 }
   where

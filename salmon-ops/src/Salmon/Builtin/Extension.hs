@@ -19,7 +19,7 @@ import Salmon.Op.Configure
 import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
-import Salmon.Op.Ref (Ref, dotRef, unRef)
+import Salmon.Op.Ref (Ref, mkRef, unRef)
 import Salmon.Op.Track
 
 -- | Instanciate actions.
@@ -119,7 +119,7 @@ noop short =
     noNotes = []
 
     ref :: Ref
-    ref = dotRef short
+    ref = mkRef "noop" short
 
     skip :: IO ()
     skip = pure ()
@@ -135,7 +135,7 @@ placeholder :: ShortHand -> Text -> Op
 placeholder short t = op short nodeps $ \actions ->
     actions
         { dynamics = [toDyn $ PlaceHolder t]
-        , ref = dotRef $ short <> t
+        , ref = mkRef short t
         }
 
 -- | Function to retrieve the dynamic objects of a given type.

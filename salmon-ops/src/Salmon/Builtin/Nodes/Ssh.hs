@@ -43,7 +43,7 @@ call r ssh tRemote remote remotepath args stdin =
             actions
                 { help = "calls " <> Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> Text.decodeUtf8 stdin
                 , notes = Text.pack remotepath : args
-                , ref = dotRef $ "ssh-run" <> Text.pack (show (remotepath, remote, args, stdin))
+                , ref = mkRef "ssh-run" (show (remotepath, remote, args, stdin))
                 , up = up r'
                 }
   where

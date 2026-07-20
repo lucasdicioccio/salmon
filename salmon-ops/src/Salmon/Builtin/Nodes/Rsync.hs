@@ -35,7 +35,7 @@ sendFile r rsync src remote remotepath =
                 op "rsync:sendfile" nodeps $ \actions ->
                     actions
                         { help = "copies " <> Text.pack filepath <> " to " <> Text.pack remotepath <> " over rsync"
-                        , ref = dotRef $ "rsync-copy:" <> Text.pack (show (filepath, remotepath, remote))
+                        , ref = mkRef "rsync-sendfile" (filepath, remotepath, remote.remoteUser, remote.remoteHost)
                         , up = up (r' cmd)
                         }
   where
@@ -47,7 +47,7 @@ sendDir r rsync mkdir dir remote remotepath =
         op "rsync:send-dir" (deps [run mkdir dir]) $ \actions ->
             actions
                 { help = "copies " <> Text.pack dirpath <> " to " <> Text.pack remotepath <> " over rsync"
-                , ref = dotRef $ "rsync-copy:" <> Text.pack (show (dirpath, remote))
+                , ref = mkRef "rsync-senddir" (dirpath, remote.remoteUser, remote.remoteHost)
                 , up = up r'
                 }
   where

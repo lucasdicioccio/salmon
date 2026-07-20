@@ -121,7 +121,7 @@ migrate r psql style (m :< x) =
     r' = contramap (ApplyMigration m.path) r
     gorec = migrate r psql style
     setref lineage actions =
-        actions{ref = dotRef $ Text.pack $ m.path <> " " <> lineage}
+        actions{ref = mkRef "migration" (m.path, lineage)}
 
     -- the string in eval pred accumulates left/right branches choices to disambiguate noop nodes by ref
     evalPred :: String -> Graph (Cofree Graph MigrationFile) -> Op
@@ -180,7 +180,7 @@ remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
     op "migrate-remotely" (deps [opaquemigration `inject` uploadsecrets]) $ \actions ->
         actions
             { help = Text.unwords ["remotely apply the (opaque) migration", uniquename]
-            , ref = dotRef $ "remote-migrate:" <> uniquename
+            , ref = mkRef "remote-migrate" uniquename
             }
   where
     rsyncRemote :: Rsync.Remote
@@ -190,7 +190,7 @@ remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
         using (unwrapTIO cfg.cfg_migrations) $ \ioMigrations ->
             op "opaque-migrate" nodeps $ \actions ->
                 actions
-                    { ref = dotRef $ "opaque-migration:" <> uniquename
+                    { ref = mkRef "opaque-migration" uniquename
                     , up = do
                         migrations <- ioMigrations
                         let prepare = remotePrepare (toList migrations)
@@ -348,7 +348,7 @@ pgConnstringFile r conn =
     Track $ \cstringpath ->
         op "pg-connstring" (deps [run (pgPassword r) passFile]) $ \actions ->
             actions
-                { ref = dotRef $ "connstring: " <> Text.pack cstringpath
+                { ref = mkRef "connstring" cstringpath
                 , help = "store connection string at " <> Text.pack cstringpath
                 , up = do
                     pass <- readPassword passFile

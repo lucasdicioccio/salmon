@@ -53,7 +53,7 @@ rootTree r boot root =
         op "debootstrap" (deps [rootdir]) $ \actions ->
             actions
                 { help = Text.unwords ["debootstraps", Text.pack (show root.suite), "at", Text.pack root.path]
-                , ref = dotRef $ "debootstrap:" <> Text.pack root.path
+                , ref = mkRef "debootstrap" root.path
                 , prelim = skipIfFileExists etcIssues
                 , up = up r'
                 }

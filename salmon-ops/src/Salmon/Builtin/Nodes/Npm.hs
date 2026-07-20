@@ -41,7 +41,7 @@ install r npm s =
         op "npm-install" nodeps $ \actions ->
             actions
                 { help = "npm installs a project"
-                , ref = dotRef $ "npm:install:" <> (Text.pack (show s))
+                , ref = mkRef "npm-install" (show s)
                 , up = up r'
                 }
   where

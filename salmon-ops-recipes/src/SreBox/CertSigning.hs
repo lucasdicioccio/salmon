@@ -34,7 +34,7 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..), bindTracked, using, (>*<))
 import Salmon.Reporter
 
@@ -61,7 +61,7 @@ acmeSign :: Reporter Report -> AcmeConfig -> Track' MicroDNSConfig -> (Certs.Dom
 acmeSign r cfg mkDNS (domain, txtrecord) =
     op "acme-sign" (deps [Acme.acmeChallenge_dns01 chall challenger]) $ \actions ->
         actions
-            { ref = dotRef $ "acme-sign:" <> Certs.getDomain domain
+            { ref = mkRef "acme-sign" (Certs.getDomain domain)
             }
   where
     chall :: Track' Acme.Challenger

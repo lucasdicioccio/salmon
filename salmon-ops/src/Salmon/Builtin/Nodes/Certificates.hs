@@ -70,7 +70,7 @@ tlsKey r bin key =
                 , notes =
                     [ "does not delete keys on down"
                     ]
-                , ref = dotRef $ "openssl:" <> Text.pack path
+                , ref = mkRef "openssl" path
                 , prelim = skipIfFileExists path
                 , up = up r'
                 }
@@ -93,7 +93,7 @@ signingRequest r bin req =
             op "certificate-csr" (deps [enclosingdir, tlsKey r bin req.certKey]) $ \actions ->
                 actions
                     { help = "generate a certificate signing request"
-                    , ref = dotRef $ "openssl:csr:" <> Text.pack csrpath
+                    , ref = mkRef "openssl-csr" csrpath
                     , up = void $ makeCSR >> convert
                     }
   where
@@ -129,7 +129,7 @@ selfSign r bin selfsigned =
         op "certificate-self-sign" (deps [signingRequest r bin selfsigned.selfSignedRequest]) $ \actions ->
             actions
                 { help = "self sign a certificate"
-                , ref = dotRef $ "openssl:selfsign:" <> Text.pack pempath
+                , ref = mkRef "openssl-selfsign" pempath
                 , prelim = skipIfFileExists pempath
                 , up = up r'
                 }

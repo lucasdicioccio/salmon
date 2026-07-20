@@ -55,7 +55,7 @@ build r cabal flags c =
         op "cabal-build" nodeps $ \actions ->
             actions
                 { help = "cabal builds a target"
-                , ref = dotRef $ "cabal:build:" <> (Text.pack (show c))
+                , ref = mkRef "cabal-build" (show c)
                 , up = up r'
                 }
   where
@@ -67,7 +67,7 @@ install r cabal flags c installdir =
         op "cabal-install" previous $ \actions ->
             actions
                 { help = "cabal builds a target"
-                , ref = dotRef $ "cabal:install:" <> (Text.pack (show c))
+                , ref = mkRef "cabal-install" (show c)
                 , up = up r'
                 }
   where
@@ -80,7 +80,7 @@ test r cabal flags c installdir =
         op "cabal-test" previous $ \actions ->
             actions
                 { help = "cabal tests a target"
-                , ref = dotRef $ "cabal:test:" <> (Text.pack (show c))
+                , ref = mkRef "cabal-test" (show c)
                 , up = up r'
                 }
   where
@@ -93,7 +93,7 @@ sdist r cabal c dirpath =
         op "cabal-sdist" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "cabal sdist a package"
-                , ref = dotRef $ "cabal:sdist:" <> (Text.pack dirpath) <> c.cabalTarget
+                , ref = mkRef "cabal-sdist" (dirpath, c.cabalTarget)
                 , up = up r'
                 }
   where
@@ -107,7 +107,7 @@ upload r cabal mkTarfile path =
         op "cabal-upload" (deps [run mkTarfile path]) $ \actions ->
             actions
                 { help = "cabal uploads a package"
-                , ref = dotRef $ "cabal:upload:" <> Text.pack path
+                , ref = mkRef "cabal-upload" path
                 , up = up r'
                 }
   where
@@ -119,7 +119,7 @@ publish r cabal mkTarfile path =
         op "cabal-publishes" (deps [run mkTarfile path]) $ \actions ->
             actions
                 { help = "cabal publishes a package"
-                , ref = dotRef $ "cabal:publish:" <> Text.pack path
+                , ref = mkRef "cabal-publish" path
                 , up = up r'
                 }
   where

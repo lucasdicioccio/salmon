@@ -23,10 +23,10 @@ collapse opName toOp (m :< x) =
     current, pred :: Op
     current = toOp m
     pred = evalPred [] x
-    currentref = case current.node of Actionless -> dotRef ""; (Actions (Act _ x)) -> x.ref
+    currentref = case current.node of Actionless -> mkRef "actionless" (); (Actions (Act _ x)) -> x.ref
     gorec = collapse opName toOp
     setref lineage actions =
-        actions{ref = dotRef $ unRef currentref <> "/" <> Text.concat lineage}
+        actions{ref = mkRef opName (unRef currentref, lineage)}
 
     -- the string in eval pred accumulates left/right branches choices to disambiguate noop nodes by ref
     evalPred :: [Text] -> Graph (Cofree Graph a) -> Op

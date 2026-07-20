@@ -32,7 +32,7 @@ group r groupadd grp =
         op "group" nodeps $ \actions ->
             actions
                 { help = "creates a system group"
-                , ref = dotRef $ "group:" <> groupName grp
+                , ref = mkRef "group" (groupName grp)
                 , up = add r'
                 }
   where
@@ -64,7 +64,7 @@ user r useradd grp nu =
         op "user" (deps userGroups) $ \actions ->
             actions
                 { help = "creates a system user"
-                , ref = dotRef $ "user" <> nu.newUser.userName
+                , ref = mkRef "user" nu.newUser.userName
                 , up = add r'
                 }
   where

@@ -62,7 +62,7 @@ table r nft t =
         op "nft-table" nodeps $ \actions ->
             actions
                 { help = "creates an Netfilter table"
-                , ref = dotRef $ "nft-table:" <> t.tableName
+                , ref = mkRef "nft-table" t.tableName
                 , up = add r'
                 , dynamics = [toDyn cmd]
                 }
@@ -76,7 +76,7 @@ chain r nft c =
         op "nft-chain" (deps [table r nft c.chainTable]) $ \actions ->
             actions
                 { help = "creates an Netfilter chain"
-                , ref = dotRef $ "nft-chain:" <> c.chainTable.tableName <> c.chainName
+                , ref = mkRef "nft-chain" (c.chainTable.tableName, c.chainName)
                 , up = add r'
                 , dynamics = [toDyn cmd]
                 }
@@ -90,7 +90,7 @@ rule r nft c nftrule =
         op "nft-rule" (deps [chain r nft c]) $ \actions ->
             actions
                 { help = "creates an Netfilter rule"
-                , ref = dotRef $ "nft-rule:" <> c.chainTable.tableName <> c.chainName <> textual nftrule
+                , ref = mkRef "nft-rule" (c.chainTable.tableName, c.chainName, textual nftrule)
                 , up = add r'
                 , dynamics = [toDyn cmd]
                 }

@@ -46,7 +46,7 @@ route r ip netroute =
         op "ip-route" nodeps $ \actions ->
             actions
                 { help = mconcat ["route ", dst, " via ", netroute.routeDevice, "(", netroute.routeVia, ")"]
-                , ref = dotRef $ "ip-route" <> netroute.routeDevice <> netroute.routeVia
+                , ref = mkRef "ip-route" (netroute.routeDevice, netroute.routeVia)
                 , up = addroute r'
                 }
   where

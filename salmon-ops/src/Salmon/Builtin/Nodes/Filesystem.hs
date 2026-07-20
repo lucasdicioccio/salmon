@@ -31,7 +31,7 @@ dir directory =
                 [ "create dir recursively"
                 , "does not delete contents of the directory"
                 ]
-            , ref = dotRef $ Text.pack $ "directory:" <> path
+            , ref = mkRef "directory" path
             , up = createDirectoryIfMissing True path
             , down = removeDirectory path
             }
@@ -56,7 +56,7 @@ filecontents fcontents =
             , notes =
                 [ "depends on the enclosing directory"
                 ]
-            , ref = dotRef $ Text.pack $ "file:" <> path
+            , ref = mkRef "file-contents" path
             , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
             , down = removeFile path
             }
@@ -95,7 +95,7 @@ fileCopy src tgt =
     op "file-copy" (deps [enclosingdir]) $ \actions ->
         actions
             { help = Text.pack $ "copies " <> src <> " " <> tgt
-            , ref = dotRef $ Text.pack $ "file-copy:" <> src <> " " <> tgt
+            , ref = mkRef "file-copy" (src, tgt)
             , up = copyFile src tgt
             , down = removeFile tgt
             }
@@ -110,7 +110,7 @@ moveDirectory src tgt modActions =
         modActions $
             actions
                 { help = Text.pack $ "moves " <> src <> " " <> tgt
-                , ref = dotRef $ Text.pack $ "move-dir:" <> src <> " " <> tgt
+                , ref = mkRef "move-dir" (src, tgt)
                 , up = renameDirectory src tgt
                 }
   where
@@ -123,7 +123,7 @@ replaceDirectory src tgt trash =
     op "replace-dir" (deps [delete3 `inject` move2 `inject` move1]) $ \actions ->
         actions
             { help = Text.pack $ "replace " <> src <> " " <> tgt
-            , ref = dotRef $ Text.pack $ "replace-dir:" <> src <> " " <> tgt
+            , ref = mkRef "replace-dir" (src, tgt)
             }
   where
     move1 :: Op
@@ -140,7 +140,7 @@ destroyDirectory trash =
     op "delete-dir" nodeps $ \actions ->
         actions
             { help = Text.pack $ "recursively trashes " <> trash
-            , ref = dotRef $ Text.pack $ "delete-dir:" <> trash
+            , ref = mkRef "delete-dir" trash
             , up = removeDirectoryRecursive trash
             , prelim = skipIfDirectoryIsMissing trash
             }

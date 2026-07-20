@@ -30,7 +30,7 @@ run r bash script =
                 op "bash-run" nodeps $ \actions ->
                     actions
                         { help = "runs a bash command"
-                        , ref = dotRef $ "bash-run:" <> Text.pack filepath
+                        , ref = mkRef "bash-run" filepath
                         , up = up (r' cmd)
                         }
   where

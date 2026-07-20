@@ -23,7 +23,7 @@ deb pkg =
     op "deb" nodeps $ \actions ->
         actions
             { help = "installs " <> pkg.pkgName
-            , ref = dotRef $ "debian:deb:" <> pkg.pkgName
+            , ref = mkRef "debian-deb" pkg.pkgName
             , up = upAction
             , down = downAction
             , dynamics = [toDyn pkg]
@@ -47,7 +47,7 @@ debs pkgs =
         actions
             { help = "installs " <> Text.pack (show (length pkgset)) <> " packages"
             , notes = pkgName <$> toList pkgset
-            , ref = dotRef $ "debian:deb:set:" <> foldMap pkgName pkgset
+            , ref = mkRef "debian-deb-set" (pkgName <$> Set.toList pkgset)
             , up = upAction
             , down = downAction
             }

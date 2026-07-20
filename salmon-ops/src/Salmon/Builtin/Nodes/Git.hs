@@ -53,7 +53,7 @@ repo r git repository =
             op "git-repo" (deps [enclosingdir]) $ \actions ->
                 actions
                     { help = "clones and force sync a repo"
-                    , ref = dotRef $ "repo:" <> Text.pack (clonedir repository)
+                    , ref = mkRef "repo" (clonedir repository)
                     , up = clone r1' >> pull r2'
                     }
   where
@@ -78,7 +78,7 @@ repoFull r git repository =
             op "git-repo" (deps [enclosingdir]) $ \actions ->
                 actions
                     { help = "clones and force sync a repo"
-                    , ref = dotRef $ "repo:" <> Text.pack (clonedir repository)
+                    , ref = mkRef "repo" (clonedir repository)
                     , up = clone r1' >> pull r2'
                     }
   where
@@ -155,7 +155,7 @@ addfiles r git mkrepo repository files =
             actions
                 { help = Text.unwords ["add", Text.pack (show (length files)), "in repo", repository.repoLocalName]
                 , notes = fmap Text.pack paths
-                , ref = dotRef $ "git-add:" <> Text.pack (repodir <> concat paths)
+                , ref = mkRef "git-add" (repodir, paths)
                 , up = up (contramap (AddFileChanges repository paths) r)
                 }
   where
@@ -181,7 +181,7 @@ commit r git mkrepo mkauthor repository author msg modrepo =
         op "git-commit" (deps [run mkauthor author, repochange]) $ \actions ->
             actions
                 { help = Text.unwords ["commits", headline.getHeadline, "on repo", repository.repoLocalName]
-                , ref = dotRef $ "commit:" <> headline.getHeadline <> repository.repoLocalName
+                , ref = mkRef "commit" (headline.getHeadline, repository.repoLocalName)
                 , up = up (contramap (ApplyCommit headline repository) r)
                 }
   where
@@ -205,7 +205,7 @@ tag r git mkrepo repository name msg =
             op "git-tag" (deps [run mkrepo repository]) $ \actions ->
                 actions
                     { help = Text.unwords ["apply git tag", name.getTagName, "on repo", repository.repoLocalName]
-                    , ref = dotRef $ "tag:" <> name.getTagName <> repository.repoLocalName
+                    , ref = mkRef "tag" (name.getTagName, repository.repoLocalName)
                     , up = do
                         checkClean (reportBoth r' (applyTagOnCleanRepository (f r')))
                     }
@@ -240,7 +240,7 @@ remote r git mkrepo repository name remote =
         op "git-add-remote" (deps [run mkrepo repository]) $ \actions ->
             actions
                 { help = Text.unwords ["add remote", name.getRemoteName, "on repo", repository.repoLocalName]
-                , ref = dotRef $ "remote:" <> name.getRemoteName <> repository.repoLocalName
+                , ref = mkRef "remote" (name.getRemoteName, repository.repoLocalName)
                 , up = up (contramap (DefineRemote repository name) r)
                 }
 
@@ -360,7 +360,7 @@ push r git mkrepo repository remoteSpec remotename modrepo =
         op "git-push" (deps [referenceRemote, repochange]) $ \actions ->
             actions
                 { help = Text.unwords ["pushes", branch.getBranch, "of repo", repository.repoLocalName, "to", remoteSpec.getRemote]
-                , ref = dotRef $ "push:" <> repository.repoLocalName <> remoteSpec.getRemote <> branch.getBranch
+                , ref = mkRef "push" (repository.repoLocalName, remoteSpec.getRemote, branch.getBranch)
                 , up = up (contramap (PushRepo repository remoteSpec) r)
                 }
   where

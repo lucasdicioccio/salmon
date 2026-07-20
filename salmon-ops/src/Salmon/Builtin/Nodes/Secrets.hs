@@ -44,7 +44,7 @@ sharedSecretFile r bin sec =
         op "secret:gen" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "generates a secret file for shared-secret"
-                , ref = dotRef $ "gen-secret" <> Text.pack sec.secret_path
+                , ref = mkRef "gen-secret" sec.secret_path
                 , prelim = skipIfFileExists sec.secret_path
                 , up = up r' >> modifyInPlace sec.secret_path
                 }

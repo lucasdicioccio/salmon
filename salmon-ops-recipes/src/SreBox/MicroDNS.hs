@@ -35,7 +35,7 @@ import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..), bindTracked, trackedGraph, using, (>*<))
 import Salmon.Reporter
 
@@ -252,7 +252,7 @@ sharedToken r secret_path hashedpart token_path =
     op "microdns-token" (deps [prepareSecret, enclosingdir]) $ \actions ->
         actions
             { help = "store token built from " <> Text.pack secret_path <> " at " <> Text.pack token_path
-            , ref = dotRef $ "microdns-token: " <> Text.pack token_path
+            , ref = mkRef "microdns-token" token_path
             , up = do
                 sharedsecret <- ByteString.readFile secret_path
                 ByteString.writeFile token_path $ hmacHashedPart sharedsecret hashedpart

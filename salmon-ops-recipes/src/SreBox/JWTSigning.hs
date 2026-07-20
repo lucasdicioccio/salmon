@@ -21,7 +21,7 @@ import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import Salmon.Op.OpGraph (OpGraph (..), inject)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (using)
 import Salmon.Reporter
 
@@ -36,7 +36,7 @@ signHmac r secret jwtPayload jwtPath =
         op "jwt-signed-token" nodeps $ \actions ->
             actions
                 { help = "derive a JWT for claims and and a given signing Key"
-                , ref = dotRef $ "sign-jwt" <> Text.pack jwtPath
+                , ref = mkRef "sign-jwt" jwtPath
                 , prelim = skipIfFileExists jwtPath
                 , up = up sekret
                 }

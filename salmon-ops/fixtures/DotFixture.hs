@@ -28,13 +28,13 @@ import Salmon.Actions.UpDown (upTree)
 import Salmon.Builtin.Extension
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph (OpGraph (..), inject, overlaid)
-import Salmon.Op.Ref (dotRef)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Reporter (reportPrint)
 
 leaf :: Text.Text -> Op
 leaf name =
     op name nodeps $ \x ->
-        x{ref = dotRef name, up = putStrLn ("up " <> Text.unpack name)}
+        x{ref = mkRef "leaf" name, up = putStrLn ("up " <> Text.unpack name)}
 
 -- | Depended on by both 'childV' and 'childO', to exercise upTree's
 -- dedup-by-Ref path (one Eval, one Redundant).
@@ -49,7 +49,7 @@ leafCL = leaf "leaf-cl"
 childV :: Op
 childV =
     op "child-v" (deps [commonLeaf]) $ \x ->
-        x{ref = dotRef "child-v", up = putStrLn "up child-v"}
+        x{ref = mkRef "child" ("child-v" :: Text.Text), up = putStrLn "up child-v"}
 
 -- | Own predecessors are 'Overlay' (shape O): the edge into this node from
 -- 'root' is tagged (CR,O) -> gray. Also overlays an 'Actionless' node
@@ -57,7 +57,7 @@ childV =
 childO :: Op
 childO =
     ( op "child-o" nodeps $ \x ->
-        x{ref = dotRef "child-o", up = putStrLn "up child-o"}
+        x{ref = mkRef "child" ("child-o" :: Text.Text), up = putStrLn "up child-o"}
     )
         `overlaid` commonLeaf
         `overlaid` realNoop
@@ -68,7 +68,7 @@ childO =
 childC :: Op
 childC =
     ( op "child-c" nodeps $ \x ->
-        x{ref = dotRef "child-c", up = putStrLn "up child-c"}
+        x{ref = mkRef "child" ("child-c" :: Text.Text), up = putStrLn "up child-c"}
     )
         `inject` leaf "leaf-c-inner"
 
@@ -78,7 +78,7 @@ childC =
 -- each then getting a different edge color from its own predecessor shape.
 root :: Op
 root =
-    (op "root" nodeps $ \x -> x{ref = dotRef "root", up = putStrLn "up root"})
+    (op "root" nodeps $ \x -> x{ref = mkRef "root" (), up = putStrLn "up root"})
         { predecessors = pure (Connect (Vertices [leafCL]) (Vertices [childV, childO, childC]))
         }
 

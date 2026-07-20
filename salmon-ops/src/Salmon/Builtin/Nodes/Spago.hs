@@ -44,7 +44,7 @@ build r spago s =
         op "spago-build" nodeps $ \actions ->
             actions
                 { help = "spago builds a target"
-                , ref = dotRef $ "spago:build:" <> (Text.pack (show s))
+                , ref = mkRef "spago-build" (show s)
                 , up = up r'
                 }
   where
@@ -56,7 +56,7 @@ bundleApp r spago s m path =
         op "spago-build" (deps [enclosingdir]) $ \actions ->
             actions
                 { help = "spago bundles a target"
-                , ref = dotRef $ "spago:build:" <> (Text.pack path)
+                , ref = mkRef "spago-bundle" path
                 , up = up r'
                 }
   where
