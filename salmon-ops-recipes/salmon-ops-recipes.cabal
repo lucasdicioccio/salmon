@@ -73,3 +73,37 @@ library
                       , OverloadedRecordDot
                       , TypeApplications
                       , ScopedTypeVariables
+
+test-suite salmon-ops-recipes-test
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    other-modules:    Test.Harness
+                    , Test.JWTSigningSpec
+                    , Test.PodmanSpec
+    build-depends:    base
+                    , aeson
+                    , bytestring
+                    , comonad
+                    , containers
+                    , contravariant
+                    , directory
+                    , filepath
+                    , free
+                    , mtl
+                    , process
+                    , process-extras
+                    , salmon-core
+                    , salmon-ops
+                    , salmon-ops-recipes
+                    , tasty
+                    , tasty-hunit
+                    , temporary
+                    , text
+    default-language: Haskell2010
+    default-extensions: DataKinds
+                      , KindSignatures
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , ScopedTypeVariables
+                      , TypeApplications

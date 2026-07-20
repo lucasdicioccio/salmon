@@ -122,6 +122,7 @@ podmanCommand = Command $ \cmd -> case cmd of
                 "podman"
                 [ "run"
                 , "-dt"
+                , "-p"
                 , mconcat [Text.unpack pm.portOnHost, ":", Text.unpack pm.portInGuest, "/", port]
                 , (Text.unpack $ getRegistry r) </> (Text.unpack $ getImage i)
                 ]
