@@ -44,7 +44,7 @@ program =
 
     optimizedDeps :: Op -> Op
     optimizedDeps base =
-        let pkgs = Debian.installAllDebsAtOnce base
+        let pkgs = Debian.installAllDebsAtOnceWith reportPrint base
          in Debian.removeSinglePackages base `inject` pkgs
 
 configure :: Configure IO Seed Spec
