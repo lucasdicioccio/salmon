@@ -257,33 +257,35 @@ remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
 
     remotePrepare :: [MigrationFile] -> Op
     remotePrepare migrations =
-        let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in trackedGraph $
-                s `bindTracked` \x ->
-                    Self.callSelf
-                        (contramap CallSelf r)
-                        Ssh.preExistingRemoteMachine
-                        x
-                        simulate
-                        CLI.Up
-                        ( toSpec $
-                            Left $
-                                PrepareRemoteMigrationSetup $
-                                    fmap remoteMigrationDir migrations
-                        )
+        trackedGraph $
+            Self.uploadAndCallSelf
+                (contramap UploadSelf r)
+                (contramap CallSelf r)
+                "tmp"
+                selfRemote
+                selfpath
+                Ssh.preExistingRemoteMachine
+                simulate
+                CLI.Up
+                ( toSpec $
+                    Left $
+                        PrepareRemoteMigrationSetup $
+                            fmap remoteMigrationDir migrations
+                )
 
     remoteApply :: G MigrationFile -> Op
     remoteApply migrations =
-        let s = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
-         in trackedGraph $
-                s `bindTracked` \x ->
-                    Self.callSelfAsSudo
-                        (contramap CallSelf r)
-                        Ssh.preExistingRemoteMachine
-                        x
-                        simulate
-                        CLI.Up
-                        (toSpec $ Right $ MigrationSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath remoteExtraUsers)
+        trackedGraph $
+            Self.uploadAndCallSelfAsSudo
+                (contramap UploadSelf r)
+                (contramap CallSelf r)
+                "tmp"
+                selfRemote
+                selfpath
+                Ssh.preExistingRemoteMachine
+                simulate
+                CLI.Up
+                (toSpec $ Right $ MigrationSetup (remoteMigrationPlan migrations) cfg.cfg_user cfg.cfg_database remotePgSecretPath remoteExtraUsers)
 
 data PrepareRemoteMigrationSetup
     = PrepareRemoteMigrationSetup

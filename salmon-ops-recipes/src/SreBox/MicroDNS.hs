@@ -36,7 +36,7 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (mkRef)
-import Salmon.Op.Track (Track (..), bindTracked, trackedGraph, using, (>*<))
+import Salmon.Op.Track (Track (..), trackedGraph, using, (>*<))
 import Salmon.Reporter
 
 import SreBox.CabalBuilding (cabalBinUpload, microDNS, optBuildsBindir)
@@ -110,13 +110,17 @@ setupDNS r mkRemote simulate selfRemote selfpath toSpec cfg =
     configUploads = op "uploads-microdns-configs" (deps [uploadCert, uploadKey, uploadSecret]) id
 
     -- recursive call
-    continueRemotely setup = self `bindTracked` recurse setup
-
-    recurse setup selfref =
-        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
-
-    -- upload self
-    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+    continueRemotely setup =
+        Self.uploadAndCallSelfAsSudo
+            (contramap UploadSelf r)
+            (contramap CallSelf r)
+            "tmp"
+            selfRemote
+            selfpath
+            mkRemote
+            simulate
+            CLI.Up
+            (toSpec setup)
 
     -- upload certificate and key
     remotePem = "tmp/microdns.pem"

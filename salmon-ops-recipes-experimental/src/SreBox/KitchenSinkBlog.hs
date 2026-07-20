@@ -96,13 +96,17 @@ setupKS r mkRemote mkCert simulate selfRemote selfpath cfg toSpec =
     uploads blogSrcDir = op "uploads-ks-blog" (deps [uploadCert, uploadKey, uploadSources blogSrcDir]) id
 
     -- recursive call
-    continueRemotely setup = self `bindTracked` recurse setup
-
-    recurse setup selfref =
-        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
-
-    -- upload self
-    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+    continueRemotely setup =
+        Self.uploadAndCallSelfAsSudo
+            (contramap UploadSelf r)
+            (contramap CallSelf r)
+            "tmp"
+            selfRemote
+            selfpath
+            mkRemote
+            simulate
+            CLI.Up
+            (toSpec setup)
 
     -- upload sources
     uploadSources blogSrcDir =

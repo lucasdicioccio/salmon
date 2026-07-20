@@ -135,8 +135,10 @@ generateKitchenSinkSite r base =
 
     build :: FilePath -> Op
     build outdir =
-        using (CabalBuilding.kitchenSink (contramap BuildKS r) localKSPath) $ \kspath ->
-            using (Git.repodir mkrepo base.genKitchenSinkSiteSourceRepo "") $ \srcdir ->
+        using2
+            (CabalBuilding.kitchenSink (contramap BuildKS r) localKSPath)
+            (Git.repodir mkrepo base.genKitchenSinkSiteSourceRepo "")
+            $ \(kspath, srcdir) ->
                 let ksargs = (kspath, srcdir.directoryPath, srcdir.directoryPath </> "site-src", outdir)
                  in Binary.withBinary ignoreTrack callks ksargs $ \buildBlog ->
                         op "gen-ks-site" nodeps $ \actions ->

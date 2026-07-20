@@ -86,3 +86,26 @@ using tracked use =
     tracking tracked.track dup tracked.obj use
   where
     dup a = (a, a)
+
+{- | Like 'using', but for two independent 'Tracked' values at once — avoids
+nesting two 'using' calls just to get both objects in scope together.
+-}
+using2 ::
+    (Applicative m) =>
+    Tracked m n a ->
+    Tracked m n b ->
+    ((a, b) -> OpGraph m n) ->
+    OpGraph m n
+using2 t1 t2 use =
+    use (t1.obj, t2.obj) `inject` (trackedGraph t1 `overlaid` trackedGraph t2)
+
+-- | Like 'using2', for three independent 'Tracked' values.
+using3 ::
+    (Applicative m) =>
+    Tracked m n a ->
+    Tracked m n b ->
+    Tracked m n c ->
+    ((a, b, c) -> OpGraph m n) ->
+    OpGraph m n
+using3 t1 t2 t3 use =
+    use (t1.obj, t2.obj, t3.obj) `inject` (trackedGraph t1 `overlaid` trackedGraph t2 `overlaid` trackedGraph t3)

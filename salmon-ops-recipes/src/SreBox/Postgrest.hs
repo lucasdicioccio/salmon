@@ -28,7 +28,7 @@ import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.G (G (..))
 import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Ref (mkRef)
-import Salmon.Op.Track (Track (..), Tracked (..), bindTracked, trackedGraph, using, (>*<))
+import Salmon.Op.Track (Track (..), Tracked (..), trackedGraph, using, (>*<))
 import Salmon.Reporter
 
 import qualified Salmon.Builtin.Nodes.Git as Git
@@ -124,13 +124,17 @@ setupPostgrest r mkRemote simulate selfRemote selfpath toSpec makeJwt jwtFilePat
                     }
 
     -- recursive call
-    continueRemotely setup = self `bindTracked` recurse setup
-
-    recurse setup selfref =
-        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
-
-    -- upload self
-    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
+    continueRemotely setup =
+        Self.uploadAndCallSelfAsSudo
+            (contramap UploadSelf r)
+            (contramap CallSelf r)
+            "tmp"
+            selfRemote
+            selfpath
+            mkRemote
+            simulate
+            CLI.Up
+            (toSpec setup)
 
     -- upload config file
     remoteConfig = Text.unpack $ "tmp/postgrest-" <> cfg.postgrest_cfg_serviceName <> ".config"

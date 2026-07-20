@@ -121,6 +121,44 @@ callSelfAsSudo r mkRemote self simulate base directive =
     callOverSSH = Ssh.call r' Debian.ssh mkRemote sshRemote "sudo" cmdArgs cmdStdin
     r' = contramap RunSsh r
 
+-- | Upload this binary to a remote host, then invoke it there over SSH with
+-- a directive — the composition every recipe that self-orchestrates a
+-- remote step was hand-rolling via uploadSelf `bindTracked` callSelf.
+uploadAndCallSelf ::
+    forall directive.
+    (ToJSON directive, FromJSON directive) =>
+    Reporter Report ->
+    Reporter Report ->
+    FilePath ->
+    Remote ->
+    SelfPath ->
+    Track' Ssh.Remote ->
+    Track' directive ->
+    CLI.BaseCommand ->
+    directive ->
+    Tracked' (RemoteCall directive)
+uploadAndCallSelf rUpload rCall remotedir uploadRemote selfpath mkRemote simulate base directive =
+    uploadSelf rUpload remotedir uploadRemote selfpath `bindTracked` \self ->
+        callSelf rCall mkRemote self simulate base directive
+
+-- | Same as 'uploadAndCallSelf', but invokes the remote binary via sudo.
+uploadAndCallSelfAsSudo ::
+    forall directive.
+    (ToJSON directive, FromJSON directive) =>
+    Reporter Report ->
+    Reporter Report ->
+    FilePath ->
+    Remote ->
+    SelfPath ->
+    Track' Ssh.Remote ->
+    Track' directive ->
+    CLI.BaseCommand ->
+    directive ->
+    Tracked' (RemoteCall directive)
+uploadAndCallSelfAsSudo rUpload rCall remotedir uploadRemote selfpath mkRemote simulate base directive =
+    uploadSelf rUpload remotedir uploadRemote selfpath `bindTracked` \self ->
+        callSelfAsSudo rCall mkRemote self simulate base directive
+
 remoteDir ::
     forall directive.
     (ToJSON directive, FromJSON directive) =>

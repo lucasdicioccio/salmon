@@ -231,12 +231,18 @@ setupKS r mkRemote mkCerts cloneKitchenSink simulate selfRemote selfpath cfg toS
     stanzaUploads = srcUploads <> certUploads
     srcUploads = stanzaUploadSources r rsyncRemote <$> ks_cfg_site_stanzas cfg
     certUploads = stanzaUploadCerts r mkCerts rsyncRemote <$> ks_cfg_stanzas cfg
-    -- upload self
-    self = Self.uploadSelf (contramap UploadSelf r) "tmp" selfRemote selfpath
     -- recursive call
-    continueRemotely setup = self `bindTracked` recurse setup
-    recurse setup selfref =
-        Self.callSelfAsSudo (contramap CallSelf r) mkRemote selfref simulate CLI.Up (toSpec setup)
+    continueRemotely setup =
+        Self.uploadAndCallSelfAsSudo
+            (contramap UploadSelf r)
+            (contramap CallSelf r)
+            "tmp"
+            selfRemote
+            selfpath
+            mkRemote
+            simulate
+            CLI.Up
+            (toSpec setup)
 
 stanzaUploadCerts ::
     Reporter Report ->
