@@ -69,7 +69,13 @@ setupNakedPGAgainstSandbox = requireExecutable "podman" $
             runUp op
 
         -- postcondition: did "appdb" actually get created for real?
-        (_, out, _) <- podmanExecCapture cid ["sudo", "-u", "postgres", "psql", "-lqt"]
+        (code, out, err) <- podmanExecCapture cid ["sudo", "-u", "postgres", "psql", "-lqt"]
         assertBool
-            ("expected \"appdb\" to be a real database inside the container; `psql -l` said:\n" <> out)
+            ("expected \"appdb\" to be a real database inside the container; `psql -l` said ("
+                <> show code
+                <> "):\nstdout:\n"
+                <> out
+                <> "\nstderr:\n"
+                <> err
+            )
             ("appdb" `isInfixOf` out)
