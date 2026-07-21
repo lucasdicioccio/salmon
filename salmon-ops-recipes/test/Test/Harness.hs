@@ -33,18 +33,17 @@ module Test.Harness (
 ) where
 
 import Control.Exception (bracket, bracket_)
-import Control.Monad (void)
 import Control.Monad.Identity (Identity, runIdentity)
-import qualified Data.ByteString.Char8 as C8
 import Data.IORef
-import Data.List (find)
+import qualified Data.Text as Text
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (downTree, upTree)
 import Salmon.Builtin.Extension (Extension (..), Op, Track', ignoreTrack)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import Salmon.Reporter (Reporter, ReporterM (..))
-import System.Directory (createDirectoryIfMissing, findExecutable, getPermissions, setOwnerExecutable, setPermissions)
+import System.CPUTime (getCPUTime)
+import System.Directory (findExecutable, getPermissions, setOwnerExecutable, setPermissions)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -102,44 +101,50 @@ requireExecutable name act = do
 -------------------------------------------------------------------------------
 -- Podman-backed sandboxes.
 --
--- Dogfoods "Podman.pullImage"\/"Podman.runContainer" (i.e. runs them for
--- real through 'runUp', exactly like production code would) as the sandbox
--- provisioner, rather than hand-rolling shell-outs to bring the container
--- up. The Podman builtins have no teardown of their own, so cleanup here is
--- always a raw @podman rm -f@.
+-- Dogfoods "Podman.pullImage"\/"Podman.runContainer"\/"Podman.runContainer"'s
+-- 'down' (i.e. runs them for real through 'runUp'\/'runDown', exactly like
+-- production code would) as the sandbox provisioner and cleaner-upper —
+-- there is no hand-rolled @podman rm -f@ shell-out here at all, since the
+-- Podman nodes now carry a real teardown of their own. We pick the
+-- container's name ourselves (so it's known up front and 'down' has a
+-- stable target), rather than needing to recover an id from `podman run`'s
+-- stdout.
 
 -- | Assumes podman is already installed on the host\/CI image running the
 -- test (checked by 'requireExecutable' at the call site).
 podmanTrack :: Track' (Binary.Binary "podman")
 podmanTrack = ignoreTrack
 
--- | Pull an image and run it (dogfooding the project's own Podman ops),
--- yielding the container id, and guarantee cleanup via @podman rm -f@
--- afterwards, however the action exits (including on exception).
+-- | Pull an image and run it under a fresh, unique name (dogfooding the
+-- project's own Podman ops both ways), and guarantee cleanup via the
+-- production 'down' action afterwards, however the action exits (including
+-- on exception). The pulled image itself is left in the local cache — only
+-- the container is torn down — since removing shared image cache on every
+-- test run would be needlessly destructive and slow subsequent runs down.
 withContainer :: Podman.Image -> Podman.PortMapping -> (String -> IO a) -> IO a
 withContainer img pm act =
-    bracket bringUp cleanup act
+    bracket bringUp cleanup (act . fst)
   where
-    cleanup :: String -> IO ()
-    cleanup cid = void (readProcessWithExitCode "podman" ["rm", "-f", cid] "")
+    cleanup :: (String, Op) -> IO ()
+    cleanup (_, runOp) = runDown runOp
 
-    bringUp :: IO String
+    bringUp :: IO (String, Op)
     bringUp = do
-        (reporter, readReports) <- capture
+        cname <- freshContainerName
+        (reporter, _) <- capture
         let reg = Podman.dockerRegistry
-        runUp (Podman.pullImage reporter podmanTrack reg img)
-        runUp (Podman.runContainer reporter podmanTrack reg img pm)
-        reports <- readReports
-        let cmdReports = [b | Podman.RunContainer _ _ _ b <- reports]
-        case find isStopped (map unwrapRequested cmdReports) of
-            Just (Binary.CommandStopped _ ExitSuccess out _) -> pure (C8.unpack (C8.takeWhile (/= '\n') out))
-            _ -> error "withContainer: could not recover the container id from `podman run`'s stdout"
+            pullOp = Podman.pullImage reporter podmanTrack reg img
+            runOp = Podman.runContainer reporter podmanTrack reg img cname pm
+        runUp pullOp
+        runUp runOp
+        pure (Text.unpack (Podman.getContainerName cname), runOp)
 
-    unwrapRequested (Binary.Requested _ r) = unwrapRequested r
-    unwrapRequested r = r
-
-    isStopped (Binary.CommandStopped{}) = True
-    isStopped _ = False
+-- | CPU time at picosecond resolution is more than enough entropy to keep
+-- concurrent\/successive test containers from colliding on a name.
+freshContainerName :: IO Podman.ContainerName
+freshContainerName = do
+    t <- getCPUTime
+    pure (Podman.ContainerName (Text.pack ("salmon-ops-recipes-test-" <> show t)))
 
 -- | Run a command inside an already-running container, discarding its output.
 -- Used for sandbox setup steps (installing prerequisites) that are not
@@ -185,7 +190,12 @@ withShimmedPath containerId commands act =
         let path = dir </> cmd
         writeFile path $
             unlines
-                [ "#!/usr/bin/env bash"
+                [ -- Absolute shebang on purpose: `#!/usr/bin/env bash` would
+                  -- have `env` resolve "bash" via the (now shim-prepended)
+                  -- PATH, which — if "bash" is itself one of the shimmed
+                  -- commands — finds this very script and recurses into
+                  -- itself forever instead of running real bash.
+                  "#!/bin/bash"
                 , "exec podman exec -i " <> containerId <> " " <> cmd <> " \"$@\""
                 ]
         perms <- getPermissions path
