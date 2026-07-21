@@ -32,6 +32,7 @@ library
                    , SreBox.PostgresInit
                    , SreBox.Postgrest
                    , SreBox.JWTSigning
+                   , SreBox.WireGuardVpn
     build-depends:    base >=4.16.3.0
                     , acme-not-a-joke
                     , aeson

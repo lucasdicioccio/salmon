@@ -70,6 +70,9 @@ wg = installWith "wireguard"
 nft :: Installer "nft"
 nft = installWith "netfilter"
 
+sysctl :: Installer "sysctl"
+sysctl = installWith "procps"
+
 debootstrap :: Installer "debootstrap"
 debootstrap = installWith "debootstrap"
 

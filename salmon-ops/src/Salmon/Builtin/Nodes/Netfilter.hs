@@ -25,11 +25,13 @@ import System.Process.ListLike (CreateProcess (..), proc)
 -------------------------------------------------------------------------------
 data Report
     = RunNftCommand !NftCommand !Binary.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 
 data NetFamily
     = Inet
+    deriving (Show)
 
 -- TODO: Ip, Ip6, Arp, Bridge, NetDev
 
@@ -41,20 +43,79 @@ data Table
     { tableName :: Text
     , tableFamily :: NetFamily
     }
+    deriving (Show)
+
+{- | A base chain is one hooked into the netfilter packet path (as opposed to a
+regular chain, which only runs when jumped to explicitly). Needed for e.g. NAT
+postrouting or forwarding decisions to actually fire.
+-}
+data ChainType
+    = FilterChain
+    | NatChain
+    deriving (Show)
+
+chainTypeTxt :: ChainType -> Text
+chainTypeTxt FilterChain = "filter"
+chainTypeTxt NatChain = "nat"
+
+data Hook
+    = PreRouting
+    | Input
+    | Forward
+    | Output
+    | PostRouting
+    deriving (Show)
+
+hookTxt :: Hook -> Text
+hookTxt PreRouting = "prerouting"
+hookTxt Input = "input"
+hookTxt Forward = "forward"
+hookTxt Output = "output"
+hookTxt PostRouting = "postrouting"
+
+data ChainPolicy
+    = Accept
+    | Drop
+    deriving (Show)
+
+policyTxt :: ChainPolicy -> Text
+policyTxt Accept = "accept"
+policyTxt Drop = "drop"
+
+data BaseChainSpec
+    = BaseChainSpec
+    { baseChainType :: ChainType
+    , baseChainHook :: Hook
+    , baseChainPriority :: Int
+    , baseChainPolicy :: ChainPolicy
+    }
+    deriving (Show)
 
 data Chain
     = Chain
     { chainName :: Text
     , chainTable :: Table
+    , chainBase :: Maybe BaseChainSpec
     }
+    deriving (Show)
+
+-- | A regular (non-hooked) chain, only reachable via explicit jumps.
+regularChain :: Text -> Table -> Chain
+regularChain name t = Chain name t Nothing
+
+-- | A base chain, hooked into the netfilter packet path.
+baseChain :: Text -> Table -> BaseChainSpec -> Chain
+baseChain name t spec = Chain name t (Just spec)
 
 data Rule
     = RawRule [Text]
+    deriving (Show)
 
 data NftCommand
     = AddTable Table
     | AddChain Chain
     | AddRule Chain Rule
+    deriving (Show)
 
 table :: Reporter Report -> Track' (Binary "nft") -> Table -> Op
 table r nft t =
@@ -100,6 +161,22 @@ rule r nft c nftrule =
     textual :: Rule -> Text
     textual (RawRule txts) = Text.unwords txts
 
+baseChainSpecTerms :: BaseChainSpec -> [Text]
+baseChainSpecTerms spec =
+    [ "{"
+    , "type"
+    , chainTypeTxt spec.baseChainType
+    , "hook"
+    , hookTxt spec.baseChainHook
+    , "priority"
+    , Text.pack (show spec.baseChainPriority)
+    , ";"
+    , "policy"
+    , policyTxt spec.baseChainPolicy
+    , ";"
+    , "}"
+    ]
+
 nftcommand :: Command "nft" NftCommand
 nftcommand = Command $ \cmd -> case cmd of
     (AddTable table) ->
@@ -111,14 +188,17 @@ nftcommand = Command $ \cmd -> case cmd of
             , Text.unpack table.tableName
             ]
     (AddChain chain) ->
-        proc
-            "nft"
-            [ "add"
-            , "chain"
-            , Text.unpack $ netFamily chain.chainTable.tableFamily
-            , Text.unpack chain.chainTable.tableName
-            , Text.unpack chain.chainName
-            ]
+        proc "nft" $
+            mconcat
+                [
+                    [ "add"
+                    , "chain"
+                    , Text.unpack $ netFamily chain.chainTable.tableFamily
+                    , Text.unpack chain.chainTable.tableName
+                    , Text.unpack chain.chainName
+                    ]
+                , maybe [] (fmap Text.unpack . baseChainSpecTerms) chain.chainBase
+                ]
     (AddRule chain (RawRule terms)) ->
         proc "nft" $
             mconcat

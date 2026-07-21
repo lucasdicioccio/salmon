@@ -244,6 +244,8 @@ client r wg key iface wgname privatekeyPath =
     pk = run key privatekeyPath
     netdev = run iface wgname
 
+type KeepaliveSeconds = Int
+
 peer ::
     Reporter Report ->
     Track' (Binary "wg") ->
@@ -256,13 +258,32 @@ peer ::
     AllowedIps ->
     Op
 peer r wg key iface endpoint wgname publicKeyPath ep ips =
+    peerKeepalive r wg key iface endpoint wgname publicKeyPath ep ips Nothing
+
+{- | Like 'peer', but also sets a persistent-keepalive interval. Needed on the
+side behind a NAT/dynamic-IP (typically the client) so the tunnel stays
+punched through and the far (static-IP) side can keep sending it traffic.
+-}
+peerKeepalive ::
+    Reporter Report ->
+    Track' (Binary "wg") ->
+    Track' FilePath ->
+    Track' WgName ->
+    Track' Endpoint ->
+    WgName ->
+    FilePath ->
+    Maybe Endpoint ->
+    AllowedIps ->
+    Maybe KeepaliveSeconds ->
+    Op
+peerKeepalive r wg key iface endpoint wgname publicKeyPath ep ips keepalive =
     op "wireguard-peer" (deps [justInstall wg, pk, netdev, peersetup]) $ \actions ->
         actions
             { ref = mkRef "wg-peer" (wgname, publicKeyPath)
             , up = do
                 pkey <- Text.strip <$> Text.readFile publicKeyPath
                 print (wgname, publicKeyPath, pkey)
-                let cmd = AddPeer wgname pkey ep ips
+                let cmd = AddPeer wgname pkey ep ips keepalive
                 untrackedExec wgcommand cmd "" (r' cmd)
             }
   where
@@ -274,7 +295,7 @@ peer r wg key iface endpoint wgname publicKeyPath ep ips =
 data WgCommand
     = SetupServer WgName PortNum FilePath
     | SetupClient WgName FilePath
-    | AddPeer WgName B64PubKey (Maybe Endpoint) AllowedIps
+    | AddPeer WgName B64PubKey (Maybe Endpoint) AllowedIps (Maybe KeepaliveSeconds)
     deriving (Show)
 
 wgcommand :: Command "wg" WgCommand
@@ -297,25 +318,16 @@ wgcommand = Command $ \cmd -> case cmd of
             , "private-key"
             , key
             ]
-    (AddPeer name b64pk (Just ep) allowedIps) ->
-        proc
-            "wg"
-            [ "set"
-            , Text.unpack name
-            , "peer"
-            , Text.unpack b64pk
-            , "endpoint"
-            , Text.unpack ep
-            , "allowed-ips"
-            , Text.unpack allowedIps
-            ]
-    (AddPeer name b64pk Nothing allowedIps) ->
-        proc
-            "wg"
-            [ "set"
-            , Text.unpack name
-            , "peer"
-            , Text.unpack b64pk
-            , "allowed-ips"
-            , Text.unpack allowedIps
-            ]
+    (AddPeer name b64pk ep allowedIps keepalive) ->
+        proc "wg" $
+            mconcat
+                [
+                    [ "set"
+                    , Text.unpack name
+                    , "peer"
+                    , Text.unpack b64pk
+                    ]
+                , maybe [] (\e -> ["endpoint", Text.unpack e]) ep
+                , ["allowed-ips", Text.unpack allowedIps]
+                , maybe [] (\k -> ["persistent-keepalive", show k]) keepalive
+                ]
