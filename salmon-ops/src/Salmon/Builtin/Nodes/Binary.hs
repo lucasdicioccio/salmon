@@ -13,6 +13,9 @@ module Salmon.Builtin.Nodes.Binary (
     Report (..),
     pattern CommandSuccess,
     isCommandSuccessful,
+    CommandFailed (..),
+    CommandFailedSimple (..),
+    checkExitCode,
 ) where
 
 import Salmon.Builtin.Extension
@@ -22,7 +25,9 @@ import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
 
+import Control.Exception (Exception, throwIO)
 import Control.Monad (void)
+import qualified Data.ByteString.Char8 as C8
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -32,7 +37,7 @@ import GHC.TypeLits (Symbol)
 import GHC.IO.Handle (Handle)
 import System.Process (ProcessHandle, createProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
-import System.Process.ListLike (CreateProcess, proc)
+import System.Process.ListLike (CreateProcess (..), proc)
 
 -------------------------------------------------------------------------------
 
@@ -91,12 +96,62 @@ withBinaryStdin t cmd arg stdin consumeIO =
         ret = tracking t mk arg fconsume
      in ret
 
+{- | Runs the command and, unlike a naive shell-out, does not swallow a
+non-zero exit: after reporting 'CommandStopped' (so the failure is still
+visible in the 'Report' stream either way), it throws 'CommandFailed'. This
+is what lets "Salmon.Actions.UpDown".'Salmon.Actions.UpDown.upTree' actually
+notice a failing command instead of blindly running every dependent as if it
+had succeeded.
+-}
 untrackedExec :: Command x a -> a -> ByteString -> (Reporter Report -> IO ())
 untrackedExec binary arg dat = \r -> do
     let p = prepare binary arg
     runReporter r (CommandStart p)
     (code, out, err) <- readCreateProcessWithExitCode p dat
     runReporter r (CommandStopped p code out err)
+    case code of
+        ExitSuccess -> pure ()
+        ExitFailure n -> throwIO (CommandFailed p n out err)
+
+-- | Thrown by 'untrackedExec' (and so, transitively, by every node built on 'withBinary') on a non-zero exit.
+data CommandFailed
+    = CommandFailed
+    { commandFailed_process :: CreateProcess
+    , commandFailed_exitCode :: Int
+    , commandFailed_stdout :: ByteString
+    , commandFailed_stderr :: ByteString
+    }
+
+instance Show CommandFailed where
+    show e =
+        mconcat
+            [ "command failed (exit "
+            , show e.commandFailed_exitCode
+            , "): "
+            , show (cmdspec e.commandFailed_process)
+            , "\nstdout:\n"
+            , C8.unpack e.commandFailed_stdout
+            , "\nstderr:\n"
+            , C8.unpack e.commandFailed_stderr
+            ]
+
+instance Exception CommandFailed
+
+{- | A minimal variant of 'CommandFailed' for call sites that only have a
+human-readable label for what ran, not the full 'CreateProcess' (e.g. those
+built on 'withBinaryIO', which hands back a raw 'ProcessHandle' rather than
+a checked result — see "Salmon.Builtin.Nodes.WireGuard" for an example).
+-}
+data CommandFailedSimple = CommandFailedSimple String Int
+
+instance Show CommandFailedSimple where
+    show (CommandFailedSimple label n) = mconcat ["command failed (exit ", show n, "): ", label]
+
+instance Exception CommandFailedSimple
+
+checkExitCode :: String -> ExitCode -> IO ()
+checkExitCode _ ExitSuccess = pure ()
+checkExitCode label (ExitFailure n) = throwIO (CommandFailedSimple label n)
 
 type RunningCommand = (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
 

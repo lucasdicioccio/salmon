@@ -1,5 +1,6 @@
 module Salmon.Builtin.Nodes.Netfilter where
 
+import Salmon.Actions.UpDown (Requirement (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -14,7 +15,10 @@ import Control.Monad (void)
 import Data.Dynamic (toDyn)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text
 import qualified Data.Text.IO as Text
+import GHC.IO.Exception (ExitCode (..))
 import GHC.IO.Handle (Handle)
 
 import System.FilePath (takeDirectory, (</>))
@@ -152,6 +156,7 @@ rule r nft c nftrule =
             actions
                 { help = "creates an Netfilter rule"
                 , ref = mkRef "nft-rule" (c.chainTable.tableName, c.chainName, textual nftrule)
+                , prelim = skipIfNftRuleExists c nftrule
                 , up = add r'
                 , dynamics = [toDyn cmd]
                 }
@@ -160,6 +165,38 @@ rule r nft c nftrule =
     cmd = AddRule c nftrule
     textual :: Rule -> Text
     textual (RawRule txts) = Text.unwords txts
+
+{- | @nft add rule@ is not idempotent on its own — reapplying the same rule
+appends a duplicate each time instead of a no-op (nft rule handles aren't
+content-addressed, so there's no equivalent of @ip route replace@ here).
+Instead, this checks whether a line matching the rule's own rendered text is
+already present in @nft list chain@'s output and, if so, reports
+'Skippable' — the same "does the effect already exist" shape as
+'Salmon.Actions.UpDown.skipIfFileExists', just backed by a command's output
+instead of the filesystem. If the chain itself doesn't exist yet (e.g. the
+very first run, before its dependency has created it) 'Required' is
+naturally correct too: there is nothing to find, so nothing to skip.
+-}
+skipIfNftRuleExists :: Chain -> Rule -> IO Requirement
+skipIfNftRuleExists c (RawRule terms) = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            ( proc
+                "nft"
+                [ "list"
+                , "chain"
+                , Text.unpack (netFamily c.chainTable.tableFamily)
+                , Text.unpack c.chainTable.tableName
+                , Text.unpack c.chainName
+                ]
+            )
+            ""
+    pure $ case code of
+        ExitSuccess | wanted `Text.isInfixOf` Text.decodeUtf8With Text.lenientDecode out -> Skippable
+        _ -> Required
+  where
+    wanted :: Text
+    wanted = Text.unwords terms
 
 baseChainSpecTerms :: BaseChainSpec -> [Text]
 baseChainSpecTerms spec =

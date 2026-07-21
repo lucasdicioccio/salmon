@@ -11,14 +11,14 @@ them. Both are generic over any node type and know nothing about ops,
 actions, or refs — that stays in the callers.
 -}
 module Salmon.Op.GraphFold (
-    postOrderM_,
+    postOrderM,
     Shape (..),
     Branch (..),
     foldWithContext,
 ) where
 
 import Control.Comonad.Cofree (Cofree (..))
-import Data.Foldable (traverse_)
+import Data.Foldable (toList)
 
 import Salmon.Op.Graph
 
@@ -28,11 +28,20 @@ order 'Graph's derived 'Foldable' instance would produce) before the node
 itself. Performs no deduplication — a node reachable via two paths is
 visited once per path. Callers that need dedup do it themselves, keyed off
 whatever identity they extract from the node.
+
+@visit@ is told whether /any/ of the current node's immediate children
+reported 'True' (e.g. "this child, or something it itself depended on,
+failed"), and returns its own such flag for the node just visited — letting
+a caller like "Salmon.Actions.UpDown".'Salmon.Actions.UpDown.upTree'
+propagate "a predecessor failed, so skip me too" down through the whole
+subtree without needing its own separate graph walk.
 -}
-postOrderM_ :: (Monad m) => (a -> m ()) -> Cofree Graph a -> m ()
-postOrderM_ visit = go
+postOrderM :: (Monad m) => (Bool -> a -> m Bool) -> Cofree Graph a -> m Bool
+postOrderM visit = go
   where
-    go (x :< g) = traverse_ go g >> visit x
+    go (x :< g) = do
+        childFailed <- or <$> mapM go (toList g)
+        visit childFailed x
 
 -- | Which 'Graph' constructor a node's own predecessors are wrapped in.
 data Shape = SVertices | SOverlay | SConnect

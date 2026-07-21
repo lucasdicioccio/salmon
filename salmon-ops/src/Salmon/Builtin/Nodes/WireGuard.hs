@@ -2,7 +2,7 @@ module Salmon.Builtin.Nodes.WireGuard where
 
 import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), CommandIO (..), justInstall, untrackedExec, withBinary, withBinaryIO)
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), CommandIO (..), checkExitCode, justInstall, untrackedExec, withBinary, withBinaryIO)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Ref
@@ -11,7 +11,6 @@ import Salmon.Reporter
 
 import System.IO (IOMode (ReadMode, WriteMode), withFile)
 
-import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -48,7 +47,7 @@ privateKey wg path =
                 , prelim = skipIfFileExists path
                 , up = withFile path WriteMode $ \h -> do
                     (_, _, _, ph) <- writePK (PrivateKeyForWriting h)
-                    void $ waitForProcess ph
+                    waitForProcess ph >>= checkExitCode "wg genkey"
                 }
   where
     enclosingdir :: Op
@@ -71,7 +70,7 @@ publicKey wg mkprivate private path =
                     withFile private ReadMode $ \hIn ->
                         withFile path WriteMode $ \hOut -> do
                             (_, _, _, ph) <- writePK ((PrivateKeyForReading hIn), (PublicKeyForWriting hOut))
-                            void $ waitForProcess ph
+                            waitForProcess ph >>= checkExitCode "wg pubkey"
                 }
   where
     enclosingdir :: Op

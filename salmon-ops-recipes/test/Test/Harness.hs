@@ -33,6 +33,7 @@ module Test.Harness (
 ) where
 
 import Control.Exception (bracket, bracket_)
+import Control.Monad (unless)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
 import qualified Data.Text as Text
@@ -70,11 +71,16 @@ nat = pure . runIdentity
 runUpCapturing :: Op -> IO [UpDown.Report Extension]
 runUpCapturing o = do
     (r, readBack) <- capture
-    upTree r nat o
+    _ <- upTree r nat o
     readBack
 
--- | Run 'upTree' when you only care about the side effects, not the trace.
-runUp :: Op -> IO ()
+{- | Run 'upTree' when you only care about the side effects, not the trace.
+Returns whether everything actually succeeded (see 'UpDown.upTree') — most
+callers that don't check it explicitly still get a real postcondition
+assertion elsewhere in the test, but the result is there for callers that
+want to assert on it directly instead.
+-}
+runUp :: Op -> IO Bool
 runUp o = do
     (r, _) <- capture
     upTree r nat o
@@ -136,8 +142,10 @@ withContainer img pm act =
             opts = Podman.noRunOptions{Podman.runPorts = [pm]}
             pullOp = Podman.pullImage reporter podmanTrack reg img
             runOp = Podman.runContainer reporter podmanTrack reg img cname opts
-        runUp pullOp
-        runUp runOp
+        pullOk <- runUp pullOp
+        unless pullOk (fail "withContainer: pulling the sandbox image failed")
+        runOk <- runUp runOp
+        unless runOk (fail "withContainer: starting the sandbox container failed")
         pure (Text.unpack (Podman.getContainerName cname), runOp)
 
 -- | CPU time at picosecond resolution is more than enough entropy to keep

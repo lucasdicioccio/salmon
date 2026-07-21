@@ -49,8 +49,12 @@ cabal build salmon-migrator                                          # a single 
 cabal build --project-file=cabal.perso.project salmon-ops-recipes-experimental salmon-personal-apps
 ```
 
-There are no test-suite stanzas in any `.cabal` file currently — there is nothing to run with
-`cabal test`.
+`salmon-ops-recipes` has a real test suite (`cabal test salmon-ops-recipes`); the other packages
+don't. It mixes cheap in-process assertions on graph shape/traversal with slower "Layer 2" tests
+that dogfood the project's own `Podman` builtins to run real recipes against disposable
+containers (see `salmon-ops-recipes/test/Test/Harness.hs` and `Test.PostgresInitSpec` for the
+pattern) — those need a working `podman` on the machine running the tests and are skipped loudly
+if it's missing.
 
 `cabal.project` carries `allow-newer` pins for `dhall-json` against `aeson`/`bytestring`/`text`;
 don't remove these without checking the build still resolves.
@@ -97,13 +101,62 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   that fills in `help`/`notes`/`ref`/`up`/`down`).
 - **`Actions/UpDown.hs`** implements graph execution: `upTree` walks the expanded `Cofree Graph`
   bottom-up, dedupes by `Ref` (an already-visited ref is reported `Redundant` and skipped even if
-  reachable via multiple paths), evaluates `prelim` to decide `Skip` vs `Eval`+`up`. `downTree` is
-  the simpler top-level teardown pass.
+  reachable via multiple paths), evaluates `prelim` to decide `Skip` vs `Eval`+`up`. If `up`
+  throws, that's caught and reported as `Failed`, and everything that (transitively) depends on it
+  is reported `Blocked` instead of being evaluated — see "Conventions for node authors" below for
+  what this means for how `up` needs to be written. `upTree` returns `IO Bool` (`False` iff
+  anything failed or was blocked). `downTree` is a much simpler, unconditional top-level teardown
+  pass with none of the above (no dedup, no `Requirement`, no failure handling).
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
   kept possibly-pure (non-IO) so the "turn a human-facing seed into a directive" step can be
   hermetically separated from the IO-heavy "turn a directive into ops and run them" step.
+
+## Conventions for node authors
+
+None of this is enforced by the type system — these are conventions every existing builtin
+follows, and new ones should too.
+
+**Idempotency.** `up` must be safe to run twice. Prefer, in rough order of how commonly they
+apply:
+- `replace` over `add` for anything that has it (e.g. `ip route replace`, used by
+  `Salmon.Builtin.Nodes.Routes.route`; `ALTER SYSTEM SET`, which is a set rather than an insert).
+- A `DO $$ IF NOT EXISTS (...) THEN ... END IF; END $$;` guard for a bare `CREATE` that has no
+  `IF NOT EXISTS`/`CREATE OR REPLACE` form but *is* allowed to run inside one — e.g. `CREATE ROLE`
+  (see `Postgres.CreateUser`/`CreateGroup`/`CreateReplicationUser`) or a physical replication slot
+  (`Postgres.EnsurePhysicalReplicationSlot`).
+- A shell-level check-then-act when even that isn't available — e.g. `CREATE DATABASE`, which
+  Postgres refuses to run inside a transaction/DO block at all (`Postgres.CreateDB`: `psql -tAc
+  "SELECT 1 FROM pg_database WHERE datname = '...'" | grep -q 1 || psql -c 'CREATE DATABASE
+  ...'`).
+- Append-if-missing for config file lines with no SQL/CLI equivalent at all (`grep -qxF ... ||
+  echo ... >>`, see `Postgres.ensureHbaLineScript`, the `pg_hba.conf` case — there's no `ALTER
+  SYSTEM` for that file).
+
+`nft add rule` itself is *not* idempotent — reapplying the same graph would append a duplicate
+rule every time instead of a no-op, since nft rule handles aren't content-addressed the way a
+file path or a SQL role name is. `Netfilter.rule` instead uses `prelim` for this (rather than a
+SQL/shell guard): `skipIfNftRuleExists` shells out to `nft list chain` and reports `Skippable` if
+a line matching the rule's own rendered text is already there — the same "does the effect already
+exist" shape as `Salmon.Actions.UpDown.skipIfFileExists`, just backed by a command's output
+instead of the filesystem. Worth remembering as a template for any other node whose underlying
+tool has no idempotent "set" verb at all (nothing to `replace`, no `IF NOT EXISTS`): check output,
+skip via `prelim`, rather than trying to force the command itself to be idempotent.
+
+**Failure must not be swallowed.** `Extension.up :: IO ()` has no way to signal failure in its
+type — the only way a failure becomes visible to `upTree` (see above) is if `up` *throws*.
+`Binary.untrackedExec`, which almost every builtin's `up` goes through via `withBinary`, does this
+automatically: it checks the subprocess's exit code and throws `CommandFailed` on non-zero, so
+most node authors don't need to think about this at all. The two places that do need explicit
+handling:
+- Anything built on the lower-level `withBinaryIO`/`CommandIO` (hands back a raw `ProcessHandle`
+  instead of a checked result — used where stdin/stdout need redirecting, e.g.
+  `WireGuard.privateKey`/`publicKey`) has to check `waitForProcess`'s `ExitCode` itself; use
+  `Binary.checkExitCode label` (throws `CommandFailedSimple`).
+- A node whose `up` recursively runs its own nested `upTree` (e.g.
+  `PostgresMigrations.remoteMigrateOpaqueSetup`'s continuation) must check the returned `Bool` and
+  `throwIO` if it's `False` — the outer traversal has no other way to learn the nested one failed.
 
 ## The seed → spec → ops CLI protocol
 

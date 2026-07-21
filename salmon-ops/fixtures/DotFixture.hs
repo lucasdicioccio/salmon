@@ -18,6 +18,7 @@ after touching graph-traversal or dot-rendering code:
 -}
 module Main (main) where
 
+import Control.Monad (void)
 import Control.Monad.Identity (runIdentity)
 import qualified Data.Text as Text
 import System.Environment (getArgs)
@@ -87,5 +88,5 @@ main = do
     args <- getArgs
     case args of
         ["dot"] -> printDigraph (pure . runIdentity) root
-        ["up"] -> upTree reportPrint (pure . runIdentity) root
+        ["up"] -> void $ upTree reportPrint (pure . runIdentity) root
         _ -> die "usage: salmon-ops-dot-fixture (dot|up)"

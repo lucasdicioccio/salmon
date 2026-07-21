@@ -4,6 +4,8 @@ module SreBox.PostgresMigrations where
 
 import Control.Comonad (extract)
 import Control.Comonad.Cofree (Cofree (..))
+import Control.Exception (throwIO)
+import Control.Monad (unless)
 import Control.Monad.Identity
 import Crypto.Hash.SHA256 as SHA256
 import Data.Aeson (FromJSON, ToJSON)
@@ -19,6 +21,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import GHC.Generics
 import System.FilePath (takeDirectory, (</>))
+import System.IO.Error (userError)
 
 import qualified Salmon.Actions.Dot as Dot
 import qualified Salmon.Actions.UpDown as UpDown
@@ -196,7 +199,11 @@ remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
                         let prepare = remotePrepare (toList migrations)
                         let uploads = collapse "." uploadmigrationFile (getCofreeGraph migrations)
                         let apply = remoteApply migrations
-                        UpDown.upTree (contramap Continuation r) (pure . runIdentity) (apply `inject` uploads `inject` prepare)
+                        ok <- UpDown.upTree (contramap Continuation r) (pure . runIdentity) (apply `inject` uploads `inject` prepare)
+                        -- 'up' has to throw, not just report, to fail loudly: this is a nested
+                        -- upTree run from inside another node's 'up', so the only way the outer
+                        -- traversal finds out this failed is if this 'up' itself throws.
+                        unless ok (throwIO (userError ("remote migration failed: " <> Text.unpack uniquename)))
                     , dynamics = [toDyn $ Dot.OpaqueNode "migration"]
                     }
 

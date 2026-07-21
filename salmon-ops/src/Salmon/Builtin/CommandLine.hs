@@ -3,12 +3,13 @@
 
 module Salmon.Builtin.CommandLine where
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
 import Options.Applicative
 import Options.Generic
+import System.Exit (exitFailure)
 
 import Salmon.Op.Configure
 import Salmon.Op.Eval
@@ -75,33 +76,37 @@ execCommandOrSeed ::
     Track' directive ->
     Command seed ->
     IO ()
-execCommandOrSeed r genBase traceBase cmd = void $ do
+execCommandOrSeed r genBase traceBase cmd = do
     case cmd of
         (Run Up) -> do
-            withGraph (UpDown.upTree r nat)
+            result <- withGraph (UpDown.upTree r nat)
+            when (result == Just False) exitFailure
         (Run Tree) -> do
-            withGraph (Help.printHelpCograph . (runIdentity . expand))
+            void $ withGraph (Help.printHelpCograph . (runIdentity . expand))
         (Run DAG) -> do
-            withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
+            void $ withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
         Config seed -> do
             dir <- gen genBase seed
             LBysteString.putStr $ encode dir
   where
     nat = pure . runIdentity
 
-    withGraph :: (Op -> IO ()) -> IO ()
+    -- | 'Nothing' iff the incoming JSON graph failed to parse (in which case @cont@ never ran).
+    withGraph :: (Op -> IO a) -> IO (Maybe a)
     withGraph cont = do
         jsonbody <- LBysteString.getContents
         case eitherDecode jsonbody of
-            Left err -> putStrLn ("failed to json-parse graph: " <> err)
+            Left err -> do
+                putStrLn ("failed to json-parse graph: " <> err)
+                pure Nothing
             Right a -> do
-                cont (run traceBase a)
+                Just <$> cont (run traceBase a)
 
 updownOnReport ::
     Reporter (UpDown.Report Extension) ->
     Reporter Op
 updownOnReport r =
-    ReporterM $ \op -> UpDown.upTree r nat op
+    ReporterM $ \op -> void $ UpDown.upTree r nat op
   where
     nat = pure . runIdentity
 

@@ -9,20 +9,23 @@
 -- container via @podman exec@. Nothing in the recipe is touched or aware of
 -- this — it is exercising unmodified production code.
 --
--- IMPORTANT: 'Salmon.Actions.UpDown.upTree' never inspects a failing
--- subprocess's exit code — 'Extension.up' is just @IO ()@, and
--- @Binary.untrackedExec@ records the 'ExitCode' into a 'Report' but never
--- throws on non-zero. So a Haskell exception from 'runUp' is NOT proof the
--- recipe worked; only a real postcondition check against the container is.
--- This module hit that the hard way: the first version of this test
--- asserted nothing beyond \"'runUp' didn't throw\" and reported a false
--- green, even though 'Postgres.pgLocalCluster' used to hardcode
--- @hardcodedVersion = 12@, which silently failed to start on Debian
--- bookworm (which ships postgresql 15 by default) — @pg_ctlcluster 12 main
--- start@ exited 1 and nobody noticed. 'Postgres.pgLocalCluster' now detects
--- the installed cluster version at 'up' time instead of hardcoding it; this
--- test's postcondition is what caught the original bug and is what proves
--- the fix.
+-- IMPORTANT (historical): this test is what originally caught a real bug —
+-- 'Postgres.pgLocalCluster' used to hardcode @hardcodedVersion = 12@, which
+-- silently failed to start on Debian bookworm (which ships postgresql 15 by
+-- default): @pg_ctlcluster 12 main start@ exited 1 and nobody noticed,
+-- because at the time 'Salmon.Actions.UpDown.upTree' never inspected a
+-- failing subprocess's exit code (@Binary.untrackedExec@ recorded the
+-- 'ExitCode' into a 'Report' but never threw on non-zero), so a Haskell
+-- exception from 'runUp' not being thrown was NOT proof the recipe worked.
+-- 'Postgres.pgLocalCluster' now detects the installed cluster version at
+-- 'up' time instead of hardcoding it, and separately, 'untrackedExec' now
+-- throws on a non-zero exit and 'upTree'/'runUp' surface that as a real
+-- @False@ return instead of silently continuing — so the explicit
+-- postcondition check below is now belt-and-suspenders rather than the only
+-- thing standing between this test and a false green. Both are kept: the
+-- 'runUp' result proves the graph traversal itself didn't skip/fail
+-- anything, the postcondition proves the *specific* effect we care about
+-- actually happened.
 module Test.PostgresInitSpec (tests) where
 
 import Data.List (isInfixOf)
@@ -62,11 +65,8 @@ setupNakedPGAgainstSandbox = requireExecutable "podman" $
             -- this is the real recipe, unmodified, run exactly like
             -- production code would via upTree — only the binaries it
             -- shells out to have been redirected into the container.
-            -- Note: `up` here can't fail loudly even if the underlying
-            -- command errors (see the module haddock) — the actual proof
-            -- the recipe worked is the postcondition below, not the
-            -- absence of a Haskell exception from `runUp`.
-            runUp op
+            ok <- runUp op
+            assertBool "expected the recipe's graph traversal to fully succeed (no failed/blocked node)" ok
 
         -- postcondition: did "appdb" actually get created for real?
         (code, out, err) <- podmanExecCapture cid ["sudo", "-u", "postgres", "psql", "-lqt"]

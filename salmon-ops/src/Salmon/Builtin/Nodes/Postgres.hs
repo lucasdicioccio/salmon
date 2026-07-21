@@ -393,8 +393,26 @@ psqlAdminRun_Sudo = Command go
         proc "chmod" ["a+r", path]
     go (AdminScript name path) =
         proc "sudo" ["-u", "postgres", "psql", "-f", path, Text.unpack name]
+    -- CREATE DATABASE can't run inside a transaction/DO block (a hard Postgres
+    -- restriction), so unlike the role-creation commands below, idempotency
+    -- has to be a shell-level check-then-create rather than a SQL one.
     go (CreateDB name) =
-        proc "sudo" ["-u", "postgres", "psql", "-c", unwords ["CREATE DATABASE", Text.unpack name]]
+        proc
+            "sudo"
+            [ "-u"
+            , "postgres"
+            , "bash"
+            , "-c"
+            , mconcat
+                [ "psql -tAc \"SELECT 1 FROM pg_database WHERE datname = '"
+                , Text.unpack name
+                , "'\" | grep -q 1 || psql -c 'CREATE DATABASE "
+                , Text.unpack name
+                , "'"
+                ]
+            ]
+    -- CREATE ROLE has no IF NOT EXISTS form, but (unlike CREATE DATABASE) it's
+    -- fine inside a DO block, so we guard it with an explicit existence check.
     go (CreateUser name pass) =
         proc
             "sudo"
@@ -402,13 +420,14 @@ psqlAdminRun_Sudo = Command go
             , "postgres"
             , "psql"
             , "-c"
-            , unwords
-                [ "CREATE ROLE"
+            , mconcat
+                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
                 , Text.unpack name
-                , "WITH"
-                , "LOGIN"
-                , "PASSWORD"
+                , "') THEN CREATE ROLE "
+                , Text.unpack name
+                , " WITH LOGIN PASSWORD "
                 , quotePass pass
+                , "; END IF; END $$;"
                 ]
             ]
     go (CreateReplicationUser name pass) =
@@ -461,9 +480,12 @@ psqlAdminRun_Sudo = Command go
             , "postgres"
             , "psql"
             , "-c"
-            , unwords
-                [ "CREATE ROLE"
+            , mconcat
+                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
                 , Text.unpack name
+                , "') THEN CREATE ROLE "
+                , Text.unpack name
+                , "; END IF; END $$;"
                 ]
             ]
     go (GroupMembership g u) =

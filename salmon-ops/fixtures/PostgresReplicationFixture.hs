@@ -40,10 +40,11 @@ own doc.
 -}
 module Main (main) where
 
+import Control.Monad (unless)
 import Control.Monad.Identity (runIdentity)
 import qualified Data.Text as Text
 import System.Environment (getArgs)
-import System.Exit (die)
+import System.Exit (die, exitFailure)
 
 import Salmon.Actions.Dot (printDigraph)
 import Salmon.Actions.UpDown (upTree)
@@ -114,12 +115,20 @@ standbyOp primaryHost =
 
 -------------------------------------------------------------------------------
 
+-- | Runs the graph and, unlike blindly ignoring 'upTree''s result, actually
+-- exits non-zero if a command failed (and everything downstream of it got
+-- 'Blocked') instead of reporting false success.
+runUpOrDie :: Op -> IO ()
+runUpOrDie o = do
+    ok <- upTree reportPrint (pure . runIdentity) o
+    unless ok exitFailure
+
 main :: IO ()
 main = do
     args <- getArgs
     case args of
-        ["primary", standbyCidr] -> upTree reportPrint (pure . runIdentity) (primaryOp (Text.pack standbyCidr))
-        ["standby", primaryHost] -> upTree reportPrint (pure . runIdentity) (standbyOp (Text.pack primaryHost))
+        ["primary", standbyCidr] -> runUpOrDie (primaryOp (Text.pack standbyCidr))
+        ["standby", primaryHost] -> runUpOrDie (standbyOp (Text.pack primaryHost))
         ["dot", "primary", standbyCidr] -> printDigraph (pure . runIdentity) (primaryOp (Text.pack standbyCidr))
         ["dot", "standby", primaryHost] -> printDigraph (pure . runIdentity) (standbyOp (Text.pack primaryHost))
         _ -> die "usage: salmon-postgres-replication-fixture ((dot (primary|standby))|primary <standby-cidr>|standby <primary-host>)"
