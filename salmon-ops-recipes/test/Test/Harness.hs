@@ -133,8 +133,9 @@ withContainer img pm act =
         cname <- freshContainerName
         (reporter, _) <- capture
         let reg = Podman.dockerRegistry
+            opts = Podman.noRunOptions{Podman.runPorts = [pm]}
             pullOp = Podman.pullImage reporter podmanTrack reg img
-            runOp = Podman.runContainer reporter podmanTrack reg img cname pm
+            runOp = Podman.runContainer reporter podmanTrack reg img cname opts
         runUp pullOp
         runUp runOp
         pure (Text.unpack (Podman.getContainerName cname), runOp)

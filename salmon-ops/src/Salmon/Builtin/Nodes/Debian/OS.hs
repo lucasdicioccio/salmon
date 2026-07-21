@@ -73,6 +73,12 @@ nft = installWith "netfilter"
 sysctl :: Installer "sysctl"
 sysctl = installWith "procps"
 
+pgbouncer :: Installer "pgbouncer"
+pgbouncer = installWith "pgbouncer"
+
+nginx :: Installer "nginx"
+nginx = installWith "nginx"
+
 debootstrap :: Installer "debootstrap"
 debootstrap = installWith "debootstrap"
 

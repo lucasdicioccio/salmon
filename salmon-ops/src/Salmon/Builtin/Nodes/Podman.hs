@@ -23,7 +23,7 @@ import System.Process.ListLike (CreateProcess (..), proc)
 data Report
     = PullImage !Registry !Image !Binary.Report
     | BuildImage !FilePath !TagName !Binary.Report
-    | RunContainer !Registry !Image !ContainerName !PortMapping !Binary.Report
+    | RunContainer !Registry !Image !ContainerName !RunOptions !Binary.Report
     | RemoveImage !Registry !Image !Binary.Report
     | RemoveBuiltImage !TagName !Binary.Report
     | RemoveContainer !ContainerName !Binary.Report
@@ -59,6 +59,38 @@ data PortMapping
     }
     deriving (Eq, Ord, Show)
 
+-- | A container environment variable, e.g. for a connstring or a secret path.
+type EnvVar = (Text, Text)
+
+data VolumeMode
+    = ReadOnly
+    | ReadWrite
+    deriving (Eq, Ord, Show)
+
+data VolumeMount
+    = VolumeMount
+    { volumeHostPath :: FilePath
+    , volumeGuestPath :: FilePath
+    , volumeMode :: VolumeMode
+    }
+    deriving (Eq, Ord, Show)
+
+{- | Everything besides image/name needed to start a container: published
+ports, env vars (config/secrets), bind-mounted volumes, and an optional
+podman network to join. 'noRunOptions' is the empty starting point.
+-}
+data RunOptions
+    = RunOptions
+    { runPorts :: [PortMapping]
+    , runEnv :: [EnvVar]
+    , runVolumes :: [VolumeMount]
+    , runNetwork :: Maybe Text
+    }
+    deriving (Eq, Ord, Show)
+
+noRunOptions :: RunOptions
+noRunOptions = RunOptions [] [] [] Nothing
+
 -------------------------------------------------------------------------------
 pullImage :: Reporter Report -> Track' (Binary "podman") -> Registry -> Image -> Op
 pullImage r podman reg img =
@@ -90,10 +122,10 @@ buildImage r podman containerfile tagname =
     r'' = contramap (RemoveBuiltImage tagname) r
 
 -- | Runs a detached container under a caller-chosen 'ContainerName' (so
--- 'down' has a stable target to remove), publishing a single port mapping.
-runContainer :: Reporter Report -> Track' (Binary "podman") -> Registry -> Image -> ContainerName -> PortMapping -> Op
-runContainer r podman reg img cname pm =
-    withBinary podman podmanCommand (Run reg img cname pm) $ \run ->
+-- 'down' has a stable target to remove), with the given ports/env/volumes/network.
+runContainer :: Reporter Report -> Track' (Binary "podman") -> Registry -> Image -> ContainerName -> RunOptions -> Op
+runContainer r podman reg img cname opts =
+    withBinary podman podmanCommand (Run reg img cname opts) $ \run ->
         op "podman-run" (deps []) $ \actions ->
             actions
                 { help = "runs a podman container"
@@ -102,13 +134,13 @@ runContainer r podman reg img cname pm =
                 , down = Binary.untrackedExec podmanCommand (Rm cname) "" r''
                 }
   where
-    r' = contramap (RunContainer reg img cname pm) r
+    r' = contramap (RunContainer reg img cname opts) r
     r'' = contramap (RemoveContainer cname) r
 
 -------------------------------------------------------------------------------
 data PodmanCommand
     = Pull !Registry !Image
-    | Run !Registry !Image !ContainerName !PortMapping
+    | Run !Registry !Image !ContainerName !RunOptions
     | Build !FilePath !TagName
     | Rmi !Registry !Image
     | RmiTag !TagName
@@ -134,22 +166,40 @@ podmanCommand = Command $ \cmd -> case cmd of
         )
             { cwd = Just $ takeDirectory fullpath
             }
-    (Run r i cname pm) ->
-        let
-            port = case pm.portProtocol of
-                TCPPort -> "tcp"
-                UDPPort -> "udp"
-         in
-            proc
-                "podman"
-                [ "run"
-                , "-dt"
-                , "--name"
-                , Text.unpack (getContainerName cname)
-                , "-p"
-                , mconcat [Text.unpack pm.portOnHost, ":", Text.unpack pm.portInGuest, "/", port]
-                , (Text.unpack $ getRegistry r) </> (Text.unpack $ getImage i)
+    (Run r i cname opts) ->
+        proc "podman" $
+            mconcat
+                [
+                    [ "run"
+                    , "-dt"
+                    , "--name"
+                    , Text.unpack (getContainerName cname)
+                    ]
+                , concatMap portArgs opts.runPorts
+                , concatMap envArgs opts.runEnv
+                , concatMap volumeArgs opts.runVolumes
+                , maybe [] (\net -> ["--network", Text.unpack net]) opts.runNetwork
+                , [(Text.unpack $ getRegistry r) </> (Text.unpack $ getImage i)]
                 ]
+      where
+        portArgs :: PortMapping -> [String]
+        portArgs pm =
+            let
+                proto = case pm.portProtocol of
+                    TCPPort -> "tcp"
+                    UDPPort -> "udp"
+             in
+                ["-p", mconcat [Text.unpack pm.portOnHost, ":", Text.unpack pm.portInGuest, "/", proto]]
+        envArgs :: EnvVar -> [String]
+        envArgs (k, v) = ["--env", mconcat [Text.unpack k, "=", Text.unpack v]]
+        volumeArgs :: VolumeMount -> [String]
+        volumeArgs vol =
+            let
+                mode = case vol.volumeMode of
+                    ReadOnly -> "ro"
+                    ReadWrite -> "rw"
+             in
+                ["-v", mconcat [vol.volumeHostPath, ":", vol.volumeGuestPath, ":", mode]]
     (Rmi r i) ->
         proc
             "podman"

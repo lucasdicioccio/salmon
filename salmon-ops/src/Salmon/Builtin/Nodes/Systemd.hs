@@ -51,6 +51,28 @@ systemdService r systemctl t cfg =
     configContents :: Op
     configContents = filecontents $ FileContents unitPath (render_config cfg)
 
+{- | Restarts a pre-existing systemd service (e.g. one shipped by a Debian
+package, such as nginx) — unlike 'systemdService', this does not author a
+unit file of its own.
+-}
+restartService :: Reporter Report -> Track' (Binary "systemctl") -> UnitTarget -> Op
+restartService r systemctl target =
+    withCommand (Up target) $ \restart ->
+        op "systemd-restart-service" nodeps $ \actions ->
+            actions
+                { help = "restarts " <> target
+                , ref = mkRef "systemd-restart" target
+                , up = restart
+                }
+  where
+    r' cmd = contramap (CallSystemCtl cmd) r
+    withCommand cmd f =
+        let
+            g :: (Reporter Binary.Report -> IO ()) -> Op
+            g callbin = f (callbin (r' cmd))
+         in
+            withBinary systemctl callSystemctl cmd g
+
 data SystemCtlCall
     = DaemonReload
     | Enable UnitTarget

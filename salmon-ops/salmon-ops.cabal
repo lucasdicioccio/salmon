@@ -47,7 +47,9 @@ library
                    , Salmon.Builtin.Nodes.User
                    , Salmon.Builtin.Nodes.Keys
                    , Salmon.Builtin.Nodes.Netfilter
+                   , Salmon.Builtin.Nodes.Nginx
                    , Salmon.Builtin.Nodes.Npm
+                   , Salmon.Builtin.Nodes.PgBouncer
                    , Salmon.Builtin.Nodes.Postgres
                    , Salmon.Builtin.Nodes.Podman
                    , Salmon.Builtin.Nodes.Rsync
