@@ -31,7 +31,6 @@ library
                    , Salmon.Builtin.CommandLine
                    , Salmon.Builtin.Helpers
                    , Salmon.Builtin.Migrations
-                   , Salmon.Builtin.Nodes.Acme
                    , Salmon.Builtin.Nodes.Bash
                    , Salmon.Builtin.Nodes.Binary
                    , Salmon.Builtin.Nodes.Cabal
@@ -68,7 +67,6 @@ library
                    , Salmon.Op.Ref
                    , Salmon.Reporter
     build-depends:    base >=4.16.3.0
-                    , acme-not-a-joke
                     , aeson
                     , bytestring
                     , containers

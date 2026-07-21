@@ -27,16 +27,27 @@ library
     exposed-modules: SreBox.GeneratedSite
                    , SreBox.KitchenSinkBlog
                    , SreBox.KitchenSinkMultiSites
+                   , SreBox.CertSigning
+                   , Salmon.Builtin.Nodes.Acme
     build-depends:    base >=4.16.3.0
+                    , acme-not-a-joke
                     , aeson
                     , bytestring
+                    , contravariant
+                    , crypton-connection
+                    , crypton-x509
+                    , crypton-x509-store
+                    , crypton-x509-validation
                     , filepath
+                    , http-client
+                    , http-client-tls
                     , kitchen-sink
                     , process-extras
                     , salmon-core
                     , salmon-ops
                     , salmon-ops-recipes
                     , text
+                    , tls
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions: KindSignatures

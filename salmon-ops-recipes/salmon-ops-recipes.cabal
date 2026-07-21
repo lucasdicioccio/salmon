@@ -24,7 +24,6 @@ extra-source-files: CHANGELOG.md
 library
     exposed-modules: SreBox.PostgresMigrations
                    , SreBox.CabalBuilding
-                   , SreBox.CertSigning
                    , SreBox.Environment
                    , SreBox.Initialize
                    , SreBox.DNSRegistration
@@ -34,7 +33,6 @@ library
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
     build-depends:    base >=4.16.3.0
-                    , acme-not-a-joke
                     , aeson
                     , base16-bytestring
                     , base64-bytestring
