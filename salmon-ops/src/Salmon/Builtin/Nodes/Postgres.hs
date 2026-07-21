@@ -35,6 +35,11 @@ data Report
     | PGScript !FilePath !Binary.Report
     | PGAdminScript !FilePath !Binary.Report
     | PGChmod !FilePath !Binary.Report
+    | PGCreateReplicationUser !User !Binary.Report
+    | PGClusterOp !PgCtl !Binary.Report
+    | PGAlterSystem !Text !Text !Binary.Report
+    | PGReloadConf !Binary.Report
+    | PGReplicationSlot !Text !Binary.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -76,13 +81,33 @@ pgLocalCluster r pg pgctl server =
   where
     r' = contramap PGStartLocalCluster r
 
+type ClusterName = Text
+
+mainCluster :: ClusterName
+mainCluster = "main"
+
 data PgCtl
     = Start Port
+    | CreateCluster !ClusterName !Port
+    | StartCluster !ClusterName
+    | StopCluster !ClusterName
+    | RestartCluster !ClusterName
+    | PromoteCluster !ClusterName
+    | EnsureHbaLine !ClusterName !Text
+    | CloneFromPrimary !StandbySetup
+    deriving (Show)
 
 pgctlRun :: Command "pg_ctlcluster" PgCtl
 pgctlRun = Command go
   where
     go (Start _port) = proc "bash" ["-c", detectVersionAndStartMainCluster]
+    go (CreateCluster name port) = proc "bash" ["-c", createClusterScript name port]
+    go (StartCluster name) = proc "bash" ["-c", clusterCtlScript name "start"]
+    go (StopCluster name) = proc "bash" ["-c", clusterCtlScript name "stop"]
+    go (RestartCluster name) = proc "bash" ["-c", clusterCtlScript name "restart"]
+    go (PromoteCluster name) = proc "bash" ["-c", clusterCtlScript name "promote"]
+    go (EnsureHbaLine name line) = proc "bash" ["-c", ensureHbaLineScript name line]
+    go (CloneFromPrimary setup) = proc "bash" ["-c", cloneFromPrimaryScript setup]
 
 {- | @pg_lsclusters@'s header-less output is one line per cluster:
 @Ver Cluster Port Status Owner DataDirectory LogFile@; sort numerically and
@@ -92,6 +117,76 @@ just works, and a box with several installed versions picks the newest.
 detectVersionAndStartMainCluster :: String
 detectVersionAndStartMainCluster =
     "set -e; version=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1); pg_ctlcluster \"$version\" main start"
+
+-- | Shared preamble: detects the (single) installed major version, same way as 'detectVersionAndStartMainCluster'.
+detectVersion :: String
+detectVersion = "version=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1)"
+
+-- | Idempotent: only creates the named cluster if @pg_lsclusters@ doesn't already list it.
+createClusterScript :: ClusterName -> Port -> String
+createClusterScript name port =
+    unlines
+        [ "set -e"
+        , detectVersion
+        , "pg_lsclusters --no-header | awk '{print $2}' | grep -qx " <> shellQuote name <> " || pg_createcluster \"$version\" " <> Text.unpack name <> " -p " <> show port <> " -- --auth-local=peer --auth-host=md5"
+        ]
+
+clusterCtlScript :: ClusterName -> String -> String
+clusterCtlScript name action =
+    unlines
+        [ "set -e"
+        , detectVersion
+        , "pg_ctlcluster \"$version\" " <> Text.unpack name <> " " <> action
+        ]
+
+-- | Appends a @pg_hba.conf@ line for the named cluster (skipping if already present) and reloads it.
+ensureHbaLineScript :: ClusterName -> Text -> String
+ensureHbaLineScript name line =
+    unlines
+        [ "set -e"
+        , detectVersion
+        , "hba=/etc/postgresql/$version/" <> Text.unpack name <> "/pg_hba.conf"
+        , "grep -qxF " <> shellQuote line <> " \"$hba\" || echo " <> shellQuote line <> " >> \"$hba\""
+        , "pg_ctlcluster \"$version\" " <> Text.unpack name <> " reload"
+        ]
+
+{- | Clones the named cluster's data directory from a running primary via
+@pg_basebackup -R@ (which writes both @standby.signal@ and
+@primary_conninfo@, so the cluster comes up in streaming-standby mode as
+soon as it's started) and starts it. Guarded by @standby.signal@'s presence
+so a second 'up' is a no-op instead of re-cloning (and destroying) an
+already-running standby.
+-}
+cloneFromPrimaryScript :: StandbySetup -> String
+cloneFromPrimaryScript setup =
+    unlines
+        [ "set -e"
+        , detectVersion
+        , "datadir=/var/lib/postgresql/$version/" <> Text.unpack setup.standby_cluster
+        , "if [ ! -e \"$datadir/standby.signal\" ]; then"
+        , "  pg_ctlcluster \"$version\" " <> Text.unpack setup.standby_cluster <> " stop || true"
+        , "  rm -rf \"$datadir\""
+        , "  PGPASSWORD="
+            <> shellQuote setup.standby_repl_password.revealPassword
+            <> " pg_basebackup -h "
+            <> Text.unpack setup.standby_primary_host
+            <> " -p "
+            <> show setup.standby_primary_port
+            <> " -U "
+            <> Text.unpack setup.standby_repl_user.userRole
+            <> " -D \"$datadir\" -Fp -Xs -R"
+            <> slotArg
+        , "  chown -R postgres:postgres \"$datadir\""
+        , "  pg_ctlcluster \"$version\" " <> Text.unpack setup.standby_cluster <> " start"
+        , "fi"
+        ]
+  where
+    -- the slot (if any) is expected to already exist on the primary, created
+    -- independently via 'replicationSlot'/'primaryReplicationSetup'
+    slotArg = maybe "" (\slot -> " -S " <> Text.unpack slot) setup.standby_slot
+
+shellQuote :: Text -> String
+shellQuote t = "'" <> Text.unpack (Text.replace "'" "'\\''" t) <> "'"
 
 type DatabaseName = Text
 
@@ -276,12 +371,16 @@ expected to run as user "postgres" in Debian to handle the nopassword initial st
 data PsqlAdmin
     = CreateDB DatabaseName
     | CreateUser RoleName Password
+    | CreateReplicationUser RoleName Password
     | CreateGroup RoleName
     | Grant AccessRight
     | GroupMembership RoleName RoleName
     | AdminScript DatabaseName FilePath
     | DatabaseOwnership DatabaseName RoleName
     | ChmodAdminScript FilePath
+    | AlterSystemSet Text Text
+    | ReloadConf
+    | EnsurePhysicalReplicationSlot Text
 
 {- | todo: workaround chmod and sudo hack with some calling preference
 - we'll need to request more than a Track' (Binary "psql") but some more complex logic
@@ -310,6 +409,49 @@ psqlAdminRun_Sudo = Command go
                 , "LOGIN"
                 , "PASSWORD"
                 , quotePass pass
+                ]
+            ]
+    go (CreateReplicationUser name pass) =
+        proc
+            "sudo"
+            [ "-u"
+            , "postgres"
+            , "psql"
+            , "-c"
+            , mconcat
+                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
+                , Text.unpack name
+                , "') THEN CREATE ROLE "
+                , Text.unpack name
+                , " WITH REPLICATION LOGIN PASSWORD "
+                , quotePass pass
+                , "; END IF; END $$;"
+                ]
+            ]
+    go (AlterSystemSet param val) =
+        proc
+            "sudo"
+            [ "-u"
+            , "postgres"
+            , "psql"
+            , "-c"
+            , unwords ["ALTER SYSTEM SET", Text.unpack param, "=", "'" <> Text.unpack val <> "'"]
+            ]
+    go ReloadConf =
+        proc "sudo" ["-u", "postgres", "psql", "-c", "SELECT pg_reload_conf();"]
+    go (EnsurePhysicalReplicationSlot slot) =
+        proc
+            "sudo"
+            [ "-u"
+            , "postgres"
+            , "psql"
+            , "-c"
+            , mconcat
+                [ "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '"
+                , Text.unpack slot
+                , "') THEN PERFORM pg_create_physical_replication_slot('"
+                , Text.unpack slot
+                , "'); END IF; END $$;"
                 ]
             ]
     go (CreateGroup name) =
@@ -463,3 +605,181 @@ psqlUserRun c = Command go
             , "-f"
             , path
             ]
+
+-------------------------------------------------------------------------------
+-- Cluster lifecycle (named, non-"main" clusters)
+
+-- | @pg_createcluster@s a new, empty cluster under Debian's cluster management
+-- (idempotent: a no-op if a cluster by that name already exists).
+createCluster :: Reporter Report -> Track' (Binary "postgres") -> Track' (Binary "pg_ctlcluster") -> ClusterName -> Port -> Op
+createCluster r pg pgctl name port =
+    withBinary pgctl pgctlRun cmd $ \run ->
+        op "pg-create-cluster" (deps [justInstall pg]) $ \actions ->
+            actions
+                { ref = mkRef "pg-create-cluster" name
+                , help = Text.unwords ["creates pg cluster", name, "on port", Text.pack (show port)]
+                , up = run r'
+                }
+  where
+    cmd = CreateCluster name port
+    r' = contramap (PGClusterOp cmd) r
+
+clusterCtl :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> PgCtl -> Text -> Op
+clusterCtl r pgctl name cmd label =
+    withBinary pgctl pgctlRun cmd $ \run ->
+        op "pg-cluster-ctl" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-cluster-ctl" (name, label)
+                , help = Text.unwords [label, "pg cluster", name]
+                , up = run r'
+                }
+  where
+    r' = contramap (PGClusterOp cmd) r
+
+startCluster, stopCluster, restartCluster, promoteCluster :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> Op
+startCluster r pgctl name = clusterCtl r pgctl name (StartCluster name) "start"
+stopCluster r pgctl name = clusterCtl r pgctl name (StopCluster name) "stop"
+restartCluster r pgctl name = clusterCtl r pgctl name (RestartCluster name) "restart"
+promoteCluster r pgctl name = clusterCtl r pgctl name (PromoteCluster name) "promote"
+
+-------------------------------------------------------------------------------
+-- Physical (WAL streaming) replication
+
+{- | Settings a primary needs to accept streaming replicas. Debian's default
+@postgresql.conf@ already ships @wal_level = replica@ on modern versions,
+but we set it explicitly since a misconfigured value there is a silent
+failure mode (replication just won't start).
+-}
+data ReplicationTuning
+    = ReplicationTuning
+    { repl_max_wal_senders :: Int
+    , repl_max_replication_slots :: Int
+    }
+    deriving (Show)
+
+defaultReplicationTuning :: ReplicationTuning
+defaultReplicationTuning = ReplicationTuning 10 10
+
+-- | A host or CIDR allowed to authenticate as the replication role, e.g. the standby's address.
+type AllowedCidr = Text
+
+type ReplicationSlotName = Text
+
+-- | Everything needed to clone an empty (or freshly created) cluster off a running primary and start it as a streaming standby.
+data StandbySetup
+    = StandbySetup
+    { standby_cluster :: ClusterName
+    , standby_primary_host :: Host
+    , standby_primary_port :: Port
+    , standby_repl_user :: User
+    , standby_repl_password :: Password
+    , standby_slot :: Maybe ReplicationSlotName
+    }
+    deriving (Show)
+
+-- | A login role carrying the @REPLICATION@ attribute, for a standby's @pg_basebackup@\/streaming connection.
+replicationUser :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
+replicationUser r server psql u pwd =
+    withBinary psql psqlAdminRun_Sudo (CreateReplicationUser u.userRole pwd) $ \up ->
+        op "pg-replication-user" (deps [run server localServer]) $ \actions ->
+            actions
+                { ref = mkRef "pg-replication-user" u.userRole
+                , help = Text.unwords ["create replication user", u.userRole]
+                , up = up r'
+                }
+  where
+    r' = contramap (PGCreateReplicationUser u) r
+
+alterSystemSet :: Reporter Report -> Track' (Binary "psql") -> Text -> Text -> Op
+alterSystemSet r psql param val =
+    withBinary psql psqlAdminRun_Sudo (AlterSystemSet param val) $ \up ->
+        op "pg-alter-system" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-alter-system" param
+                , help = Text.unwords ["ALTER SYSTEM SET", param, "=", val]
+                , up = up r'
+                }
+  where
+    r' = contramap (PGAlterSystem param val) r
+
+reloadConf :: Reporter Report -> Track' (Binary "psql") -> Op
+reloadConf r psql =
+    withBinary psql psqlAdminRun_Sudo ReloadConf $ \up ->
+        op "pg-reload-conf" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-reload-conf" ("reload" :: Text)
+                , up = up r'
+                }
+  where
+    r' = contramap PGReloadConf r
+
+-- | Ensures a physical replication slot exists on the primary (idempotent: skips if already present).
+replicationSlot :: Reporter Report -> Track' (Binary "psql") -> ReplicationSlotName -> Op
+replicationSlot r psql slot =
+    withBinary psql psqlAdminRun_Sudo (EnsurePhysicalReplicationSlot slot) $ \up ->
+        op "pg-replication-slot" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-replication-slot" slot
+                , help = Text.unwords ["ensure replication slot", slot]
+                , up = up r'
+                }
+  where
+    r' = contramap (PGReplicationSlot slot) r
+
+allowReplicationFrom :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> RoleName -> AllowedCidr -> Op
+allowReplicationFrom r pgctl name replRole cidr =
+    withBinary pgctl pgctlRun cmd $ \run ->
+        op "pg-hba-replication" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-hba-replication" (name, replRole, cidr)
+                , help = Text.unwords ["allow replication from", cidr, "as", replRole, "on", name]
+                , up = run r'
+                }
+  where
+    line = Text.unwords ["host", "replication", replRole, cidr, "md5"]
+    cmd = EnsureHbaLine name line
+    r' = contramap (PGClusterOp cmd) r
+
+{- | Turns an already-running, named cluster into a replication-capable
+primary: WAL/replication-slot tuning (restart-required, so this restarts the
+cluster), a @pg_hba.conf@ entry authorizing the standby, and the physical
+replication slot the standby will stream from. Does /not/ create the
+replication role itself — do that once via 'replicationUser' (it's shared
+infrastructure, not per-standby).
+-}
+primaryReplicationSetup ::
+    Reporter Report ->
+    Track' (Binary "psql") ->
+    Track' (Binary "pg_ctlcluster") ->
+    ClusterName ->
+    ReplicationTuning ->
+    RoleName ->
+    AllowedCidr ->
+    ReplicationSlotName ->
+    Op
+primaryReplicationSetup r psql pgctl name tuning replRole cidr slot =
+    op "pg-primary-replication-setup" (deps [replicationSlot r psql slot, allowReplicationFrom r pgctl name replRole cidr, restartOp]) id
+  where
+    restartOp = restartCluster r pgctl name `inject` applySettings
+    applySettings = op "pg-primary-wal-settings" (deps $ fmap (uncurry (alterSystemSet r psql)) settings) id
+    settings =
+        [ ("wal_level", "replica")
+        , ("max_wal_senders", tshow tuning.repl_max_wal_senders)
+        , ("max_replication_slots", tshow tuning.repl_max_replication_slots)
+        , ("listen_addresses", "*")
+        ]
+    tshow = Text.pack . show
+
+-- | Clones 'StandbySetup's cluster off its primary via @pg_basebackup -R@ and starts it as a streaming standby.
+standbyReplicationSetup :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> StandbySetup -> Op
+standbyReplicationSetup r pgctl setup =
+    withBinary pgctl pgctlRun cmd $ \run ->
+        op "pg-standby-setup" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-standby-setup" setup.standby_cluster
+                , help = Text.unwords ["clone", setup.standby_cluster, "from", setup.standby_primary_host, "as a streaming standby"]
+                , up = run r'
+                }
+  where
+    cmd = CloneFromPrimary setup
+    r' = contramap (PGClusterOp cmd) r
