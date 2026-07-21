@@ -87,6 +87,7 @@ primaryOp standbyCidr =
         reportPrint
         Debian.psql
         Debian.pg_ctlcluster
+        primaryPort
         Postgres.mainCluster
         Postgres.defaultReplicationTuning
         replRole
@@ -95,7 +96,7 @@ primaryOp standbyCidr =
         `inject` replUser
         `inject` serverUp
   where
-    replUser = Postgres.replicationUser reportPrint serverTrack Debian.psql (Postgres.User replRole) replPassword
+    replUser = Postgres.replicationUser reportPrint serverTrack Debian.psql primaryPort (Postgres.User replRole) replPassword
 
 -- | Standby role: installs postgres (for pg_basebackup) and clones "main" off the given primary host.
 standbyOp :: Text.Text -> Op

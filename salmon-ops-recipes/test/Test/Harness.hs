@@ -33,7 +33,7 @@ module Test.Harness (
 ) where
 
 import Control.Exception (bracket, bracket_)
-import Control.Monad (unless)
+import Control.Monad (unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
 import qualified Data.Text as Text
@@ -85,8 +85,10 @@ runUp o = do
     (r, _) <- capture
     upTree r nat o
 
-runDown :: Op -> IO ()
-runDown = downTree nat
+runDown :: Op -> IO Bool
+runDown o = do
+    (r, _) <- capture
+    downTree r nat o
 
 -- | A fresh, auto-cleaned-up temp directory for filesystem-touching nodes.
 withTempDir :: (FilePath -> IO a) -> IO a
@@ -132,7 +134,7 @@ withContainer img pm act =
     bracket bringUp cleanup (act . fst)
   where
     cleanup :: (String, Op) -> IO ()
-    cleanup (_, runOp) = runDown runOp
+    cleanup (_, runOp) = void (runDown runOp)
 
     bringUp :: IO (String, Op)
     bringUp = do

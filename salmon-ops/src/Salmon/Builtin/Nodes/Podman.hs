@@ -1,5 +1,6 @@
 module Salmon.Builtin.Nodes.Podman where
 
+import Salmon.Actions.UpDown (Requirement (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -15,6 +16,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+import GHC.IO.Exception (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
@@ -24,9 +26,11 @@ data Report
     = PullImage !Registry !Image !Binary.Report
     | BuildImage !FilePath !TagName !Binary.Report
     | RunContainer !Registry !Image !ContainerName !RunOptions !Binary.Report
+    | CreateNetwork !NetworkName !Binary.Report
     | RemoveImage !Registry !Image !Binary.Report
     | RemoveBuiltImage !TagName !Binary.Report
     | RemoveContainer !ContainerName !Binary.Report
+    | RemoveNetwork !NetworkName !Binary.Report
     -- todo: prune volumes, import for bootstrap
     deriving (Show)
 
@@ -42,6 +46,14 @@ type TagName = Text
 -- | A container needs a stable, caller-chosen identity: podman assigns a
 -- random name otherwise, which would leave 'down' with nothing to target.
 newtype ContainerName = ContainerName {getContainerName :: Text}
+    deriving (Eq, Ord, Show)
+
+{- | A user-defined podman network — needed for containers to resolve each
+other by name (podman's implicit default network doesn't reliably do this,
+at least in rootless mode; a network created via @podman network create@
+does, via embedded DNS).
+-}
+newtype NetworkName = NetworkName {getNetworkName :: Text}
     deriving (Eq, Ord, Show)
 
 type PortSpec = Text
@@ -137,14 +149,41 @@ runContainer r podman reg img cname opts =
     r' = contramap (RunContainer reg img cname opts) r
     r'' = contramap (RemoveContainer cname) r
 
+-- | Creates a user-defined podman network under a caller-chosen 'NetworkName'
+-- (idempotent: skipped via 'prelim' if @podman network exists@ already says yes,
+-- since @podman network create@ itself errors on a duplicate name).
+network :: Reporter Report -> Track' (Binary "podman") -> NetworkName -> Op
+network r podman name =
+    withBinary podman podmanCommand (CreateNetworkCmd name) $ \create ->
+        op "podman-network" (deps []) $ \actions ->
+            actions
+                { help = "creates a podman network"
+                , ref = mkRef "podman-network" (getNetworkName name)
+                , prelim = skipIfNetworkExists name
+                , up = create r'
+                , down = Binary.untrackedExec podmanCommand (RemoveNetworkCmd name) "" r''
+                }
+  where
+    r' = contramap (CreateNetwork name) r
+    r'' = contramap (RemoveNetwork name) r
+
+skipIfNetworkExists :: NetworkName -> IO Requirement
+skipIfNetworkExists name = do
+    (code, _, _) <- readCreateProcessWithExitCode (proc "podman" ["network", "exists", Text.unpack (getNetworkName name)]) ""
+    pure $ case code of
+        ExitSuccess -> Skippable
+        _ -> Required
+
 -------------------------------------------------------------------------------
 data PodmanCommand
     = Pull !Registry !Image
     | Run !Registry !Image !ContainerName !RunOptions
     | Build !FilePath !TagName
+    | CreateNetworkCmd !NetworkName
     | Rmi !Registry !Image
     | RmiTag !TagName
     | Rm !ContainerName
+    | RemoveNetworkCmd !NetworkName
 
 podmanCommand :: Command "podman" PodmanCommand
 podmanCommand = Command $ \cmd -> case cmd of
@@ -206,10 +245,14 @@ podmanCommand = Command $ \cmd -> case cmd of
             [ "rmi"
             , (Text.unpack $ getRegistry r) </> (Text.unpack $ getImage i)
             ]
+    (CreateNetworkCmd name) ->
+        proc "podman" ["network", "create", Text.unpack (getNetworkName name)]
     (RmiTag tagname) ->
         proc "podman" ["rmi", Text.unpack tagname]
     (Rm cname) ->
         proc "podman" ["rm", "-f", Text.unpack (getContainerName cname)]
+    (RemoveNetworkCmd name) ->
+        proc "podman" ["network", "rm", Text.unpack (getNetworkName name)]
 
 -------------------------------------------------------------------------------
 -- some builtins

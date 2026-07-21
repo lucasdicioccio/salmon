@@ -114,7 +114,7 @@ migrate r psql style (m :< x) =
                 MigrateUserScript mksetup connstring ->
                     userScript r' psql mksetup connstring (PreExisting m.path)
                 MigrateAdminScript mksetup dbname ->
-                    adminScript r' psql mksetup dbname (PreExisting m.path)
+                    adminScript r' psql localServer.serverPort mksetup dbname (PreExisting m.path)
 
         pred :: Op
         pred = evalPred "" x

@@ -105,13 +105,26 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   throws, that's caught and reported as `Failed`, and everything that (transitively) depends on it
   is reported `Blocked` instead of being evaluated — see "Conventions for node authors" below for
   what this means for how `up` needs to be written. `upTree` returns `IO Bool` (`False` iff
-  anything failed or was blocked). `downTree` is a much simpler, unconditional top-level teardown
-  pass with none of the above (no dedup, no `Requirement`, no failure handling).
+  anything failed or was blocked). `downTree` has the same dedup-by-`Ref`/catch-and-report/`Bool`
+  return shape, just walking top-to-bottom (the node itself before whatever it depended on — the
+  reverse of `upTree`'s order, since removing a dependency out from under a still-standing
+  dependent generally isn't safe) and with the failure-blocking direction flipped to match: a
+  failed `down` blocks descending into *that node's own predecessors*, not its dependents. Neither
+  function has a `Requirement`/`prelim`-equivalent for teardown (nothing like "skip if already
+  gone" exists for `down` yet).
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
   kept possibly-pure (non-IO) so the "turn a human-facing seed into a directive" step can be
   hermetically separated from the IO-heavy "turn a directive into ops and run them" step.
+
+`Postgres.hs`'s `psql`-based admin commands (`database`, `user`, `group`, `grant`, `adminScript`,
+`replicationUser`, `alterSystemSet`, `replicationSlot`, etc.) all take an explicit `Port` and pass
+it as `-p` to every `sudo -u postgres psql ...` invocation — this is what makes it possible to
+target a specific named, non-`"main"` cluster (see `createCluster`/`ClusterName` above) rather
+than always silently hitting whichever cluster happens to be on the default port. Existing callers
+that only ever manage `"main"` pass `Postgres.localServer.serverPort` (5432); a caller managing
+multiple clusters on one box passes each cluster's own port.
 
 ## Conventions for node authors
 

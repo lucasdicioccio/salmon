@@ -66,18 +66,20 @@ setupPG r setup =
 
     cluster = Track $ Postgres.pgLocalCluster (contramap InitPostgres r) Debian.postgres Debian.pg_ctlcluster
 
-    db = Postgres.database (contramap InitPostgres r) cluster Debian.psql setup.init_setup_database
+    port = Postgres.localServer.serverPort
+
+    db = Postgres.database (contramap InitPostgres r) cluster Debian.psql port setup.init_setup_database
 
     groups = op "pg-groups" (deps $ fmap group setup.init_setup_groups) id
 
     group (g, _) =
-        Postgres.group (contramap InitPostgres r) cluster Debian.psql g
+        Postgres.group (contramap InitPostgres r) cluster Debian.psql port g
 
     users = op "pg-users" (deps $ fmap user setup.init_setup_users) id
 
     -- roundabout ways to generate users and owner user
     baseUser u pass =
-        Postgres.userPassFile (contramap InitPostgres r) cluster Debian.psql pass u
+        Postgres.userPassFile (contramap InitPostgres r) cluster Debian.psql port pass u
     user (u, pass, _, _) = baseUser u pass
     owner =
         let (u, pass) = setup.init_setup_owner
@@ -96,6 +98,7 @@ setupPG r setup =
                 (contramap InitPostgres r)
                 cluster
                 Debian.psql
+                port
                 ignoreTrack
                 setup.init_setup_database
                 trackOwnerRoleForUser
@@ -107,6 +110,7 @@ setupPG r setup =
             Postgres.grant
                 (contramap InitPostgres r)
                 Debian.psql
+                port
                 trackuserFromAclsByCreatingAllUsers
                 (Postgres.AccessRight setup.init_setup_database (Postgres.UserRole u) rights)
 
@@ -116,6 +120,7 @@ setupPG r setup =
             Postgres.grant
                 (contramap InitPostgres r)
                 Debian.psql
+                port
                 trackgroupsFromAclsByCreatingAllGroups
                 (Postgres.AccessRight setup.init_setup_database (Postgres.GroupRole g) rights)
 
@@ -126,6 +131,7 @@ setupPG r setup =
                 (contramap InitPostgres r)
                 cluster
                 Debian.psql
+                port
                 g
                 trackuserFromMembershipByCreatingAllUsers
                 (Postgres.UserRole u)
@@ -166,6 +172,7 @@ setupNakedPG r dbname =
         (contramap InitPostgres r)
         cluster
         Debian.psql
+        Postgres.localServer.serverPort
         (Postgres.Database dbname)
   where
     cluster = Track $ Postgres.pgLocalCluster (contramap InitPostgres r) Debian.postgres Debian.pg_ctlcluster

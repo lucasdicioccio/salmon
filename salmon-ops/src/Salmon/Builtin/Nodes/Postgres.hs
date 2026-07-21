@@ -193,9 +193,9 @@ type DatabaseName = Text
 newtype Database = Database {getDatabase :: DatabaseName}
     deriving (Show, ToJSON, FromJSON)
 
-database :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Database -> Op
-database r server psql db =
-    withBinary psql psqlAdminRun_Sudo (CreateDB db.getDatabase) $ \up ->
+database :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> Database -> Op
+database r server psql port db =
+    withBinary psql (psqlAdminRun_Sudo port) (CreateDB db.getDatabase) $ \up ->
         op "pg-database" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-db" db.getDatabase
@@ -218,9 +218,9 @@ instance Show Password where
 newtype User = User {userRole :: RoleName}
     deriving (Show, ToJSON, FromJSON)
 
-user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
-user r server psql user pwd =
-    withBinary psql psqlAdminRun_Sudo (CreateUser user.userRole pwd) $ \up ->
+user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
+user r server psql port user pwd =
+    withBinary psql (psqlAdminRun_Sudo port) (CreateUser user.userRole pwd) $ \up ->
         op "pg-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-user" user.userRole
@@ -230,8 +230,8 @@ user r server psql user pwd =
   where
     r' = contramap (PGCreateUser user) r
 
-userPassFile :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> File "passfile" -> User -> Op
-userPassFile r server psql genpass user =
+userPassFile :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> File "passfile" -> User -> Op
+userPassFile r server psql port genpass user =
     withFile genpass $ \passfile ->
         op "pg-user" (deps [runningServer, justInstall psql]) $ \actions ->
             actions
@@ -243,16 +243,16 @@ userPassFile r server psql genpass user =
   where
     r' = contramap (PGSetUserPass user) r
     runningServer = run server localServer
-    up pass = untrackedExec psqlAdminRun_Sudo (CreateUser user.userRole pass) "" r'
+    up pass = untrackedExec (psqlAdminRun_Sudo port) (CreateUser user.userRole pass) "" r'
 
 data Group = Group {groupRole :: RoleName}
     deriving (Show, Generic)
 instance ToJSON Group
 instance FromJSON Group
 
-group :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Op
-group r server psql group =
-    withBinary psql psqlAdminRun_Sudo (CreateGroup group.groupRole) $ \up ->
+group :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> Group -> Op
+group r server psql port group =
+    withBinary psql (psqlAdminRun_Sudo port) (CreateGroup group.groupRole) $ \up ->
         op "pg-group" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-group" group.groupRole
@@ -290,9 +290,9 @@ data AccessRight
 instance ToJSON AccessRight
 instance FromJSON AccessRight
 
-grant :: Reporter Report -> Track' (Binary "psql") -> Track' Role -> AccessRight -> Op
-grant r psql role acl =
-    withBinary psql psqlAdminRun_Sudo (Grant acl) $ \up ->
+grant :: Reporter Report -> Track' (Binary "psql") -> Port -> Track' Role -> AccessRight -> Op
+grant r psql port role acl =
+    withBinary psql (psqlAdminRun_Sudo port) (Grant acl) $ \up ->
         op "pg-grant" (deps [dbrole]) $ \actions ->
             actions
                 { ref = mkRef "pg-grant" (roleName acl.access_role)
@@ -307,13 +307,14 @@ databaseOnwership ::
     Reporter Report ->
     Track' Server ->
     Track' (Binary "psql") ->
+    Port ->
     Track' Database ->
     Database ->
     Track' Role ->
     Role ->
     Op
-databaseOnwership r server psql mkdb db role u =
-    withBinary psql psqlAdminRun_Sudo (DatabaseOwnership db.getDatabase (roleName u)) $ \up ->
+databaseOnwership r server psql port mkdb db role u =
+    withBinary psql (psqlAdminRun_Sudo port) (DatabaseOwnership db.getDatabase (roleName u)) $ \up ->
         op "pg-member" (deps [run mkdb db, dbuser]) $ \actions ->
             actions
                 { ref = mkRef "pg-ownership" (db.getDatabase, roleName u)
@@ -324,9 +325,9 @@ databaseOnwership r server psql mkdb db role u =
     r' = contramap (PGDatabaseOwnership db u) r
     dbuser = run role u
 
-groupMember :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Group -> Track' Role -> Role -> Op
-groupMember r server psql g role u =
-    withBinary psql psqlAdminRun_Sudo (GroupMembership g.groupRole (roleName u)) $ \up ->
+groupMember :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> Group -> Track' Role -> Role -> Op
+groupMember r server psql port g role u =
+    withBinary psql (psqlAdminRun_Sudo port) (GroupMembership g.groupRole (roleName u)) $ \up ->
         op "pg-member" (deps [dbgroup, dbuser]) $ \actions ->
             actions
                 { ref = mkRef "pg-member" (g.groupRole, roleName u)
@@ -335,21 +336,22 @@ groupMember r server psql g role u =
                 }
   where
     r' = contramap (PGGroupMembership g u) r
-    dbgroup = group r server psql g
+    dbgroup = group r server psql port g
     dbuser = run role u
 
 adminScript ::
     Reporter Report ->
     Track' (Binary "psql") ->
+    Port ->
     Track' DatabaseName ->
     DatabaseName ->
     File "psql-script" ->
     Op
-adminScript r psql mkdb dbname file =
+adminScript r psql port mkdb dbname file =
     withFile file $ \path ->
         let accessiblePath = adminDir </> path
-         in withBinary psql psqlAdminRun_Sudo (ChmodAdminScript accessiblePath) $ \chmod ->
-                withBinary psql psqlAdminRun_Sudo (AdminScript dbname accessiblePath) $ \up ->
+         in withBinary psql (psqlAdminRun_Sudo port) (ChmodAdminScript accessiblePath) $ \chmod ->
+                withBinary psql (psqlAdminRun_Sudo port) (AdminScript dbname accessiblePath) $ \up ->
                     op "pg-admin-script" (deps [run mkdb dbname, FS.fileCopy path accessiblePath `inject` enclosingdir]) $ \actions ->
                         actions
                             { ref = mkRef "pg-admin-script" path
@@ -382,17 +384,27 @@ data PsqlAdmin
     | ReloadConf
     | EnsurePhysicalReplicationSlot Text
 
-{- | todo: workaround chmod and sudo hack with some calling preference
+{- | Every case connects to the locally-running cluster on 'port' explicitly
+(via @-p@) rather than relying on @psql@'s default (which only ever reaches
+whichever cluster happens to be on the default port, i.e. "main" — see
+'Postgres.CreateDB' below and the "Conventions for node authors" note in
+CLAUDE.md for why this matters once more than one named cluster exists on a
+box).
+
+todo: workaround chmod and sudo hack with some calling preference
 - we'll need to request more than a Track' (Binary "psql") but some more complex logic
 with sudo, the user, and the right binary
 -}
-psqlAdminRun_Sudo :: Command "psql" PsqlAdmin
-psqlAdminRun_Sudo = Command go
+psqlAdminRun_Sudo :: Port -> Command "psql" PsqlAdmin
+psqlAdminRun_Sudo port = Command go
   where
+    portArgs :: [String]
+    portArgs = ["-p", show port]
+
     go (ChmodAdminScript path) =
         proc "chmod" ["a+r", path]
     go (AdminScript name path) =
-        proc "sudo" ["-u", "postgres", "psql", "-f", path, Text.unpack name]
+        proc "sudo" (["-u", "postgres", "psql"] <> portArgs <> ["-f", path, Text.unpack name])
     -- CREATE DATABASE can't run inside a transaction/DO block (a hard Postgres
     -- restriction), so unlike the role-creation commands below, idempotency
     -- has to be a shell-level check-then-create rather than a SQL one.
@@ -404,9 +416,13 @@ psqlAdminRun_Sudo = Command go
             , "bash"
             , "-c"
             , mconcat
-                [ "psql -tAc \"SELECT 1 FROM pg_database WHERE datname = '"
+                [ "psql -p "
+                , show port
+                , " -tAc \"SELECT 1 FROM pg_database WHERE datname = '"
                 , Text.unpack name
-                , "'\" | grep -q 1 || psql -c 'CREATE DATABASE "
+                , "'\" | grep -q 1 || psql -p "
+                , show port
+                , " -c 'CREATE DATABASE "
                 , Text.unpack name
                 , "'"
                 ]
@@ -416,122 +432,120 @@ psqlAdminRun_Sudo = Command go
     go (CreateUser name pass) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , mconcat
-                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
-                , Text.unpack name
-                , "') THEN CREATE ROLE "
-                , Text.unpack name
-                , " WITH LOGIN PASSWORD "
-                , quotePass pass
-                , "; END IF; END $$;"
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , mconcat
+                        [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
+                        , Text.unpack name
+                        , "') THEN CREATE ROLE "
+                        , Text.unpack name
+                        , " WITH LOGIN PASSWORD "
+                        , quotePass pass
+                        , "; END IF; END $$;"
+                        ]
+                   ]
+            )
     go (CreateReplicationUser name pass) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , mconcat
-                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
-                , Text.unpack name
-                , "') THEN CREATE ROLE "
-                , Text.unpack name
-                , " WITH REPLICATION LOGIN PASSWORD "
-                , quotePass pass
-                , "; END IF; END $$;"
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , mconcat
+                        [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
+                        , Text.unpack name
+                        , "') THEN CREATE ROLE "
+                        , Text.unpack name
+                        , " WITH REPLICATION LOGIN PASSWORD "
+                        , quotePass pass
+                        , "; END IF; END $$;"
+                        ]
+                   ]
+            )
     go (AlterSystemSet param val) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , unwords ["ALTER SYSTEM SET", Text.unpack param, "=", "'" <> Text.unpack val <> "'"]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> ["-c", unwords ["ALTER SYSTEM SET", Text.unpack param, "=", "'" <> Text.unpack val <> "'"]]
+            )
     go ReloadConf =
-        proc "sudo" ["-u", "postgres", "psql", "-c", "SELECT pg_reload_conf();"]
+        proc "sudo" (["-u", "postgres", "psql"] <> portArgs <> ["-c", "SELECT pg_reload_conf();"])
     go (EnsurePhysicalReplicationSlot slot) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , mconcat
-                [ "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '"
-                , Text.unpack slot
-                , "') THEN PERFORM pg_create_physical_replication_slot('"
-                , Text.unpack slot
-                , "'); END IF; END $$;"
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , mconcat
+                        [ "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '"
+                        , Text.unpack slot
+                        , "') THEN PERFORM pg_create_physical_replication_slot('"
+                        , Text.unpack slot
+                        , "'); END IF; END $$;"
+                        ]
+                   ]
+            )
     go (CreateGroup name) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , mconcat
-                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
-                , Text.unpack name
-                , "') THEN CREATE ROLE "
-                , Text.unpack name
-                , "; END IF; END $$;"
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , mconcat
+                        [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
+                        , Text.unpack name
+                        , "') THEN CREATE ROLE "
+                        , Text.unpack name
+                        , "; END IF; END $$;"
+                        ]
+                   ]
+            )
     go (GroupMembership g u) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , unwords
-                [ "ALTER GROUP"
-                , Text.unpack g
-                , "ADD USER"
-                , Text.unpack u
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , unwords
+                        [ "ALTER GROUP"
+                        , Text.unpack g
+                        , "ADD USER"
+                        , Text.unpack u
+                        ]
+                   ]
+            )
     go (DatabaseOwnership d u) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , unwords
-                [ "ALTER DATABASE"
-                , Text.unpack d
-                , "OWNER TO"
-                , Text.unpack u
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , unwords
+                        [ "ALTER DATABASE"
+                        , Text.unpack d
+                        , "OWNER TO"
+                        , Text.unpack u
+                        ]
+                   ]
+            )
     go (Grant acl) =
         proc
             "sudo"
-            [ "-u"
-            , "postgres"
-            , "psql"
-            , "-c"
-            , unwords
-                [ "GRANT"
-                , Text.unpack $ commaList $ fmap renderRight acl.access_rights
-                , "ON DATABASE"
-                , Text.unpack acl.access_database.getDatabase
-                , "TO"
-                , Text.unpack (roleName acl.access_role)
-                ]
-            ]
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> [ "-c"
+                   , unwords
+                        [ "GRANT"
+                        , Text.unpack $ commaList $ fmap renderRight acl.access_rights
+                        , "ON DATABASE"
+                        , Text.unpack acl.access_database.getDatabase
+                        , "TO"
+                        , Text.unpack (roleName acl.access_role)
+                        ]
+                   ]
+            )
 
     quotePass :: Password -> String
     quotePass pwd = "'" <> Text.unpack pwd.revealPassword <> "'"
@@ -700,9 +714,9 @@ data StandbySetup
     deriving (Show)
 
 -- | A login role carrying the @REPLICATION@ attribute, for a standby's @pg_basebackup@\/streaming connection.
-replicationUser :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> User -> Password -> Op
-replicationUser r server psql u pwd =
-    withBinary psql psqlAdminRun_Sudo (CreateReplicationUser u.userRole pwd) $ \up ->
+replicationUser :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
+replicationUser r server psql port u pwd =
+    withBinary psql (psqlAdminRun_Sudo port) (CreateReplicationUser u.userRole pwd) $ \up ->
         op "pg-replication-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-replication-user" u.userRole
@@ -712,9 +726,9 @@ replicationUser r server psql u pwd =
   where
     r' = contramap (PGCreateReplicationUser u) r
 
-alterSystemSet :: Reporter Report -> Track' (Binary "psql") -> Text -> Text -> Op
-alterSystemSet r psql param val =
-    withBinary psql psqlAdminRun_Sudo (AlterSystemSet param val) $ \up ->
+alterSystemSet :: Reporter Report -> Track' (Binary "psql") -> Port -> Text -> Text -> Op
+alterSystemSet r psql port param val =
+    withBinary psql (psqlAdminRun_Sudo port) (AlterSystemSet param val) $ \up ->
         op "pg-alter-system" nodeps $ \actions ->
             actions
                 { ref = mkRef "pg-alter-system" param
@@ -724,9 +738,9 @@ alterSystemSet r psql param val =
   where
     r' = contramap (PGAlterSystem param val) r
 
-reloadConf :: Reporter Report -> Track' (Binary "psql") -> Op
-reloadConf r psql =
-    withBinary psql psqlAdminRun_Sudo ReloadConf $ \up ->
+reloadConf :: Reporter Report -> Track' (Binary "psql") -> Port -> Op
+reloadConf r psql port =
+    withBinary psql (psqlAdminRun_Sudo port) ReloadConf $ \up ->
         op "pg-reload-conf" nodeps $ \actions ->
             actions
                 { ref = mkRef "pg-reload-conf" ("reload" :: Text)
@@ -736,9 +750,9 @@ reloadConf r psql =
     r' = contramap PGReloadConf r
 
 -- | Ensures a physical replication slot exists on the primary (idempotent: skips if already present).
-replicationSlot :: Reporter Report -> Track' (Binary "psql") -> ReplicationSlotName -> Op
-replicationSlot r psql slot =
-    withBinary psql psqlAdminRun_Sudo (EnsurePhysicalReplicationSlot slot) $ \up ->
+replicationSlot :: Reporter Report -> Track' (Binary "psql") -> Port -> ReplicationSlotName -> Op
+replicationSlot r psql port slot =
+    withBinary psql (psqlAdminRun_Sudo port) (EnsurePhysicalReplicationSlot slot) $ \up ->
         op "pg-replication-slot" nodeps $ \actions ->
             actions
                 { ref = mkRef "pg-replication-slot" slot
@@ -773,17 +787,18 @@ primaryReplicationSetup ::
     Reporter Report ->
     Track' (Binary "psql") ->
     Track' (Binary "pg_ctlcluster") ->
+    Port ->
     ClusterName ->
     ReplicationTuning ->
     RoleName ->
     AllowedCidr ->
     ReplicationSlotName ->
     Op
-primaryReplicationSetup r psql pgctl name tuning replRole cidr slot =
-    op "pg-primary-replication-setup" (deps [replicationSlot r psql slot, allowReplicationFrom r pgctl name replRole cidr, restartOp]) id
+primaryReplicationSetup r psql pgctl port name tuning replRole cidr slot =
+    op "pg-primary-replication-setup" (deps [replicationSlot r psql port slot, allowReplicationFrom r pgctl name replRole cidr, restartOp]) id
   where
     restartOp = restartCluster r pgctl name `inject` applySettings
-    applySettings = op "pg-primary-wal-settings" (deps $ fmap (uncurry (alterSystemSet r psql)) settings) id
+    applySettings = op "pg-primary-wal-settings" (deps $ fmap (uncurry (alterSystemSet r psql port)) settings) id
     settings =
         [ ("wal_level", "replica")
         , ("max_wal_senders", tshow tuning.repl_max_wal_senders)
