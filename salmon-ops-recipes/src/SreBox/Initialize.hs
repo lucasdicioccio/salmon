@@ -13,7 +13,7 @@ import Salmon.Reporter
 
 initialize :: Reporter User.Report -> Op
 initialize r =
-    op "initialize" (deps [sudoerfile, tmpdir `inject` sudoUser]) id
+    op "initialize" (deps [sudoerfile, tmpdir `inject` sudoUser, passwordlessUser, homeOwnership]) id
   where
     sudoerfile :: Op
     sudoerfile =
@@ -33,6 +33,19 @@ initialize r =
 
     sudoUser :: Op
     sudoUser = User.user r Debian.useradd mkGroup (User.NewUser user [sudo])
+
+    passwordlessUser :: Op
+    passwordlessUser = User.passwordless r Debian.usermod mkUser user
+
+    homeOwnership :: Op
+    homeOwnership =
+        User.chown r Debian.chown True (User.Owner user salmonGroup) "/home/salmon" `inject` tmpdir
+
+    salmonGroup :: User.Group
+    salmonGroup = User.Group "salmon"
+
+    mkUser :: Track' User.User
+    mkUser = Track $ \u -> User.user r Debian.useradd mkGroup (User.NewUser u [sudo])
 
     mkGroup :: Track' User.Group
     mkGroup = Track $ \grp -> User.group r Debian.groupadd grp

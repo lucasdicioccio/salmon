@@ -61,6 +61,12 @@ useradd = installWith "passwd"
 groupadd :: Installer "groupadd"
 groupadd = installWith "passwd"
 
+usermod :: Installer "usermod"
+usermod = installWith "passwd"
+
+chown :: Installer "chown"
+chown = installWith "coreutils"
+
 ip :: Installer "ip"
 ip = installWith "iproute2"
 
