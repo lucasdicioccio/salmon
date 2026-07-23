@@ -166,3 +166,40 @@ withFile (Generated mkp path) f = tracking mkp (\x -> (x, x)) path f
 generateFileContents :: (EncodeFileContents a) => a -> FilePath -> File b
 generateFileContents c path =
     Generated (Track $ \_ -> filecontents $ FileContents path c) path
+
+-------------------------------------------------------------------------------
+
+-- | A line to ensure is present in a file, appending it if missing.
+data AppendLineIfMissing = AppendLineIfMissing {appendLineFilePath :: FilePath, appendLineText :: Text.Text}
+
+{- | Idempotent append: ensures a line is present in a file, appending it if
+not already there verbatim (@grep -qxF ... || echo ... >>@, done in-process
+rather than via a shell) — the same "append-if-missing" shape used for
+@pg_hba.conf@ lines (see @Salmon.Builtin.Nodes.Postgres.ensureHbaLineScript@),
+generalized to any file. Does not truncate or otherwise touch the file if the
+line is already present. Creates the enclosing directory but not the file
+itself (an absent file is treated as empty, and the append creates it).
+-}
+appendLineIfMissing :: AppendLineIfMissing -> Op
+appendLineIfMissing item =
+    op "append-line-if-missing" (deps [enclosingdir]) $ \actions ->
+        actions
+            { help = Text.pack $ "ensures a line is present in " <> path
+            , notes = ["append-if-missing", "does not truncate or delete existing lines"]
+            , ref = mkRef "append-line-if-missing" (path, item.appendLineText)
+            , up = ensureLine
+            }
+  where
+    path :: FilePath
+    path = item.appendLineFilePath
+
+    enclosingdir :: Op
+    enclosingdir = dir (Directory $ takeDirectory path)
+
+    ensureLine :: IO ()
+    ensureLine = do
+        exists <- doesFileExist path
+        contents <- if exists then Text.decodeUtf8 <$> ByteString.readFile path else pure ""
+        if item.appendLineText `elem` Text.lines contents
+            then pure ()
+            else ByteString.appendFile path (Text.encodeUtf8 $ item.appendLineText <> "\n")
