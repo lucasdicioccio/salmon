@@ -105,13 +105,39 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   throws, that's caught and reported as `Failed`, and everything that (transitively) depends on it
   is reported `Blocked` instead of being evaluated — see "Conventions for node authors" below for
   what this means for how `up` needs to be written. `upTree` returns `IO Bool` (`False` iff
-  anything failed or was blocked). `downTree` has the same dedup-by-`Ref`/catch-and-report/`Bool`
-  return shape, just walking top-to-bottom (the node itself before whatever it depended on — the
-  reverse of `upTree`'s order, since removing a dependency out from under a still-standing
-  dependent generally isn't safe) and with the failure-blocking direction flipped to match: a
-  failed `down` blocks descending into *that node's own predecessors*, not its dependents. Neither
-  function has a `Requirement`/`prelim`-equivalent for teardown (nothing like "skip if already
-  gone" exists for `down` yet).
+  anything failed or was blocked). `downTree` tears down and shares the catch-and-report/`Bool`
+  return shape, but does *not* walk the `Cofree` structurally the way `upTree` does. A node must
+  be torn down only after *every* node that depends on it already has — which for a predecessor
+  shared by several dependents (e.g. the directory two files live in) a naive top-down + dedup
+  walk gets wrong: it would tear that predecessor down at the *first* dependent reached, while the
+  others still stand on it (a real "directory not empty" bug this used to have). So `downTree`
+  first collapses the `Cofree` to a `Ref`-level DAG (deduping shared nodes, skipping through
+  `Actionless` glue) and tears nodes down in reverse-dependency order: a node becomes free once
+  its last dependent is done, and only then are its own predecessors released. Because a shared
+  node is visited exactly once, `downTree` never emits `Redundant`. Failure containment is the
+  mirror of `upTree`'s: a failed `down` leaves that node *still standing*, so every one of its
+  predecessors is `Blocked` (unsafe to pull a dependency out from under a node that's still up),
+  and a predecessor is blocked if *any* of its dependents was — one failure contains a whole
+  still-standing sub-DAG. A node's own `prelim` is never consulted for teardown (it answers "does
+  my effect still need creating", which isn't the question a teardown asks), so there's no
+  per-node "skip if already gone".
+  Both take an optional `Gate ext = Act ext -> IO Requirement` via `upTreeWith`/`downTreeWith` —
+  a *caller*-supplied "does this traversal want to touch this node at all", asked before (and
+  short-circuiting) the node's own `prelim`, and reported as a `Skip`. `upTree`/`downTree` are
+  those with a gate that wants everything; the only real user is `Actions/Serve.hs` (below),
+  which walks a union of several seeds' graphs and must leave other seeds' nodes alone.
+- **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
+  `World` — an append-only history of `Epoch`s (a declared seed, the directive it configured to,
+  and the graph it evaluated to *at that moment*), the set of seeds currently declared up, and,
+  unified across all their graphs by `Ref`, a `NodeState` per node (a `Direction` it's wanted in
+  plus whether it has `Converged` there). Everything else is derived: a node an active seed's
+  graph contains is wanted `TurnUp`, a node no active seed still asks for is wanted `TurnDown`
+  (retired epochs' graphs are kept precisely because they're the only remaining description of
+  how to tear those nodes down), and flipping a node's direction resets it to `Pending`.
+  Converging is then just one `downTreeWith` pass plus one `upTreeWith` pass with a gate that
+  filters to "wanted in this pass, not yet converged" — so ordering, dedup and failure
+  containment are exactly `run up`/`run down`'s, and all this module adds is the memory. Nodes
+  left `Errored`/`Blocked` are retried by the next pass.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
@@ -177,16 +203,34 @@ Every salmon binary (see `salmon-apps/src/Migrator.hs` as the worked example) ex
 subcommands via `Salmon.Builtin.CommandLine.execCommandOrSeed`:
 
 ```sh
-my-salmon config <seed-args...>   # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
-my-salmon run Up|Tree|DAG         # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
+my-salmon config <seed-args...>          # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
+my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
+my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
 ```
 
-Typical usage pipes them together: `my-salmon config 123 | my-salmon run Up`. This split exists so
+Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
 that config generation (which may be impure/human-parametrized) and execution (which must be
 IO/hermetic and is meant to run unattended, e.g. on a remote box) are distinct, independently
 inspectable steps — the JSON directive is the contract between them. `run tree` prints a
 human-readable dependency tree (`Actions.Help`); `run dag` prints Graphviz dot output
-(`Actions.Dot`).
+(`Actions.Dot`); `run down` tears the directive's graph down (`downTree`).
+
+`run serve` is the odd one out: it reads *seeds* (not a directive) as command lines, one
+declaration per line, and keeps converging a `Salmon.Actions.Serve.World` across all of them —
+see `Actions/Serve.hs` above for the state it maintains. Its input language is:
+
+```
+up <seed args...>      # declare this seed up (added to the active set)
+only <seed args...>    # declare this seed up and retire every other one
+down <seed args...>    # retire this seed (its nodes go down unless another seed still wants them)
+clear                  # retire every seed
+converge               # re-attempt whatever hasn't converged (e.g. after fixing what made it fail)
+status | history       # dump the per-node state / the seed+graph history
+quit                   # leave the loop, changing nothing on the way out
+```
+
+Seed args are parsed with the binary's own `ParseRecord seed` — the same words that would follow
+`config` — so a seed is identified by the directive it configures to, not by its spelling.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

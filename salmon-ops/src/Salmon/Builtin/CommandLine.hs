@@ -7,9 +7,11 @@ import Control.Monad (void, when)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
+import qualified Data.Text as Text
 import Options.Applicative
 import Options.Generic
 import System.Exit (exitFailure)
+import System.IO (stdin)
 
 import Salmon.Op.Configure
 import Salmon.Op.Eval
@@ -19,6 +21,7 @@ import Salmon.Op.Track
 import Salmon.Actions.Check as Check
 import Salmon.Actions.Dot as Dot
 import Salmon.Actions.Help as Help
+import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension
 import Salmon.Reporter
@@ -30,15 +33,19 @@ data Command seed
 
 data BaseCommand
     = Up
+    | Down
     | Tree
     | DAG
+    | Serve
     deriving (Eq, Ord, Generic, Show, Read)
 
 argForBaseCommand :: BaseCommand -> Text
 argForBaseCommand = \case
     Up -> "up"
+    Down -> "down"
     Tree -> "tree"
     DAG -> "dag"
+    Serve -> "serve"
 
 instance (ParseRecord seed) => ParseRecord (Command seed) where
     parseRecord =
@@ -70,21 +77,41 @@ todo: consider adding some non-det when the graph depends not just on a seed but
 -}
 execCommandOrSeed ::
     forall directive seed.
-    (ToJSON directive, FromJSON directive) =>
+    (ToJSON directive, FromJSON directive, ParseRecord seed) =>
     Reporter (UpDown.Report Extension) ->
     Configure IO seed directive ->
     Track' directive ->
     Command seed ->
     IO ()
-execCommandOrSeed r genBase traceBase cmd = do
+execCommandOrSeed = execCommandOrSeedWith Serve.reportText
+
+{- | 'execCommandOrSeed' with a say in how @run serve@ reports its own
+loop-level events (as opposed to the per-node events, which go to the same
+reporter every other command uses).
+-}
+execCommandOrSeedWith ::
+    forall directive seed.
+    (ToJSON directive, FromJSON directive, ParseRecord seed) =>
+    Reporter Serve.Report ->
+    Reporter (UpDown.Report Extension) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Command seed ->
+    IO ()
+execCommandOrSeedWith serveR r genBase traceBase cmd = do
     case cmd of
         (Run Up) -> do
             result <- withGraph (UpDown.upTree r nat)
+            when (result == Just False) exitFailure
+        (Run Down) -> do
+            result <- withGraph (UpDown.downTree r nat)
             when (result == Just False) exitFailure
         (Run Tree) -> do
             void $ withGraph (Help.printHelpCograph . (runIdentity . expand))
         (Run DAG) -> do
             void $ withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
+        (Run Serve) -> do
+            void $ Serve.serve serveR r parseSeedArgs genBase traceBase stdin
         Config seed -> do
             dir <- gen genBase seed
             LBysteString.putStr $ encode dir
@@ -101,6 +128,17 @@ execCommandOrSeed r genBase traceBase cmd = do
                 pure Nothing
             Right a -> do
                 Just <$> cont (run traceBase a)
+
+{- | Runs a seed's own command-line parser over the arguments of one @run
+serve@ declaration — i.e. the same words that would follow @config@ on an
+actual command line.
+-}
+parseSeedArgs :: forall seed. (ParseRecord seed) => [String] -> Either Text seed
+parseSeedArgs args =
+    case execParserPure defaultPrefs (info parseRecord briefDesc) args of
+        Success seed -> Right seed
+        Failure failure -> Left (Text.pack $ fst $ renderFailure failure "config")
+        CompletionInvoked _ -> Left "unexpected shell-completion request"
 
 updownOnReport ::
     Reporter (UpDown.Report Extension) ->

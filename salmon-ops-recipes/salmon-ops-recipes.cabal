@@ -78,9 +78,11 @@ test-suite salmon-ops-recipes-test
     main-is:          Main.hs
     hs-source-dirs:   test
     other-modules:    Test.Harness
+                    , Test.DownTreeSpec
                     , Test.JWTSigningSpec
                     , Test.PodmanSpec
                     , Test.PostgresInitSpec
+                    , Test.ServeSpec
     build-depends:    base
                     , aeson
                     , bytestring
