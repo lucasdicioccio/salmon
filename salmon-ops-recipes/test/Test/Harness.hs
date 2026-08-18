@@ -9,6 +9,12 @@
 --   * Layer 2 (system services): real IO against a service that only exists
 --     inside a disposable podman container, dogfooding "Podman.pullImage"\/
 --     "Podman.runContainer" as the sandbox provisioner (see "Test.PodmanSpec").
+--   * Layer 3 (whole-machine): real IO against a qemu VM booted from a
+--     caller-prepared "Salmon.Builtin.Nodes.Debian.Debootstrap" rootfs,
+--     dogfooding "Salmon.Builtin.Nodes.LinuxBridge"\/"Salmon.Builtin.Nodes.Qemu"
+--     as the sandbox provisioner, for recipes Layer 2's containers can't
+--     exercise well (real systemd-as-PID-1, real network interfaces). See
+--     @specs/qemu-test-vms.md@ for the design.
 module Test.Harness (
     -- * capturing UpDown traversal reports
     capture,
@@ -30,18 +36,30 @@ module Test.Harness (
 
     -- * redirecting a recipe's system binaries into a container via PATH shims
     withShimmedPath,
+
+    -- * qemu-backed sandboxes (Layer 3)
+    testBridge,
+    testBridgeCidr,
+    testVmAddr,
+    ensureTestBridge,
+    withVm,
 ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, bracket_)
 import Control.Monad (unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
 import qualified Data.Text as Text
+import Numeric (showHex)
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (downTree, upTree)
 import Salmon.Builtin.Extension (Extension (..), Op, Track', ignoreTrack)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
+import qualified Salmon.Builtin.Nodes.LinuxBridge as LinuxBridge
 import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.Qemu as Qemu
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Reporter (Reporter, ReporterM (..))
 import System.CPUTime (getCPUTime)
 import System.Directory (findExecutable, getPermissions, setOwnerExecutable, setPermissions)
@@ -219,3 +237,156 @@ withPrependedPath dir act = do
         (setEnv "PATH" (dir <> maybe "" (":" <>) original))
         (maybe (unsetEnv "PATH") (setEnv "PATH") original)
         act
+
+-------------------------------------------------------------------------------
+-- qemu-backed sandboxes (Layer 3).
+--
+-- Mirrors the podman section above in spirit: dogfoods
+-- "Salmon.Builtin.Nodes.LinuxBridge"'s and "Salmon.Builtin.Nodes.Qemu"'s own
+-- up\/down through 'runUp'\/'runDown' as the sandbox provisioner, real IO, no
+-- mocking. Unlike podman, this needs real host privilege (@CAP_NET_ADMIN@
+-- for the bridge\/tap devices, plus whatever qemu itself needs) that is
+-- assumed already available to whoever runs this tier — a documented
+-- prerequisite, same stance @specs/qemu-test-vms.md@'s privilege open
+-- question leans towards, rather than this harness trying to sudo on its
+-- own behalf.
+--
+-- Caveat carried over from the spec: the guest-networking scheme here
+-- (static IP via the kernel @ip=@ cmdline parameter, assumed @eth0@ naming)
+-- is a first cut, not yet checked against a real boot — @specs/qemu-test-vms.md@'s
+-- phased plan puts "hand-validate a boot" before wrapping things in a node,
+-- and that hand-validation hasn't happened yet. Expect to revisit the exact
+-- cmdline\/interface-naming details here once a real VM has actually booted.
+
+ipTrack :: Track' (Binary.Binary "ip")
+ipTrack = ignoreTrack
+
+qemuBinTrack :: Track' (Binary.Binary "qemu-system-x86_64")
+qemuBinTrack = ignoreTrack
+
+systemctlTrack :: Track' (Binary.Binary "systemctl")
+systemctlTrack = ignoreTrack
+
+-- | One shared bridge, left standing across test runs rather than torn down
+-- per test — matches @specs/qemu-test-vms.md@'s leaning on bridge lifecycle
+-- scope. Only each VM's own tap is created\/destroyed per test.
+testBridge :: LinuxBridge.Bridge
+testBridge = LinuxBridge.Bridge "salmontest0"
+
+testBridgeCidr :: LinuxBridge.Cidr
+testBridgeCidr = LinuxBridge.Cidr "10.99.0.1" 24
+
+{- | Fixed guest address — v1 assumes a single VM under test at a time (see
+@specs/qemu-test-vms.md@'s phased plan: proving the tier end to end comes
+before anything like a real address pool).
+-}
+testVmAddr :: Text.Text
+testVmAddr = "10.99.0.2"
+
+-- | Ensures the shared test bridge (and its address) exist. Idempotent via
+-- the production 'LinuxBridge.bridgeAddr' op's own @prelim@ — safe to call
+-- before every test.
+ensureTestBridge :: IO ()
+ensureTestBridge = do
+    (reporter, _) <- capture
+    ok <- runUp (LinuxBridge.bridgeAddr reporter ipTrack testBridge testBridgeCidr)
+    unless ok (fail "ensureTestBridge: failed to bring up the shared test bridge")
+
+-- | CPU time at picosecond resolution, truncated to fit Linux's 15-character
+-- interface name limit — same entropy source as 'freshContainerName' above,
+-- just shorter (an interface name, unlike a container name, can't be long).
+freshTapName :: IO LinuxBridge.DevName
+freshTapName = do
+    t <- getCPUTime
+    pure (Text.pack ("vmtap" <> take 6 (reverse (show t))))
+
+-- | A locally-administered MAC in qemu's own default OUI (@52:54:00@), with
+-- a CPU-time-derived low byte for uniqueness across concurrent\/successive VMs.
+freshMac :: IO Text.Text
+freshMac = do
+    t <- getCPUTime
+    let byte = fromInteger (t `mod` 256) :: Int
+        hex = showHex byte ""
+    pure (Text.pack ("52:54:00:12:34:" <> (if length hex < 2 then '0' : hex else hex)))
+
+{- | Boots a VM from an already-prepared 'Salmon.Builtin.Nodes.Debian.Debootstrap.RootTree'
+directory (built and populated by the caller — this harness does not run
+debootstrap itself, see @specs/qemu-test-vms.md@) — waits for SSH to answer,
+runs the action, and guarantees teardown afterwards via the production
+'Qemu.setup' down action, however the action exits (including on
+exception), same bracket-based shape as 'withContainer'.
+
+@rootfs@ must already have @root\/.ssh\/authorized_keys@ populated with a
+key the caller holds the private half of (this harness only ever connects
+as @root@ over key-based SSH; it does not generate or transport any secret,
+matching this project's key-exchange-agnostic recipe convention).
+-}
+withVm :: FilePath -> (Ssh.Remote -> IO a) -> IO a
+withVm rootfs act =
+    withSystemTempDirectory "salmon-ops-recipes-test-vm" $ \tmpdir ->
+        bracket (bringUp tmpdir) cleanup (act . fst)
+  where
+    cleanup :: (Ssh.Remote, Op) -> IO ()
+    cleanup (_, vmOp) = void (runDown vmOp)
+
+    bringUp :: FilePath -> IO (Ssh.Remote, Op)
+    bringUp tmpdir = do
+        ensureTestBridge
+        tapName <- freshTapName
+        mac <- freshMac
+        (kernel, initrd) <- Qemu.resolveKernelInitrd rootfs
+        (reporter, _) <- capture
+        (reporterTap, _) <- capture
+        let cfg =
+                Qemu.VmConfig
+                    { Qemu.vm_name = Text.pack ("salmon-test-vm-" <> takeWhile (/= '/') (reverse tmpdir))
+                    , Qemu.vm_memory_mb = 512
+                    , Qemu.vm_smp = 1
+                    , Qemu.vm_rootfs = rootfs
+                    , Qemu.vm_kernel = kernel
+                    , Qemu.vm_initrd = initrd
+                    , Qemu.vm_extra_kernel_args =
+                        [ "ip=" <> testVmAddr <> "::" <> testBridgeCidr.cidrAddr <> ":255.255.255.0::eth0:off"
+                        ]
+                    , Qemu.vm_tap = LinuxBridge.Tap tapName testBridge Nothing
+                    , Qemu.vm_mac = mac
+                    , Qemu.vm_monitor_socket = tmpdir </> "monitor.sock"
+                    , Qemu.vm_enable_kvm = False
+                    , Qemu.vm_user = "root"
+                    , Qemu.vm_group = "root"
+                    , Qemu.vm_working_dir = tmpdir
+                    }
+            vmOp = Qemu.setup reporter reporterTap systemctlTrack qemuBinTrack ipTrack cfg
+        ok <- runUp vmOp
+        unless ok (fail "withVm: starting the sandbox VM failed")
+        let remote = Ssh.Remote "root" testVmAddr
+        waitForSsh remote
+        pure (remote, vmOp)
+
+-- | Polls SSH every two seconds (a VM takes real seconds to boot, unlike a
+-- podman container being "up") for up to two minutes, then fails loudly
+-- rather than hanging the test suite indefinitely — same "skip\/fail loudly,
+-- don't hang" spirit as 'requireExecutable'.
+waitForSsh :: Ssh.Remote -> IO ()
+waitForSsh remote = go (60 :: Int)
+  where
+    go 0 = fail ("withVm: " <> show remote <> " never answered SSH within the timeout")
+    go n = do
+        (code, _, _) <-
+            readProcessWithExitCode
+                "ssh"
+                [ "-o"
+                , "BatchMode=yes"
+                , "-o"
+                , "StrictHostKeyChecking=no"
+                , "-o"
+                , "UserKnownHostsFile=/dev/null"
+                , "-o"
+                , "ConnectTimeout=2"
+                , Text.unpack (Ssh.remoteUser remote) <> "@" <> Text.unpack (Ssh.remoteHost remote)
+                , "true"
+                ]
+                ""
+        case code of
+            ExitSuccess -> pure ()
+            _ -> threadDelay 2000000 >> go (n - 1)

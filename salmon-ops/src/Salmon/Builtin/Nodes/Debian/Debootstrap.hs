@@ -35,6 +35,26 @@ data Suite
 type Includes =
     [Package]
 
+{- | Packages a 'RootTree' needs beyond a bare chroot for it to be bootable
+as a qemu guest and reachable once up: a kernel (so there's a
+@\/boot\/vmlinuz-*@\/@initrd.img-*@ pair to hand qemu's @-kernel@\/@-initrd@
+directly, skipping a bootloader entirely) and an SSH server (so a test
+harness can reach in the same way "Salmon.Builtin.Nodes.Podman"-backed
+tests @podman exec@ into a container). Debian's default debootstrap variant
+already pulls in @systemd-sysv@ (so PID 1 reaches multi-user target) unless
+@--variant=minbase@ was requested elsewhere — this list only adds what's
+never on by default.
+
+Merge into a caller's own 'Includes' with @<>@, e.g.:
+
+> rootTree r boot (RootTree Stable "/var/lib/salmon-test-vms/foo/root" (vmEssentials <> [Package "curl"]))
+-}
+vmEssentials :: Includes
+vmEssentials =
+    [ Package "linux-image-amd64"
+    , Package "openssh-server"
+    ]
+
 data RootTree
     = RootTree
     { suite :: Suite
