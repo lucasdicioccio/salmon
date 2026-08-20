@@ -170,8 +170,22 @@ render_service s =
     render_type :: ServiceType -> Text
     render_type Simple = "simple"
 
+    -- | Quotes an arg that contains whitespace, per systemd's own
+    -- @ExecStart=@ word-splitting rules (docs: @systemd.service(5)@ §
+    -- "Command lines"): unlike @Text.unwords@ alone, a bare multi-word
+    -- string here (e.g. a kernel @-append@ value) would otherwise be split
+    -- back into several separate argv entries by systemd's parser when the
+    -- unit file is loaded — this bit "Salmon.Builtin.Nodes.Qemu" for
+    -- exactly that reason (hand-validated 2026-08-20, see
+    -- @specs/qemu-test-vms-progress.md@).
     render_start :: Start -> Text
-    render_start s = Text.unwords (Text.pack s.start_path : s.start_args)
+    render_start s = Text.unwords (Text.pack s.start_path : map quoteArg s.start_args)
+
+    quoteArg :: Text -> Text
+    quoteArg a
+        | Text.any (`elem` (" \t\"'$`\\" :: String)) a =
+            "\"" <> Text.replace "\"" "\\\"" (Text.replace "\\" "\\\\" a) <> "\""
+        | otherwise = a
 
     render_restart :: Restart -> Text
     render_restart OnFailure = "on-failure"

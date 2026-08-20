@@ -10,6 +10,33 @@ kernel\/initrd already unpacked into the chroot's own @\/boot@ by
 'Salmon.Builtin.Nodes.Debian.Debootstrap.vmEssentials' are handed to qemu
 directly via @-kernel@\/@-initrd@.
 
+Two details below only became certain after actually booting one of these
+(hand-validated 2026-08-20, see @specs/qemu-test-vms-progress.md@):
+
+* The 9p @fsdev@ uses @security_model=passthrough@, not the more obvious
+  @mapped@: qemu (and this whole tier) already runs as root on the host
+  (see 'Qemu.setup's haddock below), so there's no need for @mapped@'s
+  host-uid remapping — and @mapped@ actively breaks booting here, because
+  it doesn't round-trip Debian's @\/bin -> usr\/bin@-style symlinks
+  faithfully, which @run-init@ then sees as a symlink loop
+  (@\/sbin\/init: Too many symbolic links encountered@).
+* The 9p mount tag (and the kernel's @root=@) is @vroot@, not
+  @\/dev\/root@: Debian's stock @initramfs-tools@ @\/scripts\/local@ only
+  skips its udev block-device wait for a @ROOT@ that neither starts with
+  @\/dev@ nor contains @=@ (see @local_device_setup@) — anything else, 9p
+  mount tags included, it waits on forever since a 9p mount never produces
+  a udev block device. A tag with no @\/dev@ prefix takes that fast path
+  and hands the tag straight to @mount -t 9p@, which resolves it fine.
+
+The kernel command line also always carries @net.ifnames=0 biosdevname=0@
+(see 'kernelCmdline'): Debian's default predictable-naming udev rules
+rename the single virtio-net device to something like @ens4@, not @eth0@,
+which breaks a caller-supplied @ip=...:eth0:off@ kernel arg silently (VM
+boots, network never comes up). Forcing classic naming keeps the "single
+NIC, always @eth0@" assumption this whole tier's networking (fixed
+@ip=@\/'Salmon.Builtin.Nodes.Debian.Debootstrap.ensureVm9pBoot') already
+makes actually true.
+
 Lifecycle (start\/stop) is delegated entirely to
 "Salmon.Builtin.Nodes.Systemd" — a VM is just another systemd unit from the
 host's point of view, exactly like 'Salmon.Builtin.Nodes.Nginx.setup' or
@@ -145,9 +172,9 @@ qemuArgs cfg =
             ]
         ,
             [ "-fsdev"
-            , "local,id=root,path=" <> Text.pack cfg.vm_rootfs <> ",security_model=mapped"
+            , "local,id=root,path=" <> Text.pack cfg.vm_rootfs <> ",security_model=passthrough"
             , "-device"
-            , "virtio-9p-pci,fsdev=root,mount_tag=/dev/root"
+            , "virtio-9p-pci,fsdev=root,mount_tag=vroot"
             ]
         ,
             [ "-kernel"
@@ -170,7 +197,7 @@ qemuArgs cfg =
             , "-serial"
             , "mon:stdio"
             ]
-        , if cfg.vm_enable_kvm then ["-enable-kvm"] else []
+        , if cfg.vm_enable_kvm then ["-enable-kvm", "-cpu", "host"] else []
         ]
 
 kernelCmdline :: VmConfig -> Text
@@ -178,11 +205,13 @@ kernelCmdline cfg =
     Text.unwords $
         mconcat
             [
-                [ "root=/dev/root"
+                [ "root=vroot"
                 , "rootfstype=9p"
                 , "rootflags=trans=virtio"
                 , "rw"
                 , "console=ttyS0"
+                , "net.ifnames=0"
+                , "biosdevname=0"
                 ]
             , cfg.vm_extra_kernel_args
             ]

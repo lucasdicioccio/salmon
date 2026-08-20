@@ -41,8 +41,14 @@ module Test.Harness (
     testBridge,
     testBridgeCidr,
     testVmAddr,
+    testVmAddr2,
     ensureTestBridge,
     withVm,
+    withVmAt,
+    VmAccess (..),
+    sshToVm,
+    quoteForRemoteShell,
+    scpToVm,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -56,13 +62,14 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (downTree, upTree)
 import Salmon.Builtin.Extension (Extension (..), Op, Track', ignoreTrack)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
+import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.LinuxBridge as LinuxBridge
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Qemu as Qemu
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Reporter (Reporter, ReporterM (..))
 import System.CPUTime (getCPUTime)
-import System.Directory (findExecutable, getPermissions, setOwnerExecutable, setPermissions)
+import System.Directory (createDirectoryIfMissing, findExecutable, getPermissions, setOwnerExecutable, setPermissions)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -283,6 +290,11 @@ before anything like a real address pool).
 testVmAddr :: Text.Text
 testVmAddr = "10.99.0.2"
 
+-- | A second fixed guest address, for tests that need two VMs up at once
+-- (e.g. a primary\/standby pair) via two nested 'withVmAt' calls.
+testVmAddr2 :: Text.Text
+testVmAddr2 = "10.99.0.3"
+
 -- | Ensures the shared test bridge (and its address) exist. Idempotent via
 -- the production 'LinuxBridge.bridgeAddr' op's own @prelim@ — safe to call
 -- before every test.
@@ -309,6 +321,12 @@ freshMac = do
         hex = showHex byte ""
     pure (Text.pack ("52:54:00:12:34:" <> (if length hex < 2 then '0' : hex else hex)))
 
+-- | What 'withVm' hands its action: the guest's login plus the private key
+-- to authenticate with (see 'sshToVm' — always pass this explicitly rather
+-- than relying on an ssh-agent\/default identity file, see 'VmAccess's
+-- construction site in 'withVm' for why that doesn't work here).
+data VmAccess = VmAccess {vmRemote :: Ssh.Remote, vmIdentityFile :: FilePath}
+
 {- | Boots a VM from an already-prepared 'Salmon.Builtin.Nodes.Debian.Debootstrap.RootTree'
 directory (built and populated by the caller — this harness does not run
 debootstrap itself, see @specs/qemu-test-vms.md@) — waits for SSH to answer,
@@ -316,22 +334,52 @@ runs the action, and guarantees teardown afterwards via the production
 'Qemu.setup' down action, however the action exits (including on
 exception), same bracket-based shape as 'withContainer'.
 
-@rootfs@ must already have @root\/.ssh\/authorized_keys@ populated with a
-key the caller holds the private half of (this harness only ever connects
-as @root@ over key-based SSH; it does not generate or transport any secret,
-matching this project's key-exchange-agnostic recipe convention).
+Login access is entirely this harness's own doing, not the caller's: a
+fresh SSH CA and a client key signed by it (via
+"Salmon.Builtin.Nodes.Keys"'s production 'Keys.sshKey'\/'Keys.signKey', the
+same primitives a real CA-backed recipe would use) are generated per boot
+into the VM's own tmpdir, and the CA's public half plus a
+@TrustedUserCAKeys@\/@PasswordAuthentication no@ sshd drop-in are written
+straight into @rootfs@ before qemu starts — the 9p export means that's the
+guest's own @\/etc\/ssh@, no separate transport step needed. This
+sidesteps two problems hand-validation on 2026-08-20 ran into with relying
+on a developer's own key instead (see @specs/qemu-test-vms-progress.md@):
+running the whole privileged tier under @sudo@ doesn't forward the
+invoking user's ssh-agent, so pubkey auth via a personal key silently never
+succeeds and 'waitForSsh' just times out; and a per-run generated identity
+means nothing here depends on a human having pre-populated
+@root\/.ssh\/authorized_keys@ by hand at all.
+
+@rootfs@ only needs 'Salmon.Builtin.Nodes.Debian.Debootstrap.vmEssentials'
+and 'Salmon.Builtin.Nodes.Debian.Debootstrap.ensureVm9pBoot' already
+applied; no key material needs pre-provisioning by the caller any more.
+
+Fixed at 'testVmAddr' — for more than one VM at a time on the shared test
+bridge (e.g. a primary/standby pair), see 'withVmAt'.
 -}
-withVm :: FilePath -> (Ssh.Remote -> IO a) -> IO a
-withVm rootfs act =
+withVm :: FilePath -> (VmAccess -> IO a) -> IO a
+withVm = withVmAt testVmAddr
+
+{- | Like 'withVm', but at a caller-chosen guest address on the shared test
+bridge instead of the hardcoded 'testVmAddr' — lets a test bring up more
+than one VM at once (e.g. nesting two calls, one per address, for a
+primary/standby pair) without them fighting over the same IP. Caller picks
+addresses inside 'testBridgeCidr' that don't collide with each other or
+with 'testVmAddr' (still used by single-VM tests like
+"Test.QemuSmokeSpec" running concurrently in the same tasty run).
+-}
+withVmAt :: Text.Text -> FilePath -> (VmAccess -> IO a) -> IO a
+withVmAt addr rootfs act =
     withSystemTempDirectory "salmon-ops-recipes-test-vm" $ \tmpdir ->
         bracket (bringUp tmpdir) cleanup (act . fst)
   where
-    cleanup :: (Ssh.Remote, Op) -> IO ()
+    cleanup :: (VmAccess, Op) -> IO ()
     cleanup (_, vmOp) = void (runDown vmOp)
 
-    bringUp :: FilePath -> IO (Ssh.Remote, Op)
+    bringUp :: FilePath -> IO (VmAccess, Op)
     bringUp tmpdir = do
         ensureTestBridge
+        identityFile <- ensureVmSshAccess tmpdir rootfs
         tapName <- freshTapName
         mac <- freshMac
         (kernel, initrd) <- Qemu.resolveKernelInitrd rootfs
@@ -346,47 +394,144 @@ withVm rootfs act =
                     , Qemu.vm_kernel = kernel
                     , Qemu.vm_initrd = initrd
                     , Qemu.vm_extra_kernel_args =
-                        [ "ip=" <> testVmAddr <> "::" <> testBridgeCidr.cidrAddr <> ":255.255.255.0::eth0:off"
+                        [ "ip=" <> addr <> "::" <> testBridgeCidr.cidrAddr <> ":255.255.255.0::eth0:off"
                         ]
                     , Qemu.vm_tap = LinuxBridge.Tap tapName testBridge Nothing
                     , Qemu.vm_mac = mac
                     , Qemu.vm_monitor_socket = tmpdir </> "monitor.sock"
-                    , Qemu.vm_enable_kvm = False
+                    , Qemu.vm_enable_kvm = True
                     , Qemu.vm_user = "root"
                     , Qemu.vm_group = "root"
                     , Qemu.vm_working_dir = tmpdir
                     }
             vmOp = Qemu.setup reporter reporterTap systemctlTrack qemuBinTrack ipTrack cfg
         ok <- runUp vmOp
-        unless ok (fail "withVm: starting the sandbox VM failed")
-        let remote = Ssh.Remote "root" testVmAddr
-        waitForSsh remote
-        pure (remote, vmOp)
+        unless ok (fail "withVmAt: starting the sandbox VM failed")
+        let access = VmAccess (Ssh.Remote "root" addr) identityFile
+        waitForSsh access
+        pure (access, vmOp)
+
+{- | Generates a fresh SSH CA and a client key signed by it (both kept in
+the VM's own @tmpdir@, torn down with everything else there), and wires
+@rootfs@'s sshd to trust that CA instead of relying on
+@root\/.ssh\/authorized_keys@ — see 'withVm's haddock for why. Returns the
+signed client's private key path, for use with 'sshToVm'.
+-}
+ensureVmSshAccess :: FilePath -> FilePath -> IO FilePath
+ensureVmSshAccess tmpdir rootfs = do
+    (reporter, _) <- capture
+    let keygenTrack = ignoreTrack :: Track' (Binary.Binary "ssh-keygen")
+        ca = Keys.SSHKeyPair Keys.ED25519 tmpdir "test-ca"
+        client = Keys.SSHKeyPair Keys.ED25519 tmpdir "test-client"
+    okCa <- runUp (Keys.sshKey reporter keygenTrack ca)
+    unless okCa (fail "ensureVmSshAccess: failed to generate the test CA key")
+    okSign <- runUp (Keys.signKey reporter keygenTrack (Keys.SSHCertificateAuthority ca) (Keys.KeyIdentifier "salmon-test-vm") [Keys.Principal "root"] client)
+    unless okSign (fail "ensureVmSshAccess: failed to sign the test client key")
+    caPub <- readFile (Keys.publicKeyPath ca)
+    let sshdDropinDir = rootfs </> "etc/ssh/sshd_config.d"
+    createDirectoryIfMissing True sshdDropinDir
+    writeFile (rootfs </> "etc/ssh/ca.pub") caPub
+    writeFile
+        (sshdDropinDir </> "99-salmon-test.conf")
+        ( unlines
+            [ "TrustedUserCAKeys /etc/ssh/ca.pub"
+            , "PasswordAuthentication no"
+            , "KbdInteractiveAuthentication no"
+            ]
+        )
+    pure (Keys.privateKeyPath client)
+
+-- | Every ssh call this harness makes against a booted VM goes through
+-- this: explicit identity file (never an agent\/default identity, see
+-- 'withVm's haddock), 'IdentitiesOnly' so ssh doesn't also try any other
+-- key it happens to find first.
+--
+-- @ssh@ joins every element of 'args' with a single space and ships the
+-- result as one string for the remote shell to tokenize — same as typing
+-- the words after the hostname by hand at a terminal. That means an 'args'
+-- element containing its own whitespace (a whole SQL statement, a
+-- @cmd 2>&1@ redirection) does NOT arrive remotely as one token: the
+-- remote shell re-splits it on spaces just like everything else, so e.g.
+-- @["psql", "-tAc", "SELECT state FROM t;"]@ arrives as
+-- @psql -tAc SELECT state FROM t;@ — @-tAc@ only captures @SELECT@, and
+-- @state@\/@FROM@\/@t;@ become stray extra arguments. Callers that need an
+-- element to survive as a single remote token (a full SQL statement, a
+-- whole @bash -c@ script) must pre-quote it themselves with
+-- 'quoteForRemoteShell' before it goes in 'args' — see that function's
+-- haddock for why this isn't done unconditionally for every element here.
+sshToVm :: VmAccess -> [String] -> IO (ExitCode, String, String)
+sshToVm access args =
+    readProcessWithExitCode
+        "ssh"
+        ( [ "-o"
+          , "BatchMode=yes"
+          , "-o"
+          , "StrictHostKeyChecking=no"
+          , "-o"
+          , "UserKnownHostsFile=/dev/null"
+          , "-o"
+          , "IdentitiesOnly=yes"
+          , "-i"
+          , access.vmIdentityFile
+          , Text.unpack (Ssh.loginAtHost access.vmRemote)
+          ]
+            <> args
+        )
+        ""
+
+{- | Single-quotes a string so it survives 'sshToVm''s ssh-level space-join
+as one remote token, e.g. a whole SQL statement or @bash -c@ script that
+must not be re-split by the remote shell. Not applied to every 'sshToVm'
+argument automatically: some existing callers (e.g. "Test.QemuSmokeSpec"'s
+@sshToVm access ["echo smoke-ok"]@) rely on the remote shell's own
+re-splitting to turn one Haskell-level string into several remote words,
+same as typing @echo smoke-ok@ by hand — quoting unconditionally would
+instead hand the remote shell one literal token @"echo smoke-ok"@ (a
+program name with a space in it) and break that. Use this only for an
+argument you specifically want to arrive remotely as a single word.
+-}
+quoteForRemoteShell :: String -> String
+quoteForRemoteShell s = "'" <> concatMap (\c -> if c == '\'' then "'\\''" else [c]) s <> "'"
+
+-- | Copies a local file onto the VM at the given remote path, using the
+-- same identity\/options as 'sshToVm' (never an agent\/default identity).
+-- Used to get a compiled fixture\/recipe binary onto the guest without
+-- needing it preinstalled in the rootfs.
+scpToVm :: VmAccess -> FilePath -> String -> IO ()
+scpToVm access localPath remotePath = do
+    (code, out, err) <-
+        readProcessWithExitCode
+            "scp"
+            [ "-o"
+            , "BatchMode=yes"
+            , "-o"
+            , "StrictHostKeyChecking=no"
+            , "-o"
+            , "UserKnownHostsFile=/dev/null"
+            , "-o"
+            , "IdentitiesOnly=yes"
+            , "-i"
+            , access.vmIdentityFile
+            , localPath
+            , Text.unpack (Ssh.loginAtHost access.vmRemote) <> ":" <> remotePath
+            ]
+            ""
+    case code of
+        ExitSuccess -> pure ()
+        ExitFailure n ->
+            error $
+                "scpToVm " <> localPath <> " -> " <> remotePath <> " failed with exit " <> show n <> "\nstdout: " <> out <> "\nstderr: " <> err
 
 -- | Polls SSH every two seconds (a VM takes real seconds to boot, unlike a
 -- podman container being "up") for up to two minutes, then fails loudly
 -- rather than hanging the test suite indefinitely — same "skip\/fail loudly,
 -- don't hang" spirit as 'requireExecutable'.
-waitForSsh :: Ssh.Remote -> IO ()
-waitForSsh remote = go (60 :: Int)
+waitForSsh :: VmAccess -> IO ()
+waitForSsh access = go (60 :: Int)
   where
-    go 0 = fail ("withVm: " <> show remote <> " never answered SSH within the timeout")
+    go 0 = fail ("withVm: " <> show (Ssh.loginAtHost access.vmRemote) <> " never answered SSH within the timeout")
     go n = do
-        (code, _, _) <-
-            readProcessWithExitCode
-                "ssh"
-                [ "-o"
-                , "BatchMode=yes"
-                , "-o"
-                , "StrictHostKeyChecking=no"
-                , "-o"
-                , "UserKnownHostsFile=/dev/null"
-                , "-o"
-                , "ConnectTimeout=2"
-                , Text.unpack (Ssh.remoteUser remote) <> "@" <> Text.unpack (Ssh.remoteHost remote)
-                , "true"
-                ]
-                ""
+        (code, _, _) <- sshToVm access ["-o", "ConnectTimeout=2", "true"]
         case code of
             ExitSuccess -> pure ()
             _ -> threadDelay 2000000 >> go (n - 1)
