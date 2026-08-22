@@ -41,6 +41,7 @@ data Report ext
     = Redundant !(Act ext)
     | Skip !(Act ext)
     | Eval !(Act ext)
+    | Done !(Act ext)
     | Failed !(Act ext) !SomeException
     | Blocked !(Act ext)
     deriving (Show)
@@ -165,7 +166,9 @@ upTreeWith gate r nat graph = do
                                         Left e -> do
                                             runReporter r (Failed act e)
                                             recordOutcome s aref True
-                                        Right () -> recordOutcome s aref False
+                                        Right () -> do
+                                            runReporter r (Done act)
+                                            recordOutcome s aref False
 
 -- | Shared by 'upTree' and 'downTree': remembers a node's outcome (by 'Ref') so a
 -- second encounter (dedup) or a descendant can look it up without re-running anything.
@@ -298,7 +301,9 @@ downTreeWith gate r nat graph = do
                                     runReporter r (Failed act e)
                                     writeIORef failRef True
                                     pure True
-                                Right () -> pure False
+                                Right () -> do
+                                    runReporter r (Done act)
+                                    pure False
 
         processReady :: Ref -> IO ()
         processReady aref = do

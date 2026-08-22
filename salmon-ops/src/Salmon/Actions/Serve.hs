@@ -504,10 +504,9 @@ serve r nodeReporter parseSeed configure program h = do
     recorder :: IORef (World seed directive) -> Direction -> Reporter (UpDown.Report Extension)
     recorder world dir = reportBoth (stateWriter world dir) nodeReporter
 
-    {- 'upTree'/'downTree' report an 'Eval' before running a node and a
-    'Failed' after it only if it threw, and they run nodes one at a time —
-    so recording 'Eval' as converged and letting the immediately following
-    'Failed' overwrite it is exact, and avoids needing a success report. A
+    {- 'upTree'/'downTree' report an 'Eval' before running a node and, once
+    it returns, exactly one of 'Done' (succeeded) or 'Failed' (threw) — so
+    recording convergence off 'Done'/'Failed' rather than 'Eval' is exact. A
     'Skip' is either this pass's own gate (already converged, or not ours —
     both fine to record as converged, the direction check below drops the
     latter) or, on the way up, the node's own 'prelim' saying its effect is
@@ -515,7 +514,8 @@ serve r nodeReporter parseSeed configure program h = do
     stateWriter :: IORef (World seed directive) -> Direction -> Reporter (UpDown.Report Extension)
     stateWriter world dir = ReporterM $ \rep ->
         case rep of
-            UpDown.Eval act -> mark act Converged
+            UpDown.Eval _ -> pure ()
+            UpDown.Done act -> mark act Converged
             UpDown.Skip act -> mark act Converged
             UpDown.Failed act _ -> mark act Errored
             UpDown.Blocked act -> mark act Blocked
