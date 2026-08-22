@@ -4,9 +4,11 @@ proves SSH into it actually works end to end (bridge/tap up, kernel boots,
 @specs/qemu-test-vms-progress.md@ for the design/validation history this
 closes out (step 4 of its "exact next steps").
 
-Needs root (bridge/tap + a systemd unit, matching this whole VM tier's
-documented privilege assumption — see "Salmon.Builtin.Nodes.Qemu"'s
-haddock) and a pre-built VM rootfs at 'smokeRootfs', with
+Needs either root or the one-time capability setup described in
+'Test.Harness.hasVmPrivileges' (bridge/tap + a systemd unit running qemu,
+matching this whole VM tier's documented privilege assumption — see
+"Salmon.Builtin.Nodes.Qemu"'s haddock) and a pre-built VM rootfs at
+'smokeRootfs', with
 'Salmon.Builtin.Nodes.Debian.Debootstrap.vmEssentials' and
 'Salmon.Builtin.Nodes.Debian.Debootstrap.ensureVm9pBoot' already applied
 (this test does not run debootstrap itself, same stance as
@@ -23,7 +25,6 @@ module Test.QemuSmokeSpec (tests) where
 import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
-import System.Posix.User (getEffectiveUserID)
 import Test.Harness
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase)
@@ -39,11 +40,11 @@ smokeRootfs = "/var/lib/salmon-test-vms/smoke/root"
 
 bootsAndAnswersSsh :: IO ()
 bootsAndAnswersSsh = do
-    isRoot <- (== 0) <$> getEffectiveUserID
+    privileged <- hasVmPrivileges
     hasQemu <- (/= Nothing) <$> findExecutable "qemu-system-x86_64"
     hasRootfs <- doesFileExist (smokeRootfs <> "/etc/issue")
-    if not isRoot
-        then skip "needs root (bridge/tap + systemd unit)"
+    if not privileged
+        then skip "needs root, or ip/qemu-system-x86_64 setcap'd (see Test.Harness.hasVmPrivileges)"
         else
             if not hasQemu
                 then skip "qemu-system-x86_64 not found on PATH"

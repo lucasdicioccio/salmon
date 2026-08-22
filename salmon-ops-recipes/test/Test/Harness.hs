@@ -49,6 +49,8 @@ module Test.Harness (
     sshToVm,
     quoteForRemoteShell,
     scpToVm,
+    testHarnessUser,
+    hasVmPrivileges,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -56,6 +58,7 @@ import Control.Exception (bracket, bracket_)
 import Control.Monad (unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
+import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import Numeric (showHex)
 import qualified Salmon.Actions.UpDown as UpDown
@@ -69,12 +72,13 @@ import qualified Salmon.Builtin.Nodes.Qemu as Qemu
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Reporter (Reporter, ReporterM (..))
 import System.CPUTime (getCPUTime)
-import System.Directory (createDirectoryIfMissing, findExecutable, getPermissions, setOwnerExecutable, setPermissions)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, findExecutable, getPermissions, setOwnerExecutable, setPermissions)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 import System.IO.Temp (withSystemTempDirectory)
+import System.Posix.User (getEffectiveUserID, getLoginName)
 import System.Process (readProcessWithExitCode)
 
 -- | Build a reporter that accumulates every emitted value, in order, plus a
@@ -256,7 +260,12 @@ withPrependedPath dir act = do
 -- assumed already available to whoever runs this tier — a documented
 -- prerequisite, same stance @specs/qemu-test-vms.md@'s privilege open
 -- question leans towards, rather than this harness trying to sudo on its
--- own behalf.
+-- own behalf. As of the tap-owner\/unprivileged-qemu change (see
+-- 'testHarnessUser'\/'hasVmPrivileges'), that prerequisite no longer has to
+-- mean root: a one-time @setcap@ on @ip@ and @qemu-system-x86_64@ plus
+-- @kvm@ group membership is enough for routine test runs, with root (or
+-- @sudo@) only still needed for building rootfses (@debootstrap@ itself
+-- always needs a real chroot) and, once, granting those capabilities.
 --
 -- Caveat carried over from the spec: the guest-networking scheme here
 -- (static IP via the kernel @ip=@ cmdline parameter, assumed @eth0@ naming)
@@ -273,6 +282,77 @@ qemuBinTrack = ignoreTrack
 
 systemctlTrack :: Track' (Binary.Binary "systemctl")
 systemctlTrack = ignoreTrack
+
+{- | The unprivileged host user this tier's tap device and qemu process
+itself now run as (see 'withVmAt'), instead of root — prefers @SUDO_USER@
+(set when this suite is still invoked via a transitional @sudo@, e.g. for
+the one-time steps in 'hasVmPrivileges''s haddock) and falls back to the
+process's own login name, which is what a non-sudo invocation already is.
+Both the tap's owner and the systemd unit's @User=@\/@Group=@ use this same
+name — relies on the Debian\/Ubuntu convention of a private group sharing
+the user's name (true for any normal, non-system account).
+-}
+testHarnessUser :: IO Text.Text
+testHarnessUser = do
+    viaSudo <- lookupEnv "SUDO_USER"
+    case viaSudo of
+        Just u | not (null u) -> pure (Text.pack u)
+        _ -> Text.pack <$> getLoginName
+
+{- | Whether the calling process can plausibly bring up this tier without
+being root: either it already is root (the original, still-supported
+mode), or the two binaries this tier shells out to for privileged
+operations have been granted just enough Linux capability to do those
+operations as an unprivileged user —
+
+* @ip@ needs @cap_net_admin@ to create\/configure the bridge\/tap devices
+  ('LinuxBridge.bridge'\/'LinuxBridge.tap').
+* @qemu-system-x86_64@ needs @cap_dac_override@ (plus @cap_chown@\/
+  @cap_fowner@ for guest-side @chown@\/@chmod@ over 9p) so its
+  @security_model=passthrough@ export can still act on behalf of whichever
+  uid\/gid a file inside the debootstrapped rootfs actually belongs to
+  (e.g. the guest's own @postgres@ account) — without this, an
+  unprivileged qemu could only ever access files it happens to already own
+  on the host, which a real multi-user rootfs is not. Root granted this
+  for free; a plain unprivileged process needs the capability instead of
+  full root, not on top of it.
+
+Both are one-time host setup (@setcap cap_net_admin+eip $(command -v ip)@,
+@setcap cap_dac_override,cap_chown,cap_fowner+eip $(command -v
+qemu-system-x86_64)@), same spirit as the KVM group membership already
+assumed — see @specs/qemu-test-vms-progress.md@ for the exact commands run
+to validate this. @\/dev\/kvm@ access itself is deliberately not re-checked
+here: it's already gated by 'Salmon.Builtin.Nodes.Qemu.vm_enable_kvm' being
+best-effort (see 'withVmAt') and by plain group membership, no capability
+needed.
+-}
+hasVmPrivileges :: IO Bool
+hasVmPrivileges = do
+    isRoot <- (== 0) <$> getEffectiveUserID
+    if isRoot
+        then pure True
+        else
+            (&&)
+                <$> hasCapability "cap_net_admin" "ip"
+                <*> hasCapability "cap_dac_override" "qemu-system-x86_64"
+
+{- | Whether @exe@ (looked up on @PATH@) has been granted @capName@ via
+@setcap@. Canonicalizes past any symlink first (e.g. Debian's usrmerge
+makes @\/usr\/sbin\/ip@, which @PATH@ finds before the real @\/bin\/ip@, a
+symlink) — @getcap@ reports nothing at all for a symlink path, only for the
+real file the capability is actually stored on, same reason
+'Salmon.Builtin.Nodes.Capabilities.grantCapabilities' itself needs the
+canonical path to set it in the first place.
+-}
+hasCapability :: String -> String -> IO Bool
+hasCapability capName exe = do
+    mPath <- findExecutable exe
+    case mPath of
+        Nothing -> pure False
+        Just linkedPath -> do
+            path <- canonicalizePath linkedPath
+            (code, out, _err) <- readProcessWithExitCode "getcap" [path] ""
+            pure (code == ExitSuccess && capName `isInfixOf` out)
 
 -- | One shared bridge, left standing across test runs rather than torn down
 -- per test — matches @specs/qemu-test-vms.md@'s leaning on bridge lifecycle
@@ -300,9 +380,12 @@ testVmAddr2 = "10.99.0.3"
 -- before every test.
 ensureTestBridge :: IO ()
 ensureTestBridge = do
-    (reporter, _) <- capture
-    ok <- runUp (LinuxBridge.bridgeAddr reporter ipTrack testBridge testBridgeCidr)
-    unless ok (fail "ensureTestBridge: failed to bring up the shared test bridge")
+    (nodeReporter, _) <- capture
+    (traceReporter, readBack) <- capture
+    ok <- upTree traceReporter nat (LinuxBridge.bridgeAddr nodeReporter ipTrack testBridge testBridgeCidr)
+    unless ok $ do
+        trace <- readBack
+        fail ("ensureTestBridge: failed to bring up the shared test bridge:\n" <> unlines (map show trace))
 
 -- | CPU time at picosecond resolution, truncated to fit Linux's 15-character
 -- interface name limit — same entropy source as 'freshContainerName' above,
@@ -382,6 +465,7 @@ withVmAt addr rootfs act =
         identityFile <- ensureVmSshAccess tmpdir rootfs
         tapName <- freshTapName
         mac <- freshMac
+        user <- testHarnessUser
         (kernel, initrd) <- Qemu.resolveKernelInitrd rootfs
         (reporter, _) <- capture
         (reporterTap, _) <- capture
@@ -396,12 +480,12 @@ withVmAt addr rootfs act =
                     , Qemu.vm_extra_kernel_args =
                         [ "ip=" <> addr <> "::" <> testBridgeCidr.cidrAddr <> ":255.255.255.0::eth0:off"
                         ]
-                    , Qemu.vm_tap = LinuxBridge.Tap tapName testBridge Nothing
+                    , Qemu.vm_tap = LinuxBridge.Tap tapName testBridge (Just user)
                     , Qemu.vm_mac = mac
                     , Qemu.vm_monitor_socket = tmpdir </> "monitor.sock"
                     , Qemu.vm_enable_kvm = True
-                    , Qemu.vm_user = "root"
-                    , Qemu.vm_group = "root"
+                    , Qemu.vm_user = user
+                    , Qemu.vm_group = user
                     , Qemu.vm_working_dir = tmpdir
                     }
             vmOp = Qemu.setup reporter reporterTap systemctlTrack qemuBinTrack ipTrack cfg

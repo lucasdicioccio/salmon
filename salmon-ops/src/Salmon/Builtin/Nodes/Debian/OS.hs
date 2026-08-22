@@ -70,6 +70,9 @@ chown = installWith "coreutils"
 ip :: Installer "ip"
 ip = installWith "iproute2"
 
+setcap :: Installer "setcap"
+setcap = installWith "libcap2-bin"
+
 wg :: Installer "wg"
 wg = installWith "wireguard"
 

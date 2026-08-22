@@ -16,8 +16,9 @@ qemu guests do. This test drives the exact same fixture binary, just
 copied onto real VMs over SSH instead of @podman cp@/@podman exec@, with
 real assertions instead of a human eyeballing @psql@.
 
-Needs root (same qemu/bridge privilege requirement as
-"Test.QemuSmokeSpec") and two pre-built rootfses, one per role, each with
+Needs the same qemu/bridge privilege requirement as "Test.QemuSmokeSpec"
+(root, or the one-time capability setup in 'Test.Harness.hasVmPrivileges')
+and two pre-built rootfses, one per role, each with
 'Salmon.Builtin.Nodes.Debian.Debootstrap.vmEssentials' @<>@
 @[Package \"postgresql\", Package \"sudo\"]@ and
 'Salmon.Builtin.Nodes.Debian.Debootstrap.ensureVm9pBoot' already applied
@@ -40,7 +41,6 @@ import qualified Data.Text as Text
 import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
-import System.Posix.User (getEffectiveUserID)
 import System.Process (readProcessWithExitCode)
 import Test.Harness
 import Test.Tasty (TestTree, testGroup)
@@ -132,13 +132,13 @@ replicatesARow = requirePrereqs $ do
 
 requirePrereqs :: IO () -> IO ()
 requirePrereqs act = do
-    isRoot <- (== 0) <$> getEffectiveUserID
+    privileged <- hasVmPrivileges
     hasQemu <- (/= Nothing) <$> findExecutable "qemu-system-x86_64"
     hasPrimary <- doesFileExist (primaryRootfs <> "/etc/issue")
     hasStandby <- doesFileExist (standbyRootfs <> "/etc/issue")
     case () of
         _
-            | not isRoot -> skip "needs root (bridge/tap + systemd units)"
+            | not privileged -> skip "needs root, or ip/qemu-system-x86_64 setcap'd (see Test.Harness.hasVmPrivileges)"
             | not hasQemu -> skip "qemu-system-x86_64 not found on PATH"
             | not hasPrimary -> skip ("no primary VM rootfs at " <> primaryRootfs <> " (see this module's haddock)")
             | not hasStandby -> skip ("no standby VM rootfs at " <> standbyRootfs <> " (see this module's haddock)")
