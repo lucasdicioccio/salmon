@@ -9,6 +9,65 @@ Work on this branch is being committed incrementally as it lands (see
 `git log`); this doc may still lag the latest working-tree state by a
 change or two at any given moment.
 
+## 0.2 Headline: the whole tier runs unprivileged now, no `sudo` at all (2026-09-01/08)
+
+Following up on §4's privilege open question: dropped the requirement that
+the whole test binary run as root. `Test.Harness.hasVmPrivileges` now
+accepts either real root or a one-time capability grant; `withVmAt` runs
+qemu as the invoking user (via `LinuxBridge.Tap`'s `tapOwner` and
+`Qemu.VmConfig`'s `vm_user`/`vm_group`) instead of `root:root`. New
+`Salmon.Builtin.Nodes.Capabilities` (`setcap`/`getcap`, idempotent) plus a
+`salmon-qemu-host-setup-fixture` executable do the one-time host grant as
+a real `Op` graph instead of a shell snippet — see its own haddock for the
+exact commands. Confirmed passing fully unprivileged: `QemuSmokeSpec`
+(20s) and `PostgresReplicationSpec` (69s, two VMs) both green with no
+`sudo` anywhere in the test invocation.
+
+Two real, boot-validated bugs found getting there, neither guessable from
+code review:
+
+1. **Granting `cap_net_admin` to `ip` itself does not work.** `strace` on
+   a failing unprivileged `ip link add ... type bridge` showed `ip`
+   unconditionally calling `capset({...}, {effective=0, permitted=0,
+   inheritable=0})` at startup — iproute2 drops its entire capability set
+   on exec and only trusts the *ambient* set afterwards, which a plain
+   file-capability grant can never populate (the kernel zeroes ambient for
+   any exec of a "privileged" file, by design). Confirmed via a clean
+   control test first: `ping` (file-cap `cap_net_raw`) works fine
+   unprivileged, proving the capability mechanism itself was never the
+   problem. Fix: grant the capability to `capsh` instead, and have `ip`
+   invocations go through `capsh --inh=cap_net_admin --addamb=cap_net_admin
+   -- -c "ip ...args..."` (`Salmon.Builtin.Nodes.LinuxBridge.ipLinkCommand`)
+   — ambient capabilities do propagate across exec and are what iproute2
+   actually honors. Raising ambient itself needs the capability in *both*
+   the process's permitted *and* inheritable sets (`--inh=` first) since
+   exec does not carry a file's inheritable bit into the new process's own
+   inheritable set. Works identically for real root (whose permitted set
+   is already full) and for an unprivileged user with the grant on
+   `capsh`, so the wrapping is unconditional now, not privilege-mode
+   -specific.
+2. **A qemu VM's systemd unit can't live under `/etc/systemd/system`
+   unprivileged** (plain permission denied writing there). Fix: added
+   `Systemd.Scope` (`System`/`User`) to `Salmon.Builtin.Nodes.Systemd`;
+   `Qemu.VmConfig` gained `vm_systemd_scope`/`vm_unit_dir`, and
+   `Test.Harness.withVmAt` now uses `Systemd.User` against a resolved
+   `~/.config/systemd/user`, with `systemctl --user` and `default.target`
+   swapped in for `multi-user.target`/`network-online.target` (which don't
+   exist in the user manager). Systemd also rejects `User=`/`Group=` in a
+   user-manager unit, so `render_service` omits them for `User` scope.
+   `PgBouncer`/`Postgrest`/`MicroDNS`'s existing `Systemd.Config` call
+   sites were updated to explicit `System`/`/etc/systemd/system` — no
+   behavior change for them.
+
+Not yet chased down: the Postgres replication VM test flaked once when run
+as part of the full 20-test suite (`cabal test salmon-ops-recipes`) —
+`walsender process due to replication timeout` inside the guest, a
+stale-pidfile postgres restart loop — while passing cleanly twice
+standalone. Smells like timing/resource contention from running
+back-to-back with everything else rather than a regression from the
+privilege changes above (this project already has one documented
+unrelated Layer 2 podman flake under load), but not confirmed either way.
+
 ## 0.1 Headline: Phase 5's real recipe test now passes for real (2026-08-21)
 
 `Test.PostgresReplicationSpec` (see §1) now passes under `sudo` against real
