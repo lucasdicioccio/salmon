@@ -150,7 +150,7 @@ systemdKitchenSinkBlog r arg =
         op "system" (deps [Debian.deb (Debian.Package "graphviz")]) id
 
     config :: Systemd.Config
-    config = Systemd.Config tgt unit service install
+    config = Systemd.Config Systemd.System "/etc/systemd/system" tgt unit service install
 
     tgt :: Systemd.UnitTarget
     tgt = "salmon-ks.service"

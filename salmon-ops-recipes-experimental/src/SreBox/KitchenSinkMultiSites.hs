@@ -366,7 +366,7 @@ systemdKitchenSink r setup =
     ksconfigFile = FS.filecontents $ FS.FileContents ksConfigPath (Text.decodeUtf8 $ LByteString.toStrict $ Aeson.encode $ ksConfigContents setup)
 
     systemdConfig :: Systemd.Config
-    systemdConfig = Systemd.Config tgt unit service install
+    systemdConfig = Systemd.Config Systemd.System "/etc/systemd/system" tgt unit service install
 
     tgt :: Systemd.UnitTarget
     tgt = "salmon-ks-multisite.service"
