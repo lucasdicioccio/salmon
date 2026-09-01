@@ -13,7 +13,7 @@ idempotent (see 'skipIfLinkExists', mirroring
 -}
 module Salmon.Builtin.Nodes.LinuxBridge where
 
-import Salmon.Actions.UpDown (Requirement (..))
+import Salmon.Actions.UpDown (Requirement (..), upTree)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -21,6 +21,9 @@ import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
 
+import Control.Exception (throwIO)
+import Control.Monad (unless)
+import Control.Monad.Identity (runIdentity)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -81,22 +84,50 @@ bridge r ip br =
     r' = contramap (RunIpLink (AddBridge br)) r
 
 {- | Creates a tap device, attaches it to its bridge, and brings both the tap
-and the bridge up. Depends on the bridge already existing.
+and the bridge up.
+
+Deliberately does *not* declare the bridge as a graph dependency (@deps
+[bridge ...]@) — a persistent, shared bridge (the documented, intended
+lifecycle here: many taps/VMs come and go, the bridge outlives all of
+them) must never be reachable as *this tap's own* predecessor, or
+'Salmon.Actions.UpDown.downTree''s "release a predecessor once its last
+dependent is torn down" rule (correct in general — see the directory/
+two-files example in CLAUDE.md) would delete the bridge out from under
+every *other* still-running tap the moment any single one of them tears
+down, since each tap's own 'Salmon.Op.OpGraph.OpGraph' traversal has no
+visibility into sibling taps' graphs (different process, different
+'downTree' call). Hand-observed 2026-09-08: several real qemu VMs' taps
+left dangling (@NO-CARRIER@) after the bridge vanished this way mid test
+session — see @specs/qemu-test-vms-progress.md@.
+
+Instead, 'up' ensures the bridge exists via a *nested* 'upTree' run
+(same accepted pattern as
+"Salmon.Builtin.Nodes.PostgresMigrations".@remoteMigrateOpaqueSetup@ —
+check the returned 'Bool', 'throwIO' if it's 'False', since that's the
+only way a nested traversal's failure becomes visible to the outer one)
+rather than a plain graph dependency, so the bridge is brought up as a
+precondition without ever becoming *this* op's own teardown-reachable
+predecessor. Whoever wants the bridge gone does so explicitly (e.g.
+'bridge'\/'bridgeAddr' torn down directly) — never implicitly as a side
+effect of one tap going down.
 -}
 tap :: Reporter Report -> Track' (Binary "ip") -> Tap -> Op
 tap r ip t =
     withBinary ip ipLinkCommand (AddTap t) $ \add ->
-        op "linux-tap" (deps [bridge r ip t.tapBridge]) $ \actions ->
+        op "linux-tap" nodeps $ \actions ->
             actions
                 { help = "creates tap device " <> t.tapName <> " on bridge " <> t.tapBridge.bridgeName
                 , ref = mkRef "linux-tap" (t.tapBridge.bridgeName, t.tapName)
                 , prelim = skipIfLinkExists t.tapName
-                , up = add r' >> attach r' >> Binary.untrackedExec ipLinkCommand (SetUp t.tapName) "" r'
+                , up = ensureBridge >> add r' >> attach r' >> Binary.untrackedExec ipLinkCommand (SetUp t.tapName) "" r'
                 , down = Binary.untrackedExec ipLinkCommand (DeleteLink t.tapName) "" r'
                 }
   where
     r' = contramap (RunIpLink (AddTap t)) r
     attach r'' = Binary.untrackedExec ipLinkCommand (SetMaster t.tapName t.tapBridge) "" r''
+    ensureBridge = do
+        ok <- upTree silent (pure . runIdentity) (bridge r ip t.tapBridge)
+        unless ok (throwIO (userError ("linux-tap: failed to bring up bridge " <> Text.unpack t.tapBridge.bridgeName)))
 
 {- | Assigns an IPv4 address to an already-existing 'Bridge' (e.g. so the host
 side of a test network has something to route SSH traffic through to a

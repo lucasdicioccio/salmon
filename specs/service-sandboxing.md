@@ -6,7 +6,7 @@ committed plan.
 ## Problem
 
 Every service recipe in this repo today (`PgBouncer.setup`, `Nginx.setup`,
-`SreBox.Postgrest.setupPostgrest`, and the "budgetz"-style app instances
+`SreBox.Postgrest.setupPostgrest`, and the "internaltool"-style app instances
 sketched in `specs/pg-ha-control-plane.md`) runs as a plain
 `Systemd.systemdService` unit: a `[Service]` stanza with `User`/`Group`/
 `WorkingDirectory`/`ExecStart` and nothing else — `Systemd.Service`
@@ -16,7 +16,7 @@ The only *heavier* isolation option this project has is
 namespace by default, its own lifecycle/pull/build machinery).
 
 That leaves a wide gap on the isolation spectrum for exactly the case the
-[[pg-ha control plane]] spec's app-instances (`budgetz.a.0`, `postgrest.b`,
+[[pg-ha control plane]] spec's app-instances (`internaltool.a.0`, `postgrest.b`,
 ...) sit in: several independent, mutually-untrusting-ish app instances
 sharing a machine (the "shared tier" from that spec), each with its own
 pg-user/secret/connstring, where "plain systemd service, wide open to the
@@ -44,7 +44,7 @@ default**. Reasoning:
 
 - **A costs nothing new.** Every existing service recipe already routes
   through `Systemd.systemdService` — adding hardening fields to
-  `Systemd.Service` benefits `Nginx`/`PgBouncer`/`Postgrest`/budgetz
+  `Systemd.Service` benefits `Nginx`/`PgBouncer`/`Postgrest`/internaltool
   immediately, with no new dependency to install, detect, or version-pin.
   For a same-machine "shared tier" deployment where the main worry is one
   app instance reading another's secret file or binding another's port,
@@ -212,7 +212,7 @@ own small PR (touch the 3–4 call sites, thread `noHardening` through)
 before building anything Tier-A-consuming on top.
 
 A concrete "shared tier app instance" profile, for the pg-ha spec's
-budgetz-instance recipe to use once it exists:
+internaltool-instance recipe to use once it exists:
 
 ```haskell
 appInstanceHardening :: Hardening
@@ -334,7 +334,7 @@ insufficient for some concrete case.
    `cabal build`+existing tests still pass.
 2. Write `appInstanceHardening` (or similar) and apply it by hand to one
    real service (e.g. `PgBouncer.setup`'s call site, or once it exists, the
-   budgetz-instance recipe from `specs/pg-ha-control-plane.md`) — hand-test
+   internaltool-instance recipe from `specs/pg-ha-control-plane.md`) — hand-test
    that the service still starts and does its job with `ProtectSystem=
    strict`/`ReadWritePaths=`/etc. actually applied, not just that it
    compiles.

@@ -31,12 +31,14 @@ systemdService r systemctl t cfg =
     withCommand (DaemonReload cfg.config_scope) $ \reload ->
         withCommand (Enable cfg.config_scope cfg.config_target) $ \enable ->
             withCommand (Up cfg.config_scope cfg.config_target) $ \up ->
-                op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
-                    actions
-                        { help = "installs a systemd-unit and up it"
-                        , ref = mkRef "systemd-unit" cfg.config_target
-                        , up = reload >> enable >> up
-                        }
+                withCommand (Stop cfg.config_scope cfg.config_target) $ \stop ->
+                    op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
+                        actions
+                            { help = "installs a systemd-unit and up it"
+                            , ref = mkRef "systemd-unit" cfg.config_target
+                            , up = reload >> enable >> up
+                            , down = stop
+                            }
   where
     r' cmd = contramap (CallSystemCtl cmd) r
     withCommand cmd f =
@@ -93,6 +95,7 @@ data SystemCtlCall
     = DaemonReload Scope
     | Enable Scope UnitTarget
     | Up Scope UnitTarget
+    | Stop Scope UnitTarget
     deriving (Show)
 
 callSystemctl :: Command "systemctl" SystemCtlCall
@@ -101,6 +104,7 @@ callSystemctl = Command go
     go (DaemonReload sc) = proc "systemctl" (scopeArgs sc <> ["daemon-reload"])
     go (Enable sc u) = proc "systemctl" (scopeArgs sc <> ["enable", Text.unpack u])
     go (Up sc u) = proc "systemctl" (scopeArgs sc <> ["restart", Text.unpack u])
+    go (Stop sc u) = proc "systemctl" (scopeArgs sc <> ["stop", Text.unpack u])
 
 -------------------------------------------------------------------------------
 

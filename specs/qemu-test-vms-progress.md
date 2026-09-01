@@ -9,6 +9,53 @@ Work on this branch is being committed incrementally as it lands (see
 `git log`); this doc may still lag the latest working-tree state by a
 change or two at any given moment.
 
+## 0.3 Headline: fixed the flake — two real teardown bugs, both pre-existing (2026-09-08)
+
+Following a flake reported in §0.2 (Postgres replication VM test timing out
+only inside the full 20-test suite, not standalone): the actual cause was
+found by inspecting the live machine rather than guessing from logs — `ps`
+showed **6 orphaned `qemu-system-x86_64` processes** left running from
+earlier interrupted/crashed test runs, eating ~3GB RAM and real CPU, which
+starved the timing-sensitive replication test under full-suite load.
+Cleaning them up and rerunning made the flake disappear, but the real fix
+was finding *why* teardown wasn't cleaning them up — two separate,
+pre-existing bugs, neither introduced by §0.2's privilege work:
+
+1. **`LinuxBridge.tap` declared the shared bridge as its own graph
+   dependency** (`deps [bridge ...]`). `downTree`'s "release a predecessor
+   once its last dependent is torn down" rule is correct in general (the
+   directory/two-files case documented in CLAUDE.md) but wrong here: the
+   bridge is explicitly meant to persist across many taps/VMs coming and
+   going, and each tap's `downTree` call has no visibility into *other*
+   taps still relying on the same bridge (different process, different
+   traversal). Result: tearing down any single VM deleted the shared
+   bridge out from under every other still-running VM, leaving their taps
+   `NO-CARRIER` — directly observed on the live machine (`ip link show
+   salmontest0` → "Device does not exist" while several taps sat orphaned).
+   Fixed by dropping the graph dependency entirely and instead running
+   `bridge`'s own `Op` via a *nested* `upTree` inside `tap`'s `up` (same
+   accepted "nested traversal, check the `Bool`, `throwIO` if `False`"
+   pattern as `PostgresMigrations.remoteMigrateOpaqueSetup` —
+   `howto-ops.md` §5) — brings the bridge up as a precondition without
+   ever making it *this* tap's own teardown-reachable predecessor.
+2. **`Systemd.systemdService` never actually set a `down` action at all**
+   — it defaulted to `Extension`'s no-op, silently contradicting
+   `Qemu.hs`'s own module haddock, which already claimed "down goes
+   through plain `systemctl stop`". This is *why* the orphaned VMs existed
+   in the first place: every single `withVmAt` teardown, even a clean,
+   successful one, left the qemu process running forever — `down` deleted
+   the tap and the unit file (via `configContents`'s own real `down`) but
+   never stopped the service itself. Fixed by adding a `Stop` `SystemCtlCall`
+   and wiring `down = stop` — confirmed via `ps`/`systemctl --user
+   list-units` immediately after a test run: no leftover process, no
+   leftover unit file, where before there reliably was one of each per
+   `withVmAt` call.
+
+Confirmed via `ps`/`ip link`/`systemctl --user list-units` before and
+after: the full 20-test suite (`cabal test salmon-ops-recipes`) passed
+clean twice in a row post-fix (168s, 186s), leaving zero qemu processes
+and zero unit files behind either time — no flake recurrence.
+
 ## 0.2 Headline: the whole tier runs unprivileged now, no `sudo` at all (2026-09-01/08)
 
 Following up on §4's privilege open question: dropped the requirement that

@@ -159,27 +159,27 @@ before `systemctl start` ever runs.
 
 ```haskell
 appNs :: NetNs
-appNs = NetNs "ns-budgetz-a-0"
+appNs = NetNs "ns-internaltool-a-0"
 
 wgIfaceOp :: Op
-wgIfaceOp = WireGuard.iface reporter ipTrack "wg-budgetz-a-0" (Ipv4Cidr "10.66.0.2" 32)
+wgIfaceOp = WireGuard.iface reporter ipTrack "wg-internaltool-a-0" (Ipv4Cidr "10.66.0.2" 32)
     -- ...peer/key setup as any other WireGuardVpn.hs-style recipe already does...
 
 pinnedOp :: Op
 pinnedOp =
     Systemd.systemdService reporter systemctl trackConfig cfg
-        `inject` NetNamespace.moveInterface reporter ipTrack appNs "wg-budgetz-a-0" wgIfaceOp
+        `inject` NetNamespace.moveInterface reporter ipTrack appNs "wg-internaltool-a-0" wgIfaceOp
         `inject` defaultRouteInsideNs
   where
     defaultRouteInsideNs =
-        Routes.route reporter (wrapCommand appNs Routes.ipcommand |> asTrack) (Routes.Route Routes.Default "wg-budgetz-a-0" Nothing)
+        Routes.route reporter (wrapCommand appNs Routes.ipcommand |> asTrack) (Routes.Route Routes.Default "wg-internaltool-a-0" Nothing)
         -- ^ pseudocode: see §2's note that Routes.route needs a small parameter
         -- change before this composes as cleanly as sketched
-    cfg = /* Systemd.Config with service_network_namespace = Just "/run/netns/ns-budgetz-a-0" */
+    cfg = /* Systemd.Config with service_network_namespace = Just "/run/netns/ns-internaltool-a-0" */
 ```
 
 The app instance's own binary needs no awareness of any of this — it just
-opens sockets normally; the kernel only ever shows it `wg-budgetz-a-0` (plus
+opens sockets normally; the kernel only ever shows it `wg-internaltool-a-0` (plus
 loopback). No policy-routing rule to get subtly wrong, no fwmark to leak
 across a recipe boundary.
 
@@ -196,7 +196,7 @@ of abstraction rather than over-fit to one caller.
 
 - **DNS resolution inside the namespace**: `ip netns exec` bind-mounts
   `/etc/netns/<name>/*` over `/etc/*` if present — so a pinned app needing
-  working DNS resolution needs `/etc/netns/ns-budgetz-a-0/resolv.conf`
+  working DNS resolution needs `/etc/netns/ns-internaltool-a-0/resolv.conf`
   written (a plain `FS.filecontents` op, nothing new needed) pointing at a
   resolver actually reachable from inside the namespace (not necessarily
   the host's own `/etc/resolv.conf` contents, if that resolver is only

@@ -13,7 +13,7 @@ We want to host a service (multiple services, eventually) on top of:
   `pg.b`, machine.ab.1 is the mirror image),
 - pgbouncer in front of each cluster, pointed at whichever side currently
   holds the primary role,
-- app instances (PostgREST-style, plus the user's own "budgetz" service) that
+- app instances (PostgREST-style, plus the user's own "internaltool" service) that
   need their own pg users/roles/secrets/CORS/rate-limit settings, sat behind
   the bouncers,
 - a front load balancer (or a small HA pair of them) fronting the bouncers
@@ -32,7 +32,7 @@ Sketch (as given):
  └──────────┬──────────┘        └──────────┬──────────┘
       bouncer.a                       bouncer.b
             │  (crossed: every app instance can reach either bouncer)
-   budgetz.a.0  budgetz.b.0  budgetz.a.1  budgetz.b.1  postgrest.b  control-plane
+   internaltool.a.0  internaltool.b.0  internaltool.a.1  internaltool.b.1  postgrest.b  control-plane
             └──────────────────────┬──────────────────────┘
                                    LB ── DNS
 ```
@@ -54,7 +54,7 @@ below is new work:
 | bouncer.a / bouncer.b | `Salmon.Builtin.Nodes.PgBouncer` — takes plain host/port/dbname/user/password, deliberately decoupled from how the upstream cluster was provisioned |
 | LB | `Salmon.Builtin.Nodes.Nginx` — vhost list → upstream group, reverse proxy. Nothing HA (keepalived/VRRP) for "load-balancer(s)" plural yet |
 | DNS | `SreBox.MicroDNS`, `SreBox.DNSRegistration` |
-| app instance (budgetz/postgrest shape: pg-user, secret, connstring, systemd unit, pushed to a remote box) | `SreBox.Postgrest` is the exact template — build the "budgetz" recipe by mirroring its `PostgrestSetup`/`setupPostgrest` shape, not by generalizing it prematurely (see `[[recipe_key_exchange_agnostic]]`-style convention: pass in pre-provisioned secrets, don't invent a transport) |
+| app instance (internaltool/postgrest shape: pg-user, secret, connstring, systemd unit, pushed to a remote box) | `SreBox.Postgrest` is the exact template — build the "internaltool" recipe by mirroring its `PostgrestSetup`/`setupPostgrest` shape, not by generalizing it prematurely (see `[[recipe_key_exchange_agnostic]]`-style convention: pass in pre-provisioned secrets, don't invent a transport) |
 | seed → directive → ops, long-running convergence | `Salmon.Builtin.CommandLine.execCommandOrSeed`, `Salmon.Actions.Serve` (`World`/`Epoch`/`NodeState`) |
 | declaring "which pg cluster/user/db" | `SreBox.PostgresInit`, `Postgres.CreateDB`/`CreateUser`/etc. |
 
@@ -243,7 +243,7 @@ data ControlPlaneSeed
     = ControlPlaneSeed
     { cp_tier :: Tier
     , cp_pair :: ClusterSeed              -- previous-state-aware, see above
-    , cp_app_instances :: [AppInstanceSeed]  -- budgetz.a.0, budgetz.b.0, ...
+    , cp_app_instances :: [AppInstanceSeed]  -- internaltool.a.0, internaltool.b.0, ...
     , cp_postgrest :: [PostgrestSeed]
     , cp_lb :: LbSeed
     , cp_dns :: DnsSeed
@@ -268,7 +268,7 @@ data ControlPlaneSpec
 
 `gen :: ControlPlaneSeed -> IO ControlPlaneSpec` is where all the "unfold
 one seed into machines/clusters/bouncers/..." fan-out happens — e.g.
-deriving each `budgetz.X.N` instance's pg-user name from `X`/`N`
+deriving each `internaltool.X.N` instance's pg-user name from `X`/`N`
 deterministically, deriving bouncer upstream lists from `cps_pair` +
 `bouncerUpstream` above, deriving the LB's vhost upstream list from the
 concrete app-instance ports. This step is pure fan-out/derivation logic,
@@ -322,12 +322,12 @@ Two independently-shippable pieces, not one:
 - **Monitoring stack**: Prometheus + node_exporter + something for alerts
   (Alertmanager? a hosted service?) — needs a decision before §5 can be
   more than a stub.
-- **"Budgetz" vs. generic app-instance**: is `SreBox.Postgrest` close enough
-  to fork/mirror directly, or does budgetz need meaningfully different
+- **"Internaltool" vs. generic app-instance**: is `SreBox.Postgrest` close enough
+  to fork/mirror directly, or does internaltool need meaningfully different
   shape (its own migrations, non-PostgREST HTTP surface, different secret
   set)? Affects whether §4's `AppInstanceSeed` is its own new module or a
   thin renaming of `PostgrestSeed`.
-- **Cross-wiring in the diagram** (every `budgetz.X.N` reaching *both*
+- **Cross-wiring in the diagram** (every `internaltool.X.N` reaching *both*
   bouncers, not just its "own" one): intentional (read replicas via the
   standby-side bouncer, or just redundancy), or a simplification in the
   sketch? Determines whether `AppInstanceSetup` takes one connstring or a
@@ -345,7 +345,7 @@ Two independently-shippable pieces, not one:
 2. Previous-seed state convention (§2), proven out against the §1 fixture:
    manually flip `pair_primary_side` via a state file, confirm bouncer
    config follows.
-3. `AppInstanceSeed`/budgetz recipe (§4, mirroring `SreBox.Postgrest`),
+3. `AppInstanceSeed`/internaltool recipe (§4, mirroring `SreBox.Postgrest`),
    wired to a single `PgClusterPair` — no LB/DNS/monitoring yet.
 4. LB + DNS wiring (§6, DNS-fanout option first).
 5. `ControlPlaneSeed` (§4) tying 1–4 together end to end for one tier.
