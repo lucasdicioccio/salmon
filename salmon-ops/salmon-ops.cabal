@@ -35,6 +35,7 @@ library
                    , Salmon.Builtin.Nodes.Bash
                    , Salmon.Builtin.Nodes.Binary
                    , Salmon.Builtin.Nodes.Cabal
+                   , Salmon.Builtin.Nodes.Capabilities
                    , Salmon.Builtin.Nodes.Certificates
                    , Salmon.Builtin.Nodes.Continuation
                    , Salmon.Builtin.Nodes.CronTask
@@ -46,12 +47,14 @@ library
                    , Salmon.Builtin.Nodes.Git
                    , Salmon.Builtin.Nodes.User
                    , Salmon.Builtin.Nodes.Keys
+                   , Salmon.Builtin.Nodes.LinuxBridge
                    , Salmon.Builtin.Nodes.Netfilter
                    , Salmon.Builtin.Nodes.Nginx
                    , Salmon.Builtin.Nodes.Npm
                    , Salmon.Builtin.Nodes.PgBouncer
                    , Salmon.Builtin.Nodes.Postgres
                    , Salmon.Builtin.Nodes.Podman
+                   , Salmon.Builtin.Nodes.Qemu
                    , Salmon.Builtin.Nodes.Rsync
                    , Salmon.Builtin.Nodes.Routes
                    , Salmon.Builtin.Nodes.Self
@@ -115,6 +118,21 @@ executable salmon-postgres-replication-fixture
     hs-source-dirs:   fixtures
     build-depends:    base >=4.16.3.0
                     , mtl
+                    , salmon-core
+                    , salmon-ops
+                    , text
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , ScopedTypeVariables
+
+executable salmon-qemu-host-setup-fixture
+    main-is:          QemuHostSetupFixture.hs
+    hs-source-dirs:   fixtures
+    build-depends:    base >=4.16.3.0
+                    , directory
+                    , mtl
+                    , filepath
                     , salmon-core
                     , salmon-ops
                     , text

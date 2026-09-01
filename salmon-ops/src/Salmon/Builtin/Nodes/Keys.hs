@@ -92,15 +92,27 @@ data SSHCertificateAuthority = SSHCertificateAuthority {sshcaKey :: SSHKeyPair}
 
 -------------------------------------------------------------------------------
 
+newtype Principal = Principal {getPrincipal :: Text}
+    deriving (Eq, Ord, Show)
+
+{- | @principals@ must be non-empty: modern OpenSSH (checked against 9.6p1)
+rejects a certificate with an empty principal list outright at auth time
+(@Certificate lacks principal list@), even with a matching
+@TrustedUserCAKeys@ — it is not, as older docs/folklore suggest, "valid for
+any principal" (hand-validated 2026-08-20, see
+@specs/qemu-test-vms-progress.md@). Pass the login name(s) this key is
+meant to authenticate as, e.g. @[Principal "root"]@.
+-}
 signKey ::
     Reporter Report ->
     Track' (Binary "ssh-keygen") ->
     SSHCertificateAuthority ->
     KeyIdentifier ->
+    [Principal] ->
     SSHKeyPair ->
     Op
-signKey r bin ca kid keyToSign =
-    withBinary bin sshsign (SignKey (ca, kid, (privateKeyPath keyToSign))) $ \up ->
+signKey r bin ca kid principals keyToSign =
+    withBinary bin sshsign (SignKey (ca, kid, principals, (privateKeyPath keyToSign))) $ \up ->
         op "ssh-ca-sign" (deps preds) $ \actions ->
             actions
                 { help = "sign a SSH-key"
@@ -115,11 +127,19 @@ signKey r bin ca kid keyToSign =
         , sshKey r bin ca.sshcaKey
         ]
 
-newtype SignKey = SignKey (SSHCertificateAuthority, KeyIdentifier, FilePath)
+newtype SignKey = SignKey (SSHCertificateAuthority, KeyIdentifier, [Principal], FilePath)
 
 sshsign :: Command "ssh-keygen" SignKey
-sshsign = Command $ \(SignKey (ca, kid, certifiedPath)) ->
-    proc "ssh-keygen" ["-s", privateKeyPath ca.sshcaKey, "-I", Text.unpack kid.getIdentifier, certifiedPath]
+sshsign = Command $ \(SignKey (ca, kid, principals, certifiedPath)) ->
+    proc "ssh-keygen" $
+        [ "-s"
+        , privateKeyPath ca.sshcaKey
+        , "-I"
+        , Text.unpack kid.getIdentifier
+        , "-n"
+        , Text.unpack (Text.intercalate "," (map getPrincipal principals))
+        , certifiedPath
+        ]
 
 data JWKKeyPair = JWKKeyPair {jwkKeyType :: KeyType, jwkKeyDir :: FilePath, jwkKeyName :: Text}
     deriving (Eq, Ord, Show)

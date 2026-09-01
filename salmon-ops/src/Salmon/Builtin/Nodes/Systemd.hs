@@ -28,15 +28,17 @@ systemdService ::
     Config ->
     Op
 systemdService r systemctl t cfg =
-    withCommand DaemonReload $ \reload ->
-        withCommand (Enable cfg.config_target) $ \enable ->
-            withCommand (Up cfg.config_target) $ \up ->
-                op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
-                    actions
-                        { help = "installs a systemd-unit and up it"
-                        , ref = mkRef "systemd-unit" cfg.config_target
-                        , up = reload >> enable >> up
-                        }
+    withCommand (DaemonReload cfg.config_scope) $ \reload ->
+        withCommand (Enable cfg.config_scope cfg.config_target) $ \enable ->
+            withCommand (Up cfg.config_scope cfg.config_target) $ \up ->
+                withCommand (Stop cfg.config_scope cfg.config_target) $ \stop ->
+                    op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
+                        actions
+                            { help = "installs a systemd-unit and up it"
+                            , ref = mkRef "systemd-unit" cfg.config_target
+                            , up = reload >> enable >> up
+                            , down = stop
+                            }
   where
     r' cmd = contramap (CallSystemCtl cmd) r
     withCommand cmd f =
@@ -46,7 +48,7 @@ systemdService r systemctl t cfg =
          in
             withBinary systemctl callSystemctl cmd g
     unitPath :: FilePath
-    unitPath = "/etc/systemd/system" </> Text.unpack cfg.config_target
+    unitPath = cfg.config_unit_dir </> Text.unpack cfg.config_target
 
     configContents :: Op
     configContents = filecontents $ FileContents unitPath (render_config cfg)
@@ -57,7 +59,7 @@ unit file of its own.
 -}
 restartService :: Reporter Report -> Track' (Binary "systemctl") -> UnitTarget -> Op
 restartService r systemctl target =
-    withCommand (Up target) $ \restart ->
+    withCommand (Up System target) $ \restart ->
         op "systemd-restart-service" nodeps $ \actions ->
             actions
                 { help = "restarts " <> target
@@ -73,24 +75,48 @@ restartService r systemctl target =
          in
             withBinary systemctl callSystemctl cmd g
 
+{- | A system-wide unit (@systemctl@ against @\/etc\/systemd\/system@, the
+original and still-default behavior) vs. a per-user one (@systemctl --user@
+against a caller-resolved @~\/.config\/systemd\/user@, see 'Config's
+@config_unit_dir@) — the latter needs no root at all, which is what
+"Salmon.Builtin.Nodes.Qemu" uses for its VM units so the whole Layer-3 test
+tier (see @specs/qemu-test-vms.md@) doesn't need it either. Systemd itself
+rejects @User=@\/@Group=@ directives in a user-manager unit (a user session
+can't switch users), so 'render_service' omits them for 'User' scope.
+-}
+data Scope = System | User
+    deriving (Eq, Show)
+
+scopeArgs :: Scope -> [String]
+scopeArgs System = []
+scopeArgs User = ["--user"]
+
 data SystemCtlCall
-    = DaemonReload
-    | Enable UnitTarget
-    | Up UnitTarget
+    = DaemonReload Scope
+    | Enable Scope UnitTarget
+    | Up Scope UnitTarget
+    | Stop Scope UnitTarget
     deriving (Show)
 
 callSystemctl :: Command "systemctl" SystemCtlCall
 callSystemctl = Command go
   where
-    go DaemonReload = proc "systemctl" ["daemon-reload"]
-    go (Enable u) = proc "systemctl" ["enable", Text.unpack u]
-    go (Up u) = proc "systemctl" ["restart", Text.unpack u]
+    go (DaemonReload sc) = proc "systemctl" (scopeArgs sc <> ["daemon-reload"])
+    go (Enable sc u) = proc "systemctl" (scopeArgs sc <> ["enable", Text.unpack u])
+    go (Up sc u) = proc "systemctl" (scopeArgs sc <> ["restart", Text.unpack u])
+    go (Stop sc u) = proc "systemctl" (scopeArgs sc <> ["stop", Text.unpack u])
 
 -------------------------------------------------------------------------------
 
 data Config
     = Config
-    { config_target :: UnitTarget
+    { config_scope :: Scope
+    , config_unit_dir :: FilePath
+    -- ^ @\/etc\/systemd\/system@ for 'System' scope; a caller-resolved
+    -- @~\/.config\/systemd\/user@ for 'User' scope (this module has no
+    -- opinion on how @~@ is found — same "resolve before constructing"
+    -- rule as 'Salmon.Builtin.Nodes.Qemu.resolveKernelInitrd').
+    , config_target :: UnitTarget
     , config_unit :: Unit
     , config_service :: Service
     , config_install :: Install
@@ -101,7 +127,7 @@ render_config c =
     Text.unlines
         [ render_unit c.config_unit
         , ""
-        , render_service c.config_service
+        , render_service c.config_scope c.config_service
         , ""
         , render_install c.config_install
         ]
@@ -153,25 +179,42 @@ data Service
     , service_working_dir :: FilePath
     }
 
-render_service :: Service -> Text
-render_service s =
-    Text.unlines
-        [ "[Service]"
-        , "Type=" <> render_type s.service_type
-        , "User=" <> s.service_user
-        , "Group=" <> s.service_group
-        , "UMask=" <> s.service_umask
-        , "ExecStart=" <> render_start s.service_execStart
-        , "Restart=" <> render_restart s.service_restart
-        , "KillMode=" <> render_killmode s.service_killmode
-        , "WorkingDirectory=" <> Text.pack s.service_working_dir
-        ]
+render_service :: Scope -> Service -> Text
+render_service scope s =
+    Text.unlines $
+        mconcat
+            [ ["[Service]", "Type=" <> render_type s.service_type]
+            , case scope of
+                System -> ["User=" <> s.service_user, "Group=" <> s.service_group]
+                User -> []
+            ,
+                [ "UMask=" <> s.service_umask
+                , "ExecStart=" <> render_start s.service_execStart
+                , "Restart=" <> render_restart s.service_restart
+                , "KillMode=" <> render_killmode s.service_killmode
+                , "WorkingDirectory=" <> Text.pack s.service_working_dir
+                ]
+            ]
   where
     render_type :: ServiceType -> Text
     render_type Simple = "simple"
 
+    -- | Quotes an arg that contains whitespace, per systemd's own
+    -- @ExecStart=@ word-splitting rules (docs: @systemd.service(5)@ §
+    -- "Command lines"): unlike @Text.unwords@ alone, a bare multi-word
+    -- string here (e.g. a kernel @-append@ value) would otherwise be split
+    -- back into several separate argv entries by systemd's parser when the
+    -- unit file is loaded — this bit "Salmon.Builtin.Nodes.Qemu" for
+    -- exactly that reason (hand-validated 2026-08-20, see
+    -- @specs/qemu-test-vms-progress.md@).
     render_start :: Start -> Text
-    render_start s = Text.unwords (Text.pack s.start_path : s.start_args)
+    render_start s = Text.unwords (Text.pack s.start_path : map quoteArg s.start_args)
+
+    quoteArg :: Text -> Text
+    quoteArg a
+        | Text.any (`elem` (" \t\"'$`\\" :: String)) a =
+            "\"" <> Text.replace "\"" "\\\"" (Text.replace "\\" "\\\\" a) <> "\""
+        | otherwise = a
 
     render_restart :: Restart -> Text
     render_restart OnFailure = "on-failure"
