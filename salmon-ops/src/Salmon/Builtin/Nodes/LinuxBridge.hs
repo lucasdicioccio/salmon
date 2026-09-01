@@ -28,7 +28,7 @@ import qualified Data.Text.Encoding.Error as Text
 
 import GHC.IO.Exception (ExitCode (..))
 import System.Process.ByteString (readCreateProcessWithExitCode)
-import System.Process.ListLike (proc)
+import System.Process.ListLike (CreateProcess, proc)
 
 -------------------------------------------------------------------------------
 data Report
@@ -150,63 +150,97 @@ data IpLinkCommand
     | DelAddr DevName Cidr
     deriving (Show)
 
+{- | Every @ip@ invocation here goes through @capsh@ instead of calling
+@ip@ directly — hand-validated 2026-09-08 against a real unprivileged run
+(see @specs/qemu-test-vms-progress.md@): granting @ip@ itself
+@cap_net_admin@ via plain @setcap@ does not work. @strace@ on a failing
+@ip link add@ showed @ip@ unconditionally calling
+@capset({...}, {effective=0, permitted=0, inheritable=0})@ at startup —
+iproute2 drops its *entire* capability set on exec and only trusts the
+*ambient* set to re-populate what it needs, which a plain file-capability
+grant can never populate (the kernel zeroes ambient for any exec of a
+"privileged" file, by design — see @capabilities(7)@). The fix is a
+launcher that already holds the capability (via file caps, granted on
+@capsh@ itself — see 'Salmon.Builtin.Nodes.Capabilities.grantCapabilities')
+raising it into its *own* ambient set (which requires it in both the
+permitted and — separately, since exec does not carry a file's inheritable
+bit into the new process's own inheritable set — the inheritable set
+first) before exec'ing the real, uncapped @ip@; ambient capabilities do
+propagate across exec and are what iproute2 actually honors. Works
+identically whether the caller is real root (whose permitted set is
+already full, so @--inh=@/@--addamb=@ trivially succeed with no file
+capability needed at all) or an unprivileged user with the capability
+granted on @capsh@ — so this wrapping is unconditional, not privilege-mode
+-specific.
+-}
 ipLinkCommand :: Command "ip" IpLinkCommand
-ipLinkCommand = Command $ \cmd -> case cmd of
+ipLinkCommand = Command $ \cmd -> capshAmbient (rawIpArgs cmd)
+
+rawIpArgs :: IpLinkCommand -> [String]
+rawIpArgs cmd = case cmd of
     (AddBridge br) ->
-        proc
-            "ip"
-            [ "link"
-            , "add"
-            , "name"
-            , Text.unpack br.bridgeName
-            , "type"
-            , "bridge"
-            ]
+        [ "link"
+        , "add"
+        , "name"
+        , Text.unpack br.bridgeName
+        , "type"
+        , "bridge"
+        ]
     (AddTap t) ->
-        proc "ip" $
-            mconcat
-                [ ["tuntap", "add", "dev", Text.unpack t.tapName, "mode", "tap"]
-                , maybe [] (\owner -> ["user", Text.unpack owner]) t.tapOwner
-                ]
+        mconcat
+            [ ["tuntap", "add", "dev", Text.unpack t.tapName, "mode", "tap"]
+            , maybe [] (\owner -> ["user", Text.unpack owner]) t.tapOwner
+            ]
     (SetMaster name br) ->
-        proc
-            "ip"
-            [ "link"
-            , "set"
-            , Text.unpack name
-            , "master"
-            , Text.unpack br.bridgeName
-            ]
+        [ "link"
+        , "set"
+        , Text.unpack name
+        , "master"
+        , Text.unpack br.bridgeName
+        ]
     (SetUp name) ->
-        proc
-            "ip"
-            [ "link"
-            , "set"
-            , Text.unpack name
-            , "up"
-            ]
+        [ "link"
+        , "set"
+        , Text.unpack name
+        , "up"
+        ]
     (DeleteLink name) ->
-        proc
-            "ip"
-            [ "link"
-            , "delete"
-            , Text.unpack name
-            ]
+        [ "link"
+        , "delete"
+        , Text.unpack name
+        ]
     (AddAddr name cidr) ->
-        proc
-            "ip"
-            [ "addr"
-            , "add"
-            , Text.unpack (cidrText cidr)
-            , "dev"
-            , Text.unpack name
-            ]
+        [ "addr"
+        , "add"
+        , Text.unpack (cidrText cidr)
+        , "dev"
+        , Text.unpack name
+        ]
     (DelAddr name cidr) ->
-        proc
-            "ip"
-            [ "addr"
-            , "del"
-            , Text.unpack (cidrText cidr)
-            , "dev"
-            , Text.unpack name
-            ]
+        [ "addr"
+        , "del"
+        , Text.unpack (cidrText cidr)
+        , "dev"
+        , Text.unpack name
+        ]
+
+{- | Runs @ip \<args\>@ via @capsh --inh=cap_net_admin --addamb=cap_net_admin
+-- -c "ip ...quoted args..."@ — see 'ipLinkCommand's haddock for why. The
+inner @-c@ string is re-split by a shell, so each arg is individually
+single-quoted first (same "one Haskell string, one remote/shell token"
+concern as "Test.Harness".'Test.Harness.quoteForRemoteShell', just for a
+local shell instead of ssh's).
+-}
+capshAmbient :: [String] -> CreateProcess
+capshAmbient args =
+    proc
+        "capsh"
+        [ "--inh=cap_net_admin"
+        , "--addamb=cap_net_admin"
+        , "--"
+        , "-c"
+        , unwords (map shellQuote ("ip" : args))
+        ]
+
+shellQuote :: String -> String
+shellQuote s = "'" <> concatMap (\c -> if c == '\'' then "'\\''" else [c]) s <> "'"

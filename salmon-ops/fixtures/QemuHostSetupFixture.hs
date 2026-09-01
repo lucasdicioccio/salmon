@@ -3,15 +3,19 @@
 
 {- | One-time, privileged host setup for the Layer 3 qemu test tier (see
 @specs/qemu-test-vms.md@\/@specs/qemu-test-vms-progress.md@): grants
-"Salmon.Builtin.Nodes.Capabilities" to @ip@\/@qemu-system-x86_64@ and hands
-ownership of each rootfs's @etc\/ssh@ subtree to an unprivileged user, so
-that routine test runs (@cabal test salmon-ops-recipes@,
+"Salmon.Builtin.Nodes.Capabilities" to @capsh@\/@qemu-system-x86_64@ and
+hands ownership of each rootfs's @etc\/ssh@ subtree to an unprivileged
+user, so that routine test runs (@cabal test salmon-ops-recipes@,
 "Test.Harness".'Test.Harness.hasVmPrivileges') no longer need to run as
-root at all — only this one-off setup does.
+root at all — only this one-off setup does. Grants @capsh@, not @ip@
+itself: see "Salmon.Builtin.Nodes.LinuxBridge".'Salmon.Builtin.Nodes.LinuxBridge.ipLinkCommand's
+haddock for why a direct grant on @ip@ doesn't work (iproute2
+unconditionally drops its own capability set at startup and only trusts
+the ambient set, which only @capsh@-mediated exec can populate).
 
 Meant to be run once per machine, as root (or under @sudo@), and again
-after any @apt upgrade@ of @iproute2@\/@qemu-system-x86@ (package upgrades
-replace the binary, wiping its capabilities — see
+after any @apt upgrade@ of @libcap2-bin@\/@qemu-system-x86@ (package
+upgrades replace the binary, wiping its capabilities — see
 "Salmon.Builtin.Nodes.Capabilities".'Salmon.Builtin.Nodes.Capabilities.grantCapabilities'
 haddock) or after debootstrapping a new rootfs:
 
@@ -42,8 +46,8 @@ import Salmon.Op.OpGraph (overlaid)
 import Salmon.Reporter (reportPrint)
 
 -- | The capabilities each binary needs — see 'Salmon.Builtin.Nodes.Capabilities.grantCapabilities'.
-ipCapabilities, qemuCapabilities :: [Capabilities.Capability]
-ipCapabilities = ["cap_net_admin"]
+capshCapabilities, qemuCapabilities :: [Capabilities.Capability]
+capshCapabilities = ["cap_net_admin"]
 qemuCapabilities = ["cap_dac_override", "cap_chown", "cap_fowner"]
 
 -- | Grants a resolved binary path its needed capabilities, or dies loudly
@@ -73,11 +77,11 @@ main = do
     args <- getArgs
     case args of
         (user : rootfsPaths) -> do
-            ipOp <- capabilityOp "ip" ipCapabilities
+            capshOp <- capabilityOp "capsh" capshCapabilities
             qemuOp <- capabilityOp "qemu-system-x86_64" qemuCapabilities
             let owner = User.Owner (User.User (Text.pack user)) (User.Group (Text.pack user))
                 sshOps = map (sshDirOwnershipOp owner) rootfsPaths
-                allOps = foldl' overlaid ipOp (qemuOp : sshOps)
+                allOps = foldl' overlaid capshOp (qemuOp : sshOps)
             ok <- upTree reportPrint (pure . runIdentity) allOps
             unless ok exitFailure
         _ -> die "usage: salmon-qemu-host-setup-fixture <unprivileged-user> <rootfs-path>..."

@@ -95,6 +95,13 @@ data VmConfig
     , vm_user :: Systemd.User
     , vm_group :: Systemd.Group
     , vm_working_dir :: FilePath
+    , vm_systemd_scope :: Systemd.Scope
+    , vm_unit_dir :: FilePath
+    -- ^ @\/etc\/systemd\/system@ for 'Systemd.System' scope, or a
+    -- caller-resolved @~\/.config\/systemd\/user@ for 'Systemd.User' scope
+    -- (needs no root at all — see "Test.Harness".'Test.Harness.withVmAt',
+    -- the only 'Systemd.User'-scope caller so far) — same "resolve before
+    -- constructing" rule as 'resolveKernelInitrd' above.
     }
 
 {- | Finds the single @vmlinuz-*@\/@initrd.img-*@ pair a
@@ -141,13 +148,21 @@ setup r rTap systemctl qemuBin ip cfg =
     trackConfig = Track $ \_ -> op "qemu-setup" (deps [justInstall qemuBin]) id
 
     systemdCfg :: Systemd.Config
-    systemdCfg = Systemd.Config unitName unit svc install
+    systemdCfg = Systemd.Config cfg.vm_systemd_scope cfg.vm_unit_dir unitName unit svc install
 
     unitName :: Systemd.UnitTarget
     unitName = "salmon-vm-" <> cfg.vm_name <> ".service"
 
+    -- | @network-online.target@/@multi-user.target@ only exist in the
+    -- system manager — a 'Systemd.User'-scope unit orders against and is
+    -- wanted by the user session's own @default.target@ instead.
     unit :: Systemd.Unit
-    unit = Systemd.Unit ("Salmon-managed qemu VM: " <> cfg.vm_name) "network-online.target"
+    unit = Systemd.Unit ("Salmon-managed qemu VM: " <> cfg.vm_name) afterTarget
+
+    afterTarget :: Systemd.UnitTarget
+    afterTarget = case cfg.vm_systemd_scope of
+        Systemd.System -> "network-online.target"
+        Systemd.User -> "default.target"
 
     svc :: Systemd.Service
     svc = Systemd.Service Systemd.Simple cfg.vm_user cfg.vm_group "0022" start Systemd.OnFailure Systemd.Process cfg.vm_working_dir
@@ -156,7 +171,12 @@ setup r rTap systemctl qemuBin ip cfg =
     start = Systemd.Start "/usr/bin/qemu-system-x86_64" (qemuArgs cfg)
 
     install :: Systemd.Install
-    install = Systemd.Install "multi-user.target"
+    install = Systemd.Install wantedByTarget
+
+    wantedByTarget :: Systemd.UnitTarget
+    wantedByTarget = case cfg.vm_systemd_scope of
+        Systemd.System -> "multi-user.target"
+        Systemd.User -> "default.target"
 
 -- | The command-line qemu is started with — see @specs/qemu-test-vms.md@ §2 for the design.
 qemuArgs :: VmConfig -> [Text]

@@ -70,9 +70,10 @@ import qualified Salmon.Builtin.Nodes.LinuxBridge as LinuxBridge
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Qemu as Qemu
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
+import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Reporter (Reporter, ReporterM (..))
 import System.CPUTime (getCPUTime)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, findExecutable, getPermissions, setOwnerExecutable, setPermissions)
+import System.Directory (XdgDirectory (XdgConfig), canonicalizePath, createDirectoryIfMissing, findExecutable, getPermissions, getXdgDirectory, setOwnerExecutable, setPermissions)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -305,8 +306,16 @@ mode), or the two binaries this tier shells out to for privileged
 operations have been granted just enough Linux capability to do those
 operations as an unprivileged user —
 
-* @ip@ needs @cap_net_admin@ to create\/configure the bridge\/tap devices
-  ('LinuxBridge.bridge'\/'LinuxBridge.tap').
+* @capsh@ (not @ip@ itself!) needs @cap_net_admin@, to raise it into its
+  own ambient set before exec'ing the real, uncapped @ip@ —
+  'Salmon.Builtin.Nodes.LinuxBridge.ipLinkCommand's haddock has the full
+  story, but the short version: granting @cap_net_admin@ to @ip@ directly
+  does not work, because iproute2 unconditionally drops its entire
+  effective\/permitted\/inheritable capability set at startup and only
+  trusts the *ambient* set afterwards — which a plain file-capability grant
+  can never populate (the kernel zeroes ambient for any exec of a
+  "privileged" file). Hand-validated 2026-09-08 via @strace@ on a real
+  failing, then real passing, unprivileged @ip link add@.
 * @qemu-system-x86_64@ needs @cap_dac_override@ (plus @cap_chown@\/
   @cap_fowner@ for guest-side @chown@\/@chmod@ over 9p) so its
   @security_model=passthrough@ export can still act on behalf of whichever
@@ -315,10 +324,11 @@ operations as an unprivileged user —
   unprivileged qemu could only ever access files it happens to already own
   on the host, which a real multi-user rootfs is not. Root granted this
   for free; a plain unprivileged process needs the capability instead of
-  full root, not on top of it.
+  full root, not on top of it. Unlike @ip@, qemu does not appear to
+  self-drop its capabilities this way — it's a plain file-capability grant.
 
-Both are one-time host setup (@setcap cap_net_admin+eip $(command -v ip)@,
-@setcap cap_dac_override,cap_chown,cap_fowner+eip $(command -v
+Both are one-time host setup (@setcap cap_net_admin+eip $(command -v
+capsh)@, @setcap cap_dac_override,cap_chown,cap_fowner+eip $(command -v
 qemu-system-x86_64)@), same spirit as the KVM group membership already
 assumed — see @specs/qemu-test-vms-progress.md@ for the exact commands run
 to validate this. @\/dev\/kvm@ access itself is deliberately not re-checked
@@ -333,7 +343,7 @@ hasVmPrivileges = do
         then pure True
         else
             (&&)
-                <$> hasCapability "cap_net_admin" "ip"
+                <$> hasCapability "cap_net_admin" "capsh"
                 <*> hasCapability "cap_dac_override" "qemu-system-x86_64"
 
 {- | Whether @exe@ (looked up on @PATH@) has been granted @capName@ via
@@ -466,6 +476,7 @@ withVmAt addr rootfs act =
         tapName <- freshTapName
         mac <- freshMac
         user <- testHarnessUser
+        unitDir <- getXdgDirectory XdgConfig "systemd/user"
         (kernel, initrd) <- Qemu.resolveKernelInitrd rootfs
         (reporter, _) <- capture
         (reporterTap, _) <- capture
@@ -487,10 +498,15 @@ withVmAt addr rootfs act =
                     , Qemu.vm_user = user
                     , Qemu.vm_group = user
                     , Qemu.vm_working_dir = tmpdir
+                    , Qemu.vm_systemd_scope = Systemd.User
+                    , Qemu.vm_unit_dir = unitDir
                     }
             vmOp = Qemu.setup reporter reporterTap systemctlTrack qemuBinTrack ipTrack cfg
-        ok <- runUp vmOp
-        unless ok (fail "withVmAt: starting the sandbox VM failed")
+        (traceReporter, readBack) <- capture
+        ok <- upTree traceReporter nat vmOp
+        unless ok $ do
+            trace <- readBack
+            fail ("withVmAt: starting the sandbox VM failed:\n" <> unlines (map show trace))
         let access = VmAccess (Ssh.Remote "root" addr) identityFile
         waitForSsh access
         pure (access, vmOp)

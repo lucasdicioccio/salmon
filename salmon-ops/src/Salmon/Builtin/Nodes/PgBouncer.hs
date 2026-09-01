@@ -149,7 +149,7 @@ setup r systemctl pgbouncerBin cfg =
     trackConfig = Track $ \_ -> op "pgbouncer-setup" (deps [configFiles cfg, justInstall pgbouncerBin]) id
 
     systemdCfg :: Systemd.Config
-    systemdCfg = Systemd.Config "pgbouncer.service" unit svc install
+    systemdCfg = Systemd.Config Systemd.System "/etc/systemd/system" "pgbouncer.service" unit svc install
 
     unit :: Systemd.Unit
     unit = Systemd.Unit "PgBouncer (from Salmon)" "network-online.target"

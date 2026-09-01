@@ -73,6 +73,9 @@ ip = installWith "iproute2"
 setcap :: Installer "setcap"
 setcap = installWith "libcap2-bin"
 
+capsh :: Installer "capsh"
+capsh = installWith "libcap2-bin"
+
 wg :: Installer "wg"
 wg = installWith "wireguard"
 

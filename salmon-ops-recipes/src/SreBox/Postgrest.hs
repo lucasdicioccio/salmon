@@ -213,7 +213,7 @@ systemdPostgrest r paths setup =
                     }
 
     config :: Systemd.Config
-    config = Systemd.Config tgt unit service install
+    config = Systemd.Config Systemd.System "/etc/systemd/system" tgt unit service install
 
     tgt :: Systemd.UnitTarget
     tgt = "salmon-postgrest-" <> setup.postgrest_setup_serviceName <> ".service"
