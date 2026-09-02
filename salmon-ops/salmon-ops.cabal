@@ -73,6 +73,7 @@ library
                    , Salmon.Reporter
     build-depends:    base >=4.16.3.0
                     , aeson
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , contravariant

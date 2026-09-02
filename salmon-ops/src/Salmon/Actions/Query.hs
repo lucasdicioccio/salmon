@@ -18,12 +18,15 @@ module Salmon.Actions.Query (
 
     -- * Resolving selectors against an expanded graph
     pathedRefs,
+    pathedNodes,
     resolveSelectors,
 
     -- * Applying an exclusion set
     forceSkip,
 
     -- * Human-readable output
+    shortRef,
+    renderAnnotated,
     printAnnotated,
 
     -- * Plans
@@ -34,13 +37,17 @@ module Salmon.Actions.Query (
 import Control.Comonad.Cofree (Cofree (..))
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64.URL as Base64.URL
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Foldable (toList, traverse_)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import GHC.Generics (Generic)
 import Numeric (showHex)
@@ -50,7 +57,7 @@ import Salmon.Builtin.Extension (Extension (..), Op)
 import Salmon.Op.Actions
 import Salmon.Op.Graph (Graph)
 import Salmon.Op.OpGraph
-import Salmon.Op.Ref (Ref)
+import Salmon.Op.Ref (Ref, unRef)
 import Salmon.Actions.UpDown (Requirement (Skippable))
 
 -------------------------------------------------------------------------------
@@ -89,15 +96,19 @@ matchPattern (Lit l : ps) (seg : rest) = l == seg && matchPattern ps rest
 
 -- | Every node's path (as segments, root-to-node) paired with the 'Ref' found there.
 pathedRefs :: Cofree Graph Op -> [([Text], Ref)]
-pathedRefs = go []
+pathedRefs = map (\(path, ref, _help) -> (path, ref)) . pathedNodes
+
+-- | Like 'pathedRefs', but also carries each node's 'Salmon.Builtin.Extension.help' text.
+pathedNodes :: Cofree Graph Op -> [([Text], Ref, Text)]
+pathedNodes = go []
   where
-    go :: [Text] -> Cofree Graph Op -> [([Text], Ref)]
+    go :: [Text] -> Cofree Graph Op -> [([Text], Ref, Text)]
     go pfx (x :< g) =
         case x.node of
             Actionless -> concatMap (go pfx) (toList g)
             Actions act ->
                 let path = pfx <> [shorthand act]
-                 in (path, act.extension.ref) : concatMap (go path) (toList g)
+                 in (path, act.extension.ref, act.extension.help) : concatMap (go path) (toList g)
 
 -------------------------------------------------------------------------------
 
@@ -137,16 +148,68 @@ forceSkip refs = fmap (fmap rewrite)
 
 -------------------------------------------------------------------------------
 
--- | Mirrors 'Salmon.Actions.Help.printHelpCograph', annotating matched paths.
-printAnnotated :: Cofree Graph Op -> Set Ref -> Set Ref -> IO ()
-printAnnotated cograph selected excluded =
-    traverse_ Text.putStrLn [line path ref | (path, ref) <- pathedRefs cograph]
+{- | A short, stable, content-derived tag for a 'Ref' (the base64url encoding
+of its own text, truncated to 8 characters) — the same "git abbreviated SHA"
+idea, used to disambiguate colliding path text in 'renderAnnotated' without
+resorting to an arbitrary, traversal-order-dependent counter.
+-}
+shortRef :: Ref -> Text
+shortRef = Text.take 8 . Text.decodeUtf8 . Base64.URL.encode . Text.encodeUtf8 . unRef
+
+{- | Mirrors 'Salmon.Actions.Help.printHelpCograph', annotating matched paths.
+
+@dedupe@: the same 'Ref' can occur at several paths (a shared predecessor); when
+'True', only its first-encountered occurrence is printed instead of one line per
+path. @showDescriptions@: when 'True', a node's 'Salmon.Builtin.Extension.help'
+text (if non-empty) is printed on its own indented line right below the node's
+path, prefixed with @"  # "@.
+
+Path text alone doesn't always identify a node: sibling nodes built with the
+same 'Salmon.Builtin.Extension.ShortHand' (e.g. several migration files each
+going through the same @pg-script@ builder) render the exact same path text
+while carrying distinct 'Ref's. Every occurrence of such a colliding path
+(post-dedupe) is suffixed with @" #" <> 'shortRef' ref@ — stable across runs
+and independent of traversal order, unlike an incrementing counter — so the
+repeats are visibly distinguished instead of looking like accidental
+duplicates.
+-}
+printAnnotated :: Cofree Graph Op -> Set Ref -> Set Ref -> Bool -> Bool -> IO ()
+printAnnotated cograph selected excluded dedupe showDescriptions =
+    traverse_ Text.putStrLn (renderAnnotated cograph selected excluded dedupe showDescriptions)
+
+-- | Pure line-rendering behind 'printAnnotated' (kept separate so it's testable without IO capture).
+renderAnnotated :: Cofree Graph Op -> Set Ref -> Set Ref -> Bool -> Bool -> [Text]
+renderAnnotated cograph selected excluded dedupe showDescriptions =
+    concatMap render entries
   where
-    line path ref = pathText path <> annotation ref
+    entries
+        | dedupe = dedupeBy (\(_, ref, _) -> ref) (pathedNodes cograph)
+        | otherwise = pathedNodes cograph
+
+    -- how many (post-dedupe) entries render to this exact path text; >1 means it needs disambiguating.
+    pathCounts :: Map Text Int
+    pathCounts = Map.fromListWith (+) [(pathText path, 1 :: Int) | (path, _, _) <- entries]
+
+    render :: ([Text], Ref, Text) -> [Text]
+    render (path, ref, help) = line : descLine
+      where
+        key = pathText path
+        collides = Map.findWithDefault 0 key pathCounts > 1
+        line = key <> (if collides then " #" <> shortRef ref else "") <> annotation ref
+        descLine = ["  # " <> help | showDescriptions && not (Text.null help)]
+
     annotation ref
         | ref `Set.member` excluded = " [excluded]"
         | ref `Set.member` selected = " [selected]"
         | otherwise = ""
+
+dedupeBy :: (Ord b) => (a -> b) -> [a] -> [a]
+dedupeBy f = go Set.empty
+  where
+    go _ [] = []
+    go seen (x : xs)
+        | f x `Set.member` seen = go seen xs
+        | otherwise = x : go (Set.insert (f x) seen) xs
 
 -------------------------------------------------------------------------------
 

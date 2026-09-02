@@ -73,7 +73,11 @@ instance ToJSON RunCommand
 
 data QueryCommand
     = -- | @query show@: annotate the directive's tree with [selected]/[excluded].
-      QueryShow !QuerySelection
+      -- The 'Bool's are dedupe (print each 'Salmon.Op.Ref.Ref' only once, at
+      -- its first-encountered path; on by default, @--no-dedupe@ turns it
+      -- off) and descriptions (@--descriptions@: print each node's help text
+      -- on an indented line below its path).
+      QueryShow !QuerySelection !Bool !Bool
     | -- | @query plan@: emit a 'Query.Plan' (JSON) for @run up --plan@.
       QueryPlan !QuerySelection !Bool
     | -- | @query extract-directive@: recover an embedded directive from a
@@ -147,7 +151,17 @@ queryCommandParser =
         QuerySelection
             <$> many (Text.pack <$> strOption (long "select" <> Options.Applicative.metavar "PATTERN" <> Options.Applicative.help "May repeat; union. Omitted entirely = everything."))
             <*> many (Text.pack <$> strOption (long "exclude" <> Options.Applicative.metavar "PATTERN" <> Options.Applicative.help "May repeat; union, then subtracted from the selection."))
-    showP = QueryShow <$> selectionP
+    showP =
+        QueryShow
+            <$> selectionP
+            <*> (not <$> switch
+                    ( long "no-dedupe"
+                        <> Options.Applicative.help "Print every path a node is reachable from, instead of only its first-encountered one (dedupe is on by default)."
+                    ))
+            <*> switch
+                ( long "descriptions"
+                    <> Options.Applicative.help "Print each node's help text on an indented line (\"  # ...\") below its path."
+                )
     planP =
         QueryPlan
             <$> selectionP
@@ -237,11 +251,11 @@ execCommandOrSeedWith serveR r genBase traceBase cmd = do
             void $ withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
         (Run RunServe) -> do
             void $ Serve.serve serveR r parseSeedArgs genBase traceBase stdin
-        (Query (QueryShow (QuerySelection sel exc))) -> do
+        (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
                 let (selected, excluded) = Query.resolveSelectors cograph sel exc
-                Query.printAnnotated cograph selected excluded
+                Query.printAnnotated cograph selected excluded dedupe showDescriptions
         (Query (QueryPlan (QuerySelection sel exc) embedDirective)) -> do
             void $ withGraphAndBytes $ \dirBytes op -> do
                 let cograph = runIdentity (expand op)

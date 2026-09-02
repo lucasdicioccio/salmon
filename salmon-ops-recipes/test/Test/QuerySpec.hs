@@ -32,6 +32,8 @@ tests =
         , testCase "resolveSelectors: a shared predecessor is one Ref, matched at both its paths" sharedPredecessorRefs
         , testCase "resolveSelectors: empty --select means everything, minus --exclude" selectDefaultsToEverything
         , testCase "forceSkip makes upTree report Skip for the excluded node, Eval for the rest" forceSkipSkipsOnlyExcluded
+        , testCase "pathedNodes carries each node's help text alongside its path/Ref" pathedNodesCarriesHelp
+        , testCase "renderAnnotated tags same-path, distinct-Ref siblings with a stable shortRef so they aren't mistaken for duplicates" renderAnnotatedDisambiguatesSameTextSiblings
         ]
 
 patternMatching :: IO ()
@@ -103,3 +105,50 @@ forceSkipSkipsOnlyExcluded = do
     let evals = [() | Eval act <- reports, isApex act]
     assertEqual "apex reported Skip exactly once (the other occurrence dedupes as Redundant)" 1 (length skips)
     assertEqual "apex never reported Eval" 0 (length evals)
+
+-- | 'query show --dedupe' collapses a shared node's repeated occurrences down
+-- to its first-encountered path; 'query show --descriptions' needs each
+-- node's help text alongside it, which is what 'pathedNodes' adds over
+-- 'pathedRefs'.
+pathedNodesCarriesHelp :: IO ()
+pathedNodesCarriesHelp = do
+    let shared = op "shared" nodeps $ \x -> x{ref = mkRef "leaf" ("shared" :: Text), help = "the shared leaf"}
+        a = op "a" (deps [shared]) $ \x -> x{ref = mkRef "mid" ("a" :: Text)}
+        b = op "b" (deps [shared]) $ \x -> x{ref = mkRef "mid" ("b" :: Text)}
+        root = op "root" (deps [a, b]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        entries = Query.pathedNodes cograph
+        sharedEntries = [(path, h) | (path, r, h) <- entries, r == mkRef "leaf" ("shared" :: Text)]
+    assertEqual "the shared Ref still occurs at both its paths" 2 (length sharedEntries)
+    assertBool "each occurrence carries the node's help text" (all ((== "the shared leaf") . snd) sharedEntries)
+    let dedupedRefs = go Set.empty [r | (_, r, _) <- entries]
+        go _ [] = []
+        go seen (r : rest)
+            | r `Set.member` seen = go seen rest
+            | otherwise = r : go (Set.insert r seen) rest
+    assertEqual "dedupe-by-Ref keeps one occurrence per distinct node" 4 (length dedupedRefs)
+
+-- | Two siblings built with the same 'ShortHand' (e.g. two migration files
+-- both going through a "pg-script" builder) render identical path text but
+-- carry distinct 'Ref's — 'query show's disambiguation tags every occurrence
+-- of a colliding path with a stable, content-derived 'Query.shortRef' of its
+-- own node (not an arbitrary, traversal-order-dependent counter), so the
+-- lines don't look like an accidental exact duplicate and the tag doesn't
+-- shift around if the graph is walked in a different order.
+renderAnnotatedDisambiguatesSameTextSiblings :: IO ()
+renderAnnotatedDisambiguatesSameTextSiblings = do
+    let refA = mkRef "migration" ("a" :: Text)
+        refB = mkRef "migration" ("b" :: Text)
+        a = op "pg-script" nodeps $ \x -> x{ref = refA, help = "runs a"}
+        b = op "pg-script" nodeps $ \x -> x{ref = refB, help = "runs b"}
+        root = op "root" (deps [a, b]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        rendered = Query.renderAnnotated cograph Set.empty Set.empty True True
+        lineA = "/root/pg-script #" <> Query.shortRef refA
+        lineB = "/root/pg-script #" <> Query.shortRef refB
+    assertBool "shortRef tags are distinct for distinct refs" (lineA /= lineB)
+    assertBool "the first sibling's path is tagged with its own shortRef" (lineA `elem` rendered)
+    assertBool "the second sibling's path is tagged with its own shortRef" (lineB `elem` rendered)
+    assertBool "each sibling's own description follows its own tagged line" ("  # runs a" `elem` rendered && "  # runs b" `elem` rendered)
+    assertEqual "no plain, untagged occurrence of the colliding path remains" 0 (length (Prelude.filter (== "/root/pg-script") rendered))
+    assertBool "the non-colliding root path itself is left untagged" ("/root" `elem` rendered)
