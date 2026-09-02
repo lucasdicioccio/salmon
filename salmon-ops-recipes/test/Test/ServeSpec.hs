@@ -15,7 +15,8 @@ module Test.ServeSpec (tests) where
 
 import Control.Exception (throwIO)
 import Control.Monad (when)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, encode)
+import qualified Data.ByteString.Lazy as LByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -50,6 +51,14 @@ tests =
         , testCase "`only` retires the previous seed but keeps shared nodes" onlySupersedes
         , testCase "a node whose up threw is retried by the next pass" failedNodeIsRetried
         , testCase "unparseable input does not disturb the world" badInputIsInert
+        , testCase "`load` runs a file of declarations as if typed" loadRunsAScript
+        , testCase "`up-directive` declares straight from a directive file" upDirectiveDeclares
+        , testCase "`status --exclude **` hides every node" statusExcludeAllHidesEverything
+        , testCase "`history --exclude **` hides every epoch" historyExcludeAllHidesEverything
+        , testCase "`converge --select` restricted to nothing leaves a failed node untouched" convergeSelectRestricts
+        , testCase "`help` prints the command reference and touches nothing" helpPrintsReference
+        , testCase "`help TOPIC` prints a longer, topic-specific block" helpTopicIsLonger
+        , testCase "`help` with an unrecognised topic falls back to the full reference" helpUnknownTopicFallsBack
         ]
 
 -------------------------------------------------------------------------------
@@ -178,6 +187,90 @@ badInputIsInert =
         ( length [() | Serve.BadCommand _ <- reports]
         , length [() | Serve.BadSeed _ <- reports]
         )
+
+loadRunsAScript :: IO ()
+loadRunsAScript =
+    withTempDir $ \root -> do
+        let scriptPath = root </> "commands.txt"
+        writeFile scriptPath (unlines ["up a"])
+        (w, reports, _) <- runServe program root ["load " <> scriptPath]
+        assertFileExists root "a" True
+        assertAllConverged TurnUp w
+        assertEqual "loaded exactly one line" [1] [n | Serve.LoadDone _ n <- reports]
+
+upDirectiveDeclares :: IO ()
+upDirectiveDeclares =
+    withTempDir $ \root -> do
+        let directivePath = root </> "directive.json"
+        LByteString.writeFile directivePath (encode (Spec (root </> "files") ["a"]))
+        (w, _, _) <- runServe program root ["up-directive " <> directivePath]
+        assertFileExists root "a" True
+        assertAllConverged TurnUp w
+        assertEqual "one epoch, declared from a directive file" [Nothing] (fmap Serve.epochSeed w.worldHistory)
+        assertEqual
+            "history records the file, not seed args"
+            [["<directive-file>", directivePath]]
+            (fmap Serve.epochTokens w.worldHistory)
+
+statusExcludeAllHidesEverything :: IO ()
+statusExcludeAllHidesEverything =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServe program root ["up a", "status --exclude **"]
+        -- `up a`'s own auto-converge never emits a StatusReport, so the only
+        -- one here is the explicit `status` call's.
+        assertEqual "every node excluded" [0] [length xs | Serve.StatusReport xs <- reports]
+
+historyExcludeAllHidesEverything :: IO ()
+historyExcludeAllHidesEverything =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServe program root ["up a", "history --exclude **"]
+        assertEqual "every epoch excluded" [[]] [xs | Serve.HistoryReport xs <- reports]
+
+convergeSelectRestricts :: IO ()
+convergeSelectRestricts =
+    withTempDir $ \root -> do
+        attempts <- newIORef (0 :: Int)
+        (w, reports, _) <-
+            runServe (flaky attempts) root ["up a", "converge --select nope-does-not-match", "converge"]
+        assertEqual "attempted twice: the initial failure, then the unrestricted retry" 2 =<< readIORef attempts
+        assertEqual "eventually converged" [Converged] (convergences w)
+        assertEqual
+            -- the restricted pass reports True ("nothing it attempted
+            -- failed") even though the excluded node is still pending —
+            -- that's why `ConvergeStop`'s remaining-node count matters too.
+            "three passes: declare's auto-converge (fails), the restricted no-op, the unrestricted retry"
+            [False, True, True]
+            (convergeOutcomes reports)
+        assertEqual
+            "the restricted pass leaves the node pending rather than wrongly marking it converged"
+            [(0, 1), (0, 1), (0, 1)]
+            [(ndown, nup) | Serve.ConvergeStart ndown nup <- reports]
+  where
+    convergences :: World Spec Spec -> [Convergence]
+    convergences w = fmap nodeConvergence (Map.elems w.worldNodes)
+
+helpPrintsReference :: IO ()
+helpPrintsReference =
+    withTempDir $ \root -> do
+        (w, reports, _) <- runServe program root ["help"]
+        assertEqual "help declares nothing" 0 (length w.worldHistory)
+        assertEqual "exactly one HelpText report, no topic" [Nothing] [t | Serve.HelpText t <- reports]
+
+helpTopicIsLonger :: IO ()
+helpTopicIsLonger =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServe program root ["help converge", "help"]
+        let [topicLines, fullLines] = [Serve.renderReport rep | rep@Serve.HelpText{} <- reports]
+        assertBool "a topic's own text is shorter than the full reference" (length topicLines < length fullLines)
+        assertBool "a topic's text mentions its own command" (any (Text.isInfixOf "converge") topicLines)
+        assertBool "a topic's text does not repeat unrelated commands" (not (any (Text.isInfixOf "up-directive") topicLines))
+
+helpUnknownTopicFallsBack :: IO ()
+helpUnknownTopicFallsBack =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServe program root ["help there-is-no-such-topic", "help"]
+        let [unknownLines, fullLines] = [Serve.renderReport rep | rep@Serve.HelpText{} <- reports]
+        assertEqual "an unrecognised topic renders exactly like no topic at all" fullLines unknownLines
 
 -------------------------------------------------------------------------------
 
