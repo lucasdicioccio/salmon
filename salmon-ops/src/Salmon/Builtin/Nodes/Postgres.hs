@@ -296,7 +296,7 @@ grant r psql port role acl =
         op "pg-grant" (deps [dbrole]) $ \actions ->
             actions
                 { ref = mkRef "pg-grant" (roleName acl.access_role)
-                , up = up r'
+                , up = if null acl.access_rights then pure () else up r'
                 , help = Text.unwords ["grant", roleName acl.access_role]
                 }
   where
