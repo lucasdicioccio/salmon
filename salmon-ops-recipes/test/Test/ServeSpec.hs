@@ -32,7 +32,7 @@ import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.UpDown as UpDown
-import Salmon.Builtin.Extension (Extension, Op, Track', deps, nodeps, op, ref, up)
+import Salmon.Builtin.Extension (Extension, Op, Track', deps, down, nodeps, op, ref, up)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (Ref, mkRef)
@@ -50,6 +50,10 @@ tests =
         , testCase "retiring a multi-file bundle removes its shared directory cleanly" retireMultiFileBundle
         , testCase "`only` retires the previous seed but keeps shared nodes" onlySupersedes
         , testCase "a node whose up threw is retried by the next pass" failedNodeIsRetried
+        , testCase "a graph still needed for teardown survives a failed down" teardownGraphSurvives
+        , testCase "re-declaring a seed does not accumulate graphs" reDeclareDoesNotAccumulate
+        , testCase "history outlives the graph it declared" historyOutlivesTheGraph
+        , testCase "the history log is capped and says how much it dropped" historyLogIsCapped
         , testCase "unparseable input does not disturb the world" badInputIsInert
         , testCase "`load` runs a file of declarations as if typed" loadRunsAScript
         , testCase "`up-directive` declares straight from a directive file" upDirectiveDeclares
@@ -112,8 +116,11 @@ reDeclareIsNoop =
             "second declaration has nothing pending"
             [(0, 3), (0, 0)]
             (convergeStarts reports)
-        assertEqual "history keeps both declarations" 2 (length w.worldHistory)
+        assertEqual "history keeps both declarations" 2 (length w.worldLog)
         assertEqual "but they are one active seed" 1 (Map.size w.worldActive)
+        -- the superseded epoch is no longer active and none of its nodes is
+        -- on its way down, so its graph is collected rather than piling up.
+        assertEqual "and only the live graph is retained" 1 (length w.worldEpochs)
 
 retireTearsDown :: IO ()
 retireTearsDown =
@@ -121,7 +128,7 @@ retireTearsDown =
         (w, _, _) <- runServe program root ["up a", "down a"]
         assertFileExists root "a" False
         assertDirExists root False
-        assertAllConverged TurnDown w
+        assertWorldSettled w
 
 {- | Two files in one bundle share the enclosing-directory node. Tearing the
 bundle down must remove both files before that directory, or @removeDirectory@
@@ -137,7 +144,7 @@ retireMultiFileBundle =
         assertFileExists root "b" False
         assertFileExists root "c" False
         assertDirExists root False
-        assertAllConverged TurnDown w
+        assertWorldSettled w
         assertEqual "nothing failed while tearing down" [] [() | UpDown.Failed{} <- nodeReports]
 
 onlySupersedes :: IO ()
@@ -153,6 +160,9 @@ onlySupersedes =
         assertBool
             "every node converged, whichever way it is wanted"
             (all (\st -> st.nodeConvergence == Converged) (Map.elems w.worldNodes))
+        -- the retired seed's graph has nothing left to describe: the node it
+        -- alone held is down, and the shared directory belongs to `b` now.
+        assertEqual "only the surviving seed's graph is retained" 1 (length w.worldEpochs)
 
 failedNodeIsRetried :: IO ()
 failedNodeIsRetried =
@@ -174,13 +184,66 @@ failedNodeIsRetried =
     convergences :: World Spec Spec -> [Convergence]
     convergences w = fmap nodeConvergence (Map.elems w.worldNodes)
 
+{- | An epoch is collected once nothing could still walk it — so the one
+thing that must never happen is collecting the graph a teardown has not
+finished with. This is what pins 'Salmon.Actions.Serve.resettle''s ordering:
+prune before retune and the @down a@ declaration's own nodes still look
+up-and-converged, so its graph would be dropped and the retry would have
+nothing to walk.
+-}
+teardownGraphSurvives :: IO ()
+teardownGraphSurvives =
+    withTempDir $ \root -> do
+        attempts <- newIORef (0 :: Int)
+        (w1, _, _) <- runServe (flakyDown attempts) root ["up a", "down a"]
+        assertEqual "the teardown was attempted once" 1 =<< readIORef attempts
+        assertEqual "and left the node non-converged" [Errored] (convergences w1)
+        assertBool "so the graph describing it is still held" (not (null w1.worldEpochs))
+
+        attempts2 <- newIORef (0 :: Int)
+        (w2, _, _) <- runServe (flakyDown attempts2) root ["up a", "down a", "converge"]
+        assertEqual "retried by the explicit converge" 2 =<< readIORef attempts2
+        assertWorldSettled w2
+  where
+    convergences :: World Spec Spec -> [Convergence]
+    convergences w = fmap nodeConvergence (Map.elems w.worldNodes)
+
+reDeclareDoesNotAccumulate :: IO ()
+reDeclareDoesNotAccumulate =
+    withTempDir $ \root -> do
+        (w, _, _) <- runServe program root (replicate 5 "up a")
+        assertEqual "every declaration is logged" 5 (length w.worldLog)
+        assertEqual "but they describe one live graph between them" 1 (length w.worldEpochs)
+
+historyOutlivesTheGraph :: IO ()
+historyOutlivesTheGraph =
+    withTempDir $ \root -> do
+        (w, reports, _) <- runServe program root ["up a", "down a", "history"]
+        assertWorldSettled w
+        assertEqual
+            "both declarations are still listed after their graphs are gone"
+            [2]
+            [length xs | Serve.HistoryReport xs <- reports]
+
+historyLogIsCapped :: IO ()
+historyLogIsCapped =
+    withTempDir $ \root -> do
+        let overflow = 5
+        let script = replicate (Serve.worldLogLimit + overflow) "up a" <> ["history"]
+        (w, reports, _) <- runServe program root script
+        assertEqual "the log stops at the limit" Serve.worldLogLimit (length w.worldLog)
+        assertEqual
+            "and history says how much it is not showing"
+            [overflow]
+            [n | Serve.HistoryElided n <- reports]
+
 badInputIsInert :: IO ()
 badInputIsInert =
     withTempDir $ \root -> do
         (w, reports, _) <- runServe program root ["nonsense", "up", "up a"]
         assertFileExists root "a" True
         assertAllConverged TurnUp w
-        assertEqual "only the well-formed declaration made an epoch" 1 (length w.worldHistory)
+        assertEqual "only the well-formed declaration made an epoch" 1 (length w.worldLog)
         assertEqual "one unknown command, one unusable seed" (1, 1) (badCounts reports)
   where
     badCounts reports =
@@ -206,11 +269,11 @@ upDirectiveDeclares =
         (w, _, _) <- runServe program root ["up-directive " <> directivePath]
         assertFileExists root "a" True
         assertAllConverged TurnUp w
-        assertEqual "one epoch, declared from a directive file" [Nothing] (fmap Serve.epochSeed w.worldHistory)
+        assertEqual "one epoch, declared from a directive file" [Nothing] (fmap Serve.epochSeed w.worldEpochs)
         assertEqual
             "history records the file, not seed args"
             [["<directive-file>", directivePath]]
-            (fmap Serve.epochTokens w.worldHistory)
+            (fmap Serve.logTokens w.worldLog)
 
 statusExcludeAllHidesEverything :: IO ()
 statusExcludeAllHidesEverything =
@@ -253,7 +316,7 @@ helpPrintsReference :: IO ()
 helpPrintsReference =
     withTempDir $ \root -> do
         (w, reports, _) <- runServe program root ["help"]
-        assertEqual "help declares nothing" 0 (length w.worldHistory)
+        assertEqual "help declares nothing" 0 (length w.worldLog)
         assertEqual "exactly one HelpText report, no topic" [Nothing] [t | Serve.HelpText t <- reports]
 
 helpTopicIsLonger :: IO ()
@@ -285,6 +348,19 @@ flaky attempts = Track $ \spec ->
             , up = do
                 n <- atomicModifyIORef' attempts (\k -> (k + 1, k))
                 when (n == 0) $ throwIO (userError "flaky node failing on purpose")
+            }
+
+{- | The mirror of 'flaky': one node whose @down@ throws the first time, so
+the world is left holding a teardown it has not finished.
+-}
+flakyDown :: IORef Int -> Track' Spec
+flakyDown attempts = Track $ \spec ->
+    op "flaky-down" nodeps $ \actions ->
+        actions
+            { ref = mkRef "flaky-down" spec.specNames
+            , down = do
+                n <- atomicModifyIORef' attempts (\k -> (k + 1, k))
+                when (n == 0) $ throwIO (userError "flaky node refusing to go down on purpose")
             }
 
 -- | Run the serve loop over a scripted stdin, capturing both report streams.
@@ -325,6 +401,15 @@ assertAllConverged dir w = do
     check _ st = do
         assertEqual (Text.unpack st.nodeShorthand <> ": direction") dir st.nodeDirection
         assertEqual (Text.unpack st.nodeShorthand <> ": convergence") Converged st.nodeConvergence
+
+{- | A world whose seeds have all been retired and converged keeps nothing:
+the nodes are off the machine, and the graphs that described them have
+nothing left to say. @history@ is what still remembers they existed.
+-}
+assertWorldSettled :: World seed directive -> IO ()
+assertWorldSettled w = do
+    assertEqual "no node left to manage" 0 (Map.size w.worldNodes)
+    assertEqual "no graph left to walk" 0 (length w.worldEpochs)
 
 assertFileExists :: FilePath -> String -> Bool -> IO ()
 assertFileExists root name expected = do

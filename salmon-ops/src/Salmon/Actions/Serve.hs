@@ -10,17 +10,18 @@ a per-node 'NodeState' saying which 'Direction' that node is wanted in and
 whether it has 'Converged' there yet.
 
 The unit of input is a /declaration/: a seed, plus what to do with it (see
-'ServeCommand'). Declaring a seed appends an 'Epoch' to an append-only
-history (keeping the seed, the directive it configured to, and the graph it
+'ServeCommand'). Declaring a seed appends an 'Epoch' to 'worldEpochs'
+(keeping the seed, the directive it configured to, and the graph it
 evaluated to /at that moment/ — a later declaration of the same seed
 re-evaluates and appends a fresh epoch rather than mutating the old one) and
 updates the set of /active/ seeds. From the active set everything else is
 derived:
 
   * a node in some active seed's graph is wanted 'TurnUp';
-  * a node this world has ever seen and no active seed still asks for is
-    wanted 'TurnDown' — this is why retired epochs' graphs are kept, they
-    are the only remaining description of how to tear those nodes down;
+  * a node this world still tracks and no active seed still asks for is
+    wanted 'TurnDown' — this is why a retired epoch's graph is kept until
+    its nodes are down, it being the only remaining description of how to
+    tear them down;
   * flipping a node's direction resets it to 'Pending', so it gets applied
     again in the new direction.
 
@@ -34,6 +35,38 @@ whatever depended on it" containment therefore behave exactly as they do for
 @run up@ / @run down@; the only thing this module adds on top is the memory
 of what has already been done. Nodes that end a pass 'Errored' or 'Blocked'
 stay non-converged and are retried by the next pass.
+
+That memory is bounded, which matters for a process meant to stay up: an
+epoch's graph is kept only for as long as some future pass could still walk
+it, and 'resettle' collects the rest after every declaration and every
+convergence. See 'prune' for the retention rule. What survives collection is
+'worldLog', one small line per declaration ever made, which is what
+@history@ prints — so the record of /what was declared/ outlives the graphs
+that were declared.
+
+todo: supervision — "keep this running", not just "make this so".
+
+Every node here is a one-shot idempotent action: 'Salmon.Builtin.Extension.up'
+runs to completion and returns. Nothing in this loop owns a long-lived child
+process, which is why 'Salmon.Builtin.Nodes.Systemd.systemdService' has to
+delegate the whole problem to systemd (its @up@ is @systemctl restart@, which
+returns immediately and leaves systemd holding the process).
+
+The pieces to do it here are mostly already present, and want an /event
+source/ rather than a new execution model: a node's 'prelim' answers
+@Skippable@ when its process is alive and @Required@ when it is not; @up@
+spawns; @down@ signals the process group; a @SIGCHLD@ marks that node
+non-'Converged' and the next 'converge' pass restarts it. Restart backoff
+needs no new control flow either — @Skippable@ already means "not now", and
+'Errored' nodes are already retried next pass. What is missing is somewhere
+to keep the per-service supervision state (live pid and pgid, restart count
+and its window, next-eligible-restart time, and a give-up latch so a
+crash-looping service stops being retried); that belongs in a table beside
+'worldNodes' keyed by 'Ref', not in 'NodeState', which is shared with the
+one-shot path that has no notion of a running process.
+
+See @specs\/salmon-as-init.md@, which needs exactly this and describes the
+'Salmon.Builtin.Nodes.Systemd.Service'-shaped node that would declare it.
 -}
 module Salmon.Actions.Serve (
     -- * Running
@@ -54,6 +87,8 @@ module Salmon.Actions.Serve (
     emptyWorld,
     Epoch (..),
     EpochId (..),
+    LogEntry (..),
+    worldLogLimit,
     NodeState (..),
     Direction (..),
     Convergence (..),
@@ -136,9 +171,10 @@ newtype EpochId = EpochId {unEpochId :: Int}
     deriving (Show, Eq, Ord)
 
 {- | One declaration, and everything derived from it at the time it was made.
-Kept forever in 'worldHistory' (the graph of a retired seed is what a
-teardown is walked over), so this is deliberately a snapshot: re-declaring
-the same seed appends a new epoch instead of updating this one.
+Held in 'worldEpochs' (the graph of a retired seed is what a teardown is
+walked over), so this is deliberately a snapshot: re-declaring the same seed
+appends a new epoch instead of updating this one. Dropped by 'prune' once no
+pass could still walk it; 'worldLog' remembers that it happened.
 -}
 data Epoch seed directive = Epoch
     { epochId :: !EpochId
@@ -161,18 +197,45 @@ data Epoch seed directive = Epoch
     , epochRefs :: Map Ref (ShortHand, Text)
     }
 
+{- | What @history@ prints, and all that is kept of an 'Epoch' once 'prune'
+has collected it. Deliberately small — no graph, no seed, no directive —
+which is what makes it affordable to keep long after the epoch itself is
+gone. 'logRefs' is the one non-trivial field: it is 'epochRefs'' key set,
+kept so @history --select@ still answers for a collected epoch.
+-}
+data LogEntry = LogEntry
+    { logEpoch :: !EpochId
+    , logDeclaration :: !Declaration
+    , logTokens :: [String]
+    , logRefs :: !(Set Ref)
+    }
+    deriving (Show)
+
+-- | How many declarations 'worldLog' remembers.
+worldLogLimit :: Int
+worldLogLimit = 1000
+
 data World seed directive = World
     { worldNextId :: !Int
-    , -- | append-only, newest first
-      worldHistory :: [Epoch seed directive]
+    , -- | the epochs whose graphs a future pass could still walk — the
+      -- active ones, plus retired ones that still describe a node to turn
+      -- down. Newest first; collected by 'prune'.
+      worldEpochs :: [Epoch seed directive]
+    , -- | one line per declaration ever made, newest first, outliving the
+      -- epoch's graph. Capped at 'worldLogLimit'.
+      worldLog :: [LogEntry]
+    , -- | declarations that have fallen off the end of 'worldLog'
+      worldLogDropped :: !Int
     , -- | seeds currently declared up, by 'epochKey'
       worldActive :: Map ByteString EpochId
-    , -- | every node ever seen, unified by 'Ref'
+    , -- | every node still being managed or still to be torn down, unified
+      -- by 'Ref'. A node that has converged 'TurnDown' is finished and is
+      -- dropped, so a fully retired world settles empty.
       worldNodes :: Map Ref NodeState
     }
 
 emptyWorld :: World seed directive
-emptyWorld = World 0 [] Map.empty Map.empty
+emptyWorld = World 0 [] [] 0 Map.empty Map.empty
 
 -------------------------------------------------------------------------------
 
@@ -359,6 +422,9 @@ data Report
     | StatusReport ![(Ref, NodeState)]
     | -- | epoch, declaration, still active, argv
       HistoryReport ![(EpochId, Declaration, Bool, [String])]
+    | -- | declarations too old to still be in 'worldLog'; emitted after a
+      -- 'HistoryReport' so @history@ never silently claims to be complete
+      HistoryElided !Int
     | -- | world nodes annotated against a resolved selection: selected, excluded
       QueryReport ![(Ref, NodeState)] !(Set Ref) !(Set Ref)
     | -- | @help@: the full reference ('Nothing', or a 'Topic' 'lookupTopic'
@@ -415,6 +481,7 @@ renderReport rep =
         StatusReport xs -> "serve: nodes:" : fmap renderNode (sortOn statusOrder xs)
         HistoryReport [] -> ["serve: no seed declared yet"]
         HistoryReport xs -> "serve: seeds:" : fmap renderEpochLine xs
+        HistoryElided n -> ["serve: " <> tshow n <> " earlier declaration(s) elided"]
         QueryReport [] _ _ -> ["serve: no nodes"]
         QueryReport xs sel exc -> "serve: nodes:" : fmap (renderQueryNode sel exc) (sortOn statusOrder xs)
         HelpText mtopic ->
@@ -614,9 +681,11 @@ statusHelp :: [Text]
 statusHelp =
     [ "serve: status [--select PATTERN]... [--exclude PATTERN]..."
     , ""
-    , "  Lists every node this world has ever seen, unified by Ref across every seed that shares"
-    , "  it, with its wanted direction (up/down) and convergence (Pending/Converged/Errored/"
-    , "  Blocked)."
+    , "  Lists every node this world is still concerned with, unified by Ref across every seed"
+    , "  that shares it, with its wanted direction (up/down) and convergence (Pending/Converged/"
+    , "  Errored/Blocked). A node that has finished going down is dropped, so a world whose seeds"
+    , "  have all been retired and converged lists nothing at all — `history` still shows they"
+    , "  were declared."
     , ""
     , "  With no flags at all, lists everything, exactly as before --select/--exclude existed"
     , "  (including nodes still on their way down). With --select/--exclude given, narrows the"
@@ -628,12 +697,15 @@ historyHelp :: [Text]
 historyHelp =
     [ "serve: history [--select PATTERN]... [--exclude PATTERN]..."
     , ""
-    , "  Lists every declaration ever made (an append-only log — a retired seed's epoch is kept,"
-    , "  since its graph is the only remaining description of how to tear it down), newest last,"
-    , "  each tagged [active]/[retired] and showing the original argv (or, for a directive-file"
-    , "  declaration, the file path)."
+    , "  Lists the declarations made, newest last, each tagged [active]/[retired] and showing the"
+    , "  original argv (or, for a directive-file declaration, the file path). This is a log of"
+    , "  what was asked for, kept long after the graph a declaration built has been collected —"
+    , "  so a [retired] line here does not mean that graph is still held in memory."
     , ""
-    , "  With --select/--exclude, only epochs that declared at least one node in the resolved"
+    , "  The log is capped; if older declarations have fallen off the end, a line after the"
+    , "  listing says how many."
+    , ""
+    , "  With --select/--exclude, only declarations that named at least one node in the resolved"
     , "  selection (see `help select`) are shown."
     ]
 
@@ -728,9 +800,11 @@ serve r nodeReporter parseSeed configure program h = do
                         w <- readIORef world
                         let (selr, excr) = resolveWorldSelectors w sel
                         let allowed = selr `Set.difference` excr
-                        let matches :: Epoch seed directive -> Bool
-                            matches ep = sel == noSelection || not (Set.null (Set.intersection (Map.keysSet ep.epochRefs) allowed))
+                        let matches :: LogEntry -> Bool
+                            matches e = sel == noSelection || not (Set.null (Set.intersection e.logRefs allowed))
                         runReporter r (HistoryReport (historyLinesMatching matches w))
+                        when (w.worldLogDropped > 0) $
+                            runReporter r (HistoryElided w.worldLogDropped)
                         pure True
                     QueryCmd sel -> do
                         w <- readIORef world
@@ -749,7 +823,7 @@ serve r nodeReporter parseSeed configure program h = do
                         pure True
                     Clear -> do
                         w <- readIORef world
-                        writeIORef world (retune w{worldActive = Map.empty})
+                        writeIORef world (resettle w{worldActive = Map.empty})
                         runReporter r (Cleared (Map.size w.worldActive))
                         converge world Nothing
                         pure True
@@ -848,7 +922,7 @@ serve r nodeReporter parseSeed configure program h = do
     -- a declaration is never itself scoped by a 'Selection').
     commitEpoch :: IORef (World seed directive) -> World seed directive -> Declaration -> Epoch seed directive -> IO ()
     commitEpoch world w0 decl ep = do
-        let w1 = retune (record decl ep w0)
+        let w1 = resettle (record decl ep w0)
         writeIORef world w1
         runReporter r $
             Declared
@@ -888,6 +962,9 @@ serve r nodeReporter parseSeed configure program h = do
                         (recorder world TurnUp restriction)
                         nat
                         (forest (upOps w))
+        -- this pass is what turns nodes converged-'TurnDown', so it is also
+        -- where the graphs that described them stop being needed.
+        modifyIORef' world resettle
         w' <- readIORef world
         let (rup, rdown) = pendingCounts w'
         runReporter r (ConvergeStop (okDown && okUp) (rup + rdown))
@@ -937,17 +1014,46 @@ serve r nodeReporter parseSeed configure program h = do
 
 -------------------------------------------------------------------------------
 
--- | Appends the epoch to the history and applies it to the active set.
+{- | Adds the epoch (and its 'worldLog' line) and applies it to the active
+set. 'worldNextId' only ever grows, so an id in the log stays meaningful
+after 'prune' has collected the epoch it names.
+-}
 record :: Declaration -> Epoch seed directive -> World seed directive -> World seed directive
 record decl ep w =
     w
         { worldNextId = w.worldNextId + 1
-        , worldHistory = ep : w.worldHistory
+        , worldEpochs = ep : w.worldEpochs
+        , worldLog = kept
+        , worldLogDropped = w.worldLogDropped + length dropped
         , worldActive = case decl of
             Add -> Map.insert ep.epochKey ep.epochId w.worldActive
             Replace -> Map.singleton ep.epochKey ep.epochId
             Remove -> Map.delete ep.epochKey w.worldActive
         }
+  where
+    entry =
+        LogEntry
+            { logEpoch = ep.epochId
+            , logDeclaration = ep.epochDeclaration
+            , logTokens = ep.epochTokens
+            , logRefs = Map.keysSet ep.epochRefs
+            }
+    (kept, dropped) = splitAt worldLogLimit (entry : w.worldLog)
+
+{- | Re-derives the world after anything that could have changed it: first
+'retune' (every node's wanted 'Direction', from the active seeds), then
+'prune' (drop what is finished).
+
+The order is load-bearing and is the one way to get this wrong. 'prune' asks
+which nodes are still on their way down, and immediately after a @down@
+declaration is 'record'ed those nodes still look 'TurnUp' and 'Converged' —
+so pruning first would collect the very graph the teardown is about to be
+walked over. 'retune' is what flips them to 'TurnDown'\/'Pending', after
+which 'prune' keeps their epoch. (@Test.ServeSpec@'s "a graph still needed
+for teardown survives" case pins this.)
+-}
+resettle :: World seed directive -> World seed directive
+resettle = prune . retune
 
 {- | Re-derives every node's wanted 'Direction' from the active seeds. A node
 whose direction is unchanged keeps its 'Convergence'; one that just flipped
@@ -964,17 +1070,18 @@ retune w =
     desired =
         Set.unions
             [ Map.keysSet ep.epochRefs
-            | ep <- w.worldHistory
+            | ep <- w.worldEpochs
             , Set.member ep.epochId activeIds
             ]
 
-    -- every node ever seen; history is newest-first and 'Map.unions' is
-    -- left-biased, so a node's metadata comes from the latest graph it was in.
+    -- every node the retained epochs still describe; the list is newest-first
+    -- and 'Map.unions' is left-biased, so a node's metadata comes from the
+    -- latest graph it was in.
     known :: Map Ref (EpochId, ShortHand, Text)
     known =
         Map.unions
             [ fmap (\(sh, hlp) -> (ep.epochId, sh, hlp)) ep.epochRefs
-            | ep <- w.worldHistory
+            | ep <- w.worldEpochs
             ]
 
     adjust r (eid, sh, hlp) =
@@ -984,6 +1091,54 @@ retune w =
                     | st.nodeDirection == dir ->
                         st{nodeShorthand = sh, nodeHelp = hlp, nodeEpoch = eid}
                 _ -> NodeState sh hlp dir Pending eid
+
+{- | Drops what is finished, which is what keeps a long-lived @serve@
+bounded. Two rules that have to agree with each other:
+
+  * a node converged 'TurnDown' is done — it is off the machine and nothing
+    will be done to it again — so it leaves 'worldNodes';
+  * an epoch is kept only while some pass could still walk it: it is active
+    (so 'upOps' selects it) or one of its refs is still to be turned down (so
+    'downOps' does). That is deliberately the union of those two functions'
+    own predicates — we keep exactly the graphs they can reach, which is the
+    whole correctness argument.
+
+The final 'Map.restrictKeys' is implied by the rules rather than adding to
+them, and is there so "every node in 'worldNodes' is described by some
+retained epoch" holds structurally instead of by argument.
+
+Note this is why re-declaring an unchanged seed is cheap forever: the
+superseded epoch stops being active while its nodes stay 'TurnUp' under the
+new one, so it matches neither rule and its graph goes.
+-}
+prune :: World seed directive -> World seed directive
+prune w =
+    w
+        { worldEpochs = kept
+        , worldNodes = Map.restrictKeys nodes described
+        }
+  where
+    nodes = Map.filter (not . finished) w.worldNodes
+
+    -- these locals are annotated because a record-dot binding without a
+    -- signature generalizes over 'HasField' and would need FlexibleContexts.
+    finished :: NodeState -> Bool
+    finished st = st.nodeDirection == TurnDown && st.nodeConvergence == Converged
+
+    activeIds = Set.fromList (Map.elems w.worldActive)
+
+    kept = filter needed w.worldEpochs
+    needed ep =
+        Set.member (epochId ep) activeIds
+            || any stillToTurnDown (Map.keys (epochRefs ep))
+
+    stillToTurnDown :: Ref -> Bool
+    stillToTurnDown r =
+        case Map.lookup r nodes of
+            Just st -> st.nodeDirection == TurnDown
+            Nothing -> False
+
+    described = Set.unions (map (Map.keysSet . epochRefs) kept)
 
 setConvergence :: Direction -> Ref -> Convergence -> World seed directive -> World seed directive
 setConvergence dir r c w =
@@ -1004,7 +1159,7 @@ pendingCounts w =
 upOps :: World seed directive -> [Op]
 upOps w =
     [ ep.epochOp
-    | ep <- w.worldHistory
+    | ep <- w.worldEpochs
     , Set.member ep.epochId activeIds
     ]
   where
@@ -1017,7 +1172,7 @@ are left out, so a long history does not make every pass more expensive.
 downOps :: World seed directive -> [Op]
 downOps w =
     [ ep.epochOp
-    | ep <- w.worldHistory
+    | ep <- w.worldEpochs
     , any needsDown (Map.keys ep.epochRefs)
     ]
   where
@@ -1032,18 +1187,23 @@ downOps w =
 forest :: [Op] -> Op
 forest ops = OpGraph (deps ops) Actionless
 
+{- | Read off 'worldLog', not 'worldEpochs' — a declaration is still worth
+printing long after 'prune' has collected the graph it made. The
+@[active]@\/@[retired]@ flag stays exact regardless: a collected epoch is
+never in 'worldActive'.
+-}
 historyLines :: World seed directive -> [(EpochId, Declaration, Bool, [String])]
 historyLines = historyLinesMatching (const True)
 
--- | Like 'historyLines', but only for epochs satisfying a predicate.
+-- | Like 'historyLines', but only for declarations satisfying a predicate.
 historyLinesMatching ::
-    (Epoch seed directive -> Bool) ->
+    (LogEntry -> Bool) ->
     World seed directive ->
     [(EpochId, Declaration, Bool, [String])]
 historyLinesMatching p w =
-    [ (ep.epochId, ep.epochDeclaration, Set.member ep.epochId activeIds, ep.epochTokens)
-    | ep <- reverse w.worldHistory
-    , p ep
+    [ (e.logEpoch, e.logDeclaration, Set.member e.logEpoch activeIds, e.logTokens)
+    | e <- reverse w.worldLog
+    , p e
     ]
   where
     activeIds = Set.fromList (Map.elems w.worldActive)
@@ -1062,7 +1222,7 @@ resolveWorldSelectors w sel =
     activeIds = Set.fromList (Map.elems w.worldActive)
     perEpoch =
         [ Query.resolveSelectors ep.epochGraph sel.selSelect sel.selExclude
-        | ep <- w.worldHistory
+        | ep <- w.worldEpochs
         , Set.member ep.epochId activeIds
         ]
 
