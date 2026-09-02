@@ -5,6 +5,7 @@ module Salmon.Op.Ref (
     mkRef,
 ) where
 
+import Data.Aeson (FromJSON (..), ToJSON (..))
 import Data.Hashable (Hashable, hash, hashWithSalt)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -12,6 +13,12 @@ import Text.Printf (printf)
 
 newtype Ref = Ref {unRef :: Text}
     deriving (Show, Eq, Ord)
+
+instance ToJSON Ref where
+    toJSON = toJSON . unRef
+
+instance FromJSON Ref where
+    parseJSON = fmap Ref . parseJSON
 
 instance Semigroup Ref where
     r1 <> r2 = dotRef $ unRef r1 <> unRef r2

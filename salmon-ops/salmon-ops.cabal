@@ -28,6 +28,7 @@ library
                    , Salmon.Actions.Check
                    , Salmon.Actions.Dot
                    , Salmon.Actions.Notify
+                   , Salmon.Actions.Query
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine
                    , Salmon.Builtin.Helpers
@@ -75,6 +76,7 @@ library
                     , bytestring
                     , containers
                     , contravariant
+                    , cryptohash-sha256
                     , directory
                     , filepath
                     , free
