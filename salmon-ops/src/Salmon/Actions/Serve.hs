@@ -44,33 +44,32 @@ convergence. See 'prune' for the retention rule. What survives collection is
 @history@ prints — so the record of /what was declared/ outlives the graphs
 that were declared.
 
-todo: supervision — "keep this running", not just "make this so".
+== Supervision
 
-Every node here is a one-shot idempotent action: 'Salmon.Builtin.Extension.up'
-runs to completion and returns. Nothing in this loop owns a long-lived child
-process, which is why 'Salmon.Builtin.Nodes.Systemd.systemdService' has to
-delegate the whole problem to systemd (its @up@ is @systemctl restart@, which
-returns immediately and leaves systemd holding the process).
+Every node here is a one-shot idempotent action, so nothing in this loop owns
+a long-lived child process. A node /can/ own one —
+"Salmon.Builtin.Nodes.Supervised" is exactly that: @prelim@ answers
+@Skippable@ while its process is alive and @Required@ once it is not, so a
+restart is an ordinary bring-up and needs no new execution model. What that
+node cannot supply on its own is the /event/: a process that dies between two
+declarations goes unnoticed, because this loop is blocked reading its input.
 
-The pieces to do it here are mostly already present, and want an /event
-source/ rather than a new execution model: a node's 'prelim' answers
-@Skippable@ when its process is alive and @Required@ when it is not; @up@
-spawns; @down@ signals the process group; a @SIGCHLD@ marks that node
-non-'Converged' and the next 'converge' pass restarts it. Restart backoff
-needs no new control flow either — @Skippable@ already means "not now", and
-'Errored' nodes are already retried next pass. What is missing is somewhere
-to keep the per-service supervision state (live pid and pgid, restart count
-and its window, next-eligible-restart time, and a give-up latch so a
-crash-looping service stops being retried); that belongs in a table beside
-'worldNodes' keyed by 'Ref', not in 'NodeState', which is shared with the
-one-shot path that has no notion of a running process.
+'serveWith' supplies it. Given a source of "these nodes want attention"
+(the supervisor's 'Salmon.Builtin.Nodes.Supervised.supervisorWakeups'), the
+loop selects on that alongside its command input, marks the woken nodes
+'Pending' in the direction they are wanted, and converges — which is what
+turns "restart it when someone types @converge@" into supervision. 'serve' is
+'serveWith' with a source that never fires, i.e. exactly the old behaviour.
 
-See @specs\/salmon-as-init.md@, which needs exactly this and describes the
-'Salmon.Builtin.Nodes.Systemd.Service'-shaped node that would declare it.
+Note the wakeup is deliberately just a 'Ref' set and not a process event:
+this module knows nothing about processes, and anything able to say "look at
+this node again" can drive it.
 -}
 module Salmon.Actions.Serve (
     -- * Running
     serve,
+    serveWith,
+    noWakeups,
 
     -- * Input language
     ServeCommand (..),
@@ -100,8 +99,10 @@ module Salmon.Actions.Serve (
 ) where
 
 import Control.Comonad.Cofree (Cofree)
-import Control.Exception (IOException, try)
-import Control.Monad (when)
+import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent.STM (STM, TChan, atomically, newTChanIO, orElse, readTChan, retry, writeTChan)
+import Control.Exception (IOException, finally, try)
+import Control.Monad (unless, when)
 import Control.Monad.Identity (runIdentity)
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import Data.ByteString.Lazy (ByteString)
@@ -415,6 +416,8 @@ data Report
       Declared !EpochId !Direction !Int !Int
     | -- | number of seeds retired
       Cleared !Int
+    | -- | an external wakeup put this many nodes back to 'Pending'
+      Woken !Int
     | -- | nodes to turn down, nodes to turn up
       ConvergeStart !Int !Int
     | -- | everything applied cleanly, nodes still not converged
@@ -463,6 +466,7 @@ renderReport rep =
                 ]
             ]
         Cleared n -> ["serve: retired " <> tshow n <> " seed(s)"]
+        Woken n -> ["serve: woken for " <> tshow n <> " node(s)"]
         ConvergeStart ndown nup ->
             ["serve: converging (" <> tshow ndown <> " down, " <> tshow nup <> " up)"]
         ConvergeStop ok remaining ->
@@ -756,28 +760,98 @@ serve ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serve r nodeReporter parseSeed configure program h = do
+serve = serveWith noWakeups
+
+{- | A wakeup source that never fires: 'serveWith' with this is 'serve', a
+loop driven entirely by its input.
+-}
+noWakeups :: STM (Set Ref)
+noWakeups = retry
+
+{- | 'serve', plus an external source of "these nodes want attention".
+
+Whenever the source yields, the named nodes that are currently wanted
+'TurnUp' go back to 'Pending' and a convergence pass runs — so a supervised
+process that dies (see "Salmon.Builtin.Nodes.Supervised") is restarted
+without anybody typing anything. Refs the world does not know, or knows only
+as wanted 'TurnDown', are ignored: a service exiting because we just told it
+to is not a reason to bring it back.
+
+The source is consulted concurrently with the input handle, so a wakeup
+arriving while the loop waits for a command is acted on immediately, and one
+arriving mid-convergence is picked up by the next turn of the loop.
+-}
+serveWith ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    -- | blocks until some node wants attention, then names them
+    STM (Set Ref) ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Handle ->
+    IO (World seed directive)
+serveWith wakeups r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
+    inbox <- newTChanIO
+    -- the input handle is read on its own thread so that waiting for a
+    -- command and waiting for a wakeup can be the same wait.
+    reader <- forkIO (readInto inbox)
     runReporter r Started
-    loop world
+    loop world inbox `finally` killThread reader
     readIORef world
   where
     nat = pure . runIdentity
+
+    -- | 'Nothing' marks end of input, after which the reader stops.
+    readInto :: TChan (Maybe String) -> IO ()
+    readInto inbox = do
+        eof <- hIsEOF h
+        if eof
+            then atomically (writeTChan inbox Nothing)
+            else do
+                line <- hGetLine h
+                atomically (writeTChan inbox (Just line))
+                readInto inbox
 
     -- | Deepest chain of nested @load@s allowed, to bound a self-referential
     -- (or mutually-referential) load file rather than looping forever.
     maxLoadDepth :: Int
     maxLoadDepth = 8
 
-    loop :: IORef (World seed directive) -> IO ()
-    loop world = do
-        eof <- hIsEOF h
-        if eof
-            then runReporter r Stopped
-            else do
-                line <- hGetLine h
+    loop :: IORef (World seed directive) -> TChan (Maybe String) -> IO ()
+    loop world inbox = do
+        event <- atomically (fmap Left (readTChan inbox) `orElse` fmap Right wakeups)
+        case event of
+            Left Nothing -> runReporter r Stopped
+            Left (Just line) -> do
                 keepGoing <- step 0 world line
-                when keepGoing (loop world)
+                when keepGoing (loop world inbox)
+            Right refs -> do
+                wake world refs
+                loop world inbox
+
+    {- | An external source says these nodes want looking at again. Only
+    those currently wanted 'TurnUp' are put back to 'Pending': a node the
+    world does not know, or one it is deliberately taking down, has nothing
+    to answer for. If none qualify this is silent and costs no convergence. -}
+    wake :: IORef (World seed directive) -> Set Ref -> IO ()
+    wake world refs = do
+        w <- readIORef world
+        let woken = [rf | rf <- Set.toList refs, wantedUp w rf]
+        unless (null woken) $ do
+            modifyIORef' world $ \w0 ->
+                foldr (\rf acc -> setConvergence TurnUp rf Pending acc) w0 woken
+            runReporter r (Woken (length woken))
+            converge world Nothing
+
+    wantedUp :: World seed directive -> Ref -> Bool
+    wantedUp w rf =
+        case Map.lookup rf w.worldNodes of
+            Just st -> st.nodeDirection == TurnUp
+            Nothing -> False
 
     step :: Int -> IORef (World seed directive) -> String -> IO Bool
     step depth world line =

@@ -10,6 +10,7 @@ import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
 import qualified Test.ServeSpec as ServeSpec
+import qualified Test.SupervisedSpec as SupervisedSpec
 import Test.Tasty (defaultMain, testGroup)
 
 main :: IO ()
@@ -27,4 +28,5 @@ main =
             , QemuSmokeSpec.tests
             , QuerySpec.tests
             , ServeSpec.tests
+            , SupervisedSpec.tests
             ]
