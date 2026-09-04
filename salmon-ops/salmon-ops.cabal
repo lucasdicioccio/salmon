@@ -62,7 +62,6 @@ library
                    , Salmon.Builtin.Nodes.Secrets
                    , Salmon.Builtin.Nodes.Spago
                    , Salmon.Builtin.Nodes.Ssh
-                   , Salmon.Builtin.Nodes.Supervised
                    , Salmon.Builtin.Nodes.Sysctl
                    , Salmon.Builtin.Nodes.Systemd
                    , Salmon.Builtin.Nodes.Tar

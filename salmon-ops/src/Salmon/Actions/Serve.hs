@@ -44,26 +44,28 @@ convergence. See 'prune' for the retention rule. What survives collection is
 @history@ prints — so the record of /what was declared/ outlives the graphs
 that were declared.
 
-== Supervision
+== Waking the loop from outside
 
 Every node here is a one-shot idempotent action, so nothing in this loop owns
-a long-lived child process. A node /can/ own one —
-"Salmon.Builtin.Nodes.Supervised" is exactly that: @prelim@ answers
-@Skippable@ while its process is alive and @Required@ once it is not, so a
-restart is an ordinary bring-up and needs no new execution model. What that
-node cannot supply on its own is the /event/: a process that dies between two
-declarations goes unnoticed, because this loop is blocked reading its input.
+anything that could change on its own — and if something did, this loop would
+not notice, being blocked reading its input between declarations.
 
-'serveWith' supplies it. Given a source of "these nodes want attention"
-(the supervisor's 'Salmon.Builtin.Nodes.Supervised.supervisorWakeups'), the
-loop selects on that alongside its command input, marks the woken nodes
-'Pending' in the direction they are wanted, and converges — which is what
-turns "restart it when someone types @converge@" into supervision. 'serve' is
-'serveWith' with a source that never fires, i.e. exactly the old behaviour.
+'serveWith' is the hook for that. Given a source of "these nodes want
+attention", it selects on that alongside its command input, puts the named
+nodes back to 'Pending' in the direction they are wanted, and converges. The
+wakeup is deliberately just a 'Ref' set rather than any particular kind of
+event: this module knows nothing about what may have changed, and anything
+able to say "look at this node again" can drive it. 'serve' is 'serveWith'
+with a source that never fires, i.e. exactly the behaviour from before the
+hook existed.
 
-Note the wakeup is deliberately just a 'Ref' set and not a process event:
-this module knows nothing about processes, and anything able to say "look at
-this node again" can drive it.
+todo: nothing in the repo drives this hook. A @Salmon.Builtin.Nodes.Supervised@
+did briefly, and was removed in favour of @specs\/per-node-state-machines.md@,
+where supervision is a property every node has rather than one special node
+type — and where this hook is subsumed, because nodes with state of their own
+can be blocked on directly instead of having to be told to look again. Either
+that design lands and 'serveWith' goes with it, or something else needs to
+justify keeping it.
 -}
 module Salmon.Actions.Serve (
     -- * Running
