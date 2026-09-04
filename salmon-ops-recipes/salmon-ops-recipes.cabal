@@ -81,6 +81,7 @@ test-suite salmon-ops-recipes-test
                     , Test.CheckSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
+                    , Test.DaemonSpec
                     , Test.DagSpec
                     , Test.DownTreeSpec
                     , Test.JWTSigningSpec

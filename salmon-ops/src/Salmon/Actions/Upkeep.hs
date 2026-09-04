@@ -129,26 +129,34 @@ module Salmon.Actions.Upkeep (
     supervisorTending,
     instruct,
 
+    -- * Machines that outlive a supervisor
+    Kept,
+    noKept,
+    keptHeld,
+    releaseKept,
+
     -- * Reporting
     Report (..),
 ) where
 
-import Control.Concurrent.Async (Async, async, waitCatch)
+import Control.Concurrent.Async (Async, async, cancel, poll, waitCatch, waitCatchSTM, withAsync)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, registerDelay, retry, writeTVar)
+import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTVar)
 import Control.Exception (SomeException, bracket, try)
 import Control.Monad (forM, forM_, unless)
 import Data.Dynamic (Dynamic)
 import Data.Foldable (traverse_)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
-import GHC.Records (HasField)
+import GHC.Records (HasField, getField)
+import System.Exit (ExitCode (..))
 
 import Salmon.Actions.UpDown (CheckResult (..), runCheck)
 import qualified Salmon.Actions.UpDown as UpDown
@@ -278,6 +286,16 @@ data Report ext
     | -- | told to stop tending this node; its effect is left exactly as it is
       Paused !(Act ext)
     | Resumed !(Act ext)
+    | -- | this many consecutive failures was the author's limit
+      -- ('Salmon.Op.Supervision.supGiveUpAfter'), so the node is parked
+      -- until an operator forces or rechecks it
+      GaveUp !(Act ext) !Int
+    | -- | a machine left running by a previous supervisor was taken over
+      -- rather than restarted, so the effect it holds never stopped
+      Adopted !(Act ext)
+    | -- | ...and one that was not taken over: cancelled, which tears the
+      -- effect it held down through the action's own bracket
+      Released !(Act ext)
     | -- | this node declared more than one 'Supervision'; the first is in
       -- force and the rest are not. See "Salmon.Op.Supervision".
       Policy !(Act ext) !Supervision ![Supervision]
@@ -291,6 +309,9 @@ data Report ext
       Supervising !Int !Int
     | -- | machines stopped
       Retired !Int
+    | -- | ...and machines left running, holding effects up, for the next
+      -- supervisor to adopt. See 'Kept'.
+      Holding !Int
     deriving (Show)
 
 
@@ -303,6 +324,10 @@ data Machine ext = Machine
     , machineStatus :: !(TVar Status)
     , machineMailbox :: !Mailbox
     , machineWatchdog :: !(Maybe Micros)
+    , machineHolds :: !Bool
+    -- ^ whether this machine holds a running
+    -- 'Salmon.Builtin.Extension.managed' action, and so is 'Kept' rather
+    -- than wound down when its supervisor stops.
     , machineThread :: !(Async ())
     }
 
@@ -320,6 +345,61 @@ data Supervisor ext = Supervisor
     , supWatch :: !(Maybe (Async ()))
     , supSay :: !(Report ext -> IO ())
     }
+
+{- | Machines a stopped supervisor left running, for the next one to take
+over.
+
+A machine that holds a running process cannot be treated the way a one-shot
+machine is. Stopping a supervisor stops /tending/ — and since @serve@ stands
+its machines down before every command it is handed, a supervisor that wound
+its processes down with it would kill every service on every @status@. So a
+holding machine survives its supervisor, and the next 'startUpkeep' either
+__adopts__ it (the effect it holds never stopped) or __releases__ it
+(cancelled, which tears that effect down through the action's own bracket).
+
+The choice between the two is what @specs\/per-node-state-machines.md@'s
+§"@Ref@ is location-addressed" calls the one case where swapping a machine is
+right: a node is adopted only if it is still wanted 'TurnUp' /and/ its
+representative has not changed. A @managed@ node whose command line changed
+but whose ref key did not is the same node with a different action, and the
+process running is the old one's.
+-}
+newtype Kept ext = Kept (Map Ref (Machine ext))
+
+-- | Nothing running: what a first supervisor is given.
+noKept :: Kept ext
+noKept = Kept Map.empty
+
+-- | What each kept machine is holding up, for a caller deciding what to
+-- release.
+keptHeld :: Kept ext -> Map Ref (Act ext)
+keptHeld (Kept ms) = fmap machineAct ms
+
+{- | Cancel every kept machine whose 'Ref' the predicate rejects, and return
+what is left.
+
+Cancelling is the teardown: the machine's thread is inside a 'withAsync' over
+the node's action, so the async exception unwinds through whatever bracket
+that action is built from — for "Salmon.Builtin.Nodes.Daemon" that is
+@SIGTERM@ to the process group, a grace period, then @SIGKILL@. 'cancel'
+waits, so when this returns the effects really are down.
+
+That waiting is the point of exposing this at all: a caller tearing a node
+down has to be able to do it __before__ anything else in the graph moves. A
+daemon's dependencies — its config file, its working directory — must not be
+removed while it is still running, and nothing but ordering prevents that.
+-}
+releaseKept ::
+    Reporter (Report ext) ->
+    (Ref -> Bool) ->
+    Kept ext ->
+    IO (Kept ext)
+releaseKept report keep (Kept ms) = do
+    let (kept, going) = Map.partitionWithKey (\aref _ -> keep aref) ms
+    forM_ (Map.elems going) $ \m -> do
+        cancel (machineThread m)
+        runReporter report (Released (machineAct m))
+    pure (Kept kept)
 
 -- | The live state of every node being tended.
 supervisorStatuses :: Supervisor ext -> Map Ref (TVar Status)
@@ -358,16 +438,21 @@ startUpkeep ::
     forall ext.
     ( HasField "up" ext (IO ())
     , HasField "down" ext (IO ())
+    , HasField "managed" ext (Maybe ((Text -> IO ()) -> IO ExitCode))
     , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
+    , HasField "help" ext Text
+    , HasField "notes" ext [Text]
     , HasField "dynamics" ext [Dynamic]
     ) =>
     Reporter (Report ext) ->
+    -- | machines a previous supervisor left running; 'noKept' for a first one
+    Kept ext ->
     -- | which nodes to tend, how
     (Ref -> Maybe Tend) ->
     Dag ext ->
     IO (Supervisor ext)
-startUpkeep report tend dag = do
+startUpkeep report (Kept prior) tend dag = do
     -- reports are serialised for the same reason the concurrent one-shot
     -- driver serialises them: the caller's reporter is not assumed
     -- thread-safe, and interleaved multi-line reports are unreadable.
@@ -380,16 +465,44 @@ startUpkeep report tend dag = do
     forM_ untended $ \act -> say (Untended act)
     forM_ blocked $ \act -> say (Acted (UpDown.Blocked act))
 
-    statuses <-
-        Map.fromList
-            <$> forM tended (\(aref, _, t) -> (,) aref <$> newStatus t.tendDirection)
+    -- machines left running by the previous supervisor that this one is
+    -- taking over rather than restarting. Everything else it left is
+    -- released below, which tears down what it was holding.
+    adopted <- fmap (Map.fromList . concat) $ forM tended $ \(aref, act, t) ->
+        case Map.lookup aref prior of
+            Just m
+                | t.tendDirection == TurnUp
+                , Dag.sameRepresentative (machineAct m) act -> do
+                    alive <- poll (machineThread m)
+                    case alive of
+                        -- its thread finished while nobody was watching, so
+                        -- there is nothing to take over.
+                        Just _ -> pure []
+                        Nothing -> do
+                            say (Adopted act)
+                            pure [(aref, m)]
+            _ -> pure []
+    Kept leftovers <- releaseKept report (`Map.member` adopted) (Kept prior)
+    -- 'releaseKept' cancelled everything not adopted, so this is empty; it
+    -- is bound rather than ignored so that a future change to that function
+    -- cannot silently strand a process here.
+    unless (Map.null leftovers) $
+        forM_ (Map.elems leftovers) (say . Released . machineAct)
 
-    machines <- forM tended $ \(aref, act, t) -> do
+    let starting = [entry | entry@(aref, _, _) <- tended, not (Map.member aref adopted)]
+
+    fresh <-
+        Map.fromList
+            <$> forM starting (\(aref, _, t) -> (,) aref <$> newStatus t.tendDirection)
+    let statuses = fmap machineStatus adopted <> fresh
+
+    machines <- forM starting $ \(aref, act, t) -> do
         let (policy, ignored) = supervisionOf act.extension
         unless (null ignored) $ say (Policy act policy ignored)
         box <- Mailbox.newMailbox Mailbox.defaultCapacity
         drops <- newTVarIO 0
         let status = statuses Map.! aref
+        let holds = isJust (getField @"managed" act.extension)
         let ctx =
                 Ctx
                     { ctxSay = say
@@ -404,7 +517,12 @@ startUpkeep report tend dag = do
                     , ctxDrops = drops
                     , ctxPolicy = policy
                     }
-        thread <- async (machine t ctx)
+        -- A 'Settled' claim is about an effect that persists on its own, and
+        -- a managed effect does not persist without a machine holding it. So
+        -- a managed node that was not adopted starts from scratch whatever
+        -- the caller believes about it: there is no process, so it is not up.
+        let t' = if holds then t{tendStanding = Unsettled} else t
+        thread <- async (machine t' ctx)
         pure
             ( aref
             , Machine
@@ -413,11 +531,12 @@ startUpkeep report tend dag = do
                 , machineStatus = status
                 , machineMailbox = box
                 , machineWatchdog = supWatchdog policy
+                , machineHolds = holds
                 , machineThread = thread
                 }
             )
 
-    let table = Map.fromList machines
+    let table = adopted <> Map.fromList machines
     let ups = length [() | m <- Map.elems table, machineDirection m == TurnUp]
     say (Supervising ups (Map.size table - ups))
 
@@ -460,11 +579,12 @@ it does not run anybody's @down@. A node whose @up@ is in flight is waited
 for rather than interrupted, because interrupting an @up@ halfway is how a
 half-applied effect happens; a node that is merely napping stops at once.
 -}
-stopUpkeep :: Supervisor ext -> IO ()
+stopUpkeep :: Supervisor ext -> IO (Kept ext)
 stopUpkeep sup = do
     atomically (writeTVar (supHalt sup) True)
     traverse_ waitCatch (supWatch sup)
-    forM_ (Map.elems (supMachines sup)) $ \m -> do
+    let (holding, oneShots) = Map.partition machineHolds (supMachines sup)
+    forM_ (Map.elems oneShots) $ \m -> do
         outcome <- waitCatch (machineThread m)
         case outcome of
             Right () -> pure ()
@@ -472,14 +592,26 @@ stopUpkeep sup = do
             -- `down` are caught inside it. If one does, that is this
             -- module's bug and not the node's, so it is reported as such.
             Left e -> supSay sup (Escaped (machineAct m) e)
-    supSay sup (Retired (Map.size (supMachines sup)))
+    -- a holding machine ignores the halt flag by construction, so these are
+    -- all still running — except one whose node never got past 'WaitUp' (it
+    -- was holding nothing yet, so it heeded the halt like any other) or
+    -- whose action gave up on its own. Those have nothing to hand over.
+    kept <- flip Map.traverseMaybeWithKey holding $ \_ m -> do
+        alive <- poll (machineThread m)
+        pure (if isJust alive then Nothing else Just m)
+    supSay sup (Retired (Map.size oneShots))
+    unless (Map.null kept) $ supSay sup (Holding (Map.size kept))
+    pure (Kept kept)
 
 -- | 'startUpkeep' and 'stopUpkeep' as a bracket.
 withUpkeep ::
     ( HasField "up" ext (IO ())
     , HasField "down" ext (IO ())
+    , HasField "managed" ext (Maybe ((Text -> IO ()) -> IO ExitCode))
     , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
+    , HasField "help" ext Text
+    , HasField "notes" ext [Text]
     , HasField "dynamics" ext [Dynamic]
     ) =>
     Reporter (Report ext) ->
@@ -487,8 +619,15 @@ withUpkeep ::
     Dag ext ->
     (Supervisor ext -> IO a) ->
     IO a
-withUpkeep report tend dag =
-    bracket (startUpkeep report tend dag) stopUpkeep
+withUpkeep report tend dag body =
+    bracket (startUpkeep report noKept tend dag) release body
+  where
+    -- a bracket owns everything it started, holding machines included: the
+    -- caller has nowhere to put a 'Kept'.
+    release sup = do
+        kept <- stopUpkeep sup
+        _ <- releaseKept report (const False) kept
+        pure ()
 
 -------------------------------------------------------------------------------
 
@@ -532,13 +671,91 @@ data Wake
       Elapsed
     | -- | somebody said something; oldest first, never empty
       Told ![Instruction]
+    | -- | the held action stopped, with its exit status (or the exception it
+      -- threw instead of exiting). Only a machine holding a
+      -- 'Salmon.Builtin.Extension.managed' action can see this.
+      Ended !(Either SomeException ExitCode)
     | -- | the supervisor is stopping
       Halt
-    deriving (Show)
+
+{- | Whether a wait is allowed to end because the supervisor is stopping.
+
+A machine holding a running effect answers 'IgnoreHalt': stopping a
+supervisor stops /tending/, and a machine that let go of its own process
+every time a command was typed would kill every service on every @status@.
+Such a machine is kept (see 'Kept') and is only ever taken by an outright
+'cancel', which is also what tears its effect down.
+-}
+data Heed
+    = HeedHalt
+    | IgnoreHalt
+    deriving (Show, Eq)
+
+-------------------------------------------------------------------------------
+
+{- | What the restart policy has to remember between attempts.
+
+Two fields, and neither is derivable from the node's 'Status': that carries
+what the node is doing now, while this carries how it has been getting on.
+-}
+data Tally = Tally
+    { tallyFailures :: !Int
+    -- ^ /consecutive/ failures, which is the only count a give-up limit can
+    -- sensibly read.
+    , tallyUpSince :: !(Maybe Word64)
+    -- ^ monotonic nanoseconds at the moment the node last reached 'Up'.
+    }
+
+freshTally :: Tally
+freshTally = Tally 0 Nothing
+
+{- | Count a failure — first forgetting the ones before it, if the node had
+been up long enough to count as working.
+
+'Salmon.Op.Supervision.supStableAfter' is what makes a give-up limit usable
+at all: without it, a service that falls over once a day reaches any finite
+limit eventually and latches off, having never actually been in a crash
+loop.
+-}
+countFailure :: Supervision -> Word64 -> Tally -> Tally
+countFailure sup now t =
+    case t.tallyUpSince of
+        Just since
+            | now >= since
+            , now - since >= toNanos sup.supStableAfter ->
+                Tally 1 Nothing
+        _ -> Tally (t.tallyFailures + 1) Nothing
+
+-- | Has this node used up the author's patience?
+exhausted :: Supervision -> Tally -> Bool
+exhausted sup t = maybe False (\n -> t.tallyFailures >= n) sup.supGiveUpAfter
+
+{- | How long to wait before the n-th consecutive retry: the floor doubled
+@n-1@ times, capped.
+
+Derived from the failure count rather than carried alongside it, so it resets
+exactly when 'countFailure' resets the count, and cannot drift out of step
+with it.
+-}
+backoff :: Int -> Delay
+backoff n = iterate relaxed initialDelay !! min 24 (max 0 (n - 1))
+
+{- | What a restart policy makes of an exit status.
+
+The systemd reading, and the reason owning a process is worth the trouble:
+'Salmon.Op.Supervision.OnFailure' is only expressible if something can tell
+@exit 0@ from @exit 137@, which no @check@ can.
+-}
+restartsOnExit :: Restart -> ExitCode -> Bool
+restartsOnExit Never _ = False
+restartsOnExit OnFailure ExitSuccess = False
+restartsOnExit OnFailure (ExitFailure _) = True
+restartsOnExit Always _ = True
 
 machine ::
     ( HasField "up" ext (IO ())
     , HasField "down" ext (IO ())
+    , HasField "managed" ext (Maybe ((Text -> IO ()) -> IO ExitCode))
     , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
     ) =>
@@ -550,12 +767,21 @@ machine (Tend TurnDown standing) ctx = downkeep standing ctx
 
 -------------------------------------------------------------------------------
 
-{- | @WaitUp -> Upping -> Up@, and back to 'Upping' whenever the check says
-the effect has gone and the policy says to put it back.
+{- | The lifecycle of a node wanted up: @WaitUp -> Upping -> Up@, and back to
+'Upping' whenever the node stops being up and its policy says to put it back.
+
+Two shapes of node run through here and the difference is confined to one
+step. A node with only @up@ /does/ something and returns, and 'Up' is a
+periodic check on what it left behind. A node with a
+'Salmon.Builtin.Extension.managed' action /is/ its effect for as long as the
+action runs, so 'Up' additionally races the action itself: the exit it
+eventually yields is the reason the node stopped being up, and is what the
+restart policy reads instead of a 'CheckResult'.
 -}
 upkeep ::
     forall ext.
     ( HasField "up" ext (IO ())
+    , HasField "managed" ext (Maybe ((Text -> IO ()) -> IO ExitCode))
     , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
     ) =>
@@ -565,23 +791,33 @@ upkeep ::
 upkeep standing ctx =
     case standing of
         Unsettled -> waitUp []
-        -- already up: settle so dependants may go, and start watching. The
+        -- Already up: settle so dependants may go, and start watching. The
         -- verdict is 'Skipped' because that is exactly what it is — nobody
         -- looked, somebody said — and the first 'look' replaces it.
+        --
+        -- 'startUpkeep' never hands 'Settled' to a node with a managed
+        -- action, because a 'Settled' claim is about an effect that persists
+        -- on its own and a managed effect does not persist without the
+        -- machine holding it.
         Settled -> do
             markOk ctx
             settle status Skipped
             say (Upkeep act Up)
-            resting Skipped initialDelay
+            resting Skipped (relaxed initialDelay) freshTally
   where
     act = ctxAct ctx
     say = ctxSay ctx
     status = ctxStatus ctx
+    policy = ctxPolicy ctx
 
-    -- | Nothing to do until the dependencies are up. Instructions that
-    -- arrive meanwhile are held rather than lost: a 'Force' typed at a node
-    -- whose dependency is still coming up means "when you get there, act",
-    -- not "act now against an unmet precondition".
+    -- | The action, if this node owns one.
+    holding :: Maybe ((Text -> IO ()) -> IO ExitCode)
+    holding = getField @"managed" act.extension
+
+    {- | Nothing to do until the dependencies are up. Instructions that arrive
+    meanwhile are held rather than lost: a 'Force' typed at a node whose
+    dependency is still coming up means "when you get there, act", not "act
+    now against an unmet precondition". -}
     waitUp :: [Instruction] -> IO ()
     waitUp pending = do
         say (Upkeep act WaitUp)
@@ -592,12 +828,13 @@ upkeep standing ctx =
             told <- announce ctx w
             case w of
                 Halt -> pure ()
+                Ended _ -> pure () -- nothing is running yet; unreachable
                 Told _ -> paused ctx told (loop (held <> told)) (loop (held <> told))
-                Elapsed -> upping (held <> told) Consult initialDelay
+                Elapsed -> attempt (held <> told) Consult freshTally
 
-    -- | Run @up@, unless the check (or an instruction) says not to.
-    upping :: [Instruction] -> Intent -> Delay -> IO ()
-    upping told intent d
+    -- | Decide whether to act, then act in whichever way this node acts.
+    attempt :: [Instruction] -> Intent -> Tally -> IO ()
+    attempt told intent tally
         | Just Satisfy <- override told = satisfy
         | otherwise = do
             say (Upkeep act Upping)
@@ -611,77 +848,199 @@ upkeep standing ctx =
             case decided of
                 Left verdict -> do
                     say (Acted (UpDown.Skip act))
-                    reached verdict d
-                Right _ -> do
-                    say (Acted (UpDown.Eval act))
-                    note status "up"
-                    outcome <- try @SomeException act.extension.up
-                    case outcome of
-                        Right () -> do
-                            say (Acted (UpDown.Done act))
-                            reached Success d
-                        Left e -> do
-                            let why = Failure (Text.pack (show e))
-                            say (Acted (UpDown.Failed act e))
-                            note status (Text.pack (show e))
-                            markFailed ctx
-                            -- back off rather than tighten: this is a
-                            -- failing action, not a vanished effect, and
-                            -- retrying `apt-get` twice a second helps
-                            -- nobody. See the module header.
-                            settle status why
-                            retryUp why (relaxed d)
+                    reached verdict tally
+                Right _ -> case holding of
+                    Nothing -> oneShot tally
+                    Just action -> hold action tally
 
-    -- | Wait out the backoff, then have another go at @up@.
-    retryUp :: CheckResult -> Delay -> IO ()
-    retryUp why d = do
-        say (NextLook act why (delayMicros d))
-        w <- naptime ctx (delayMicros d)
+    -- | An @up@ that returns, leaving something behind that persists.
+    oneShot :: Tally -> IO ()
+    oneShot tally = do
+        say (Acted (UpDown.Eval act))
+        note status "up"
+        outcome <- try @SomeException act.extension.up
+        case outcome of
+            Right () -> do
+                say (Acted (UpDown.Done act))
+                reached Success tally
+            Left e -> do
+                say (Acted (UpDown.Failed act e))
+                note status (Text.pack (show e))
+                failed (Failure (Text.pack (show e))) tally
+
+    {- | An action that /is/ the effect. 'withAsync' rather than 'async' is
+    the whole of the teardown story: cancelling this machine's thread
+    cancels the action, and whatever bracket the action is built from does
+    the killing — see "Salmon.Builtin.Nodes.Daemon". The scope of the
+    'withAsync' is one run of the effect; a restart leaves it and comes
+    back through 'attempt'. -}
+    hold :: ((Text -> IO ()) -> IO ExitCode) -> Tally -> IO ()
+    hold action tally = do
+        say (Acted (UpDown.Eval act))
+        note status "spawn"
+        -- 'watch' hands back what to do /once the action is no longer held/,
+        -- and that continuation is run outside the 'withAsync' on purpose:
+        -- leaving the block is what cancels the action, so a restart is
+        -- guaranteed to have torn the old effect down before the new
+        -- attempt spawns.
+        next <- withAsync (action (note status)) $ \running -> do
+            -- Up as soon as it is running: for a node whose action is the
+            -- effect, "the action is running" is the whole of being up. The
+            -- report is 'Done' for the same reason, which is what lets
+            -- @serve@ record such a node as converged at all.
+            now <- getMonotonicTimeNSec
+            markOk ctx
+            settle status Success
+            say (Acted (UpDown.Done act))
+            say (Upkeep act Up)
+            watch running Success (relaxed initialDelay) tally{tallyUpSince = Just now}
+        next
+
+    {- | 'Up' with an action in hand: the nap, the mailbox and the action's
+    own exit, raced. The check still runs on the adaptive delay, so a
+    managed node that also supplies a @check@ gets both; one that does not
+    pays a @pure Unknown@ per delay, which is the price of not being able to
+    tell "no check" from "a check that could not tell". -}
+    watch :: Async ExitCode -> CheckResult -> Delay -> Tally -> IO (IO ())
+    watch running verdict d tally = do
+        say (NextLook act verdict (delayMicros d))
+        w <- naptimeHolding ctx running (delayMicros d)
         told <- announce ctx w
         case w of
-            Halt -> pure ()
-            Told _ -> paused ctx told (retryUp why d) (upping told Consult (soonIf told d))
-            Elapsed -> upping told Consult d
+            -- 'naptimeHolding' answers 'IgnoreHalt', so this cannot happen:
+            -- a machine holding a running effect is kept rather than wound
+            -- down, and only a 'cancel' takes it.
+            Halt -> watch running verdict d tally
+            Ended outcome -> pure (afterExit outcome tally)
+            Elapsed -> peek (relaxed d)
+            Told _
+                -- pausing a node that owns a process must not kill the
+                -- process: that is the whole difference between 'Pause' and
+                -- a teardown. So this parks while still holding.
+                | Just Pause <- tending told -> do
+                    say (Paused act)
+                    heldPause
+                    say (Resumed act)
+                    watch running verdict d tally
+                -- forcing a node that is already running its own effect
+                -- means restart it: hand back the next attempt, which runs
+                -- after the 'withAsync' has cancelled this one.
+                | Just Force <- override told -> pure (attempt told (Regardless (Failure "forced")) tally)
+                | Just Satisfy <- override told -> pure satisfy
+                | otherwise -> peek (soonIf told d)
+      where
+        {- | Look while still holding. A check that says the effect is gone
+        even though the action is still running is a health probe failing —
+        the process is up and not working — and restarting is what the
+        policy is for. -}
+        peek :: Delay -> IO (IO ())
+        peek d' = do
+            v <- runCheck act
+            touch status
+            if restarts policy v
+                then pure (attempt [] (Regardless v) tally)
+                else watch running v d' tally
+
+        -- | Block for a 'Resume'. Ignores the halt flag for the same reason
+        -- the nap does.
+        heldPause :: IO ()
+        heldPause = do
+            told <- listenHolding ctx
+            _ <- announce ctx (Told told)
+            case tending told of
+                Just Resume -> pure ()
+                _ -> heldPause
+
+    {- | The action stopped. Consult the check /before/ the policy: a process
+    that exits 0 because it daemonised is still up, and the check is the only
+    thing that can say so. That one ordering handles the double-fork case for
+    free — the one shape a process handle cannot speak to at all, since a
+    handle to a process that has exited says nothing about the daemon it left
+    behind. -}
+    afterExit :: Either SomeException ExitCode -> Tally -> IO ()
+    afterExit outcome tally = do
+        case outcome of
+            Left e -> do
+                say (Acted (UpDown.Failed act e))
+                note status (Text.pack (show e))
+            Right code -> note status ("exited " <> Text.pack (show code))
+        verdict <- runCheck act
+        if satisfiedBy verdict
+            then do
+                -- it forked, or something else is holding the effect up. The
+                -- node is now an unowned effect and is polled like one.
+                settle status verdict
+                resting verdict (relaxed initialDelay) tally
+            else
+                if wantsBack
+                    then failed (why verdict) tally
+                    else do
+                        -- it stopped and the policy says leave it. Settled,
+                        -- and 'statusCheck' says which kind of stopped.
+                        let final = case outcome of
+                                Right ExitSuccess -> Completed
+                                _ -> why verdict
+                        case final of
+                            Completed -> markOk ctx
+                            _ -> markFailed ctx
+                        settle status final
+                        say (NextLook act final (delayMicros (relaxed initialDelay)))
+                        resting final (relaxed initialDelay) tally
+      where
+        wantsBack = case outcome of
+            -- the action threw rather than exiting, so there is no code for
+            -- the policy to read; anything but 'Never' tries again.
+            Left _ -> policy.supRestart /= Never
+            Right code -> restartsOnExit policy.supRestart code
+        why verdict = case outcome of
+            Left e -> Failure (Text.pack (show e))
+            Right ExitSuccess -> case verdict of
+                Failure _ -> verdict
+                _ -> Failure "exited"
+            Right code -> Failure (Text.pack ("exited " <> show code))
 
     -- | The effect is in place. Keep an eye on it.
-    reached :: CheckResult -> Delay -> IO ()
-    reached verdict d = do
+    reached :: CheckResult -> Tally -> IO ()
+    reached verdict tally = do
+        now <- getMonotonicTimeNSec
         markOk ctx
         settle status verdict
         say (Upkeep act Up)
-        resting verdict (relaxed d)
+        resting verdict (relaxed initialDelay) tally{tallyUpSince = Just now}
 
-    {- | 'Up': the steady state. Sleep, look, and adapt — back off while the
-    effect is there, tighten and go back to 'Upping' when it is not. -}
-    resting :: CheckResult -> Delay -> IO ()
-    resting verdict d = do
+    {- | 'Up' without an action to hold: sleep, look, and adapt — back off
+    while the effect is there, tighten and go back to 'Upping' when it is
+    not. -}
+    resting :: CheckResult -> Delay -> Tally -> IO ()
+    resting verdict d tally = do
         say (NextLook act verdict (delayMicros d))
         w <- naptime ctx (delayMicros d)
         told <- announce ctx w
         case w of
             Halt -> pure ()
+            Ended _ -> pure ()
             -- 'Pause' is read before 'Force'/'Satisfy', so a flush holding
             -- both contradictory things does the lesser: stop tending, and
             -- let the operator say what they meant.
             Told _ ->
-                paused ctx told (resting verdict d) $
+                paused ctx told (resting verdict d tally) $
                     case override told of
-                        Just Force -> upping told (Regardless (Failure "forced")) initialDelay
+                        Just Force -> attempt told (Regardless (Failure "forced")) tally
                         Just Satisfy -> satisfy
-                        _ -> look (soonIf told d)
-            Elapsed -> look d
+                        _ -> look (soonIf told d) tally
+            Elapsed -> look d tally
 
-    {- | Look, and either carry on resting or go back to 'Upping'. The
-    policy is consulted before 'satisfiedBy' rather than after, which is
-    the only way 'Salmon.Op.Supervision.Always' can act on a
-    'Salmon.Actions.UpDown.Completed' node — that verdict /is/ satisfied,
-    and the whole of what @Always@ means is "run it again anyway". -}
-    look :: Delay -> IO ()
-    look d = do
+    {- | Look, and either carry on resting or go back to 'Upping'. The policy
+    is consulted before 'satisfiedBy' rather than after, which is the only
+    way 'Salmon.Op.Supervision.Always' can act on a 'Completed' node — that
+    verdict /is/ satisfied, and the whole of what @Always@ means is "run it
+    again anyway". -}
+    look :: Delay -> Tally -> IO ()
+    look d tally = do
         verdict <- runCheck act
         touch status
-        if restarts (ctxPolicy ctx) verdict
-            then upping [] (Regardless verdict) (attentive d)
+        if restarts policy verdict
+            then attempt [] (Regardless verdict) tally
             else do
                 -- either still up, or stopped being up with a policy that
                 -- says leave it: settled either way, but 'statusCheck'
@@ -690,14 +1049,66 @@ upkeep standing ctx =
                 -- A node that has actually stopped being up counts as
                 -- failing, so a dependant still in 'WaitUp' holds off rather
                 -- than being brought up on top of it. Only an outright
-                -- 'Salmon.Actions.UpDown.Failure' qualifies: marking
-                -- 'Salmon.Actions.UpDown.Unknown' would strand the
+                -- 'Failure' qualifies: marking 'Unknown' would strand the
                 -- dependants of every node that has no check at all.
                 case verdict of
                     Failure _ -> markFailed ctx
                     _ -> markOk ctx
                 settle status verdict
-                resting verdict (relaxed d)
+                resting verdict (relaxed d) tally
+
+    {- | The node did not get up, or stopped being up and is wanted back.
+    Counts the failure, and either backs off and tries again or latches off. -}
+    failed :: CheckResult -> Tally -> IO ()
+    failed why tally = do
+        now <- getMonotonicTimeNSec
+        let tally' = countFailure policy now tally
+        markFailed ctx
+        settle status why
+        if exhausted policy tally'
+            then gaveUp why tally'
+            else retryUp why (backoff tally'.tallyFailures) tally'
+
+    -- | Wait out the backoff, then have another go.
+    retryUp :: CheckResult -> Delay -> Tally -> IO ()
+    retryUp why d tally = do
+        say (NextLook act why (delayMicros d))
+        w <- naptime ctx (delayMicros d)
+        told <- announce ctx w
+        case w of
+            Halt -> pure ()
+            Ended _ -> pure ()
+            Told _ ->
+                paused ctx told (retryUp why d tally) $
+                    case override told of
+                        Just Satisfy -> satisfy
+                        _ -> attempt told Consult tally
+            Elapsed -> attempt told Consult tally
+
+    {- | This many consecutive failures was the node author's limit, so stop
+    trying and stay out of the way.
+
+    Parked rather than exited, for two reasons: the node's dependants have to
+    keep seeing it settled-and-failing, and an operator has to be able to
+    change their mind. 'Force' or 'Recheck' starts it over with a clean
+    tally. -}
+    gaveUp :: CheckResult -> Tally -> IO ()
+    gaveUp why tally = do
+        say (GaveUp act tally.tallyFailures)
+        loop
+      where
+        loop = do
+            w <- atomically (halting HeedHalt ctx (listen ctx retry))
+            told <- announce ctx w
+            case w of
+                Halt -> pure ()
+                Ended _ -> pure ()
+                Elapsed -> loop
+                Told _
+                    | told `has` Force -> attempt told (Regardless why) freshTally
+                    | told `has` Recheck -> attempt told Consult freshTally
+                    | Just Satisfy <- override told -> satisfy
+                    | otherwise -> loop
 
     {- | An operator said "treat this as done". Settled without acting, and
     still tended: the instruction satisfies this attempt, it does not stop
@@ -709,7 +1120,7 @@ upkeep standing ctx =
         markOk ctx
         settle status Skipped
         say (Upkeep act Up)
-        resting Skipped (Delay delayCap)
+        resting Skipped (Delay delayCap) freshTally
 
 {- | @WaitDown -> Downing -> Down@. 'Down' is terminal: nothing in the model
 answers "is it still gone", so there is nothing to poll for.
@@ -743,6 +1154,7 @@ downkeep standing ctx =
             told <- announce ctx w
             case w of
                 Halt -> pure ()
+                Ended _ -> pure ()
                 Told _ ->
                     paused ctx told loop $
                         case override told of
@@ -776,6 +1188,7 @@ downkeep standing ctx =
         told <- announce ctx w
         case w of
             Halt -> pure ()
+            Ended _ -> pure ()
             Told _ ->
                 paused ctx told (retryDown why d) $
                     case override told of
@@ -804,7 +1217,7 @@ tending are not waited on at all.
 standby :: Ctx ext -> Direction -> [Ref] -> IO Wake
 standby ctx dir neighbours =
     atomically $
-        halting ctx $
+        halting HeedHalt ctx $
             listen ctx $ do
                 waitStability dir Stable vars
                 broken <- readTVar (ctxFailed ctx)
@@ -820,16 +1233,52 @@ naptime :: Ctx ext -> Micros -> IO Wake
 naptime ctx d = do
     timer <- registerDelay (unMicros d)
     atomically $
-        halting ctx $
+        halting HeedHalt ctx $
             listen ctx $ do
                 over <- readTVar timer
                 if over then pure Elapsed else retry
 
--- | 'Halt' wins over everything: a stopping supervisor is not negotiable.
-halting :: Ctx ext -> STM Wake -> STM Wake
-halting ctx k = do
+{- | 'naptime' for a machine holding a running action: the nap and the
+mailbox as before, plus the action's own exit, and no 'Halt'.
+
+Four things raced in one transaction, which is the shape §"Ordering is STM"
+promised and the reason nothing here needs a scheduler: the exit wins as soon
+as it happens, rather than being noticed at the end of a delay that may be a
+minute long.
+-}
+naptimeHolding :: Ctx ext -> Async ExitCode -> Micros -> IO Wake
+naptimeHolding ctx running d = do
+    timer <- registerDelay (unMicros d)
+    atomically $
+        halting IgnoreHalt ctx $
+            ended running $
+                listen ctx $ do
+                    over <- readTVar timer
+                    if over then pure Elapsed else retry
+
+-- | Block until somebody says something. For a holding machine, which has no
+-- other reason to stop waiting.
+listenHolding :: Ctx ext -> IO [Instruction]
+listenHolding ctx = do
+    w <- atomically (listen ctx retry)
+    case w of
+        Told told -> pure told
+        _ -> listenHolding ctx
+
+{- | 'Halt' wins over everything, for a machine that is allowed to hear it: a
+stopping supervisor is not negotiable. A machine holding a running effect is
+not allowed to hear it — see 'Heed'.
+-}
+halting :: Heed -> Ctx ext -> STM Wake -> STM Wake
+halting IgnoreHalt _ k = k
+halting HeedHalt ctx k = do
     stop <- readTVar (ctxHalt ctx)
     if stop then pure Halt else k
+
+-- | The held action stopping pre-empts the nap, though not an instruction
+-- already waiting.
+ended :: Async ExitCode -> STM Wake -> STM Wake
+ended running k = k `orElse` (Ended <$> waitCatchSTM running)
 
 -- | Anything pending in the mailbox pre-empts whatever else this wait was for.
 listen :: Ctx ext -> STM Wake -> STM Wake
@@ -843,6 +1292,7 @@ hand it back. @[]@ for any wake that was not an instruction.
 announce :: Ctx ext -> Wake -> IO [Instruction]
 announce _ Halt = pure []
 announce _ Elapsed = pure []
+announce _ (Ended _) = pure []
 announce ctx (Told told) = do
     total <- Mailbox.dropped (ctxBox ctx)
     fresh <- atomically $ do
@@ -872,9 +1322,10 @@ paused ctx told onResume onwards =
         _ -> onwards
   where
     hold = do
-        w <- atomically (halting ctx (listen ctx retry))
+        w <- atomically (halting HeedHalt ctx (listen ctx retry))
         case w of
             Halt -> pure ()
+            Ended _ -> pure ()
             Elapsed -> hold
             Told ts -> do
                 _ <- announce ctx (Told ts)

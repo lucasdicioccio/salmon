@@ -22,7 +22,8 @@ module Test.UpkeepSpec (tests) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
+import Control.Exception (bracket)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, retry)
 import Control.Monad (unless, void)
 import Data.Dynamic (toDyn)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -30,6 +31,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import System.Timeout (timeout)
+import System.Exit (ExitCode (..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
@@ -37,13 +39,16 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.Upkeep (DownkeepState (..), Report (..), Standing (..), Supervisor, Tend (..), UpkeepState (..))
 import qualified Salmon.Actions.Upkeep as Upkeep
-import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, evalDeps, help, nodeps, notes, op, opAct, ref, up)
+-- imported with their field selectors: OverloadedRecordDot only solves
+-- HasField for fields whose selector is in scope, and 'Upkeep' asks for
+-- several this module never mentions by name.
+import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, evalDeps, help, managed, nodeps, notes, op, opAct, ref, up)
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..))
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Status (Direction (..))
-import Salmon.Op.Supervision (Restart (..), Supervision (..), millis, supervised)
+import Salmon.Op.Supervision (Restart (..), Supervision (..), defaultSupervision, millis, seconds, supervised)
 import Salmon.Reporter (ReporterM (..))
 
 tests :: TestTree
@@ -68,6 +73,20 @@ tests =
         , testCase "stopping waits for an up in flight rather than cutting it" stopWaitsForUp
         , testCase "a node already standing is watched, not re-upped" settledIsNotReUpped
         , testCase "a node waiting on a slow dependency is not itself wedged" watchdogSkipsWaiters
+        , testGroup
+            "a node that owns its effect"
+            [ testCase "is Up for as long as its action runs" managedIsUpWhileRunning
+            , testCase "exiting cleanly is Completed, not a restart" managedCleanExitRests
+            , testCase "exiting non-zero is restarted" managedFailureRestarts
+            , testCase "Restart Never respects even a crash" managedNeverStaysDown
+            , testCase "Restart Always restarts a clean exit too" managedAlwaysRestarts
+            , testCase "a check that says the effect is there survives a 0 exit" managedDoubleFork
+            , testCase "giving up latches off until forced" managedGivesUp
+            , testCase "having run a while resets the failure count" managedStableResets
+            , testCase "cancelling tears the action down through its bracket" managedCancelTearsDown
+            , testCase "is never told it is already standing" managedIgnoresSettled
+            , testCase "Force restarts it rather than skipping it" managedForceRestarts
+            ]
         ]
 
 -------------------------------------------------------------------------------
@@ -261,7 +280,7 @@ neverLeavesItAlone = within 10 $ do
                             ok <- readIORef there
                             pure (if ok then Success else Failure "gone")
                         , up = bump >> writeIORef there True
-                        , dynamics = [supervised (Supervision Never Nothing)]
+                        , dynamics = [supervised defaultSupervision{supRestart = Never}]
                         }
     supervising (dagOf o) allUp $ \sup trace -> do
         await trace (\rs -> not (null (reached Up rs)))
@@ -283,7 +302,7 @@ alwaysActsOnCompleted = within 10 $ do
                     x
                         { check = pure Completed
                         , up = bump
-                        , dynamics = [supervised (Supervision Always Nothing)]
+                        , dynamics = [supervised defaultSupervision{supRestart = Always}]
                         }
     supervising (dagOf o) allUp $ \sup trace -> do
         await trace (\rs -> not (null (reached Up rs)))
@@ -423,7 +442,7 @@ watchdogFires = within 10 $ do
                 \x ->
                     x
                         { up = takeMVar gate
-                        , dynamics = [supervised (Supervision OnFailure (Just (millis 300)))]
+                        , dynamics = [supervised defaultSupervision{supWatchdog = Just (millis 300)}]
                         }
     supervising (dagOf o) allUp $ \_ trace -> do
         await trace (\rs -> not (null [() | Wedged{} <- rs]))
@@ -439,8 +458,8 @@ conflicting magma representative is.
 -}
 policyConflict :: IO ()
 policyConflict = within 10 $ do
-    let first = Supervision Never Nothing
-        second = Supervision Always (Just (millis 500))
+    let first = defaultSupervision{supRestart = Never}
+        second = defaultSupervision{supRestart = Always, supWatchdog = Just (millis 500)}
     let o =
             node "twominds" $
                 \x -> x{check = pure Success, dynamics = [toDyn first, toDyn second]}
@@ -502,7 +521,7 @@ wedged would point at the wrong node.
 watchdogSkipsWaiters :: IO ()
 watchdogSkipsWaiters = within 10 $ do
     gate <- newEmptyMVar
-    let policy = supervised (Supervision OnFailure (Just (millis 300)))
+    let policy = supervised defaultSupervision{supWatchdog = Just (millis 300)}
         dep = node "slowdep" $ \x -> x{up = takeMVar gate, dynamics = [policy]}
         top = nodeOn "waiter" [dep] $ \x -> x{dynamics = [policy]}
     supervising (dagOf top) allUp $ \_ trace -> do
@@ -514,3 +533,229 @@ watchdogSkipsWaiters = within 10 $ do
             [act.shorthand | Wedged act _ <- rs]
         putMVar gate ()
         await trace (\rs -> "waiter" `elem` evals rs)
+
+-------------------------------------------------------------------------------
+-- nodes that own their effect
+
+{- | These use a plain 'IO' 'ExitCode' as the "process", which is all the
+machine ever sees of one — the state machine's job is the racing, the
+policy and the accounting, and none of that is easier to see through a real
+subprocess. @Test.DaemonSpec@ covers the part that /is/ about processes:
+signals, groups, and pipes.
+-}
+exits :: Int -> ExitCode
+exits 0 = ExitSuccess
+exits n = ExitFailure n
+
+{- | A managed node: counts its spawns and hands each one the action to run.
+
+The count is a 'TVar' rather than an 'IORef' so a case can /wait/ for it. The
+machine reports @Eval@ before it starts the action, so any assertion made off
+the report stream alone races the thread that does the spawning.
+-}
+holder :: Text -> TVar Int -> IO ExitCode -> (Extension -> Extension) -> Op
+holder name spawns action f =
+    node name $ \x ->
+        f
+            x
+                { managed = Just $ \_out -> do
+                    atomically (modifyTVar' spawns (+ 1))
+                    action
+                }
+
+spawnCounter :: IO (TVar Int)
+spawnCounter = newTVarIO 0
+
+-- | Block until the action has been started at least this many times.
+awaitSpawns :: TVar Int -> Int -> IO ()
+awaitSpawns v n = atomically (readTVar v >>= \k -> unless (k >= n) retry)
+
+spawnsSoFar :: TVar Int -> IO Int
+spawnsSoFar = readTVarIO
+
+verdicts :: [Report Extension] -> [CheckResult]
+verdicts rs = [v | NextLook _ v _ <- rs]
+
+managedIsUpWhileRunning :: IO ()
+managedIsUpWhileRunning = within 10 $ do
+    gate <- newEmptyMVar
+    spawns <- spawnCounter
+    let o = holder "svc" spawns (takeMVar gate >> pure ExitSuccess) id
+    supervising (dagOf o) allUp $ \_ trace -> do
+        -- Up as soon as the action is running: for a node whose action is
+        -- the effect, that is the whole of being up.
+        await trace (\rs -> not (null (reached Up rs)))
+        awaitSpawns spawns 1
+        assertEqual "spawned once" 1 =<< spawnsSoFar spawns
+        rs <- seen trace
+        assertEqual "and reported Done, which is what lets serve converge it" ["svc"] [act.shorthand | Acted (UpDown.Done act) <- rs]
+        putMVar gate ()
+
+managedCleanExitRests :: IO ()
+managedCleanExitRests = within 10 $ do
+    spawns <- spawnCounter
+    let o = holder "job" spawns (pure ExitSuccess) id
+    supervising (dagOf o) allUp $ \_ trace -> do
+        await trace (\rs -> Completed `elem` verdicts rs)
+        assertEqual "ran once and was left alone" 1 =<< spawnsSoFar spawns
+
+managedFailureRestarts :: IO ()
+managedFailureRestarts = within 20 $ do
+    spawns <- spawnCounter
+    let o = holder "flapper" spawns (pure (exits 3)) id
+    supervising (dagOf o) allUp $ \_ _ -> do
+        awaitSpawns spawns 2
+        n <- spawnsSoFar spawns
+        assertBool "put back after a non-zero exit" (n >= 2)
+
+managedNeverStaysDown :: IO ()
+managedNeverStaysDown = within 10 $ do
+    spawns <- spawnCounter
+    let o = holder "once" spawns (pure (exits 1)) $ \x ->
+            x{dynamics = [supervised defaultSupervision{supRestart = Never}]}
+    supervising (dagOf o) allUp $ \sup trace -> do
+        -- it has stopped and settled; nothing put it back
+        await trace (\rs -> any isFailure (verdicts rs))
+        assertEqual "ran once" 1 =<< spawnsSoFar spawns
+        -- and a look does not change its mind either
+        void (Upkeep.instruct sup (refOf "once") Recheck)
+        await trace (\rs -> length (verdicts rs) >= 2)
+        assertEqual "still once" 1 =<< spawnsSoFar spawns
+  where
+    isFailure (Failure _) = True
+    isFailure _ = False
+
+managedAlwaysRestarts :: IO ()
+managedAlwaysRestarts = within 20 $ do
+    spawns <- spawnCounter
+    let o = holder "reloader" spawns (pure ExitSuccess) $ \x ->
+            x{dynamics = [supervised defaultSupervision{supRestart = Always}]}
+    supervising (dagOf o) allUp $ \_ _ -> do
+        awaitSpawns spawns 2
+        n <- spawnsSoFar spawns
+        assertBool "a clean exit is not the end of it under Always" (n >= 2)
+
+{- | The one shape a process handle cannot speak to: a daemon that exits 0
+having forked. Consulting the check before the policy handles it for free,
+and this is what pins that ordering.
+-}
+managedDoubleFork :: IO ()
+managedDoubleFork = within 10 $ do
+    forked <- newIORef False
+    spawns <- spawnCounter
+    let o = holder "forker" spawns (writeIORef forked True >> pure ExitSuccess) $ \x ->
+            x
+                { -- as a real double-forking daemon looks: nothing there
+                  -- until it has run, and there afterwards even though the
+                  -- process salmon spawned has exited.
+                  check = do
+                    up' <- readIORef forked
+                    pure (if up' then Success else Failure "not yet")
+                , dynamics = [supervised defaultSupervision{supRestart = Always}]
+                }
+    supervising (dagOf o) allUp $ \sup trace -> do
+        awaitSpawns spawns 1
+        await trace (\rs -> Success `elem` verdicts rs)
+        -- `Always` would otherwise restart even a clean exit. The check
+        -- saying the effect is there anyway is what stops it, and is the
+        -- only thing that could.
+        void (Upkeep.instruct sup (refOf "forker") Recheck)
+        await trace (\rs -> length (verdicts rs) >= 2)
+        assertEqual "the check outranks the policy" 1 =<< spawnsSoFar spawns
+
+managedGivesUp :: IO ()
+managedGivesUp = within 20 $ do
+    spawns <- spawnCounter
+    let o = holder "hopeless" spawns (pure (exits 1)) $ \x ->
+            x{dynamics = [supervised defaultSupervision{supGiveUpAfter = Just 2}]}
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null [n | GaveUp _ n <- rs]))
+        assertEqual "tried exactly as often as it was told to" 2 =<< spawnsSoFar spawns
+        rs <- seen trace
+        assertEqual "and says how many times" [2] [n | GaveUp _ n <- rs]
+        -- parked, not gone: an operator can change their mind
+        void (Upkeep.instruct sup (refOf "hopeless") Force)
+        awaitSpawns spawns 3
+        n <- spawnsSoFar spawns
+        assertBool "forcing starts it over" (n >= 3)
+
+{- | Without 'supStableAfter' a give-up limit latches off any long-lived node
+eventually: a service that falls over once a day reaches any finite count in
+that many days, having never been in a crash loop. So only /consecutive
+quick/ failures count.
+-}
+managedStableResets :: IO ()
+managedStableResets = within 30 $ do
+    spawns <- spawnCounter
+    let o = holder "daily" spawns (threadDelay 200000 >> pure (exits 1)) $ \x ->
+            x
+                { dynamics =
+                    [ supervised
+                        defaultSupervision
+                            { supGiveUpAfter = Just 2
+                            , supStableAfter = millis 100
+                            }
+                    ]
+                }
+    supervising (dagOf o) allUp $ \_ trace -> do
+        awaitSpawns spawns 3
+        rs <- seen trace
+        assertEqual "having run past supStableAfter, it never accumulates" [] [n | GaveUp _ n <- rs]
+
+{- | Teardown is cancelling the machine, and whatever bracket the action is
+built from is what does the killing. This is the property
+"Salmon.Builtin.Nodes.Daemon" relies on entirely.
+-}
+managedCancelTearsDown :: IO ()
+managedCancelTearsDown = within 10 $ do
+    torn <- newIORef False
+    blocker <- newEmptyMVar
+    spawns <- spawnCounter
+    let o =
+            holder "held" spawns
+                ( bracket
+                    (pure ())
+                    (\() -> writeIORef torn True)
+                    (\() -> takeMVar blocker >> pure ExitSuccess)
+                )
+                id
+    -- `supervising` stops the supervisor on the way out, and a machine
+    -- holding an effect is only ever taken by a cancel.
+    supervising (dagOf o) allUp $ \_ _ ->
+        awaitSpawns spawns 1
+    assertBool "the action's own bracket ran" =<< readIORef torn
+
+{- | A 'Settled' claim is about an effect that persists on its own. A managed
+effect does not persist without the machine holding it, so a caller believing
+otherwise (@serve@ does, for any node a pass marked converged) must not stop
+it being spawned.
+-}
+managedIgnoresSettled :: IO ()
+managedIgnoresSettled = within 10 $ do
+    gate <- newEmptyMVar
+    spawns <- spawnCounter
+    let o = holder "wrongly-settled" spawns (takeMVar gate >> pure ExitSuccess) id
+    supervising (dagOf o) restingUp $ \_ _ -> do
+        awaitSpawns spawns 1
+        assertEqual "spawned anyway" 1 =<< spawnsSoFar spawns
+        putMVar gate ()
+
+managedForceRestarts :: IO ()
+managedForceRestarts = within 10 $ do
+    torn <- newIORef (0 :: Int)
+    spawns <- spawnCounter
+    blocker <- newEmptyMVar
+    let o =
+            holder "restartable" spawns
+                ( bracket
+                    (pure ())
+                    (\() -> atomicModifyIORef' torn (\n -> (n + 1, ())))
+                    (\() -> takeMVar blocker >> pure ExitSuccess)
+                )
+                id
+    supervising (dagOf o) allUp $ \sup _ -> do
+        awaitSpawns spawns 1
+        void (Upkeep.instruct sup (refOf "restartable") Force)
+        awaitSpawns spawns 2
+        assertEqual "the old one was torn down before the new one spawned" 1 =<< readIORef torn
+        assertEqual "and there is a new one" 2 =<< spawnsSoFar spawns

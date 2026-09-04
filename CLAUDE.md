@@ -91,9 +91,32 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `check` (an `IO CheckResult` answering "is my effect already in place", run before `up`),
   `down`, plus `dynamics :: [Dynamic]` for attaching arbitrary typed metadata that can be
   recovered later via `getDynamics`/`collectDynamics` (used e.g. to flatten "remote call" ops out
-  of a graph). `Op = OpGraph Identity Actions'` is the type alias used everywhere in node/recipe
+  of a graph). One more field, `managed :: Maybe (Output -> IO ExitCode)`, is the long-running
+  counterpart to `up`: an action that blocks for as long as the node's effect is up and returns
+  why it stopped. `Nothing` for nearly every node. It is two fields rather than an
+  `OneShot ... | Managed ...` sum on purpose — the sum is the better type and would rewrite all
+  106 `up =` sites in the tree for a feature a handful of nodes use. **Only `run serve` honours
+  it** (see `Actions/Upkeep.hs`); the one-shot drivers call `up`, so a node with no meaningful
+  `up` should throw from it rather than no-op. `Op = OpGraph Identity Actions'` is the type alias used everywhere in node/recipe
   code. Building a node normally goes through the `op :: ShortHand -> Identity (Graph Op) ->
   (Extension -> Extension) -> Op` helper, starting from `noop`/`nodeps`/`deps`.
+- **`Nodes/Daemon.hs`** is the one builtin that fills in `managed`: a process salmon owns and
+  keeps running, for where there is no systemd to hand the problem to (a container, a test
+  harness, `specs/salmon-as-init.md`'s supervisor). `runDaemon` is the action, exposed so a node
+  wanting more than `daemon` offers (a `check` of its own, dependencies, a richer `ref` key) can
+  build on it rather than reimplement the teardown. That teardown is an **escalation, not a
+  `cancel`**: signal the process *group*, wait `stop_grace`, then `SIGKILL` and wait again —
+  recovered from the removed `Nodes/Supervised.hs` at `f9d7116`, because `withCreateProcess`
+  sends `SIGTERM` and waits forever behind a service that ignores it, and because a service that
+  forks workers has to take them with it (`create_group` is forced on regardless of what the
+  caller's `CreateProcess` said). Its stdout/stderr are drained *while* it runs, not after, or a
+  process that fills a pipe buffer blocks forever and looks wedged for a reason nobody can see.
+  Its `up` **throws** `NeedsSupervisor` (a one-shot driver has nowhere to put an action that
+  never returns, and a node that cannot be brought up should say so); its `down` is `pure ()`
+  and that is not an inconsistency — under `serve` the process died when its machine was
+  cancelled, and under `run down` this process never held one, so there is genuinely nothing to
+  stop. See `Test/DaemonSpec.hs`, which covers exactly the parts a fake `IO ExitCode` cannot:
+  signals, groups, and pipes.
 - **Builtin nodes** live under `salmon-ops/src/Salmon/Builtin/Nodes/` — one module per concern
   (Filesystem, Systemd, Debian.Package, Podman, Postgres, WireGuard, Certificates, Ssh, Git,
   Netfilter, CronTask, Rsync, etc). Look at `Filesystem.hs` as the canonical small example of the
@@ -166,6 +189,24 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   an `Unknown` node would otherwise have that work done again immediately.
   `Recheck`/`Pause`/`Resume` finally mean something here. See milestone 7 and
   `Test/UpkeepSpec.hs`.
+  A node with a `managed` action runs the same three states with one difference: `Up`
+  additionally races the *action itself*, so the `ExitCode` it eventually yields is what the
+  restart policy reads instead of a `CheckResult` (`Always`/`OnFailure`/`Never` mapped the
+  systemd way, which is only expressible because something can tell `exit 0` from `exit 137`).
+  Four things about that path are load-bearing. **The check is consulted before the policy** —
+  a process that exits 0 because it daemonised is still up, and nothing else can say so; that
+  one ordering handles double-forking for free. **The action runs under `withAsync`**, so
+  cancelling the machine cancels the action and whatever bracket it is built from does the
+  killing — which is the whole teardown story, and why `Nodes/Daemon.hs` needs no pid table.
+  **A machine holding an action ignores the halt flag**: stopping a supervisor means "stop
+  tending", so such a machine is *kept* (`Upkeep.Kept`) and adopted by the next supervisor
+  rather than wound down — otherwise typing `status` would restart every service. And a
+  `Settled` claim is **never** made about a managed node, because `Settled` means "the effect
+  persists on its own" and a managed effect does not persist without its machine.
+  Failure accounting lives in a per-machine `Tally` (consecutive failures, plus when the node
+  last reached `Up`), which is what makes `supGiveUpAfter` usable: without `supStableAfter`
+  resetting it, a service that falls over once a day reaches any finite limit eventually. A node
+  that has given up is *parked*, not gone — `Force` or `Recheck` starts it over. See milestone 8.
 - **`Op/Supervision.hs`** is the per-node policy the above reads: `Restart`
   (`Always`/`OnFailure`/`Never`, default `OnFailure`) and an optional watchdog, carried on
   `dynamics` rather than in a new `Extension` field — the same channel, and for the same
@@ -173,10 +214,13 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   for the many nodes with no opinion, "a node that declares no watchdog is never considered
   wedged" is just `getDynamics` returning `[]`, and it is one line to add. Untyped and
   unenforced, so two conflicting policies on one node get a magma-conflict's treatment: take
-  the first, report the rest. Over the one-shot lifecycle `Extension` can express today the
-  policy reads a `CheckResult`, not an exit code (those arrive with `Managed`). The watchdog
-  only ever *reports*: killing a wedged `up` needs the teardown-through-a-bracket that owning
-  the process buys.
+  the first, report the rest. The policy reads a `CheckResult` for a node whose effect persists
+  on its own and an `ExitCode` for one that owns a process. Two more fields exist only for the
+  latter's sake: `supStableAfter` (having been up this long forgets the previous failures) and
+  `supGiveUpAfter` (stop after this many consecutive ones, default never). Prefer amending
+  `defaultSupervision` to spelling out every field — the record has grown once and will again.
+  The watchdog only ever *reports*: killing a wedged `up` would need a bracket the node does not
+  necessarily have.
 - **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded
   `Cofree Graph (OpGraph m (Actions ext))` into a `Dag` — one representative per `Ref`
   (`dagNodes`, the *magma*), `dagDependencies` **and** `dagDependants` (the direction the
@@ -245,7 +289,18 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `converge --select` scopes the *pass*, not the standing watch, so `supervise off` first if a
   pass must be the only thing touching anything. This is what replaced `serveWakingWith`, a
   "these nodes want attention" hook nothing ever drove: it existed because a node had no state
-  of its own to block on. Neither pass
+  of its own to block on.
+  A node with a `managed` action is handled differently again, and the difference is all about
+  ordering. It is **invisible to both passes** (`gateFor` skips it, and `stateWriter` ignores
+  that skip so the pass cannot claim it converged): there is nothing a one-shot `up` could do
+  with it and nothing left for a one-shot `down` to do. Its machine is `Kept` across commands
+  rather than stood down with the others. And `settleManaged` runs **before** a convergence
+  pass, letting go of the machines for anything this world no longer wants up — that ordering is
+  the point, because the down pass is what removes a daemon's config file and working directory,
+  and it must not do so while the daemon is still running. Recording such a node down there is
+  exact rather than optimistic: for an effect that only exists while something holds it,
+  "nothing holds it" is what being down *is*. Leaving the loop leaves these processes running,
+  which is what `quit`'s "changing nothing on the way out" has always promised. Neither pass
   touches a graph: `worldDag` rebuilds one walkable structure from the magma and the ledger's
   precedence via `Dag.fromMagma`, and both directions run over it. `epochGraph` survives for one
   reason only — `--select` resolves *path* patterns, and a `Dag` has `Ref`s and edges but no

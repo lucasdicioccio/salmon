@@ -129,6 +129,7 @@ import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isSpace)
 import Data.Foldable (traverse_)
+import Data.Maybe (isJust)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -282,6 +283,12 @@ meaningful once 'serve' has returned.
 -}
 data Tending = Tending
     { tendingSup :: !(IORef (Maybe (Upkeep.Supervisor Extension)))
+    , tendingKept :: !(IORef (Upkeep.Kept Extension))
+    -- ^ machines still holding a 'Salmon.Builtin.Extension.managed' effect
+    -- up, between one supervisor and the next. These outlive a command
+    -- precisely because stopping a supervisor means "stop tending", and a
+    -- @status@ that killed every service would be a poor reading of that.
+    -- See 'Salmon.Actions.Upkeep.Kept'.
     , tendingOn :: !(IORef Bool)
     -- ^ @supervise off@ clears this; nothing is tended between passes, and
     -- @serve@ behaves as it did before per-node machines existed.
@@ -615,7 +622,20 @@ renderTended t =
                 <> tshow (us `div` 1000)
                 <> "ms, past its watchdog"
             ]
+        Upkeep.Holding n -> ["serve: " <> tshow n <> " node(s) still holding an effect up"]
         Upkeep.Unwedged act -> ["serve: " <> act.shorthand <> " is moving again"]
+        Upkeep.GaveUp act n ->
+            [ "serve: "
+                <> act.shorthand
+                <> " gave up after "
+                <> tshow n
+                <> " consecutive failures; force or recheck it to try again"
+            ]
+        -- a machine taken over from the previous supervisor: worth a line,
+        -- because the alternative (a restart) would have been visible and an
+        -- operator should be able to tell which happened.
+        Upkeep.Adopted act -> ["serve: " <> act.shorthand <> " kept running"]
+        Upkeep.Released act -> ["serve: " <> act.shorthand <> " let go"]
         Upkeep.Paused act -> ["serve: " <> act.shorthand <> " paused (its effect is untouched)"]
         Upkeep.Resumed act -> ["serve: " <> act.shorthand <> " resumed"]
         Upkeep.Policy act _ ignored ->
@@ -941,7 +961,7 @@ serveWith ::
     IO (World seed directive)
 serveWith rewrites r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
-    tending <- Tending <$> newIORef Nothing <*> newIORef True
+    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True
     inbox <- newTChanIO
     -- the input handle is read on its own thread so that the loop is never
     -- itself blocked in a read: the supervisor's machines run while it
@@ -1008,28 +1028,98 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
     the moment it has. -}
     startTending :: Tending -> IORef (World seed directive) -> IO ()
     startTending tending world = do
-        stopTending tending
-        on <- readIORef (tendingOn tending)
-        w <- readIORef world
-        unless (not on || Map.null w.worldNodes) $ do
-            -- the same computed dag the pass just walked: a rewrite's
-            -- collection node is what actually gets tended, and 'membersOf'
-            -- is what keeps the bookkeeping in declared terms.
-            let computed = Rewrite.rewrite rewrites (phaseOf w Nothing) (worldDag w)
-            sup <-
-                Upkeep.startUpkeep
-                    (tendReporter world computed)
-                    (tendOf w computed)
-                    (Rewrite.computedDag computed)
-            writeIORef (tendingSup tending) (Just sup)
+        already <- readIORef (tendingSup tending)
+        case already of
+            -- a read-only command does not stand the machines down, so by
+            -- the time the loop is idle again they are still running and
+            -- there is nothing to do. Restarting them would re-check every
+            -- node for no reason, and would drop the mailboxes an operator
+            -- may have posted into.
+            Just _ -> pure ()
+            Nothing -> do
+                on <- readIORef (tendingOn tending)
+                w <- readIORef world
+                unless (not on || Map.null w.worldNodes) $ do
+                    -- the same computed dag a pass walks: a rewrite's
+                    -- collection node is what actually gets tended, and
+                    -- 'membersOf' is what keeps the bookkeeping in declared
+                    -- terms.
+                    let computed = Rewrite.rewrite rewrites (phaseOf w Nothing) (worldDag w)
+                    kept <- readIORef (tendingKept tending)
+                    sup <-
+                        Upkeep.startUpkeep
+                            (tendReporter world computed)
+                            kept
+                            (tendOf w computed)
+                            (Rewrite.computedDag computed)
+                    -- the supervisor owns them now: it adopted what it could
+                    -- and released the rest.
+                    writeIORef (tendingKept tending) Upkeep.noKept
+                    writeIORef (tendingSup tending) (Just sup)
 
-    -- | Stop tending, without tearing anything down. Waits for any @up@ or
-    -- @down@ in flight rather than interrupting it.
+    {- | Stop tending, without tearing anything down.
+
+    Two different things happen to the two kinds of machine, and the
+    difference is the whole of why 'Upkeep.Kept' exists. A machine tending an
+    effect that persists on its own is wound down, waiting for any @up@ or
+    @down@ in flight rather than interrupting it. A machine /holding/ an
+    effect up keeps running: this is called before every command, @status@
+    included, and a supervisor that took its processes with it would restart
+    every service every time anybody typed anything. -}
     stopTending :: Tending -> IO ()
     stopTending tending = do
         current <- readIORef (tendingSup tending)
-        forM_ current Upkeep.stopUpkeep
+        forM_ current $ \sup -> do
+            kept <- Upkeep.stopUpkeep sup
+            writeIORef (tendingKept tending) kept
         writeIORef (tendingSup tending) Nothing
+
+    {- | Tear down the machines still holding effects for nodes this world no
+    longer wants up, and record those nodes as down.
+
+    This runs __before__ a convergence pass rather than as part of it, and
+    the ordering is the point: a daemon's dependencies — its config file, its
+    working directory — must not be removed while it is still running, and
+    the down pass is what removes them. 'Upkeep.releaseKept' cancels and
+    waits, so by the time the pass starts the processes really are gone.
+
+    Recording them down here is exact rather than optimistic: for a node
+    whose effect only exists while something holds it, "nothing holds it" is
+    what being down /is/. Which is also why a managed node is invisible to
+    both passes ('gateFor'): there is nothing for a one-shot @down@ to do
+    that this has not already done, and nothing a one-shot @up@ could do at
+    all. -}
+    settleManaged :: Tending -> IORef (World seed directive) -> IO ()
+    settleManaged tending world = do
+        w <- readIORef world
+        kept <- readIORef (tendingKept tending)
+        kept' <- Upkeep.releaseKept releaseReporter (wantedUp w) kept
+        writeIORef (tendingKept tending) kept'
+        let goners =
+                [ rf
+                | (rf, a) <- Map.toList w.worldMagma
+                , isJust a.extension.managed
+                , Just st <- [Map.lookup rf w.worldNodes]
+                , st.nodeDirection == TurnDown
+                ]
+        unless (null goners) $
+            modifyIORef' world $ \w0 ->
+                foldr (\rf acc -> setConvergence TurnDown rf Converged acc) w0 goners
+
+    wantedUp :: World seed directive -> Ref -> Bool
+    wantedUp w rf =
+        case Map.lookup rf w.worldNodes of
+            Just st -> st.nodeDirection == TurnUp
+            Nothing -> False
+
+    -- | Just enough of 'tendReporter' for 'Upkeep.releaseKept', which is
+    -- called outside any particular pass and so has no 'Rewritten' to
+    -- translate through.
+    releaseReporter :: Reporter (Upkeep.Report Extension)
+    releaseReporter = ReporterM $ \rep ->
+        case rep of
+            Upkeep.Acted inner -> runReporter nodeReporter inner
+            _ -> runReporter r (Tended rep)
 
     {- | Which nodes the supervisor tends, and how.
 
@@ -1160,19 +1250,19 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                                     w <- readIORef world
                                     let (selr, excr) = resolveWorldSelectors w sel
                                     pure (Just (selr `Set.difference` excr))
-                        converge world restriction
+                        converge tending world restriction
                         pure True
                     Clear -> do
                         w <- readIORef world
                         writeIORef world (resettle w{worldLedger = Ledger.retractAll w.worldLedger})
                         runReporter r (Cleared (Ledger.liveCount w.worldLedger))
-                        converge world Nothing
+                        converge tending world Nothing
                         pure True
                     Declare decl args -> do
-                        declare world decl args
+                        declare tending world decl args
                         pure True
                     DeclareDirective decl path -> do
-                        declareDirective world decl path
+                        declareDirective tending world decl path
                         pure True
                     Load path -> loadFile tending world (depth + 1) path
                     Supervise on -> do
@@ -1216,8 +1306,8 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
             keepGoing <- step tending depth world ln
             if keepGoing then go (n + 1) rest else pure False
 
-    declare :: IORef (World seed directive) -> Declaration -> [String] -> IO ()
-    declare world decl args =
+    declare :: Tending -> IORef (World seed directive) -> Declaration -> [String] -> IO ()
+    declare tending world decl args =
         case parseSeed args of
             Left err -> runReporter r (BadSeed err)
             Right seed -> do
@@ -1236,10 +1326,10 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                             , epochKey = encode directive
                             , epochGraph = gr
                             }
-                commitEpoch world w0 decl ep
+                commitEpoch tending world w0 decl ep
 
-    declareDirective :: IORef (World seed directive) -> Declaration -> FilePath -> IO ()
-    declareDirective world decl path = do
+    declareDirective :: Tending -> IORef (World seed directive) -> Declaration -> FilePath -> IO ()
+    declareDirective tending world decl path = do
         result <- try (LByteString.readFile path) :: IO (Either IOException ByteString)
         case result of
             Left ex -> runReporter r (BadDirective ("cannot read " <> Text.pack path <> ": " <> Text.pack (show ex)))
@@ -1261,12 +1351,12 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                                     , epochKey = encode directive
                                     , epochGraph = gr
                                     }
-                        commitEpoch world w0 decl ep
+                        commitEpoch tending world w0 decl ep
 
     -- | Appends and records a freshly-built epoch, then converges (fully:
     -- a declaration is never itself scoped by a 'Selection').
-    commitEpoch :: IORef (World seed directive) -> World seed directive -> Declaration -> Epoch seed directive -> IO ()
-    commitEpoch world w0 decl ep = do
+    commitEpoch :: Tending -> IORef (World seed directive) -> World seed directive -> Declaration -> Epoch seed directive -> IO ()
+    commitEpoch tending world w0 decl ep = do
         let dag = Dag.foldDag Dag.sameRepresentative ep.epochGraph
         -- the fold is where a Ref collision inside one declaration is
         -- visible; the down pass no longer folds anything, so this is the
@@ -1281,18 +1371,20 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                 ep.epochDirection
                 (Map.size (Dag.dagNodes dag))
                 (length w1.worldEpochs)
-        converge world Nothing
+        converge tending world Nothing
 
     -- | Runs one down-then-up convergence pass. @restriction@, when
     -- present, additionally 'Skippable'-gates any node whose 'Ref' isn't in
     -- it — used only by an explicit @converge --select\/--exclude@; the
     -- auto-converge that follows every declaration always passes 'Nothing'.
-    converge :: IORef (World seed directive) -> Maybe (Set Ref) -> IO ()
-    converge world restriction = do
-        -- no 'stopTending' here: 'loop' stands the machines down before
-        -- handing any command to 'step', so by the time a pass runs there
-        -- are none. Doing it again would be harmless, but taking a
-        -- 'Tending' in order to would suggest it was this function's job.
+    converge :: Tending -> IORef (World seed directive) -> Maybe (Set Ref) -> IO ()
+    converge tending world restriction = do
+        -- 'loop' has already stood the one-shot machines down. What it did
+        -- not do is let go of the effects something is still /holding/,
+        -- because at that point this world had not yet been told what the
+        -- command changed. Now it has, so: anything no longer wanted up goes
+        -- first, before the down pass starts removing what it stood on.
+        settleManaged tending world
         w <- readIORef world
         -- the rewrites run per pass rather than per declaration, because
         -- what they partition on ('Ledger.desired') is a property of the
@@ -1341,9 +1433,17 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
         -- For every other node 'membersOf' is the singleton of itself, so
         -- this is the same predicate it always was.
         pure $
-            if any (wants w) (Set.toList (Rewrite.membersOf computed act.extension.ref))
-                then Required
-                else Skippable
+            -- a node whose effect only exists while something holds it is
+            -- not this pass's business in either direction: bringing it up
+            -- needs a driver that can hold it (so its @up@ throws, on
+            -- purpose — see "Salmon.Builtin.Nodes.Daemon"), and taking it
+            -- down is 'settleManaged', which has already run.
+            if isJust act.extension.managed
+                then Skippable
+                else
+                    if any (wants w) (Set.toList (Rewrite.membersOf computed act.extension.ref))
+                        then Required
+                        else Skippable
       where
         wants :: World seed directive -> Ref -> Bool
         wants w rf =
@@ -1374,6 +1474,11 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
             UpDown.Done act -> mark act Converged
             UpDown.Skip act
                 | maybe False (Set.notMember act.extension.ref) restriction -> pure ()
+                -- 'gateFor' skips every managed node, and that skip says
+                -- nothing about whether the node is up: only the machine
+                -- holding it can say that, and it does so through
+                -- 'tendWriter'.
+                | isJust act.extension.managed -> pure ()
                 | otherwise -> mark act Converged
             UpDown.Failed act _ -> mark act Errored
             UpDown.Blocked act -> mark act Blocked

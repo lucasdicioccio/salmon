@@ -13,10 +13,10 @@ non-converged and picked up again by the next pass.
 -}
 module Test.ServeSpec (tests) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
-import Control.Exception (throwIO)
+import Control.Exception (IOException, throwIO, try)
 import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy as LByteString
@@ -32,7 +32,7 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), Handle, IOMode (ReadMode), hClose, hPutStr, hPutStrLn, hSetBuffering, withFile)
 import System.IO.Temp (withSystemTempFile)
-import System.Process (createPipe)
+import System.Process (createPipe, proc)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
@@ -43,6 +43,7 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, nodeps, op, opAct, ref, up)
+import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
@@ -50,7 +51,7 @@ import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (ReporterM (..))
+import Salmon.Reporter (ReporterM (..), silent)
 
 import Test.Harness (capture, withTempDir)
 
@@ -81,6 +82,7 @@ tests =
         , testCase "a rewrite's batch splits by direction when a seed is retired" rewriteSplitsOnRetire
         , testCase "an idle loop tends its nodes and puts a vanished effect back" idleLoopTends
         , testCase "`supervise off` leaves a vanished effect alone" superviseOffLeavesItAlone
+        , testCase "a node that owns a process keeps it across commands, and loses it on clear" ownedProcessSurvivesCommands
         ]
 
 -------------------------------------------------------------------------------
@@ -670,3 +672,72 @@ superviseOffLeavesItAlone =
             assertBool "and supervision never started" . not . tending
                 =<< atomically (reverse <$> readTVar session.sessionServe)
         pure ()
+
+{- | The property the whole 'Salmon.Actions.Upkeep.Kept' machinery exists
+for, and the one that cannot be seen anywhere smaller.
+
+@serve@ stands its machines down before every command it is handed, @status@
+included. A machine that holds a running process cannot be stood down the way
+a one-shot machine is, or typing @status@ would restart every service on the
+box — so it survives, and the next supervisor adopts it. And when the node
+stops being wanted, it has to be let go /before/ the down pass starts
+removing what it stood on.
+
+Both halves are asserted the same way: whether the process is still writing.
+-}
+ownedProcessSurvivesCommands :: IO ()
+ownedProcessSurvivesCommands =
+    withTempDir $ \root -> do
+        let ticks = root </> "ticks"
+        (_, w) <- withSession (ticker ticks) root $ \session -> do
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 1)
+            -- it is running
+            n0 <- awaitTicks ticks 2
+            -- a read-only command: the machines stand down, but not this one
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            n1 <- awaitTicks ticks (n0 + 2)
+            assertBool "it kept running across the command" (n1 > n0)
+            -- ...and now nothing wants it
+            hPutStrLn session.sessionIn "clear"
+            awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 2)
+            n2 <- countTicks ticks
+            threadDelay 400000
+            n3 <- countTicks ticks
+            assertEqual "and stopped once nothing wanted it" n2 n3
+        assertEqual
+            "the world records it as having been dealt with"
+            []
+            [st.nodeConvergence | st <- Map.elems w.worldNodes, st.nodeConvergence /= Converged]
+
+{- | One node, which owns a process that writes a line every 50ms.
+
+@up@ throwing is 'Salmon.Builtin.Nodes.Daemon.daemon''s own convention and is
+what makes the test meaningful: if @serve@ ever routed this node through a
+convergence pass instead of to a machine, the pass would fail loudly rather
+than quietly do nothing.
+-}
+ticker :: FilePath -> Track' Spec
+ticker path = Track $ \_ ->
+    Daemon.daemon silent $
+        Daemon.defaultDaemon
+            "ticker"
+            (proc "/bin/sh" ["-c", "while true; do echo tick >> " <> path <> "; sleep 0.05; done"])
+
+countTicks :: FilePath -> IO Int
+countTicks path = do
+    there <- doesFileExist path
+    if not there
+        then pure 0
+        else do
+            contents <- try (readFile path) :: IO (Either IOException String)
+            pure (either (const 0) (length . lines) contents)
+
+-- | Block until the file has at least this many lines, and say how many.
+awaitTicks :: FilePath -> Int -> IO Int
+awaitTicks path n = expect ("the process to write " <> show n <> " line(s)") go
+  where
+    go = do
+        k <- countTicks path
+        if k >= n then pure k else threadDelay 25000 >> go

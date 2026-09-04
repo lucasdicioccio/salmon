@@ -45,6 +45,8 @@ data Extension = Extension
     , notes   :: [Text]          -- longer free-form notes
     , ref     :: Ref             -- dedup identity (see §2.1)
     , up      :: IO ()           -- bring this node's own effect into being
+    , managed :: Maybe (Output -> IO ExitCode)
+                                 -- ...or *be* the effect, for as long as it runs (see §2.2)
     , check   :: IO CheckResult  -- is my effect already in place? (see §4)
     , down    :: IO ()           -- undo this node's own effect
     , dynamics :: [Dynamic]      -- arbitrary typed metadata, see §7
@@ -52,7 +54,9 @@ data Extension = Extension
 ```
 
 You only ever need to touch `help`, `ref`, `up`, `down`, and — if the node
-needs idempotency beyond what `up` itself can guarantee — `check`.
+needs idempotency beyond what `up` itself can guarantee — `check`. `managed`
+is `Nothing` for all but a handful of nodes; see §2.2 if yours is one of
+them.
 
 `check` answers one question about the node's own effect, with five possible
 answers: `Success` (it is in place), `Skipped` (someone decided to treat it as
@@ -105,6 +109,52 @@ reported as `Conflicting` so the collision is at least visible.
 Tightening a key (putting a content digest in it, say) is a legitimate per-node
 fix, but think about it per node: it is right for a file and wrong for a
 long-running service, where every config tweak would become a different node.
+
+### 2.2 `managed`: when the node *is* a running process
+
+`up :: IO ()` describes an effect that persists once it has been made: the
+file stays written, the route stays installed. A long-running process does
+not — nothing keeps it alive but something watching it. That is what
+`managed` is for:
+
+```haskell
+managed :: Maybe (Output -> IO ExitCode)
+```
+
+It blocks for as long as the node is up and returns the reason it stopped,
+which means the node's own thread is in scope for the process's entire
+lifetime and the handle never has to escape. Three things follow that a
+`check` alone cannot give you: an exit *status* (so "don't restart a service
+that exited cleanly" is expressible), promptness (a death is noticed at once
+rather than at the end of a check delay that may be a minute), and identity
+that survives pid reuse.
+
+Don't write one from scratch — use `Salmon.Builtin.Nodes.Daemon`:
+
+```haskell
+Daemon.daemon reportPrint (Daemon.defaultDaemon "webserver" (proc "nginx" ["-g", "daemon off;"]))
+```
+
+or, if your node needs dependencies or a liveness `check` of its own, build
+it around `Daemon.runDaemon`, which is the same action without the node
+wrapped round it. Either way you get the teardown: `SIGTERM` to the process
+*group*, a grace period, then `SIGKILL`. Writing that yourself is easy to get
+subtly wrong.
+
+Three things to know before reaching for this:
+
+- **only `run serve` honours it.** `run up`/`run down` call `up`, and a
+  one-pass driver has nowhere to put an action that never returns. So a node
+  like this should `throwIO` from `up` (that's what `Daemon.daemon` does)
+  rather than no-op into a world that then believes it is up.
+- **prefer systemd where there is systemd.** `Systemd.systemdService` hands
+  the whole problem to an init system that is better at it and survives
+  salmon exiting. `managed` is for where that is not available: a container,
+  a test harness, or salmon-as-init itself.
+- **the `Output` argument is where your process's own lines go** — into the
+  node's bounded ring, which is what an operator reads when it has failed and
+  what tells a watchdog it is still making progress. `Daemon.runDaemon`
+  handles the piping.
 
 ## 3. The canonical example: `Filesystem.hs`
 

@@ -7,30 +7,28 @@ piece is worth doing, and what order I would do it in. Read the design first
 if you need the "why" of the model; read this if you want to know what to
 pick up next.
 
-Written after milestone 7 landed (`git log --oneline` on `serve-supervision`:
-`41f181f` back to `52ab4f8`).
+Written after milestone 8 landed (`git log --oneline` on `serve-supervision`).
 
-## Headline: two milestones, and a residue that matters more than one of them
+## Headline: one milestone, and a residue that matters more than it
 
-**Two of the nine milestones are unstarted:**
+**One of the nine milestones is unstarted:**
 
 | # | what | size | why it is not done |
 |---|---|---|---|
-| 8 | **`Managed` nodes** — a node that owns a running process | medium | needs a new field on `Extension` and a real teardown; deliberately after 7 |
-| 9 | **`rest_for_one`** — a node leaving `Up` demotes its dependants | small | last on purpose: the only step that changes what a *correct* graph does |
+| 9 | **`rest_for_one`** — a node leaving `Up` demotes its dependants | small | last on purpose: the only step that changes what a *correct* graph does, and the only one with a plausible thundering-herd |
 
 **And a residue no milestone covers.** Some of it is bookkeeping, but item
-(R1) is not: it is the reason milestone 7 currently supervises almost
-nothing, and it is worth more than milestone 9. The residue is §"Not in any
-milestone" below.
+(R1) is not: it is the reason milestones 7 and 8 currently supervise almost
+nothing on a real graph, and it is worth more than milestone 9. The residue
+is §"Not in any milestone" below.
 
 The honest summary of where this design stands: **the execution model is
-finished and the nodes have not caught up with it.** Seven milestones built a
-per-node state machine, a ledger, a rewrite phase and two concurrent drivers,
-all of which ask each node one question — "is your effect in place?" — that
-roughly a quarter of nodes can answer.
+finished and the nodes have not caught up with it.** Eight milestones built a
+per-node state machine, a ledger, a rewrite phase, two concurrent drivers and
+a supervisor that can own a process, all of which ask each node one question
+— "is your effect in place?" — that roughly a quarter of nodes can answer.
 
-## Where 1–7 got to, in one line each
+## Where 1–8 got to, in one line each
 
 So this file stands alone. Each is marked *landed* in the design, with its
 deviations recorded in place there.
@@ -51,185 +49,35 @@ deviations recorded in place there.
 7. `Salmon.Actions.Upkeep`/`Salmon.Op.Supervision` — the upkeep and downkeep
    FSMs, adaptive delay, authored watchdog. `serve` tends its nodes while
    idle. `serveWakingWith` deleted.
+8. `Extension.managed` and `Salmon.Builtin.Nodes.Daemon` — a node can own a
+   running process. `Up` races the action, exit codes reach the policy,
+   teardown escalates through the action's own bracket to the process group,
+   and a machine holding a process is `Kept` across commands rather than
+   stopped with its supervisor.
 
 -------------------------------------------------------------------------------
 
-## Milestone 8: `Managed` nodes
+## Milestone 8: `Managed` nodes — landed
 
-> `Up` races the running action against the check timer, `cancel` tears down
-> through the bracket, and exit statuses reach the restart policy. This is the
-> step that restores what removing `Supervised` gave up, so nothing supervises
-> owned processes until it lands.
+Landed as planned, with six departures recorded in place in
+`specs/per-node-state-machines.md`. Three are worth knowing here because they
+change what the remaining work looks like:
 
-Everything milestone 7 built supervises effects salmon does **not** own: it
-polls a `check` and re-runs `up`. That is the right answer for a systemd
-unit, a container, or a service on another host, and a poor one for a process
-salmon started itself, for the three reasons §"Recovering process ownership"
-gives — no exit status, a 60s worst-case detection delay, and no identity
-that survives pid reuse.
+- **`Lifecycle` is a field, not a sum** (`managed` beside `up`), as this plan
+  recommended. If a third lifecycle ever appears, that is when to pay for the
+  sum.
+- **A machine holding a process is `Kept` across commands.** This was not in
+  the plan and is the largest thing milestone 8 added: `serve` stands its
+  machines down before every command, so a supervisor that wound its
+  processes down with it would restart every service on every `status`.
+  Holding machines survive and the next supervisor adopts them, on exactly
+  the condition §"`Ref` is location-addressed" named — still wanted up, and
+  its representative unchanged.
+- **The restart policy got `supStableAfter`/`supGiveUpAfter`**, folded in
+  rather than deferred, as recommended. Which also means milestone 9's
+  flapping hazard (§9.3) already has its mitigation available.
 
-### 8.1 `Lifecycle` has to go on `Extension`, not on `dynamics`
-
-`Supervision` rides `dynamics` and that was right: it is *policy*, optional,
-and a node with no opinion needs to say nothing. `Lifecycle` is not policy —
-it is *what the node's action is*, and there is already a field for that:
-
-```haskell
-data Lifecycle
-    = OneShot (IO ())        -- returns; the effect persists on its own
-    | Managed (IO ExitCode)  -- blocks while the effect is up
-```
-
-Two ways to land it, and the second is the one to take.
-
-- **Replace `up :: IO ()` with `up :: Lifecycle`.** Honest, and touches every
-  one of the ~91 `op` sites plus `noop`'s default, `instance Semigroup
-  Extension` (whose `up a <> up b` has no meaning for two `Managed` halves),
-  and `Actions/Dot.hs`. A large mechanical diff over the whole tree for a
-  feature roughly two nodes will use.
-- **Add `managed :: Maybe (IO ExitCode)` beside `up`.** `Nothing` is every
-  existing node, unchanged and uninspected. The FSM reads `managed` first and
-  falls back to `up`. Ugly in the sense that two fields encode one choice,
-  and the ugliness is confined to `Extension` and one `case` in
-  `Salmon.Actions.Upkeep.upping` rather than spread across 91 call sites.
-
-Take the second, and say in `Extension`'s haddock that the two fields are one
-sum type spelled as a product to avoid a tree-wide diff — a note, so the next
-person does not have to rediscover the trade. If a third lifecycle ever
-appears, that is the moment to pay for the sum.
-
-### 8.2 `Up` becomes a race, and that is the whole state-machine change
-
-Today `Salmon.Actions.Upkeep.resting` naps on `naptime` and then `look`s. For
-a `Managed` node it has to wait on **three** things at once, which is one STM
-choice plus one `Async`:
-
-```
-Up:  the action returning (the process died, with its ExitCode)
-  |  the check timer expiring (an unowned effect went away)
-  |  the mailbox (an operator said something)
-```
-
-`naptime`'s shape already composes: it is `halting ctx (listen ctx k)` over a
-`registerDelay` `TVar`. Add `waitCatchSTM` on the action's `Async` as a
-fourth branch and the existing `Wake` type grows one constructor. A node
-supplying only `check` behaves exactly as it does now; one supplying only
-`Managed` never polls, because its `Delay` is simply never consulted.
-
-`Upping` changes less than it looks: it currently runs `up` inline and
-catches. For `Managed` it `async`es the action and moves straight to `Up`,
-because a `Managed` node **is** up for as long as its action is still
-running. Which means `note status` gains a real writer for the first time —
-`statusOutput` exists (milestone 6) and nothing writes to it but the
-machine's own transitions.
-
-### 8.3 The teardown is the part that is easy to get wrong
-
-`cancel` alone is not a stop. §"Recovering process ownership" is explicit and
-right: `withCreateProcess`'s cleanup sends `SIGTERM` and waits, and a service
-that ignores `SIGTERM` wedges the teardown.
-
-**This code already existed and was deleted, not lost.** `git show
-f9d7116:salmon-ops/src/Salmon/Builtin/Nodes/Supervised.hs` has
-`serviceDown`: flag it stopping *before* signalling (so whoever notices the
-exit does not count it as a failure and schedule a restart), signal the
-process **group**, `waitGone` for a grace period, then `sigKILL` and wait
-again. Recover that into the bracket, with `create_group = True` on the
-`CreateProcess` so the whole group goes. `System.Posix.Signals`
-(`signalProcessGroup`) is already a dependency via `unix`.
-
-The "flag it stopping first" detail is worth keeping precisely because
-milestone 7 made it *more* necessary, not less: the upkeep FSM's whole job is
-to put a stopped thing back, so a teardown that lets the machine observe the
-exit it asked for is a teardown that resurrects what it just stopped.
-
-### 8.4 `check` before the policy, and the double-fork it buys for free
-
-```
-on exit with code c:
-    check >>= \case
-        Success -> stay Up        -- it forked; the effect is there regardless
-        _       -> apply policy to c
-```
-
-One line, and it handles the case a process handle fundamentally cannot: a
-daemon that exits 0 having forked. `Salmon.Actions.Upkeep.look` is already
-the function that runs the check and decides, so this is an extra entry into
-it rather than new machinery.
-
-### 8.5 The restart policy is currently too thin, and f9d7116 knew it
-
-`Supervision.Restart = Always | OnFailure | Never` is what milestone 7
-landed, and against a `CheckResult` that is enough. Against a **crash loop**
-it is not, and the deleted module had the two fields that make the difference:
-
-```haskell
-policy_stableAfter :: Double   -- having run this long resets the escalation
-policy_giveUpAfter :: Maybe Int -- stop after this many consecutive failures
-```
-
-`stableAfter` is what stops a service that crashes once a day from eventually
-being treated as a crash loop — only *consecutive quick* failures count.
-`giveUpAfter` is right for a service and wrong for anything the machine
-cannot come back without (`neverGiveUp`, in the old module).
-
-Milestone 7's adaptive delay is a backoff but it neither latches off nor
-resets, so this is a real gap rather than a nicety — and it is a gap the
-existing `Delay` cannot express, because a `Delay` has no memory of how it
-got where it is. Adding it means `Supervision` grows two fields and the
-machine carries a consecutive-failure count and a "running since"
-timestamp. Do it *with* 8, not after: a `Managed` node that dies instantly
-and forever is the first thing that will exercise it.
-
-### 8.6 Three smaller things
-
-- **`Restart` now collides.** `Salmon.Builtin.Nodes.Systemd.Restart`
-  (rendered into a unit file's `Restart=` directive, one constructor:
-  `OnFailure`) and `Salmon.Op.Supervision.Restart` (`Always`/`OnFailure`/
-  `Never`) share both a name and a constructor. Nothing imports both today.
-  This is the fourth collision of this kind in this work (`CheckResult`'s
-  `Success`/`Failure` vs optparse, `Mailbox.Skip` vs `Report.Skip`, two
-  `Direction`s — the last resolved by *merging* them, which is not available
-  here). The two are genuinely different things: one is a string salmon
-  writes into a file for systemd to read, the other is a decision salmon
-  makes itself. Rename `Systemd.Restart` to `Systemd.RestartDirective` when
-  something first needs both.
-- **A replaced representative must restart its machine.** §"`Ref` is
-  location-addressed" names this as the *one* case where swapping the `Async`
-  is right: a `Managed` node whose command line changed but whose ref key did
-  not is the same node, last-writer-wins replaces the magma entry, and the
-  running process belongs to a machine started from the old one. Today
-  `Serve.startTending` builds a whole new supervisor per idle period, so this
-  is currently free — and will stop being free the moment a supervisor
-  outlives a declaration, which milestone 8 makes tempting (killing a healthy
-  process to restart its watcher is exactly what nobody wants). Decide it
-  when it bites; do not pre-build it.
-- **`-threaded` is already done** (milestone 6, all six executables plus the
-  test suite), so the requirement §"Recovering process ownership" flags is
-  met before it is needed.
-
-### 8.7 What to test
-
-`Test/UpkeepSpec.hs`'s pattern carries over unchanged — start a supervisor,
-block on the report stream, poke, block again — and its 18 cases are the
-regression net. New cases, all cheap:
-
-- a `Managed` node is `Up` while its action runs, and the machine does not
-  advance past it;
-- its exit reaches the policy: `ExitSuccess` + `OnFailure` does not restart,
-  `ExitFailure` does, `Always` restarts either;
-- a check answering `Success` after a 0 exit keeps the node `Up` (the
-  double-fork case) — assert with a `check` that ignores the action entirely;
-- teardown kills a process that ignores `SIGTERM`, within the grace period
-  plus slack, and the *group* goes (spawn a child that outlives its parent);
-- an exit salmon asked for does not schedule a restart;
-- `giveUpAfter` latches off, and `stableAfter` resets the count.
-
-The last two want a fake clock or a very short `stableAfter`; prefer the
-short value over a clock abstraction, as `watchdogFires` already does with
-300ms.
-
--------------------------------------------------------------------------------
+The `Restart` name collision the plan flagged is **still latent** — see (R8).
 
 ## Milestone 9: `rest_for_one`
 
@@ -286,9 +134,10 @@ dependants is a statement about *other people's* nodes.
 
 A node that flaps — check fails, check succeeds, check fails — with
 `RestForOne` dependants demotes and re-runs its whole cone on every flap.
-`stableAfter` from §8.5 is the mitigation and is another reason to do 8
-first: demote dependants only once the node has been down long enough to
-count, not on the first failed check.
+`supStableAfter` is the mitigation and it exists now (milestone 8): demote
+dependants only once the node has been down long enough to count against the
+tally, not on the first failed check. Milestone 9's job is to *use* it, not
+to add it.
 
 ### 9.4 What to test
 
@@ -353,6 +202,15 @@ Three candidates, in the order I would do them:
 3. **`Filesystem.dir`** — `doesDirectoryExist`. Trivial;
    `skipIfDirectoryIsMissing` is right there, inverted.
 
+Milestone 8 narrows this in one respect and widens it in another. A node that
+owns its process needs no `check` at all to be supervised — the action's exit
+is the authority, which is most of what ownership was for — so
+`Nodes/Daemon.hs` works today with nothing added. But it makes the gap
+sharper for everything salmon does *not* own, which is every service already
+under systemd: `Systemd.systemdService` still cannot notice its unit
+stopping, and that is the largest single category of long-running effect in
+this repository.
+
 **Each of these changes what `run up` does for every existing caller**: a
 node whose check says `Success` stops being re-applied. That is an
 improvement (it is what the `check` convention is *for*, and CLAUDE.md's
@@ -379,13 +237,18 @@ pause   [--select P]... [--exclude P]...
 resume  [--select P]... [--exclude P]...
 ```
 
-One caveat to design for: `Serve.startTending` currently builds a fresh
-supervisor per idle period, and posting to a mailbox that is about to be
-discarded does nothing. Either these commands act on the *next* supervisor
-(hold the instruction in the world and hand it to `startUpkeep`, which is
-honest — the machines are stopped while a command is being handled, by
-construction), or supervisors start outliving commands. The first is much the
-smaller change and probably the right semantics anyway: "force this node next
+Milestone 8 raised the value of this considerably: `pause` on a node that
+owns a process is a real operational verb (stop tending without killing the
+service), and `force` on one means "restart it", which is the thing an
+operator most often wants and currently cannot say.
+
+One caveat to design for, now half-solved. A *holding* machine survives
+commands, so posting to its mailbox works as-is. A one-shot machine does not:
+`Serve.startTending` rebuilds it, and posting to a mailbox about to be
+discarded does nothing. So either these commands act on the *next* supervisor
+for one-shot nodes (hold the instruction in the world and hand it to
+`startUpkeep`), or one-shot machines start being kept too. The first is
+smaller and is probably the right semantics anyway: "force this node next
 time you look at it".
 
 ### R3. `statusOutput` has no reader
@@ -402,6 +265,13 @@ just `Pending`/`Converged`/`Errored`. That is a genuinely better `status`
 output and it is the thing an operator wants when a node is `Errored`. (The
 alternative, keeping supervisors alive across read-only commands, buys
 liveness at the cost of the determinism §7 deliberately bought.)
+
+Milestone 8 made this worth more than it was: the ring now carries a managed
+process's actual stdout and stderr, so a service that failed has its last
+lines sitting in a structure nothing can print. That is the single most
+useful thing an operator could be shown and it is currently write-only.
+A holding machine's `Status` is also genuinely live between commands, so for
+those nodes `status` could read the `TVar` directly rather than a snapshot.
 
 ### R4. `query`/`run tree`/`run dag` still print the *declared* graph
 
@@ -437,6 +307,24 @@ has needed it. Worth remembering that convergence has been parallel and
 unbounded since milestone 6 and the only protection is an edge or a
 collection.
 
+### R8. `Restart` means two different things
+
+`Salmon.Builtin.Nodes.Systemd.Restart` (rendered into a unit file's
+`Restart=` directive; one constructor, `OnFailure`) and
+`Salmon.Op.Supervision.Restart` (`Always`/`OnFailure`/`Never`) share both a
+name and a constructor. Nothing imports both today, so nothing is broken —
+but this is the fourth collision of this kind in this work (`CheckResult`'s
+`Success`/`Failure` vs optparse's `ParserResult`, `Mailbox.Skip` vs
+`Report.Skip`, and two `Direction`s, the last resolved by *merging* them,
+which is not available here).
+
+The two are genuinely different things: one is a string salmon writes into a
+file for systemd to read, the other is a decision salmon makes itself. Rename
+`Systemd.Restart` to `Systemd.RestartDirective` when something first needs
+both — which is likely to be soon, since a systemd service node with a
+`check` (R1) is exactly the node that would want a `Supervision` too, and
+would then have to decide whether salmon or systemd is supervising it.
+
 ### R7. Two dead bindings
 
 - `Salmon.Op.GraphFold.postOrderM` (`salmon-core`) has no in-repo caller
@@ -451,36 +339,39 @@ collection.
 
 ## The order I would do it in
 
-Not the milestone order, because (R1) outranks milestone 9 and arguably
-milestone 8.
+Not the milestone order, because (R1) outranks milestone 9.
 
-1. **R1, one node at a time** — `Systemd.systemdService`, then
-   `Filesystem.filecontents`, then `dir`. This is what turns milestone 7 from
-   a tested engine into something that does anything, and it is the only item
-   here whose value does not depend on another item landing. Three small
-   commits, each with a Layer-1 test.
-2. **R3** — snapshot `Status` into the `World` on `stopTending`. Small, and it
-   is how you will *see* whether (R1) is working on a real graph. Do it early
-   for that reason.
-3. **Milestone 8**, with §8.5's `stableAfter`/`giveUpAfter` folded in rather
-   than deferred. This is the biggest single piece left and the one that
-   restores what deleting `Supervised` gave up.
-4. **R2** — the four instruction commands. Cheap once 8 exists, and much more
-   useful then: `pause` on a node that owns a process is a real operational
-   verb.
-5. **Milestone 9**, whose hazard (§9.3) wants `stableAfter` from step 3 and
-   whose thundering-herd risk (§9.1) wants a real graph from step 1 to
-   measure against.
-6. **R4**, **R6**, **R7** as they become annoying. None is blocking anything.
+1. **R1, one node at a time** — `Systemd.systemdService` first (it is the
+   largest category of long-running effect in the repo and the one salmon
+   does not own, so it depends entirely on a `check`), then
+   `Filesystem.filecontents`, then `dir`. This is what turns milestones 7 and
+   8 from a tested engine into something that does anything on a real graph,
+   and it is the only item here whose value does not depend on another item
+   landing. Three small commits, each with a Layer-1 test. Expect (R8) to
+   come due while doing the first one.
+2. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
+   live `TVar` for a holding machine. Small, and it is how you will *see*
+   whether (R1) is working. Milestone 8 also gave the output ring real
+   content, so this is now the difference between having a failed service's
+   last log lines and not.
+3. **R2** — the four instruction commands. Cheap, and much more useful now
+   that `pause` and `force` mean something to a node that owns a process.
+4. **Milestone 9**, whose hazard (§9.3) has its mitigation already
+   (`supStableAfter`, milestone 8) and whose thundering-herd risk (§9.1)
+   wants a real graph from step 1 to measure against.
+5. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
+   anything.
 
 ## Relationship to the other specs
 
-Unchanged from the design's own section, with one thing now firmer:
-`specs/salmon-as-init.md` needs milestone 8 specifically, not this work in
-general. Its PID-2 supervisor is the upkeep FSM (landed), but a supervisor
-that cannot own a process cannot be an init system's — so init is gated on 8
-and on R1, and not on 9. The Rust PID 1 remains unaffected: that boundary is
-about `waitpid(-1)`, and everything here waits on specific children.
+`specs/salmon-as-init.md` is **no longer gated on this work**. Its PID-2
+supervisor is the upkeep FSM and its restart policy is `Supervision`, both
+landed; a node that owns a process is `Nodes/Daemon.hs`. What it still needs
+from here is (R1) for anything it does not own, and nothing at all from
+milestone 9. The Rust PID 1 remains unaffected: that boundary is about
+`waitpid(-1)`, and everything here waits on specific children — deliberately,
+which is why the polling `getProcessExitCode` reaper the removed
+`Supervised` module used was not recovered along with its teardown.
 
 `specs/advance-querying.md` is R4. `specs/multi-user-privilege-separation.md`
 still composes unchanged — an `Invoker` decorates the `CreateProcess` a node

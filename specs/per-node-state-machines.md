@@ -1107,10 +1107,91 @@ wakeup channel, and the `run_stopping` flag.
    9. A node that has actually failed does hold off a dependant still in
    `WaitUp`, which is the containment the one-shot drivers have, expressed as
    a wait rather than as a `Blocked`.
-8. **`Managed` nodes**: `Up` races the running action against the check timer,
-   `cancel` tears down through the bracket, and exit statuses reach the
-   restart policy. This is the step that restores what removing `Supervised`
-   gave up, so nothing supervises owned processes until it lands.
+8. **`Managed` nodes** — *landed*. `Up` races the running action against the
+   check timer, `cancel` tears down through the bracket, and exit statuses
+   reach the restart policy. This is the step that restored what removing
+   `Supervised` gave up.
+
+   `Extension.managed :: Maybe (Output -> IO ExitCode)` is the action;
+   `Salmon.Builtin.Nodes.Daemon` is the one builtin that fills it in, and
+   `Test/DaemonSpec.hs` covers the part only a real subprocess shows.
+   The state machine changes in exactly one place: `Up`'s nap becomes a
+   four-way STM race (nap, mailbox, the action's own exit, and — for a
+   machine that holds one — never the halt flag), and the exit is what the
+   policy reads.
+
+   Six departures, three of them shapes this document guessed wrong.
+
+   - **`Lifecycle` is a field, not a sum.** §"Recovering process ownership"
+     declares `OneShot (IO ()) | Managed (IO ExitCode)`. Replacing `up`'s
+     type would rewrite all 106 `up =` sites in the tree for a feature a
+     handful of nodes use, so `managed` sits beside `up` and `Nothing` is
+     every existing node, unchanged and uninspected. The sum is the better
+     type; it is not worth that diff until a third lifecycle exists.
+   - **The action takes an `Output` sink.** The declared type is
+     `IO ExitCode`, which leaves §"Output: a bounded ring per node" unable to
+     deliver what it promised — ownership was the thing that made capturing
+     stdout possible, and with no channel the ring can only ever hold the
+     machine's own narration. So the action is handed a `Text -> IO ()` that
+     writes into it. The pipes are drained *while* the process runs rather
+     than after, or one that fills a pipe buffer blocks forever and looks
+     wedged for a reason nobody could see.
+   - **A machine holding a process is `Kept`, not stopped.** This is the
+     largest thing the document did not anticipate, and it follows from
+     milestone 7's own choice to rebuild the supervisor whenever the loop
+     goes idle. Stopping a supervisor means "stop tending", and `serve`
+     stands its machines down before every command — so a supervisor that
+     wound its processes down with it would restart every service every time
+     anybody typed `status`. Holding machines therefore survive their
+     supervisor and the next one **adopts** them, on precisely the condition
+     §"`Ref` is location-addressed" identified as the one legitimate reason
+     to swap a machine: still wanted `TurnUp`, and its representative
+     unchanged. Everything else it left is **released** — cancelled, which
+     tears the effect down through the action's own bracket.
+   - **A managed node is invisible to both convergence passes**, and the
+     ordering around that is load-bearing. `run up` cannot host it (so its
+     `up` throws, loudly, rather than no-oping into a world that then
+     believes it is up) and there is nothing left for a one-shot `down` to
+     do. But letting go of the machine has to happen **before** the down
+     pass, because the down pass is what removes the daemon's config file and
+     working directory. `Serve.settleManaged` is that step, and it records
+     those nodes down as it goes — exact rather than optimistic, since for an
+     effect that only exists while something holds it, "nothing holds it" is
+     what being down *is*.
+   - **The restart policy needed two more fields.** `Restart` alone cannot
+     express a crash loop, and the module deleted at `f9d7116` already knew
+     it: `supStableAfter` (having been up this long forgets the earlier
+     failures) and `supGiveUpAfter`. Without the first the second latches off
+     any long-lived node eventually — a service that falls over once a day
+     reaches any finite limit in that many days, having never been in a crash
+     loop. A node that gives up is *parked*, not gone: its dependants must
+     keep seeing it settled-and-failing, and an operator has to be able to
+     change their mind (`Force` or `Recheck`).
+   - **A managed node whose check already says the effect is there is not
+     spawned.** It is treated as an unowned effect and polled, because
+     starting a second copy of something already running is worse than not
+     owning what is running. Worth naming because it means a process left
+     behind by a `serve` that has since exited is never re-adopted — the
+     pidfile problem §"Non-goals" excludes, showing up in the one place it
+     still bites.
+
+   `Settled` is never claimed about a managed node, whatever the caller
+   believes: a `Settled` claim is about an effect that persists on its own,
+   and a managed effect does not persist without its machine. `withAsync`
+   rather than `async` is what makes the teardown work at all — cancelling
+   the machine cancels the action, and whatever bracket the action is built
+   from does the killing, which is why no pid table appears anywhere here.
+   The grace-then-`SIGKILL` escalation and `create_group = True` are
+   recovered from `f9d7116` as this document said they should be, not
+   reinvented.
+
+   One bug worth recording, because of how it hid: adding `Ended` to the
+   machine's `Wake` type left `announce` non-exhaustive, so every managed
+   node's thread died of a pattern-match failure the moment its action
+   returned. The `-Wincomplete-patterns` sweep that would have caught it
+   reported nothing, because `cabal build` with different `--ghc-options` in
+   an up-to-date build directory does not recompile. Sweep in a fresh
+   `--builddir` or not at all.
 9. **`rest_for_one`**: a node leaving `Up` demotes its dependants. The payoff,
    and last because it is the only step that changes what a correct graph
    *does*.

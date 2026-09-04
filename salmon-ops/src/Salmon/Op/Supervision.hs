@@ -91,9 +91,11 @@ node that simply has no check at its delay floor forever. "I could not look"
 is not evidence the effect went away; only 'Salmon.Actions.UpDown.Failure'
 is.
 
-Exit codes reach this once nodes can own processes, which is the next
-milestone; the shape of the type is chosen so that arrival is an added case
-rather than a rewrite.
+For a node that owns a process ('Salmon.Builtin.Extension.managed') the same
+three answers are read against its 'System.Exit.ExitCode' instead, with one
+ordering rule that matters: __the check is consulted before the policy.__ A
+process that exits 0 because it daemonised is still up, and the check is the
+only thing that can say so.
 -}
 data Restart
     = Always
@@ -106,12 +108,38 @@ data Supervision = Supervision
     , supWatchdog :: !(Maybe Micros)
     -- ^ how long this node may go without doing anything observable before
     -- it should be called wedged. 'Nothing' — the default — means never.
+    , supStableAfter :: !Micros
+    -- ^ having been up this long counts as working: the backoff and the
+    -- consecutive-failure count both reset.
+    --
+    -- This is what stops a service that falls over once a day from
+    -- eventually being treated as a crash loop — only /consecutive quick/
+    -- failures count. Without it, 'supGiveUpAfter' would latch off any
+    -- long-lived node given enough days.
+    , supGiveUpAfter :: !(Maybe Int)
+    -- ^ stop putting the node back after this many consecutive failures.
+    -- 'Nothing' — the default — never gives up.
+    --
+    -- Right for a service whose repeated failure is information rather than
+    -- an emergency; wrong for anything the machine cannot come back without,
+    -- which is why the default is to keep trying. A node that has given up
+    -- says so in its status and is not touched again until an operator
+    -- forces it.
     }
     deriving (Show, Eq)
 
--- | 'OnFailure', no watchdog: what a node that says nothing gets.
+{- | 'OnFailure', no watchdog, ten seconds of uptime counts as stable, never
+gives up: what a node that says nothing gets.
+
+Note the difference in kind between the two defaults that /do/ something.
+'OnFailure' is an active choice — a node declared up that has stopped being
+up is a convergence gap, and quietly accepting it would make this model
+weaker than @run up@ already is (systemd's own default is the opposite, and
+systemd is not converging a declared graph). Never giving up is the passive
+choice: latching off is a decision only the node's author can justify.
+-}
 defaultSupervision :: Supervision
-defaultSupervision = Supervision OnFailure Nothing
+defaultSupervision = Supervision OnFailure Nothing (seconds 10) Nothing
 
 {- | State a supervision policy on a node, for a later pass to read back:
 
@@ -119,9 +147,13 @@ defaultSupervision = Supervision OnFailure Nothing
 op "webserver" nodeps $ \\actions ->
     actions
         { ...
-        , dynamics = [supervised (Supervision Always (Just (seconds 30)))]
+        , dynamics = [supervised defaultSupervision{supWatchdog = Just (seconds 30)}]
         }
 @
+
+Prefer amending 'defaultSupervision' to spelling out every field: the record
+has grown once already and will again, and a node that only cares about its
+watchdog should not have to have an opinion about giving up.
 -}
 supervised :: Supervision -> Dynamic
 supervised = toDyn
