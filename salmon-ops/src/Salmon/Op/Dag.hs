@@ -57,12 +57,14 @@ module Salmon.Op.Dag (
     dagOrder,
     dependenciesOf,
     dependantsOf,
+    dagEdges,
     representativeOf,
     roots,
 
     -- * Building one
     foldDag,
     mergeDag,
+    fromMagma,
     record,
 
     -- * Colliding representatives
@@ -78,6 +80,7 @@ import Data.Foldable (toList)
 import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import GHC.Records (HasField (..))
@@ -147,6 +150,18 @@ dependenciesOf dag r = Map.findWithDefault [] r (dagDependencies dag)
 -- starting point: nothing is standing on it.
 dependantsOf :: Dag ext -> Ref -> [Ref]
 dependantsOf dag r = Map.findWithDefault [] r (dagDependants dag)
+
+{- | Every edge as a flat @(dependency, dependant)@ set — the shape
+"Salmon.Op.Ledger" keeps per declaration, where it has to be unionable and
+retractable rather than walkable.
+-}
+dagEdges :: Dag ext -> Set (Ref, Ref)
+dagEdges dag =
+    Set.fromList
+        [ (d, r)
+        | (r, ds) <- Map.toList (dagDependencies dag)
+        , d <- ds
+        ]
 
 representativeOf :: Dag ext -> Ref -> Maybe (Act ext)
 representativeOf dag r = Map.lookup r (dagNodes dag)
@@ -257,6 +272,37 @@ record same aref act predRefs dag =
         | new `elem` old = old
         | otherwise = old <> [new]
     snoc new old = old <> filter (`notElem` old) new
+
+{- | Rebuild a 'Dag' from a magma and a flat edge set — the inverse of
+'dagEdges', and how a driver that keeps nodes and precedence separately (as
+"Salmon.Op.Ledger" does, because edges have to be retractable there) gets
+back something it can walk.
+
+Restricted to the magma: an edge naming a node the magma no longer holds is
+dropped rather than resurrecting a node with no representative. 'dagOrder' is
+the magma's key order, which is arbitrary but stable — the walk this feeds is
+order-independent apart from tie-breaks.
+-}
+fromMagma :: Map Ref (Act ext) -> Set (Ref, Ref) -> Dag ext
+fromMagma magma edges = foldl' add emptyDag (Map.keys magma)
+  where
+    -- \_ _ -> True: these representatives are already the survivors of
+    -- whatever fold produced the magma, so there is no collision left to
+    -- report here.
+    add dag r = record (\_ _ -> True) r (magma Map.! r) (deps r) dag
+
+    deps :: Ref -> [Ref]
+    deps r = Map.findWithDefault [] r incoming
+
+    incoming :: Map Ref [Ref]
+    incoming =
+        Map.fromListWith
+            (flip (<>))
+            [ (dependant, [dependency])
+            | (dependency, dependant) <- Set.toList edges
+            , Map.member dependency magma
+            , Map.member dependant magma
+            ]
 
 {- | Fold the right 'Dag' into the left one: representatives from the right
 win, edges and order accumulate. This is how a second declaration joins a

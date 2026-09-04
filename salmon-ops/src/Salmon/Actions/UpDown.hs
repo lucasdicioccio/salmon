@@ -3,7 +3,6 @@
 
 module Salmon.Actions.UpDown where
 
-import Control.Comonad.Cofree (Cofree (..))
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, when)
 import Data.Dynamic (Dynamic)
@@ -22,7 +21,6 @@ import Salmon.Op.Actions
 import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Eval
-import Salmon.Op.Graph
 import Salmon.Op.GraphFold (postOrderM)
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
@@ -349,12 +347,10 @@ downTreeWith ::
 downTreeWith gate r nat graph = do
     cofree <- nat (expand graph)
 
-    -- 1. Collapse the Cofree to a Ref-level DAG: one representative per node
-    -- plus both adjacency directions. This is "Salmon.Op.Dag"'s whole job;
-    -- what a teardown needs from it and the Cofree cannot give is
+    -- The collapse to a Ref-level DAG is "Salmon.Op.Dag"'s whole job; what a
+    -- teardown needs from it and the 'Cofree' cannot give is
     -- 'Dag.dependantsOf'.
     let dag = Dag.foldDag Dag.sameRepresentative cofree
-    let order = Dag.dagOrder dag
 
     -- Two declarations describing one effect site differently is not an
     -- error, but it does mean one of them is silently not the node that gets
@@ -362,11 +358,33 @@ downTreeWith gate r nat graph = do
     forM_ (reverse (Dag.dagConflicts dag)) $ \c ->
         runReporter r (Conflicting c.conflictRef c.conflictKept c.conflictReplaced)
 
-    -- 2. Count each node's dependants; a node with none is a starting point.
+    downDag gate r dag
+
+{- | 'downTreeWith' once the graph has already been collapsed — the actual
+teardown, over nothing but a 'Dag.Dag'.
+
+Split out because a long-running driver does not keep graphs: it keeps a
+magma and a "Salmon.Op.Ledger" of who still wants what, and rebuilds
+something walkable with 'Dag.fromMagma'. Expanding a 'Cofree' is then just
+one way to get here, not the only one.
+-}
+downDag ::
+    forall ext.
+    ( HasField "down" ext (IO ())
+    , HasField "ref" ext Ref
+    ) =>
+    Gate ext ->
+    Reporter (Report ext) ->
+    Dag ext ->
+    IO Bool
+downDag gate r dag = do
+    let order = Dag.dagOrder dag
+
+    -- Count each node's dependants; a node with none is a starting point.
     let depCount0 :: Map Ref Int
         depCount0 = Map.fromList [(aref, length (Dag.dependantsOf dag aref)) | aref <- order]
 
-    -- 3. Tear down: a node becomes ready once its last dependant has released
+    -- Tear down: a node becomes ready once its last dependant has released
     -- it; then, unless it's blocked, run its 'down' and release its own
     -- predecessors (blocking them if this node is still standing).
     countRef <- newIORef depCount0

@@ -5,6 +5,7 @@ import qualified Test.DagSpec as DagSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
+import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
@@ -24,6 +25,7 @@ main =
             , DebootstrapSpec.tests
             , DownTreeSpec.tests
             , JWTSigningSpec.tests
+            , LedgerSpec.tests
             , PodmanSpec.tests
             , PostgresInitSpec.tests
             , PostgresReplicationSpec.tests

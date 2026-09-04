@@ -871,12 +871,29 @@ wakeup channel, and the `run_stopping` flag.
    `postOrderM` already does. `Conflicting` is a new `UpDown.Report`
    constructor; only `downTreeWith` emits it, because only `downTreeWith` goes
    through the fold until step 4.
-3. **The ledger**: per-declaration `Contribution`s (ref set *and* edge set),
-   `desired` as the union over live ones and `precedence` as the union over
-   live *and retiring* ones, shrinking `worldEpochs`/`prune` in `serve` to a
-   graph-free equivalent. Still no concurrency; `Test.ServeSpec` is the
-   regression net, and the retraction cases it already covers are what prove
-   the edge sets retract correctly.
+3. **The ledger** — *landed*. Per-declaration `Contribution`s (ref set *and*
+   edge set), `desired` as the union over live ones and `precedence` as the
+   union over live *and retiring* ones, shrinking `worldEpochs`/`prune` in
+   `serve` to a graph-free equivalent. Still no concurrency; `Test.ServeSpec`
+   is the regression net, and the retraction cases it already covers are what
+   prove the edge sets retract correctly.
+
+   Two things this turned out to need that the section above did not say.
+   First, "graph-free" is only true of the *teardown*: `upTreeWith` still
+   walks a `Cofree` of its own, so an epoch's graph is still what the up pass
+   reads, and the saving is that an epoch is now dropped the moment its
+   declaration is retired or superseded rather than being held until its
+   nodes are down. Step 4 is what closes that. Second, running a teardown off
+   the magma needs `downTreeWith` split in two: `downDag` is the walk over a
+   `Dag`, and `downTreeWith` is `expand` plus the fold plus `downDag`. The
+   `Dag` a `serve` teardown walks is rebuilt from the magma and
+   `precedenceOf` by `Dag.fromMagma`, which is `dagEdges`' inverse.
+
+   `worldActive` is gone, absorbed: the ledger's liveness is the only source
+   of truth for what is declared up, and `worldEpochs` after `prune` is
+   exactly the live declarations' newest epochs. `NodeState.nodeEpoch` is
+   gone too — it was write-only, and there is no longer an epoch to name once
+   a declaration retires.
 4. **Sync drivers re-expressed** over the magma and ledger. `run up`/`run
    down` produce the same `Report` stream and the same `Bool`;
    `Test.DownTreeSpec`/`Test.QuerySpec` are the net.

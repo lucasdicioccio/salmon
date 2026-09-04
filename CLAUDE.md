@@ -142,18 +142,33 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   rendering of `dynamics` — `up`/`check`/`down` are functions, and `Dynamic` renders as its type
   alone), so it is a heuristic; it is still strictly more than the zero available before. See
   `specs/per-node-state-machines.md` milestone 2 and `Test/DagSpec.hs`.
+- **`Op/Ledger.hs`** is the other half: who still *wants* which nodes. One `Contribution` per
+  declaration — a `Set Ref` and a `Set (Ref, Ref)` of precedence edges, plus a `contribLive`
+  flag — keyed by whatever identifies the declaration. `desired` is the union of the live ones'
+  refs; `precedenceOf` is the union over **all** of them, live and retiring. Two decisions worth
+  knowing before touching it. It's a **set, not a refcount**: counting breaks four ways (a
+  diamond double-counts its apex, a `down` of something never up goes negative, a re-declared
+  seed reaches 2 so one `down` strands it, and two declarations wanting one node cancel each
+  other) that a set gets structurally. And a retraction **retires rather than deletes**
+  (`contribLive = False`, then `collect` drops it once none of its nodes is still coming down),
+  because retracting is exactly when a declaration's edges matter most: they're the only
+  remaining statement of what order to tear its nodes down in. See milestone 3 and
+  `Test/LedgerSpec.hs`.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
-  `World` — an append-only history of `Epoch`s (a declared seed, the directive it configured to,
-  and the graph it evaluated to *at that moment*), the set of seeds currently declared up, and,
-  unified across all their graphs by `Ref`, a `NodeState` per node (a `Direction` it's wanted in
-  plus whether it has `Converged` there). Everything else is derived: a node an active seed's
-  graph contains is wanted `TurnUp`, a node no active seed still asks for is wanted `TurnDown`
-  (retired epochs' graphs are kept precisely because they're the only remaining description of
-  how to tear those nodes down), and flipping a node's direction resets it to `Pending`.
-  Converging is then just one `downTreeWith` pass plus one `upTreeWith` pass with a gate that
-  filters to "wanted in this pass, not yet converged" — so ordering, dedup and failure
-  containment are exactly `run up`/`run down`'s, and all this module adds is the memory. Nodes
-  left `Errored`/`Blocked` are retried by the next pass.
+  `World` — a `worldLedger` of who's asked for what, a `worldMagma` of one representative per
+  `Ref` (what each node *is*), a `NodeState` per node (a `Direction` it's wanted in plus whether
+  it has `Converged` there), and `worldEpochs`, the declared seed / directive / graph, kept only
+  for declarations that are still live. Everything else is derived: a node some live declaration
+  asks for is wanted `TurnUp`, a node no live declaration still asks for is wanted `TurnDown`,
+  and flipping a node's direction resets it to `Pending`. Converging is then one teardown pass
+  plus one `upTreeWith` pass with a gate that filters to "wanted in this pass, not yet
+  converged" — so ordering, dedup and failure containment are exactly `run up`/`run down`'s, and
+  all this module adds is the memory. Nodes left `Errored`/`Blocked` are retried by the next
+  pass. Note the asymmetry: the **up** pass still walks the active epochs' graphs
+  (`upTreeWith`), while the **down** pass has no graph at all — `downDag` rebuilds something
+  walkable out of the magma and the ledger's precedence via `Dag.fromMagma`, which is why a
+  retired declaration's graph can be dropped the moment it's retracted. Re-expressing the up
+  pass the same way is milestone 4.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately

@@ -35,6 +35,7 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension (Extension, Op, Track', deps, down, nodeps, op, ref, up)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
+import qualified Salmon.Op.Ledger as Ledger
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Track (Track (..))
 
@@ -50,7 +51,7 @@ tests =
         , testCase "retiring a multi-file bundle removes its shared directory cleanly" retireMultiFileBundle
         , testCase "`only` retires the previous seed but keeps shared nodes" onlySupersedes
         , testCase "a node whose up threw is retried by the next pass" failedNodeIsRetried
-        , testCase "a graph still needed for teardown survives a failed down" teardownGraphSurvives
+        , testCase "a retired declaration survives a failed down" retiredContributionSurvives
         , testCase "re-declaring a seed does not accumulate graphs" reDeclareDoesNotAccumulate
         , testCase "history outlives the graph it declared" historyOutlivesTheGraph
         , testCase "the history log is capped and says how much it dropped" historyLogIsCapped
@@ -117,9 +118,10 @@ reDeclareIsNoop =
             [(0, 3), (0, 0)]
             (convergeStarts reports)
         assertEqual "history keeps both declarations" 2 (length w.worldLog)
-        assertEqual "but they are one active seed" 1 (Map.size w.worldActive)
-        -- the superseded epoch is no longer active and none of its nodes is
-        -- on its way down, so its graph is collected rather than piling up.
+        assertEqual "but they are one live declaration" 1 (Ledger.liveCount w.worldLedger)
+        -- the superseded epoch is no longer the newest for its key and none
+        -- of its nodes is on its way down, so its graph is collected rather
+        -- than piling up.
         assertEqual "and only the live graph is retained" 1 (length w.worldEpochs)
 
 retireTearsDown :: IO ()
@@ -156,7 +158,7 @@ onlySupersedes =
         -- the enclosing directory is one node shared by both seeds' graphs:
         -- it must survive the teardown of the seed that is going away.
         assertDirExists root True
-        assertEqual "one active seed" 1 (Map.size w.worldActive)
+        assertEqual "one live declaration" 1 (Ledger.liveCount w.worldLedger)
         assertBool
             "every node converged, whichever way it is wanted"
             (all (\st -> st.nodeConvergence == Converged) (Map.elems w.worldNodes))
@@ -184,21 +186,32 @@ failedNodeIsRetried =
     convergences :: World Spec Spec -> [Convergence]
     convergences w = fmap nodeConvergence (Map.elems w.worldNodes)
 
-{- | An epoch is collected once nothing could still walk it — so the one
-thing that must never happen is collecting the graph a teardown has not
-finished with. This is what pins 'Salmon.Actions.Serve.resettle''s ordering:
-prune before retune and the @down a@ declaration's own nodes still look
-up-and-converged, so its graph would be dropped and the retry would have
-nothing to walk.
+{- | A contribution is collected once nothing could still walk it — so the
+one thing that must never happen is collecting the description a teardown has
+not finished with. This is what pins 'Salmon.Actions.Serve.resettle''s
+ordering: prune before retune and the @down a@ declaration's own nodes still
+look up-and-converged, so its contribution would be dropped and the retry
+would have nothing to walk.
+
+Note what is /not/ retained: the graph. A retired declaration's epoch goes
+immediately, and what survives is its 'Salmon.Op.Ledger.Contribution' (nodes
+and edges) plus those nodes' representatives in the magma — which is what
+'Salmon.Actions.Serve.downDag' rebuilds the teardown from.
 -}
-teardownGraphSurvives :: IO ()
-teardownGraphSurvives =
+retiredContributionSurvives :: IO ()
+retiredContributionSurvives =
     withTempDir $ \root -> do
         attempts <- newIORef (0 :: Int)
         (w1, _, _) <- runServe (flakyDown attempts) root ["up a", "down a"]
         assertEqual "the teardown was attempted once" 1 =<< readIORef attempts
         assertEqual "and left the node non-converged" [Errored] (convergences w1)
-        assertBool "so the graph describing it is still held" (not (null w1.worldEpochs))
+        assertEqual "the retired declaration's graph is gone" 0 (length w1.worldEpochs)
+        assertBool
+            "but its contribution is still held, so the retry has something to walk"
+            (not (null (Map.elems w1.worldLedger)))
+        assertBool
+            "and the node still has a representative to run down"
+            (not (Map.null w1.worldMagma))
 
         attempts2 <- newIORef (0 :: Int)
         (w2, _, _) <- runServe (flakyDown attempts2) root ["up a", "down a", "converge"]
@@ -403,13 +416,15 @@ assertAllConverged dir w = do
         assertEqual (Text.unpack st.nodeShorthand <> ": convergence") Converged st.nodeConvergence
 
 {- | A world whose seeds have all been retired and converged keeps nothing:
-the nodes are off the machine, and the graphs that described them have
+the nodes are off the machine, and every structure that described them has
 nothing left to say. @history@ is what still remembers they existed.
 -}
 assertWorldSettled :: World seed directive -> IO ()
 assertWorldSettled w = do
     assertEqual "no node left to manage" 0 (Map.size w.worldNodes)
     assertEqual "no graph left to walk" 0 (length w.worldEpochs)
+    assertEqual "no contribution left in the ledger" 0 (Map.size w.worldLedger)
+    assertEqual "no representative left in the magma" 0 (Map.size w.worldMagma)
 
 assertFileExists :: FilePath -> String -> Bool -> IO ()
 assertFileExists root name expected = do
