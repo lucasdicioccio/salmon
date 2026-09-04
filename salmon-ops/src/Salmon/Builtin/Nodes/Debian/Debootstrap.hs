@@ -1,6 +1,6 @@
 module Salmon.Builtin.Nodes.Debian.Debootstrap where
 
-import Salmon.Actions.UpDown (Requirement (..), skipIfFileExists)
+import Salmon.Actions.UpDown (CheckResult (..), skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -82,7 +82,7 @@ rootTree r boot root =
             actions
                 { help = Text.unwords ["debootstraps", Text.pack (show root.suite), "at", Text.pack root.path]
                 , ref = mkRef "debootstrap" root.path
-                , prelim = skipIfFileExists etcIssues
+                , check = skipIfFileExists etcIssues
                 , up = up r'
                 }
   where
@@ -140,7 +140,7 @@ not exist@.
 
 Needs root (bind-mounts @\/proc@,@\/sys@,@\/dev@ into the chroot and
 unmounts them after) — same privileged-execution assumption the rest of
-this VM tier already carries. Idempotent: 'prelim' skips once
+this VM tier already carries. Idempotent: 'check' skips once
 @\/etc\/initramfs-tools\/modules@ already mentions @9pnet_virtio@, so
 rerunning after modules are already merged in only exits early rather than
 running @update-initramfs@ (and its bind-mount dance) again.
@@ -157,22 +157,25 @@ ensureVm9pBoot r bash root =
             actions
                 { help = Text.unwords ["ensures", Text.pack root.path, "can boot its root filesystem over 9p"]
                 , ref = mkRef "debootstrap-9p-boot" root.path
-                , prelim = skipIf9pModulesConfigured root.path
+                , check = skipIf9pModulesConfigured root.path
                 , up = up r'
                 }
   where
     r' = contramap (RunEnsureVm9pBoot cmd) r
     cmd = EnsureVm9pBoot root.path
 
-skipIf9pModulesConfigured :: FilePath -> IO Requirement
+skipIf9pModulesConfigured :: FilePath -> IO CheckResult
 skipIf9pModulesConfigured rootdir = do
     let modulesFile = rootdir </> "etc/initramfs-tools/modules"
     exists <- doesFileExist modulesFile
     if not exists
-        then pure Required
+        then pure (Failure $ "no modules file under " <> Text.pack rootdir)
         else do
             contents <- readFile modulesFile
-            pure $ if "9pnet_virtio" `isInfixOf` contents then Skippable else Required
+            pure $
+                if "9pnet_virtio" `isInfixOf` contents
+                    then Success
+                    else Failure "9pnet_virtio not in the modules file"
 
 newtype Vm9pBootCommand = EnsureVm9pBoot FilePath
     deriving (Show)

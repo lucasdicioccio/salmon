@@ -45,18 +45,22 @@ data Extension = Extension
     , notes   :: [Text]          -- longer free-form notes
     , ref     :: Ref             -- dedup identity (see §2.1)
     , up      :: IO ()           -- bring this node's own effect into being
-    , prelim  :: IO Requirement  -- Required | Skippable, checked before `up`
+    , check   :: IO CheckResult  -- is my effect already in place? (see §4)
     , down    :: IO ()           -- undo this node's own effect
-    , check   :: IO ()           -- (rarely used) verify state without changing it
-    , notify  :: IO ()           -- (rarely used) side-channel notification
     , dynamics :: [Dynamic]      -- arbitrary typed metadata, see §7
     }
 ```
 
-You only ever need to touch `help`, `ref`, `up`, `down`, and — if the node needs
-idempotency beyond what `up` itself can guarantee — `prelim`. `check`/`notify`
-are legacy/rarely-used; leave them at their default no-op unless you have a
-specific reason.
+You only ever need to touch `help`, `ref`, `up`, `down`, and — if the node
+needs idempotency beyond what `up` itself can guarantee — `check`.
+
+`check` answers one question about the node's own effect, with five possible
+answers: `Success` (it is in place), `Skipped` (someone decided to treat it as
+satisfied — only `Query.forceSkip` produces this), `Completed` (it ran to
+completion and stopped on purpose), `Failure reason` (it is not in place —
+the *ordinary* answer on a first run, not an error report), and `Unknown` (the
+check could not tell, which includes "this node has no check"). `upTree` skips
+the first three and runs `up` for the last two.
 
 `up` and `down` default to `pure ()` (a no-op) if you don't set them — this is
 useful for pure "grouping" nodes (see §3) that only exist to bundle
@@ -142,7 +146,7 @@ replaceDirectory src tgt trash =
             , ref = mkRef "replace-dir" (src, tgt)
             }
   where
-    move1 = moveDirectory tgt trash $ \actions -> actions{prelim = skipIfDirectoryIsMissing tgt}
+    move1 = moveDirectory tgt trash $ \actions -> actions{check = skipIfDirectoryIsMissing tgt}
     move2 = moveDirectory src tgt id
     delete3 = destroyDirectory trash
 ```
@@ -204,20 +208,23 @@ order of preference:
 5. **Append-if-missing**, for config file lines with no SQL/CLI equivalent at
    all: `grep -qxF '<line>' file || echo '<line>' >> file` (see
    `Postgres.ensureHbaLineScript`, for `pg_hba.conf`).
-6. **A `prelim`-based skip check**, when the underlying tool has *no* idempotent
+6. **A `check`-based skip check**, when the underlying tool has *no* idempotent
    verb at all — nothing to `replace`, no `IF NOT EXISTS` — so `up` itself
    cannot be made safe to re-run. Instead, check *before* running whether the
-   effect already exists, and report `Skippable` if so:
+   effect already exists, and report `Success` if so:
    ```haskell
-   skipIfNftRuleExists :: Chain -> Rule -> IO Requirement
+   skipIfNftRuleExists :: Chain -> Rule -> IO CheckResult
    skipIfNftRuleExists c rule = do
        (code, out, _err) <- readCreateProcessWithExitCode (proc "nft" ["list", "chain", ...]) ""
-       pure $ if renderedRuleText rule `isInfixOf` out then Skippable else Required
+       pure $
+           if renderedRuleText rule `isInfixOf` out
+               then Success
+               else Failure "no such rule in the chain"
    ```
    ```haskell
    op "netfilter-rule" (deps [...]) $ \actions ->
        actions
-           { prelim = skipIfNftRuleExists chain rule
+           { check = skipIfNftRuleExists chain rule
            , up = addRule ...
            , ...
            }
@@ -227,11 +234,14 @@ order of preference:
    `Salmon.Actions.UpDown`/`Salmon.Builtin.Nodes.Podman` — **when you add a new
    node wrapping a command with no idempotent "set" verb (e.g. `nft add rule`,
    `podman network create`), this is the template to copy**: write a
-   `skipIfXExists :: ... -> IO Requirement` that shells out to a read-only
-   "does X exist" check, and wire it into `prelim`.
+   `skipIfXExists :: ... -> IO CheckResult` that shells out to a read-only
+   "does X exist" check, and wire it into `check`.
 
-`prelim` defaults to `pure Required` (always run `up`) if you don't set it —
-so options 1–5 above need no `prelim` at all; only option 6 does.
+`check` defaults to `pure Unknown` — "I have no way to tell", which `upTree`
+reads as "run `up`" — if you don't set it, so options 1–5 above need no
+`check` at all; only option 6 does. Note also that a `check` that *throws* is
+contained: it is read as `Failure`, so the node is evaluated and the rest of
+the traversal is unaffected.
 
 ## 5. Failure: how `up`/`down` report errors
 

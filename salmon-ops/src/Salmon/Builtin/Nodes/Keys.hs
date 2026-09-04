@@ -57,7 +57,7 @@ sshKey r bin key =
                     [ "keeps keys around"
                     ]
                 , ref = mkRef "ssh" (sshdir, key.sshKeyName)
-                , prelim = skipIfFileExists filepath
+                , check = skipIfFileExists filepath
                 , up = up r'
                 }
   where
@@ -117,7 +117,7 @@ signKey r bin ca kid principals keyToSign =
             actions
                 { help = "sign a SSH-key"
                 , ref = mkRef "ssh-ca-sign" (show ca, kid.getIdentifier)
-                , prelim = skipIfFileExists (publicCAKeyPath keyToSign)
+                , check = skipIfFileExists (publicCAKeyPath keyToSign)
                 , up = up r'
                 }
   where
@@ -155,7 +155,7 @@ jwkKey key =
             { help = "generate a jwk-key"
             , notes = ["keeps keys around"]
             , ref = mkRef "jwk" (jwkdir, key.jwkKeyName)
-            , prelim = skipIfFileExists (jwkfilepath key)
+            , check = skipIfFileExists (jwkfilepath key)
             , up = up
             }
   where

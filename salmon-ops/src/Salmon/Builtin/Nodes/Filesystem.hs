@@ -128,7 +128,7 @@ replaceDirectory src tgt trash =
   where
     move1 :: Op
     move1 = moveDirectory tgt trash $ \actions ->
-        actions{prelim = skipIfDirectoryIsMissing tgt}
+        actions{check = skipIfDirectoryIsMissing tgt}
     move2 :: Op
     move2 = moveDirectory src tgt id
     delete3 :: Op
@@ -142,7 +142,7 @@ destroyDirectory trash =
             { help = Text.pack $ "recursively trashes " <> trash
             , ref = mkRef "delete-dir" trash
             , up = removeDirectoryRecursive trash
-            , prelim = skipIfDirectoryIsMissing trash
+            , check = skipIfDirectoryIsMissing trash
             }
 
 -------------------------------------------------------------------------------

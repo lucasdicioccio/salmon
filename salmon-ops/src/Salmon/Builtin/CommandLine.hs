@@ -21,12 +21,14 @@ import Salmon.Op.Eval
 import Salmon.Op.OpGraph
 import Salmon.Op.Track
 
-import Salmon.Actions.Check as Check
 import Salmon.Actions.Dot as Dot
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
-import Salmon.Actions.UpDown as UpDown
+-- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
+-- optparse-applicative's 'ParserResult' ones, which this module pattern
+-- matches on. Nothing here needs a 'CheckResult'.
+import Salmon.Actions.UpDown as UpDown hiding (Failure, Success)
 import Salmon.Builtin.Extension
 import Salmon.Reporter
 

@@ -130,7 +130,7 @@ position in the graph (grouping/ordering) with genuinely nothing to run.
 `salmon-core` itself is agnostic about what `ext` actually *is* — it's a type
 parameter. `salmon-ops`'s `Extension` (see `howto-ops.md`) is one particular
 choice of `ext`, tailored to shell-command-driven infrastructure provisioning
-(`up`/`down`/`prelim`/`check`/`notify`, all `IO ()`-shaped). Nothing about
+(`up`/`down`, both `IO ()`-shaped, plus a `check :: IO CheckResult`). Nothing about
 `OpGraph`/`Track`/`Eval` requires that choice.
 
 ## Generalizing beyond infrastructure
@@ -154,7 +154,7 @@ the same up/down/check/notify shape:
 - **CI/CD pipelines** — the existing use case in this repo (see
   `SreBox.CabalBuilding`, `SreBox.GeneratedSite`): a build/test/publish
   pipeline is itself a DAG of idempotent steps, and "did this artifact already
-  get published" is exactly the kind of `prelim`-skippable check the model was
+  get published" is exactly the kind of `check`-skippable question the model was
   built around.
 - **Multi-machine/fleet orchestration** — `SreBox.PostgresMigrations`'s
   "upload self and re-invoke as a nested `upTree` on the remote machine"
@@ -165,7 +165,7 @@ the same up/down/check/notify shape:
 - **Data pipelines** — a pipeline stage ("did this table/partition get
   computed for this date") is structurally the same triad as "did this file
   get written": a `Ref` keyed on (dataset, partition), an `up` that computes
-  and writes it, a `prelim` that skips recomputation if the output already
+  and writes it, a `check` that skips recomputation if the output already
   exists and its inputs haven't changed (the same shape as
   `skipIfFileExists`/`skipIfNftRuleExists` — see `howto-ops.md` §4), and a
   dependency graph that's *naturally* a DAG already (this aggregate depends on
@@ -200,7 +200,7 @@ the same up/down/check/notify shape:
   `upTree`.
 - **Declarative, convergent configuration management generally** (the
   Puppet/Ansible/Terraform space) — the `up`-is-idempotent,
-  `prelim`-skips-if-already-satisfied, `down`-tears-back-down shape is exactly
+  `check`-skips-if-already-satisfied, `down`-tears-back-down shape is exactly
   a "declare desired state, converge to it, converge back" model; what salmon
   adds relative to most tools in that space is that the DAG is a first-class,
   inspectable value (`Tree`/`Dot` output — see `howto-ops.md` §9) rather than

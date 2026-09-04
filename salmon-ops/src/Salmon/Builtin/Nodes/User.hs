@@ -1,6 +1,6 @@
 module Salmon.Builtin.Nodes.User where
 
-import Salmon.Actions.UpDown (Requirement (..))
+import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -37,7 +37,7 @@ group r groupadd grp =
             actions
                 { help = "creates a system group"
                 , ref = mkRef "group" (groupName grp)
-                , prelim = skipIfGroupExists grp
+                , check = skipIfGroupExists grp
                 , up = add r'
                 }
   where
@@ -58,16 +58,16 @@ runGroupAdd = Command go
             ]
 
 -- | @groupadd@ has no idempotent form (no @-f@-equivalent that's safe across
--- all cases), so skip it via 'prelim' if @getent group@ already knows about it.
-skipIfGroupExists :: Group -> IO Requirement
+-- all cases), so skip it via 'check' if @getent group@ already knows about it.
+skipIfGroupExists :: Group -> IO CheckResult
 skipIfGroupExists grp = do
     (code, _out, _err) <-
         readCreateProcessWithExitCode
             (proc "getent" ["group", Text.unpack grp.groupName])
             ""
     pure $ case code of
-        ExitSuccess -> Skippable
-        _ -> Required
+        ExitSuccess -> Success
+        _ -> Failure ("no such group: " <> grp.groupName)
 
 -------------------------------------------------------------------------------
 
@@ -82,7 +82,7 @@ user r useradd grp nu =
             actions
                 { help = "creates a system user"
                 , ref = mkRef "user" nu.newUser.userName
-                , prelim = skipIfUserExists nu.newUser
+                , check = skipIfUserExists nu.newUser
                 , up = add r'
                 }
   where
@@ -125,24 +125,24 @@ runUserAdd = Command go
             , Text.unpack name
             ]
 
--- | @useradd@ has no idempotent form either, so skip it via 'prelim' if
+-- | @useradd@ has no idempotent form either, so skip it via 'check' if
 -- @getent passwd@ already knows about it.
-skipIfUserExists :: User -> IO Requirement
+skipIfUserExists :: User -> IO CheckResult
 skipIfUserExists u = do
     (code, _out, _err) <-
         readCreateProcessWithExitCode
             (proc "getent" ["passwd", Text.unpack u.userName])
             ""
     pure $ case code of
-        ExitSuccess -> Skippable
-        _ -> Required
+        ExitSuccess -> Success
+        _ -> Failure ("no such user: " <> u.userName)
 
 -------------------------------------------------------------------------------
 
 -- | Clears a user's password (@usermod -p '*'@), locking out password-based
 -- login while leaving the account otherwise usable (e.g. for key-based ssh).
 -- @usermod -p@ is a set rather than an add, so it's already idempotent and
--- needs no 'prelim' guard.
+-- needs no 'check' guard.
 passwordless :: Reporter Report -> Track' (Binary "usermod") -> Track' User -> User -> Op
 passwordless r usermod trackUser u =
     withBinary usermod runUserMod cmd $ \remove ->
@@ -178,7 +178,7 @@ data Owner = Owner {ownerUser :: User, ownerGroup :: Group}
 
 {- | Sets a path's ownership (@chown user:group path@, optionally @-R@).
 @chown@ is a set rather than an add, so it's already idempotent and needs no
-'prelim' guard. Unlike 'dir'/'filecontents', this does not itself create the
+'check' guard. Unlike 'dir'/'filecontents', this does not itself create the
 path — callers are expected to wire the path's own creation as a dependency
 (e.g. via 'Salmon.Op.OpGraph.inject').
 -}

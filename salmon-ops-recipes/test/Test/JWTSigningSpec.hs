@@ -58,14 +58,14 @@ layer1UpIsIdempotent = withTempDir $ \dir -> do
 
     let o = mkOp secretPath jwtPath
 
-    -- first up: the file doesn't exist yet, prelim must be Required, and the
+    -- first up: the file doesn't exist yet, check must report Failure, and the
     -- token gets written for real
     reports1 <- runUpCapturing o
     assertBool "first up evaluates (file did not exist)" (any isEval reports1)
     exists1 <- doesFileExist jwtPath
     exists1 @?= True
 
-    -- second up: skipIfFileExists now sees the file, prelim must skip, and
+    -- second up: skipIfFileExists now sees the file, check must skip, and
     -- content is left untouched (no re-signing)
     contentsAfterFirstUp <- C8.readFile jwtPath
     reports2 <- runUpCapturing o

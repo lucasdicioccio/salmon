@@ -5,7 +5,7 @@ per-primitive cookbook (how to write one node, one `Op`, one CLI binary),
 this one collects recurring *shapes* worth reusing across recipes — patterns
 that combine several of those primitives to solve a problem that comes up
 more than once. Read `howto-ops.md` first if a term here (`Op`, `Track`,
-`seed`/`Spec`, `prelim`) is unfamiliar.
+`seed`/`Spec`, `check`) is unfamiliar.
 
 ## Pattern: one-time privileged bootstrap, then unprivileged forever after
 
@@ -35,7 +35,7 @@ my-salmon config <routine-seed> | my-salmon run up        # every other time, no
 - **This only works if every op in the bootstrap graph is genuinely
   idempotent** (`howto-ops.md` §4) — re-running `bootstrap` under `sudo`
   later (e.g. after a package upgrade wipes a capability) must be a safe,
-  cheap no-op via `prelim`, not a hazard. If you can't make the bootstrap
+  cheap no-op via `check`, not a hazard. If you can't make the bootstrap
   step idempotent, this pattern isn't safe to recommend to users as "run it
   whenever" — treat it as a real migration instead.
 - The bootstrap seed usually needs to know *which* unprivileged user/group
@@ -47,7 +47,7 @@ my-salmon config <routine-seed> | my-salmon run up        # every other time, no
 **Worked example.** `Salmon.Builtin.Nodes.Capabilities.grantCapabilities`
 (`salmon-ops/src/Salmon/Builtin/Nodes/Capabilities.hs`) is exactly this
 kind of bootstrap-only op: it needs `CAP_SETFCAP` (in practice, root) to
-run, but its `prelim` (`getcap`-based) makes every subsequent run a
+run, but its `check` (`getcap`-based) makes every subsequent run a
 no-op — see its haddock. The qemu test tier
 (`specs/qemu-test-vms-progress.md` §0.2) combines it with
 `Salmon.Builtin.Nodes.User.chown` into one bootstrap graph, currently
@@ -62,4 +62,4 @@ of remaining test-only support code.
 re-runnable (e.g. a real schema migration, a one-shot data backfill), don't
 reach for "bootstrap seed" — that's ordinary migration territory
 (`Salmon.Builtin.Migrations`), which has its own once-ever semantics instead
-of `prelim`-based idempotency.
+of `check`-based idempotency.

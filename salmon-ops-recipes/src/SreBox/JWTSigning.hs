@@ -37,7 +37,7 @@ signHmac r secret jwtPayload jwtPath =
             actions
                 { help = "derive a JWT for claims and and a given signing Key"
                 , ref = mkRef "sign-jwt" jwtPath
-                , prelim = skipIfFileExists jwtPath
+                , check = skipIfFileExists jwtPath
                 , up = up sekret
                 }
   where

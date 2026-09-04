@@ -6,7 +6,7 @@ the whole calling process to be root.
 -}
 module Salmon.Builtin.Nodes.Capabilities where
 
-import Salmon.Actions.UpDown (Requirement (..))
+import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -34,7 +34,7 @@ type Capability = Text
 it can perform privileged operations without the whole calling process
 running as root. @setcap@ is a set rather than an add — reapplying the same
 capability set is already idempotent — but *running* @setcap@ at all needs
-@CAP_SETFCAP@ (in practice: root), so this still guards with 'prelim' to
+@CAP_SETFCAP@ (in practice: root), so this still guards with 'check' to
 avoid needing that privilege on every re-run once the capabilities are
 already in place: the same "does the effect already exist" shape as
 "Salmon.Builtin.Nodes.Netfilter".'Salmon.Builtin.Nodes.Netfilter.rule',
@@ -43,7 +43,7 @@ just guarding "needs privilege at all" instead of "isn't idempotent".
 Capabilities set this way are stored as an extended attribute on the file —
 they survive a reboot, but not a package upgrade that reinstalls the
 binary (@apt upgrade@ replaces the underlying inode), which is exactly what
-'prelim' re-detects and 'up' re-grants the next time this 'Op' runs.
+'check' re-detects and 'up' re-grants the next time this 'Op' runs.
 -}
 grantCapabilities :: Reporter Report -> Track' (Binary "setcap") -> FilePath -> [Capability] -> Op
 grantCapabilities r setcapBin path caps =
@@ -52,7 +52,7 @@ grantCapabilities r setcapBin path caps =
             actions
                 { help = Text.pack $ "grants " <> Text.unpack capText <> " to " <> path
                 , ref = mkRef "grant-capabilities" (path, capText)
-                , prelim = skipIfCapabilitiesGranted path caps
+                , check = skipIfCapabilitiesGranted path caps
                 , up = apply r'
                 , down = Binary.untrackedExec runSetcap (RemoveCap path) "" r'
                 }
@@ -61,14 +61,14 @@ grantCapabilities r setcapBin path caps =
     r' = contramap (RunSetcap (SetCap path capText)) r
 
 {- | @getcap \<path\>@'s output lists every capability currently granted —
-'Skippable' iff all of @caps@ already show up in it.
+'Salmon.Actions.UpDown.Success' iff all of @caps@ already show up in it.
 -}
-skipIfCapabilitiesGranted :: FilePath -> [Capability] -> IO Requirement
+skipIfCapabilitiesGranted :: FilePath -> [Capability] -> IO CheckResult
 skipIfCapabilitiesGranted path caps = do
     (code, out, _err) <- readProcessWithExitCode "getcap" [path] ""
     pure $ case code of
-        ExitSuccess | all (\c -> Text.unpack c `isInfixOf` out) caps -> Skippable
-        _ -> Required
+        ExitSuccess | all (\c -> Text.unpack c `isInfixOf` out) caps -> Success
+        _ -> Failure ("capabilities not granted on " <> Text.pack path)
 
 -------------------------------------------------------------------------------
 data SetcapCommand

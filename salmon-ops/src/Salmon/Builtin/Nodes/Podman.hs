@@ -1,6 +1,6 @@
 module Salmon.Builtin.Nodes.Podman where
 
-import Salmon.Actions.UpDown (Requirement (..))
+import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -150,7 +150,7 @@ runContainer r podman reg img cname opts =
     r'' = contramap (RemoveContainer cname) r
 
 -- | Creates a user-defined podman network under a caller-chosen 'NetworkName'
--- (idempotent: skipped via 'prelim' if @podman network exists@ already says yes,
+-- (idempotent: skipped via 'check' if @podman network exists@ already says yes,
 -- since @podman network create@ itself errors on a duplicate name).
 network :: Reporter Report -> Track' (Binary "podman") -> NetworkName -> Op
 network r podman name =
@@ -159,7 +159,7 @@ network r podman name =
             actions
                 { help = "creates a podman network"
                 , ref = mkRef "podman-network" (getNetworkName name)
-                , prelim = skipIfNetworkExists name
+                , check = skipIfNetworkExists name
                 , up = create r'
                 , down = Binary.untrackedExec podmanCommand (RemoveNetworkCmd name) "" r''
                 }
@@ -167,12 +167,12 @@ network r podman name =
     r' = contramap (CreateNetwork name) r
     r'' = contramap (RemoveNetwork name) r
 
-skipIfNetworkExists :: NetworkName -> IO Requirement
+skipIfNetworkExists :: NetworkName -> IO CheckResult
 skipIfNetworkExists name = do
     (code, _, _) <- readCreateProcessWithExitCode (proc "podman" ["network", "exists", Text.unpack (getNetworkName name)]) ""
     pure $ case code of
-        ExitSuccess -> Skippable
-        _ -> Required
+        ExitSuccess -> Success
+        _ -> Failure ("no such podman network: " <> getNetworkName name)
 
 -------------------------------------------------------------------------------
 data PodmanCommand

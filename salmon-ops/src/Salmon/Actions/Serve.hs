@@ -1071,7 +1071,7 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
     — or restricted out by an explicit @converge --select\/--exclude@, which
     must leave the node's actual convergence untouched so a later
     unrestricted @converge@ still retries it) or, on the way up, the node's
-    own 'prelim' saying its effect is already in place, which is convergence
+    own 'check' saying its effect is already in place, which is convergence
     too. -}
     stateWriter :: IORef (World seed directive) -> Direction -> Maybe (Set Ref) -> Reporter (UpDown.Report Extension)
     stateWriter world dir restriction = ReporterM $ \rep ->

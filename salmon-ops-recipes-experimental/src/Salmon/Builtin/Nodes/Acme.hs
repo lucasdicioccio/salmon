@@ -65,7 +65,7 @@ acmeChallenge_dns01 t chall =
             actions
                 { help = "sign a certificate with an ACME challenge"
                 , ref = mkRef "acme-challenge" chall.challengerPEMPath
-                , prelim = skipIfFileExists chall.challengerPEMPath
+                , check = skipIfFileExists chall.challengerPEMPath
                 , up = up stepdance
                 }
   where

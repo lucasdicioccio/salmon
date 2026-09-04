@@ -81,8 +81,9 @@ An `Op` (`OpGraph Identity Actions'`) is a graph node centered on itself, with
 an *effectful* recipe for finding its own predecessors — this is what lets a
 one-line filesystem op and a whole clustered-database-with-replication setup
 type-check identically. Every op carries `up`/`down` (bring the effect into
-being / undo it), `prelim` (a `Required`/`Skippable` idempotency check run
-before `up`), and a `Ref` that gives it a stable identity so the traversal can
+being / undo it), `check` (a `CheckResult` answering "is my effect already in
+place", which is what makes a node idempotent to re-run), and a `Ref` that
+gives it a stable identity so the traversal can
 dedupe a resource reached via multiple graph paths. `upTree`/`downTree`
 (`Salmon.Actions.UpDown`) walk the materialized graph, catch and propagate
 real failures (a thrown exception marks a node `Failed` and blocks everything
@@ -109,7 +110,7 @@ one module per concern:
 | `Filesystem` | directories, file contents, copy/move/replace-directory (the canonical small example — see `docs/howto-ops.md`) |
 | `Git` | git repository operations |
 | `Keys` | key material management |
-| `Netfilter` | `nft` firewall rules (with `prelim`-based idempotency, since `nft add rule` itself isn't idempotent) |
+| `Netfilter` | `nft` firewall rules (with `check`-based idempotency, since `nft add rule` itself isn't idempotent) |
 | `Nginx` | nginx site/config management |
 | `Npm` | npm package operations |
 | `PgBouncer` | PgBouncer connection-pooler configuration |

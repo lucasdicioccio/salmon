@@ -71,7 +71,7 @@ tlsKey r bin key =
                     [ "does not delete keys on down"
                     ]
                 , ref = mkRef "openssl" path
-                , prelim = skipIfFileExists path
+                , check = skipIfFileExists path
                 , up = up r'
                 }
   where
@@ -130,7 +130,7 @@ selfSign r bin selfsigned =
             actions
                 { help = "self sign a certificate"
                 , ref = mkRef "openssl-selfsign" pempath
-                , prelim = skipIfFileExists pempath
+                , check = skipIfFileExists pempath
                 , up = up r'
                 }
   where

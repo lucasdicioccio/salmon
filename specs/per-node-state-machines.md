@@ -852,7 +852,7 @@ wakeup channel, and the `run_stopping` flag.
 
 ## Suggested milestones
 
-1. **`check :: IO CheckResult`**, absorbing `prelim`; delete
+1. **`check :: IO CheckResult`** — *landed*. Absorbing `prelim`; delete
    `Salmon.Actions.Check` and `Salmon.Actions.Notify` with the `notify` field.
    Mechanical across 22 node call sites plus `Query.forceSkip`, and a
    prerequisite for everything else. One deliberate behaviour change comes

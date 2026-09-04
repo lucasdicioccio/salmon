@@ -44,7 +44,7 @@ privateKey wg path =
             actions
                 { help = "privkey at " <> Text.pack path
                 , ref = mkRef "wg-write-pk" path
-                , prelim = skipIfFileExists path
+                , check = skipIfFileExists path
                 , up = withFile path WriteMode $ \h -> do
                     (_, _, _, ph) <- writePK (PrivateKeyForWriting h)
                     waitForProcess ph >>= checkExitCode "wg genkey"
@@ -65,7 +65,7 @@ publicKey wg mkprivate private path =
             actions
                 { help = "pubkey at " <> Text.pack path
                 , ref = mkRef "wg-write-public-pk" path
-                , prelim = skipIfFileExists path
+                , check = skipIfFileExists path
                 , up =
                     withFile private ReadMode $ \hIn ->
                         withFile path WriteMode $ \hOut -> do

@@ -58,7 +58,7 @@ import Salmon.Op.Actions
 import Salmon.Op.Graph (Graph)
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref (Ref, unRef)
-import Salmon.Actions.UpDown (Requirement (Skippable))
+import Salmon.Actions.UpDown (CheckResult (Skipped))
 
 -------------------------------------------------------------------------------
 
@@ -131,8 +131,10 @@ resolveSelectors cograph selectPatterns excludePatterns =
 -------------------------------------------------------------------------------
 
 {- | Rewrites every node whose 'Salmon.Op.Ref.Ref' is in the given set so its
-'Salmon.Builtin.Extension.prelim' unconditionally reports 'Skippable',
+'Salmon.Builtin.Extension.check' unconditionally reports 'Skipped',
 leaving 'up'/'down'/'ref'/'dynamics' and the graph topology untouched.
+This is the one producer of 'Skipped': it is a statement about a decision
+made over the node, not about the node's effect.
 Relies on 'OpGraph's derived 'Functor' recursing through the effectful
 'predecessors' field (works because 'Op's @meval@ is 'Data.Functor.Identity',
 itself a 'Functor') and on 'Actions'' own 'Functor' instance over its
@@ -143,7 +145,7 @@ forceSkip refs = fmap (fmap rewrite)
   where
     rewrite :: Extension -> Extension
     rewrite ext
-        | ext.ref `Set.member` refs = ext{prelim = pure Skippable}
+        | ext.ref `Set.member` refs = ext{check = pure Skipped}
         | otherwise = ext
 
 -------------------------------------------------------------------------------

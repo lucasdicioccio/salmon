@@ -13,8 +13,8 @@ this author's connection) and additionally needs the opt-in env var
 unexpectedly on a metered connection just from running the suite under
 sudo. Deliberately does *not* wipe 'freshRootPath' between runs (unlike a
 from-scratch-every-time design): once debootstrapped, 'Debootstrap.rootTree'
-and 'Debootstrap.ensureVm9pBoot''s own 'prelim's make every subsequent run
-report @Skippable@ and finish in seconds with no network use at all — that
+and 'Debootstrap.ensureVm9pBoot''s own 'check's make every subsequent run
+report @Success@ and finish in seconds with no network use at all — that
 skip path is itself exactly what this test wants to exercise on reruns.
 Delete @freshRootPath@ by hand to force a real re-debootstrap.
 -}
@@ -64,7 +64,7 @@ debootstrapsAndFixes9pBoot = do
                 skip
                     ( "first run needs a real (network-heavy) debootstrap; set "
                         <> "SALMON_TEST_RUN_DEBOOTSTRAP=1 to allow it (reruns after that are "
-                        <> "free/offline via prelim skip, see this module's haddock)"
+                        <> "free/offline via check skip, see this module's haddock)"
                     )
             | otherwise -> run
   where
@@ -89,6 +89,6 @@ debootstrapsAndFixes9pBoot = do
             (modulesFile <> " should list the 9p modules")
             (all (`isInfixOf` contents) ["9p", "9pnet", "9pnet_virtio", "virtio", "virtio_pci", "virtio_ring"])
 
-        -- idempotency: rerunning should skip cleanly (both ops' prelims report Skippable)
+        -- idempotency: rerunning should skip cleanly (both ops' checks report Success)
         ok2 <- runUp vmOp
         unless ok2 (fail "debootstrapsAndFixes9pBoot: second (idempotent) runUp failed")

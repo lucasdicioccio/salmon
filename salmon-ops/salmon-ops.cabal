@@ -25,9 +25,7 @@ library
     exposed-modules: Salmon.Actions.Help
                    , Salmon.Actions.Serve
                    , Salmon.Actions.UpDown
-                   , Salmon.Actions.Check
                    , Salmon.Actions.Dot
-                   , Salmon.Actions.Notify
                    , Salmon.Actions.Query
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine

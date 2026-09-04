@@ -386,7 +386,7 @@ testVmAddr2 :: Text.Text
 testVmAddr2 = "10.99.0.3"
 
 -- | Ensures the shared test bridge (and its address) exist. Idempotent via
--- the production 'LinuxBridge.bridgeAddr' op's own @prelim@ — safe to call
+-- the production 'LinuxBridge.bridgeAddr' op's own @check@ — safe to call
 -- before every test.
 ensureTestBridge :: IO ()
 ensureTestBridge = do

@@ -13,7 +13,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 import Salmon.Actions.Dot (PlaceHolder (..))
-import Salmon.Actions.UpDown (Requirement (..))
+import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Op.Actions
 import Salmon.Op.Configure
 import Salmon.Op.Eval
@@ -37,10 +37,10 @@ data Extension = Extension
     , notes :: [Note]
     , ref :: Ref
     , up :: IO ()
-    , prelim :: IO Requirement
+    , -- | "is my effect already in place": the merge of what used to be
+      -- @prelim@ and a separate, unimplemented @check@. See 'CheckResult'.
+      check :: IO CheckResult
     , down :: IO ()
-    , check :: IO ()
-    , notify :: IO ()
     , dynamics :: [Dynamic]
     }
 
@@ -62,10 +62,8 @@ instance Semigroup Extension where
             (notes a <> notes b)
             (ref a <> ref b)
             (up a <> up b)
-            (prelim a <> prelim b)
-            (down b <> down a)
             (check a <> check b)
-            (notify b <> notify a)
+            (down b <> down a)
             (dynamics a <> dynamics b)
 
 type Op = OpGraph Identity Actions'
@@ -102,9 +100,10 @@ noop short =
                 noNotes
                 ref
                 skip
-                (pure Required)
-                skip
-                skip
+                -- a node that says nothing about its own effect cannot tell,
+                -- which 'requirement' reads as "run up" — the same behaviour
+                -- the old @pure Required@ default had.
+                (pure Unknown)
                 skip
                 noDynamics
         )

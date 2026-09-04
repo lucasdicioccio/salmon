@@ -12,6 +12,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
 import GHC.Records
 import System.Directory (doesDirectoryExist, doesFileExist)
 
@@ -48,6 +50,57 @@ data Report ext
 
 -------------------------------------------------------------------------------
 
+{- | What a node's own 'Salmon.Builtin.Extension.check' answers about the
+effect that node is responsible for.
+
+This is the merge of what used to be two fields: @prelim :: IO Requirement@,
+implemented by 22 nodes and consulted by 'upTreeWith', and @check :: IO ()@,
+implemented by none and consulted only by a module with no callers. See
+@specs/per-node-state-machines.md@ — the per-node state machines that spec
+describes are driven by exactly this answer, so it has to say more than
+"should I act".
+
+Four of the five constructors describe the /effect/. 'Skipped' is the odd one
+out: it describes a decision someone made /about/ the node, and
+'Salmon.Actions.Query.forceSkip' is what produces it.
+-}
+data CheckResult
+    = -- | the effect is in place
+      Success
+    | -- | treat as satisfied without looking; see 'Salmon.Actions.Query.forceSkip'
+      Skipped
+    | -- | the effect ran to completion and stopped on purpose — a job rather
+      -- than a service. Converged, but not running.
+      Completed
+    | -- | the effect is not in place, with a reason. Note this is the
+      -- ordinary answer on a first run and not an error report: "the file
+      -- isn't there yet" and "the file is there but wrong" are the same
+      -- answer to the only question 'upTreeWith' asks, which is whether to
+      -- run 'up'.
+      Failure !Text
+    | -- | the check could not tell — including because the node has no check
+      -- of its own. Acts like 'Failure' when deciding whether to run 'up',
+      -- and is kept distinct so that a supervisor can tell "I looked and it
+      -- is gone" from "I could not look".
+      Unknown
+    deriving (Show, Eq)
+
+{- | Least-satisfied wins, mirroring 'Requirement''s "'Required' wins": if
+either half of a merged node still needs doing, the merged node does. Only
+reachable through @instance Semigroup Salmon.Builtin.Extension.Extension@,
+which nothing on the execution path uses.
+-}
+instance Semigroup CheckResult where
+    Failure a <> Failure b = Failure (a <> "; " <> b)
+    Failure a <> _ = Failure a
+    _ <> Failure b = Failure b
+    Unknown <> _ = Unknown
+    _ <> Unknown = Unknown
+    Completed <> _ = Completed
+    _ <> Completed = Completed
+    Skipped <> b = b
+    Success <> b = b
+
 data Requirement
     = Required
     | Skippable
@@ -57,24 +110,38 @@ instance Semigroup Requirement where
     Skippable <> Skippable = Skippable
     _ <> _ = Required
 
-skipIfDirectoryIsMissing :: FilePath -> IO Requirement
+{- | What 'upTreeWith' does with a 'CheckResult'.
+
+'Failure' and 'Unknown' both mean 'Required'. Erring that way is safe because
+'Salmon.Builtin.Extension.up' is required to be idempotent regardless (see
+CLAUDE.md), and it is the direction that keeps a node with a broken check
+converging rather than stalling.
+-}
+requirement :: CheckResult -> Requirement
+requirement Success = Skippable
+requirement Skipped = Skippable
+requirement Completed = Skippable
+requirement (Failure _) = Required
+requirement Unknown = Required
+
+skipIfDirectoryIsMissing :: FilePath -> IO CheckResult
 skipIfDirectoryIsMissing path = do
     exists <- doesDirectoryExist path
     if not exists
-        then pure Skippable
-        else pure Required
+        then pure Success
+        else pure (Failure $ "still present: " <> Text.pack path)
 
-skipIfFileExists :: FilePath -> IO Requirement
+skipIfFileExists :: FilePath -> IO CheckResult
 skipIfFileExists path = do
     exists <- doesFileExist path
     if exists
-        then pure Skippable
-        else pure Required
+        then pure Success
+        else pure (Failure $ "missing: " <> Text.pack path)
 
 {- | An extra, caller-supplied precondition, consulted per node /before/ the
 node's own opinion about itself is asked for.
 
-Where a node's own 'Salmon.Builtin.Extension.prelim' answers "is my effect
+Where a node's own 'Salmon.Builtin.Extension.check' answers "is my effect
 already in place on this machine", a 'Gate' answers the orthogonal question
 "does this traversal want to touch this node at all" — which only the caller
 knows. It exists for
@@ -83,7 +150,7 @@ that is the union of several seeds' graphs and must leave alone the nodes
 that belong to some /other/ seed, or that it has already converged.
 
 A 'Gate' returning 'Skippable' short-circuits: for 'upTreeWith' the node's
-own 'prelim' is not even consulted, and either way the node is reported
+own 'check' is not even consulted, and either way the node is reported
 'Skip'ped. Returning 'Required' means "this traversal does want this node",
 and the usual per-node logic proceeds unchanged.
 -}
@@ -94,7 +161,7 @@ alwaysRequired :: Gate ext
 alwaysRequired = const (pure Required)
 
 {- | Returns 'True' iff every node actually ran (or was legitimately
-'Skip'ped via 'prelim') — i.e. 'False' means at least one node threw and
+'Skip'ped via 'check') — i.e. 'False' means at least one node threw and
 something downstream of it was 'Blocked'. Callers that only care about
 side effects (the historical behaviour) can ignore the result; callers that
 want a process exit code to reflect reality (e.g. a CLI) now can.
@@ -103,7 +170,7 @@ upTree ::
     forall a m ext.
     ( Monad m
     , HasField "up" ext (IO ())
-    , HasField "prelim" ext (IO Requirement)
+    , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
     ) =>
     Reporter (Report ext) ->
@@ -117,7 +184,7 @@ upTreeWith ::
     forall a m ext.
     ( Monad m
     , HasField "up" ext (IO ())
-    , HasField "prelim" ext (IO Requirement)
+    , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
     ) =>
     Gate ext ->
@@ -154,7 +221,7 @@ upTreeWith gate r nat graph = do
                             wanted <- gate act
                             st <- case wanted of
                                 Skippable -> pure Skippable
-                                Required -> act.extension.prelim
+                                Required -> requirement <$> runCheck act
                             case st of
                                 Skippable -> do
                                     runReporter r (Skip act)
@@ -169,6 +236,25 @@ upTreeWith gate r nat graph = do
                                         Right () -> do
                                             runReporter r (Done act)
                                             recordOutcome s aref False
+
+{- | Runs a node's own 'Salmon.Builtin.Extension.check', containing a thrower
+as a 'Failure' rather than letting it escape.
+
+This is the one behaviour change in merging @prelim@ into @check@: @prelim@
+was evaluated outside the 'try' that wraps 'Salmon.Builtin.Extension.up', so
+a @prelim@ that threw took the whole traversal down with it instead of
+failing the one node. A check that throws now just means the node's effect
+could not be confirmed, and 'requirement' turns that into "run 'up'".
+-}
+runCheck ::
+    (HasField "check" ext (IO CheckResult)) =>
+    Act ext ->
+    IO CheckResult
+runCheck act = do
+    result <- try @SomeException act.extension.check
+    pure $ case result of
+        Left e -> Failure (Text.pack (show e))
+        Right x -> x
 
 -- | Shared by 'upTree' and 'downTree': remembers a node's outcome (by 'Ref') so a
 -- second encounter (dedup) or a descendant can look it up without re-running anything.

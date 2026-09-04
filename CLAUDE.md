@@ -88,8 +88,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
 
 - **`Extension`** (`Salmon/Builtin/Extension.hs`) is the concrete payload every op in this repo
   carries: `help`, `notes`, a `ref` (dedup identity, see `Op/Ref.hs`), and IO actions `up`,
-  `prelim` (a `Requirement` check — `Required`/`Skippable` — run before `up`), `down`, `check`,
-  `notify`, plus `dynamics :: [Dynamic]` for attaching arbitrary typed metadata that can be
+  `check` (an `IO CheckResult` answering "is my effect already in place", run before `up`),
+  `down`, plus `dynamics :: [Dynamic]` for attaching arbitrary typed metadata that can be
   recovered later via `getDynamics`/`collectDynamics` (used e.g. to flatten "remote call" ops out
   of a graph). `Op = OpGraph Identity Actions'` is the type alias used everywhere in node/recipe
   code. Building a node normally goes through the `op :: ShortHand -> Identity (Graph Op) ->
@@ -101,7 +101,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   that fills in `help`/`notes`/`ref`/`up`/`down`).
 - **`Actions/UpDown.hs`** implements graph execution: `upTree` walks the expanded `Cofree Graph`
   bottom-up, dedupes by `Ref` (an already-visited ref is reported `Redundant` and skipped even if
-  reachable via multiple paths), evaluates `prelim` to decide `Skip` vs `Eval`+`up`. If `up`
+  reachable via multiple paths), evaluates `check` to decide `Skip` vs `Eval`+`up`. If `up`
   throws, that's caught and reported as `Failed`, and everything that (transitively) depends on it
   is reported `Blocked` instead of being evaluated — see "Conventions for node authors" below for
   what this means for how `up` needs to be written. `upTree` returns `IO Bool` (`False` iff
@@ -118,12 +118,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   mirror of `upTree`'s: a failed `down` leaves that node *still standing*, so every one of its
   predecessors is `Blocked` (unsafe to pull a dependency out from under a node that's still up),
   and a predecessor is blocked if *any* of its dependents was — one failure contains a whole
-  still-standing sub-DAG. A node's own `prelim` is never consulted for teardown (it answers "does
+  still-standing sub-DAG. A node's own `check` is never consulted for teardown (it answers "does
   my effect still need creating", which isn't the question a teardown asks), so there's no
   per-node "skip if already gone".
   Both take an optional `Gate ext = Act ext -> IO Requirement` via `upTreeWith`/`downTreeWith` —
   a *caller*-supplied "does this traversal want to touch this node at all", asked before (and
-  short-circuiting) the node's own `prelim`, and reported as a `Skip`. `upTree`/`downTree` are
+  short-circuiting) the node's own `check`, and reported as a `Skip`. `upTree`/`downTree` are
   those with a gate that wants everything; the only real user is `Actions/Serve.hs` (below),
   which walks a union of several seeds' graphs and must leave other seeds' nodes alone.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
@@ -175,13 +175,25 @@ apply:
 
 `nft add rule` itself is *not* idempotent — reapplying the same graph would append a duplicate
 rule every time instead of a no-op, since nft rule handles aren't content-addressed the way a
-file path or a SQL role name is. `Netfilter.rule` instead uses `prelim` for this (rather than a
-SQL/shell guard): `skipIfNftRuleExists` shells out to `nft list chain` and reports `Skippable` if
+file path or a SQL role name is. `Netfilter.rule` instead uses `check` for this (rather than a
+SQL/shell guard): `skipIfNftRuleExists` shells out to `nft list chain` and reports `Success` if
 a line matching the rule's own rendered text is already there — the same "does the effect already
 exist" shape as `Salmon.Actions.UpDown.skipIfFileExists`, just backed by a command's output
 instead of the filesystem. Worth remembering as a template for any other node whose underlying
 tool has no idempotent "set" verb at all (nothing to `replace`, no `IF NOT EXISTS`): check output,
-skip via `prelim`, rather than trying to force the command itself to be idempotent.
+skip via `check`, rather than trying to force the command itself to be idempotent.
+
+**`check`, not `prelim`.** `Extension` used to carry both a `prelim :: IO Requirement`
+(implemented by 22 nodes, consulted by `upTree`) and a never-implemented `check :: IO ()` with a
+never-called `Actions/Check.hs` behind it, plus an equally dead `notify`. Those are merged: there
+is one `check :: IO CheckResult` (`Success`/`Skipped`/`Completed`/`Failure Text`/`Unknown`),
+`UpDown.requirement` maps it to the old `Required`/`Skippable`, and `Actions/Check.hs` /
+`Actions/Notify.hs` are gone. `Skipped` has exactly one producer — `Query.forceSkip` — and means
+"someone decided to treat this as satisfied", as opposed to `Success` which is a statement about
+the effect. A node that sets no `check` gets `Unknown`, which means `up` runs, matching the old
+`pure Required` default. A `check` that *throws* is contained as a `Failure` rather than killing
+the traversal, which `prelim` (evaluated outside `upTree`'s `try`) did not do. See
+`specs/per-node-state-machines.md` milestone 1 and `Test/CheckSpec.hs`.
 
 **Failure must not be swallowed.** `Extension.up :: IO ()` has no way to signal failure in its
 type — the only way a failure becomes visible to `upTree` (see above) is if `up` *throws*.

@@ -45,7 +45,7 @@ sharedSecretFile r bin sec =
             actions
                 { help = "generates a secret file for shared-secret"
                 , ref = mkRef "gen-secret" sec.secret_path
-                , prelim = skipIfFileExists sec.secret_path
+                , check = skipIfFileExists sec.secret_path
                 , up = up r' >> modifyInPlace sec.secret_path
                 }
   where

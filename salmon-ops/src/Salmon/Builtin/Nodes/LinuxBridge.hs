@@ -6,14 +6,15 @@ Neither @ip link add ... type bridge@ nor @ip tuntap add@ is idempotent on
 its own (both fail with "File exists" on a second run) — same shape as
 "Salmon.Builtin.Nodes.Netfilter"'s @nft add rule@ problem, so this uses the
 same fix already established as this project's convention: check whether
-the link already exists (@ip link show@) and report 'Skippable' via
-'prelim' instead of trying to force the @ip@ invocation itself to be
+the link already exists (@ip link show@) and report
+'Salmon.Actions.UpDown.Success' via 'check' instead of trying to force the
+@ip@ invocation itself to be
 idempotent (see 'skipIfLinkExists', mirroring
 "Salmon.Builtin.Nodes.Podman".'Salmon.Builtin.Nodes.Podman.skipIfNetworkExists').
 -}
 module Salmon.Builtin.Nodes.LinuxBridge where
 
-import Salmon.Actions.UpDown (Requirement (..), upTree)
+import Salmon.Actions.UpDown (CheckResult (..), upTree)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -76,7 +77,7 @@ bridge r ip br =
             actions
                 { help = "creates a Linux bridge device " <> br.bridgeName
                 , ref = mkRef "linux-bridge" br.bridgeName
-                , prelim = skipIfLinkExists br.bridgeName
+                , check = skipIfLinkExists br.bridgeName
                 , up = add r' >> Binary.untrackedExec ipLinkCommand (SetUp br.bridgeName) "" r'
                 , down = Binary.untrackedExec ipLinkCommand (DeleteLink br.bridgeName) "" r'
                 }
@@ -118,7 +119,7 @@ tap r ip t =
             actions
                 { help = "creates tap device " <> t.tapName <> " on bridge " <> t.tapBridge.bridgeName
                 , ref = mkRef "linux-tap" (t.tapBridge.bridgeName, t.tapName)
-                , prelim = skipIfLinkExists t.tapName
+                , check = skipIfLinkExists t.tapName
                 , up = ensureBridge >> add r' >> attach r' >> Binary.untrackedExec ipLinkCommand (SetUp t.tapName) "" r'
                 , down = Binary.untrackedExec ipLinkCommand (DeleteLink t.tapName) "" r'
                 }
@@ -140,7 +141,7 @@ bridgeAddr r ip br cidr =
             actions
                 { help = "assigns " <> cidrText cidr <> " to " <> br.bridgeName
                 , ref = mkRef "linux-addr" (br.bridgeName, cidrText cidr)
-                , prelim = skipIfAddrExists br.bridgeName cidr
+                , check = skipIfAddrExists br.bridgeName cidr
                 , up = add r'
                 , down = Binary.untrackedExec ipLinkCommand (DelAddr br.bridgeName cidr) "" r'
                 }
@@ -148,27 +149,28 @@ bridgeAddr r ip br cidr =
     r' = contramap (RunIpLink (AddAddr br.bridgeName cidr)) r
 
 {- | @ip addr show dev \<name\>@ succeeds and lists every address currently
-assigned — 'Skippable' iff the wanted CIDR text is already one of them, same
+assigned — 'Salmon.Actions.UpDown.Success' iff the wanted CIDR text is
+already one of them, same
 "does the effect already exist" shape as 'skipIfLinkExists'.
 -}
-skipIfAddrExists :: DevName -> Cidr -> IO Requirement
+skipIfAddrExists :: DevName -> Cidr -> IO CheckResult
 skipIfAddrExists name cidr = do
     (code, out, _err) <- readCreateProcessWithExitCode (proc "ip" ["addr", "show", "dev", Text.unpack name]) ""
     pure $ case code of
-        ExitSuccess | cidrText cidr `Text.isInfixOf` Text.decodeUtf8With Text.lenientDecode out -> Skippable
-        _ -> Required
+        ExitSuccess | cidrText cidr `Text.isInfixOf` Text.decodeUtf8With Text.lenientDecode out -> Success
+        _ -> Failure ("address not on the link: " <> cidrText cidr)
 
 {- | @ip link show \<name\>@ succeeds (exit 0) iff a link by that name already
 exists — the same "does the effect already exist" shape as
 'Salmon.Builtin.Nodes.Podman.skipIfNetworkExists' \/
 'Salmon.Builtin.Nodes.Netfilter.skipIfNftRuleExists'.
 -}
-skipIfLinkExists :: DevName -> IO Requirement
+skipIfLinkExists :: DevName -> IO CheckResult
 skipIfLinkExists name = do
     (code, _, _) <- readCreateProcessWithExitCode (proc "ip" ["link", "show", Text.unpack name]) ""
     pure $ case code of
-        ExitSuccess -> Skippable
-        _ -> Required
+        ExitSuccess -> Success
+        _ -> Failure ("no such link: " <> name)
 
 -------------------------------------------------------------------------------
 data IpLinkCommand
