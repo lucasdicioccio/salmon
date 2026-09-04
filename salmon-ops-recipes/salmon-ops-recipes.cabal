@@ -90,6 +90,7 @@ test-suite salmon-ops-recipes-test
                     , Test.QemuResolveKernelSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
+                    , Test.RewriteSpec
                     , Test.ServeSpec
                     , Test.UpTreeSpec
     build-depends:    base

@@ -6,6 +6,7 @@ import qualified Data.Text as Text
 import Options.Applicative (execParser, fullDesc, header, info, progDesc)
 import Options.Generic (ParseRecord (..))
 
+import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension (Op, Track', deps, notes, op, ref)
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
@@ -25,14 +26,26 @@ main = do
     let desc = fullDesc <> progDesc "Standalone db migration tool" <> header "for Postgres"
     let opts = info parseRecord desc
     cmd <- execParser opts
-    CLI.execCommandOrSeed reportPrint configure program cmd
+    -- the apt-get collection is a registered rewrite rather than an
+    -- `Op -> Op` applied inside `program` below: a rewrite runs after the
+    -- fold, so it sees every declaration `run serve` currently holds and
+    -- which way each package node is wanted, and it can emit a removal batch
+    -- as well as an install one. Neither is expressible in `Track' Spec`,
+    -- which is a function of one directive alone.
+    CLI.execCommandOrSeedWithRewrites
+        Serve.reportText
+        reportPrint
+        [Debian.batchPackages reportPrint]
+        configure
+        program
+        cmd
 
 program :: Track' Spec
 program =
     go 0
   where
     go n = Track $ \spec ->
-        optimizedDeps $ op "program" (deps $ specOp (n + 1) spec) $ \actions ->
+        op "program" (deps $ specOp (n + 1) spec) $ \actions ->
             actions
                 { notes = [Text.pack $ "at depth " <> show n]
                 , ref = mkRef "program" n
@@ -41,11 +54,6 @@ program =
     specOp :: Int -> Spec -> [Op]
     -- meta
     specOp _ (Migrate setup1 setup2) = [migrate setup2 `inject` migrateSuperUser setup1]
-
-    optimizedDeps :: Op -> Op
-    optimizedDeps base =
-        let pkgs = Debian.installAllDebsAtOnceWith reportPrint base
-         in Debian.removeSinglePackages base `inject` pkgs
 
 configure :: Configure IO Seed Spec
 configure = Configure go

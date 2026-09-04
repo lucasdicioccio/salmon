@@ -334,9 +334,27 @@ some other part of the codebase can later recover by type, without changing
 - `getDynamics`/`collectDynamics` walk a graph and pull out every `Dynamic` of
   a chosen type — used e.g. to flatten "which of these ops are actually remote
   calls" out of a graph for special handling.
+- `Debian.Package.deb` stashes a `Package`, which the `batchPackages` **rewrite**
+  (`Salmon.Op.Rewrite`) collects across the whole graph into one `apt-get`
+  invocation.
+
+That last one is what the field is really for, and it's worth understanding
+the shape. A node says *"I am a `Package`"* without knowing what will be done
+about it, and a later pass collects the set and acts on it. The later pass is
+the only place that *can* act: your `Track' directive` is a function of one
+directive in isolation, so it can't see the other declarations `run serve`
+currently holds, or which way each of their nodes is wanted. A `Rewrite` runs
+after the graph has been folded to a `Ref`-keyed DAG, where both of those
+exist — so it can batch across declarations and split an install batch from a
+removal batch, neither of which a recipe could express. Register one with
+`CommandLine.execCommandOrSeedWithRewrites` rather than applying an `Op -> Op`
+inside your `Track'`.
 
 You will rarely need to add a *new* dynamic type; if you find yourself wanting
-one, search for existing `toDyn`/`fromDynamic`/`getDynamics` usages first.
+one, search for existing `toDyn`/`fromDynamic`/`getDynamics` usages first. The
+question to ask is whether some *later, wider* pass needs to know this about
+your node — if the answer is "only this node cares", it's a field on your own
+value type, not a dynamic.
 
 ## 8. Writing a new builtin node — a worked template
 

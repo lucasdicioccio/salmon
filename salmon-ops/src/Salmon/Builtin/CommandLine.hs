@@ -7,6 +7,7 @@ import Control.Monad (void, when)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
+import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -16,7 +17,12 @@ import Options.Generic
 import System.Exit (exitFailure)
 import System.IO (stdin)
 
+import Salmon.Op.Actions (Act (..))
 import Salmon.Op.Configure
+import qualified Salmon.Op.Dag as Dag
+import Salmon.Op.Ref (Ref)
+import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
+import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Eval
 import Salmon.Op.OpGraph
 import Salmon.Op.Track
@@ -209,10 +215,37 @@ execCommandOrSeedWith ::
     Track' directive ->
     Command seed ->
     IO ()
-execCommandOrSeedWith serveR r genBase traceBase cmd = do
+execCommandOrSeedWith serveR r = execCommandOrSeedWithRewrites serveR r []
+
+{- | 'execCommandOrSeedWith' with "Salmon.Op.Rewrite" phases registered.
+
+This is how an application asks for something like
+'Salmon.Builtin.Nodes.Debian.Package.batchPackages' — a collection of many
+small nodes into one bulk invocation — instead of applying an @Op -> Op@ pass
+by hand inside its own 'Track''. The difference is not stylistic: a phase runs
+after the fold, so it sees every declaration and which way each node is
+wanted, neither of which a @directive -> Op@ can see. See "Salmon.Op.Rewrite".
+
+The phases apply to @run up@, @run down@ and @run serve@ — the commands that
+execute something. @run tree@\/@run dag@\/@query@ still print the /declared/
+graph, which is what the operator wrote and will edit; printing the computed
+one is a separate job, since a rewritten 'Salmon.Op.Dag.Dag' has refs and
+edges but no paths for a @--select@ pattern to match against.
+-}
+execCommandOrSeedWithRewrites ::
+    forall directive seed.
+    (ToJSON directive, FromJSON directive, ParseRecord seed) =>
+    Reporter Serve.Report ->
+    Reporter (UpDown.Report Extension) ->
+    [Rewrite Extension] ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Command seed ->
+    IO ()
+execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     case cmd of
         (Run (RunUp Nothing _)) -> do
-            result <- withGraph (UpDown.upTree r nat)
+            result <- withGraph (runUp Set.empty)
             when (result == Just False) exitFailure
         (Run (RunUp (Just planPath) forceStale)) -> do
             result <- withGraphAndBytes $ \dirBytes op -> do
@@ -225,7 +258,7 @@ execCommandOrSeedWith serveR r genBase traceBase cmd = do
                         let actual = Query.digestBytes dirBytes
                         let expected = Query.planDirectiveDigest plan
                         if actual == expected
-                            then UpDown.upTree r nat (Query.forceSkip (Set.fromList (Query.planExcludedRefs plan)) op)
+                            then runUp (Set.fromList (Query.planExcludedRefs plan)) op
                             else
                                 if forceStale
                                     then do
@@ -235,7 +268,7 @@ execCommandOrSeedWith serveR r genBase traceBase cmd = do
                                                 <> ", this directive hashes to "
                                                 <> Text.unpack actual
                                                 <> "); proceeding due to --force-stale-plan"
-                                        UpDown.upTree r nat (Query.forceSkip (Set.fromList (Query.planExcludedRefs plan)) op)
+                                        runUp (Set.fromList (Query.planExcludedRefs plan)) op
                                     else do
                                         putStrLn $
                                             "refusing to run stale plan: plan expects digest "
@@ -245,14 +278,14 @@ execCommandOrSeedWith serveR r genBase traceBase cmd = do
                                         exitFailure
             when (result == Just False) exitFailure
         (Run RunDown) -> do
-            result <- withGraph (UpDown.downTree r nat)
+            result <- withGraph runDown
             when (result == Just False) exitFailure
         (Run RunTree) -> do
             void $ withGraph (Help.printHelpCograph . (runIdentity . expand))
         (Run RunDAG) -> do
             void $ withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
         (Run RunServe) -> do
-            void $ Serve.serve serveR r parseSeedArgs genBase traceBase stdin
+            void $ Serve.serveWith rewrites serveR r parseSeedArgs genBase traceBase stdin
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
@@ -283,6 +316,39 @@ execCommandOrSeedWith serveR r genBase traceBase cmd = do
             LBysteString.putStr $ encode dir
   where
     nat = pure . runIdentity
+
+    {- | @run up@: everything in this one directive's graph is wanted up, so
+    that is the rewrites' 'phaseDesired'. @excluded@ (a plan's skipped
+    refs) is what they must not collect: batching a node the operator asked
+    to skip would run it anyway, under another node's name.
+
+    Exclusion is a 'UpDown.Gate' rather than 'Query.forceSkip' precisely so it
+    composes with collections — a batch is worth running iff some member of
+    it is, which is the same 'Rewrite.membersOf' translation @serve@'s gate
+    does. The report stream is identical either way: both produce a 'Skip'. -}
+    runUp :: Set Ref -> Op -> IO Bool
+    runUp excluded op = do
+        dag <- UpDown.expandDag r nat op
+        let computed = Rewrite.rewrite rewrites (Phase (Set.fromList (Dag.dagOrder dag)) excluded) dag
+        UpDown.upDag (excluding computed excluded) r (Rewrite.computedDag computed)
+
+    {- | @run down@: nothing is wanted up, which is what makes a
+    direction-aware rewrite emit a teardown batch here and an install batch
+    under @run up@, from the same registered phase. -}
+    runDown :: Op -> IO Bool
+    runDown op = do
+        dag <- UpDown.expandDag r nat op
+        let computed = Rewrite.rewrite rewrites (Phase Set.empty Set.empty) dag
+        UpDown.downDag UpDown.alwaysRequired r (Rewrite.computedDag computed)
+
+    excluding :: Rewritten Extension -> Set Ref -> UpDown.Gate Extension
+    excluding computed excluded
+        | Set.null excluded = UpDown.alwaysRequired
+        | otherwise = \act ->
+            pure $
+                if any (`Set.notMember` excluded) (Set.toList (Rewrite.membersOf computed act.extension.ref))
+                    then UpDown.Required
+                    else UpDown.Skippable
 
     -- | 'Nothing' iff the incoming JSON graph failed to parse (in which case @cont@ never ran).
     withGraph :: (Op -> IO a) -> IO (Maybe a)

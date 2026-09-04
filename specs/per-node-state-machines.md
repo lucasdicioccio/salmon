@@ -928,13 +928,46 @@ wakeup channel, and the `run_stopping` flag.
    reason, which is worth stating because it is the residue this milestone did
    /not/ eliminate: `--select` resolves *path* patterns, and a `Dag` has refs
    and edges but no paths.
-5. **Rewrites as a registered post-fold phase**, taking `desired` and reading
-   `dynamics` across the magma. `installAllDebsAtOnceWith` ports to it and
-   becomes direction-aware: an install batch and a removal batch with an
-   ordering edge between them, and precedence edges redirected onto them.
-   Worth doing before parallelism rather than after, since it is what stops
-   the first wide graph from wanting a concurrency limit — and it is the step
-   where applications stop applying `Op -> Op` passes by hand.
+5. **Rewrites as a registered post-fold phase** — *landed*. Taking `desired`
+   and reading `dynamics` across the magma. `installAllDebsAtOnceWith` ports
+   to it and becomes direction-aware: an install batch and a removal batch
+   with an ordering edge between them, and precedence edges redirected onto
+   them. Worth doing before parallelism rather than after, since it is what
+   stops the first wide graph from wanting a concurrency limit — and it is
+   the step where applications stop applying `Op -> Op` passes by hand.
+
+   The phase input needed a second field. `desired` alone is not enough,
+   because a plan's excluded refs and a `converge --select`'s complement are
+   nodes the traversal will not touch — and batching one of those into a
+   collection would run exactly the work the operator asked to skip, under
+   another node's name. So a phase gets `Phase { phaseDesired, phaseIgnored }`
+   and must leave the second alone. That also settles how `run up --plan`
+   composes with collections: exclusion moved from `Query.forceSkip` to a
+   `Gate`, so a batch is worth running iff some member of it is — the same
+   `membersOf` translation `serve`'s gate does, and the same `Skip` report
+   either way.
+
+   The membership map is the other thing the section above did not name.
+   A collection node has no `NodeState` and no ledger entry — it exists only
+   here — so both the gate and the convergence recording go through
+   `membersOf`: a batch is worth touching iff any declared node it stands in
+   for is, and what happened to it happened to all of them. That is what
+   makes "a batch reports failure for all of its members" fall out rather
+   than needing special-casing, and it is why `status` still reports per
+   package. For a node no rewrite touched, `membersOf` is the singleton of
+   itself, so nothing else changed.
+
+   `installAllDebsAtOnce`/`removeSinglePackages` are kept and deprecated
+   rather than deleted: the author's own out-of-tree apps still call them,
+   and porting is a one-line change they can make when they choose.
+
+   Not done, and deliberately so: **`query` still shows the declared graph**,
+   not the computed one. The decision above stands, but a rewritten `Dag` has
+   refs and edges and no *paths*, and `--select` matches path patterns — so
+   printing the computed graph needs a renderer that does not exist yet. The
+   fiction the section warns about is narrower than it was, since plan
+   exclusion now composes with collections through `membersOf` rather than
+   silently missing them.
 6. **`TVar Status` per node and `waitStability`**, plus the async drivers and
    the per-node mailbox. Parallelism appears here.
 7. **Upkeep/downkeep FSMs** with adaptive delay, over `OneShot` nodes only,

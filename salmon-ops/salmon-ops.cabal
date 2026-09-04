@@ -68,6 +68,7 @@ library
                    , Salmon.Builtin.Nodes.WireGuard
                    , Salmon.Op.Dag
                    , Salmon.Op.Ledger
+                   , Salmon.Op.Rewrite
                    , Salmon.Op.Configure
                    , Salmon.Op.Ref
                    , Salmon.Reporter

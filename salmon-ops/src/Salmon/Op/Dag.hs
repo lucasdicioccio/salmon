@@ -67,6 +67,8 @@ module Salmon.Op.Dag (
     mergeDag,
     fromMagma,
     record,
+    collapseInto,
+    addEdge,
 
     -- * Colliding representatives
     Conflict (..),
@@ -310,6 +312,83 @@ fromMagma magma edges = foldl' add emptyDag (Map.keys magma)
             , Map.member dependency magma
             , Map.member dependant magma
             ]
+
+{- | Replace a set of nodes with one node that stands in for all of them,
+redirecting every edge that touched a member onto the replacement.
+
+This is what a collection rewrite needs and the only structural edit this
+module offers: "twenty @apt-get install@ nodes become one @apt-get install@
+node, and whatever depended on any of them now depends on that one". Edges
+purely between members collapse to self-edges and are dropped, which is the
+whole reason this cannot be done by editing the magma alone.
+
+The replacement takes the position of the first member in 'dagOrder', so a
+collection lands where its members were rather than at the end. If no member
+is present the 'Dag' is returned unchanged — a rewrite that finds nothing to
+do is a no-op, not an empty node.
+-}
+collapseInto :: Ref -> Act ext -> Set Ref -> Dag ext -> Dag ext
+collapseInto into act members dag
+    | Set.null present = dag
+    | otherwise =
+        Dag
+            { dagNodes = Map.insert into act survivors
+            , dagDependencies = Map.map (nubOrd . fmap rename) keptDeps
+            , dagDependants = transposeOf (Map.map (nubOrd . fmap rename) keptDeps)
+            , dagOrderRev = reverse order'
+            , dagConflicts = dagConflicts dag
+            }
+  where
+    present = Set.intersection members (Map.keysSet (dagNodes dag))
+    survivors = Map.withoutKeys (dagNodes dag) present
+
+    rename r = if Set.member r present then into else r
+
+    -- every surviving node's dependencies, with members renamed and the
+    -- resulting self-edges dropped; the replacement inherits the union of its
+    -- members' own dependencies.
+    keptDeps :: Map Ref [Ref]
+    keptDeps =
+        Map.insert into inherited $
+            Map.mapMaybeWithKey
+                ( \r ds ->
+                    if Set.member r present
+                        then Nothing
+                        else Just [d | d <- ds, rename d /= r]
+                )
+                (dagDependencies dag)
+
+    inherited =
+        [ d
+        | m <- Set.toList present
+        , d <- Map.findWithDefault [] m (dagDependencies dag)
+        , not (Set.member d present)
+        ]
+
+    order' =
+        case break (`Set.member` present) (dagOrder dag) of
+            (before, []) -> before <> [into]
+            (before, _ : after) -> before <> [into] <> filter (not . (`Set.member` present)) after
+
+-- | Add one precedence edge, @(dependency, dependant)@. Both ends must
+-- already be nodes; an edge to a node the magma does not hold is ignored,
+-- matching 'fromMagma'.
+addEdge :: (Ref, Ref) -> Dag ext -> Dag ext
+addEdge (dependency, dependant) dag
+    | not (Map.member dependency (dagNodes dag)) = dag
+    | not (Map.member dependant (dagNodes dag)) = dag
+    | otherwise =
+        let deps' = Map.adjust (\ds -> nubOrd (ds <> [dependency])) dependant (dagDependencies dag)
+         in dag{dagDependencies = deps', dagDependants = transposeOf deps'}
+
+-- | Invert a dependency map into a dependant map. Left-biased 'Map.union' so
+-- the computed entry wins; the right-hand map only supplies the empty list
+-- for nodes nothing depends on, which have to stay keys.
+transposeOf :: Map Ref [Ref] -> Map Ref [Ref]
+transposeOf deps =
+    Map.union
+        (Map.fromListWith (flip (<>)) [(d, [r]) | (r, ds) <- Map.toList deps, d <- ds])
+        (Map.map (const []) deps)
 
 {- | Fold the right 'Dag' into the left one: representatives from the right
 win, edges and order accumulate. This is how a second declaration joins a

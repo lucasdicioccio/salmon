@@ -207,11 +207,7 @@ upTreeWith ::
     (forall a. m a -> IO a) ->
     OpGraph m (Actions ext) ->
     IO Bool
-upTreeWith gate r nat graph = do
-    cofree <- nat (expand graph)
-    let dag = Dag.foldDag Dag.sameRepresentative cofree
-    reportConflicts r dag
-    upDag gate r dag
+upTreeWith gate r nat graph = upDag gate r =<< expandDag r nat graph
 
 {- | 'upTreeWith' once the graph has already been collapsed: one pass over a
 'Dag.Dag' in dependency order, one attempt per node, 'Salmon.Builtin.Extension.check'
@@ -328,6 +324,33 @@ walk r dag ready release start apply = do
 
     not <$> readIORef failRef
 
+{- | Everything both drivers do before either of them walks anything: expand
+the effectful @predecessors@ recipes, collapse the result to a 'Dag.Dag', and
+report any 'Ref' collision the collapse had to resolve.
+
+Exposed rather than inlined because this is the seam a
+"Salmon.Op.Rewrite" phase goes in: a caller that has rewrites registered folds
+here, rewrites, and hands 'upDag'\/'downDag' the computed graph instead of
+the declared one.
+-}
+expandDag ::
+    forall a m ext.
+    ( Monad m
+    , HasField "ref" ext Ref
+    , HasField "help" ext Text
+    , HasField "notes" ext [Text]
+    , HasField "dynamics" ext [Dynamic]
+    ) =>
+    Reporter (Report ext) ->
+    (forall a. m a -> IO a) ->
+    OpGraph m (Actions ext) ->
+    IO (Dag ext)
+expandDag r nat graph = do
+    cofree <- nat (expand graph)
+    let dag = Dag.foldDag Dag.sameRepresentative cofree
+    reportConflicts r dag
+    pure dag
+
 -- | Emit one 'Conflicting' per representative that lost to last-writer-wins,
 -- oldest first. Both drivers do this before touching anything.
 reportConflicts :: Reporter (Report ext) -> Dag ext -> IO ()
@@ -424,11 +447,7 @@ downTreeWith ::
     (forall a. m a -> IO a) ->
     OpGraph m (Actions ext) ->
     IO Bool
-downTreeWith gate r nat graph = do
-    cofree <- nat (expand graph)
-    let dag = Dag.foldDag Dag.sameRepresentative cofree
-    reportConflicts r dag
-    downDag gate r dag
+downTreeWith gate r nat graph = downDag gate r =<< expandDag r nat graph
 
 {- | 'downTreeWith' once the graph has already been collapsed — the exact
 mirror of 'upDag': the same 'walk', read the other way round, running

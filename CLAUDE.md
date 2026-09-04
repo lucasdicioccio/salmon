@@ -156,6 +156,22 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   because retracting is exactly when a declaration's edges matter most: they're the only
   remaining statement of what order to tear its nodes down in. See milestone 3 and
   `Test/LedgerSpec.hs`.
+- **`Op/Rewrite.hs`** is where cross-declaration knowledge is allowed to live, and the only
+  place it can. A recipe supplies `Track' directive`, i.e. `directive -> Op` — a function of *one
+  directive in isolation* — so "batch this package with the other packages currently wanted up"
+  isn't awkward to write in a recipe, it's inexpressible there. A `Rewrite ext = Phase ->
+  Rewritten ext -> Rewritten ext` runs *after* the fold, over the whole magma, and that's simply
+  where the missing information first exists. `dynamics` is its input channel (`collectDynamic`),
+  which is what that field was always for. `Phase` carries `phaseDesired` (what's wanted up —
+  every node for `run up`, nothing for `run down`, the ledger's `desired` under `serve`) and
+  `phaseIgnored` (a plan's excluded refs, or a `converge --select`'s complement — a rewrite must
+  not batch those, or it runs work the operator asked to skip). A phase that introduces a node
+  records what it stands in for via `introduce`; `membersOf` is how the drivers keep speaking in
+  declared terms — a batch is worth touching iff some member is, and what happens to it happened
+  to all of them. Register phases with `CommandLine.execCommandOrSeedWithRewrites` /
+  `Serve.serveWith`; they apply to `run up`/`run down`/`run serve` but **not** to `run
+  tree`/`run dag`/`query`, which still print the declared graph (a rewritten `Dag` has no paths
+  for a `--select` pattern to match). See milestone 5 and `Test/RewriteSpec.hs`.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
   `World` — a `worldLedger` of who's asked for what, a `worldMagma` of one representative per
   `Ref` (what each node *is*), a `NodeState` per node (a `Direction` it's wanted in plus whether
@@ -169,7 +185,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   touches a graph: `worldDag` rebuilds one walkable structure from the magma and the ledger's
   precedence via `Dag.fromMagma`, and both directions run over it. `epochGraph` survives for one
   reason only — `--select` resolves *path* patterns, and a `Dag` has `Ref`s and edges but no
-  paths.
+  paths. Registered `Rewrite`s run once per convergence pass (not per declaration), because what
+  they partition on is a property of the whole ledger at that moment.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately

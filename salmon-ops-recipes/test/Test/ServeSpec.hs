@@ -17,7 +17,10 @@ import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy as LByteString
+import Data.Dynamic (toDyn)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import qualified Data.List
+import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -32,11 +35,13 @@ import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.UpDown as UpDown
-import Salmon.Builtin.Extension (Extension, Op, Track', deps, down, nodeps, op, ref, up)
+import Salmon.Builtin.Extension (Extension, Op, Track', deps, down, dynamics, nodeps, op, opAct, ref, up)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
 import Salmon.Op.Ref (Ref, mkRef)
+import Salmon.Op.Rewrite (Phase (..), Rewrite)
+import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
 
 import Test.Harness (capture, withTempDir)
@@ -64,6 +69,8 @@ tests =
         , testCase "`help` prints the command reference and touches nothing" helpPrintsReference
         , testCase "`help TOPIC` prints a longer, topic-specific block" helpTopicIsLonger
         , testCase "`help` with an unrecognised topic falls back to the full reference" helpUnknownTopicFallsBack
+        , testCase "a registered rewrite batches across seeds and converges its members" rewriteBatchesAcrossSeeds
+        , testCase "a rewrite's batch splits by direction when a seed is retired" rewriteSplitsOnRetire
         ]
 
 -------------------------------------------------------------------------------
@@ -382,12 +389,21 @@ runServe ::
     FilePath ->
     [String] ->
     IO (World Spec Spec, [Serve.Report], [UpDown.Report Extension])
-runServe prog root script = do
+runServe = runServeWith []
+
+-- | 'runServe' with "Salmon.Op.Rewrite" phases registered.
+runServeWith ::
+    [Rewrite Extension] ->
+    Track' Spec ->
+    FilePath ->
+    [String] ->
+    IO (World Spec Spec, [Serve.Report], [UpDown.Report Extension])
+runServeWith rewrites prog root script = do
     (serveReporter, readServeReports) <- capture
     (nodeReporter, readNodeReports) <- capture
     w <-
         withScript script $
-            Serve.serve serveReporter nodeReporter (parseSpec root) (Configure pure) prog
+            Serve.serveWith rewrites serveReporter nodeReporter (parseSpec root) (Configure pure) prog
     (,,) w <$> readServeReports <*> readNodeReports
 
 withScript :: [String] -> (Handle -> IO a) -> IO a
@@ -435,3 +451,94 @@ assertDirExists :: FilePath -> Bool -> IO ()
 assertDirExists root expected = do
     found <- doesDirectoryExist (root </> "files")
     assertEqual "enclosing directory exists" expected found
+
+-------------------------------------------------------------------------------
+-- A rewrite, without needing apt on the machine running the tests.
+--
+-- The same shape as 'Salmon.Builtin.Nodes.Debian.Package.batchPackages' —
+-- collect every node carrying a 'Widget' into one node per direction, keyed
+-- on 'phaseDesired' — but the batch just appends to an 'IORef' instead of
+-- shelling out. What is under test is 'Salmon.Actions.Serve''s side of it:
+-- that a node no declaration ever mentioned is still gated correctly (via
+-- its members) and that its outcome is recorded against the nodes an
+-- operator actually declared.
+
+newtype Widget = Widget Text
+    deriving (Eq, Ord, Show)
+
+-- | A seed whose file names each also declare a 'Widget'.
+widgetProgram :: Track' Spec
+widgetProgram = Track $ \spec ->
+    op "widget-root" (deps (fmap widget spec.specNames)) $ \actions ->
+        actions{ref = mkRef "widget-root" (spec.specDir, spec.specNames)}
+  where
+    widget n =
+        op "widget" nodeps $ \actions ->
+            actions
+                { ref = mkRef "widget" (Text.pack n)
+                , dynamics = [toDyn (Widget (Text.pack n))]
+                }
+
+batchWidgets :: IORef [(Text, [Widget])] -> Rewrite Extension
+batchWidgets ranRef phase computed =
+    batch "install" (filter (isDesired . fst) declared) $
+        batch "remove" (filter (not . isDesired . fst) declared) computed
+  where
+    declared = Rewrite.collectDynamic computed
+    isDesired rf = Set.member rf phase.phaseDesired
+
+    batch what members c
+        | null members = c
+        | otherwise =
+            case opAct (batchOp what (concatMap snd members)) of
+                Nothing -> c
+                Just act -> Rewrite.introduce act (Set.fromList (fmap fst members)) c
+
+    batchOp what ws =
+        op "widget-batch" nodeps $ \actions ->
+            actions
+                { ref = mkRef "widget-batch" (what :: Text, [w | Widget w <- ws])
+                , up = record what ws
+                , down = record what ws
+                }
+
+    record what ws = atomicModifyIORef' ranRef (\xs -> ((what, ws) : xs, ()))
+
+{- | Two seeds, each declaring its own widgets, both live. A rewrite running
+after the fold sees all of them at once — which is exactly what an
+@Op -> Op@ applied inside the 'Track'' could not do, since it only ever had
+one directive.
+-}
+rewriteBatchesAcrossSeeds :: IO ()
+rewriteBatchesAcrossSeeds =
+    withTempDir $ \root -> do
+        ran <- newIORef []
+        (w, _, _) <- runServeWith [batchWidgets ran] widgetProgram root ["up a", "up b"]
+        batches <- reverse <$> readIORef ran
+        assertEqual
+            "the second convergence batched both seeds' widgets in one node"
+            [Widget "a", Widget "b"]
+            (Data.List.sort (concat [ws | ("install", ws) <- batches, length ws == 2]))
+        assertBool
+            "every declared widget node is converged, though none of them ran itself"
+            (all (\st -> st.nodeConvergence == Converged) (Map.elems w.worldNodes))
+
+{- | Retiring one of the two seeds is the case that has no pre-fold
+expression at all: one widget is on its way out while the other is staying,
+so the rewrite must emit two batches rather than one, and must not sweep the
+surviving widget into the removal.
+-}
+rewriteSplitsOnRetire :: IO ()
+rewriteSplitsOnRetire =
+    withTempDir $ \root -> do
+        ran <- newIORef []
+        (w, _, _) <- runServeWith [batchWidgets ran] widgetProgram root ["up a", "up b", "down a"]
+        batches <- reverse <$> readIORef ran
+        assertEqual
+            "a came out on its own"
+            [[Widget "a"]]
+            [ws | ("remove", ws) <- batches]
+        assertBool
+            "and b was never in a removal batch"
+            (all (\(_, ws) -> Widget "b" `notElem` ws) [b | b@("remove", _) <- batches])
+        assertAllConverged TurnUp w

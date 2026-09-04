@@ -56,27 +56,28 @@ Every node here is a one-shot idempotent action, so nothing in this loop owns
 anything that could change on its own — and if something did, this loop would
 not notice, being blocked reading its input between declarations.
 
-'serveWith' is the hook for that. Given a source of "these nodes want
+'serveWakingWith' is the hook for that. Given a source of "these nodes want
 attention", it selects on that alongside its command input, puts the named
 nodes back to 'Pending' in the direction they are wanted, and converges. The
 wakeup is deliberately just a 'Ref' set rather than any particular kind of
 event: this module knows nothing about what may have changed, and anything
-able to say "look at this node again" can drive it. 'serve' is 'serveWith'
-with a source that never fires, i.e. exactly the behaviour from before the
-hook existed.
+able to say "look at this node again" can drive it. 'serve' is
+'serveWakingWith' with a source that never fires, i.e. exactly the behaviour
+from before the hook existed.
 
 todo: nothing in the repo drives this hook. A @Salmon.Builtin.Nodes.Supervised@
 did briefly, and was removed in favour of @specs\/per-node-state-machines.md@,
 where supervision is a property every node has rather than one special node
 type — and where this hook is subsumed, because nodes with state of their own
 can be blocked on directly instead of having to be told to look again. Either
-that design lands and 'serveWith' goes with it, or something else needs to
-justify keeping it.
+that design lands and 'serveWakingWith' goes with it, or something else needs
+to justify keeping it.
 -}
 module Salmon.Actions.Serve (
     -- * Running
     serve,
     serveWith,
+    serveWakingWith,
     noWakeups,
 
     -- * Input language
@@ -141,6 +142,8 @@ import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ledger (Ledger)
 import qualified Salmon.Op.Ledger as Ledger
 import Salmon.Op.Ref (Ref, unRef)
+import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
+import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (run)
 import Salmon.Reporter
 
@@ -782,7 +785,27 @@ serve ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serve = serveWith noWakeups
+serve = serveWith []
+
+{- | 'serve', with "Salmon.Op.Rewrite" phases registered. They run after every
+fold, so a convergence walks the /computed/ graph — the one where a
+collection node has replaced the nodes it batches — while the ledger and
+'worldNodes' keep speaking in terms of what was declared. See
+'Salmon.Op.Rewrite' for why that split is the only place cross-declaration
+knowledge can live.
+-}
+serveWith ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Handle ->
+    IO (World seed directive)
+serveWith = serveWakingWith noWakeups
 
 {- | A wakeup source that never fires: 'serveWith' with this is 'serve', a
 loop driven entirely by its input.
@@ -803,11 +826,12 @@ The source is consulted concurrently with the input handle, so a wakeup
 arriving while the loop waits for a command is acted on immediately, and one
 arriving mid-convergence is picked up by the next turn of the loop.
 -}
-serveWith ::
+serveWakingWith ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
     -- | blocks until some node wants attention, then names them
     STM (Set Ref) ->
+    [Rewrite Extension] ->
     Reporter Report ->
     Reporter (UpDown.Report Extension) ->
     ([String] -> Either Text seed) ->
@@ -815,7 +839,7 @@ serveWith ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serveWith wakeups r nodeReporter parseSeed configure program h = do
+serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
     inbox <- newTChanIO
     -- the input handle is read on its own thread so that waiting for a
@@ -1035,7 +1059,11 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
     converge :: IORef (World seed directive) -> Maybe (Set Ref) -> IO ()
     converge world restriction = do
         w <- readIORef world
-        let dag = worldDag w
+        -- the rewrites run per pass rather than per declaration, because
+        -- what they partition on ('Ledger.desired') is a property of the
+        -- whole ledger at this moment, not of any one declaration.
+        let computed = Rewrite.rewrite rewrites (phaseOf w restriction) (worldDag w)
+        let dag = Rewrite.computedDag computed
         let (nup, ndown) = pendingCounts w
         runReporter r (ConvergeStart ndown nup)
         -- teardown first: a node being replaced by an incompatible one
@@ -1046,16 +1074,16 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
                 then pure True
                 else
                     UpDown.downDag
-                        (gateFor world TurnDown restriction)
-                        (recorder world TurnDown restriction)
+                        (gateFor world computed TurnDown restriction)
+                        (recorder world computed TurnDown restriction)
                         dag
         okUp <-
             if nup == 0
                 then pure True
                 else
                     UpDown.upDag
-                        (gateFor world TurnUp restriction)
-                        (recorder world TurnUp restriction)
+                        (gateFor world computed TurnUp restriction)
+                        (recorder world computed TurnUp restriction)
                         dag
         -- this pass is what turns nodes converged-'TurnDown', so it is also
         -- where the graphs that described them stop being needed.
@@ -1068,19 +1096,29 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
     belongs to some other seed), already converged, or excluded by this
     pass's own 'restriction' (an explicit @converge --select\/--exclude@) is
     left alone. -}
-    gateFor :: IORef (World seed directive) -> Direction -> Maybe (Set Ref) -> UpDown.Gate Extension
-    gateFor world dir restriction = \act -> do
+    gateFor :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> UpDown.Gate Extension
+    gateFor world computed dir restriction = \act -> do
         w <- readIORef world
-        pure $ case Map.lookup act.extension.ref w.worldNodes of
-            Nothing -> Skippable
-            Just st
-                | st.nodeDirection /= dir -> Skippable
-                | st.nodeConvergence == Converged -> Skippable
-                | maybe False (Set.notMember act.extension.ref) restriction -> Skippable
-                | otherwise -> Required
+        -- a node a rewrite introduced has no 'NodeState' of its own; it is
+        -- worth touching iff any of the declared nodes it stands in for is.
+        -- For every other node 'membersOf' is the singleton of itself, so
+        -- this is the same predicate it always was.
+        pure $
+            if any (wants w) (Set.toList (Rewrite.membersOf computed act.extension.ref))
+                then Required
+                else Skippable
+      where
+        wants :: World seed directive -> Ref -> Bool
+        wants w rf =
+            case Map.lookup rf w.worldNodes of
+                Nothing -> False
+                Just st ->
+                    st.nodeDirection == dir
+                        && st.nodeConvergence /= Converged
+                        && maybe True (Set.member rf) restriction
 
-    recorder :: IORef (World seed directive) -> Direction -> Maybe (Set Ref) -> Reporter (UpDown.Report Extension)
-    recorder world dir restriction = reportBoth (stateWriter world dir restriction) nodeReporter
+    recorder :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> Reporter (UpDown.Report Extension)
+    recorder world computed dir restriction = reportBoth (stateWriter world computed dir restriction) nodeReporter
 
     {- 'upTree'/'downTree' report an 'Eval' before running a node and, once
     it returns, exactly one of 'Done' (succeeded) or 'Failed' (threw) — so
@@ -1092,8 +1130,8 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
     unrestricted @converge@ still retries it) or, on the way up, the node's
     own 'check' saying its effect is already in place, which is convergence
     too. -}
-    stateWriter :: IORef (World seed directive) -> Direction -> Maybe (Set Ref) -> Reporter (UpDown.Report Extension)
-    stateWriter world dir restriction = ReporterM $ \rep ->
+    stateWriter :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> Reporter (UpDown.Report Extension)
+    stateWriter world computed dir restriction = ReporterM $ \rep ->
         case rep of
             UpDown.Eval _ -> pure ()
             UpDown.Done act -> mark act Converged
@@ -1107,8 +1145,14 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
             -- leaves no node any more or less converged than it was.
             UpDown.Conflicting{} -> pure ()
       where
+        -- what happened to a collection node happened to every declared node
+        -- it stands in for — that is the whole of what makes a batch's
+        -- outcome legible in per-package terms, and it is why a batch
+        -- reports failure for all of its members.
         mark :: Act Extension -> Convergence -> IO ()
-        mark act c = modifyIORef' world (setConvergence dir act.extension.ref c)
+        mark act c =
+            forM_ (Set.toList (Rewrite.membersOf computed act.extension.ref)) $ \rf ->
+                modifyIORef' world (setConvergence dir rf c)
 
 -------------------------------------------------------------------------------
 
@@ -1270,6 +1314,19 @@ pendingCounts w =
     (count TurnUp, count TurnDown)
   where
     count dir = length [() | st <- Map.elems w.worldNodes, st.nodeDirection == dir, st.nodeConvergence /= Converged]
+
+{- | What the "Salmon.Op.Rewrite" phases are told about the pass about to
+run: which nodes some live declaration still wants (so a rewrite can tell an
+install from a removal), and which ones an explicit @converge
+--select@\/@--exclude@ has put out of scope (so a rewrite does not quietly
+batch up work the operator asked to skip).
+-}
+phaseOf :: World seed directive -> Maybe (Set Ref) -> Phase
+phaseOf w restriction =
+    Phase
+        { phaseDesired = Ledger.desired w.worldLedger
+        , phaseIgnored = maybe Set.empty (Map.keysSet w.worldNodes `Set.difference`) restriction
+        }
 
 {- | What both convergence passes walk: the magma, wired back up with the
 precedence the ledger holds. No graph is involved, which is the point — a

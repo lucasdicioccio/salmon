@@ -4,12 +4,20 @@ import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
+import Salmon.Op.Actions (Act (..))
+-- only `addEdge` is needed here; `Rewritten` carries the `Dag` itself.
+import qualified Salmon.Op.Dag as Dag
+import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
+import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Reporter
 
 import Data.Dynamic (toDyn)
 import Data.Foldable (toList)
+import qualified Data.List as List
 import qualified Data.List.NonEmpty as NEList
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Environment (getEnvironment)
@@ -88,9 +96,112 @@ debsWith r pkgs =
     downAction =
         Binary.untrackedExec aptUninstallCommand dedupedPkgs "" (contramap (RunAptGet (AptRemove dedupedPkgs)) r)
 
--- | Returns a new Op collecting.
+{- | Collect every @deb@ node in the graph into one @apt-get@ invocation per
+direction: one install batch for the packages some live declaration still
+wants, one removal batch for the rest, and an ordering edge putting the
+removal first.
+
+This replaces the 'installAllDebsAtOnce' \/ 'removeSinglePackages' pair of
+@Op -> Op@ passes an application used to apply by hand inside its own
+'Salmon.Op.Track.Track' (both still work, both deprecated). Three things it
+can do that they could not, all of them consequences of running after the fold
+rather than over one directive's graph:
+
+* __It sees every declaration.__ Under @run serve@ the old pass batched one
+  seed's packages at a time, because that is all a @directive -> Op@ ever
+  had. This batches across the lot.
+* __It knows the direction.__ 'phaseDesired' is what says whether a @deb@
+  node is being installed or removed, and nothing before the fold knows
+  that — so the old pass could only ever emit a blind install batch. The
+  partition here is conservative: a package any live declaration still wants
+  goes to the install batch, and only a package absent from 'phaseDesired'
+  is removed. Erring the other way would let one retraction uninstall a
+  package another declaration is standing on.
+* __It redirects the edges.__ Whatever depended on @deb foo@ now depends on
+  the batch that installs it, instead of the old pass's trick of blanking the
+  per-package nodes and 'Salmon.Op.OpGraph.inject'ing the batch under the
+  root.
+
+The ordering edge is there because @apt-get install@ and @apt-get remove@
+both want the dpkg lock. Today the two batches are in different convergence
+passes anyway, so the edge is redundant; once nodes run concurrently it is
+what serialises them, and an edge costs nothing and needs no retry loop to
+tell "could not lock" from "no such package". Removals first is also simply
+the right order — it is what one would do by hand to clear conflicts.
+
+A batch is one node, so a failure is attributed to all of its members: the
+batch's @apt-get@ exiting non-zero says the batch failed, not which package,
+and narrowing it would mean parsing apt's prose. That is the trade a
+collection makes — efficiency for attribution.
+-}
+batchPackages :: Reporter Report -> Rewrite Extension
+batchPackages r phase computed =
+    edge . batchOf "installs" installRef wanted . batchOf "removes" removeRef unwanted $ computed
+  where
+    -- (ref, the packages that node declares) for every deb node this
+    -- traversal is allowed to touch.
+    declared :: [(Ref, [Package])]
+    declared =
+        [ (aref, pkgs)
+        | (aref, pkgs) <- Rewrite.collectDynamic computed
+        , not (Set.member aref phase.phaseIgnored)
+        ]
+
+    -- conservative: still-wanted wins. Only a package no live declaration
+    -- asks for goes to the removal batch.
+    wanted, unwanted :: [(Ref, [Package])]
+    (wanted, unwanted) = List.partition (\(aref, _) -> Set.member aref phase.phaseDesired) declared
+
+    installRef = batchRef "install" wanted
+    removeRef = batchRef "remove" unwanted
+
+    -- removals before installs: both want the dpkg lock, and clearing
+    -- conflicts first is the order one would use by hand.
+    edge c
+        | Map.member installRef (Rewrite.computedMembers c)
+        , Map.member removeRef (Rewrite.computedMembers c) =
+            c{Rewrite.computedDag = Dag.addEdge (removeRef, installRef) (Rewrite.computedDag c)}
+        | otherwise = c
+
+    batchOf :: Text -> Ref -> [(Ref, [Package])] -> Rewritten Extension -> Rewritten Extension
+    batchOf verb aref members c
+        | Just pkgs <- NEList.nonEmpty (Set.toList (pkgsOf members))
+        , Just act <- opAct (debsWith r pkgs) =
+            Rewrite.introduce (relabel verb aref (pkgsOf members) act) (Set.fromList (fmap fst members)) c
+        | otherwise = c
+
+    -- 'debsWith' already knows how to run one apt-get over a package set; all
+    -- this needs of it is a stable identity of its own (so the two batches
+    -- are two nodes) and a help line that says which direction it is.
+    relabel :: Text -> Ref -> Set Package -> Act Extension -> Act Extension
+    relabel verb aref pkgset act =
+        act
+            { extension =
+                act.extension
+                    { ref = aref
+                    , help = verb <> " " <> Text.pack (show (Set.size pkgset)) <> " packages in one apt-get"
+                    }
+            }
+
+    pkgsOf :: [(Ref, [Package])] -> Set Package
+    pkgsOf members = Set.fromList (concatMap snd members)
+
+    batchRef :: Text -> [(Ref, [Package])] -> Ref
+    batchRef what members = mkRef "debian-deb-batch" (what, pkgName <$> Set.toList (pkgsOf members))
+
+{- | The pre-'batchPackages' way of doing this: an @Op -> Op@ an application
+applied by hand inside its own 'Salmon.Op.Track.Track', paired with
+'removeSinglePackages' to blank the per-package nodes it superseded.
+
+Kept working, but it cannot become direction-aware and it cannot see past one
+directive, which is the whole of why 'batchPackages' exists. Porting is:
+delete the @optimizedDeps@-style wrapper from the 'Salmon.Op.Track.Track',
+and pass @[batchPackages r]@ to
+'Salmon.Builtin.CommandLine.execCommandOrSeedWithRewrites'.
+-}
 installAllDebsAtOnce :: Op -> Op
 installAllDebsAtOnce = installAllDebsAtOnceWith silent
+{-# DEPRECATED installAllDebsAtOnce "Register `batchPackages` as a rewrite instead; this cannot see other declarations or node directions." #-}
 
 -- | Like 'installAllDebsAtOnce', but takes a 'Reporter' to observe the batched apt-get invocation.
 installAllDebsAtOnceWith :: Reporter Report -> Op -> Op
@@ -102,7 +213,9 @@ installAllDebsAtOnceWith r =
         case NEList.nonEmpty (concatMap snd $ collectDynamics root) of
             Just pkgs -> debsWith r pkgs
             Nothing -> realNoop
+{-# DEPRECATED installAllDebsAtOnceWith "Register `batchPackages` as a rewrite instead; this cannot see other declarations or node directions." #-}
 
+-- | Blanks every node 'installAllDebsAtOnceWith' has already batched.
 removeSinglePackages :: Op -> Op
 removeSinglePackages root
     | null (packages root) = root{predecessors = fmap (fmap removeSinglePackages) root.predecessors}
@@ -110,6 +223,7 @@ removeSinglePackages root
   where
     packages :: Op -> [Package]
     packages root = getDynamics root
+{-# DEPRECATED removeSinglePackages "Register `batchPackages` as a rewrite instead; it redirects precedence edges rather than blanking nodes." #-}
 
 aptInstallCommand :: [(String, String)] -> Binary.Command "apt-get" (NEList.NonEmpty Package)
 aptInstallCommand baseEnv = Binary.Command $ \pkgs -> aptInstallProcess pkgs baseEnv

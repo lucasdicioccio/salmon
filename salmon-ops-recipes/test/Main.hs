@@ -12,6 +12,7 @@ import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
+import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeSpec as ServeSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 
@@ -34,6 +35,7 @@ main =
             , QemuResolveKernelSpec.tests
             , QemuSmokeSpec.tests
             , QuerySpec.tests
+            , RewriteSpec.tests
             , ServeSpec.tests
             , UpTreeSpec.tests
             ]
