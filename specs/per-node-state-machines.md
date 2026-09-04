@@ -11,6 +11,14 @@ into a per-node *ledger*. It supersedes the first draft's five-state machine.
 current execution model — has since been removed in favour of this design;
 `Serve.serveWith` still exists but has no consumer, and is subsumed here too.
 
+A later revision corrected six things checked against the tree rather than
+remembered: `Ref` is location-addressed and not content-addressed; the ledger
+has to carry edges and retire rather than delete a retracted contribution; the
+magma holds `Extension`s and not `Op`s; the synchronous driver cannot be built
+on the FSMs because nothing in them is terminal; `Completed` is a
+`CheckResult`; and merging `prelim` into `check` is not quite behaviour-free.
+Each is marked in place.
+
 ## Problem
 
 Execution in salmon is a **traversal**. `upTreeWith`
@@ -45,9 +53,9 @@ than from walking a graph:
 
 | structure | type | what it is |
 |---|---|---|
-| **magma** | `HashMap Ref Node` | every node ever seen, one representative per `Ref` |
-| **precedence** | `HashMap Ref [Ref]` ×2 | dependencies *and* dependants |
-| **ledger** | `Map DirectiveDigest (Set Ref)` | which live declarations still want which nodes |
+| **magma** | `HashMap Ref Node` | every node ever seen, one representative per `Ref`; `Node` is the `Extension` plus its shorthand, **not** an `Op` |
+| **precedence** | `HashMap Ref [Ref]` ×2 | dependencies *and* dependants, derived from the ledger |
+| **ledger** | `Map DirectiveDigest Contribution` | which declarations still want which nodes *and edges* |
 | **processes** | `HashMap Ref (Async (), TVar Status, TBQueue Instruction)` | the machine per node, its observable state, and its mailbox |
 
 The magma and precedence come from the comonadic fold: `expand` already
@@ -57,48 +65,118 @@ directions instead of one. Because it is keyed by `Ref`, folding a *second*
 graph into the same structures is a merge, not a replacement — which is what
 makes the graph dynamic.
 
-Note what keying the magma by `Ref` buys: since `mkRef` (`Op/Ref.hs`) is
-content-addressed, an equal `Ref` means an equal node, so a collision keeps
-one representative rather than combining. In particular this does **not** need
-`instance Semigroup Extension` (`Builtin/Extension.hs:58`), whose `up a <> up
-b` would run the same action twice. The first draft worried about that
-instance; in this model it simply is not involved.
+### `Ref` is location-addressed, not content-addressed
 
-### Storage is bounded by nodes, not by declarations
+`mkRef` (`salmon-ops/src/Salmon/Op/Ref.hs`) hashes a kind tag plus an
+*author-chosen identity key*, and that key is deliberately not the node's
+behaviour: `filecontents` keys on the path alone (`Nodes/Filesystem.hs:59` —
+`mkRef "file-contents" path`), as do `dir` and `bash-run`. So an equal `Ref`
+means "the same effect site", **not** an equal node. An earlier draft of this
+document said the opposite and leaned on it twice; both leanings are
+withdrawn.
+
+The consequence for the magma is that a `Ref` collision between two
+declarations is a real choice, not a no-op: two live declarations writing
+different bytes to `/etc/foo` produce one magma entry, and something has to
+decide whose.
+
+**Decided: last-writer-wins, and the fold reports the conflict.** Last-wins
+because re-declaring is the normal way an operator changes a node, and
+first-wins would make the second declaration silently inert. Reported because
+the fold is the first thing in salmon that *can* notice: `upTree` dedupes by
+`Ref` today (`Actions/UpDown.hs:144`, first-encountered wins) but
+per-traversal and discarded at the end, so two declarations fighting over one
+file is currently invisible. The fold sees both representatives at once.
+
+Comparing representatives needs an equality the magma can compute, and
+`Extension` has none — `up :: IO ()` is not `Eq`. So the conflict test is on
+the fields that *are* comparable: `help`, `notes`, the shorthand, and the
+rendering of `dynamics`. That is a heuristic and will miss a node whose action
+changed behind an identical description. It is still strictly more than the
+zero available today.
+
+This still does **not** need `instance Semigroup Extension`
+(`Builtin/Extension.hs:58`), whose `up a <> up b` would run both actions:
+choosing a representative is not combining two.
+
+Two knock-on effects, both real:
+
+- **A `Managed` node whose command line changed but whose ref key did not is
+  the same node.** Last-writer-wins replaces the magma entry, but the running
+  process belongs to a machine started from the old one, so that machine has
+  to be restarted when its representative is replaced. This is the one case
+  where swapping the `Async` is right — see the mailbox section, which is
+  where the earlier draft's second, wrong argument lived.
+- **Tightening a ref key is a per-node fix, not a global one.** Putting a
+  content digest in `filecontents`' key would make a content change a
+  different node — correct there, but the same move on a long-running service
+  would make every config tweak a new machine. Left to node authors, node by
+  node, and out of scope here.
+
+### Storage is bounded by nodes and live declarations, not by history
 
 This is what makes the retention work already shipped (`worldEpochs`/`prune`,
-`Actions/Serve.hs:1188`) unnecessary rather than merely smaller. Today a
-retired epoch's whole `Cofree Graph Op` is kept because it is the only
-remaining description of how to tear its nodes down. Here the magma holds each
-node's `down` once, keyed by `Ref`, and the precedence graph holds the edges —
-so nothing needs a per-declaration graph at all. A node leaves all four
-structures when it has dropped out of `desired` *and* its machine has settled
-in `Down`.
+`Actions/Serve.hs:1190`) *smaller*, not absent — an earlier draft said
+"unnecessary", which was too strong. Today a retired epoch's whole
+`Cofree Graph Op` is kept because it is the only remaining description of how
+to tear its nodes down. Here the magma holds each node's `down` once, keyed by
+`Ref`, and the ledger holds the edges as flat `Set (Ref, Ref)`s — so nothing
+needs a per-declaration *graph*, which is where the saving is. What a
+retracted declaration does still need is its `Contribution`: two flat sets,
+kept only until its nodes settle. That is `prune`'s existing rule
+(`Actions/Serve.hs:1190`: keep an epoch if it is active, or if it still
+describes a node wanted `TurnDown`) applied to something orders of magnitude
+smaller than a graph.
+
+**`Node` is the `Extension` plus its shorthand, never an `Op`.** Not a detail:
+`Op = OpGraph Identity Actions'`, whose `predecessors` field retains the whole
+expanded closure, so a `HashMap Ref Op` would retain every graph ever folded
+and bound nothing at all. All structure lives in `precedence`; the magma holds
+only what a node *is*. `Serve.NodeState` (`Actions/Serve.hs:163`) already does
+exactly this — shorthand and help text, never the `Op` — which is why
+`worldNodes` is affordable today.
+
+A node leaves all four structures when it has dropped out of `desired` *and*
+its machine has settled in `Down`; a `Contribution` leaves the ledger once
+none of its refs is still standing.
 
 ## Folding declarations into the ledger
 
-**Decided: the ledger is a set, not a count.**
+**Decided: the ledger is a set, not a count — and it carries edges as well as
+nodes.**
 
 ```haskell
-type Ledger = Map DirectiveDigest (Set Ref)
+type Edge = (Ref, Ref)          -- (dependency, dependant)
+
+data Contribution = Contribution
+    { contribRefs  :: !(Set Ref)
+    , contribEdges :: !(Set Edge)
+    , contribLive  :: !Bool   -- False once retracted, until its nodes settle
+    }
+
+type Ledger = Map DirectiveDigest Contribution
 
 desired :: Ledger -> Set Ref
-desired = Set.unions . Map.elems
+desired = Set.unions . fmap contribRefs . filter contribLive . Map.elems
+
+precedenceOf :: Ledger -> Set Edge
+precedenceOf = Set.unions . fmap contribEdges . Map.elems
 ```
 
 A declaration is a `(graph, direction)` pair, and folding it is an insert or a
-delete keyed by the encoded directive — which is exactly what `worldActive`
+retraction keyed by the encoded directive — which is exactly what `worldActive`
 (`Actions/Serve.hs`) already does, with the ref-set `LogEntry.logRefs` already
-carries. A node is wanted up iff it appears in *some* live declaration's set.
+carries. A node is wanted up iff it appears in *some* live contribution.
 
 Worked through the example — `g0` declares `{A,B}` up, `g1` retracts `g0`, `g2`
 declares `{A}` up:
 
 ```
-                       ledger                     desired
-  up   g0 {A,B}        {g0: {A,B}}                {A, B}
-  down g0              {}                         {}          A and B both go down
-  up   g2 {A}          {g2: {A}}                  {A}         A back up, B stays down
+                       ledger                          desired
+  up   g0 {A,B}        {g0: {A,B} live}                {A, B}
+  down g0              {g0: {A,B} retiring}            {}       A and B both go down
+  (A,B settle Down)    {}                              {}       g0 collected
+  up   g2 {A}          {g2: {A} live}                  {A}      A back up, B stays down
 ```
 
 Counting was the wrong instinct — mine as much as anyone's — and every
@@ -117,8 +195,36 @@ node state changes are the hot path and do not touch the ledger at all. So
 recompute `desired` on declaration change, and memoise only if it ever shows
 up in a profile.
 
-Storage stays bounded by *live* declarations rather than by history, so the
-append-only problem `worldEpochs` had does not come back.
+Storage stays bounded by the *live and retiring* declarations rather than by
+history — and by two flat sets each rather than a graph — so the append-only
+problem `worldEpochs` had does not come back.
+
+### Why edges are in the ledger, and why a retraction retires rather than deletes
+
+Both answers are the same answer: edges have to be **retractable**, and a
+retracted declaration's edges are needed *after* it is retracted.
+
+An earlier draft kept `precedence` as a single accumulating structure and said
+nothing about how an edge leaves it. That is not a harmless omission, because
+a stale edge is not inert here the way it would be in a walk. Given a stale
+`A → B` where `B` is no longer in `desired`, `B` settles
+`Down`/`TurnDown`/`Stable`, and `A`'s `waitStability TurnUp Stable [B]`
+retries forever: a silent deadlock, no report, no failure — strictly worse
+than the `Blocked` a traversal would have produced. So `precedence` is derived
+from the ledger on declaration change, exactly as `desired` is, and for the
+same reason.
+
+But it cannot be derived from the *live* contributions alone. Retracting `g0`
+is precisely the moment `A → B` matters most: both nodes are wanted
+`TurnDown`, and that edge is what says `B` comes down before `A` does. Delete
+the contribution outright and the teardown order is gone with it. Hence
+`contribLive`: a retraction clears the flag, which removes the contribution
+from `desired` while leaving its edges in `precedenceOf`, and the contribution
+is collected only once none of its refs is still standing.
+
+That is `prune`'s rule (`Actions/Serve.hs:1190`) restated over two flat sets
+instead of a `Cofree Graph Op`, which is the whole of the saving claimed
+above.
 
 ## The node process
 
@@ -143,6 +249,12 @@ data Status = Status
     , statusOutput     :: !(Ring Text)
     }
 ```
+
+**A node's `TVar Status` is created `Transient`, before its machine starts.**
+`waitStability` below reads direction and stability only, so a status
+initialised `Stable`/`TurnUp` would let every dependant proceed before the
+node had done anything at all. One line, and otherwise the kind of thing that
+surfaces as a heisenbug on a wide graph.
 
 ### Progress, not just settledness
 
@@ -225,11 +337,18 @@ neighbours at all:
 - `Pause`/`Resume` — stop the upkeep FSM without tearing the effect down.
 
 **Decided: a bounded mailbox per node, rather than swapping the `Async` in the
-magma.** Swapping has two problems. It cannot express a *transient*
-instruction without killing and restarting the machine — for a `Managed` node
-that means killing a healthy process to set a flag. And it is largely
-redundant with content-addressing: a node whose definition really changed has
-a different `Ref`, so it is already a different node with a different machine.
+magma.** Swapping cannot express a *transient* instruction without killing and
+restarting the machine — for a `Managed` node that means killing a healthy
+process to set a flag.
+
+An earlier draft gave a second reason — that swapping is redundant, since "a
+node whose definition really changed has a different `Ref`" — and that reason
+is withdrawn, for the reason §"`Ref` is location-addressed" gives: a ref key
+is an effect *site*, not a behaviour. So swapping keeps one narrow job after
+all, and only that one: when the fold replaces a node's representative under
+last-writer-wins, the machine started from the old representative is
+cancelled and restarted. That is a fold-time event, not an instruction.
+Everything an *operator* wants to say still goes through the mailbox.
 
 Decoration still has a place, but at **fold time** rather than run time. A
 `Plan` is part of a declaration, so `Query.forceSkip` is applied as the graph
@@ -311,14 +430,35 @@ implemented 23 times and answers very nearly the question the FSM needs:
 So the change is a merge, not an addition:
 
 ```haskell
-data CheckResult = Success | Skipped | Failure !Text | Unknown
+data CheckResult
+    = Success
+    | Skipped
+    | Completed        -- did its work and stopped; see the restart policy
+    | Failure !Text
+    | Unknown
 
 check :: IO CheckResult     -- replaces both `prelim` and today's dead `check`
 ```
 
-`Requirement` derives from it (`Success`/`Skipped` ⇒ `Skippable`), so the 23
-existing implementations port mechanically and `Salmon.Actions.Check` is
-deleted rather than fixed.
+`Requirement` derives from it: `Success`/`Skipped`/`Completed` ⇒ `Skippable`,
+`Failure`/`Unknown` ⇒ `Required`. Erring toward `Required` is the safe
+direction — a node whose check cannot tell gets re-`up`'d, and `up` is
+required to be idempotent anyway — but it is a choice, and it is the one that
+keeps a node with a broken check converging rather than stalling.
+
+Of the 23 `prelim` sites, 22 are nodes and port mechanically. The
+twenty-third is `Query.forceSkip` (`Actions/Query.hs:146`), which *rewrites*
+the field rather than implementing it, and it is the one this document later
+reinterprets as fold-time decoration. `Salmon.Actions.Check` is deleted rather
+than fixed.
+
+One behaviour change rides along, and it is an improvement worth naming rather
+than a regression to hide: today `act.extension.prelim` is evaluated *outside*
+the `try @SomeException` that wraps `up` (`Actions/UpDown.hs:157` vs `:164`),
+so a `prelim` that throws escapes `upTreeWith` entirely and kills the whole
+traversal instead of failing one node. Under `check :: IO CheckResult` that
+becomes a `Failure` value, contained like any other. So milestone 1 is
+mechanical but not quite "no behaviour change".
 
 `notify :: IO ()` (`:43`) is the same story and gets the same treatment:
 zero implementations, and `Salmon.Actions.Notify.notifyTree` has zero callers.
@@ -423,17 +563,31 @@ That single line handles the double-fork case for free — the one shape
 has exited tells you nothing about the daemon it left behind.
 
 Default `OnFailure`. A `Managed` node that exits cleanly finished on purpose,
-and restarting it fights its own decision; it settles in a terminal
-`Completed` condition that is visibly *not* `Up`, so `status` shows what
-happened rather than a restart loop.
+and restarting it fights its own decision.
 
-**Decided: `Completed` counts as converged.** It is a node that did what it
-was asked and stopped, so the batch driver treats it as done and it does not
-hold up quiescence; a job modelled as `Managed` therefore lets `run up`
-terminate normally. The price is that `status` must distinguish `Up` from
-`Completed` in its output rather than collapsing both to "fine" — a service
-that quietly completed is exactly the thing an operator needs to see. `Always` is for services that exit 0 on reload;
-`Never` for a one-shot job modelled as `Managed` only to capture its output.
+**Decided: `Completed` is a `CheckResult`, not a fourth upkeep state.** An
+earlier draft called it "a terminal `Completed` condition that is visibly not
+`Up`", which does not typecheck against either structure this document
+declares: `UpkeepState` has three constructors, and `Status` has no field that
+could hold a fourth. So the machine rests in `Up` and `statusCheck` reads
+`Completed` rather than `Success`.
+
+Two things follow, and both are wanted:
+
+- **It counts as converged.** The batch driver treats it as done and it does
+  not hold up quiescence, so a job modelled as `Managed` lets `run up`
+  terminate normally.
+- **Its dependants proceed.** `waitStability` reads direction and stability
+  only, so a `Completed` node is indistinguishable from an `Up` one to
+  everything downstream — which is exactly right for a migration or a build
+  step, and is the reason `Completed` belongs in `CheckResult` rather than
+  somewhere `waitStability` would have to learn about.
+
+The price is that `status` must render `Up`+`Completed` differently from
+`Up`+`Success` rather than collapsing both to "fine" — a service that quietly
+completed is exactly the thing an operator needs to see. `Always` is for
+services that exit 0 on reload; `Never` for a one-shot job modelled as
+`Managed` only to capture its output.
 
 Note this default differs from systemd's `Restart=no`, deliberately: a node
 *declared up* that has stopped being up is a convergence gap, and quietly
@@ -476,26 +630,45 @@ upkeepGraph      :: ... -> UpkeepFSM -> DownkeepFSM -> IO ()      -- continuous
 
 `run up`/`run down` keep the synchronous topological driver and therefore keep
 returning `IO Bool` with today's exact failure containment; `serve` uses the
-async supervised driver. No quiescence predicate is needed for the batch case
-at all, because the batch driver still terminates by construction — and with
-`Completed` counting as converged, a `Managed` node that finishes its work
-does not hold it open either.
+async supervised driver. What the two share is **node definitions, the magma,
+the ledger and the precedence graph — not the machines**; see §"no separate
+`Blocked` status" below, which is where the earlier draft left two
+incompatible answers. No quiescence predicate is needed for the batch case at
+all, because the synchronous driver still terminates by construction — and
+with `Completed` counting as converged, a `Managed` node that finishes its
+work does not hold it open either.
 `Broadcast` — in `deptrack`, `(OpUniqueId, CheckResult, Stability, Direction)
 -> IO ()` — is salmon's `Reporter`, so the report stream is where the two
 drivers stay comparable.
 
-**Decided: no separate `Blocked` status; `WaitUp` is it.** A node waiting on a
-predecessor that will never arrive is in the same state as one waiting on a
-predecessor that is merely slow — what differs is what the *driver* does about
-it. The async driver keeps waiting, and correctly so: the predecessor may yet
-be repaired, and the node should then proceed without anyone re-declaring
-anything. The batch driver cannot wait forever, so it recognises "waiting on
-something terminal" and reports `Blocked`, exactly as `upTreeWith` does today
-(`Actions/UpDown.hs:150`).
+**Decided: no separate `Blocked` status; `WaitUp` is it — and the synchronous
+driver does not run the FSMs at all.** A node waiting on a predecessor that
+will never arrive is in the same state as one waiting on a predecessor that is
+merely slow. What differs is what the *driver* does about it, and an earlier
+draft left that in two incompatible halves: one section said the batch driver
+"still terminates by construction", another said it "recognises waiting on
+something terminal".
 
-So `Blocked` survives as a *report* rather than as a node state — which is
-what keeps the existing suites meaningful, since they assert on the report
-stream, while the node's own machine stays three-valued.
+The second is not available, because **nothing in the node model is
+terminal.** `Upping` retries on the adaptive delay, and `Always`/`OnFailure`
+loop by construction; only `Completed` and `Never` stop, and *failure never
+does*. A driver built on the FSMs has no terminality to recognise, so it has
+no termination condition — which for `run up` is not a refinement to postpone,
+it is whether the command returns.
+
+So the first half wins, and sharply: `syncTurnupGraph` keeps today's semantics
+exactly — one pass in topological order, one attempt per node, `check` then
+`up`, termination structural in the finite graph it walks. It reports
+`Blocked` for a node whose predecessor failed *in this pass*, which is a
+statement about the pass and needs no notion of terminality at all
+(`Actions/UpDown.hs:151`). `upkeepGraph` runs the FSMs and waits
+indefinitely, correctly so: the predecessor may yet be repaired, and the node
+should then proceed without anyone re-declaring anything.
+
+`Blocked` therefore survives as a *report* emitted by the synchronous driver,
+rather than as a node state — which is what keeps the existing suites
+meaningful, since they assert on the report stream, while the node's own
+machine stays three-valued.
 
 ## Bounding concurrency
 
@@ -659,7 +832,7 @@ protect one contended resource.
 |---|---|
 | `Nodes/Supervised.hs` (584 lines: pid table, reaper, wakeups, `Policy`) | already removed; `up`/`check`/`down` + adaptive-delay FSM replace it |
 | `Serve.serveWith` + `STM (Set Ref)` wakeups | deleted; `waitStability` is the event source |
-| `Serve`'s `worldEpochs`/`prune` retention | deleted; the magma is bounded by nodes |
+| `Serve`'s `worldEpochs`/`prune` retention | shrunk, not deleted; a retracted declaration keeps two flat sets until its nodes settle, never a graph |
 | `Serve.Convergence` (`:146`) | replaced by `Status` (check + direction + stability) |
 | `Extension.prelim`, `Extension.check`, `Actions/Check.hs` | merged into `check :: IO CheckResult` |
 | `Extension.notify`, `Actions/Notify.hs` | deleted; 0 implementations, 0 callers |
@@ -681,14 +854,21 @@ wakeup channel, and the `run_stopping` flag.
 
 1. **`check :: IO CheckResult`**, absorbing `prelim`; delete
    `Salmon.Actions.Check` and `Salmon.Actions.Notify` with the `notify` field.
-   Mechanical across 23 call sites, no behaviour change, and a prerequisite
-   for everything else.
+   Mechanical across 22 node call sites plus `Query.forceSkip`, and a
+   prerequisite for everything else. One deliberate behaviour change comes
+   with it: a throwing check stops killing the traversal.
 2. **`Salmon.Op.Dag`**: the comonadic fold to magma + both adjacency
    directions, lifted out of `downTreeWith`. Pure and unit-testable, and
-   `downTree` keeps using it, so it is a refactor with no behaviour change.
-3. **The ledger**: live-declaration ref-sets and `desired` as their union,
-   replacing `worldEpochs`/`prune` in `serve`. Still no concurrency;
-   `Test.ServeSpec` is the regression net.
+   `downTree` keeps using it, so it is a refactor with no behaviour change —
+   except that this is also where last-writer-wins and the
+   conflicting-representative report land, so §"`Ref` is location-addressed"
+   has to be settled *before* this step rather than during it.
+3. **The ledger**: per-declaration `Contribution`s (ref set *and* edge set),
+   `desired` as the union over live ones and `precedence` as the union over
+   live *and retiring* ones, shrinking `worldEpochs`/`prune` in `serve` to a
+   graph-free equivalent. Still no concurrency; `Test.ServeSpec` is the
+   regression net, and the retraction cases it already covers are what prove
+   the edge sets retract correctly.
 4. **Sync drivers re-expressed** over the magma and ledger. `run up`/`run
    down` produce the same `Report` stream and the same `Bool`;
    `Test.DownTreeSpec`/`Test.QuerySpec` are the net.
@@ -722,21 +902,53 @@ wakeup channel, and the `run_stopping` flag.
 
 ## Open questions
 
-Three rounds of these are now settled in the sections above — the ledger
-shape, concurrency, `notify`, the plan machinery, captured output, exit codes,
-`Transient`, where the rewrite runs and why, `Completed`, mailbox overflow,
-check cost, collection conservatism, batch failure attribution, `Blocked`
-versus `WaitUp`, and what `query` shows. One is left, and it is deliberately
-left:
+Four rounds of these are now settled in the sections above — the ledger shape
+(nodes *and* edges, retiring rather than deleted), what `Ref` equality does
+and does not mean, what the magma stores, concurrency, `notify`, the plan
+machinery, captured output, exit codes, `Transient`, where the rewrite runs
+and why, `Completed`, mailbox overflow, check cost, collection conservatism,
+batch failure attribution, `Blocked` versus `WaitUp` and what separates the
+two drivers, and what `query` shows.
 
-- **How is a node's watchdog authored?** It sits beside `Restart` as per-node
-  policy, but `Extension` has no policy field at all today, and adding one is
-  the first time a node would declare something about *how it is supervised*
-  rather than what it does. That is a new kind of statement for a node to
-  make, and the shape wants settling before milestone 7 rather than during it
-  — a watchdog is only as good as the authors' willingness to set it, so if
-  declaring one is awkward, nobody will and the mechanism is dead weight.
-  Tracked in `todo`.
+The one question the last round left open — **how is a node's watchdog
+authored?** — is settled too, and the answer was already in the tree.
+
+**Decided: supervision policy rides `dynamics`, not a new `Extension` field.**
+`dynamics :: [Dynamic]` (`Builtin/Extension.hs:44`) is exactly the channel by
+which a node states something about itself for a later pass to act on — which
+is the argument §"Why a recipe cannot do this itself" already makes for the
+collection rewrite. `Package` uses it (`Nodes/Debian/Package.hs:47`) and
+`installAllDebsAtOnceWith` reads it back with `collectDynamics`. So:
+
+```haskell
+data Supervision = Supervision
+    { supRestart  :: !Restart
+    , supWatchdog :: !(Maybe DiffTime)
+    }
+
+-- at the node:
+actions{ dynamics = [toDyn (Supervision OnFailure (Just 30))] }
+```
+
+and the process layer reads it with `getDynamics`, exactly as the post-fold
+rewrite pass reads `Package`. Three things this buys:
+
+- **No new `Extension` field**, so nothing changes for the many nodes with no
+  opinion about how they are supervised.
+- **The default falls out.** "A node that declares no watchdog is never
+  considered wedged" is just `getDynamics` returning `[]`, rather than a
+  `Nothing` every node has to write.
+- **It is optional and one line to add**, which was the bar this question set
+  itself: a watchdog is only as good as authors' willingness to set one.
+
+The cost is that it is untyped and unenforced — nothing stops two conflicting
+`Supervision` dynamics on one node. That is the same weakness `Package`
+collection already lives with, and it gets the same treatment as a conflicting
+magma representative: take one, report the rest.
+
+What remains is an ordering question rather than a design one: the shape above
+wants exercising on two or three real long-running nodes before milestone 7
+hardens it. Tracked in `todo`.
 
 ## Relationship to the other specs
 
