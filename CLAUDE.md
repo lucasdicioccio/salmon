@@ -129,6 +129,23 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `Skip`. `upTree`/`downTree` are those with a gate that wants everything; the only real user is
   `Actions/Serve.hs` (below), which walks the union of several seeds' nodes and must leave other
   seeds' alone.
+- **`Actions/Concurrent.hs`** is the same two walks with one thread per node. Each node gets a
+  `TVar Status` (`Op/Status.hs`) and blocks on `waitStability` over its neighbours — dependencies
+  going up, dependants coming down — so STM's `retry` does the scheduling: no counters, no
+  ready-queue, no wakeup channel. Same `Report` stream, same `IO Bool`, same failure containment
+  as the sequential drivers. Three things it has to do that they don't: every `runReporter` goes
+  through one `MVar` (the caller's reporter isn't assumed thread-safe, and interleaved multi-line
+  reports are garbage); `Dag.stuck` is consulted **before** the walk, because a thread waiting on
+  a node in a cycle never wakes rather than being noticed at the end; and failure containment
+  lives in a `TVar (Set Ref)` beside the statuses, not in `Status`, with "record the failure" and
+  "settle" in one transaction — `waitStability` deliberately can't see whether a neighbour
+  succeeded, since the two drivers answer "proceed past a failure?" differently.
+  **`serve` converges through this, so convergence is parallel and unbounded**; `run up`/`run
+  down` stay sequential. The only protection against two nodes contending for one resource is an
+  edge between them (or a collection rewrite that makes them one node) — there is no concurrency
+  cap, deliberately. `Op/Mailbox.hs` is the push side: a bounded per-node queue of `Instruction`s
+  (`Force`/`Satisfy`/`Recheck`/`Pause`/`Resume`) that drops the oldest on overflow and reports
+  the drop. See milestone 6 and `Test/ConcurrentSpec.hs`.
 - **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded
   `Cofree Graph (OpGraph m (Actions ext))` into a `Dag` — one representative per `Ref`
   (`dagNodes`, the *magma*), `dagDependencies` **and** `dagDependants` (the direction the
@@ -178,8 +195,9 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it has `Converged` there), and `worldEpochs`, the declared seed / directive / graph, kept only
   for declarations that are still live. Everything else is derived: a node some live declaration
   asks for is wanted `TurnUp`, a node no live declaration still asks for is wanted `TurnDown`,
-  and flipping a node's direction resets it to `Pending`. Converging is then one `downDag` pass
-  and one `upDag` pass with a gate that filters to "wanted in this pass, not yet converged" — so
+  and flipping a node's direction resets it to `Pending`. Converging is then one teardown pass
+  and one bring-up pass (both concurrent, see `Actions/Concurrent.hs`) with a gate that filters
+  to "wanted in this pass, not yet converged" — so
   ordering, dedup and failure containment are exactly `run up`/`run down`'s, and all this module
   adds is the memory. Nodes left `Errored`/`Blocked` are retried by the next pass. Neither pass
   touches a graph: `worldDag` rebuilds one walkable structure from the magma and the ledger's

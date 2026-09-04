@@ -80,6 +80,7 @@ test-suite salmon-ops-recipes-test
     other-modules:    Test.Harness
                     , Test.CheckSpec
                     , Test.DebootstrapSpec
+                    , Test.ConcurrentSpec
                     , Test.DagSpec
                     , Test.DownTreeSpec
                     , Test.JWTSigningSpec
@@ -105,6 +106,7 @@ test-suite salmon-ops-recipes-test
                     , mtl
                     , process
                     , process-extras
+                    , stm
                     , salmon-core
                     , salmon-ops
                     , salmon-ops-recipes

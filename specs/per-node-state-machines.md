@@ -968,8 +968,49 @@ wakeup channel, and the `run_stopping` flag.
    fiction the section warns about is narrower than it was, since plan
    exclusion now composes with collections through `membersOf` rather than
    silently missing them.
-6. **`TVar Status` per node and `waitStability`**, plus the async drivers and
-   the per-node mailbox. Parallelism appears here.
+6. **`TVar Status` per node and `waitStability`** — *landed*. Plus the async
+   drivers and the per-node mailbox. Parallelism appears here.
+
+   `Salmon.Actions.Concurrent` is one thread per node, ordering by
+   `waitStability` rather than by counters, with the same `Report` stream,
+   the same `IO Bool` and the same failure containment as the sequential
+   drivers. `serve` converges through it; `run up`/`run down` stay
+   synchronous, per §"Two drivers over one node model". **Convergence is
+   therefore now parallel and unbounded** — the protection against contention
+   is the DAG's own edges plus milestone 5's collections, exactly as
+   §"Bounding concurrency" argues, and nothing else. Recipes with a hidden
+   shared resource that were safe only because the traversal was sequential
+   are not safe any more.
+
+   Four things the sections above did not have to say, because they only
+   arise once nodes run at once:
+
+   - **Failure containment cannot live in `Status`.** `waitStability` reads
+     direction and stability only, so a node that settled having failed is
+     indistinguishable from one that settled having succeeded — which the
+     spec wants, since the two drivers answer "proceed past a failure?"
+     differently. So the pass keeps a `TVar (Set Ref)` of what did not
+     succeed, and recording that failure and settling have to be *one*
+     transaction, or a dependant can observe `Stable` before the failure is
+     visible and proceed against a node that in fact failed.
+   - **Reports have to be serialised.** The reporter belongs to the caller
+     and cannot be assumed thread-safe; a multi-line report interleaving with
+     another node's is garbage. One `MVar` around every `runReporter`.
+   - **A cycle has to be found before the walk, not after.** The sequential
+     drivers discover unreachable nodes by finishing and noticing what they
+     never touched. A thread waiting on a node in a cycle simply never wakes,
+     so `Dag.stuck` is consulted up front.
+   - **`serve`'s own bookkeeping had a latent bug** that only parallelism
+     could expose: `stateWriter` recorded convergence with `modifyIORef'`,
+     which is not atomic, so concurrent nodes reporting into one `World`
+     would silently lose records.
+
+   `Instruction`'s `Skip` is spelled `Satisfy`, to stay out of
+   `UpDown.Report.Skip`'s way. `Recheck`/`Pause`/`Resume` are read and
+   reported but mean nothing to a single-pass driver; they are for the upkeep
+   FSM in step 7. `statusOutput` is live — a node narrates its own
+   transitions into the ring — but nothing else writes to it until `Managed`
+   in step 8.
 7. **Upkeep/downkeep FSMs** with adaptive delay, over `OneShot` nodes only,
    plus the authored watchdog. Supervision of unowned effects appears here.
 8. **`Managed` nodes**: `Up` races the running action against the check timer,

@@ -61,6 +61,7 @@ module Salmon.Op.Dag (
     representativeOf,
     roots,
     leaves,
+    stuck,
 
     -- * Building one
     foldDag,
@@ -179,6 +180,31 @@ roots dag = [r | r <- dagOrder dag, null (dependantsOf dag r)]
 -- kept rather than one being recovered on demand.
 leaves :: Dag ext -> [Ref]
 leaves dag = [r | r <- dagOrder dag, null (dependenciesOf dag r)]
+
+{- | The nodes that can never become ready: everything on a cycle, and
+everything behind one.
+
+@waitsOn@ is what a node waits for in the direction of interest —
+'dependenciesOf' going up, 'dependantsOf' coming down. Kahn's algorithm, and
+what is left over when it runs out of ready nodes is the answer.
+
+Worth having because a 'Dag' assembled from a flat edge set /can/ describe a
+cycle, unlike one folded from an expanded 'Control.Comonad.Cofree.Cofree':
+two declarations can each contribute one leg of it. A driver that waits for
+neighbours would wait forever on such a node, so it needs to know up front
+which nodes those are rather than discovering it by hanging.
+-}
+stuck :: (Dag ext -> Ref -> [Ref]) -> Dag ext -> Set Ref
+stuck waitsOn dag = go (Set.fromList (dagOrder dag))
+  where
+    go remaining =
+        let ready =
+                Set.filter
+                    (\r -> all (`Set.notMember` remaining) (waitsOn dag r))
+                    remaining
+         in if Set.null ready
+                then remaining
+                else go (remaining `Set.difference` ready)
 
 -------------------------------------------------------------------------------
 

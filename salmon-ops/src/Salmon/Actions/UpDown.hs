@@ -18,6 +18,7 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 import Salmon.FoldBranch
 import Salmon.Op.Actions
 import Salmon.Op.Dag (Dag)
+import Salmon.Op.Mailbox (Instruction)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Eval
 import Salmon.Op.OpGraph
@@ -51,6 +52,14 @@ data Report ext
       -- last-wins.
       --
       Conflicting !Ref !(Act ext) !(Act ext)
+    | -- | an operator's 'Instruction' overrode what this node would otherwise
+      -- have done. Only the concurrent driver can emit these: a one-shot
+      -- 'upTree' has no mailboxes to read.
+      Instructed !(Act ext) !Instruction
+    | -- | this node's mailbox was full and evicted this many older
+      -- instructions. Reported because forcing a node has to be either
+      -- reliable or visibly unreliable.
+      DroppedInstructions !(Act ext) !Int
     deriving (Show)
 
 -------------------------------------------------------------------------------

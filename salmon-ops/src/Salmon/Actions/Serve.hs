@@ -117,7 +117,7 @@ import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isSpace)
 import Data.Foldable (traverse_)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -129,6 +129,7 @@ import qualified Data.Text.IO as Text
 import System.IO (Handle, hFlush, hGetLine, hIsEOF, stdout)
 
 import qualified Salmon.Actions.Query as Query
+import qualified Salmon.Actions.Concurrent as Concurrent
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (Requirement (..))
 -- imported with their field selectors: OverloadedRecordDot only solves
@@ -1073,17 +1074,19 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
             if ndown == 0
                 then pure True
                 else
-                    UpDown.downDag
+                    Concurrent.downDagConcurrent
                         (gateFor world computed TurnDown restriction)
                         (recorder world computed TurnDown restriction)
+                        Concurrent.noMailboxes
                         dag
         okUp <-
             if nup == 0
                 then pure True
                 else
-                    UpDown.upDag
+                    Concurrent.upDagConcurrent
                         (gateFor world computed TurnUp restriction)
                         (recorder world computed TurnUp restriction)
+                        Concurrent.noMailboxes
                         dag
         -- this pass is what turns nodes converged-'TurnDown', so it is also
         -- where the graphs that described them stop being needed.
@@ -1144,15 +1147,24 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
             -- node differently, which the operator wants to see but which
             -- leaves no node any more or less converged than it was.
             UpDown.Conflicting{} -> pure ()
+            -- likewise not node outcomes: an instruction being applied, or
+            -- an older one being evicted, says what was asked for rather
+            -- than what happened.
+            UpDown.Instructed{} -> pure ()
+            UpDown.DroppedInstructions{} -> pure ()
       where
         -- what happened to a collection node happened to every declared node
         -- it stands in for — that is the whole of what makes a batch's
         -- outcome legible in per-package terms, and it is why a batch
         -- reports failure for all of its members.
+        -- 'atomicModifyIORef'', not 'modifyIORef'': the concurrent driver
+        -- runs several nodes at once and they all report into this same
+        -- world, so a read-modify-write that is not atomic silently loses
+        -- convergence records.
         mark :: Act Extension -> Convergence -> IO ()
         mark act c =
             forM_ (Set.toList (Rewrite.membersOf computed act.extension.ref)) $ \rf ->
-                modifyIORef' world (setConvergence dir rf c)
+                atomicModifyIORef' world (\w -> (setConvergence dir rf c w, ()))
 
 -------------------------------------------------------------------------------
 
