@@ -21,6 +21,7 @@ module Test.Harness (
     runUpCapturing,
     runUp,
     runDown,
+    runDownCapturing,
 
     -- * scratch filesystem
     withTempDir,
@@ -119,6 +120,16 @@ runDown :: Op -> IO Bool
 runDown o = do
     (r, _) <- capture
     downTree r nat o
+
+-- | 'runDown', keeping the trace — the teardown counterpart of
+-- 'runUpCapturing'. Note 'downTree' reports more than per-node outcomes:
+-- 'Salmon.Actions.UpDown.Conflicting' comes from the 'Salmon.Op.Dag' fold,
+-- before any node runs.
+runDownCapturing :: Op -> IO [UpDown.Report Extension]
+runDownCapturing o = do
+    (r, readBack) <- capture
+    _ <- downTree r nat o
+    readBack
 
 -- | A fresh, auto-cleaned-up temp directory for filesystem-touching nodes.
 withTempDir :: (FilePath -> IO a) -> IO a

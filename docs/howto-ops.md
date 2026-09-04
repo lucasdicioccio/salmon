@@ -72,8 +72,8 @@ dependencies, with no effect of their own.
 ref = mkRef "directory" path
 ```
 
-`mkRef :: (Show a) => ShortHand -> a -> Ref` builds a `Ref` from the `ShortHand`
-plus anything `Show`-able that uniquely identifies *this* instance of the node
+`mkRef :: (Hashable key) => Text -> key -> Ref` builds a `Ref` from a kind tag
+plus anything `Hashable` that uniquely identifies *this* instance of the node
 — usually the primary key of whatever you're describing (a file path, a
 database name, a `(src, tgt)` pair for a copy). Two `Op`s with the same `Ref`
 are treated as the *same node* by the graph traversal (`upTree`/`downTree`):
@@ -83,6 +83,16 @@ single most important thing when writing a new node** — get it wrong (too
 coarse, e.g. reusing one `Ref` for two different files) and you silently skip
 work; get it wrong the other way (varying per-call for what should be the same
 resource) and you silently do the work twice.
+
+Note what the identity key is *not*: the node's behaviour. `filecontents` keys
+on the path alone, so an equal `Ref` means "the same effect site", not an equal
+node — two `Op`s writing different bytes to one path are one node, and only one
+of them wins. `upTree` takes the first one it reaches (`Redundant` for the
+rest); `downTree`, which goes through `Salmon.Op.Dag`, takes the **last** and
+reports the loser as `Conflicting` so the collision is at least visible.
+Tightening a key (putting a content digest in it, say) is a legitimate per-node
+fix, but think about it per node: it is right for a file and wrong for a
+long-running service, where every config tweak would become a different node.
 
 ## 3. The canonical example: `Filesystem.hs`
 

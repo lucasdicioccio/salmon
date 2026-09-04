@@ -5,8 +5,8 @@ module Salmon.Actions.UpDown where
 
 import Control.Comonad.Cofree (Cofree (..))
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_, unless, when)
-import Data.Foldable (toList)
+import Control.Monad (forM_, when)
+import Data.Dynamic (Dynamic)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -19,6 +19,8 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 
 import Salmon.FoldBranch
 import Salmon.Op.Actions
+import Salmon.Op.Dag (Dag)
+import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.GraphFold (postOrderM)
@@ -46,6 +48,17 @@ data Report ext
     | Done !(Act ext)
     | Failed !(Act ext) !SomeException
     | Blocked !(Act ext)
+    | -- | Two nodes in this graph share one 'Ref' — the same effect site,
+      -- reached from two declarations that describe it differently. The
+      -- second 'Act' is the representative that lost to last-writer-wins and
+      -- was /not/ run; the first is the one that replaced it. See
+      -- "Salmon.Op.Dag" for why the comparison is a heuristic, and why
+      -- last-wins.
+      --
+      -- Only 'downTreeWith' emits this today, because only 'downTreeWith'
+      -- goes through 'Salmon.Op.Dag.foldDag'; 'upTreeWith' still dedupes by
+      -- 'Ref' inline and reports 'Redundant' instead.
+      Conflicting !Ref !(Act ext) !(Act ext)
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -270,11 +283,12 @@ directory two files sit in: the naive "walk the tree top-down, dedupe by
 'Ref'" would tear that directory down at the /first/ dependent it was reached
 through, while the other dependents were still standing on top of it (a
 directory-not-empty failure, in the filesystem case). So this does not walk
-the 'Cofree' structurally; it first collapses it to a 'Ref'-level DAG
-(deduping shared nodes, and skipping through 'Actionless' nodes, which carry
-no identity) and then tears nodes down as they become free — a node is
-processed once all its dependents are done, and only then are its own
-predecessors released.
+the 'Cofree' structurally; it first collapses it with
+"Salmon.Op.Dag".'Salmon.Op.Dag.foldDag' into a 'Ref'-level DAG that knows
+each node's /dependants/ as well as its dependencies, and then tears nodes
+down as they become free — a node is processed once all its dependants are
+done, and only then are its own predecessors released. A 'Ref' collision
+inside the graph is reported 'Conflicting' before anything runs.
 
 Failure is contained the mirror image of 'upTree's: a node whose 'down' threw
 is reported 'Failed', and because it is therefore /still standing/, every one
@@ -292,6 +306,11 @@ downTree ::
     ( Monad m
     , HasField "down" ext (IO ())
     , HasField "ref" ext Ref
+    , -- the fields 'Salmon.Op.Dag.sameRepresentative' compares two colliding
+      -- representatives on; see 'Conflicting'.
+      HasField "help" ext Text
+    , HasField "notes" ext [Text]
+    , HasField "dynamics" ext [Dynamic]
     ) =>
     Reporter (Report ext) ->
     (forall a. m a -> IO a) ->
@@ -301,15 +320,26 @@ downTree = downTreeWith alwaysRequired
 
 {- | 'downTree', but only tearing down the nodes a caller-supplied 'Gate'
 asks for. Note that, unlike 'upTreeWith', this is the /only/ way a node gets
-'Skip'ped on the way down: a node's own 'prelim' is never consulted for
-teardown (it is written to answer "does my effect still need creating",
-which is not the question a teardown needs answered).
+'Skip'ped on the way down: a node's own 'Salmon.Builtin.Extension.check' is
+never consulted for teardown (it is written to answer "does my effect still
+need creating", which is not the question a teardown needs answered).
+
+The @help@\/@notes@\/@dynamics@ constraints are
+'Salmon.Op.Dag.sameRepresentative''s, not this function's. GHC only solves a
+'HasField' constraint when the field selector is in scope, so a caller that
+imports 'Salmon.Builtin.Extension' selectively has to name those three
+fields even though it never mentions them.
 -}
 downTreeWith ::
     forall a m ext.
     ( Monad m
     , HasField "down" ext (IO ())
     , HasField "ref" ext Ref
+    , -- the fields 'Salmon.Op.Dag.sameRepresentative' compares two colliding
+      -- representatives on; see 'Conflicting'.
+      HasField "help" ext Text
+    , HasField "notes" ext [Text]
+    , HasField "dynamics" ext [Dynamic]
     ) =>
     Gate ext ->
     Reporter (Report ext) ->
@@ -319,43 +349,24 @@ downTreeWith ::
 downTreeWith gate r nat graph = do
     cofree <- nat (expand graph)
 
-    -- 1. Collapse the Cofree to a Ref-level DAG: each node's payload, its
-    -- direct predecessor Refs (Actionless nodes skipped), and the order Refs
-    -- were first seen (for a stable, top-down-ish teardown order).
-    payloadRef <- newIORef (Map.empty :: Map Ref (Act ext))
-    depsRef <- newIORef (Map.empty :: Map Ref [Ref])
-    orderRef <- newIORef ([] :: [Ref])
-    seenRef <- newIORef (Set.empty :: Set Ref)
-    let
-        goNode :: Cofree Graph (OpGraph m (Actions ext)) -> IO ()
-        goNode (x :< g) =
-            case x.node of
-                Actionless -> mapM_ goNode (effPreds g)
-                Actions act -> do
-                    let aref = act.extension.ref
-                    let preds = effPreds g
-                    let predRefs = nubOrd [pr | p <- preds, Just pr <- [refOf p]]
-                    seen <- Set.member aref <$> readIORef seenRef
-                    unless seen $ do
-                        modifyIORef' seenRef (Set.insert aref)
-                        modifyIORef' payloadRef (Map.insert aref act)
-                        modifyIORef' depsRef (Map.insert aref predRefs)
-                        modifyIORef' orderRef (aref :)
-                        mapM_ goNode preds
-    goNode cofree
+    -- 1. Collapse the Cofree to a Ref-level DAG: one representative per node
+    -- plus both adjacency directions. This is "Salmon.Op.Dag"'s whole job;
+    -- what a teardown needs from it and the Cofree cannot give is
+    -- 'Dag.dependantsOf'.
+    let dag = Dag.foldDag Dag.sameRepresentative cofree
+    let order = Dag.dagOrder dag
 
-    payload <- readIORef payloadRef
-    depsMap <- readIORef depsRef
-    order <- reverse <$> readIORef orderRef
+    -- Two declarations describing one effect site differently is not an
+    -- error, but it does mean one of them is silently not the node that gets
+    -- torn down, so say which.
+    forM_ (reverse (Dag.dagConflicts dag)) $ \c ->
+        runReporter r (Conflicting c.conflictRef c.conflictKept c.conflictReplaced)
 
-    -- 2. Count each node's dependents; a node with none is a starting point.
+    -- 2. Count each node's dependants; a node with none is a starting point.
     let depCount0 :: Map Ref Int
-        depCount0 =
-            Map.fromListWith
-                (+)
-                ([(aref, 0) | aref <- order] <> [(d, 1) | aref <- order, d <- depsMap Map.! aref])
+        depCount0 = Map.fromList [(aref, length (Dag.dependantsOf dag aref)) | aref <- order]
 
-    -- 3. Tear down: a node becomes ready once its last dependent has released
+    -- 3. Tear down: a node becomes ready once its last dependant has released
     -- it; then, unless it's blocked, run its 'down' and release its own
     -- predecessors (blocking them if this node is still standing).
     countRef <- newIORef depCount0
@@ -364,10 +375,9 @@ downTreeWith gate r nat graph = do
     let
         -- returns True iff the node is still standing (Failed/Blocked), so its
         -- predecessors must not be pulled out from under it.
-        processNode :: Ref -> IO Bool
-        processNode aref = do
-            let act = payload Map.! aref
-            blocked <- Set.member aref <$> readIORef blockedRef
+        processNode :: Act ext -> IO Bool
+        processNode act = do
+            blocked <- Set.member act.extension.ref <$> readIORef blockedRef
             if blocked
                 then do
                     runReporter r (Blocked act)
@@ -393,40 +403,12 @@ downTreeWith gate r nat graph = do
 
         processReady :: Ref -> IO ()
         processReady aref = do
-            standing <- processNode aref
-            forM_ (depsMap Map.! aref) $ \d -> do
+            standing <- maybe (pure False) processNode (Dag.representativeOf dag aref)
+            forM_ (Dag.dependenciesOf dag aref) $ \d -> do
                 when standing $ modifyIORef' blockedRef (Set.insert d)
                 n <- atomicModifyIORef' countRef $ \m ->
-                    let k = (m Map.! d) - 1 in (Map.insert d k m, k)
+                    let k = (Map.findWithDefault 0 d m) - 1 in (Map.insert d k m, k)
                 when (n == 0) $ processReady d
 
-    mapM_ processReady [aref | aref <- order, depCount0 Map.! aref == 0]
+    mapM_ processReady (Dag.roots dag)
     not <$> readIORef failRef
-  where
-    -- The effective predecessors of a node: the nearest 'Ref'-carrying
-    -- subtrees below it, descending through 'Actionless' nodes (which are
-    -- structural glue with no teardown of their own).
-    effPreds ::
-        Graph (Cofree Graph (OpGraph m (Actions ext))) ->
-        [Cofree Graph (OpGraph m (Actions ext))]
-    effPreds g = concatMap pick (toList g)
-      where
-        pick c@(x :< g') =
-            case x.node of
-                Actions _ -> [c]
-                Actionless -> effPreds g'
-
-    refOf :: Cofree Graph (OpGraph m (Actions ext)) -> Maybe Ref
-    refOf (x :< _) =
-        case x.node of
-            Actions act -> Just act.extension.ref
-            Actionless -> Nothing
-
-    -- order-preserving dedup.
-    nubOrd :: (Ord b) => [b] -> [b]
-    nubOrd = go Set.empty
-      where
-        go _ [] = []
-        go s (y : ys)
-            | Set.member y s = go s ys
-            | otherwise = y : go (Set.insert y s) ys

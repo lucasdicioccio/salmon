@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Test.CheckSpec as CheckSpec
+import qualified Test.DagSpec as DagSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
@@ -19,6 +20,7 @@ main =
         testGroup
             "salmon-ops-recipes"
             [ CheckSpec.tests
+            , DagSpec.tests
             , DebootstrapSpec.tests
             , DownTreeSpec.tests
             , JWTSigningSpec.tests

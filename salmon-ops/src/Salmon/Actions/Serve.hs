@@ -1084,6 +1084,10 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
             UpDown.Failed act _ -> mark act Errored
             UpDown.Blocked act -> mark act Blocked
             UpDown.Redundant _ -> pure ()
+            -- not a node outcome: it says two declarations describe one
+            -- node differently, which the operator wants to see but which
+            -- leaves no node any more or less converged than it was.
+            UpDown.Conflicting{} -> pure ()
       where
         mark :: Act Extension -> Convergence -> IO ()
         mark act c = modifyIORef' world (setConvergence dir act.extension.ref c)

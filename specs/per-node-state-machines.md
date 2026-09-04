@@ -59,9 +59,9 @@ than from walking a graph:
 | **processes** | `HashMap Ref (Async (), TVar Status, TBQueue Instruction)` | the machine per node, its observable state, and its mailbox |
 
 The magma and precedence come from the comonadic fold: `expand` already
-produces the `Cofree`, and the collapse `downTreeWith` performs internally
-(`:239`–`:259`) becomes a first-class reusable step that emits both adjacency
-directions instead of one. Because it is keyed by `Ref`, folding a *second*
+produces the `Cofree`, and the collapse `downTreeWith` used to perform
+internally becomes a first-class reusable step that emits both adjacency
+directions instead of one — `Salmon.Op.Dag`, as of milestone 2. Because it is keyed by `Ref`, folding a *second*
 graph into the same structures is a merge, not a replacement — which is what
 makes the graph dynamic.
 
@@ -857,12 +857,20 @@ wakeup channel, and the `run_stopping` flag.
    Mechanical across 22 node call sites plus `Query.forceSkip`, and a
    prerequisite for everything else. One deliberate behaviour change comes
    with it: a throwing check stops killing the traversal.
-2. **`Salmon.Op.Dag`**: the comonadic fold to magma + both adjacency
-   directions, lifted out of `downTreeWith`. Pure and unit-testable, and
-   `downTree` keeps using it, so it is a refactor with no behaviour change —
-   except that this is also where last-writer-wins and the
+2. **`Salmon.Op.Dag`** — *landed*. The comonadic fold to magma + both
+   adjacency directions, lifted out of `downTreeWith`. Pure and unit-testable,
+   and `downTree` keeps using it, so it is a refactor with no behaviour change
+   — except that this is also where last-writer-wins and the
    conflicting-representative report land, so §"`Ref` is location-addressed"
-   has to be settled *before* this step rather than during it.
+   has to be settled *before* this step rather than during it. Two things the
+   fold does that the inline collapse did not, beyond the report: it keeps the
+   edges of *every* occurrence of a node rather than only the first one's
+   (without which `mergeDag` would silently drop the joining graph's edges,
+   which is the entire point of the module), and it therefore drops the
+   `seen`-pruning of the walk — the same full traversal `upTree`'s
+   `postOrderM` already does. `Conflicting` is a new `UpDown.Report`
+   constructor; only `downTreeWith` emits it, because only `downTreeWith` goes
+   through the fold until step 4.
 3. **The ledger**: per-declaration `Contribution`s (ref set *and* edge set),
    `desired` as the union over live ones and `precedence` as the union over
    live *and retiring* ones, shrinking `worldEpochs`/`prune` in `serve` to a

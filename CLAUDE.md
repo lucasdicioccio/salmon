@@ -113,7 +113,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   others still stand on it (a real "directory not empty" bug this used to have). So `downTree`
   first collapses the `Cofree` to a `Ref`-level DAG (deduping shared nodes, skipping through
   `Actionless` glue) and tears nodes down in reverse-dependency order: a node becomes free once
-  its last dependent is done, and only then are its own predecessors released. Because a shared
+  its last dependent is done, and only then are its own predecessors released. That collapse is
+  `Salmon.Op.Dag` (below), not code inside `UpDown`. Because a shared
   node is visited exactly once, `downTree` never emits `Redundant`. Failure containment is the
   mirror of `upTree`'s: a failed `down` leaves that node *still standing*, so every one of its
   predecessors is `Blocked` (unsafe to pull a dependency out from under a node that's still up),
@@ -126,6 +127,21 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   short-circuiting) the node's own `check`, and reported as a `Skip`. `upTree`/`downTree` are
   those with a gate that wants everything; the only real user is `Actions/Serve.hs` (below),
   which walks a union of several seeds' graphs and must leave other seeds' nodes alone.
+- **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded
+  `Cofree Graph (OpGraph m (Actions ext))` into a `Dag` — one representative per `Ref`
+  (`dagNodes`, the *magma*), `dagDependencies` **and** `dagDependants` (the direction the
+  `Cofree` cannot answer and a teardown needs), and first-seen `dagOrder`. Two things it does
+  that the old inline version didn't. First, edges from *every* occurrence of a node accumulate
+  rather than only the first one's, which is what makes folding a second graph into an existing
+  `Dag` (`mergeDag`) a merge rather than a replacement. Second, because a `Ref` is
+  *location-addressed* — `mkRef` hashes a kind tag plus an author-chosen identity key, so an
+  equal `Ref` means "the same effect site", not an equal node — two declarations can collide on
+  one node; **last writer wins**, and the representative that lost is recorded in `dagConflicts`
+  and reported by `downTree` as `UpDown.Conflicting`. The comparison behind that is
+  `sameRepresentative`, on the only fields that *are* comparable (`shorthand`/`help`/`notes`/the
+  rendering of `dynamics` — `up`/`check`/`down` are functions, and `Dynamic` renders as its type
+  alone), so it is a heuristic; it is still strictly more than the zero available before. See
+  `specs/per-node-state-machines.md` milestone 2 and `Test/DagSpec.hs`.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
   `World` — an append-only history of `Epoch`s (a declared seed, the directive it configured to,
   and the graph it evaluated to *at that moment*), the set of seeds currently declared up, and,

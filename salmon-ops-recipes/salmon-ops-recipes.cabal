@@ -80,6 +80,7 @@ test-suite salmon-ops-recipes-test
     other-modules:    Test.Harness
                     , Test.CheckSpec
                     , Test.DebootstrapSpec
+                    , Test.DagSpec
                     , Test.DownTreeSpec
                     , Test.JWTSigningSpec
                     , Test.PodmanSpec
