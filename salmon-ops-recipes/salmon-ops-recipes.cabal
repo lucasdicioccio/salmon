@@ -94,6 +94,7 @@ test-suite salmon-ops-recipes-test
                     , Test.RewriteSpec
                     , Test.ServeSpec
                     , Test.UpTreeSpec
+                    , Test.UpkeepSpec
     build-depends:    base
                     , aeson
                     , bytestring

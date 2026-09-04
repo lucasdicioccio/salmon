@@ -50,35 +50,47 @@ declaration and every convergence; see 'prune' for the rules. What survives coll
 @history@ prints — so the record of /what was declared/ outlives the graphs
 that were declared.
 
-== Waking the loop from outside
+== Between passes, the nodes are tended
 
-Every node here is a one-shot idempotent action, so nothing in this loop owns
-anything that could change on its own — and if something did, this loop would
-not notice, being blocked reading its input between declarations.
+A convergence pass is one attempt at whatever is outstanding, and then it is
+over. That leaves a gap this loop used to have no answer for: an effect that
+goes away on its own — a service that dies, a file something else deletes —
+is not noticed until somebody types @converge@.
 
-'serveWakingWith' is the hook for that. Given a source of "these nodes want
-attention", it selects on that alongside its command input, puts the named
-nodes back to 'Pending' in the direction they are wanted, and converges. The
-wakeup is deliberately just a 'Ref' set rather than any particular kind of
-event: this module knows nothing about what may have changed, and anything
-able to say "look at this node again" can drive it. 'serve' is
-'serveWakingWith' with a source that never fires, i.e. exactly the behaviour
-from before the hook existed.
+So while this loop is idle, every node it knows has a machine of its own
+("Salmon.Actions.Upkeep"), running in whatever direction the node is wanted.
+A node wanted up rechecks its own effect on an adaptive delay and runs @up@
+again if it has gone; a node wanted down retries its @down@ until it works,
+then stops.
 
-todo: nothing in the repo drives this hook. A @Salmon.Builtin.Nodes.Supervised@
-did briefly, and was removed in favour of @specs\/per-node-state-machines.md@,
-where supervision is a property every node has rather than one special node
-type — and where this hook is subsumed, because nodes with state of their own
-can be blocked on directly instead of having to be told to look again. Either
-that design lands and 'serveWakingWith' goes with it, or something else needs
-to justify keeping it.
+/Idle/ is exactly the condition, and it is 'loop' that enforces it: the
+machines start when nothing is waiting in the input and stand down before any
+command is handled (stopping /waits for/ an @up@ or @down@ in flight rather
+than interrupting one, since a half-applied effect is worse than a slow
+command). Two things fall out, and the second is the reason:
+
+  * a piped script has every line, end-of-input included, queued before the
+    first pass finishes, so it is never supervised at all — @serve \< script@
+    stays a deterministic sequence of passes;
+  * there is nothing to race. Starting machines and then stopping them
+    because a command had been sitting in the queue all along would make
+    "was this node acted on?" depend on thread timing.
+
+@supervise off@ stops them for good and leaves every effect exactly as it is:
+@off@ is not a teardown. Note also that a restricted @converge --select@
+scopes the /pass/, not the standing watch — a node the pass skipped is still
+tended once the loop goes idle.
+
+This is what replaced @serveWakingWith@, an "these nodes want attention" hook
+nothing in the repo ever drove. It was there because a node had no state of
+its own to block on; now one does, so the hook is not a smaller version of
+this — it is unnecessary. Restart policy and watchdogs are per-node and live
+in "Salmon.Op.Supervision".
 -}
 module Salmon.Actions.Serve (
     -- * Running
     serve,
     serveWith,
-    serveWakingWith,
-    noWakeups,
 
     -- * Input language
     ServeCommand (..),
@@ -109,7 +121,7 @@ module Salmon.Actions.Serve (
 
 import Control.Comonad.Cofree (Cofree)
 import Control.Concurrent (forkIO, killThread)
-import Control.Concurrent.STM (STM, TChan, atomically, newTChanIO, orElse, readTChan, retry, writeTChan)
+import Control.Concurrent.STM (TChan, atomically, isEmptyTChan, newTChanIO, readTChan, writeTChan)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
@@ -145,16 +157,16 @@ import qualified Salmon.Op.Ledger as Ledger
 import Salmon.Op.Ref (Ref, unRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
 import qualified Salmon.Op.Rewrite as Rewrite
+-- 'Direction' used to be declared here, identically. It belongs with the
+-- per-node state now that a node has state of its own, and is re-exported
+-- from this module so nothing that named 'Serve.TurnUp' had to change.
+import Salmon.Op.Status (Direction (..))
+import Salmon.Op.Supervision (Micros (..))
 import Salmon.Op.Track (run)
 import Salmon.Reporter
+import qualified Salmon.Actions.Upkeep as Upkeep
 
 -------------------------------------------------------------------------------
-
--- | Which way a node is currently wanted.
-data Direction
-    = TurnUp
-    | TurnDown
-    deriving (Show, Eq, Ord)
 
 -- | How far a node is from its wanted 'Direction'.
 data Convergence
@@ -261,6 +273,20 @@ data World seed directive = World
       worldNodes :: Map Ref NodeState
     }
 
+{- | The machines currently tending this world's nodes, and whether they are
+wanted at all.
+
+Deliberately not part of 'World': a 'World' is a pure value this module hands
+back to its caller, and a running 'Upkeep.Supervisor' is neither pure nor
+meaningful once 'serve' has returned.
+-}
+data Tending = Tending
+    { tendingSup :: !(IORef (Maybe (Upkeep.Supervisor Extension)))
+    , tendingOn :: !(IORef Bool)
+    -- ^ @supervise off@ clears this; nothing is tended between passes, and
+    -- @serve@ behaves as it did before per-node machines existed.
+    }
+
 emptyWorld :: World seed directive
 emptyWorld = World 0 [] [] 0 Ledger.emptyLedger Map.empty Map.empty
 
@@ -309,6 +335,9 @@ data ServeCommand
     | -- | @query@: annotate the world's nodes with a 'Selection', without
       -- acting on anything.
       QueryCmd !Selection
+    | -- | @supervise on@\/@supervise off@: whether to keep tending nodes
+      -- between convergence passes. On by default.
+      Supervise !Bool
     | -- | @help@\/@help TOPIC@: print the command reference, or (when
       -- 'Just' a recognised 'Topic') a lengthier explanation of just that
       -- one command. 'Nothing', or a topic 'lookupTopic' doesn't recognise,
@@ -354,6 +383,7 @@ parseServeCommand line =
                     "status" -> Status <$> parseSelection args
                     "history" -> History <$> parseSelection args
                     "query" -> QueryCmd <$> parseSelection args
+                    "supervise" -> onOff w args
                     "help" -> Help <$> helpTopic w args
                     "?" -> Help <$> helpTopic w args
                     "quit" -> nullary w args Quit
@@ -374,6 +404,12 @@ parseServeCommand line =
         case args of
             [path] -> Right (mk path)
             _ -> Left (Text.pack w <> " takes exactly one file argument")
+
+    onOff w args =
+        case args of
+            ["on"] -> Right (Supervise True)
+            ["off"] -> Right (Supervise False)
+            _ -> Left (Text.pack w <> " takes exactly one of `on` or `off`")
 
 {- | Scans a token list for repeated @--select PATTERN@\/@--exclude
 PATTERN@ pairs, shared by @query@\/@status@\/@history@\/@converge@.
@@ -442,8 +478,12 @@ data Report
       Declared !EpochId !Direction !Int !Int
     | -- | number of seeds retired
       Cleared !Int
-    | -- | an external wakeup put this many nodes back to 'Pending'
-      Woken !Int
+    | -- | @supervise on@\/@supervise off@
+      Supervised !Bool
+    | -- | something a node's own machine had to say between convergence
+      -- passes. See 'Salmon.Actions.Upkeep.Report'; the chatty half of that
+      -- stream is filtered out before it reaches here.
+      Tended !(Upkeep.Report Extension)
     | -- | nodes to turn down, nodes to turn up
       ConvergeStart !Int !Int
     | -- | everything applied cleanly, nodes still not converged
@@ -492,7 +532,9 @@ renderReport rep =
                 ]
             ]
         Cleared n -> ["serve: retired " <> tshow n <> " seed(s)"]
-        Woken n -> ["serve: woken for " <> tshow n <> " node(s)"]
+        Supervised True -> ["serve: supervising (nodes are tended between passes)"]
+        Supervised False -> ["serve: not supervising (nodes are left alone between passes)"]
+        Tended t -> renderTended t
         ConvergeStart ndown nup ->
             ["serve: converging (" <> tshow ndown <> " down, " <> tshow nup <> " up)"]
         ConvergeStop ok remaining ->
@@ -550,6 +592,49 @@ renderReport rep =
             , Text.pack (unwords toks)
             ]
 
+{- | The supervision events worth an operator's attention, one line each.
+
+Everything a machine says about its own progress — state transitions, the
+next check's delay — is dropped upstream in 'serve''s own reporter rather
+than rendered small here: a per-node line on every nap is a trace, not a
+report.
+-}
+renderTended :: Upkeep.Report Extension -> [Text]
+renderTended t =
+    case t of
+        Upkeep.Supervising nup ndown ->
+            ["serve: tending " <> tshow nup <> " node(s) up, " <> tshow ndown <> " down"]
+        -- not rendered: the machines stand down before every command,
+        -- including a `help`, and a line saying so each time is noise. That
+        -- they came back is what the next 'Upkeep.Supervising' says.
+        Upkeep.Retired _ -> []
+        Upkeep.Wedged act (Micros us) ->
+            [ "serve: "
+                <> act.shorthand
+                <> " has been silent for "
+                <> tshow (us `div` 1000)
+                <> "ms, past its watchdog"
+            ]
+        Upkeep.Unwedged act -> ["serve: " <> act.shorthand <> " is moving again"]
+        Upkeep.Paused act -> ["serve: " <> act.shorthand <> " paused (its effect is untouched)"]
+        Upkeep.Resumed act -> ["serve: " <> act.shorthand <> " resumed"]
+        Upkeep.Policy act _ ignored ->
+            [ "serve: "
+                <> act.shorthand
+                <> " declares "
+                <> tshow (1 + length ignored)
+                <> " supervision policies; the first is in force"
+            ]
+        Upkeep.Escaped act e ->
+            ("serve: " <> act.shorthand <> "'s own machine threw:") : Text.lines (tshow e)
+        -- filtered out before they get here; listed so a new constructor is
+        -- a compile error rather than a silent omission.
+        Upkeep.Acted _ -> []
+        Upkeep.Upkeep{} -> []
+        Upkeep.Downkeep{} -> []
+        Upkeep.NextLook{} -> []
+        Upkeep.Untended{} -> []
+
 renderDirection :: Direction -> Text
 renderDirection TurnUp = "up"
 renderDirection TurnDown = "down"
@@ -587,12 +672,13 @@ commandReference =
     , "                                 list past declarations"
     , "  query [--select P]... [--exclude P]..."
     , "                                 annotate nodes [selected]/[excluded], without acting on anything"
+    , "  supervise on|off               whether to keep tending nodes between passes (default on)"
     , "  help, ? [TOPIC]                print this reference, or (given a topic) more about just it"
     , "  quit, exit                     leave the loop, changing nothing on the way out"
     , "serve: --select/--exclude patterns are /-separated node-path globs (* one segment, ** any depth);"
     , "       may repeat; omitting --select entirely means everything."
     , "serve: `help TOPIC` for more, where TOPIC is one of:"
-    , "       up, directive, load, clear, converge, status, history, query, select"
+    , "       up, directive, load, clear, converge, status, history, query, select, supervise"
     ]
 
 {- | @help TOPIC@'s lookup table, matched case-insensitively (several names
@@ -615,6 +701,8 @@ helpTopics =
     , ("status", statusHelp)
     , ("history", historyHelp)
     , ("query", queryHelp)
+    , ("supervise", superviseHelp)
+    , ("watchdog", superviseHelp)
     , ("select", selectHelp)
     , ("exclude", selectHelp)
     , ("pattern", selectHelp)
@@ -702,6 +790,11 @@ convergeHelp =
     , "  neither attempted nor marked converged, so a later unrestricted `converge` still picks it"
     , "  up. Omitting both flags converges everything pending, as before."
     , ""
+    , "  Note the restriction scopes the *pass*, not the world: with supervision on (the"
+    , "  default), a node this pass skipped is still tended once the loop goes idle, and may be"
+    , "  acted on then. `supervise off` first if you want a pass to be the only thing that"
+    , "  touches anything."
+    , ""
     , "  The report's headline (`converged` vs. `converge incomplete`) reflects how many nodes are"
     , "  still left afterwards, not just whether anything attempted this pass failed — a"
     , "  restricted pass can report no failure while still leaving excluded nodes pending."
@@ -747,6 +840,46 @@ queryHelp =
     , "  against the resolved selection (see `help select`), without acting on anything — no"
     , "  convergence pass runs. Useful for checking what a `converge --select/--exclude` would"
     , "  touch before actually running it."
+    ]
+
+superviseHelp :: [Text]
+superviseHelp =
+    [ "serve: supervise on|off"
+    , ""
+    , "  Whether nodes are *tended* between convergence passes, rather than only applied by"
+    , "  them. On by default."
+    , ""
+    , "  While supervising, every node this world knows has a small state machine of its own,"
+    , "  running in whatever direction the node is wanted. A node wanted up rechecks its own"
+    , "  effect on an adaptive delay — doubling to a minute while the effect is there, halving"
+    , "  to half a second when it is not — and runs `up` again if the effect has gone. A node"
+    , "  wanted down retries its `down` on the same schedule until it succeeds, then stops."
+    , ""
+    , "  The machines run only while this loop is idle. They start when there is nothing"
+    , "  waiting in the input and stand down before any command is handled (stopping waits for"
+    , "  any `up`/`down` in flight rather than cutting it), so a piped script — every line of"
+    , "  which is queued before the first pass ends — is never supervised at all, and behaves"
+    , "  exactly as it did before any of this existed."
+    , ""
+    , "  Turning supervision off stops the machines and leaves every effect exactly as it is:"
+    , "  `off` is not a teardown, it is `serve` behaving as it did before nodes had machines."
+    , ""
+    , "  What a node does about its effect going away is the node author's choice, stated as a"
+    , "  supervision policy on the node itself (see Salmon.Op.Supervision):"
+    , ""
+    , "    OnFailure  put it back when the check says the effect is gone. The default."
+    , "    Never      report it and leave it; an operator decides."
+    , "    Always     also rerun a node whose check says it ran to completion and stopped."
+    , ""
+    , "  A check that cannot tell (`Unknown` — which includes every node with no check of its"
+    , "  own, i.e. most of them) never triggers a restart. Such a node is brought up once and"
+    , "  then only polled; nothing here re-runs `up` on a node that has said nothing about"
+    , "  itself."
+    , ""
+    , "  A node may also declare a watchdog: how long it may go without doing anything"
+    , "  observable before that silence should be reported. Nodes that declare none are never"
+    , "  called wedged, which is the right default — silence is evidence only once somebody has"
+    , "  said what silence would mean."
     ]
 
 selectHelp :: [Text]
@@ -806,48 +939,17 @@ serveWith ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serveWith = serveWakingWith noWakeups
-
-{- | A wakeup source that never fires: 'serveWith' with this is 'serve', a
-loop driven entirely by its input.
--}
-noWakeups :: STM (Set Ref)
-noWakeups = retry
-
-{- | 'serve', plus an external source of "these nodes want attention".
-
-Whenever the source yields, the named nodes that are currently wanted
-'TurnUp' go back to 'Pending' and a convergence pass runs — so a supervised
-process that dies (see "Salmon.Builtin.Nodes.Supervised") is restarted
-without anybody typing anything. Refs the world does not know, or knows only
-as wanted 'TurnDown', are ignored: a service exiting because we just told it
-to is not a reason to bring it back.
-
-The source is consulted concurrently with the input handle, so a wakeup
-arriving while the loop waits for a command is acted on immediately, and one
-arriving mid-convergence is picked up by the next turn of the loop.
--}
-serveWakingWith ::
-    forall seed directive.
-    (ToJSON directive, FromJSON directive) =>
-    -- | blocks until some node wants attention, then names them
-    STM (Set Ref) ->
-    [Rewrite Extension] ->
-    Reporter Report ->
-    Reporter (UpDown.Report Extension) ->
-    ([String] -> Either Text seed) ->
-    Configure IO seed directive ->
-    Track' directive ->
-    Handle ->
-    IO (World seed directive)
-serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = do
+serveWith rewrites r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
+    tending <- Tending <$> newIORef Nothing <*> newIORef True
     inbox <- newTChanIO
-    -- the input handle is read on its own thread so that waiting for a
-    -- command and waiting for a wakeup can be the same wait.
+    -- the input handle is read on its own thread so that the loop is never
+    -- itself blocked in a read: the supervisor's machines run while it
+    -- waits, and stopping them has to be able to interleave with a command
+    -- arriving.
     reader <- forkIO (readInto inbox)
     runReporter r Started
-    loop world inbox `finally` killThread reader
+    loop tending world inbox `finally` (stopTending tending >> killThread reader)
     readIORef world
   where
     -- | 'Nothing' marks end of input, after which the reader stops.
@@ -866,40 +968,160 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
     maxLoadDepth :: Int
     maxLoadDepth = 8
 
-    loop :: IORef (World seed directive) -> TChan (Maybe String) -> IO ()
-    loop world inbox = do
-        event <- atomically (fmap Left (readTChan inbox) `orElse` fmap Right wakeups)
-        case event of
-            Left Nothing -> runReporter r Stopped
-            Left (Just line) -> do
-                keepGoing <- step 0 world line
-                when keepGoing (loop world inbox)
-            Right refs -> do
-                wake world refs
-                loop world inbox
+    loop :: Tending -> IORef (World seed directive) -> TChan (Maybe String) -> IO ()
+    loop tending world inbox = do
+        {- Tend the nodes only while there is genuinely nothing to do.
 
-    {- | An external source says these nodes want looking at again. Only
-    those currently wanted 'TurnUp' are put back to 'Pending': a node the
-    world does not know, or one it is deliberately taking down, has nothing
-    to answer for. If none qualify this is silent and costs no convergence. -}
-    wake :: IORef (World seed directive) -> Set Ref -> IO ()
-    wake world refs = do
+        The reader thread queues input as fast as it arrives, so an empty
+        inbox means the loop is idle and a non-empty one means the next
+        command is already waiting. Starting machines only when idle is worth
+        more than the two lines it costs:
+
+          * a piped script behaves exactly as it did before any of this
+            existed. Every line, end-of-input included, is already queued by
+            the time the first pass finishes, so nothing is ever tended and
+            @serve < script@ stays a deterministic sequence of passes;
+          * there is nothing to race. Starting machines and then stopping
+            them because a command had been sitting in the queue all along
+            would mean whether a node got acted on depended on thread
+            timing.
+
+        Which leaves supervision doing exactly what it is for: minding the
+        nodes while whoever is driving this loop is not saying anything. -}
+        idle <- atomically (isEmptyTChan inbox)
+        when idle (startTending tending world)
+        line <- atomically (readTChan inbox)
+        -- a command is about to act on these nodes, so the machines stand
+        -- down. Waits for anything in flight rather than cutting it.
+        stopTending tending
+        case line of
+            Nothing -> runReporter r Stopped
+            Just l -> do
+                keepGoing <- step tending 0 world l
+                when keepGoing (loop tending world inbox)
+
+    -------------------------------------------------------------------------
+    -- supervision
+
+    {- | Start tending every node this world knows, in whatever direction it
+    is wanted. Called by 'loop' when it has nothing to do, and stopped again
+    the moment it has. -}
+    startTending :: Tending -> IORef (World seed directive) -> IO ()
+    startTending tending world = do
+        stopTending tending
+        on <- readIORef (tendingOn tending)
         w <- readIORef world
-        let woken = [rf | rf <- Set.toList refs, wantedUp w rf]
-        unless (null woken) $ do
-            modifyIORef' world $ \w0 ->
-                foldr (\rf acc -> setConvergence TurnUp rf Pending acc) w0 woken
-            runReporter r (Woken (length woken))
-            converge world Nothing
+        unless (not on || Map.null w.worldNodes) $ do
+            -- the same computed dag the pass just walked: a rewrite's
+            -- collection node is what actually gets tended, and 'membersOf'
+            -- is what keeps the bookkeeping in declared terms.
+            let computed = Rewrite.rewrite rewrites (phaseOf w Nothing) (worldDag w)
+            sup <-
+                Upkeep.startUpkeep
+                    (tendReporter world computed)
+                    (tendOf w computed)
+                    (Rewrite.computedDag computed)
+            writeIORef (tendingSup tending) (Just sup)
 
-    wantedUp :: World seed directive -> Ref -> Bool
-    wantedUp w rf =
-        case Map.lookup rf w.worldNodes of
-            Just st -> st.nodeDirection == TurnUp
-            Nothing -> False
+    -- | Stop tending, without tearing anything down. Waits for any @up@ or
+    -- @down@ in flight rather than interrupting it.
+    stopTending :: Tending -> IO ()
+    stopTending tending = do
+        current <- readIORef (tendingSup tending)
+        forM_ current Upkeep.stopUpkeep
+        writeIORef (tendingSup tending) Nothing
 
-    step :: Int -> IORef (World seed directive) -> String -> IO Bool
-    step depth world line =
+    {- | Which nodes the supervisor tends, and how.
+
+    'gateFor' is the convergence version of this and differs in one place: it
+    demands the node has /not/ converged yet, because a pass is one attempt
+    at whatever is outstanding. Tending is the opposite — a converged node is
+    precisely the one worth keeping an eye on — so convergence becomes
+    'Upkeep.Standing' rather than a filter: a converged node starts already
+    where it wants to be and is only watched, and a 'Pending'\/'Errored'\/
+    'Blocked' one is acted on.
+
+    That distinction is load-bearing rather than an optimisation. Almost no
+    node in this repository has a @check@, so almost every node answers
+    'UpDown.Unknown'; without it, starting a supervisor after a pass would
+    re-run every @up@ in the graph. -}
+    tendOf :: World seed directive -> Rewritten Extension -> Ref -> Maybe Upkeep.Tend
+    tendOf w computed aref =
+        case [st | rf <- Set.toList (Rewrite.membersOf computed aref), Just st <- [Map.lookup rf w.worldNodes]] of
+            [] -> Nothing
+            sts ->
+                -- a collection node standing in for members that disagree
+                -- goes up: the conservative direction, the same call
+                -- 'Salmon.Op.Rewrite' asks its phases to make. And it counts
+                -- as standing only if /every/ member it speaks for does,
+                -- which is the same all-or-nothing attribution a batch makes
+                -- everywhere else.
+                let ups = [st | st <- sts, st.nodeDirection == TurnUp]
+                    mine = if null ups then sts else ups
+                 in Just
+                        Upkeep.Tend
+                            { Upkeep.tendDirection = if null ups then TurnDown else TurnUp
+                            , Upkeep.tendStanding =
+                                if all (\st -> st.nodeConvergence == Converged) mine
+                                    then Upkeep.Settled
+                                    else Upkeep.Unsettled
+                            }
+
+    {- | Where a machine's reports go.
+
+    Node-level events ('Upkeep.Acted') are the one-shot drivers' own
+    vocabulary, so they go where a pass's do: into the convergence
+    bookkeeping, and on to the caller's node reporter. Two filters, both
+    about volume rather than meaning:
+
+    * a 'UpDown.Skip' is recorded but not printed. The supervisor re-checks
+      every node when it starts, and saying "nothing to do" once per node
+      per convergence on top of what the pass already said is noise;
+    * 'Upkeep.NextLook' and the state transitions are dropped entirely. Every
+      node emits one on every nap, forever, which is a trace rather than a
+      report. What survives is what an operator would want woken for: a
+      wedged node, a paused one, a contradictory policy, a machine that
+      escaped. -}
+    tendReporter :: IORef (World seed directive) -> Rewritten Extension -> Reporter (Upkeep.Report Extension)
+    tendReporter world computed = ReporterM $ \rep ->
+        case rep of
+            Upkeep.Acted inner -> do
+                runReporter (tendWriter world computed) inner
+                case inner of
+                    UpDown.Skip _ -> pure ()
+                    _ -> runReporter nodeReporter inner
+            Upkeep.Upkeep{} -> pure ()
+            Upkeep.Downkeep{} -> pure ()
+            Upkeep.NextLook{} -> pure ()
+            Upkeep.Untended{} -> pure ()
+            _ -> runReporter r (Tended rep)
+
+    {- | 'stateWriter', for a driver that tends both directions at once.
+
+    The convergence version is told which direction its pass is for; a
+    supervisor is not, so each node's own currently-wanted direction is what
+    its outcome is recorded against. There is no @restriction@ either: a
+    supervisor is never scoped by a @--select@, because the operator restricts
+    a /pass/, not what is kept running. -}
+    tendWriter :: IORef (World seed directive) -> Rewritten Extension -> Reporter (UpDown.Report Extension)
+    tendWriter world computed = ReporterM $ \rep ->
+        case rep of
+            UpDown.Eval _ -> pure ()
+            UpDown.Done act -> mark act Converged
+            UpDown.Skip act -> mark act Converged
+            UpDown.Failed act _ -> mark act Errored
+            UpDown.Blocked act -> mark act Blocked
+            UpDown.Conflicting{} -> pure ()
+            UpDown.Instructed{} -> pure ()
+            UpDown.DroppedInstructions{} -> pure ()
+      where
+        mark :: Act Extension -> Convergence -> IO ()
+        mark act c =
+            forM_ (Set.toList (Rewrite.membersOf computed act.extension.ref)) $ \rf ->
+                atomicModifyIORef' world (\w -> (setConvergenceHere rf c w, ()))
+
+    step :: Tending -> Int -> IORef (World seed directive) -> String -> IO Bool
+    step tending depth world line =
         case parseServeCommand line of
             Left err -> do
                 runReporter r (BadCommand err)
@@ -952,7 +1174,15 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
                     DeclareDirective decl path -> do
                         declareDirective world decl path
                         pure True
-                    Load path -> loadFile world (depth + 1) path
+                    Load path -> loadFile tending world (depth + 1) path
+                    Supervise on -> do
+                        writeIORef (tendingOn tending) on
+                        -- turning it off has to take effect now; turning it
+                        -- on happens the moment this loop is next idle,
+                        -- which is immediately after this command.
+                        unless on (stopTending tending)
+                        runReporter r (Supervised on)
+                        pure True
 
     -- | Filters 'worldNodes' by a 'Selection', preserving today's exact
     -- unfiltered listing (including nodes wanted 'TurnDown') when no
@@ -965,8 +1195,8 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
                 allowed = selr `Set.difference` excr
              in [(rf, st) | (rf, st) <- Map.toList w.worldNodes, rf `Set.member` allowed]
 
-    loadFile :: IORef (World seed directive) -> Int -> FilePath -> IO Bool
-    loadFile world depth path
+    loadFile :: Tending -> IORef (World seed directive) -> Int -> FilePath -> IO Bool
+    loadFile tending world depth path
         | depth > maxLoadDepth = do
             runReporter r (BadLoad ("refusing to load " <> Text.pack path <> ": nesting too deep (possible cycle)"))
             pure True
@@ -983,7 +1213,7 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
             runReporter r (LoadDone path n)
             pure True
         go n (ln : rest) = do
-            keepGoing <- step depth world ln
+            keepGoing <- step tending depth world ln
             if keepGoing then go (n + 1) rest else pure False
 
     declare :: IORef (World seed directive) -> Declaration -> [String] -> IO ()
@@ -1059,6 +1289,10 @@ serveWakingWith wakeups rewrites r nodeReporter parseSeed configure program h = 
     -- auto-converge that follows every declaration always passes 'Nothing'.
     converge :: IORef (World seed directive) -> Maybe (Set Ref) -> IO ()
     converge world restriction = do
+        -- no 'stopTending' here: 'loop' stands the machines down before
+        -- handing any command to 'step', so by the time a pass runs there
+        -- are none. Doing it again would be harmless, but taking a
+        -- 'Tending' in order to would suggest it was this function's job.
         w <- readIORef world
         -- the rewrites run per pass rather than per declaration, because
         -- what they partition on ('Ledger.desired') is a property of the
@@ -1319,6 +1553,20 @@ setConvergence dir r c w =
     upd st
         | st.nodeDirection == dir = st{nodeConvergence = c}
         | otherwise = st
+
+{- | 'setConvergence' against whichever direction the node is currently
+wanted in, rather than against a stated one.
+
+The convergence passes know their own direction and use it as a filter — a
+node wanted the other way belongs to another pass and must not be recorded.
+A supervisor tends both directions at once and has no such filter to apply,
+so the node's own state is the answer.
+-}
+setConvergenceHere :: Ref -> Convergence -> World seed directive -> World seed directive
+setConvergenceHere r c w =
+    case Map.lookup r w.worldNodes of
+        Nothing -> w
+        Just st -> setConvergence st.nodeDirection r c w
 
 -- | (nodes wanted up, nodes wanted down) that have not converged yet.
 pendingCounts :: World seed directive -> (Int, Int)

@@ -26,6 +26,7 @@ library
                    , Salmon.Actions.Help
                    , Salmon.Actions.Serve
                    , Salmon.Actions.UpDown
+                   , Salmon.Actions.Upkeep
                    , Salmon.Actions.Dot
                    , Salmon.Actions.Query
                    , Salmon.Builtin.Extension
@@ -72,6 +73,7 @@ library
                    , Salmon.Op.Mailbox
                    , Salmon.Op.Rewrite
                    , Salmon.Op.Status
+                   , Salmon.Op.Supervision
                    , Salmon.Op.Configure
                    , Salmon.Op.Ref
                    , Salmon.Reporter

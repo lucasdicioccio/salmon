@@ -13,8 +13,11 @@ non-converged and picked up again by the next pass.
 -}
 module Test.ServeSpec (tests) where
 
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
 import Control.Exception (throwIO)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Dynamic (toDyn)
@@ -27,15 +30,19 @@ import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath ((</>))
-import System.IO (Handle, IOMode (ReadMode), hClose, hPutStr, withFile)
+import System.IO (BufferMode (LineBuffering), Handle, IOMode (ReadMode), hClose, hPutStr, hPutStrLn, hSetBuffering, withFile)
 import System.IO.Temp (withSystemTempFile)
+import System.Process (createPipe)
+import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.UpDown as UpDown
-import Salmon.Builtin.Extension (Extension, Op, Track', deps, down, dynamics, nodeps, op, opAct, ref, up)
+import Salmon.Actions.UpDown (CheckResult (..))
+import qualified Salmon.Actions.Upkeep as Upkeep
+import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, nodeps, op, opAct, ref, up)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
@@ -43,6 +50,7 @@ import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
+import Salmon.Reporter (ReporterM (..))
 
 import Test.Harness (capture, withTempDir)
 
@@ -71,6 +79,8 @@ tests =
         , testCase "`help` with an unrecognised topic falls back to the full reference" helpUnknownTopicFallsBack
         , testCase "a registered rewrite batches across seeds and converges its members" rewriteBatchesAcrossSeeds
         , testCase "a rewrite's batch splits by direction when a seed is retired" rewriteSplitsOnRetire
+        , testCase "an idle loop tends its nodes and puts a vanished effect back" idleLoopTends
+        , testCase "`supervise off` leaves a vanished effect alone" superviseOffLeavesItAlone
         ]
 
 -------------------------------------------------------------------------------
@@ -542,3 +552,121 @@ rewriteSplitsOnRetire =
             "and b was never in a removal batch"
             (all (\(_, ws) -> Widget "b" `notElem` ws) [b | b@("remove", _) <- batches])
         assertAllConverged TurnUp w
+
+-------------------------------------------------------------------------------
+-- supervision between commands
+
+{- | The two cases below drive the loop over a real pipe rather than a
+scripted file, because idleness is the whole point: 'Salmon.Actions.Serve'
+tends its nodes only while nothing is waiting in its input, and every line of
+a piped script is already queued by the time the first pass finishes. So
+these write one command, wait for what the machines say, and only then write
+the next.
+
+The waiting is on the report streams, never on a clock: a case that passes
+does so as soon as the machines get there.
+-}
+data Session = Session
+    { sessionIn :: !Handle
+    , sessionServe :: !(TVar [Serve.Report])
+    , sessionNodes :: !(TVar [UpDown.Report Extension])
+    }
+
+-- | Run the loop on its own thread over a pipe the body writes into.
+withSession :: Track' Spec -> FilePath -> (Session -> IO a) -> IO (a, World Spec Spec)
+withSession prog root body = do
+    serveTrace <- newTVarIO []
+    nodeTrace <- newTVarIO []
+    let serveReporter = ReporterM (\rep -> atomically (modifyTVar' serveTrace (rep :)))
+    let nodeReporter = ReporterM (\rep -> atomically (modifyTVar' nodeTrace (rep :)))
+    (readEnd, writeEnd) <- createPipe
+    hSetBuffering writeEnd LineBuffering
+    done <- newEmptyMVar
+    _ <-
+        forkIO $ do
+            w <- Serve.serveWith [] serveReporter nodeReporter (parseSpec root) (Configure pure) prog readEnd
+            putMVar done w
+    let session = Session writeEnd serveTrace nodeTrace
+    result <- body session
+    hPutStrLn writeEnd "quit"
+    w <- expect "the loop to exit" (takeMVar done)
+    hClose writeEnd
+    pure (result, w)
+
+-- | Block until the reports so far (oldest first) satisfy the predicate.
+awaitOn :: TVar [a] -> ([a] -> Bool) -> IO ()
+awaitOn trace p =
+    expect "the reports to say so" $
+        atomically $ do
+            rs <- readTVar trace
+            unless (p (reverse rs)) retry
+
+expect :: String -> IO a -> IO a
+expect what act = do
+    result <- timeout 20000000 act
+    maybe (fail ("timed out waiting for " <> what)) pure result
+
+-- | Whether supervision has started over at least one node.
+tending :: [Serve.Report] -> Bool
+tending rs = not (null [() | Serve.Tended (Upkeep.Supervising nup _) <- rs, nup > 0])
+
+dones :: [UpDown.Report Extension] -> Int
+dones rs = length [() | UpDown.Done _ <- rs]
+
+{- | A node whose effect something else can remove. Its @check@ is the only
+thing in the model that can notice, which is exactly the case @check@ was
+merged into existence for.
+-}
+watched :: IORef Bool -> IORef Int -> Track' Spec
+watched there attempts = Track $ \spec ->
+    op "watched" nodeps $ \actions ->
+        actions
+            { ref = mkRef "watched" spec.specNames
+            , check = do
+                ok <- readIORef there
+                pure (if ok then Success else Failure "gone")
+            , up = do
+                atomicModifyIORef' attempts (\k -> (k + 1, ()))
+                writeIORefTrue there
+            }
+  where
+    writeIORefTrue v = atomicModifyIORef' v (const (True, ()))
+
+idleLoopTends :: IO ()
+idleLoopTends =
+    withTempDir $ \root -> do
+        there <- newIORef False
+        attempts <- newIORef (0 :: Int)
+        (_, w) <- withSession (watched there attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe tending
+            assertEqual "the pass brought it up once" 1 =<< readIORef attempts
+            -- something else removes the effect; nothing tells the loop
+            atomicModifyIORef' there (const (False, ()))
+            awaitOn session.sessionNodes (\rs -> dones rs >= 2)
+            assertEqual "its own machine put it back" 2 =<< readIORef attempts
+        assertEqual
+            "and the world still says converged"
+            [Converged]
+            (fmap nodeConvergence (Map.elems w.worldNodes))
+
+superviseOffLeavesItAlone :: IO ()
+superviseOffLeavesItAlone =
+    withTempDir $ \root -> do
+        there <- newIORef False
+        attempts <- newIORef (0 :: Int)
+        _ <- withSession (watched there attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "supervise off"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Supervised False <- rs]))
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 1)
+            atomicModifyIORef' there (const (False, ()))
+            -- there is nothing to wait for, which is the assertion: ask the
+            -- loop to do something else and check nothing happened in the
+            -- meantime.
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            assertEqual "nothing put it back" 1 =<< readIORef attempts
+            assertBool "and supervision never started" . not . tending
+                =<< atomically (reverse <$> readTVar session.sessionServe)
+        pure ()

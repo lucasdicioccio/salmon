@@ -62,6 +62,18 @@ the *ordinary* answer on a first run, not an error report), and `Unknown` (the
 check could not tell, which includes "this node has no check"). `upTree` skips
 the first three and runs `up` for the last two.
 
+`check` earns its keep twice, and the second time is easy to miss. In a one-shot
+`run up` it is an optimisation: it saves an `up` you didn't need. Under `run
+serve`, which *tends* its nodes between commands (`Salmon.Actions.Upkeep`), it
+is the **only** thing that can notice your effect going away — nothing else in
+the model looks. A node with no `check` answers `Unknown`, which the upkeep FSM
+deliberately never acts on (a loop that treated "I could not tell" as "so run
+`up`" would re-run every check-less node forever), so it gets brought up once
+and then only pointlessly polled. If your node is something that can stop being
+true on its own — a service, a mount, a firewall rule, a file something else
+might clobber — write a `check`. `Netfilter.rule`'s `skipIfNftRuleExists` is the
+template.
+
 `up` and `down` default to `pure ()` (a no-op) if you don't set them — this is
 useful for pure "grouping" nodes (see §3) that only exist to bundle
 dependencies, with no effect of their own.
@@ -337,6 +349,15 @@ some other part of the codebase can later recover by type, without changing
 - `Debian.Package.deb` stashes a `Package`, which the `batchPackages` **rewrite**
   (`Salmon.Op.Rewrite`) collects across the whole graph into one `apt-get`
   invocation.
+- A `Salmon.Op.Supervision.Supervision` states how the node wants to be tended:
+  whether to put it back when its `check` says the effect has gone (`Always`/
+  `OnFailure`/`Never`, defaulting to `OnFailure`) and how long its silence may
+  last before somebody should worry. `Salmon.Actions.Upkeep` reads it back with
+  the same `getDynamics`. One line, and a node with no opinion needs none:
+
+  ```haskell
+  dynamics = [supervised (Supervision Always (Just (seconds 30)))]
+  ```
 
 That last one is what the field is really for, and it's worth understanding
 the shape. A node says *"I am a `Package`"* without knowing what will be done

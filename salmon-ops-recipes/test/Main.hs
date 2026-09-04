@@ -16,6 +16,7 @@ import qualified Test.QuerySpec as QuerySpec
 import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeSpec as ServeSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
+import qualified Test.UpkeepSpec as UpkeepSpec
 
 import Test.Tasty (defaultMain, testGroup)
 
@@ -40,4 +41,5 @@ main =
             , RewriteSpec.tests
             , ServeSpec.tests
             , UpTreeSpec.tests
+            , UpkeepSpec.tests
             ]

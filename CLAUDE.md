@@ -146,6 +146,37 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   cap, deliberately. `Op/Mailbox.hs` is the push side: a bounded per-node queue of `Instruction`s
   (`Force`/`Satisfy`/`Recheck`/`Pause`/`Resume`) that drops the oldest on overflow and reports
   the drop. See milestone 6 and `Test/ConcurrentSpec.hs`.
+- **`Actions/Upkeep.hs`** is the *continuous* driver: a node is not applied once, it is
+  **tended**. Same ordering (`waitStability`), same `Report` vocabulary (wrapped in
+  `Upkeep.Acted`), but it does not return — each node runs `WaitUp/Upping/Up` (or
+  `WaitDown/Downing/Down`) and keeps asking whether its effect is still there. The steady
+  state is a check on an adaptive delay: doubling to a 60s cap while the effect is there,
+  halving to a 500ms floor when it is not. Five things to know before touching it.
+  **`Down` is terminal and `Up` is not** — `check` answers "does my effect need creating",
+  and nothing answers "is it still gone", so a downkeep machine that arrives exits while an
+  upkeep machine that arrives has only started. **`Unknown` restarts nothing**: the one-shot
+  drivers map it to `Required` (safe over one pass of an idempotent action), but a loop that
+  did the same would re-run `up` at the delay floor forever for every node with no `check` —
+  i.e. nearly all of them. **A failing `up` backs off** (doubles) while a *vanished effect*
+  tightens (halves); only the latter is evidence to look sooner. **Failure is waited out, not
+  contained**: where a one-shot pass reports `Blocked` and ends, here the dependency's own
+  machine is still retrying, so the dependant keeps waiting and proceeds the moment it
+  recovers. And **`Standing`** — the caller says whether a node is already where it wants to
+  be, because a supervisor is normally started right after something else did the work, and
+  an `Unknown` node would otherwise have that work done again immediately.
+  `Recheck`/`Pause`/`Resume` finally mean something here. See milestone 7 and
+  `Test/UpkeepSpec.hs`.
+- **`Op/Supervision.hs`** is the per-node policy the above reads: `Restart`
+  (`Always`/`OnFailure`/`Never`, default `OnFailure`) and an optional watchdog, carried on
+  `dynamics` rather than in a new `Extension` field — the same channel, and for the same
+  reason, as `Package` and the collection rewrite. Three things that buys: nothing changes
+  for the many nodes with no opinion, "a node that declares no watchdog is never considered
+  wedged" is just `getDynamics` returning `[]`, and it is one line to add. Untyped and
+  unenforced, so two conflicting policies on one node get a magma-conflict's treatment: take
+  the first, report the rest. Over the one-shot lifecycle `Extension` can express today the
+  policy reads a `CheckResult`, not an exit code (those arrive with `Managed`). The watchdog
+  only ever *reports*: killing a wedged `up` needs the teardown-through-a-bracket that owning
+  the process buys.
 - **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded
   `Cofree Graph (OpGraph m (Actions ext))` into a `Dag` — one representative per `Ref`
   (`dagNodes`, the *magma*), `dagDependencies` **and** `dagDependants` (the direction the
@@ -199,7 +230,22 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   and one bring-up pass (both concurrent, see `Actions/Concurrent.hs`) with a gate that filters
   to "wanted in this pass, not yet converged" — so
   ordering, dedup and failure containment are exactly `run up`/`run down`'s, and all this module
-  adds is the memory. Nodes left `Errored`/`Blocked` are retried by the next pass. Neither pass
+  adds is the memory. Nodes left `Errored`/`Blocked` are retried by the next pass.
+  **Between commands the nodes are tended** (`Actions/Upkeep.hs`), which closes the gap a pass
+  leaves: an effect that goes away on its own is otherwise unnoticed until somebody types
+  `converge`. The machines run **only while the loop is idle** — they start when nothing is
+  waiting in the input and stand down before any command is handled (stopping *waits for* an
+  `up`/`down` in flight rather than cutting it). That is deliberate twice over: a piped script
+  has every line, EOF included, already queued before the first pass ends, so `serve < script`
+  is never supervised and stays a deterministic sequence of passes; and starting machines only
+  to stop them because a command had been queued all along would make "was this node acted
+  on?" depend on thread timing. A node's convergence becomes its `Upkeep.Standing` rather than
+  a filter — `gateFor` demands a node has *not* converged, `tendOf` uses convergence to decide
+  whether to act or merely watch. `supervise on|off` is the switch; note a restricted
+  `converge --select` scopes the *pass*, not the standing watch, so `supervise off` first if a
+  pass must be the only thing touching anything. This is what replaced `serveWakingWith`, a
+  "these nodes want attention" hook nothing ever drove: it existed because a node had no state
+  of its own to block on. Neither pass
   touches a graph: `worldDag` rebuilds one walkable structure from the magma and the ledger's
   precedence via `Dag.fromMagma`, and both directions run over it. `epochGraph` survives for one
   reason only — `--select` resolves *path* patterns, and a `Dag` has `Ref`s and edges but no
@@ -262,6 +308,17 @@ the effect. A node that sets no `check` gets `Unknown`, which means `up` runs, m
 the traversal, which `prelim` (evaluated outside `upTree`'s `try`) did not do. See
 `specs/per-node-state-machines.md` milestone 1 and `Test/CheckSpec.hs`.
 
+One consequence worth naming now that `run serve` tends its nodes: **a node's `check` is the
+only thing that can notice its effect going away.** A node with no `check` answers `Unknown`,
+which the upkeep FSM deliberately never acts on (see `Actions/Upkeep.hs` above), so such a node
+is brought up once and thereafter only polled pointlessly. Almost no builtin implements one
+today — `filecontents` does not, so a managed file deleted behind salmon's back is still not
+restored. Adding one is per-node work and changes what `run up` does for existing callers (a
+node whose check says `Success` stops being re-applied), so it is a deliberate decision rather
+than a mechanical sweep. `Netfilter.rule`'s `skipIfNftRuleExists` is the template, and
+`Op/Supervision.hs` is where a node states what should happen when its check says the effect
+is gone.
+
 **Failure must not be swallowed.** `Extension.up :: IO ()` has no way to signal failure in its
 type — the only way a failure becomes visible to `upTree` (see above) is if `up` *throws*.
 `Binary.untrackedExec`, which almost every builtin's `up` goes through via `withBinary`, does this
@@ -304,6 +361,7 @@ only <seed args...>    # declare this seed up and retire every other one
 down <seed args...>    # retire this seed (its nodes go down unless another seed still wants them)
 clear                  # retire every seed
 converge               # re-attempt whatever hasn't converged (e.g. after fixing what made it fail)
+supervise on|off       # whether to tend nodes while the loop is idle (default on)
 status | history       # dump the per-node state / the seed+graph history
 quit                   # leave the loop, changing nothing on the way out
 ```

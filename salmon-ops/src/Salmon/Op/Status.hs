@@ -206,11 +206,24 @@ settled dir = waitStability dir Stable
 {- | Has this node been silent for longer than its author said silence should
 ever last? 'Nothing' for a watchdog means the node never declares itself
 wedged, which is the default and the right one.
+
+Three conditions, and the middle one is easy to leave out and wrong to. A
+node is wedged if it has not settled, /has said something at least once/, and
+has said nothing since. Without the middle condition a node sitting in
+'Salmon.Actions.Upkeep.WaitUp' behind a slow dependency trips its own
+watchdog, having never run at all: it is not silent, it has not started. The
+node actually worth reporting there is the dependency, which /is/ doing
+something and will trip its own.
+
+A node's own machine notes its transitions into the ring precisely so this
+has something to read.
 -}
 wedged :: Word64 -> Maybe Word64 -> Status -> Bool
 wedged _ Nothing _ = False
 wedged now (Just watchdogNs) st =
-    st.statusStability == Transient && now - st.statusLastActive > watchdogNs
+    st.statusStability == Transient
+        && ringSize st.statusOutput > 0
+        && now - st.statusLastActive > watchdogNs
 
 -------------------------------------------------------------------------------
 

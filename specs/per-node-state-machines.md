@@ -1012,7 +1012,101 @@ wakeup channel, and the `run_stopping` flag.
    transitions into the ring — but nothing else writes to it until `Managed`
    in step 8.
 7. **Upkeep/downkeep FSMs** with adaptive delay, over `OneShot` nodes only,
-   plus the authored watchdog. Supervision of unowned effects appears here.
+   plus the authored watchdog — *landed*. Supervision of unowned effects
+   appears here.
+
+   `Salmon.Actions.Upkeep` is the continuous driver: `UpkeepState` and
+   `DownkeepState` exactly as declared above, `waitStability` for ordering,
+   the adaptive delay as the backoff, one mailbox per node, and a single
+   scanning thread for the watchdogs. `Salmon.Op.Supervision` is the policy —
+   `Restart` plus `Maybe` watchdog, riding `dynamics`, read back with the
+   same `getDynamics` the collection rewrite uses, first-wins with the losers
+   reported. Neither one owns a process; that is step 8.
+
+   Eight places this differs from what the sections above say, six of them
+   because the sections were written about one pass and this is a loop.
+
+   - **`Unknown` restarts nothing.** §"Keep this running" reads
+     `_ -> fsm (decreaseDelay delay) Upping`, which lumps `Unknown` in with
+     `Failure`. That is right for the one-shot drivers, where
+     `requirement Unknown = Required` errs safely over an idempotent action,
+     and a spin loop here: a node with no `check` answers `Unknown` forever,
+     so it would re-run `up` at the 500ms floor for as long as `serve` lived.
+     "I could not look" is not evidence the effect went away. Only `Failure`
+     demotes a node out of `Up`.
+   - **A failing `up` backs off; only a vanished effect tightens.** The spec
+     adapts the delay on what the *check* said and is silent on how often to
+     retry an `up` that keeps throwing. Tightening there would retry
+     `apt-get` twice a second, so `Upping` doubles toward the cap on each
+     failure while `Up -> Upping` still halves toward the floor.
+   - **The restart policy is consulted before satisfaction, not after.**
+     §"The restart policy" wants `Always` to rerun a `Completed` node, and
+     `Completed` is a *satisfied* verdict — so a `look` that asks
+     "satisfied?" first can never reach the policy, and `Always` would be
+     unreachable. Hence `Intent`: arriving in `Upping` from `WaitUp` consults
+     the check, arriving from `Up` (or from a `Force`) does not, because the
+     answer already in hand is the *reason*.
+   - **A supervisor is told what the last pass achieved** (`Standing`). This
+     is not in the spec at all and is load-bearing: almost nothing in this
+     repository implements `check`, so a supervisor started after a
+     convergence pass would consult every node, get `Unknown`, and run every
+     `up` in the graph a second time. `Settled` skips the first `up` and
+     nothing else — the node is still watched, and still put back if its
+     check later says the effect is gone.
+   - **`serve` supervises only while it is idle**, rather than "`serve` uses
+     the async supervised driver" wholesale (§"Two drivers"). The machines
+     start when nothing is waiting in the input and stand down before any
+     command is handled. Two reasons, and the second is the real one: a
+     piped script has every line, EOF included, queued before the first pass
+     ends, so it is never supervised and `serve < script` stays a
+     deterministic sequence of passes; and starting machines only to stop
+     them because a command had been sitting in the queue would make
+     "was this node acted on?" depend on thread timing. `run up`/`run down`
+     are untouched, as §"Two drivers" wants.
+   - **A restricted `converge --select` scopes the pass, not the world.**
+     Supervision is unrestricted, so a node a restricted pass skipped is
+     still tended once the loop goes idle. The alternative — carrying a
+     transient flag into the standing watch — would mean a one-off
+     `--select` silently stopped watching everything else, which is a worse
+     surprise than the one it avoids. `supervise off` is the way to get a
+     pass that is the only thing touching anything.
+   - **The watchdog reports and does not kill.** Interrupting an `up` needs
+     the teardown-through-a-bracket that owning the process buys, i.e. step
+     8. Reporting is still most of the value: it is what tells a slow node
+     from a stuck one.
+   - **`Down` is terminal, `Up` is not.** Nothing in the model answers "is it
+     still gone" — `check` answers "does my effect need creating" — so a
+     downkeep machine that reaches `Down` exits, while an upkeep machine that
+     reaches `Up` has only started. The asymmetry is in the two state names
+     above but its consequence was never stated.
+
+   Time is `Micros` (an `Int`) rather than `DiffTime`: salmon-ops has no
+   `time` dependency and neither consumer of the value wants one —
+   `threadDelay` takes microseconds and `getMonotonicTimeNSec` returns an
+   integral nanosecond count.
+
+   Three things fell out. `serveWakingWith`/`noWakeups`/`Woken` are **gone**,
+   which its own todo predicted: the hook existed because a node had no state
+   of its own to block on, and it is not a smaller version of this. Serve's
+   `Direction` was a second, identical declaration of `Status.Direction` and
+   is now that one, re-exported. And `Instruction`'s `Recheck`/`Pause`/
+   `Resume` mean something for the first time.
+
+   **What this does not yet buy, and it is worth being blunt about it.**
+   Supervision is exactly as good as nodes' `check`s, and in this tree almost
+   no node has one: `filecontents` does not, so a managed file deleted behind
+   salmon's back is still not noticed. The engine is here and tested; making
+   it *do* anything for a real graph is now a per-node question — which is
+   the ordering question §"Open questions" already logged against `todo`, now
+   sharper: it is not "does this shape work", it is "which nodes get a
+   `check`". `filecontents` comparing its own contents is the obvious first
+   one, and it changes what `run up` does for every existing caller, so it is
+   deliberately not smuggled in here.
+
+   Nothing demotes a node's *dependants* when it stops being up; that is step
+   9. A node that has actually failed does hold off a dependant still in
+   `WaitUp`, which is the containment the one-shot drivers have, expressed as
+   a wait rather than as a `Blocked`.
 8. **`Managed` nodes**: `Up` races the running action against the check timer,
    `cancel` tears down through the bracket, and exit statuses reach the
    restart policy. This is the step that restores what removing `Supervised`
