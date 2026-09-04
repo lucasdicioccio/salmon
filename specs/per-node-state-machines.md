@@ -1176,6 +1176,11 @@ hardens it. Tracked in `todo`.
 
 ## Relationship to the other specs
 
+- `specs/per-node-state-machines-remaining.md` is the companion plan: what is
+  left of the milestone list below (8 and 9), plus the residue no milestone
+  covers — chiefly that `check` is implemented by roughly a quarter of nodes,
+  which is what currently limits milestone 7 to supervising almost nothing.
+  Start there if you are picking this work up rather than reading it.
 - `specs/salmon-as-init.md` needs this and gets simpler for it: its PID-2
   supervisor is this control loop, its restart policy is the upkeep FSM, and
   its "PID 1 rate-limits, the supervisor decides" split is the same two-level
