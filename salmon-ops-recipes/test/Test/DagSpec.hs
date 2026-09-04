@@ -20,12 +20,16 @@ import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 -- scope, and `Dag.sameRepresentative` needs three of them: a selective import
 -- here has to name `notes` and `dynamics` even though this module never
 -- mentions either.
-import Salmon.Builtin.Extension (Extension, Op, deps, dynamics, evalDeps, help, nodeps, notes, op, ref)
+import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, evalDeps, help, nodeps, notes, op, opAct, ref, up)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (Ref, mkRef)
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Op.Actions (Act (..))
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+
+import Test.Harness (capture)
 
 import Test.Harness (runDownCapturing)
 
@@ -41,6 +45,8 @@ tests =
         , testCase "the same node reached twice is not a conflict" noSelfConflict
         , testCase "roots are the nodes nothing depends on" rootsAreUndepended
         , testCase "downTree reports a conflict to its caller" downTreeReportsConflict
+        , testCase "fromMagma rebuilds what dagEdges flattened" fromMagmaRoundTrips
+        , testCase "a cycle is reported Blocked, not silently skipped" cycleIsBlocked
         ]
 
 -------------------------------------------------------------------------------
@@ -175,3 +181,49 @@ downTreeReportsConflict = do
         "one Conflicting, naming the contested ref"
         [refOf "contested"]
         [aref | UpDown.Conflicting aref _ _ <- reports]
+
+{- | 'Dag.fromMagma' is 'Dag.dagEdges'' inverse, and is how a driver that
+keeps nodes and precedence separately — "Salmon.Op.Ledger", where edges have
+to be retractable — gets back something walkable.
+-}
+fromMagmaRoundTrips :: IO ()
+fromMagmaRoundTrips = do
+    let (root, _, _, _) = diamond
+        dag = foldOf root
+        rebuilt = Dag.fromMagma (Dag.dagNodes dag) (Dag.dagEdges dag)
+    assertEqual "same nodes" (Map.keysSet (Dag.dagNodes dag)) (Map.keysSet (Dag.dagNodes rebuilt))
+    assertEqual "same edges" (Dag.dagEdges dag) (Dag.dagEdges rebuilt)
+    assertEqual
+        "and the direction a teardown needs survives"
+        (Set.fromList (Dag.dependantsOf dag (refOf "apex")))
+        (Set.fromList (Dag.dependantsOf rebuilt (refOf "apex")))
+
+{- | A 'Dag' built from a flat edge set can describe a cycle, which a 'Dag'
+folded from an expanded 'Cofree' cannot — so this is a hazard that only
+arrived with the ledger, where two declarations can each contribute one leg
+of it. A node on a cycle never becomes ready, and the walk used to leave it
+silently unapplied while still reporting success. It is 'Blocked' now.
+-}
+cycleIsBlocked :: IO ()
+cycleIsBlocked = do
+    let a = leaf "a"
+        b = leaf "b"
+        magma =
+            Map.fromList
+                [ (r, act)
+                | o <- [a, b]
+                , Just act <- [opAct o]
+                , let r = act.extension.ref
+                ]
+        -- a depends on b and b depends on a: neither can ever be first.
+        looped = Set.fromList [(refOf "a", refOf "b"), (refOf "b", refOf "a")]
+        dag = Dag.fromMagma magma looped
+    (r, readBack) <- capture
+    ok <- UpDown.upDag (const (pure UpDown.Required)) r dag
+    reports <- readBack
+    assertBool "the walk reports failure rather than vacuous success" (not ok)
+    assertEqual
+        "both nodes are named"
+        2
+        (length [() | UpDown.Blocked _ <- reports])
+    assertEqual "and nothing was evaluated" 0 (length [() | UpDown.Eval _ <- reports])

@@ -14,7 +14,7 @@ after touching graph-traversal or dot-rendering code:
 > salmon-ops-dot-fixture dot > after.dot    # after your change
 > diff before.dot after.dot                 # expect no diff
 
-> salmon-ops-dot-fixture up                 # eyeball the Eval\/Skip\/Redundant report
+> salmon-ops-dot-fixture up                 # eyeball the Eval\/Skip\/Done report
 -}
 module Main (main) where
 
@@ -38,7 +38,7 @@ leaf name =
         x{ref = mkRef "leaf" name, up = putStrLn ("up " <> Text.unpack name)}
 
 -- | Depended on by both 'childV' and 'childO', to exercise upTree's
--- dedup-by-Ref path (one Eval, one Redundant).
+-- dedup-by-Ref path (one Eval, however many paths reach it).
 commonLeaf :: Op
 commonLeaf = leaf "common-leaf"
 

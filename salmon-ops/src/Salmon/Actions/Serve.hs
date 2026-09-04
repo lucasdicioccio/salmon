@@ -111,7 +111,6 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.STM (STM, TChan, atomically, newTChanIO, orElse, readTChan, retry, writeTChan)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (forM_, unless, when)
-import Control.Monad.Identity (runIdentity)
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
@@ -133,11 +132,10 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (Requirement (..))
 -- imported with their field selectors: OverloadedRecordDot only solves
 -- HasField for fields that are in scope.
-import Salmon.Builtin.Extension (Extension (..), Op, Track', deps, evalDeps)
-import Salmon.Op.Actions (Act (..), Actions (..), ShortHand)
+import Salmon.Builtin.Extension (Extension (..), Op, Track', evalDeps)
+import Salmon.Op.Actions (Act (..), ShortHand)
 import Salmon.Op.Configure (Configure, gen)
 import Salmon.Op.Graph (Graph)
-import Salmon.Op.OpGraph (OpGraph (OpGraph))
 import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ledger (Ledger)
@@ -184,8 +182,8 @@ newtype EpochId = EpochId {unEpochId :: Int}
 {- | One declaration, and everything derived from it at the time it was made.
 
 An epoch is kept only while its declaration is /live/, because the only thing
-it is still needed for is the up pass ('upOps') and @--select@ resolution,
-both of which are about active seeds. What a retired declaration leaves
+it is still needed for is @--select@ resolution, which is about active seeds
+and needs the graph's paths rather than the magma's nodes. What a retired declaration leaves
 behind is its 'Ledger.Contribution' — two flat sets — plus its nodes in
 'worldMagma', which is all a teardown needs and is bounded by node count
 rather than by graph shape. Re-declaring the same seed appends a new epoch
@@ -206,8 +204,9 @@ data Epoch seed directive = Epoch
     , -- | identity of the seed for the active set: its encoded directive, so
       -- that two spellings of the same desired state are one active seed
       epochKey :: !ByteString
-    , epochOp :: Op
-    , -- | the graph as evaluated when the seed was declared
+    , -- | the graph as evaluated when the seed was declared. The one thing
+      -- left that needs a graph rather than the magma: @--select@ resolves
+      -- path patterns, and a 'Dag' has 'Ref's and edges but no paths.
       epochGraph :: Cofree Graph Op
     }
 
@@ -826,8 +825,6 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
     loop world inbox `finally` killThread reader
     readIORef world
   where
-    nat = pure . runIdentity
-
     -- | 'Nothing' marks end of input, after which the reader stops.
     readInto :: TChan (Maybe String) -> IO ()
     readInto inbox = do
@@ -982,7 +979,6 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
                             , epochSeed = Just seed
                             , epochDirective = directive
                             , epochKey = encode directive
-                            , epochOp = o
                             , epochGraph = gr
                             }
                 commitEpoch world w0 decl ep
@@ -1008,7 +1004,6 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
                                     , epochSeed = Nothing
                                     , epochDirective = directive
                                     , epochKey = encode directive
-                                    , epochOp = o
                                     , epochGraph = gr
                                     }
                         commitEpoch world w0 decl ep
@@ -1040,6 +1035,7 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
     converge :: IORef (World seed directive) -> Maybe (Set Ref) -> IO ()
     converge world restriction = do
         w <- readIORef world
+        let dag = worldDag w
         let (nup, ndown) = pendingCounts w
         runReporter r (ConvergeStart ndown nup)
         -- teardown first: a node being replaced by an incompatible one
@@ -1052,16 +1048,15 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
                     UpDown.downDag
                         (gateFor world TurnDown restriction)
                         (recorder world TurnDown restriction)
-                        (downDag w)
+                        dag
         okUp <-
             if nup == 0
                 then pure True
                 else
-                    UpDown.upTreeWith
+                    UpDown.upDag
                         (gateFor world TurnUp restriction)
                         (recorder world TurnUp restriction)
-                        nat
-                        (forest (upOps w))
+                        dag
         -- this pass is what turns nodes converged-'TurnDown', so it is also
         -- where the graphs that described them stop being needed.
         modifyIORef' world resettle
@@ -1107,7 +1102,6 @@ serveWith wakeups r nodeReporter parseSeed configure program h = do
                 | otherwise -> mark act Converged
             UpDown.Failed act _ -> mark act Errored
             UpDown.Blocked act -> mark act Blocked
-            UpDown.Redundant _ -> pure ()
             -- not a node outcome: it says two declarations describe one
             -- node differently, which the operator wants to see but which
             -- leaves no node any more or less converged than it was.
@@ -1277,34 +1271,18 @@ pendingCounts w =
   where
     count dir = length [() | st <- Map.elems w.worldNodes, st.nodeDirection == dir, st.nodeConvergence /= Converged]
 
-{- | Graphs of the active seeds: what the up pass walks. 'prune' has already
-reduced 'worldEpochs' to exactly those, so this is the whole list.
+{- | What both convergence passes walk: the magma, wired back up with the
+precedence the ledger holds. No graph is involved, which is the point — a
+retired declaration's graph is long gone, and its two flat sets are enough.
 
-The up pass is still graph-driven; the down pass is not (see 'downDag'). That
-asymmetry is deliberate and temporary — 'UpDown.upTreeWith' still walks a
-'Cofree' of its own, and re-expressing it over the same structures is a step
-of its own in @specs\/per-node-state-machines.md@.
+One structure for both directions, rather than a union of graphs per pass.
+Nodes this pass is not for are in it too, exactly as they used to be in the
+epoch graphs the old @upOps@\/@downOps@ handed over; the pass's
+'UpDown.Gate' is what leaves them alone, and a 'UpDown.Skip'ped node releases
+its neighbours just like an applied one.
 -}
-upOps :: World seed directive -> [Op]
-upOps w = fmap epochOp w.worldEpochs
-
-{- | What the down pass walks: the magma, wired back up with the precedence
-the ledger holds. No graph is involved, which is the point — a retired
-declaration's graph is gone, and its two flat sets are enough.
-
-Nodes not wanted down are in here too, exactly as they used to be in the
-epoch graphs the old @downOps@ handed over; the pass's 'UpDown.Gate' is what
-leaves them alone, and a 'UpDown.Skip'ped node releases its predecessors just
-like a torn-down one.
--}
-downDag :: World seed directive -> Dag Extension
-downDag w = Dag.fromMagma w.worldMagma (Ledger.precedenceOf w.worldLedger)
-
-{- | Bundles several graphs under one 'Actionless' root, which 'upTree' and
-'downTree' walk through without treating it as a node of its own.
--}
-forest :: [Op] -> Op
-forest ops = OpGraph (deps ops) Actionless
+worldDag :: World seed directive -> Dag Extension
+worldDag w = Dag.fromMagma w.worldMagma (Ledger.precedenceOf w.worldLedger)
 
 {- | Read off 'worldLog', not 'worldEpochs' — a declaration is still worth
 printing long after 'prune' has collected the graph it made. The

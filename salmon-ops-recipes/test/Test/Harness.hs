@@ -96,9 +96,9 @@ capture = do
 nat :: Identity a -> IO a
 nat = pure . runIdentity
 
--- | Run 'upTree' and return the full traversal trace (Eval\/Skip\/Redundant
--- per node), so idempotency\/dedup can be asserted on directly instead of
--- only inferring it from side effects.
+-- | Run 'upTree' and return the full traversal trace (Eval\/Skip\/Blocked
+-- per node, one report per node), so idempotency\/dedup can be asserted on
+-- directly instead of only inferring it from side effects.
 runUpCapturing :: Op -> IO [UpDown.Report Extension]
 runUpCapturing o = do
     (r, readBack) <- capture

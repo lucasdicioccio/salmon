@@ -84,8 +84,8 @@ selectDefaultsToEverything = do
 -- | Diamond shape reached two ways ('inject' + 'deps', like
 -- 'Test.DownTreeSpec.diamondApexOnceLast'), so dedup-by-'Ref' at 'upTree'
 -- time is exercised alongside the force-skip itself: 'apex' is excluded, and
--- must be 'Skip'ped both times it's walked (not just once, and not
--- 'Redundant' the second time as if it had genuinely run).
+-- must be reported 'Skip'ped — once, because the collapse to a
+-- 'Salmon.Op.Dag.Dag' makes it one node, and never 'Eval'ed.
 forceSkipSkipsOnlyExcluded :: IO ()
 forceSkipSkipsOnlyExcluded = do
     ranRef <- newIORef []
@@ -103,7 +103,7 @@ forceSkipSkipsOnlyExcluded = do
     let isApex act = ref (extension act) == mkRef "leaf" ("apex" :: Text)
     let skips = [() | Skip act <- reports, isApex act]
     let evals = [() | Eval act <- reports, isApex act]
-    assertEqual "apex reported Skip exactly once (the other occurrence dedupes as Redundant)" 1 (length skips)
+    assertEqual "apex reported Skip exactly once, however many paths reach it" 1 (length skips)
     assertEqual "apex never reported Eval" 0 (length evals)
 
 -- | 'query show --dedupe' collapses a shared node's repeated occurrences down

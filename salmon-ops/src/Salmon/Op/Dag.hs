@@ -60,6 +60,7 @@ module Salmon.Op.Dag (
     dagEdges,
     representativeOf,
     roots,
+    leaves,
 
     -- * Building one
     foldDag,
@@ -170,6 +171,12 @@ representativeOf dag r = Map.lookup r (dagNodes dag)
 -- starts, and (for a fold of a single rooted graph) normally just the root.
 roots :: Dag ext -> [Ref]
 roots dag = [r | r <- dagOrder dag, null (dependantsOf dag r)]
+
+-- | The nodes that depend on nothing, in first-seen order — where a bring-up
+-- starts. The mirror of 'roots', and the reason both adjacency directions are
+-- kept rather than one being recovered on demand.
+leaves :: Dag ext -> [Ref]
+leaves dag = [r | r <- dagOrder dag, null (dependenciesOf dag r)]
 
 -------------------------------------------------------------------------------
 

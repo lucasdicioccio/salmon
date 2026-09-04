@@ -894,9 +894,40 @@ wakeup channel, and the `run_stopping` flag.
    exactly the live declarations' newest epochs. `NodeState.nodeEpoch` is
    gone too — it was write-only, and there is no longer an epoch to name once
    a declaration retires.
-4. **Sync drivers re-expressed** over the magma and ledger. `run up`/`run
-   down` produce the same `Report` stream and the same `Bool`;
+4. **Sync drivers re-expressed** — *landed*. Over the magma and ledger.
+   `run up`/`run down` produce the same `Report` stream and the same `Bool`;
    `Test.DownTreeSpec`/`Test.QuerySpec` are the net.
+
+   "The same `Report` stream" turned out to be one constructor too strong.
+   `Redundant` was a statement about a repeated *occurrence in the expanded
+   `Cofree`*, and there are no occurrences left once the fold has run: a node
+   is one node however many paths reach it, which is exactly what the magma
+   means. So `Redundant` is deleted rather than preserved, and `upTree` now
+   matches `downTree`, which never emitted it. Nothing consumed it —
+   `Serve.stateWriter` ignored it, and `Test.QuerySpec`'s assertion was that
+   the excluded node reported `Skip` *once*, which is now structural rather
+   than incidental. The "how many paths reach this node" question it half
+   answered is `length . dependantsOf`.
+
+   Both drivers are now the same walk — `UpDown.walk`, parameterised by which
+   adjacency direction a node waits on — so `upDag` and `downDag` differ only
+   in direction and in which action they run. That is the shape §"Two drivers
+   over one node model" asks for, one step early: the *synchronous* driver is
+   now single, and step 6's async driver joins it over the same structures.
+
+   One behaviour change falls out of the merge and is worth having. A `Dag`
+   built from a flat edge set can describe a cycle — impossible from an
+   expanded `Cofree`, but reachable now that two declarations can each
+   contribute one leg — and a node on a cycle never becomes ready. Both
+   drivers used to leave it silently unapplied and still report success. The
+   walk now sweeps for unreached nodes at the end and reports them `Blocked`.
+
+   `serve` loses its last graph-driven pass: `worldDag` rebuilds one structure
+   from the magma and `precedenceOf`, and both directions run over it.
+   `epochOp` is gone with `upOps` and `forest`. `epochGraph` survives for one
+   reason, which is worth stating because it is the residue this milestone did
+   /not/ eliminate: `--select` resolves *path* patterns, and a `Dag` has refs
+   and edges but no paths.
 5. **Rewrites as a registered post-fold phase**, taking `desired` and reading
    `dynamics` across the magma. `installAllDebsAtOnceWith` ports to it and
    becomes direction-aware: an install batch and a removal batch with an

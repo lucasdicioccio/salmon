@@ -186,7 +186,7 @@ the same up/down/check/notify shape:
   is a first-class, inspectable value (the same `Tree`/`Dot` rendering used
   for infra graphs — see `howto-ops.md` §9) rather than something that only
   exists as the emergent behavior of a program, the *reported* trace of a
-  traversal (which nodes were `Eval`ed, `Skip`ped, `Redundant`, `Failed`,
+  traversal (which nodes were `Eval`ed, `Skip`ped, `Failed`,
   `Blocked`, and in what order — see `Salmon.Actions.UpDown.Report`) is
   already the kind of event log process-mining tooling wants to reconstruct
   a real process model from, without needing separate instrumentation

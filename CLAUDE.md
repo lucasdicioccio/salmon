@@ -99,34 +99,36 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   Netfilter, CronTask, Rsync, etc). Look at `Filesystem.hs` as the canonical small example of the
   `op` pattern (a value type like `Directory`/`FileContents`, a smart constructor returning `Op`
   that fills in `help`/`notes`/`ref`/`up`/`down`).
-- **`Actions/UpDown.hs`** implements graph execution: `upTree` walks the expanded `Cofree Graph`
-  bottom-up, dedupes by `Ref` (an already-visited ref is reported `Redundant` and skipped even if
-  reachable via multiple paths), evaluates `check` to decide `Skip` vs `Eval`+`up`. If `up`
-  throws, that's caught and reported as `Failed`, and everything that (transitively) depends on it
-  is reported `Blocked` instead of being evaluated — see "Conventions for node authors" below for
-  what this means for how `up` needs to be written. `upTree` returns `IO Bool` (`False` iff
-  anything failed or was blocked). `downTree` tears down and shares the catch-and-report/`Bool`
-  return shape, but does *not* walk the `Cofree` structurally the way `upTree` does. A node must
-  be torn down only after *every* node that depends on it already has — which for a predecessor
-  shared by several dependents (e.g. the directory two files live in) a naive top-down + dedup
-  walk gets wrong: it would tear that predecessor down at the *first* dependent reached, while the
-  others still stand on it (a real "directory not empty" bug this used to have). So `downTree`
-  first collapses the `Cofree` to a `Ref`-level DAG (deduping shared nodes, skipping through
-  `Actionless` glue) and tears nodes down in reverse-dependency order: a node becomes free once
-  its last dependent is done, and only then are its own predecessors released. That collapse is
-  `Salmon.Op.Dag` (below), not code inside `UpDown`. Because a shared
-  node is visited exactly once, `downTree` never emits `Redundant`. Failure containment is the
-  mirror of `upTree`'s: a failed `down` leaves that node *still standing*, so every one of its
-  predecessors is `Blocked` (unsafe to pull a dependency out from under a node that's still up),
-  and a predecessor is blocked if *any* of its dependents was — one failure contains a whole
-  still-standing sub-DAG. A node's own `check` is never consulted for teardown (it answers "does
-  my effect still need creating", which isn't the question a teardown asks), so there's no
-  per-node "skip if already gone".
-  Both take an optional `Gate ext = Act ext -> IO Requirement` via `upTreeWith`/`downTreeWith` —
-  a *caller*-supplied "does this traversal want to touch this node at all", asked before (and
-  short-circuiting) the node's own `check`, and reported as a `Skip`. `upTree`/`downTree` are
-  those with a gate that wants everything; the only real user is `Actions/Serve.hs` (below),
-  which walks a union of several seeds' graphs and must leave other seeds' nodes alone.
+- **`Actions/UpDown.hs`** implements graph execution. Both directions run the same way: `expand`
+  the `OpGraph` to a `Cofree Graph`, collapse that to a `Ref`-keyed DAG with `Salmon.Op.Dag`
+  (below), then walk it. `upDag` walks it in dependency order — a node is applied once everything
+  it depends on is done — evaluating `check` to decide `Skip` vs `Eval`+`up`. `downDag` walks the
+  same structure the other way, running `down`. `upTree`/`downTree` are the expand-fold-walk
+  wrappers over an `Op`. Both return `IO Bool`, `False` iff anything failed or was blocked.
+  A node appears **once** whatever number of paths reach it, so there is no per-occurrence
+  report; a `Ref` reached from two differently-described nodes is reported `Conflicting` (see
+  `Op/Dag.hs`).
+  Failure is contained in whichever direction the walk runs. Going up: `up` throwing is caught,
+  reported `Failed`, and everything that (transitively) depends on it is `Blocked` instead of
+  being evaluated against an unmet precondition — see "Conventions for node authors" below for
+  what that means for how `up` must be written. Going down it is the mirror: a failed `down`
+  leaves that node *still standing*, so every one of its predecessors is `Blocked` (unsafe to
+  pull a dependency out from under a node that's still up), and a predecessor is blocked if
+  *any* of its dependents was — one failure contains a whole still-standing sub-DAG.
+  Walking the dependants direction is what teardown needs and is the reason the DAG carries both:
+  a node must go down only after *every* node depending on it has, which for a predecessor shared
+  by several dependents (the directory two files live in) a naive top-down walk gets wrong — it
+  would remove that directory at the *first* dependent reached (a real "directory not empty" bug
+  this used to have). A node's own `check` is never consulted for teardown (it answers "does my
+  effect still need creating", which isn't the question a teardown asks), so there's no per-node
+  "skip if already gone". If an edge set describes a **cycle**, the nodes on it never become
+  ready; they're reported `Blocked` at the end of the walk rather than silently skipped.
+  Both take an optional `Gate ext = Act ext -> IO Requirement` via `upTreeWith`/`downTreeWith`
+  (or `upDag`/`downDag` directly) — a *caller*-supplied "does this traversal want to touch this
+  node at all", asked before (and short-circuiting) the node's own `check`, and reported as a
+  `Skip`. `upTree`/`downTree` are those with a gate that wants everything; the only real user is
+  `Actions/Serve.hs` (below), which walks the union of several seeds' nodes and must leave other
+  seeds' alone.
 - **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded
   `Cofree Graph (OpGraph m (Actions ext))` into a `Dag` — one representative per `Ref`
   (`dagNodes`, the *magma*), `dagDependencies` **and** `dagDependants` (the direction the
@@ -160,15 +162,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it has `Converged` there), and `worldEpochs`, the declared seed / directive / graph, kept only
   for declarations that are still live. Everything else is derived: a node some live declaration
   asks for is wanted `TurnUp`, a node no live declaration still asks for is wanted `TurnDown`,
-  and flipping a node's direction resets it to `Pending`. Converging is then one teardown pass
-  plus one `upTreeWith` pass with a gate that filters to "wanted in this pass, not yet
-  converged" — so ordering, dedup and failure containment are exactly `run up`/`run down`'s, and
-  all this module adds is the memory. Nodes left `Errored`/`Blocked` are retried by the next
-  pass. Note the asymmetry: the **up** pass still walks the active epochs' graphs
-  (`upTreeWith`), while the **down** pass has no graph at all — `downDag` rebuilds something
-  walkable out of the magma and the ledger's precedence via `Dag.fromMagma`, which is why a
-  retired declaration's graph can be dropped the moment it's retracted. Re-expressing the up
-  pass the same way is milestone 4.
+  and flipping a node's direction resets it to `Pending`. Converging is then one `downDag` pass
+  and one `upDag` pass with a gate that filters to "wanted in this pass, not yet converged" — so
+  ordering, dedup and failure containment are exactly `run up`/`run down`'s, and all this module
+  adds is the memory. Nodes left `Errored`/`Blocked` are retried by the next pass. Neither pass
+  touches a graph: `worldDag` rebuilds one walkable structure from the magma and the ledger's
+  precedence via `Dag.fromMagma`, and both directions run over it. `epochGraph` survives for one
+  reason only — `--select` resolves *path* patterns, and a `Dag` has `Ref`s and edges but no
+  paths.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately

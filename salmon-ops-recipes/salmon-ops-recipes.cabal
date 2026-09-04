@@ -91,6 +91,7 @@ test-suite salmon-ops-recipes-test
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
                     , Test.ServeSpec
+                    , Test.UpTreeSpec
     build-depends:    base
                     , aeson
                     , bytestring
