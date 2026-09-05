@@ -17,10 +17,12 @@ with its deviations recorded in place there.
 **What remains is of two kinds.** A residue no milestone covers — some of it
 bookkeeping, but item (R1) is not: it is the reason milestones 7, 8 and 9
 supervise almost nothing on a real graph, and it was already worth more than
-the last milestone. And, separately, five things that *did* land but were
+the last milestone. And, separately, six things that *did* land but were
 shaped under one milestone's pressure and want a second pass now that the
-whole thing exists; §"Landed, but wanting another iteration" is those, and
-(I1) is the one that gets worse rather than better as (R1) proceeds.
+whole thing exists; §"Landed, but wanting another iteration" is those. Two of
+them are not matters of taste: (I1) loses a running process outright, and
+(I6) means a convergence pass does nothing at all about a re-declaration that
+changed a node's content.
 
 The honest summary of where this design stands: **the execution model is
 finished and the nodes have not caught up with it.** Eight milestones built a
@@ -183,22 +185,46 @@ to add it.
 ## Landed, but wanting another iteration
 
 These are not open work items in the sense (R1)–(R8) are: each one is
-implemented, tested and shipped, and the code does something coherent today.
+implemented and shipped, and — (I1) excepted — the code does something
+coherent today.
 They are the places where the *shape* was decided under a single milestone's
 pressure and a different answer was defensible — so they want a second pass
-with the whole thing built, rather than a bug report. Ranked by how much the
-answer changes.
+with the whole thing built, rather than a bug report. (I1) and (I6) are the
+two to settle; the rest are listed after them and are genuinely matters of
+taste.
 
-(I1) is the one to settle first. It is the only one of the five where the
-current behaviour is arguably wrong rather than merely one of two readings,
-and it gets worse rather than better as (R1) lands.
+(I1) is the one to settle first, and it is no longer a matter of taste: it
+loses a running process outright, which
+`salmon-ops-serve-fixture --daemon --stale-check` demonstrates in about
+fifteen seconds. (I6) is the widest — it is not a milestone-9 decision at all,
+and it says something uncomfortable about what a convergence pass currently
+does.
 
-### I1. A demoted node consults its own `check`, so a node that *can* answer is never bounced
+### I1. A demoted node consults its own `check` — and a `managed` one is then left down while reporting `Up`
+
+**This one is a bug rather than a fork, and there is a demonstration of it in
+the tree.** `salmon-ops-serve-fixture --daemon --stale-check` gives a daemon
+node a plausible health check ("my log file exists"); drive the loop, change
+the config it stands on, and watch:
+
+```
+Signalling "web" 15
+Reaped "web"
+serve: daemon sent back to wait: ... stopped being up
+```
+
+...and nothing after it. The process is torn down and never restarted, and
+the node settles into `Up` claiming its effect is in place.
 
 `demoting` sends a node to `waitUp`, which comes back through
 `attempt ... Consult` — and `Consult` asks the node's own `check` first. A
 node whose check says `Success` therefore reports `Skip` and settles straight
 back into `Up` without re-running anything (`Actions/Upkeep.hs`, `attempt`).
+For a one-shot node that is merely a missed bounce; the effect really is
+still there, and the check is right. For a `managed` node it is a lie the
+supervisor tells about itself: the machine cancelled the action on its way
+out of `watch`, so the process is *certainly* gone, and any check that says
+otherwise is stale by construction.
 
 So `RestForOne` fires only for dependants that *cannot* tell whether they are
 up. Today that is nearly every node, which is why the milestone's tests pass
@@ -218,10 +244,19 @@ whether work is needed. The case against is that it makes the feature
 self-cancelling: the better a node's check, the less `RestForOne` can do to
 it.
 
-A middle answer exists and may be the right one: `Regardless` for a node with
-a `managed` action (whose process this node has just torn down, so it is
-certainly not up), `Consult` for one whose effect persists on its own. That
-splits along the line milestone 8 already drew.
+**The middle answer is the one to take, and it is a one-line change:**
+`Regardless` for a node with a `managed` action, `Consult` for one whose
+effect persists on its own. It splits along the line milestone 8 already
+drew, it fixes the orphaning outright, and it leaves the genuinely
+contestable half — whether a *one-shot* node's demotion means re-apply or
+re-evaluate — open to be decided on its own merits rather than under the
+pressure of a bug.
+
+Milestone 8's own ordering rule is the precedent and points the same way: it
+consults the check before the policy because "a process that exits 0 because
+it daemonised is still up, and the check is the only thing that can say so".
+The demotion case is the exact opposite — *we* stopped the process, so the
+check is the only thing that cannot say anything useful.
 
 ### I2. The strategy is authored on the dependency, not on the dependant
 
@@ -307,6 +342,36 @@ under an old `supGiveUpAfter` would need to be reconsidered); or make
 `sameRepresentative` able to see it, which means `Supervision` rendering as a
 value rather than as a `Dynamic`'s type name, and is the more honest fix
 because it makes the change visible to the magma's conflict reporting too.
+
+### I6. A re-declaration that changes what a node *is* does not re-apply it
+
+Not a milestone-9 decision at all — it predates it, and milestone 9 is only
+how it came to light. `Serve` records convergence per `Ref`, and a
+re-declaration that changes a node's *content* leaves its `Ref` alone: the
+magma's last-writer-wins swaps in the new representative, but the node stays
+`Converged` and the gate skips it. The pass says `converging (0 down, 0 up)`
+and does nothing at all.
+
+Watchable in the fixture: `only --name web --daemon --greeting goodbye` after
+an `up ... --greeting hello` produces an empty pass, and the new content only
+lands afterwards, when the config node's own machine looks and finds the file
+saying something other than what it should. **A node with no `check` — which
+is very nearly all of them — keeps the old content indefinitely.** So today
+`filecontents` with changed content is a no-op on re-declaration, and the
+operator has no way to tell.
+
+This is (R1) wearing a different hat, and it is the strongest argument for
+(R1) so far: the checks are not only how drift is noticed, they are currently
+the only way a *deliberate* change is applied at all.
+
+**The fork.** Reset a node's convergence when its representative changes,
+which needs `sameRepresentative`'s comparison to be trusted for this purpose
+(it compares shorthand, help, notes and the rendering of `dynamics` — not
+`up`, which is where the content actually lives, so a `filecontents` whose
+bytes changed compares *equal* and this does not work without giving nodes a
+content-bearing identity). Or accept it and lean on (R1), making "a node
+worth re-declaring with different content is a node that needs a `check`" an
+explicit convention in the node-author docs.
 
 -------------------------------------------------------------------------------
 
@@ -539,6 +604,12 @@ what makes it bite.
    with (R5) since both are about what an adopted or replaced machine is
    handed, and (I2) and (I4) are questions about what the feature *means*
    that are better answered after somebody has used it on a real graph.
+
+(I6) has no place in that order because it is not a step: it is a fact about
+what a convergence pass does that should be decided before (R1) is done
+node-by-node, since which way it goes changes whether adding a `check` to
+`filecontents` is a nicety or the only thing that makes re-declaring content
+work.
 
 ## Relationship to the other specs
 

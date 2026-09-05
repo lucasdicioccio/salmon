@@ -1252,11 +1252,15 @@ wakeup channel, and the `run_stopping` flag.
    never fires. The cascade needed no code — a demoted node is itself no
    longer up, which is all a dependant of *it* that opted in has to see.
 
-   Four of those five, plus where the strategy hangs off an edge and what a
-   demotion means for a node that can answer its own `check`, are written up
-   as wanting another pass in
-   `specs/per-node-state-machines-remaining.md` §"Landed, but wanting another
-   iteration" — they are decided, not settled.
+   Those departures, plus two things found by building a demonstration of
+   this milestone (`salmon-ops-serve-fixture --daemon`), are written up as
+   wanting another pass in `specs/per-node-state-machines-remaining.md`
+   §"Landed, but wanting another iteration" — they are decided, not settled.
+   Two of them are not matters of taste: a demoted `managed` node whose check
+   is satisfied is torn down and never restarted while reporting itself `Up`
+   (I1), and a convergence pass does nothing about a re-declaration that
+   changed a node's content, so only a node with a `check` ever picks one up
+   (I6).
 
 ## Non-goals (v1)
 

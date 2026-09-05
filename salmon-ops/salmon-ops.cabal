@@ -167,9 +167,11 @@ executable salmon-ops-serve-fixture
     hs-source-dirs:   fixtures
     build-depends:    base >=4.16.3.0
                     , aeson
+                    , directory
                     , filepath
                     , optparse-applicative
                     , optparse-generic
+                    , process
                     , salmon-core
                     , salmon-ops
                     , text

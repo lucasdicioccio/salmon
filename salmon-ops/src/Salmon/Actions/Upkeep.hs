@@ -575,12 +575,13 @@ startUpkeep report (Kept prior) tend dag = do
                             say (Adopted act)
                             pure [(aref, m)]
             _ -> pure []
+    -- everything not adopted is cancelled here, which tears down what it was
+    -- holding. What comes back is therefore exactly the adopted set; anything
+    -- else would be a machine stranded by a future change to 'releaseKept',
+    -- and is reported rather than dropped on the floor.
     Kept leftovers <- releaseKept report (`Map.member` adopted) (Kept prior)
-    -- 'releaseKept' cancelled everything not adopted, so this is empty; it
-    -- is bound rather than ignored so that a future change to that function
-    -- cannot silently strand a process here.
-    unless (Map.null leftovers) $
-        forM_ (Map.elems leftovers) (say . Released . machineAct)
+    forM_ (Map.toList leftovers) $ \(aref, m) ->
+        unless (Map.member aref adopted) (say (Released (machineAct m)))
 
     let starting = [entry | entry@(aref, _, _) <- tended, not (Map.member aref adopted)]
 
