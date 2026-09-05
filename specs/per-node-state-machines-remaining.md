@@ -14,11 +14,13 @@ Written after milestone 9 landed (`git log --oneline` on `serve-supervision`).
 **All nine milestones have landed.** Each is marked *landed* in the design,
 with its deviations recorded in place there.
 
-**What remains is a residue no milestone covers.** Some of it is
+**What remains is of two kinds.** A residue no milestone covers — some of it
 bookkeeping, but item (R1) is not: it is the reason milestones 7, 8 and 9
 supervise almost nothing on a real graph, and it was already worth more than
-the last milestone. The residue is §"Not in any milestone" below, and it is
-now the whole of this file's forward-looking content.
+the last milestone. And, separately, five things that *did* land but were
+shaped under one milestone's pressure and want a second pass now that the
+whole thing exists; §"Landed, but wanting another iteration" is those, and
+(I1) is the one that gets worse rather than better as (R1) proceeds.
 
 The honest summary of where this design stands: **the execution model is
 finished and the nodes have not caught up with it.** Eight milestones built a
@@ -175,6 +177,136 @@ to add it.
   again — i.e. the demotion goes through `WaitUp` and not straight to
   `Upping`;
 - a node with no dependants demotes nothing and costs nothing.
+
+-------------------------------------------------------------------------------
+
+## Landed, but wanting another iteration
+
+These are not open work items in the sense (R1)–(R8) are: each one is
+implemented, tested and shipped, and the code does something coherent today.
+They are the places where the *shape* was decided under a single milestone's
+pressure and a different answer was defensible — so they want a second pass
+with the whole thing built, rather than a bug report. Ranked by how much the
+answer changes.
+
+(I1) is the one to settle first. It is the only one of the five where the
+current behaviour is arguably wrong rather than merely one of two readings,
+and it gets worse rather than better as (R1) lands.
+
+### I1. A demoted node consults its own `check`, so a node that *can* answer is never bounced
+
+`demoting` sends a node to `waitUp`, which comes back through
+`attempt ... Consult` — and `Consult` asks the node's own `check` first. A
+node whose check says `Success` therefore reports `Skip` and settles straight
+back into `Up` without re-running anything (`Actions/Upkeep.hs`, `attempt`).
+
+So `RestForOne` fires only for dependants that *cannot* tell whether they are
+up. Today that is nearly every node, which is why the milestone's tests pass
+and why it looks like it works. It is exactly backwards from where the tree
+is going: the whole of (R1) is teaching nodes to answer that question, and
+every node that learns to stops being bounceable. The flagship case is the
+casualty — a service with a working health probe reads "still up" and ignores
+the configuration that changed underneath it, which is the one thing this
+milestone was for.
+
+**The fork.** Either a demotion means *re-apply* — `attempt` entered with
+`Regardless` rather than `Consult`, the way a restart from `look` already is
+— or it means *re-evaluate*, which is what it means now. The case for the
+current behaviour is that a spurious demotion then costs one check rather
+than one `up`, and that a node's check is meant to be the authority on
+whether work is needed. The case against is that it makes the feature
+self-cancelling: the better a node's check, the less `RestForOne` can do to
+it.
+
+A middle answer exists and may be the right one: `Regardless` for a node with
+a `managed` action (whose process this node has just torn down, so it is
+certainly not up), `Consult` for one whose effect persists on its own. That
+splits along the line milestone 8 already drew.
+
+### I2. The strategy is authored on the dependency, not on the dependant
+
+§9.2 says the strategy is a per-node knob without saying which end of the
+edge it hangs off, and Erlang — where it is a property of the *supervisor* —
+does not settle it either, because there is no supervisor here to put it on.
+It went on the node that goes away: the config file declares that its going
+away matters, and the services reading it say nothing.
+
+The argument for that is real and is in the design doc: the file's author
+knows the content is load-bearing, while six services would each have to know
+separately that it might change. The argument against is equally real and is
+not written down anywhere — **a node's own restarts are its own business**,
+and this is the one policy in `Supervision` that lets one node's author
+decide something about another node's behaviour. A `RestForOne` on a widely
+shared node is a lever with a very long arm, and nothing warns the nodes on
+the other end of it.
+
+**The fork.** Keep it on the dependency; move it to the dependant ("bounce me
+when anything I stand on moves"); or have both and require them to agree,
+which is the conservative option and the expensive one.
+
+### I3. `supStableAfter` now carries two unrelated meanings
+
+It was "having been up this long forgets the earlier failures", read by
+`countFailure`. Milestone 9 also made it "do not demote this node twice
+inside this interval", read by `tooSoon`. One field, two jobs, and no
+particular reason an author would want the same number for both: how long a
+service has to run before a crash counts as a new crash rather than a
+continuing one is a different question from how often its dependants may be
+rebuilt behind it.
+
+This happened because §9.3 named `supStableAfter` as the mitigation and
+adding a field looked like exceeding the brief. It was the wrong instinct:
+the record is *meant* to grow, `defaultSupervision` makes growing it free for
+every node that does not care, and this is precisely the situation the "amend
+`defaultSupervision`" convention exists to make cheap.
+
+**The fork.** Split out `supDemoteEvery :: Micros` (defaulting to
+`supStableAfter`'s value, so nothing changes for anybody), or accept the
+overload and document it as one concept — "the timescale on which this node's
+state is meaningful" — which is a defensible reading and is roughly the
+justification the current doc gives.
+
+### I4. The cascade needs opting in at every hop
+
+A demoted node unsettles, so a dependant of *it* that also declared
+`RestForOne` sees the same thing and goes back too. That is the whole
+mechanism, and it means the cascade stops at the first node in the chain that
+did not opt in: a `RestForOne` config, a plain service, and something
+downstream of the service leaves the downstream node alone.
+
+Erlang's `rest_for_one` restarts everything started after the failed child
+regardless of what those children think. Ours is strictly more conservative,
+which is the right default for a mechanism landing late — but it means the
+name promises more than the behaviour, and an author reading "and everything
+after it" will be surprised.
+
+**The fork.** Leave it (and rename, or at least document the difference
+loudly); or make the cascade transitive from the declaring node, which means
+a demotion carries an "originating ref" out to the whole transitive cone
+rather than only to the immediate dependants that opted in.
+
+### I5. Adoption refreshes a machine's supervisor, but not its policy
+
+`startUpkeep` writes a new `Under` into every machine it adopts, so an
+adopted machine follows its current supervisor's statuses, failure set,
+neighbour lists and halt flag. It does not rewrite `ctxPolicy`
+(`Actions/Upkeep.hs`), so a `managed` node whose `Supervision` changes keeps
+the old one for as long as it stays adopted — which under `serve` is
+indefinitely.
+
+Nor is the change detectable: `Dag.sameRepresentative` compares the
+*rendering* of `dynamics`, and a `Dynamic` renders as its type alone, so a
+node whose policy changed and whose ref did not is "unchanged" and is
+adopted rather than replaced. This predates milestone 9 — but milestone 9 put
+a second thing in `Supervision` that matters to other nodes, so a stale
+policy now has reach beyond its own node.
+
+**The fork.** Refresh the policy on adoption (cheap, but changing a running
+machine's policy mid-flight has its own questions — a node that has given up
+under an old `supGiveUpAfter` would need to be reconsidered); or make
+`sameRepresentative` able to see it, which means `Supervision` rendering as a
+value rather than as a `Dynamic`'s type name, and is the more honest fix
+because it makes the change visible to the magma's conflict reporting too.
 
 -------------------------------------------------------------------------------
 
@@ -372,7 +504,14 @@ would then have to decide whether salmon or systemd is supervising it.
 ## The order I would do it in
 
 (R1) is now the whole of what stands between this engine and its doing
-anything on a real graph.
+anything on a real graph — with one thing to settle first, because (R1) is
+what makes it bite.
+
+0. **I1**, before or alongside the first node that gains a `check`. A demoted
+   node consults its own check, so every node that learns to answer "am I up"
+   stops being bounceable by the config it stands on. Doing (R1) without
+   settling this quietly converts `RestForOne` from working-by-accident into
+   not working, one node at a time, with nothing failing to say so.
 
 1. **R1, one node at a time** — `Systemd.systemdService` first (it is the
    largest category of long-running effect in the repo and the one salmon
@@ -395,6 +534,11 @@ anything on a real graph.
    anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
    is most of what a supervisor-level restart would have needed to hand a
    replacement machine.
+5. **I2**–**I5** whenever there is an opinion to apply. None of them is
+   urgent and none is a bug; (I3) is fifteen minutes, (I5) is worth doing
+   with (R5) since both are about what an adopted or replaced machine is
+   handed, and (I2) and (I4) are questions about what the feature *means*
+   that are better answered after somebody has used it on a real graph.
 
 ## Relationship to the other specs
 

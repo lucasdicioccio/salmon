@@ -1252,6 +1252,12 @@ wakeup channel, and the `run_stopping` flag.
    never fires. The cascade needed no code — a demoted node is itself no
    longer up, which is all a dependant of *it* that opted in has to see.
 
+   Four of those five, plus where the strategy hangs off an edge and what a
+   demotion means for a node that can answer its own `check`, are written up
+   as wanting another pass in
+   `specs/per-node-state-machines-remaining.md` §"Landed, but wanting another
+   iteration" — they are decided, not settled.
+
 ## Non-goals (v1)
 
 - Cross-machine supervision. `Nodes/Self.hs`'s remote-op flattening is
@@ -1273,6 +1279,14 @@ two drivers, and what `query` shows.
 
 The one question the last round left open — **how is a node's watchdog
 authored?** — is settled too, and the answer was already in the tree.
+
+What is *not* settled is a different list, and it is not in this document:
+the questions above are the ones this design set itself, while the places
+where a landed milestone's shape was decided under that milestone's pressure
+and wants a second pass are collected in
+`specs/per-node-state-machines-remaining.md` §"Landed, but wanting another
+iteration" (I1–I5). Read that before acting on the departures recorded in the
+milestone list, which are written as decisions taken.
 
 **Decided: supervision policy rides `dynamics`, not a new `Extension` field.**
 `dynamics :: [Dynamic]` (`Builtin/Extension.hs:44`) is exactly the channel by
