@@ -155,7 +155,11 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
 - **`Actions/Concurrent.hs`** is the same two walks with one thread per node. Each node gets a
   `TVar Status` (`Op/Status.hs`) and blocks on `waitStability` over its neighbours — dependencies
   going up, dependants coming down — so STM's `retry` does the scheduling: no counters, no
-  ready-queue, no wakeup channel. Same `Report` stream, same `IO Bool`, same failure containment
+  ready-queue, no wakeup channel. `Status` also carries a monotonic `statusEpoch`, bumped when a
+  settled node unsettles, because `Stability` only answers "where is it now" and something
+  watching a neighbour for *departures* needs "did it move while I wasn't looking": a node that
+  fell over and recovered between two readings is `Stable` at both of them, and STM keeps no
+  queue of what happened in between. Same `Report` stream, same `IO Bool`, same failure containment
   as the sequential drivers. Three things it has to do that they don't: every `runReporter` goes
   through one `MVar` (the caller's reporter isn't assumed thread-safe, and interleaved multi-line
   reports are garbage); `Dag.stuck` is consulted **before** the walk, because a thread waiting on
@@ -207,8 +211,32 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   last reached `Up`), which is what makes `supGiveUpAfter` usable: without `supStableAfter`
   resetting it, a service that falls over once a day reaches any finite limit eventually. A node
   that has given up is *parked*, not gone — `Force` or `Recheck` starts it over. See milestone 8.
+  Lastly, **a node leaving `Up` can take its dependants with it**, though by default it does not.
+  A dependency whose author wrote `supStrategy = RestForOne` sends every dependant that had
+  reached `Up` back to `WaitUp`, to be brought up again on top of whatever it turns into —
+  Erlang's strategy of the same name read along dependency edges, and a config file is the case
+  for it. Four things make that affordable and are load-bearing. **It is opt-in on the node that
+  goes away**, so a machine with no such dependency subscribes to no statuses at all and the
+  whole watch is skipped rather than being a branch that never fires; the thundering herd simply
+  does not arise. **The watch compares `statusEpoch`, not `Stability`**, or it would miss every
+  departure short enough to matter — a rewritten config file is back in milliseconds. **It
+  remembers which `TVar` that epoch came from**, since under `serve` a dependency gets a new
+  machine on every command, and comparing across the two would read as a departure every time
+  anyone typed anything. And **a dependency that has not been seen settled up yet cannot demote
+  anybody**, which is what stops this undoing `Standing`. A second demotion inside the node's own
+  `supStableAfter` is dropped (that is a flap, not a change); an isolated one is always honoured,
+  whenever it comes. The cascade needed no code: a demoted node is itself no longer up, which is
+  all a dependant of *it* that opted in has to see. See milestone 9.
+  One structure exists only for adopted machines. `Upkeep.Under` is everything that belongs to a
+  machine's *supervisor* rather than to its node — the statuses, the failure set, the neighbour
+  lists, the halt flag — behind a `TVar` that `startUpkeep` rewrites on adoption. Without it an
+  adopted machine watches state nobody maintains any more: it never sees a dependency move, it
+  records its failures where no dependant reads them, and the first time it takes a path that
+  heeds the halt flag (which, before `RestForOne`, it never did) it reads one that is
+  permanently set and quietly exits, orphaning the process it holds.
 - **`Op/Supervision.hs`** is the per-node policy the above reads: `Restart`
-  (`Always`/`OnFailure`/`Never`, default `OnFailure`) and an optional watchdog, carried on
+  (`Always`/`OnFailure`/`Never`, default `OnFailure`), a `Strategy`
+  (`OneForOne`/`RestForOne`, default `OneForOne`) and an optional watchdog, carried on
   `dynamics` rather than in a new `Extension` field — the same channel, and for the same
   reason, as `Package` and the collection rewrite. Three things that buys: nothing changes
   for the many nodes with no opinion, "a node that declares no watchdog is never considered
@@ -217,8 +245,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   the first, report the rest. The policy reads a `CheckResult` for a node whose effect persists
   on its own and an `ExitCode` for one that owns a process. Two more fields exist only for the
   latter's sake: `supStableAfter` (having been up this long forgets the previous failures) and
-  `supGiveUpAfter` (stop after this many consecutive ones, default never). Prefer amending
-  `defaultSupervision` to spelling out every field — the record has grown once and will again.
+  `supGiveUpAfter` (stop after this many consecutive ones, default never). `supStrategy` is the
+  one field authored for somebody else's benefit — it says what this node's *going away* does to
+  the nodes standing on it, and it goes on the config file rather than on the six services
+  reading it, because only the file's author knows the content is load-bearing. Its default is
+  the opposite kind from `supRestart`'s, deliberately: putting a node back is an active choice
+  about that node, while bouncing its dependants is a decision about other people's nodes, so
+  nothing happens until somebody says it should. Prefer amending `defaultSupervision` to
+  spelling out every field — the record has grown twice and will again.
   The watchdog only ever *reports*: killing a wedged `up` would need a bracket the node does not
   necessarily have.
 - **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded
@@ -363,8 +397,10 @@ the effect. A node that sets no `check` gets `Unknown`, which means `up` runs, m
 the traversal, which `prelim` (evaluated outside `upTree`'s `try`) did not do. See
 `specs/per-node-state-machines.md` milestone 1 and `Test/CheckSpec.hs`.
 
-One consequence worth naming now that `run serve` tends its nodes: **a node's `check` is the
-only thing that can notice its effect going away.** A node with no `check` answers `Unknown`,
+Two consequences worth naming now that `run serve` tends its nodes. **A node's `check` is the
+only thing that can notice its effect going away**, and it is therefore also the only thing that
+can fire a `RestForOne` — a config node with no `check` never notices its own file changing, so
+nothing standing on it is ever bounced. A node with no `check` answers `Unknown`,
 which the upkeep FSM deliberately never acts on (see `Actions/Upkeep.hs` above), so such a node
 is brought up once and thereafter only polled pointlessly. Almost no builtin implements one
 today — `filecontents` does not, so a managed file deleted behind salmon's back is still not

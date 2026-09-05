@@ -636,6 +636,18 @@ renderTended t =
         -- operator should be able to tell which happened.
         Upkeep.Adopted act -> ["serve: " <> act.shorthand <> " kept running"]
         Upkeep.Released act -> ["serve: " <> act.shorthand <> " let go"]
+        -- worth a line even though it is a normal consequence of a
+        -- declared policy: it is the one thing in the supervisor that
+        -- touches a node nobody asked about, so an operator seeing work
+        -- happen on a node they did not expect should be able to find out
+        -- why from the same stream.
+        Upkeep.Demoted act dep ->
+            [ "serve: "
+                <> act.shorthand
+                <> " sent back to wait: "
+                <> unRef dep
+                <> " stopped being up"
+            ]
         Upkeep.Paused act -> ["serve: " <> act.shorthand <> " paused (its effect is untouched)"]
         Upkeep.Resumed act -> ["serve: " <> act.shorthand <> " resumed"]
         Upkeep.Policy act _ ignored ->

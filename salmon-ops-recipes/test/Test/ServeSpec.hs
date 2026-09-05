@@ -15,7 +15,7 @@ module Test.ServeSpec (tests) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, retry)
 import Control.Exception (IOException, throwIO, try)
 import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, ToJSON, encode)
@@ -42,13 +42,14 @@ import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), W
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.Upkeep as Upkeep
-import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, nodeps, op, opAct, ref, up)
+import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, managed, nodeps, op, opAct, ref, up)
 import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite)
+import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (ReporterM (..), silent)
@@ -83,6 +84,7 @@ tests =
         , testCase "an idle loop tends its nodes and puts a vanished effect back" idleLoopTends
         , testCase "`supervise off` leaves a vanished effect alone" superviseOffLeavesItAlone
         , testCase "a node that owns a process keeps it across commands, and loses it on clear" ownedProcessSurvivesCommands
+        , testCase "an adopted process still follows the config it stands on" adoptedDaemonFollowsItsConfig
         ]
 
 -------------------------------------------------------------------------------
@@ -620,17 +622,21 @@ thing in the model that can notice, which is exactly the case @check@ was
 merged into existence for.
 -}
 watched :: IORef Bool -> IORef Int -> Track' Spec
-watched there attempts = Track $ \spec ->
+watched there attempts = Track (watchedOp there attempts id)
+
+watchedOp :: IORef Bool -> IORef Int -> (Extension -> Extension) -> Spec -> Op
+watchedOp there attempts f spec =
     op "watched" nodeps $ \actions ->
-        actions
-            { ref = mkRef "watched" spec.specNames
-            , check = do
-                ok <- readIORef there
-                pure (if ok then Success else Failure "gone")
-            , up = do
-                atomicModifyIORef' attempts (\k -> (k + 1, ()))
-                writeIORefTrue there
-            }
+        f
+            actions
+                { ref = mkRef "watched" spec.specNames
+                , check = do
+                    ok <- readIORef there
+                    pure (if ok then Success else Failure "gone")
+                , up = do
+                    atomicModifyIORef' attempts (\k -> (k + 1, ()))
+                    writeIORefTrue there
+                }
   where
     writeIORefTrue v = atomicModifyIORef' v (const (True, ()))
 
@@ -711,6 +717,69 @@ ownedProcessSurvivesCommands =
             []
             [st.nodeConvergence | st <- Map.elems w.worldNodes, st.nodeConvergence /= Converged]
 
+{- | Milestone 9 under @serve@, which is the one place its neighbourhood
+refresh can be seen at all.
+
+A machine holding a process is /adopted/ by every new supervisor rather than
+restarted (see 'Salmon.Actions.Upkeep.Kept'), and every supervisor is new: the
+loop stands its machines down before each command it is handed. So an adopted
+machine that went on watching the maps of the supervisor that started it
+would stop noticing its config change after the very first command — which is
+to say, immediately and silently.
+
+Both halves are asserted: that the command did not restart it (the spawn
+count is unchanged across a @status@), and that it still followed its config
+afterwards.
+-}
+adoptedDaemonFollowsItsConfig :: IO ()
+adoptedDaemonFollowsItsConfig =
+    withTempDir $ \root -> do
+        there <- newIORef False
+        attempts <- newIORef (0 :: Int)
+        spawns <- newTVarIO (0 :: Int)
+        let ticks = root </> "ticks"
+        _ <- withSession (tickerOnConfig ticks there attempts spawns) root $ \session -> do
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 1)
+            awaitSpawns spawns 1
+            -- a read-only command, after which a different supervisor is
+            -- tending the same still-running process
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> supervisings rs >= 2)
+            assertEqual "the command adopted it rather than restarting it" 1 =<< readTVarIO spawns
+            -- now the config underneath it is taken away
+            atomicModifyIORef' there (const (False, ()))
+            awaitSpawns spawns 2
+            assertEqual "the config node had put its own effect back first" 2 =<< readIORef attempts
+        pure ()
+
+-- | How many times supervision has (re)started over at least one node.
+supervisings :: [Serve.Report] -> Int
+supervisings rs = length [() | Serve.Tended (Upkeep.Supervising _ _) <- rs]
+
+awaitSpawns :: TVar Int -> Int -> IO ()
+awaitSpawns v n =
+    expect ("the process to have been started " <> show n <> " time(s)") $
+        atomically (readTVar v >>= \k -> unless (k >= n) retry)
+
+{- | A process standing on a configuration node that declares
+'Salmon.Op.Supervision.RestForOne', which is the shape the whole strategy
+exists for: the config is rewritten, so what reads it has to be bounced.
+-}
+tickerOnConfig :: FilePath -> IORef Bool -> IORef Int -> TVar Int -> Track' Spec
+tickerOnConfig path there attempts spawns = Track $ \spec ->
+    let cfg = watchedOp there attempts restForOne spec
+     in op "ticker" (deps [cfg]) $ \actions ->
+            actions
+                { ref = Daemon.daemonRef (tickerDaemon path)
+                , managed = Just $ \out -> do
+                    atomically (modifyTVar' spawns (+ 1))
+                    Daemon.runDaemon silent (tickerDaemon path) out
+                , up = throwIO (userError "the ticker cannot be brought up by a one-shot pass")
+                }
+  where
+    restForOne x = x{dynamics = [supervised defaultSupervision{supStrategy = RestForOne}]}
+
 {- | One node, which owns a process that writes a line every 50ms.
 
 @up@ throwing is 'Salmon.Builtin.Nodes.Daemon.daemon''s own convention and is
@@ -719,11 +788,13 @@ convergence pass instead of to a machine, the pass would fail loudly rather
 than quietly do nothing.
 -}
 ticker :: FilePath -> Track' Spec
-ticker path = Track $ \_ ->
-    Daemon.daemon silent $
-        Daemon.defaultDaemon
-            "ticker"
-            (proc "/bin/sh" ["-c", "while true; do echo tick >> " <> path <> "; sleep 0.05; done"])
+ticker path = Track (const (Daemon.daemon silent (tickerDaemon path)))
+
+tickerDaemon :: FilePath -> Daemon.Daemon
+tickerDaemon path =
+    Daemon.defaultDaemon
+        "ticker"
+        (proc "/bin/sh" ["-c", "while true; do echo tick >> " <> path <> "; sleep 0.05; done"])
 
 countTicks :: FilePath -> IO Int
 countTicks path = do

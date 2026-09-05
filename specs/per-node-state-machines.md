@@ -1192,9 +1192,65 @@ wakeup channel, and the `run_stopping` flag.
    reported nothing, because `cabal build` with different `--ghc-options` in
    an up-to-date build directory does not recompile. Sweep in a fresh
    `--builddir` or not at all.
-9. **`rest_for_one`**: a node leaving `Up` demotes its dependants. The payoff,
-   and last because it is the only step that changes what a correct graph
-   *does*.
+9. **`rest_for_one`**: a node leaving `Up` demotes its dependants — *landed*.
+   `Supervision` gains `supStrategy :: Strategy` (`OneForOne`/`RestForOne`,
+   defaulting to `OneForOne`), a node in `Up` watches the dependencies that
+   declared `RestForOne`, and one of them leaving sends it back to `WaitUp`.
+   `Test/UpkeepSpec.hs` covers the eight behaviours, `Test/ServeSpec.hs` the
+   ninth that only exists under `serve`. Five departures, and the first two
+   are corrections to this document rather than choices:
+
+   - **A level read of a neighbour's `Stability` cannot see a departure at
+     all.** §9.1's sketch — "`resting`'s STM choice gains a branch watching
+     its dependencies' statuses" — misses every transition it is for: a
+     dependency that fell over and recovered between two of a dependant's
+     waits is `Stable` at both of them, and STM keeps no queue of what
+     happened in between. A config file rewritten in milliseconds is exactly
+     that shape, so the feature would have worked only for slow failures. The
+     fix is a monotonic `Status.statusEpoch`, bumped when a settled node
+     unsettles: the dependant remembers the number it last saw and compares.
+     Level-triggered STM, turned into edge detection by remembering.
+   - **The remembered number is only meaningful with the machine it came
+     from.** Under `serve` a dependency gets a *new* machine on every command
+     — a fresh `Status`, counting from zero — so a dependant comparing its
+     memory of the old one would read a departure every time an operator
+     typed anything, restarting every service, which is precisely what
+     `Kept` exists to prevent. The `TVar` is therefore remembered alongside
+     the epoch, and a dependency whose machine has been replaced is re-armed
+     rather than acted on.
+   - **An adopted machine had to be given its supervisor's state, not just
+     watched with it.** Everything a machine waits on — the statuses, the
+     failure set, the neighbour lists, *and the halt flag* — belongs to a
+     supervisor, while a machine holding a `managed` action outlives the one
+     that started it. Before this milestone that was invisible, because such
+     a machine only ever took paths that ignore the halt flag; a demoted one
+     takes `standby`, which heeds it, and would have read a permanently-set
+     flag and quietly exited, orphaning its process. Hence `Upkeep.Under`,
+     which `startUpkeep` writes into every machine it adopts. It also fixes a
+     bug that predates this milestone: an adopted machine was recording its
+     failures in a set no dependant read.
+   - **A dependency that has not been seen up cannot demote anybody.** Not in
+     the plan, and without it this milestone would have undone milestone 7's
+     `Standing`: a supervisor starting over a graph a pass has just converged
+     would send every opted-in node back to `WaitUp` before its dependencies'
+     machines had settled, re-running every `up` in the cone once per command.
+     A dependency is armed the first time it is seen settled up, and not
+     before.
+   - **`supStableAfter` is used as a rate limit, not as a settling delay.**
+     §9.3 asks for the second and it cannot work: a settling delay swallows
+     the case the feature is for, since the config file a service stands on is
+     back within milliseconds of being rewritten. So an isolated departure is
+     always honoured whenever it comes, and what is dropped is a *second*
+     demotion inside the node's own `supStableAfter` — which is what a flap
+     looks like and a change does not. That bounds a flapping dependency to
+     rebuilding the cone behind it once per interval.
+
+   The thundering herd §9.1 worried about does not arise, because the watch is
+   authored on the node that goes away rather than on the ones that get
+   bounced: a machine with no `RestForOne` dependency subscribes to no
+   statuses at all, and `crossing` is skipped rather than being a branch that
+   never fires. The cascade needed no code — a demoted node is itself no
+   longer up, which is all a dependant of *it* that opted in has to see.
 
 ## Non-goals (v1)
 

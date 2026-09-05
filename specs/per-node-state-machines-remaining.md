@@ -7,20 +7,18 @@ piece is worth doing, and what order I would do it in. Read the design first
 if you need the "why" of the model; read this if you want to know what to
 pick up next.
 
-Written after milestone 8 landed (`git log --oneline` on `serve-supervision`).
+Written after milestone 9 landed (`git log --oneline` on `serve-supervision`).
 
-## Headline: one milestone, and a residue that matters more than it
+## Headline: no milestones left, and a residue that matters more than they did
 
-**One of the nine milestones is unstarted:**
+**All nine milestones have landed.** Each is marked *landed* in the design,
+with its deviations recorded in place there.
 
-| # | what | size | why it is not done |
-|---|---|---|---|
-| 9 | **`rest_for_one`** — a node leaving `Up` demotes its dependants | small | last on purpose: the only step that changes what a *correct* graph does, and the only one with a plausible thundering-herd |
-
-**And a residue no milestone covers.** Some of it is bookkeeping, but item
-(R1) is not: it is the reason milestones 7 and 8 currently supervise almost
-nothing on a real graph, and it is worth more than milestone 9. The residue
-is §"Not in any milestone" below.
+**What remains is a residue no milestone covers.** Some of it is
+bookkeeping, but item (R1) is not: it is the reason milestones 7, 8 and 9
+supervise almost nothing on a real graph, and it was already worth more than
+the last milestone. The residue is §"Not in any milestone" below, and it is
+now the whole of this file's forward-looking content.
 
 The honest summary of where this design stands: **the execution model is
 finished and the nodes have not caught up with it.** Eight milestones built a
@@ -54,6 +52,11 @@ deviations recorded in place there.
    teardown escalates through the action's own bracket to the process group,
    and a machine holding a process is `Kept` across commands rather than
    stopped with its supervisor.
+9. `Supervision.supStrategy` — a node that declares `RestForOne` sends its
+   dependants back to `WaitUp` when it stops being up. Opt-in, so it costs
+   nothing until used; `Status.statusEpoch` is what makes a brief departure
+   impossible to miss; `Upkeep.Under` is what an adopted machine is handed so
+   that it keeps following a supervisor it did not start under.
 
 -------------------------------------------------------------------------------
 
@@ -79,10 +82,34 @@ change what the remaining work looks like:
 
 The `Restart` name collision the plan flagged is **still latent** — see (R8).
 
-## Milestone 9: `rest_for_one`
+## Milestone 9: `rest_for_one` — landed
 
-> A node leaving `Up` demotes its dependants. The payoff, and last because it
-> is the only step that changes what a correct graph *does*.
+Landed with five departures, recorded in place in
+`specs/per-node-state-machines.md`. Two of them are corrections to the
+sketch below rather than choices, and both are worth knowing before touching
+this code:
+
+- **§9.1's "watch the dependencies' statuses" cannot work as written.** A
+  level read of `Stability` misses every departure it is for — a dependency
+  that fell over and recovered between two of a dependant's waits looks
+  identical to one that never moved, and a rewritten config file is exactly
+  that shape. `Status.statusEpoch` (monotonic, bumped when a settled node
+  unsettles) is what the dependant compares against instead.
+- **§9.3's use of `supStableAfter` as a settling delay would swallow the case
+  the feature is for**, for the same reason: the config is back within
+  milliseconds. It is a rate limit on *repeat* demotions instead — an
+  isolated departure is always honoured, a second one inside the interval is
+  dropped.
+
+Two things the sketch got right and one it did not anticipate: the strategy
+is per-node and authored on the node that goes away (§9.2), the cascade
+needed no code, and the thundering herd (§9.1) does not arise at all, because
+a machine with no opted-in dependency subscribes to nothing. What it did not
+anticipate is that an adopted machine had to be *handed* its new supervisor's
+state — see the design's fourth departure, and (R5) below, which this made
+smaller.
+
+The original analysis follows, for the reasoning behind the shape.
 
 ### 9.1 The exact gap, as the code stands
 
@@ -297,6 +324,11 @@ stops being tolerable the moment one outlives a command (see R2). A machine
 throwing is a bug in `Salmon.Actions.Upkeep` rather than a node failure, so
 the honest fix is to keep it loud rather than to make it survivable.
 
+Milestone 9 made this smaller without meaning to. Restarting a machine in
+place means handing the replacement its supervisor's state rather than
+whatever the dead one closed over, and `Upkeep.Under` is exactly that,
+written into an adopted machine already.
+
 ### R6. Bounding concurrency: still no primitive
 
 §"Bounding concurrency" decided in two parts and shipped the first
@@ -339,16 +371,19 @@ would then have to decide whether salmon or systemd is supervising it.
 
 ## The order I would do it in
 
-Not the milestone order, because (R1) outranks milestone 9.
+(R1) is now the whole of what stands between this engine and its doing
+anything on a real graph.
 
 1. **R1, one node at a time** — `Systemd.systemdService` first (it is the
    largest category of long-running effect in the repo and the one salmon
    does not own, so it depends entirely on a `check`), then
-   `Filesystem.filecontents`, then `dir`. This is what turns milestones 7 and
-   8 from a tested engine into something that does anything on a real graph,
-   and it is the only item here whose value does not depend on another item
-   landing. Three small commits, each with a Layer-1 test. Expect (R8) to
-   come due while doing the first one.
+   `Filesystem.filecontents`, then `dir`. This is what turns nine landed
+   milestones into something that does anything on a real graph, and it is
+   the only item here whose value does not depend on another item landing.
+   Three small commits, each with a Layer-1 test. Expect (R8) to come due
+   while doing the first one. Milestone 9 sharpens the case for
+   `filecontents` in particular: a config node with no `check` cannot notice
+   its own file changing, so `RestForOne` on it can never fire.
 2. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
    live `TVar` for a holding machine. Small, and it is how you will *see*
    whether (R1) is working. Milestone 8 also gave the output ring real
@@ -356,19 +391,18 @@ Not the milestone order, because (R1) outranks milestone 9.
    last log lines and not.
 3. **R2** — the four instruction commands. Cheap, and much more useful now
    that `pause` and `force` mean something to a node that owns a process.
-4. **Milestone 9**, whose hazard (§9.3) has its mitigation already
-   (`supStableAfter`, milestone 8) and whose thundering-herd risk (§9.1)
-   wants a real graph from step 1 to measure against.
-5. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
-   anything.
+4. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
+   anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
+   is most of what a supervisor-level restart would have needed to hand a
+   replacement machine.
 
 ## Relationship to the other specs
 
 `specs/salmon-as-init.md` is **no longer gated on this work**. Its PID-2
 supervisor is the upkeep FSM and its restart policy is `Supervision`, both
-landed; a node that owns a process is `Nodes/Daemon.hs`. What it still needs
-from here is (R1) for anything it does not own, and nothing at all from
-milestone 9. The Rust PID 1 remains unaffected: that boundary is about
+landed; a node that owns a process is `Nodes/Daemon.hs`, and "restart this
+service and everything after it" is `supStrategy`. What it still needs from
+here is (R1), for anything it does not own. The Rust PID 1 remains unaffected: that boundary is about
 `waitpid(-1)`, and everything here waits on specific children — deliberately,
 which is why the polling `getProcessExitCode` reaper the removed
 `Supervised` module used was not recovered along with its teardown.

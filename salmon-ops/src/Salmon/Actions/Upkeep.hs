@@ -91,15 +91,41 @@ A cycle is the one case with no answer, and it is found before the walk for
 the same reason "Salmon.Actions.Concurrent" finds it there: a thread waiting
 on a node in a cycle never wakes.
 
+= A node leaving 'Up' can take its dependants with it
+
+By default it does not: putting a node back is a statement about that node,
+and the nodes standing on it that have already reached 'Up' are not
+disturbed. A node whose author says
+'Salmon.Op.Supervision.RestForOne' is the exception — its dependants go back
+to 'WaitUp' and are brought up again on top of whatever it turns into, which
+is Erlang's strategy of the same name read along dependency edges, and the
+only thing in this design that changes what a /correct/ graph does.
+
+Three things keep that affordable:
+
+* __it is opt-in on the node that goes away__, so a graph naming no strategy
+  behaves exactly as it did before, and a machine with no such dependency
+  subscribes to no statuses at all — the cost is zero rather than small;
+* __a dependency that has not been ready yet cannot demote anybody.__
+  Otherwise a supervisor starting over a graph a pass has just converged
+  would send every opted-in node back to 'WaitUp' before its dependencies'
+  machines had settled, undoing 'Standing' wholesale;
+* __a node is demoted at most once per its own
+  'Salmon.Op.Supervision.supStableAfter'__, so a flapping dependency cannot
+  rebuild the cone behind it on every flap. A rate limit rather than a
+  settling delay, deliberately: a settling delay would swallow the case the
+  feature is for, since a rewritten config file is back within milliseconds.
+
 = The watchdog
 
 'Salmon.Op.Supervision.supWatchdog' is a node author saying how long their
 node may go without doing anything observable. A single scanning thread
 compares 'Salmon.Op.Status.statusLastActive' against it and reports
 'Wedged' — once per episode, with 'Unwedged' when the node moves again. It
-only ever /reports/: killing a wedged @up@ needs the teardown-through-a-bracket
-that owning the process buys, which is the next milestone. If no node in the
-dag declares a watchdog the thread is never started.
+only ever /reports/: killing a wedged @up@ would need a bracket around it
+that an @up :: IO ()@ does not have, which is exactly what a node owning its
+process ('Salmon.Builtin.Extension.managed') supplies and no other node can.
+If no node in the dag declares a watchdog the thread is never started.
 -}
 module Salmon.Actions.Upkeep (
     -- * The machines
@@ -148,7 +174,7 @@ import Data.Dynamic (Dynamic)
 import Data.Foldable (traverse_)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -167,7 +193,7 @@ import Salmon.Op.Mailbox (Instruction (..), Mailbox)
 import qualified Salmon.Op.Mailbox as Mailbox
 import Salmon.Op.Ref (Ref)
 import Salmon.Op.Status (Direction (..), Stability (..), Status (..), newStatus, note, settle, touch, unsettle, waitStability, wedged)
-import Salmon.Op.Supervision (Micros (..), Restart (..), Supervision (..), millis, seconds, supervisionOf, toNanos)
+import Salmon.Op.Supervision (Micros (..), Restart (..), Strategy (..), Supervision (..), millis, seconds, supervisionOf, toNanos)
 import Salmon.Reporter
 
 -------------------------------------------------------------------------------
@@ -283,6 +309,10 @@ data Report ext
       Wedged !(Act ext) !Micros
     | -- | ...and moving again
       Unwedged !(Act ext)
+    | -- | a dependency that declared 'Salmon.Op.Supervision.RestForOne' left
+      -- 'Up', so this node went back to 'WaitUp' to be brought up again on
+      -- top of whatever that dependency becomes
+      Demoted !(Act ext) !Ref
     | -- | told to stop tending this node; its effect is left exactly as it is
       Paused !(Act ext)
     | Resumed !(Act ext)
@@ -328,8 +358,71 @@ data Machine ext = Machine
     -- ^ whether this machine holds a running
     -- 'Salmon.Builtin.Extension.managed' action, and so is 'Kept' rather
     -- than wound down when its supervisor stops.
+    , machineUnder :: !(TVar Under)
+    -- ^ the supervisor this machine is running under. Held here, and not
+    -- only inside the machine's own closure, so that a supervisor adopting
+    -- the machine can hand it its own. See 'Under'.
     , machineThread :: !(Async ())
     }
+
+{- | Everything about a machine that belongs to its /supervisor/ rather than
+to its node: who it waits on, which of those can send it back to 'WaitUp',
+where the failures everyone reads are recorded, and when to stop.
+
+Behind a 'TVar' for one case, and it is the case 'Kept' created. A machine
+holding a 'Salmon.Builtin.Extension.managed' action outlives the supervisor
+that started it, and an adopted machine still looking at that supervisor's
+state would be looking at things nobody maintains any more: it could never
+see a dependency leave 'Up', its own failures would be recorded where no
+dependant reads them, and — the one that bites hardest — the halt flag it
+watches is permanently set, so the moment such a machine took a path that
+heeds it (which, before 'Salmon.Op.Supervision.RestForOne', it never did) it
+would quietly exit and orphan the process it holds. So 'startUpkeep' writes
+its own state into every machine it adopts, and every wait reads that afresh
+rather than closing over it.
+-}
+data Under = Under
+    { underStatuses :: !(Map Ref (TVar Status))
+    -- ^ every node this supervisor is tending. A neighbour that is not in
+    -- here is not waited on at all: nothing is going to move it, so waiting
+    -- for it to move would be waiting forever.
+    , underFailed :: !(TVar (Set Ref))
+    -- ^ which nodes are currently failing. Not in 'Status' for the reason
+    -- 'Salmon.Op.Status.waitStability' gives: the two drivers answer
+    -- "proceed past a failure?" differently.
+    , underHalt :: !(TVar Bool)
+    -- ^ set when this supervisor is stopping. See 'Heed' for who is allowed
+    -- to hear it, and why a machine holding an effect is not.
+    , underDependencies :: ![Ref]
+    -- ^ waited on by a node going up.
+    , underDependants :: ![Ref]
+    -- ^ waited on by a node coming down.
+    , underDemoters :: ![Ref]
+    -- ^ the dependencies that declared 'Salmon.Op.Supervision.RestForOne':
+    -- the ones whose leaving 'Up' sends this node back to 'WaitUp'. Empty
+    -- for every node until somebody opts one in, and that emptiness is the
+    -- whole of why the feature costs nothing.
+    }
+
+{- | Where a node in 'Up' last saw each of its demoting dependencies: which
+machine it was watching, and the 'Salmon.Op.Status.statusEpoch' that machine
+was settled at.
+
+A dependency that is /absent/ is disarmed — it has not been seen settled up
+since this node started watching, and so cannot send it anywhere. That is
+what a dependency starts out as when it has not come up yet, and what one
+becomes again when a departure of its is deliberately not acted on.
+
+The 'TVar' is remembered alongside the number because the two are only
+comparable together. An adopted machine's dependency is a /different
+machine/ for the same node (a fresh 'Salmon.Op.Status.Status', counting from
+zero), and comparing this node's memory of the old one against the new one's
+epoch would read as a departure on every command @serve@ is handed —
+restarting every service, which is the thing 'Kept' exists to prevent. A
+dependency whose machine has been replaced is therefore re-armed, not acted
+on. See 'crossing'.
+-}
+type Armed = Map Ref (TVar Status, Word64)
 
 {- | A running set of node machines.
 
@@ -496,20 +589,43 @@ startUpkeep report (Kept prior) tend dag = do
             <$> forM starting (\(aref, _, t) -> (,) aref <$> newStatus t.tendDirection)
     let statuses = fmap machineStatus adopted <> fresh
 
+    let under aref =
+            let ds = Dag.dependenciesOf dag aref
+             in Under
+                    { underStatuses = statuses
+                    , underFailed = failed
+                    , underHalt = halt
+                    , underDependencies = ds
+                    , underDependants = Dag.dependantsOf dag aref
+                    , -- authored on the dependency, read by the dependant:
+                      -- only the node that goes away knows whether its going
+                      -- away matters to whatever is standing on it.
+                      underDemoters =
+                        [ d
+                        | d <- ds
+                        , Map.member d statuses
+                        , Map.lookup d strategies == Just RestForOne
+                        ]
+                    }
+
+    -- an adopted machine came from a supervisor whose maps are now nobody's:
+    -- hand it this one's, or it would watch 'TVar's that never change again
+    -- and record its failures where no dependant reads them.
+    forM_ (Map.toList adopted) $ \(aref, m) ->
+        atomically (writeTVar (machineUnder m) (under aref))
+
     machines <- forM starting $ \(aref, act, t) -> do
         let (policy, ignored) = supervisionOf act.extension
         unless (null ignored) $ say (Policy act policy ignored)
         box <- Mailbox.newMailbox Mailbox.defaultCapacity
         drops <- newTVarIO 0
+        under' <- newTVarIO (under aref)
         let status = statuses Map.! aref
         let holds = isJust (getField @"managed" act.extension)
         let ctx =
                 Ctx
                     { ctxSay = say
-                    , ctxHalt = halt
-                    , ctxFailed = failed
-                    , ctxStatuses = statuses
-                    , ctxDag = dag
+                    , ctxUnder = under'
                     , ctxRef = aref
                     , ctxAct = act
                     , ctxStatus = status
@@ -532,6 +648,7 @@ startUpkeep report (Kept prior) tend dag = do
                 , machineMailbox = box
                 , machineWatchdog = supWatchdog policy
                 , machineHolds = holds
+                , machineUnder = under'
                 , machineThread = thread
                 }
             )
@@ -571,6 +688,15 @@ startUpkeep report (Kept prior) tend dag = do
 
     untended :: [Act ext]
     untended = [act | (_, act, Nothing, _) <- classified]
+
+    -- what each tended node's own author said about the nodes standing on
+    -- it; every dependant reads its dependencies' entries out of here.
+    strategies :: Map Ref Strategy
+    strategies =
+        Map.fromList
+            [ (aref, supStrategy (fst (supervisionOf act.extension)))
+            | (aref, act, _) <- tended
+            ]
 
 {- | Ask every machine to stop, wait for it, and report how many stopped.
 
@@ -634,10 +760,10 @@ withUpkeep report tend dag body =
 -- | What one machine needs to do its job.
 data Ctx ext = Ctx
     { ctxSay :: !(Report ext -> IO ())
-    , ctxHalt :: !(TVar Bool)
-    , ctxFailed :: !(TVar (Set Ref))
-    , ctxStatuses :: !(Map Ref (TVar Status))
-    , ctxDag :: !(Dag ext)
+    , ctxUnder :: !(TVar Under)
+    -- ^ everything about this machine's surroundings, re-read on every wait
+    -- rather than captured: an adopted machine's surroundings change under
+    -- it. See 'Under'.
     , ctxRef :: !Ref
     , ctxAct :: !(Act ext)
     , ctxStatus :: !(TVar Status)
@@ -675,6 +801,15 @@ data Wake
       -- threw instead of exiting). Only a machine holding a
       -- 'Salmon.Builtin.Extension.managed' action can see this.
       Ended !(Either SomeException ExitCode)
+    | -- | a dependency that declared 'Salmon.Op.Supervision.RestForOne' has
+      -- stopped being up. Only a machine in 'Up' with such a dependency can
+      -- see this.
+      Demote !Ref
+    | -- | ...and one that had, is settled up again — this is its machine and
+      -- the 'Salmon.Op.Status.statusEpoch' it is settled at, and it may
+      -- demote this node next time it moves. See 'crossing' on why the two
+      -- are a pair.
+      Rearm !Ref !(TVar Status) !Word64
     | -- | the supervisor is stopping
       Halt
 
@@ -704,10 +839,14 @@ data Tally = Tally
     -- sensibly read.
     , tallyUpSince :: !(Maybe Word64)
     -- ^ monotonic nanoseconds at the moment the node last reached 'Up'.
+    , tallyDemotedAt :: !(Maybe Word64)
+    -- ^ monotonic nanoseconds at the moment a dependency last sent this node
+    -- back to 'WaitUp'. What rate-limits 'Salmon.Op.Supervision.RestForOne';
+    -- see 'tooSoon'.
     }
 
 freshTally :: Tally
-freshTally = Tally 0 Nothing
+freshTally = Tally 0 Nothing Nothing
 
 {- | Count a failure — first forgetting the ones before it, if the node had
 been up long enough to count as working.
@@ -723,12 +862,30 @@ countFailure sup now t =
         Just since
             | now >= since
             , now - since >= toNanos sup.supStableAfter ->
-                Tally 1 Nothing
-        _ -> Tally (t.tallyFailures + 1) Nothing
+                t{tallyFailures = 1, tallyUpSince = Nothing}
+        _ -> t{tallyFailures = t.tallyFailures + 1, tallyUpSince = Nothing}
 
 -- | Has this node used up the author's patience?
 exhausted :: Supervision -> Tally -> Bool
 exhausted sup t = maybe False (\n -> t.tallyFailures >= n) sup.supGiveUpAfter
+
+{- | Was this node sent back by a dependency so recently that doing it again
+would be following a flap rather than a change?
+
+Never having been demoted is never too soon: an isolated departure is
+honoured whenever it comes. That is what keeps this a __rate limit rather
+than a settling delay__ — a settling delay would swallow the very case
+'Salmon.Op.Supervision.RestForOne' exists for, since the config file a
+service stands on is rewritten in milliseconds and is back long before any
+window could expire. What is dropped is the /second/ demotion inside the
+node's own 'Salmon.Op.Supervision.supStableAfter', which is what a flap looks
+like and a change does not.
+-}
+tooSoon :: Supervision -> Word64 -> Tally -> Bool
+tooSoon sup now t =
+    case t.tallyDemotedAt of
+        Just at | now >= at -> now - at < toNanos sup.supStableAfter
+        _ -> False
 
 {- | How long to wait before the n-th consecutive retry: the floor doubled
 @n-1@ times, capped.
@@ -790,7 +947,7 @@ upkeep ::
     IO ()
 upkeep standing ctx =
     case standing of
-        Unsettled -> waitUp []
+        Unsettled -> waitUp freshTally []
         -- Already up: settle so dependants may go, and start watching. The
         -- verdict is 'Skipped' because that is exactly what it is — nobody
         -- looked, somebody said — and the first 'look' replaces it.
@@ -803,7 +960,7 @@ upkeep standing ctx =
             markOk ctx
             settle status Skipped
             say (Upkeep act Up)
-            resting Skipped (relaxed initialDelay) freshTally
+            entering Skipped (relaxed initialDelay) freshTally
   where
     act = ctxAct ctx
     say = ctxSay ctx
@@ -817,20 +974,28 @@ upkeep standing ctx =
     {- | Nothing to do until the dependencies are up. Instructions that arrive
     meanwhile are held rather than lost: a 'Force' typed at a node whose
     dependency is still coming up means "when you get there, act", not "act
-    now against an unmet precondition". -}
-    waitUp :: [Instruction] -> IO ()
-    waitUp pending = do
+    now against an unmet precondition".
+
+    Carries the 'Tally' rather than starting a fresh one, because this is
+    where a demoted node comes back to and the moment it was demoted is what
+    stops a flapping dependency demoting it again immediately. -}
+    waitUp :: Tally -> [Instruction] -> IO ()
+    waitUp tally pending = do
         say (Upkeep act WaitUp)
         loop pending
       where
         loop held = do
-            w <- standby ctx TurnUp (Dag.dependenciesOf (ctxDag ctx) (ctxRef ctx))
+            w <- standby ctx TurnUp
             told <- announce ctx w
             case w of
                 Halt -> pure ()
                 Ended _ -> pure () -- nothing is running yet; unreachable
+                -- 'standby' does not watch for these; a node that is not up
+                -- has nothing to be demoted from.
+                Demote _ -> loop held
+                Rearm{} -> loop held
                 Told _ -> paused ctx told (loop (held <> told)) (loop (held <> told))
-                Elapsed -> attempt (held <> told) Consult freshTally
+                Elapsed -> attempt (held <> told) Consult tally
 
     -- | Decide whether to act, then act in whichever way this node acts.
     attempt :: [Instruction] -> Intent -> Tally -> IO ()
@@ -893,26 +1058,37 @@ upkeep standing ctx =
             settle status Success
             say (Acted (UpDown.Done act))
             say (Upkeep act Up)
-            watch running Success (relaxed initialDelay) tally{tallyUpSince = Just now}
+            armed <- arming ctx
+            watch running Success (relaxed initialDelay) tally{tallyUpSince = Just now} armed
         next
 
-    {- | 'Up' with an action in hand: the nap, the mailbox and the action's
-    own exit, raced. The check still runs on the adaptive delay, so a
-    managed node that also supplies a @check@ gets both; one that does not
-    pays a @pure Unknown@ per delay, which is the price of not being able to
-    tell "no check" from "a check that could not tell". -}
-    watch :: Async ExitCode -> CheckResult -> Delay -> Tally -> IO (IO ())
-    watch running verdict d tally = do
+    {- | 'Up' with an action in hand: the nap, the mailbox, the action's own
+    exit and any demoting dependency, raced. The check still runs on the
+    adaptive delay, so a managed node that also supplies a @check@ gets both;
+    one that does not pays a @pure Unknown@ per delay, which is the price of
+    not being able to tell "no check" from "a check that could not tell". -}
+    watch :: Async ExitCode -> CheckResult -> Delay -> Tally -> Armed -> IO (IO ())
+    watch running verdict d tally armed = do
         say (NextLook act verdict (delayMicros d))
-        w <- naptimeHolding ctx running (delayMicros d)
+        w <- naptimeHolding ctx running armed (delayMicros d)
         told <- announce ctx w
         case w of
             -- 'naptimeHolding' answers 'IgnoreHalt', so this cannot happen:
             -- a machine holding a running effect is kept rather than wound
             -- down, and only a 'cancel' takes it.
-            Halt -> watch running verdict d tally
+            Halt -> watch running verdict d tally armed
             Ended outcome -> pure (afterExit outcome tally)
             Elapsed -> peek (relaxed d)
+            Rearm dep var e -> watch running verdict d tally (Map.insert dep (var, e) armed)
+            Demote dep -> do
+                sending <- demote dep tally
+                case sending of
+                    -- handed back rather than run, like a restart and for
+                    -- the same reason: it runs outside the 'withAsync', so
+                    -- the process this node holds is torn down before it
+                    -- goes back to waiting.
+                    Just go -> pure go
+                    Nothing -> watch running verdict d tally (Map.delete dep armed)
             Told _
                 -- pausing a node that owns a process must not kill the
                 -- process: that is the whole difference between 'Pause' and
@@ -921,7 +1097,7 @@ upkeep standing ctx =
                     say (Paused act)
                     heldPause
                     say (Resumed act)
-                    watch running verdict d tally
+                    watch running verdict d tally armed
                 -- forcing a node that is already running its own effect
                 -- means restart it: hand back the next attempt, which runs
                 -- after the 'withAsync' has cancelled this one.
@@ -939,7 +1115,7 @@ upkeep standing ctx =
             touch status
             if restarts policy v
                 then pure (attempt [] (Regardless v) tally)
-                else watch running v d' tally
+                else watch running v d' tally armed
 
         -- | Block for a 'Resume'. Ignores the halt flag for the same reason
         -- the nap does.
@@ -970,7 +1146,7 @@ upkeep standing ctx =
                 -- it forked, or something else is holding the effect up. The
                 -- node is now an unowned effect and is polled like one.
                 settle status verdict
-                resting verdict (relaxed initialDelay) tally
+                entering verdict (relaxed initialDelay) tally
             else
                 if wantsBack
                     then failed (why verdict) tally
@@ -985,7 +1161,7 @@ upkeep standing ctx =
                             _ -> markFailed ctx
                         settle status final
                         say (NextLook act final (delayMicros (relaxed initialDelay)))
-                        resting final (relaxed initialDelay) tally
+                        entering final (relaxed initialDelay) tally
       where
         wantsBack = case outcome of
             -- the action threw rather than exiting, so there is no code for
@@ -1006,37 +1182,87 @@ upkeep standing ctx =
         markOk ctx
         settle status verdict
         say (Upkeep act Up)
-        resting verdict (relaxed initialDelay) tally{tallyUpSince = Just now}
+        entering verdict (relaxed initialDelay) tally{tallyUpSince = Just now}
+
+    {- | Enter 'Up'.
+
+    The demote watch starts /disarmed/ for every dependency that is not ready
+    at this instant, and each arms itself the first time it is seen ready.
+    Without that, a supervisor starting over a graph a pass has just
+    converged would demote every opted-in node before its dependencies'
+    machines had settled — undoing 'Standing' wholesale and re-running every
+    @up@ in the cone, which under @serve@ is once per command typed. -}
+    entering :: CheckResult -> Delay -> Tally -> IO ()
+    entering verdict d tally = do
+        armed <- arming ctx
+        resting verdict d tally armed
 
     {- | 'Up' without an action to hold: sleep, look, and adapt — back off
     while the effect is there, tighten and go back to 'Upping' when it is
     not. -}
-    resting :: CheckResult -> Delay -> Tally -> IO ()
-    resting verdict d tally = do
+    resting :: CheckResult -> Delay -> Tally -> Armed -> IO ()
+    resting verdict d tally armed = do
         say (NextLook act verdict (delayMicros d))
-        w <- naptime ctx (delayMicros d)
+        w <- napWatching ctx armed (delayMicros d)
         told <- announce ctx w
         case w of
             Halt -> pure ()
             Ended _ -> pure ()
+            Rearm dep var e -> resting verdict d tally (Map.insert dep (var, e) armed)
+            Demote dep -> do
+                sending <- demote dep tally
+                case sending of
+                    Just go -> go
+                    Nothing -> resting verdict d tally (Map.delete dep armed)
             -- 'Pause' is read before 'Force'/'Satisfy', so a flush holding
             -- both contradictory things does the lesser: stop tending, and
             -- let the operator say what they meant.
             Told _ ->
-                paused ctx told (resting verdict d tally) $
+                paused ctx told (resting verdict d tally armed) $
                     case override told of
                         Just Force -> attempt told (Regardless (Failure "forced")) tally
                         Just Satisfy -> satisfy
-                        _ -> look (soonIf told d) tally
-            Elapsed -> look d tally
+                        _ -> look (soonIf told d) tally armed
+            Elapsed -> look d tally armed
+
+    {- | A demoting dependency has moved. Either this node is going back to
+    'WaitUp', or it was sent back too recently for a second departure to be a
+    change rather than a flap.
+
+    A departure that is not acted on leaves the dependency /disarmed/ rather
+    than armed where it was — so that this node is not woken by the same
+    departure again, and so that what it eventually re-arms at is where the
+    dependency ended up rather than where it was before it moved. Both
+    callers do that; only whether they run the result or hand it back
+    differs. -}
+    demote :: Ref -> Tally -> IO (Maybe (IO ()))
+    demote dep tally = do
+        now <- getMonotonicTimeNSec
+        pure $
+            if tooSoon policy now tally
+                then Nothing
+                else Just (demoting dep now tally)
+
+    {- | Going back to 'WaitUp', to be brought up again on top of whatever the
+    dependency that sent this node back becomes.
+
+    No 'markFailed': being demoted is not failing, and 'Transient' is already
+    enough to hold this node's own dependants. That is also what carries the
+    cascade — a dependant of /this/ node that opted in sees exactly what this
+    node just saw. -}
+    demoting :: Ref -> Word64 -> Tally -> IO ()
+    demoting dep now tally = do
+        say (Demoted act dep)
+        unsettle status TurnUp
+        waitUp tally{tallyDemotedAt = Just now} []
 
     {- | Look, and either carry on resting or go back to 'Upping'. The policy
     is consulted before 'satisfiedBy' rather than after, which is the only
     way 'Salmon.Op.Supervision.Always' can act on a 'Completed' node — that
     verdict /is/ satisfied, and the whole of what @Always@ means is "run it
     again anyway". -}
-    look :: Delay -> Tally -> IO ()
-    look d tally = do
+    look :: Delay -> Tally -> Armed -> IO ()
+    look d tally armed = do
         verdict <- runCheck act
         touch status
         if restarts policy verdict
@@ -1055,7 +1281,7 @@ upkeep standing ctx =
                     Failure _ -> markFailed ctx
                     _ -> markOk ctx
                 settle status verdict
-                resting verdict (relaxed d) tally
+                resting verdict (relaxed d) tally armed
 
     {- | The node did not get up, or stopped being up and is wanted back.
     Counts the failure, and either backs off and tries again or latches off. -}
@@ -1078,6 +1304,8 @@ upkeep standing ctx =
         case w of
             Halt -> pure ()
             Ended _ -> pure ()
+            Demote _ -> retryUp why d tally
+            Rearm{} -> retryUp why d tally
             Told _ ->
                 paused ctx told (retryUp why d tally) $
                     case override told of
@@ -1103,6 +1331,8 @@ upkeep standing ctx =
             case w of
                 Halt -> pure ()
                 Ended _ -> pure ()
+                Demote _ -> loop
+                Rearm{} -> loop
                 Elapsed -> loop
                 Told _
                     | told `has` Force -> attempt told (Regardless why) freshTally
@@ -1120,7 +1350,7 @@ upkeep standing ctx =
         markOk ctx
         settle status Skipped
         say (Upkeep act Up)
-        resting Skipped (Delay delayCap) freshTally
+        entering Skipped (Delay delayCap) freshTally
 
 {- | @WaitDown -> Downing -> Down@. 'Down' is terminal: nothing in the model
 answers "is it still gone", so there is nothing to poll for.
@@ -1150,11 +1380,14 @@ downkeep standing ctx =
         loop
       where
         loop = do
-            w <- standby ctx TurnDown (Dag.dependantsOf (ctxDag ctx) (ctxRef ctx))
+            w <- standby ctx TurnDown
             told <- announce ctx w
             case w of
                 Halt -> pure ()
                 Ended _ -> pure ()
+                -- a node coming down is not up, so nothing can demote it.
+                Demote _ -> loop
+                Rearm{} -> loop
                 Told _ ->
                     paused ctx told loop $
                         case override told of
@@ -1189,6 +1422,8 @@ downkeep standing ctx =
         case w of
             Halt -> pure ()
             Ended _ -> pure ()
+            Demote _ -> retryDown why d
+            Rearm{} -> retryDown why d
             Told _ ->
                 paused ctx told (retryDown why d) $
                     case override told of
@@ -1211,20 +1446,22 @@ supervisor stops.
 
 Waiting out a neighbour's failure rather than reporting
 'Salmon.Actions.UpDown.Blocked' is the sharpest difference between this
-driver and the one-shot ones; see the module header. Neighbours nobody is
+driver and the one-shot ones; see the module header. Under nobody is
 tending are not waited on at all.
 -}
-standby :: Ctx ext -> Direction -> [Ref] -> IO Wake
-standby ctx dir neighbours =
+standby :: Ctx ext -> Direction -> IO Wake
+standby ctx dir =
     atomically $
         halting HeedHalt ctx $
             listen ctx $ do
-                waitStability dir Stable vars
-                broken <- readTVar (ctxFailed ctx)
+                u <- readTVar (ctxUnder ctx)
+                let neighbours = case dir of
+                        TurnUp -> underDependencies u
+                        TurnDown -> underDependants u
+                let watched = [n | n <- neighbours, Map.member n (underStatuses u)]
+                waitStability dir Stable (mapMaybe (`Map.lookup` underStatuses u) watched)
+                broken <- readTVar (underFailed u)
                 if any (`Set.member` broken) watched then retry else pure Elapsed
-  where
-    watched = [n | n <- neighbours, Map.member n (ctxStatuses ctx)]
-    vars = mapMaybe (`Map.lookup` ctxStatuses ctx) watched
 
 {- | Sleep, unless an instruction arrives or the supervisor stops — so an
 instruction is never queued behind a 60s nap.
@@ -1238,23 +1475,37 @@ naptime ctx d = do
                 over <- readTVar timer
                 if over then pure Elapsed else retry
 
-{- | 'naptime' for a machine holding a running action: the nap and the
-mailbox as before, plus the action's own exit, and no 'Halt'.
+{- | 'naptime' for a node in 'Up': the nap and the mailbox as before, plus
+any dependency that opted into demoting this node.
+-}
+napWatching :: Ctx ext -> Armed -> Micros -> IO Wake
+napWatching ctx armed d = do
+    timer <- registerDelay (unMicros d)
+    atomically $
+        halting HeedHalt ctx $
+            crossing ctx armed $
+                listen ctx $ do
+                    over <- readTVar timer
+                    if over then pure Elapsed else retry
 
-Four things raced in one transaction, which is the shape §"Ordering is STM"
+{- | 'napWatching' for a machine holding a running action: plus the action's
+own exit, and no 'Halt'.
+
+Five things raced in one transaction, which is the shape §"Ordering is STM"
 promised and the reason nothing here needs a scheduler: the exit wins as soon
 as it happens, rather than being noticed at the end of a delay that may be a
 minute long.
 -}
-naptimeHolding :: Ctx ext -> Async ExitCode -> Micros -> IO Wake
-naptimeHolding ctx running d = do
+naptimeHolding :: Ctx ext -> Async ExitCode -> Armed -> Micros -> IO Wake
+naptimeHolding ctx running armed d = do
     timer <- registerDelay (unMicros d)
     atomically $
         halting IgnoreHalt ctx $
-            ended running $
-                listen ctx $ do
-                    over <- readTVar timer
-                    if over then pure Elapsed else retry
+            crossing ctx armed $
+                ended running $
+                    listen ctx $ do
+                        over <- readTVar timer
+                        if over then pure Elapsed else retry
 
 -- | Block until somebody says something. For a holding machine, which has no
 -- other reason to stop waiting.
@@ -1272,13 +1523,108 @@ not allowed to hear it — see 'Heed'.
 halting :: Heed -> Ctx ext -> STM Wake -> STM Wake
 halting IgnoreHalt _ k = k
 halting HeedHalt ctx k = do
-    stop <- readTVar (ctxHalt ctx)
+    u <- readTVar (ctxUnder ctx)
+    stop <- readTVar (underHalt u)
     if stop then pure Halt else k
 
 -- | The held action stopping pre-empts the nap, though not an instruction
 -- already waiting.
 ended :: Async ExitCode -> STM Wake -> STM Wake
 ended running k = k `orElse` (Ended <$> waitCatchSTM running)
+
+{- | Wake when a dependency that declared 'Salmon.Op.Supervision.RestForOne'
+crosses the line between ready and not.
+
+__Skipped entirely for a node with no such dependency__, which is every node
+until somebody opts one in. That is not an optimisation but the reason this
+feature is affordable at all: the alternative — every node in a supervised
+graph holding a live subscription to all of its dependencies' statuses — is
+the thundering herd @specs\/per-node-state-machines.md@ warned about, and
+here it simply does not exist.
+
+The @quiet@ set is what turns level-triggered STM into edge detection. A
+dependency that has already been handed over is not looked at again until it
+is ready, at which point it comes back as 'Rearm'; without that, a node that
+declined a demotion would be re-woken by the same unready dependency
+immediately, forever. It is also how a node that has just entered 'Up' avoids
+demoting itself over a dependency that has not come up yet — see 'disarmed'.
+-}
+crossing :: Ctx ext -> Armed -> STM Wake -> STM Wake
+crossing ctx armed k = do
+    u <- readTVar (ctxUnder ctx)
+    case underDemoters u of
+        [] -> k
+        demoters -> k `orElse` edge u demoters
+  where
+    edge u demoters = do
+        broken <- readTVar (underFailed u)
+        crossings <- traverse (look u broken) demoters
+        case catMaybes crossings of
+            [] -> retry
+            (w : _) -> pure w
+
+    look u broken dep =
+        -- a neighbour nobody is tending is never going to move, so it is
+        -- never going to leave 'Up' either.
+        case Map.lookup dep (underStatuses u) of
+            Nothing -> pure Nothing
+            Just var -> do
+                now <- readyNow var broken dep
+                pure $ case Map.lookup dep armed of
+                    -- armed against a different machine: this node's
+                    -- supervisor was replaced under it, so there is nothing
+                    -- to compare and it re-arms rather than reacting.
+                    Just (v, _) | v /= var -> Rearm dep var <$> now
+                    -- armed, and exactly where it was left: nothing happened.
+                    Just (_, was) | now == Just was -> Nothing
+                    -- armed, and either moved since or currently failing.
+                    Just _ -> Just (Demote dep)
+                    -- not armed, and settled up: arm it where it is now.
+                    Nothing -> Rearm dep var <$> now
+
+{- | Where a neighbour is, if it is settled up and not currently failing —
+the condition 'standby' blocks on, asked about one node, and answered with
+the 'Salmon.Op.Status.statusEpoch' that says /which/ time it is settled.
+
+That number rather than a 'Bool' is what makes a departure impossible to
+miss. A dependency that fell over and recovered between two of this node's
+waits is 'Stable' at both of them, and STM keeps no queue of what happened in
+between — the epoch is the only thing left that remembers.
+-}
+readyNow :: TVar Status -> Set Ref -> Ref -> STM (Maybe Word64)
+readyNow var broken dep = do
+    st <- readTVar var
+    pure $
+        if st.statusStability == Stable
+            && st.statusDirection == TurnUp
+            && not (Set.member dep broken)
+            then Just st.statusEpoch
+            else Nothing
+
+{- | Which of this node's demoting dependencies are ready at this instant,
+and where each of them is — the ones that are not are left out, and so cannot
+demote this node until they have been seen up at least once.
+
+Taken afresh on every entry into 'Up' rather than remembered, because the two
+places that matter are exactly the ones where this machine has not been
+watching: a supervisor that has just started, and a node that has just been
+put back.
+-}
+arming :: Ctx ext -> IO Armed
+arming ctx =
+    atomically $ do
+        u <- readTVar (ctxUnder ctx)
+        case underDemoters u of
+            [] -> pure Map.empty
+            demoters -> do
+                broken <- readTVar (underFailed u)
+                entries <- traverse (entry u broken) demoters
+                pure (Map.fromList (catMaybes entries))
+  where
+    entry u broken dep =
+        case Map.lookup dep (underStatuses u) of
+            Nothing -> pure Nothing
+            Just var -> fmap (\e -> (dep, (var, e))) <$> readyNow var broken dep
 
 -- | Anything pending in the mailbox pre-empts whatever else this wait was for.
 listen :: Ctx ext -> STM Wake -> STM Wake
@@ -1293,6 +1639,8 @@ announce :: Ctx ext -> Wake -> IO [Instruction]
 announce _ Halt = pure []
 announce _ Elapsed = pure []
 announce _ (Ended _) = pure []
+announce _ (Demote _) = pure []
+announce _ (Rearm _ _ _) = pure []
 announce ctx (Told told) = do
     total <- Mailbox.dropped (ctxBox ctx)
     fresh <- atomically $ do
@@ -1326,6 +1674,8 @@ paused ctx told onResume onwards =
         case w of
             Halt -> pure ()
             Ended _ -> pure ()
+            Demote _ -> hold
+            Rearm{} -> hold
             Elapsed -> hold
             Told ts -> do
                 _ <- announce ctx (Told ts)
@@ -1374,10 +1724,19 @@ restarts sup verdict =
         _ -> False
 
 markFailed :: Ctx ext -> IO ()
-markFailed ctx = atomically (modifyTVar' (ctxFailed ctx) (Set.insert (ctxRef ctx)))
+markFailed ctx = onFailures ctx (Set.insert (ctxRef ctx))
 
 markOk :: Ctx ext -> IO ()
-markOk ctx = atomically (modifyTVar' (ctxFailed ctx) (Set.delete (ctxRef ctx)))
+markOk ctx = onFailures ctx (Set.delete (ctxRef ctx))
+
+-- | Through 'ctxUnder' rather than a captured 'TVar', so that an adopted
+-- machine records what it is doing where its /current/ supervisor's
+-- dependants read it.
+onFailures :: Ctx ext -> (Set Ref -> Set Ref) -> IO ()
+onFailures ctx f =
+    atomically $ do
+        u <- readTVar (ctxUnder ctx)
+        modifyTVar' (underFailed u) f
 
 -------------------------------------------------------------------------------
 

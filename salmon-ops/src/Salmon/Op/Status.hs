@@ -116,6 +116,17 @@ data Status = Status
     , statusLastActive :: !Word64
     -- ^ monotonic nanoseconds at the node's last observable activity. Only
     -- ever compared against a later reading of the same clock.
+    , statusEpoch :: !Word64
+    -- ^ how many times this node has stopped being settled. Monotonic, and
+    -- the only durable record that it moved at all.
+    --
+    -- 'Stability' cannot answer "did this node go away and come back?" — a
+    -- node that fell over and recovered between two readings looks exactly
+    -- like one that never moved, and STM offers no queue of the transitions
+    -- in between. Something watching a neighbour for departures rather than
+    -- for its current state therefore has to compare a number it remembers
+    -- against a number that only ever grows; see
+    -- 'Salmon.Actions.Upkeep.crossing'.
     , statusOutput :: !Ring
     }
     deriving (Show)
@@ -129,7 +140,7 @@ shows up as a heisenbug on a wide graph.
 newStatus :: Direction -> IO (TVar Status)
 newStatus dir = do
     now <- getMonotonicTimeNSec
-    newTVarIO (Status Unknown dir Transient now emptyRing)
+    newTVarIO (Status Unknown dir Transient now 0 emptyRing)
 
 readStatus :: TVar Status -> IO Status
 readStatus = readTVarIO
@@ -146,6 +157,9 @@ settle var result = do
 
 {- | The node is moving again — and, if the direction changed, moving the
 other way, which resets what it has to say about itself.
+
+A settled node moving is what bumps 'statusEpoch', and only that: an
+already-moving node moving some more is not a second departure.
 -}
 unsettle :: TVar Status -> Direction -> IO ()
 unsettle var dir = do
@@ -157,6 +171,10 @@ unsettle var dir = do
                 , statusStability = Transient
                 , statusLastActive = now
                 , statusCheck = if statusDirection st == dir then statusCheck st else Unknown
+                , statusEpoch =
+                    if st.statusStability == Stable
+                        then st.statusEpoch + 1
+                        else st.statusEpoch
                 }
 
 -- | Record activity without changing anything else: the node is still doing

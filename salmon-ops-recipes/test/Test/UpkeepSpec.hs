@@ -10,13 +10,15 @@ reports rather than @threadDelay@, so a case that passes does so as fast as
 the machines run and a case that fails fails by timing out rather than by
 flaking.
 
-Three groups. First, that a node is tended at all: satisfied nodes are left
+Four groups. First, that a node is tended at all: satisfied nodes are left
 alone, unsatisfied ones are brought up, and the ordering guarantees the
 one-shot drivers have still hold. Second, the part that only exists here —
 the effect going away brings the node back, the restart policy decides
 whether it does, and a check that cannot tell decides nothing. Third, the
 control surface: instructions that only mean something to a continuous
-driver, and the watchdog.
+driver, and the watchdog. Fourth, the two groups at the end, for the two
+things a node can be beyond an @up@ that returns: one that owns the process
+it stands for, and one whose going away takes its dependants with it.
 -}
 module Test.UpkeepSpec (tests) where
 
@@ -48,7 +50,7 @@ import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..))
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Status (Direction (..))
-import Salmon.Op.Supervision (Restart (..), Supervision (..), defaultSupervision, millis, seconds, supervised)
+import Salmon.Op.Supervision (Restart (..), Strategy (..), Supervision (..), defaultSupervision, millis, seconds, supervised)
 import Salmon.Reporter (ReporterM (..))
 
 tests :: TestTree
@@ -86,6 +88,17 @@ tests =
             , testCase "cancelling tears the action down through its bracket" managedCancelTearsDown
             , testCase "is never told it is already standing" managedIgnoresSettled
             , testCase "Force restarts it rather than skipping it" managedForceRestarts
+            ]
+        , testGroup
+            "a node that takes its dependants with it"
+            [ testCase "a dependant already up is sent back, and comes back" restForOneDemotes
+            , testCase "the default strategy leaves the dependant alone" oneForOneLeavesItAlone
+            , testCase "a demoted dependant waits rather than acting" demotedWaitsForItsDependency
+            , testCase "it cascades along the dependants that opted in" demotionCascades
+            , testCase "a node with no dependants demotes nobody" noDependantsCostsNothing
+            , testCase "a second departure in quick succession is dropped" flapIsRateLimited
+            , testCase "a dependency coming up for the first time demotes nobody" settledStartIsNotDemoted
+            , testCase "a dependant that owns a process is torn down and respawned" managedDependantIsRestarted
             ]
         ]
 
@@ -167,6 +180,22 @@ reachedDown want rs = [act.shorthand | Downkeep act st <- rs, st == want]
 
 looks :: [Report Extension] -> Int
 looks rs = length [() | NextLook{} <- rs]
+
+-- | Which node was sent back to 'WaitUp', and by which dependency.
+demotions :: [Report Extension] -> [(Text, Ref)]
+demotions rs = [(act.shorthand, dep) | Demoted act dep <- rs]
+
+-- | How many times this one node has said what it is waiting on next: the
+-- way a case waits for one machine to have been round its loop again.
+looksAt :: Text -> [Report Extension] -> Int
+looksAt name rs = length [() | NextLook a _ _ <- rs, a.shorthand == name]
+
+-- | How many times this one node ran its @up@ (or spawned its action).
+evalsOf :: Text -> [Report Extension] -> Int
+evalsOf name rs = length (filter (== name) (evals rs))
+
+reachedBy :: Text -> UpkeepState -> [Report Extension] -> Int
+reachedBy name want rs = length (filter (== name) (reached want rs))
 
 -------------------------------------------------------------------------------
 -- building nodes
@@ -554,8 +583,11 @@ machine reports @Eval@ before it starts the action, so any assertion made off
 the report stream alone races the thread that does the spawning.
 -}
 holder :: Text -> TVar Int -> IO ExitCode -> (Extension -> Extension) -> Op
-holder name spawns action f =
-    node name $ \x ->
+holder name = holderOn name []
+
+holderOn :: Text -> [Op] -> TVar Int -> IO ExitCode -> (Extension -> Extension) -> Op
+holderOn name preds spawns action f =
+    nodeOn name preds $ \x ->
         f
             x
                 { managed = Just $ \_out -> do
@@ -759,3 +791,231 @@ managedForceRestarts = within 10 $ do
         awaitSpawns spawns 2
         assertEqual "the old one was torn down before the new one spawned" 1 =<< readIORef torn
         assertEqual "and there is a new one" 2 =<< spawnsSoFar spawns
+
+-------------------------------------------------------------------------------
+-- a node that takes its dependants with it
+
+{- | Milestone 9's cases. All eight share one shape: a dependency is made to
+leave 'Up' at a moment the case controls (its effect is removed behind
+salmon's back, then it is 'Recheck'ed), and what the /dependant/ does about
+it is the assertion.
+
+Nothing here sleeps to decide anything. The two negative cases are the
+exception and say so: proving something does not happen needs a bounded wait
+for it, and a 'timeout' returning 'Nothing' is that wait made explicit.
+-}
+restForOne :: Extension -> Extension
+restForOne x = x{dynamics = [supervised defaultSupervision{supStrategy = RestForOne}]}
+
+{- | A node whose effect can be taken away behind salmon's back. Hands back
+the count of its @up@s and the flag that says whether its effect is there.
+-}
+breakable :: Text -> [Op] -> (Extension -> Extension) -> IO (Op, IORef Int, IORef Bool)
+breakable name preds f = do
+    there <- newIORef False
+    (ran, bump) <- counter
+    let o =
+            nodeOn name preds $ \x ->
+                f
+                    x
+                        { check = do
+                            ok <- readIORef there
+                            pure (if ok then Success else Failure "gone")
+                        , up = bump >> writeIORef there True
+                        }
+    pure (o, ran, there)
+
+{- | A node that only counts. Deliberately without a @check@, so that being
+sent back to 'WaitUp' really does re-run its @up@ — which is what makes a
+demotion visible at all, and is the case a repository whose nodes mostly have
+no check actually has.
+-}
+counted :: Text -> [Op] -> (Extension -> Extension) -> IO (Op, IORef Int)
+counted name preds f = do
+    (ran, bump) <- counter
+    pure (nodeOn name preds (\x -> f x{up = bump}), ran)
+
+-- | Take the effect away and tell the node to look now.
+breakIt :: Supervisor Extension -> IORef Bool -> Text -> IO ()
+breakIt sup there name = do
+    writeIORef there False
+    void (Upkeep.instruct sup (refOf name) Recheck)
+
+{- | The payoff of the whole milestone: a service standing on a configuration
+file that has just been rewritten is brought up again on the new one, rather
+than left running against content it has never seen.
+-}
+restForOneDemotes :: IO ()
+restForOneDemotes = within 20 $ do
+    (cfg, cfgRan, there) <- breakable "cfg" [] restForOne
+    (svc, svcRan) <- counted "svc" [cfg] id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        assertEqual "the service came up on the original config" 1 =<< readIORef svcRan
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "svc" Up rs >= 2)
+        rs <- seen trace
+        assertEqual "it was sent back by its config" [("svc", refOf "cfg")] (demotions rs)
+        assertEqual "and brought up again on the new one" 2 =<< readIORef svcRan
+        assertEqual "which had itself been rewritten" 2 =<< readIORef cfgRan
+
+{- | ...and the property that makes the feature safe to have landed at all:
+until a node says otherwise, its dependants are not anybody's business. This
+is today's behaviour, asserted so that it stays that way.
+-}
+oneForOneLeavesItAlone :: IO ()
+oneForOneLeavesItAlone = within 20 $ do
+    -- no strategy declared, so 'OneForOne'
+    (cfg, _, there) <- breakable "cfg" [] id
+    (svc, svcRan) <- counted "svc" [cfg] id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "cfg" Up rs >= 2)
+        -- one full turn of svc's own loop after the config came back, so
+        -- that "it did not react" is a statement about a machine that has
+        -- since run rather than one that has not got there yet.
+        void (Upkeep.instruct sup (refOf "svc") Recheck)
+        await trace (\rs -> looksAt "svc" rs >= 2)
+        rs <- seen trace
+        assertEqual "nobody was sent back" [] (demotions rs)
+        assertEqual "and the service was never touched" 1 =<< readIORef svcRan
+
+{- | Being demoted is going back to 'WaitUp', not going back to 'Upping'.
+The distinction is the whole point: a node brought up again immediately would
+be brought up against the very dependency that is currently missing.
+-}
+demotedWaitsForItsDependency :: IO ()
+demotedWaitsForItsDependency = within 20 $ do
+    gate <- newEmptyMVar
+    there <- newIORef False
+    (cfgRan, cfgBump) <- counter
+    let cfg =
+            node "cfg" $ \x ->
+                restForOne
+                    x
+                        { check = do
+                            ok <- readIORef there
+                            pure (if ok then Success else Failure "gone")
+                        , up = do
+                            n <- readIORef cfgRan
+                            cfgBump
+                            -- the repair is held open, so the dependency
+                            -- stays visibly in flight
+                            unless (n == 0) (takeMVar gate)
+                            writeIORef there True
+                        }
+    (svc, svcRan) <- counted "svc" [cfg] id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "svc" WaitUp rs >= 2)
+        assertEqual "waiting, not acting" 1 =<< readIORef svcRan
+        putMVar gate ()
+        await trace (\rs -> evalsOf "svc" rs >= 2)
+        assertEqual "and only once the dependency was back" 2 =<< readIORef svcRan
+
+{- | A demoted node is itself no longer up, which is all a dependant of /it/
+that opted in needs to see. Nothing propagates the cascade; it falls out.
+-}
+demotionCascades :: IO ()
+demotionCascades = within 20 $ do
+    (cfg, _, there) <- breakable "cfg" [] restForOne
+    (mid, midRan) <- counted "mid" [cfg] restForOne
+    (leaf, leafRan) <- counted "leaf" [mid] id
+    supervising (dagOf leaf) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "leaf" Up rs >= 1)
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "leaf" Up rs >= 2)
+        rs <- seen trace
+        assertEqual
+            "each was sent back by the one in front of it, in that order"
+            [("mid", refOf "cfg"), ("leaf", refOf "mid")]
+            (demotions rs)
+        assertEqual "mid came up again" 2 =<< readIORef midRan
+        assertEqual "and so did leaf" 2 =<< readIORef leafRan
+
+-- | The overwhelmingly common shape, and it must cost nothing.
+noDependantsCostsNothing :: IO ()
+noDependantsCostsNothing = within 20 $ do
+    (solo, ran, there) <- breakable "solo" [] restForOne
+    supervising (dagOf solo) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "solo" Up rs >= 1)
+        breakIt sup there "solo"
+        await trace (\rs -> reachedBy "solo" Up rs >= 2)
+        rs <- seen trace
+        assertEqual "it demoted nobody, itself included" [] (demotions rs)
+        assertEqual "it just put its own effect back" 2 =<< readIORef ran
+
+{- | The hazard this milestone had to be designed against: a dependency that
+flaps would otherwise rebuild the whole cone behind it on every flap.
+
+'Salmon.Op.Supervision.supStableAfter' bounds it to once per interval, and
+the default of ten seconds is well beyond what this case takes — so the
+second departure is dropped rather than delayed.
+-}
+flapIsRateLimited :: IO ()
+flapIsRateLimited = within 30 $ do
+    (cfg, _, there) <- breakable "cfg" [] restForOne
+    (svc, svcRan) <- counted "svc" [cfg] id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "svc" Up rs >= 2)
+        assertEqual "the first departure was acted on" 2 =<< readIORef svcRan
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "cfg" Up rs >= 3)
+        -- proving a thing does not happen: wait for it, and expect not to
+        -- get it. Half a second is many turns of both machines.
+        again <- timeout 500000 (await trace (\rs -> evalsOf "svc" rs >= 3))
+        assertEqual "the second was dropped rather than acted on" Nothing again
+        rs <- seen trace
+        assertEqual "one demotion, not two" 1 (length (demotions rs))
+        assertEqual "and one extra bring-up, not two" 2 =<< readIORef svcRan
+
+{- | The rule that keeps this from undoing 'Standing': a dependency that has
+not been seen up yet cannot send anybody back.
+
+Without it, @serve@ — which stands its machines up again after every command
+it is handed — would re-run every @up@ in an opted-in cone each time an
+operator typed anything, which is exactly the regression 'Standing' exists to
+prevent.
+-}
+settledStartIsNotDemoted :: IO ()
+settledStartIsNotDemoted = within 20 $ do
+    (cfg, cfgRan, _) <- breakable "cfg" [] restForOne
+    (svc, svcRan) <- counted "svc" [cfg] id
+    -- the shape a supervisor starts in over a graph a pass has half done:
+    -- the dependant is known to be up, the dependency is not.
+    let tend aref
+            | aref == refOf "svc" = Just (Tend TurnUp Settled)
+            | otherwise = Just (Tend TurnUp Unsettled)
+    supervising (dagOf svc) tend $ \sup trace -> do
+        await trace (\rs -> reachedBy "cfg" Up rs >= 1)
+        void (Upkeep.instruct sup (refOf "svc") Recheck)
+        await trace (\rs -> looksAt "svc" rs >= 2)
+        rs <- seen trace
+        assertEqual "coming up for the first time demoted nobody" [] (demotions rs)
+        assertEqual "so the standing claim held" 0 =<< readIORef svcRan
+        assertEqual "while the dependency did its own work" 1 =<< readIORef cfgRan
+
+{- | The case the feature is really for: the thing standing on the config is
+a process salmon owns. Being sent back has to tear it down — through the
+action's own bracket, outside the 'Control.Concurrent.Async.withAsync' —
+before anything spawns again.
+-}
+managedDependantIsRestarted :: IO ()
+managedDependantIsRestarted = within 20 $ do
+    (cfg, _, there) <- breakable "cfg" [] restForOne
+    spawns <- spawnCounter
+    -- held by this thread, so blocking on it is a wait rather than a
+    -- deadlock the runtime is entitled to notice
+    gate <- newEmptyMVar
+    let svc = holderOn "svc" [cfg] spawns (takeMVar gate) id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        awaitSpawns spawns 1
+        breakIt sup there "cfg"
+        awaitSpawns spawns 2
+        rs <- seen trace
+        assertEqual "the process was sent back by its config" [("svc", refOf "cfg")] (demotions rs)

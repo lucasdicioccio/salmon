@@ -401,13 +401,37 @@ some other part of the codebase can later recover by type, without changing
   invocation.
 - A `Salmon.Op.Supervision.Supervision` states how the node wants to be tended:
   whether to put it back when its `check` says the effect has gone (`Always`/
-  `OnFailure`/`Never`, defaulting to `OnFailure`) and how long its silence may
-  last before somebody should worry. `Salmon.Actions.Upkeep` reads it back with
-  the same `getDynamics`. One line, and a node with no opinion needs none:
+  `OnFailure`/`Never`, defaulting to `OnFailure`), how long its silence may
+  last before somebody should worry, and — `supStrategy` — what its *going
+  away* means for the nodes standing on it. `Salmon.Actions.Upkeep` reads it
+  back with the same `getDynamics`. One line, and a node with no opinion needs
+  none:
 
   ```haskell
-  dynamics = [supervised (Supervision Always (Just (seconds 30)))]
+  dynamics = [supervised defaultSupervision{supWatchdog = Just (seconds 30)}]
   ```
+
+  Amend `defaultSupervision` rather than spelling out every field: the record
+  has grown twice and will again, and a node that only cares about its
+  watchdog should not have to have an opinion about giving up.
+
+  `supStrategy` is the one field authored for somebody else's benefit. The
+  default, `OneForOne`, is that putting this node back is a statement about
+  this node and nothing downstream is disturbed. `RestForOne` sends every
+  dependant back to `WaitUp`, to be brought up again on top of whatever this
+  node turns into — Erlang's strategy of the same name, read along dependency
+  edges. A configuration file is the case for it:
+
+  ```haskell
+  -- the services reading this file are bounced when it is rewritten
+  dynamics = [supervised defaultSupervision{supStrategy = RestForOne}]
+  ```
+
+  Note it goes on the config node, not on the services: the file's author
+  knows their content is load-bearing, while each service reading it would
+  otherwise have to know, separately, that it might change underneath. Only
+  `run serve` acts on it (a one-shot pass has no "already up" to send back
+  from), and it costs nothing at all until a node opts in.
 
 That last one is what the field is really for, and it's worth understanding
 the shape. A node says *"I am a `Package`"* without knowing what will be done

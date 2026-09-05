@@ -3,9 +3,10 @@
 
 {- | What a node says about how it wants to be tended.
 
-Two knobs, both optional, both authored on the node itself: how eagerly to
-put it back when it stops being up ('Restart'), and how long its silence has
-to last before somebody should worry ('supWatchdog').
+A handful of knobs, all optional, all authored on the node itself: how
+eagerly to put it back when it stops being up ('Restart'), how long its
+silence has to last before somebody should worry ('supWatchdog'), and what
+its going away means for the nodes standing on it ('Strategy').
 
 = Why this rides 'Data.Dynamic.Dynamic' rather than a new field
 
@@ -44,6 +45,7 @@ An @Int@ of microseconds is what both ends already speak.
 module Salmon.Op.Supervision (
     -- * Policy
     Restart (..),
+    Strategy (..),
     Supervision (..),
     defaultSupervision,
     supervised,
@@ -103,8 +105,44 @@ data Restart
     | Never
     deriving (Show, Eq, Ord)
 
+{- | What a node leaving 'Salmon.Actions.Upkeep.Up' means for the nodes that
+depend on it. Erlang's two supervision strategies, read along dependency
+edges.
+
+* 'OneForOne' (the default) is today's behaviour exactly: putting this node
+  back is a statement about this node. A dependant that has already reached
+  'Salmon.Actions.Upkeep.Up' is not disturbed.
+* 'RestForOne' additionally sends every dependant back to
+  'Salmon.Actions.Upkeep.WaitUp', to be brought up again on top of whatever
+  this node turns into. A configuration file is the case that wants it: a
+  service reading a config that has just been rewritten should be bounced,
+  and only the config node knows that.
+
+__This is authored on the node that goes away, not on the ones that get
+bounced__, which is what makes it usable: the config file's author knows
+their content is load-bearing, while the six services reading it would each
+have to know, separately, that it might change under them.
+
+Note the default is the opposite kind from 'supRestart''s. Restarting a node
+that fell over is an active choice about that node, and 'OnFailure' makes it.
+Bouncing a node's dependants is a decision about /other people's/ nodes, so
+nothing happens until somebody says it should — which is also what makes this
+safe to have added: a graph that names no strategy behaves as it did before.
+
+The cascade is free rather than built: a demoted node is itself no longer up,
+so a dependant of /it/ that also declares 'RestForOne' sees the same thing and
+goes back too, all the way out to the edge of the opted-in cone.
+-}
+data Strategy
+    = OneForOne
+    | RestForOne
+    deriving (Show, Eq, Ord)
+
 data Supervision = Supervision
     { supRestart :: !Restart
+    , supStrategy :: !Strategy
+    -- ^ what this node leaving 'Salmon.Actions.Upkeep.Up' does to the nodes
+    -- that depend on it. See 'Strategy'.
     , supWatchdog :: !(Maybe Micros)
     -- ^ how long this node may go without doing anything observable before
     -- it should be called wedged. 'Nothing' — the default — means never.
@@ -116,6 +154,10 @@ data Supervision = Supervision
     -- eventually being treated as a crash loop — only /consecutive quick/
     -- failures count. Without it, 'supGiveUpAfter' would latch off any
     -- long-lived node given enough days.
+    --
+    -- 'RestForOne' reads it for a second purpose: a node is demoted by a
+    -- dependency at most once per this interval, so a dependency that is
+    -- flapping cannot rebuild the whole cone behind it on every flap.
     , supGiveUpAfter :: !(Maybe Int)
     -- ^ stop putting the node back after this many consecutive failures.
     -- 'Nothing' — the default — never gives up.
@@ -128,8 +170,8 @@ data Supervision = Supervision
     }
     deriving (Show, Eq)
 
-{- | 'OnFailure', no watchdog, ten seconds of uptime counts as stable, never
-gives up: what a node that says nothing gets.
+{- | 'OnFailure', 'OneForOne', no watchdog, ten seconds of uptime counts as
+stable, never gives up: what a node that says nothing gets.
 
 Note the difference in kind between the two defaults that /do/ something.
 'OnFailure' is an active choice — a node declared up that has stopped being
@@ -139,7 +181,7 @@ systemd is not converging a declared graph). Never giving up is the passive
 choice: latching off is a decision only the node's author can justify.
 -}
 defaultSupervision :: Supervision
-defaultSupervision = Supervision OnFailure Nothing (seconds 10) Nothing
+defaultSupervision = Supervision OnFailure OneForOne Nothing (seconds 10) Nothing
 
 {- | State a supervision policy on a node, for a later pass to read back:
 
