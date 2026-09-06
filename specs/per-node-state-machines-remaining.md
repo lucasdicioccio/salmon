@@ -4,181 +4,88 @@ Status: living plan, update as work continues. Companion to
 `specs/per-node-state-machines.md` (the design, whose milestone list is the
 source of truth for 1–9) — this file is what remains, why each remaining
 piece is worth doing, and what order I would do it in. Read the design first
-if you need the "why" of the model; read this if you want to know what to
-pick up next.
-
-Written after milestone 9 landed (`git log --oneline` on `serve-supervision`).
-
-## Headline: no milestones left, and a residue that matters more than they did
-
-**All nine milestones have landed.** Each is marked *landed* in the design,
-with its deviations recorded in place there.
-
-**What remains is of two kinds.** A residue no milestone covers — some of it
-bookkeeping, but item (R1) is not: it is the reason milestones 7, 8 and 9
-supervise almost nothing on a real graph, and it was already worth more than
-the last milestone. And, separately, six things that *did* land but were
-shaped under one milestone's pressure and want a second pass now that the
-whole thing exists; §"Landed, but wanting another iteration" is those. Two of
-them are not matters of taste: (I1) loses a running process outright, and
-(I6) means a convergence pass does nothing at all about a re-declaration that
-changed a node's content.
-
-The honest summary of where this design stands: **the execution model is
-finished and the nodes have not caught up with it.** Eight milestones built a
-per-node state machine, a ledger, a rewrite phase, two concurrent drivers and
-a supervisor that can own a process, all of which ask each node one question
-— "is your effect in place?" — that roughly a quarter of nodes can answer.
-
-## Where 1–8 got to, in one line each
-
-So this file stands alone. Each is marked *landed* in the design, with its
-deviations recorded in place there.
-
-1. `check :: IO CheckResult` — `prelim` absorbed, `Actions/Check.hs` and
-   `Actions/Notify.hs` deleted.
-2. `Salmon.Op.Dag` — the `Cofree` collapse lifted out and made pure, both
-   adjacency directions, last-writer-wins with a reported conflict.
-3. `Salmon.Op.Ledger` — per-declaration `Contribution`s, nodes *and* edges,
-   retiring rather than deleted.
-4. Both synchronous drivers re-expressed over the magma and ledger; `serve`'s
-   retired graphs gone; the cycle hole closed.
-5. `Salmon.Op.Rewrite` — cross-declaration knowledge as a registered
-   post-fold phase; `Debian.batchPackages`.
-6. `Salmon.Op.Status`/`Mailbox` and `Salmon.Actions.Concurrent` — one thread
-   per node, ordering by `waitStability`. `serve` converges through it, so
-   convergence is parallel and unbounded.
-7. `Salmon.Actions.Upkeep`/`Salmon.Op.Supervision` — the upkeep and downkeep
-   FSMs, adaptive delay, authored watchdog. `serve` tends its nodes while
-   idle. `serveWakingWith` deleted.
-8. `Extension.managed` and `Salmon.Builtin.Nodes.Daemon` — a node can own a
-   running process. `Up` races the action, exit codes reach the policy,
-   teardown escalates through the action's own bracket to the process group,
-   and a machine holding a process is `Kept` across commands rather than
-   stopped with its supervisor.
-9. `Supervision.supStrategy` — a node that declares `RestForOne` sends its
-   dependants back to `WaitUp` when it stops being up. Opt-in, so it costs
-   nothing until used; `Status.statusEpoch` is what makes a brief departure
-   impossible to miss; `Upkeep.Under` is what an adopted machine is handed so
-   that it keeps following a supervisor it did not start under.
+if you need the "why" of the model; read this if you want to know where
+things stand or what to pick up next.
 
 -------------------------------------------------------------------------------
 
-## Milestone 8: `Managed` nodes — landed
+## Where this stands
 
-Landed as planned, with six departures recorded in place in
-`specs/per-node-state-machines.md`. Three are worth knowing here because they
-change what the remaining work looks like:
+Everything below is on branch `serve-supervision`, on top of `0bc3ed4`.
 
-- **`Lifecycle` is a field, not a sum** (`managed` beside `up`), as this plan
-  recommended. If a third lifecycle ever appears, that is when to pay for the
-  sum.
-- **A machine holding a process is `Kept` across commands.** This was not in
-  the plan and is the largest thing milestone 8 added: `serve` stands its
-  machines down before every command, so a supervisor that wound its
-  processes down with it would restart every service on every `status`.
-  Holding machines survive and the next supervisor adopts them, on exactly
-  the condition §"`Ref` is location-addressed" named — still wanted up, and
-  its representative unchanged.
-- **The restart policy got `supStableAfter`/`supGiveUpAfter`**, folded in
-  rather than deferred, as recommended. Which also means milestone 9's
-  flapping hazard (§9.3) already has its mitigation available.
+### Shipped
 
-The `Restart` name collision the plan flagged is **still latent** — see (R8).
+| # | milestone | commit |
+|---|-----------|--------|
+| 1 | `check :: IO CheckResult` — `prelim` absorbed, `Check.hs`/`Notify.hs` deleted | `52ab4f8` |
+| 2 | `Salmon.Op.Dag` — the `Cofree` collapse, pure, both directions, conflicts reported | `042297e` |
+| 3 | `Salmon.Op.Ledger` — per-declaration contributions, nodes *and* edges, retiring | `323f626` |
+| 4 | both synchronous drivers over the magma and ledger; the cycle hole closed | `c12c32b` |
+| 5 | `Salmon.Op.Rewrite` — cross-declaration knowledge as a registered post-fold phase | `39d773d` |
+| 6 | `Op/Status` + `Op/Mailbox` + `Actions/Concurrent` — one thread per node | `14259cc` |
+| 7 | `Actions/Upkeep` + `Op/Supervision` — nodes are *tended*, not applied once | `41f181f` |
+| 8 | `Extension.managed` + `Nodes/Daemon` — a node can own its process | `ff3faaf` |
+| 9 | `supStrategy` — a node's going away sends its dependants back to `WaitUp` | `f03afc2` |
 
-## Milestone 9: `rest_for_one` — landed
+And three things that are not milestones:
 
-Landed with five departures, recorded in place in
-`specs/per-node-state-machines.md`. Two of them are corrections to the
-sketch below rather than choices, and both are worth knowing before touching
-this code:
+| what | commit |
+|------|--------|
+| (R1), first of three nodes: `Systemd.systemdService` has a `check` | `f7aec15` |
+| (I1) fixed: a bounce is believed over a stale check | `f7aec15` |
+| `salmon-ops-serve-fixture --daemon`, so 8 and 9 can be seen by hand | `12fb625` |
 
-- **§9.1's "watch the dependencies' statuses" cannot work as written.** A
-  level read of `Stability` misses every departure it is for — a dependency
-  that fell over and recovered between two of a dependant's waits looks
-  identical to one that never moved, and a rewritten config file is exactly
-  that shape. `Status.statusEpoch` (monotonic, bumped when a settled node
-  unsettles) is what the dependant compares against instead.
-- **§9.3's use of `supStableAfter` as a settling delay would swallow the case
-  the feature is for**, for the same reason: the config is back within
-  milliseconds. It is a rate limit on *repeat* demotions instead — an
-  isolated departure is always honoured, a second one inside the interval is
-  dropped.
+139 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
+Each milestone is marked *landed* in the design, with its deviations recorded
+in place there; this table is the index, not the record.
 
-Two things the sketch got right and one it did not anticipate: the strategy
-is per-node and authored on the node that goes away (§9.2), the cascade
-needed no code, and the thundering herd (§9.1) does not arise at all, because
-a machine with no opted-in dependency subscribes to nothing. What it did not
-anticipate is that an adopted machine had to be *handed* its new supervisor's
-state — see the design's fourth departure, and (R5) below, which this made
-smaller.
+The honest summary of where this leaves things: **the execution model is
+finished and the nodes have only just started catching up with it.** Nine
+milestones built a per-node state machine, a ledger, a rewrite phase, two
+concurrent drivers and a supervisor that can own a process and bounce what
+stands on it — all of which ask each node one question, "is your effect still
+in place?", that roughly a fifth of the nodes here can answer, and that until
+`f7aec15` no long-running one could.
 
-The original analysis follows, for the reasoning behind the shape.
+### Left
 
-### 9.1 The exact gap, as the code stands
+Nothing is blocking anything else. (R1) is the one that decides whether any
+of the above does anything on a real graph.
 
-`Salmon.Actions.Upkeep.look` does half of this already. When a check says the
-effect is gone it marks the node failed in the supervisor's
-`TVar (Set Ref)` — so a dependant **still in `WaitUp`** holds off, which is
-the one-shot drivers' `Blocked` containment expressed as a wait. What it does
-not do is touch a dependant that has **already reached `Up`**: that node is
-napping in `resting` and never looks at its dependencies again.
+| id | what | size | note |
+|----|------|------|------|
+| **R1** | the other two nodes need a `check`: `filecontents`, then `dir` | small each | **the item that matters**; §R1 |
+| **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | not a taste question; settle with R1 |
+| R3 | `statusOutput` has no reader — nobody can see a failed node's last lines | small | how you would *see* R1 working |
+| R2 | no operator command addresses a node, so the mailbox is unreachable | small | `pause`/`force`/`recheck` mean something now |
+| R4 | `query`/`tree`/`dag` print the declared graph, not the rewritten one | medium | = `specs/advance-querying.md` |
+| R5 | supervisor-level restart is half wired (monitored, not restarted) | small | milestone 9's `Under` did most of it |
+| R6 | no concurrency-bounding primitive; convergence is unbounded | medium | deliberate so far |
+| R7 | two dead bindings (`postOrderM`, `historyLines`) | trivial | |
+| R8 | `Restart` means two different things (`Systemd` vs `Supervision`) | trivial | did *not* bite doing R1's first node |
+| I2 | `supStrategy` is authored on the dependency, not the dependant | — | taste; §I2 |
+| I3 | `supStableAfter` carries two unrelated meanings | 15 min | taste; §I3 |
+| I4 | the `RestForOne` cascade needs opting in at every hop | — | taste; §I4 |
+| I5 | adoption refreshes a machine's supervisor but not its policy | small | do with R5 |
 
-So the missing piece is small and precisely locatable: when a node leaves
-`Up`, its dependants' machines have to go back to `WaitUp`.
-`Salmon.Op.Status.unsettle` is already the function for that. What is missing
-is a machine that *observes* it — `resting`'s STM choice would gain a branch
-watching its own dependencies' statuses, which is `waitStability` inverted
-("wake me when one of these stops being `Stable`/`TurnUp`").
+### The tradeoffs, in one place
 
-That branch is also why this is last. Every node in a supervised `serve`
-would then hold a live STM subscription to its dependencies for as long as it
-is up, and a flapping leaf wakes its whole transitive cone. On a wide graph
-that is the one part of this design with a plausible thundering-herd
-behaviour, and it should land where it can be measured rather than early
-where it cannot.
+Every milestone departed from the design somewhere; those are recorded in the
+design's own milestone list, in place, so they are read next to what they
+changed. The ones that are still *live decisions* — where a different answer
+is defensible and reversing it is a real option — are the (I) items above and
+in §"Landed, but wanting another iteration". The three worth knowing without
+reading further:
 
-### 9.2 It has to be a per-node choice
-
-Erlang's `one_for_one` is "restart just this node"; `rest_for_one` is "this
-node and everything after it". §"The supervision tree" is right that the
-strategy is a natural per-node knob — a config-file node probably wants
-`rest_for_one` (a service reading a config that changed should be bounced), a
-log shipper probably wants `one_for_one` (nothing downstream cares).
-
-That is a third field on `Supervision`, which is already the per-node policy
-channel and already optional:
-
-```haskell
-data Strategy = OneForOne | RestForOne
-supStrategy :: !Strategy   -- default OneForOne
-```
-
-**Default `OneForOne`**, which is today's behaviour exactly — so this
-milestone changes nothing until a node opts in, which is the property that
-makes it safe to land at all. Note this is the opposite default from
-`supRestart`'s (`OnFailure`, the active choice), and deliberately: restarting
-a node that fell over is a statement about that node, while bouncing its
-dependants is a statement about *other people's* nodes.
-
-### 9.3 The hazard to design against
-
-A node that flaps — check fails, check succeeds, check fails — with
-`RestForOne` dependants demotes and re-runs its whole cone on every flap.
-`supStableAfter` is the mitigation and it exists now (milestone 8): demote
-dependants only once the node has been down long enough to count against the
-tally, not on the first failed check. Milestone 9's job is to *use* it, not
-to add it.
-
-### 9.4 What to test
-
-- a dependant already `Up` is demoted when its dependency leaves `Up`, and
-  comes back after it does;
-- with `OneForOne` (the default) it is not demoted at all;
-- a demoted dependant does not run `up` until the dependency is `Stable`
-  again — i.e. the demotion goes through `WaitUp` and not straight to
-  `Upping`;
-- a node with no dependants demotes nothing and costs nothing.
+- **`run up` no longer restarts a healthy systemd unit** (`f7aec15`). That is
+  what giving a node a `check` costs, and it is the intended improvement, but
+  it is a behaviour change on existing infra.
+- **Supervision only runs while `serve` is idle** (milestone 7). A piped
+  script is therefore never supervised, which keeps `serve < script`
+  deterministic and makes the feature invisible to any scripted test.
+- **`Unknown` never restarts anything** (milestone 7). Right, given nearly no
+  node has a `check` — and the reason (R1) is worth more than any remaining
+  milestone was.
 
 -------------------------------------------------------------------------------
 
@@ -186,8 +93,7 @@ to add it.
 
 These are not open work items in the sense (R1)–(R8) are: each one is
 implemented and shipped, and — (I1) excepted — the code does something
-coherent today.
-They are the places where the *shape* was decided under a single milestone's
+coherent today. They are the places where the *shape* was decided under a single milestone's
 pressure and a different answer was defensible — so they want a second pass
 with the whole thing built, rather than a bug report. (I1) turned out to be a
 bug and is fixed; (I6) is the one left that is not a matter of taste.
@@ -641,6 +547,128 @@ what a convergence pass does that should be decided before (R1) is done
 node-by-node, since which way it goes changes whether adding a `check` to
 `filecontents` is a nicety or the only thing that makes re-declaring content
 work.
+
+## How milestones 8 and 9 actually went
+
+Kept because both departed from the design in ways worth knowing before
+touching that code, and because §9.1 and §9.3 below are the reasoning the
+milestone-9 departures are corrections *to*.
+
+### Milestone 8: `Managed` nodes
+
+Landed as planned, with six departures recorded in place in
+`specs/per-node-state-machines.md`. Three are worth knowing here because they
+change what the remaining work looks like:
+
+- **`Lifecycle` is a field, not a sum** (`managed` beside `up`), as this plan
+  recommended. If a third lifecycle ever appears, that is when to pay for the
+  sum.
+- **A machine holding a process is `Kept` across commands.** This was not in
+  the plan and is the largest thing milestone 8 added: `serve` stands its
+  machines down before every command, so a supervisor that wound its
+  processes down with it would restart every service on every `status`.
+  Holding machines survive and the next supervisor adopts them, on exactly
+  the condition §"`Ref` is location-addressed" named — still wanted up, and
+  its representative unchanged.
+- **The restart policy got `supStableAfter`/`supGiveUpAfter`**, folded in
+  rather than deferred, as recommended. Which also means milestone 9's
+  flapping hazard (§9.3) already has its mitigation available.
+
+The `Restart` name collision the plan flagged is **still latent** — see (R8).
+
+### Milestone 9: `rest_for_one`
+
+Landed with five departures, recorded in place in
+`specs/per-node-state-machines.md`. Two of them are corrections to the
+sketch below rather than choices, and both are worth knowing before touching
+this code:
+
+- **§9.1's "watch the dependencies' statuses" cannot work as written.** A
+  level read of `Stability` misses every departure it is for — a dependency
+  that fell over and recovered between two of a dependant's waits looks
+  identical to one that never moved, and a rewritten config file is exactly
+  that shape. `Status.statusEpoch` (monotonic, bumped when a settled node
+  unsettles) is what the dependant compares against instead.
+- **§9.3's use of `supStableAfter` as a settling delay would swallow the case
+  the feature is for**, for the same reason: the config is back within
+  milliseconds. It is a rate limit on *repeat* demotions instead — an
+  isolated departure is always honoured, a second one inside the interval is
+  dropped.
+
+Two things the sketch got right and one it did not anticipate: the strategy
+is per-node and authored on the node that goes away (§9.2), the cascade
+needed no code, and the thundering herd (§9.1) does not arise at all, because
+a machine with no opted-in dependency subscribes to nothing. What it did not
+anticipate is that an adopted machine had to be *handed* its new supervisor's
+state — see the design's fourth departure, and (R5) below, which this made
+smaller.
+
+The original analysis follows, for the reasoning behind the shape.
+
+#### 9.1 The exact gap, as the code stands
+
+`Salmon.Actions.Upkeep.look` does half of this already. When a check says the
+effect is gone it marks the node failed in the supervisor's
+`TVar (Set Ref)` — so a dependant **still in `WaitUp`** holds off, which is
+the one-shot drivers' `Blocked` containment expressed as a wait. What it does
+not do is touch a dependant that has **already reached `Up`**: that node is
+napping in `resting` and never looks at its dependencies again.
+
+So the missing piece is small and precisely locatable: when a node leaves
+`Up`, its dependants' machines have to go back to `WaitUp`.
+`Salmon.Op.Status.unsettle` is already the function for that. What is missing
+is a machine that *observes* it — `resting`'s STM choice would gain a branch
+watching its own dependencies' statuses, which is `waitStability` inverted
+("wake me when one of these stops being `Stable`/`TurnUp`").
+
+That branch is also why this is last. Every node in a supervised `serve`
+would then hold a live STM subscription to its dependencies for as long as it
+is up, and a flapping leaf wakes its whole transitive cone. On a wide graph
+that is the one part of this design with a plausible thundering-herd
+behaviour, and it should land where it can be measured rather than early
+where it cannot.
+
+#### 9.2 It has to be a per-node choice
+
+Erlang's `one_for_one` is "restart just this node"; `rest_for_one` is "this
+node and everything after it". §"The supervision tree" is right that the
+strategy is a natural per-node knob — a config-file node probably wants
+`rest_for_one` (a service reading a config that changed should be bounced), a
+log shipper probably wants `one_for_one` (nothing downstream cares).
+
+That is a third field on `Supervision`, which is already the per-node policy
+channel and already optional:
+
+```haskell
+data Strategy = OneForOne | RestForOne
+supStrategy :: !Strategy   -- default OneForOne
+```
+
+**Default `OneForOne`**, which is today's behaviour exactly — so this
+milestone changes nothing until a node opts in, which is the property that
+makes it safe to land at all. Note this is the opposite default from
+`supRestart`'s (`OnFailure`, the active choice), and deliberately: restarting
+a node that fell over is a statement about that node, while bouncing its
+dependants is a statement about *other people's* nodes.
+
+#### 9.3 The hazard to design against
+
+A node that flaps — check fails, check succeeds, check fails — with
+`RestForOne` dependants demotes and re-runs its whole cone on every flap.
+`supStableAfter` is the mitigation and it exists now (milestone 8): demote
+dependants only once the node has been down long enough to count against the
+tally, not on the first failed check. Milestone 9's job is to *use* it, not
+to add it.
+
+#### 9.4 What to test
+
+- a dependant already `Up` is demoted when its dependency leaves `Up`, and
+  comes back after it does;
+- with `OneForOne` (the default) it is not demoted at all;
+- a demoted dependant does not run `up` until the dependency is `Stable`
+  again — i.e. the demotion goes through `WaitUp` and not straight to
+  `Upping`;
+- a node with no dependants demotes nothing and costs nothing.
 
 ## Relationship to the other specs
 

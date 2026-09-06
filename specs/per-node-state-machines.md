@@ -7,6 +7,13 @@ This revision follows the `deptrack-devops` precedent
 ([`Devops/Graph.hs`](https://github.com/lucasdicioccio/deptrack-project/blob/master/deptrack-devops/src/Devops/Graph.hs)),
 which already solved most of this, and refines its per-node *intent stream*
 into a per-node *ledger*. It supersedes the first draft's five-state machine.
+
+**For where this stands — what shipped, what is left, and which tradeoffs are
+still reversible — read `specs/per-node-state-machines-remaining.md`
+§"Where this stands" rather than this file.** This one is the design and the
+record: every milestone below is marked *landed* with its departures written
+in place, which is the right place to read them (next to what they changed)
+and the wrong place to get an overview.
 `Salmon.Builtin.Nodes.Supervised` — a first cut at supervision under the
 current execution model — has since been removed in favour of this design;
 `Serve.serveWith` still exists but has no consumer, and is subsumed here too.
