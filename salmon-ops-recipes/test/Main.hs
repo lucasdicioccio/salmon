@@ -16,6 +16,7 @@ import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
 import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeSpec as ServeSpec
+import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
 
@@ -42,6 +43,7 @@ main =
             , QuerySpec.tests
             , RewriteSpec.tests
             , ServeSpec.tests
+            , SystemdSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests
             ]

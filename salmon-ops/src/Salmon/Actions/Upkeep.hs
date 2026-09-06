@@ -191,7 +191,7 @@ import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..), Mailbox)
 import qualified Salmon.Op.Mailbox as Mailbox
-import Salmon.Op.Ref (Ref)
+import Salmon.Op.Ref (Ref, unRef)
 import Salmon.Op.Status (Direction (..), Stability (..), Status (..), newStatus, note, settle, touch, unsettle, waitStability, wedged)
 import Salmon.Op.Supervision (Micros (..), Restart (..), Strategy (..), Supervision (..), millis, seconds, supervisionOf, toNanos)
 import Salmon.Reporter
@@ -948,7 +948,7 @@ upkeep ::
     IO ()
 upkeep standing ctx =
     case standing of
-        Unsettled -> waitUp freshTally []
+        Unsettled -> waitUp freshTally Consult []
         -- Already up: settle so dependants may go, and start watching. The
         -- verdict is 'Skipped' because that is exactly what it is — nobody
         -- looked, somebody said — and the first 'look' replaces it.
@@ -979,9 +979,11 @@ upkeep standing ctx =
 
     Carries the 'Tally' rather than starting a fresh one, because this is
     where a demoted node comes back to and the moment it was demoted is what
-    stops a flapping dependency demoting it again immediately. -}
-    waitUp :: Tally -> [Instruction] -> IO ()
-    waitUp tally pending = do
+    stops a flapping dependency demoting it again immediately, and an
+    'Intent' because what a node does when its dependencies arrive is not the
+    same question as whether they have. -}
+    waitUp :: Tally -> Intent -> [Instruction] -> IO ()
+    waitUp tally intent pending = do
         say (Upkeep act WaitUp)
         loop pending
       where
@@ -996,7 +998,7 @@ upkeep standing ctx =
                 Demote _ -> loop held
                 Rearm{} -> loop held
                 Told _ -> paused ctx told (loop (held <> told)) (loop (held <> told))
-                Elapsed -> attempt (held <> told) Consult tally
+                Elapsed -> attempt (held <> told) intent tally
 
     -- | Decide whether to act, then act in whichever way this node acts.
     attempt :: [Instruction] -> Intent -> Tally -> IO ()
@@ -1081,8 +1083,22 @@ upkeep standing ctx =
             Ended outcome -> pure (afterExit outcome tally)
             Elapsed -> peek (relaxed d)
             Rearm dep var e -> watch running verdict d tally (Map.insert dep (var, e) armed)
+            {- 'Regardless', and this is not a preference. Leaving this block
+            cancels the action, so by the time the node comes back round its
+            effect is /certainly/ gone — and a check that says otherwise is
+            stale by construction, answering about a pidfile, a port
+            something else is holding, or a log file that exists because the
+            node ran earlier. 'Consult'ing it would settle the node into 'Up'
+            holding nothing at all, which is the one outcome worse than not
+            bouncing it.
+
+            Note the discriminator is /this machine is holding the effect
+            right now/, not "this node has a managed action": a node whose
+            action forked and exited is watched from 'resting' as an unowned
+            effect, and re-applying that one would start a second copy of
+            something already running. -}
             Demote dep -> do
-                sending <- demote dep tally
+                sending <- demote dep (Regardless (Failure ("sent back by " <> unRef dep))) tally
                 case sending of
                     -- handed back rather than run, like a restart and for
                     -- the same reason: it runs outside the 'withAsync', so
@@ -1210,8 +1226,13 @@ upkeep standing ctx =
             Halt -> pure ()
             Ended _ -> pure ()
             Rearm dep var e -> resting verdict d tally (Map.insert dep (var, e) armed)
+            -- 'Consult': whatever this node's effect is, it is still there
+            -- as far as this machine knows, so its own check is the
+            -- authority on whether the demotion means any work. A demotion
+            -- that turns out to be unnecessary then costs one check rather
+            -- than one @up@.
             Demote dep -> do
-                sending <- demote dep tally
+                sending <- demote dep Consult tally
                 case sending of
                     Just go -> go
                     Nothing -> resting verdict d tally (Map.delete dep armed)
@@ -1236,13 +1257,13 @@ upkeep standing ctx =
     dependency ended up rather than where it was before it moved. Both
     callers do that; only whether they run the result or hand it back
     differs. -}
-    demote :: Ref -> Tally -> IO (Maybe (IO ()))
-    demote dep tally = do
+    demote :: Ref -> Intent -> Tally -> IO (Maybe (IO ()))
+    demote dep intent tally = do
         now <- getMonotonicTimeNSec
         pure $
             if tooSoon policy now tally
                 then Nothing
-                else Just (demoting dep now tally)
+                else Just (demoting dep now intent tally)
 
     {- | Going back to 'WaitUp', to be brought up again on top of whatever the
     dependency that sent this node back becomes.
@@ -1251,11 +1272,11 @@ upkeep standing ctx =
     enough to hold this node's own dependants. That is also what carries the
     cascade — a dependant of /this/ node that opted in sees exactly what this
     node just saw. -}
-    demoting :: Ref -> Word64 -> Tally -> IO ()
-    demoting dep now tally = do
+    demoting :: Ref -> Word64 -> Intent -> Tally -> IO ()
+    demoting dep now intent tally = do
         say (Demoted act dep)
         unsettle status TurnUp
-        waitUp tally{tallyDemotedAt = Just now} []
+        waitUp tally{tallyDemotedAt = Just now} intent []
 
     {- | Look, and either carry on resting or go back to 'Upping'. The policy
     is consulted before 'satisfiedBy' rather than after, which is the only

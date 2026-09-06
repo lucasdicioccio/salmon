@@ -94,6 +94,7 @@ test-suite salmon-ops-recipes-test
                     , Test.QuerySpec
                     , Test.RewriteSpec
                     , Test.ServeSpec
+                    , Test.SystemdSpec
                     , Test.UpTreeSpec
                     , Test.UpkeepSpec
     build-depends:    base

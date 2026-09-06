@@ -2,8 +2,13 @@ module Salmon.Builtin.Nodes.Systemd where
 
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextError
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Process.ByteString (readCreateProcessWithExitCode)
 
+import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -36,6 +41,7 @@ systemdService r systemctl t cfg =
                         actions
                             { help = "installs a systemd-unit and up it"
                             , ref = mkRef "systemd-unit" cfg.config_target
+                            , check = checkService cfg
                             , up = reload >> enable >> up
                             , down = stop
                             }
@@ -52,6 +58,106 @@ systemdService r systemctl t cfg =
 
     configContents :: Op
     configContents = filecontents $ FileContents unitPath (render_config cfg)
+
+{- | Does this unit already exist, loaded as written, enabled and running?
+
+The first @check@ on a long-running effect salmon does __not__ own, which is
+the largest category of node in this repository and the one supervision was
+built for. Without it, @systemdService@ answers
+'Salmon.Actions.UpDown.Unknown' forever, and
+"Salmon.Actions.Upkeep" deliberately never acts on @Unknown@: a service that
+died would be brought up once by the declaring pass and then watched
+pointlessly for the rest of the process's life.
+
+Three properties, one @systemctl show@ (which exits 0 even for a unit it has
+never heard of, so there is no error path to distinguish from an answer):
+
+* __@ActiveState@__ is the effect itself. @active@ is
+  'Salmon.Actions.UpDown.Success' and @inactive@\/@failed@ are
+  'Salmon.Actions.UpDown.Failure'. The transitional states —
+  @activating@, @deactivating@, @reloading@ — are
+  'Salmon.Actions.UpDown.Unknown', which is exactly what that verdict is
+  for: a service that is part-way through starting has not gone away, and
+  restarting it on the strength of a half-finished transition is how a slow
+  starter becomes a restart loop. @Unknown@ makes the supervisor wait and
+  look again, which is the right answer and the only one available.
+* __@UnitFileState@__ catches somebody having @systemctl disable@d the unit
+  underneath us. The service is still running, so @ActiveState@ alone would
+  say everything is fine, right up until the next reboot.
+* __@NeedDaemonReload@__ is what makes a /changed/ unit file take effect.
+  This node's own dependency rewrites the file before this check ever runs,
+  so comparing the bytes on disk against what we would write can only ever
+  say "they match"; systemd's own record of "the file changed since I loaded
+  it" is the only thing that still remembers. Without it, editing a unit
+  would rewrite the file and never restart the service.
+
+= This changes what @run up@ does, deliberately
+
+A @systemdService@ whose unit is already installed, enabled, loaded and
+running is now __skipped__ rather than reloaded-enabled-restarted on every
+@run up@. That is the point of giving a node a @check@ — and it is a real
+behaviour change for existing callers, so it is worth being explicit: if you
+were relying on @run up@ to bounce a service whose unit file did not change,
+that no longer happens. Change the file (any change) and @NeedDaemonReload@
+makes it happen again.
+-}
+checkService :: Config -> IO CheckResult
+checkService cfg = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            ( proc
+                "systemctl"
+                ( scopeArgs cfg.config_scope
+                    <> [ "show"
+                       , Text.unpack cfg.config_target
+                       , "--property=ActiveState"
+                       , "--property=UnitFileState"
+                       , "--property=NeedDaemonReload"
+                       ]
+                )
+            )
+            ""
+    pure $ case code of
+        ExitSuccess -> interpretShow (Text.lines (Text.decodeUtf8With TextError.lenientDecode out))
+        ExitFailure _ ->
+            -- not "the unit is down": we could not ask. Saying 'Failure'
+            -- here would have a supervisor restart every unit on a box
+            -- whose systemd is not answering.
+            Unknown
+
+{- | The verdict 'checkService' draws from @systemctl show@'s output, split
+out because it is the whole of the decision and the only part worth testing
+without a systemd to hand.
+
+A property that is missing entirely is treated as absent rather than assumed:
+@systemctl show@ omits @UnitFileState@ for a unit it has never heard of, and
+"never heard of" is a 'Salmon.Actions.UpDown.Failure' by way of
+@ActiveState=inactive@ rather than by way of a special case.
+-}
+interpretShow :: [Text] -> CheckResult
+interpretShow ls
+    | property "NeedDaemonReload" == Just "yes" =
+        Failure "the unit file on disk has changed since systemd loaded it"
+    | otherwise = case property "ActiveState" of
+        Just "active" -> case property "UnitFileState" of
+            Just st
+                | st `elem` ["enabled", "enabled-runtime", "static", "indirect"] -> Success
+                | otherwise -> Failure ("the unit is running but " <> st)
+            -- running, and systemd has no install state for it at all: not
+            -- a thing this node can author, so not a thing to complain
+            -- about either.
+            Nothing -> Success
+        Just "activating" -> Unknown
+        Just "deactivating" -> Unknown
+        Just "reloading" -> Unknown
+        Just other -> Failure ("the unit is " <> other)
+        Nothing -> Failure "systemctl said nothing about the unit's state"
+  where
+    property :: Text -> Maybe Text
+    property name =
+        case [Text.drop 1 v | l <- ls, let (k, v) = Text.breakOn "=" l, k == name, not (Text.null v)] of
+            (x : _) -> Just (Text.strip x)
+            [] -> Nothing
 
 {- | Restarts a pre-existing systemd service (e.g. one shipped by a Debian
 package, such as nginx) — unlike 'systemdService', this does not author a

@@ -189,23 +189,20 @@ implemented and shipped, and — (I1) excepted — the code does something
 coherent today.
 They are the places where the *shape* was decided under a single milestone's
 pressure and a different answer was defensible — so they want a second pass
-with the whole thing built, rather than a bug report. (I1) and (I6) are the
-two to settle; the rest are listed after them and are genuinely matters of
-taste.
+with the whole thing built, rather than a bug report. (I1) turned out to be a
+bug and is fixed; (I6) is the one left that is not a matter of taste.
 
-(I1) is the one to settle first, and it is no longer a matter of taste: it
-loses a running process outright, which
-`salmon-ops-serve-fixture --daemon --stale-check` demonstrates in about
-fifteen seconds. (I6) is the widest — it is not a milestone-9 decision at all,
-and it says something uncomfortable about what a convergence pass currently
-does.
+(I1) is fixed — it lost a running process outright, which was not a matter of
+taste. (I6) is now the one that matters most here: it is not a milestone-9
+decision at all, and it says something uncomfortable about what a convergence
+pass currently does.
 
-### I1. A demoted node consults its own `check` — and a `managed` one is then left down while reporting `Up`
+### I1. A demoted node consults its own `check` — *fixed*
 
-**This one is a bug rather than a fork, and there is a demonstration of it in
-the tree.** `salmon-ops-serve-fixture --daemon --stale-check` gives a daemon
-node a plausible health check ("my log file exists"); drive the loop, change
-the config it stands on, and watch:
+**This was a bug rather than a fork, and it is fixed; what follows is the
+record.** `salmon-ops-serve-fixture --daemon --stale-check` gives a daemon
+node a plausible health check ("my log file exists"); before the fix,
+driving the loop and changing the config it stood on produced:
 
 ```
 Signalling "web" 15
@@ -213,8 +210,8 @@ Reaped "web"
 serve: daemon sent back to wait: ... stopped being up
 ```
 
-...and nothing after it. The process is torn down and never restarted, and
-the node settles into `Up` claiming its effect is in place.
+...and nothing after it. The process was torn down and never restarted, and
+the node settled into `Up` claiming its effect was in place.
 
 `demoting` sends a node to `waitUp`, which comes back through
 `attempt ... Consult` — and `Consult` asks the node's own `check` first. A
@@ -244,13 +241,21 @@ whether work is needed. The case against is that it makes the feature
 self-cancelling: the better a node's check, the less `RestForOne` can do to
 it.
 
-**The middle answer is the one to take, and it is a one-line change:**
-`Regardless` for a node with a `managed` action, `Consult` for one whose
-effect persists on its own. It splits along the line milestone 8 already
-drew, it fixes the orphaning outright, and it leaves the genuinely
-contestable half — whether a *one-shot* node's demotion means re-apply or
-re-evaluate — open to be decided on its own merits rather than under the
-pressure of a bug.
+**The middle answer was the one taken**, and writing it sharpened the rule
+one step further: the discriminator is not "this node has a `managed`
+action" but **"this machine was holding the effect when it was sent back"**.
+A demotion out of `watch` re-applies (`Regardless`); a demotion out of
+`resting` consults. The difference matters for exactly one shape — a managed
+node whose action forked and exited, which `afterExit` then watches from
+`resting` as an unowned effect. Re-applying *that* would start a second copy
+of something already running, which is the case milestone 8 went out of its
+way to avoid.
+
+So the genuinely contestable half — whether a *one-shot* node's demotion
+means re-apply or re-evaluate — is untouched and still open, decided on its
+own merits rather than under the pressure of a bug. `Test/UpkeepSpec.hs`
+pins both halves, and the first of the pair fails by timing out if the
+`Regardless` is reverted.
 
 Milestone 8's own ordering rule is the precedent and points the same way: it
 consults the check before the policy because "a process that exits 0 because
@@ -384,7 +389,7 @@ milestones left behind. (R1) is the one that matters.
 ### R1. Nodes have no `check`, so almost nothing is actually supervised
 
 **The single highest-value item in this document, milestones 8 and 9
-included.**
+included. One of the three candidates below is now done.**
 
 `check` is the only thing in the model that can notice an effect going away.
 Counting assignments across `salmon-ops/src/Salmon/Builtin/Nodes/` and
@@ -405,17 +410,39 @@ question is no longer "does this shape work" but "which nodes get a `check`".
 
 Three candidates, in the order I would do them:
 
-1. **`Systemd.systemdService`** — `systemctl is-active <unit>`, the same
-   check-a-command's-output shape as `Netfilter.rule`'s
-   `skipIfNftRuleExists`, which CLAUDE.md already holds up as the template.
-   Highest value per line in the repo: these are the nodes that are actually
-   long-running services, and the node currently runs `systemctl restart`
-   unconditionally on every pass (`up = reload >> enable >> up`, where `Up`
-   renders to `restart`), so a check makes it idempotent *and* supervisable
-   in one change. Note the interaction to get right: a unit with `Restart=`
-   is already supervised by systemd, so salmon's own `Supervision` for such a
-   node should be `Never` or `OnFailure` and never `Always` — two supervisors
-   fighting over one service is worse than one.
+1. **`Systemd.systemdService`** — *done*. `Systemd.checkService` shells out
+   once to `systemctl show --property=ActiveState --property=UnitFileState
+   --property=NeedDaemonReload`, and `Systemd.interpretShow` (pure, tested in
+   `Test/SystemdSpec.hs`) draws the verdict. Three departures from the
+   one-line sketch above, each found by writing it:
+
+   - **`is-active` alone is not enough, because this node's own dependency
+     rewrites the unit file before the check ever runs.** Comparing the bytes
+     on disk against what we would write can therefore only ever say "they
+     match", and a changed unit would be rewritten and never restarted.
+     `NeedDaemonReload` is systemd's own record of "the file changed since I
+     loaded it" and is the only thing that still remembers.
+   - **A transitional state is `Unknown`, not `Failure`.** `activating`,
+     `deactivating` and `reloading` mean the service has not gone away, and
+     treating them as gone is how a slow starter becomes a restart loop.
+     This is the first place in the tree where `Unknown` is the *right*
+     answer rather than the absence of one.
+   - **`UnitFileState` earns its place** on its own: a unit somebody
+     `systemctl disable`d is still running, so `ActiveState` says everything
+     is fine right up until the next reboot.
+
+   The behaviour change is the expected one and is documented on the
+   function: a unit that is installed, enabled, loaded and running is now
+   *skipped* by `run up` rather than reloaded-enabled-restarted every time.
+
+   (R8) did **not** come due here, contrary to the prediction below: the
+   collision only bites a module that needs both `Restart`s in scope, and
+   this one never imports `Salmon.Op.Supervision` — the supervision policy
+   for a systemd unit belongs on the caller's nodes, not on this one. The
+   interaction still to get right when someone does write one: a unit with
+   its own `Restart=` is already supervised by systemd, so salmon's
+   `Supervision` for it should be `OnFailure` or `Never` and never `Always`
+   — two supervisors fighting over one service is worse than one.
 2. **`Filesystem.filecontents`** — compare the file's contents with what the
    node holds. Correct rather than approximate (`skipIfFileExists` would say
    `Success` for a file with the wrong bytes), and cheap in the only sense
@@ -429,11 +456,16 @@ Three candidates, in the order I would do them:
 Milestone 8 narrows this in one respect and widens it in another. A node that
 owns its process needs no `check` at all to be supervised — the action's exit
 is the authority, which is most of what ownership was for — so
-`Nodes/Daemon.hs` works today with nothing added. But it makes the gap
-sharper for everything salmon does *not* own, which is every service already
-under systemd: `Systemd.systemdService` still cannot notice its unit
-stopping, and that is the largest single category of long-running effect in
-this repository.
+`Nodes/Daemon.hs` works today with nothing added. It made the gap sharper for
+everything salmon does *not* own, which is every service already under
+systemd, and that is the gap the first candidate above has now closed: a unit
+that stops behind salmon's back is noticed and restarted, and one whose file
+changed is reloaded.
+
+Doing it also produced the first evidence that this list is in the right
+order. Giving a real node a real check is what turned (I1) from a fork into a
+demonstrated bug — a service node *has* a check, so it walked straight into
+being torn down and left down — and the two landed together for that reason.
 
 **Each of these changes what `run up` does for every existing caller**: a
 node whose check says `Success` stops being re-applied. That is an
@@ -572,22 +604,21 @@ would then have to decide whether salmon or systemd is supervising it.
 anything on a real graph — with one thing to settle first, because (R1) is
 what makes it bite.
 
-0. **I1**, before or alongside the first node that gains a `check`. A demoted
-   node consults its own check, so every node that learns to answer "am I up"
-   stops being bounceable by the config it stands on. Doing (R1) without
-   settling this quietly converts `RestForOne` from working-by-accident into
-   not working, one node at a time, with nothing failing to say so.
+0. ~~**I1**~~ and ~~**R1**'s first node~~ — both done, and together, because
+   the second is what proved the first was a bug rather than a preference.
+   `Systemd.systemdService` has a check; a demoted node that was holding its
+   effect is put back regardless of what its own check claims.
 
-1. **R1, one node at a time** — `Systemd.systemdService` first (it is the
-   largest category of long-running effect in the repo and the one salmon
-   does not own, so it depends entirely on a `check`), then
-   `Filesystem.filecontents`, then `dir`. This is what turns nine landed
-   milestones into something that does anything on a real graph, and it is
-   the only item here whose value does not depend on another item landing.
-   Three small commits, each with a Layer-1 test. Expect (R8) to come due
-   while doing the first one. Milestone 9 sharpens the case for
-   `filecontents` in particular: a config node with no `check` cannot notice
-   its own file changing, so `RestForOne` on it can never fire.
+1. **The rest of R1, one node at a time** — `Filesystem.filecontents` next,
+   then `dir`. This is what turns nine landed milestones into something that
+   does anything on a real graph, and it is the only item here whose value
+   does not depend on another item landing. One small commit each, with its
+   own Layer-1 test. Milestone 9 sharpens the case for `filecontents` in
+   particular: a config node with no `check` cannot notice its own file
+   changing, so `RestForOne` on it can never fire — which is exactly why
+   `salmon-ops-serve-fixture --daemon` had to write a config node of its own
+   rather than use `filecontents`. (I6) says the same thing from the other
+   end and should be settled around the same time.
 2. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
    live `TVar` for a holding machine. Small, and it is how you will *see*
    whether (R1) is working. Milestone 8 also gave the output ring real

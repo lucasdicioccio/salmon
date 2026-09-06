@@ -99,6 +99,8 @@ tests =
             , testCase "a second departure in quick succession is dropped" flapIsRateLimited
             , testCase "a dependency coming up for the first time demotes nobody" settledStartIsNotDemoted
             , testCase "a dependant that owns a process is torn down and respawned" managedDependantIsRestarted
+            , testCase "a torn-down process is put back whatever its own check says" managedDemotionOutranksItsOwnCheck
+            , testCase "a node that lost nothing still asks its check" oneShotDemotionAsksItsCheck
             ]
         ]
 
@@ -1019,3 +1021,59 @@ managedDependantIsRestarted = within 20 $ do
         awaitSpawns spawns 2
         rs <- seen trace
         assertEqual "the process was sent back by its config" [("svc", refOf "cfg")] (demotions rs)
+
+{- | (I1). A node that owns its process is torn down on the way out of
+'Salmon.Actions.Upkeep.watch', so by the time it comes back round its effect
+is certainly gone — whatever its own @check@ says.
+
+The check here is one somebody would plausibly write and which is wrong in
+the way health checks are wrong: it answers "this ran at some point", not
+"it is running now". Before the fix that answer was believed, the node
+reported @Skip@ and settled into 'Up' holding nothing, and the process was
+gone for good.
+-}
+managedDemotionOutranksItsOwnCheck :: IO ()
+managedDemotionOutranksItsOwnCheck = within 20 $ do
+    (cfg, _, there) <- breakable "cfg" [] restForOne
+    spawns <- spawnCounter
+    gate <- newEmptyMVar
+    ranOnce <- newIORef False
+    let svc = holderOn "svc" [cfg] spawns (takeMVar gate) $ \x ->
+            x
+                { check = do
+                    stale <- readIORef ranOnce
+                    pure (if stale then Success else Failure "not started yet")
+                }
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        awaitSpawns spawns 1
+        -- from here its check lies: it says the effect is in place, and only
+        -- this machine knows it has just cancelled the thing providing it.
+        writeIORef ranOnce True
+        breakIt sup there "cfg"
+        awaitSpawns spawns 2
+        rs <- seen trace
+        assertEqual "it was sent back" [("svc", refOf "cfg")] (demotions rs)
+        assertBool "and put back rather than talked out of it" (null (skips rs))
+
+{- | ...and the other half of the same decision, which is what keeps it a
+narrow fix rather than "a demotion always re-applies".
+
+A node whose effect persists on its own has not lost anything by being
+demoted — nothing was torn down — so its check is still the authority on
+whether the demotion means any work at all. This one says yes, it is fine,
+and is believed.
+-}
+oneShotDemotionAsksItsCheck :: IO ()
+oneShotDemotionAsksItsCheck = within 20 $ do
+    (cfg, _, there) <- breakable "cfg" [] restForOne
+    (ran, bump) <- counter
+    let svc = nodeOn "svc" [cfg] $ \x -> x{check = pure Success, up = bump}
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        breakIt sup there "cfg"
+        await trace (\rs -> not (null (demotions rs)))
+        await trace (\rs -> reachedBy "svc" Up rs >= 2)
+        assertEqual "its check said there was nothing to do, and was right" 0 =<< readIORef ran
+        rs <- seen trace
+        assertBool "so it reported a skip rather than acting" (not (null (skips rs)))

@@ -207,6 +207,15 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   rather than wound down — otherwise typing `status` would restart every service. And a
   `Settled` claim is **never** made about a managed node, because `Settled` means "the effect
   persists on its own" and a managed effect does not persist without its machine.
+  One more ordering rule belongs to the same family and points the other way. When a node is
+  sent back by a `RestForOne` dependency, **a machine that was holding the effect re-applies
+  without consulting its check, and one that was not, consults**. Leaving `watch` cancels the
+  action, so the effect is certainly gone and any check saying otherwise is stale by
+  construction — a pidfile, a port something else holds, a log file that exists because the node
+  ran earlier — and believing it would settle the node into `Up` holding nothing at all. The
+  discriminator is *holding it right now*, not "has a `managed` action": a node whose action
+  forked and exited is watched from `resting` as an unowned effect, and re-applying that one
+  would start a second copy of something already running.
   Failure accounting lives in a per-machine `Tally` (consecutive failures, plus when the node
   last reached `Up`), which is what makes `supGiveUpAfter` usable: without `supStableAfter`
   resetting it, a service that falls over once a day reaches any finite limit eventually. A node
@@ -409,6 +418,23 @@ node whose check says `Success` stops being re-applied), so it is a deliberate d
 than a mechanical sweep. `Netfilter.rule`'s `skipIfNftRuleExists` is the template, and
 `Op/Supervision.hs` is where a node states what should happen when its check says the effect
 is gone.
+
+`Systemd.systemdService` is the one that has been done, and it is the worked example of what
+writing a real one costs. `checkService` shells out once to `systemctl show` for three
+properties and `interpretShow` (pure, so it is testable without a systemd — see
+`Test/SystemdSpec.hs`) draws the verdict. Each property earns its place for a reason that only
+shows up in the writing. **`ActiveState`** is the effect itself, but its *transitional* values
+(`activating`/`deactivating`/`reloading`) map to `Unknown` rather than `Failure`: a service
+part-way through starting has not gone away, and calling it gone is how a slow starter becomes a
+restart loop — the first place in this tree where `Unknown` is the right answer rather than the
+absence of one. **`UnitFileState`** catches a unit somebody `systemctl disable`d, which is still
+running and so invisible to `ActiveState` right up until the next reboot. And
+**`NeedDaemonReload`** is what makes a *changed* unit file take effect at all: this node's own
+dependency rewrites the file before the check runs, so nothing on disk can still testify that
+the running service is stale, and systemd's own record of "the file changed since I loaded it"
+is the only thing that remembers. The behaviour change lands here too — a unit that is
+installed, enabled, loaded and running is now **skipped** by `run up` rather than
+reloaded-enabled-restarted every time.
 
 **Failure must not be swallowed.** `Extension.up :: IO ()` has no way to signal failure in its
 type — the only way a failure becomes visible to `upTree` (see above) is if `up` *throws*.

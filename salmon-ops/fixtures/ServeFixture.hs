@@ -86,11 +86,19 @@ nothing, since the node is already 'Salmon.Actions.Serve.Converged' under a
 config node's own machine, on its next look. A node with no @check@ — every
 other node in this fixture — would simply keep the old content.
 
-__Why the check is doing all the work.__ Add @--stale-check@ and the daemon
-node gains a plausible-looking health check: "my log file exists". Do either
-of the above and watch the process get torn down and __not come back__. See
-(I1) in @specs\/per-node-state-machines-remaining.md@; this flag exists to
-make that concrete rather than theoretical.
+__What a node's own check is and is not allowed to say.__ Add
+@--stale-check@ and the daemon node gains a plausible-looking health check:
+"my log file exists". It is wrong in the way health checks are wrong — it
+answers "this ran at some point", not "it is running now" — and doing either
+of the above shows it being __deliberately ignored__: the node is torn down
+and put straight back, because the machine that cancelled the action knows
+better than any check can.
+
+That is a fix rather than the original behaviour. Until (I1) in
+@specs\/per-node-state-machines-remaining.md@ was settled, this flag lost the
+process outright: the check was consulted, it said the effect was in place,
+and the node settled into 'Salmon.Actions.Upkeep.Up' holding nothing at all.
+The flag stays because the rule it demonstrates is worth being able to see.
 -}
 module Main (main) where
 
@@ -146,7 +154,7 @@ instance ParseRecord Seed where
                 )
             <*> switch
                 ( long "stale-check"
-                    <> Opt.help "give the daemon a plausible-but-stale check (\"my log exists\"), which stops it being bounced. See (I1)."
+                    <> Opt.help "give the daemon a plausible-but-stale check (\"my log exists\"), which a bounce then ignores. See (I1)."
                 )
 
 -- | The hermetic directive: same shape as the seed here, but that's a
@@ -279,9 +287,10 @@ daemonOp d =
                         -- A health check somebody might plausibly write, and
                         -- which is wrong in the way health checks are wrong:
                         -- it answers "something ran once", not "it is running
-                        -- now". Being satisfied, it makes this node
-                        -- unbounceable — see (I1) in
-                        -- specs/per-node-state-machines-remaining.md.
+                        -- now". A bounce ignores it, because the machine that
+                        -- cancelled the action knows better; see (I1) in
+                        -- specs/per-node-state-machines-remaining.md for what
+                        -- it used to do instead.
                         there <- doesFileExist d.daemonLog
                         pure (if there then Success else Failure "no log yet")
             , -- `run up` has nowhere to put an action that never returns.
