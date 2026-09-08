@@ -1,0 +1,116 @@
+{
+  "contents": {
+    "announce": "a helpful assistant",
+    "apiKeyId": "kimi",
+    "extraAgents": [
+      {
+        "slug": "dev",
+        "path": "dev.json"
+      }
+    ],
+    "builtinToolboxes": [
+      {
+        "tag": "SystemToolbox",
+        "contents": {
+          "Name": "testsys",
+          "Description": "System context and directory listing, arbitrary code execution",
+          "Capabilities": [
+            "date",
+            "operating-system",
+            "running-user",
+            "hostname",
+            "working-directory",
+            "list-directory",
+            "execute-command"
+          ]
+        }
+      },
+      {
+        "tag": "SqliteToolbox",
+        "contents": {
+          "Name": "memory",
+          "Description": "A memory base agents maintain.",
+          "Versioning": {
+            "tag": "SqliteReadWrite",
+            "path": "./agents/memory.db"
+          }
+        }
+      },
+      {
+        "tag": "DeveloperToolbox",
+        "contents": {
+          "Description": "Tools for developing agents and tools",
+          "Name": "file-edits",
+          "Capabilities": [
+            "show-spec",
+            "read-file-range",
+            "write-file-range",
+            "restore-file"
+          ],
+          "FileSandbox": {
+            "fsbName": "code-access",
+            "fsbPredicate": {
+              "tag": "Any",
+              "contents": [
+                {
+                  "tag": "FileExactly",
+                  "contents": "./README.md"
+                },
+                {
+                  "tag": "FileExactly",
+                  "contents": "./CLAUDE.md"
+                },
+                {
+                  "tag": "FileExactly",
+                  "contents": "./cabal.project"
+                },
+                {
+                  "tag": "FileExactly",
+                  "contents": "./cabal.project.local"
+                },
+                {
+                  "tag": "DirectoryRecursive",
+                  "contents": "./salmon-apps"
+                },
+                {
+                  "tag": "DirectoryRecursive",
+                  "contents": "./salmon-core"
+                },
+                {
+                  "tag": "DirectoryRecursive",
+                  "contents": "./salmon-ops"
+                },
+                {
+                  "tag": "DirectoryRecursive",
+                  "contents": "./salmon-ops-recipes"
+                },
+                {
+                  "tag": "DirectoryRecursive",
+                  "contents": "./docs"
+                },
+                {
+                  "tag": "DirectoryRecursive",
+                  "contents": "./specs"
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "flavor": "OpenAIv1",
+    "mcpServers": [],
+    "modelName": "kimi-k2.7-code",
+    "modelUrl": "https://api.moonshot.ai/v1",
+    "slug": "dev",
+    "systemPrompt": [
+      "You are dev, a helpful AI assistant.",
+      "You provide clear, accurate, and concise responses.",
+      "When using tools, you explain your actions to the user.",
+      "You are working on the salmon project. For project context, consult agents/about.md.",
+      "Important long-term findings are stored in the SQLite table findings in agents/memory.db."
+    ],
+    "toolDirectory": "agents/tools"
+  },
+  "tag": "OpenAIAgentDescription"
+}

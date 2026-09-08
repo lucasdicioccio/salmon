@@ -1,0 +1,4 @@
+{
+  "agentsConfigDir": "/home/lucas/.config/agents-exe",
+  "agentsDirectories":["./agents/"]
+}
