@@ -3,45 +3,30 @@
 {- | Generic traversal primitives over 'Cofree' 'Graph' trees.
 
 'Graph' already derives 'Foldable'/'Functor'/'Traversable', which gives
-pre-order traversal for free (see 'Data.Foldable.toList'). These primitives
-cover the two shapes that pre-order alone doesn't: a post-order visitor
-(children before the node itself), and a fold that carries context down from
-ancestor to descendant while remembering which 'Graph' constructor connected
-them. Both are generic over any node type and know nothing about ops,
-actions, or refs — that stays in the callers.
+pre-order traversal for free (see 'Data.Foldable.toList'). 'foldWithContext'
+covers the shape pre-order alone doesn't: a fold that carries context down
+from ancestor to descendant while remembering which 'Graph' constructor
+connected them. Generic over any node type and knows nothing about ops,
+actions, or refs — that stays in the caller.
+
+This module used to also offer a post-order visitor
+(@postOrderM@), written for "Salmon.Actions.UpDown".'Salmon.Actions.UpDown.upTree'
+to propagate "a predecessor failed, so skip me too" down a subtree. Milestone
+4 of @specs\/per-node-state-machines.md@ moved both drivers onto
+"Salmon.Op.Dag", which answers that question from the collapsed magma
+instead of a tree walk, and nothing else in this repository ever called it —
+dropped rather than kept speculative; recover it from history if a caller
+needs it again.
 -}
 module Salmon.Op.GraphFold (
-    postOrderM,
     Shape (..),
     Branch (..),
     foldWithContext,
 ) where
 
 import Control.Comonad.Cofree (Cofree (..))
-import Data.Foldable (toList)
 
 import Salmon.Op.Graph
-
-{- | Visit every node of a 'Cofree' 'Graph' in post-order: all of a node's
-immediate Graph-children are visited (recursively, in the same left-to-right
-order 'Graph's derived 'Foldable' instance would produce) before the node
-itself. Performs no deduplication — a node reachable via two paths is
-visited once per path. Callers that need dedup do it themselves, keyed off
-whatever identity they extract from the node.
-
-@visit@ is told whether /any/ of the current node's immediate children
-reported 'True' (e.g. "this child, or something it itself depended on,
-failed"), and returns its own such flag for the node just visited — letting
-a caller like "Salmon.Actions.UpDown".'Salmon.Actions.UpDown.upTree'
-propagate "a predecessor failed, so skip me too" down through the whole
-subtree without needing its own separate graph walk.
--}
-postOrderM :: (Monad m) => (Bool -> a -> m Bool) -> Cofree Graph a -> m Bool
-postOrderM visit = go
-  where
-    go (x :< g) = do
-        childFailed <- or <$> mapM go (toList g)
-        visit childFailed x
 
 -- | Which 'Graph' constructor a node's own predecessors are wrapped in.
 data Shape = SVertices | SOverlay | SConnect

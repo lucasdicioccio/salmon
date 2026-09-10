@@ -215,8 +215,8 @@ over all of them and the representative is the last one seen. It does not
 prune already-seen 'Ref's the way the collapse inside @downTreeWith@ used to:
 that pruning dropped the edges of every occurrence after the first, which is
 exactly what a merge must not do. The cost is a full walk of the expanded
-'Cofree' — the same cost @upTree@'s @postOrderM@ already pays, and 'expand'
-before it.
+'Cofree' — the same cost the old tree-walking @upTree@ paid before milestone
+4 moved it onto this module, and 'expand' before it.
 
 The first argument decides whether replacing a representative is worth
 reporting: it answers "are these two the same node?", so 'True' records no
