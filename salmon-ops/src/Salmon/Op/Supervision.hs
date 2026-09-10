@@ -143,6 +143,37 @@ data Supervision = Supervision
     , supStrategy :: !Strategy
     -- ^ what this node leaving 'Salmon.Actions.Upkeep.Up' does to the nodes
     -- that depend on it. See 'Strategy'.
+    , supReapply :: !Bool
+    -- ^ for a node whose check answers
+    -- 'Salmon.Actions.UpDown.Immaterial' (the default for a node with no
+    -- @check@ at all): re-run @up@ on the tending loop instead of parking.
+    --
+    -- 'Salmon.Actions.UpDown.Immaterial' says "asking would cost what
+    -- applying costs" — it does not say the effect can never go away, only
+    -- that this node has no cheap way to tell. Most nodes that answer it
+    -- should still park (see 'Salmon.Actions.Upkeep' @Rest@): re-running
+    -- @up@ on a schedule is safe only if it is genuinely cheap /and/
+    -- genuinely idempotent, a strictly stronger claim than @Immaterial@
+    -- itself makes. 'Salmon.Builtin.Nodes.Filesystem.dir' is the case this
+    -- exists for — @createDirectoryIfMissing@ costs about what
+    -- @doesDirectoryExist@ would, so there is nothing to lose by preferring
+    -- the former.
+    --
+    -- __Ignored for a node that holds a running action__
+    -- ('Salmon.Builtin.Extension.managed'): such a node's @up@ throws by
+    -- convention (see "Salmon.Builtin.Nodes.Daemon"), and re-running it on
+    -- a schedule would crash-loop a service that is working fine. Such a
+    -- node parks regardless of this field.
+    --
+    -- __Never demotes this node's own dependants.__ A scheduled re-apply
+    -- does not go through 'Salmon.Actions.Upkeep.WaitUp' \/
+    -- 'Salmon.Actions.Upkeep.Upping' and does not touch
+    -- 'Salmon.Op.Status.statusEpoch', so a 'RestForOne' dependant watching
+    -- this node is not told anything happened — nothing did, as far as that
+    -- contract is concerned: the node never stopped being up. A re-apply
+    -- that /fails/ is a different story and is folded back into the normal
+    -- failure machinery ('supRestart', 'supGiveUpAfter'), which does have a
+    -- way to say so.
     , supWatchdog :: !(Maybe Micros)
     -- ^ how long this node may go without doing anything observable before
     -- it should be called wedged. 'Nothing' — the default — means never.
@@ -170,8 +201,9 @@ data Supervision = Supervision
     }
     deriving (Show, Eq)
 
-{- | 'OnFailure', 'OneForOne', no watchdog, ten seconds of uptime counts as
-stable, never gives up: what a node that says nothing gets.
+{- | 'OnFailure', 'OneForOne', never reapply on a schedule, no watchdog, ten
+seconds of uptime counts as stable, never gives up: what a node that says
+nothing gets.
 
 Note the difference in kind between the two defaults that /do/ something.
 'OnFailure' is an active choice — a node declared up that has stopped being
@@ -181,7 +213,7 @@ systemd is not converging a declared graph). Never giving up is the passive
 choice: latching off is a decision only the node's author can justify.
 -}
 defaultSupervision :: Supervision
-defaultSupervision = Supervision OnFailure OneForOne Nothing (seconds 10) Nothing
+defaultSupervision = Supervision OnFailure OneForOne False Nothing (seconds 10) Nothing
 
 {- | State a supervision policy on a node, for a later pass to read back:
 

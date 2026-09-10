@@ -45,6 +45,7 @@ import qualified Salmon.Actions.Upkeep as Upkeep
 -- HasField for fields whose selector is in scope, and 'Upkeep' asks for
 -- several this module never mentions by name.
 import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, evalDeps, help, managed, nodeps, notes, op, opAct, ref, up)
+import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..))
@@ -52,6 +53,9 @@ import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Status (Direction (..))
 import Salmon.Op.Supervision (Restart (..), Strategy (..), Supervision (..), defaultSupervision, millis, seconds, supervised)
 import Salmon.Reporter (ReporterM (..))
+import System.Directory (doesDirectoryExist, removeDirectory)
+import System.FilePath ((</>))
+import Test.Harness (withTempDir)
 
 tests :: TestTree
 tests =
@@ -103,6 +107,15 @@ tests =
             , testCase "a dependant that owns a process is torn down and respawned" managedDependantIsRestarted
             , testCase "a torn-down process is put back whatever its own check says" managedDemotionOutranksItsOwnCheck
             , testCase "a node that lost nothing still asks its check" oneShotDemotionAsksItsCheck
+            ]
+        , testGroup
+            "a node that reapplies instead of asking (supReapply)"
+            [ testCase "it re-runs up on the loop rather than parking" reapplyRunsAgain
+            , testCase "a successful reapply never re-enters Upping" reapplyStaysInUp
+            , testCase "reapplying a RestForOne node does not demote its dependants" reapplyDoesNotDemoteDependants
+            , testCase "a throwing reapply is a real failure, backed off and given up on" failingReapplyGivesUp
+            , testCase "a node holding an action ignores supReapply and parks" managedIgnoresSupReapply
+            , testCase "Filesystem.dir puts itself back, unsupervised by anybody else" dirSelfHeals
             ]
         ]
 
@@ -187,7 +200,8 @@ down to wait again. 'Parked' counts alongside 'NextLook' because it is the
 same event said about a node with nothing to poll for: the machine finished
 a turn and is waiting on its mailbox rather than on a timer. A case that
 counted only 'NextLook' would hang forever on a node with no @check@, which
-is most of them.
+is most of them. 'Reapplying' counts too, for the same reason on a node
+that declared 'Salmon.Op.Supervision.supReapply'.
 -}
 looks :: [Report Extension] -> Int
 looks rs = length [() | r <- rs, waiting r]
@@ -195,6 +209,7 @@ looks rs = length [() | r <- rs, waiting r]
 waiting :: Report Extension -> Bool
 waiting NextLook{} = True
 waiting Parked{} = True
+waiting Reapplying{} = True
 waiting _ = False
 
 -- | Which node was sent back to 'WaitUp', and by which dependency.
@@ -214,6 +229,7 @@ waiters rs =
     , a <- case r of
         NextLook a' _ _ -> [a']
         Parked a' -> [a']
+        Reapplying a' _ -> [a']
         _ -> []
     ]
 
@@ -893,6 +909,22 @@ for it, and a 'timeout' returning 'Nothing' is that wait made explicit.
 restForOne :: Extension -> Extension
 restForOne x = x{dynamics = [supervised defaultSupervision{supStrategy = RestForOne}]}
 
+-- | Opts a node into 'Salmon.Op.Supervision.supReapply': re-run @up@ on the
+-- loop instead of parking. See the "supReapply" test group.
+reapplying :: Extension -> Extension
+reapplying x = x{dynamics = [supervised defaultSupervision{supReapply = True}]}
+
+-- | Both at once: the shape a config-file-that-happens-to-be-cheap would
+-- declare, and the case that pins 'supReapply' must not fire 'RestForOne'
+-- on a success — only a genuine departure may.
+reapplyingRestForOne :: Extension -> Extension
+reapplyingRestForOne x = x{dynamics = [supervised defaultSupervision{supReapply = True, supStrategy = RestForOne}]}
+
+-- | Like 'reapplying', but gives up after exactly one failure — deterministic
+-- without needing to wait out a real backoff or a real 'supStableAfter'.
+reapplyingGivesUpFast :: Extension -> Extension
+reapplyingGivesUpFast x = x{dynamics = [supervised defaultSupervision{supReapply = True, supGiveUpAfter = Just 1}]}
+
 {- | A node whose effect can be taken away behind salmon's back. Hands back
 the count of its @up@s and the flag that says whether its effect is there.
 -}
@@ -1161,3 +1193,138 @@ oneShotDemotionAsksItsCheck = within 20 $ do
         assertEqual "its check said there was nothing to do, and was right" 0 =<< readIORef ran
         rs <- seen trace
         assertBool "so it reported a skip rather than acting" (not (null (skips rs)))
+
+--------------------------------------------------------------------------------
+-- a node that reapplies instead of asking (supReapply)
+
+{- | The whole point: a node with 'reapplying' and no @check@ re-runs @up@
+on the adaptive delay rather than parking on its mailbox forever. 'Recheck'
+collapses the delay exactly as it does for a checked node, which for this
+node means "reapply now" rather than "look now".
+-}
+reapplyRunsAgain :: IO ()
+reapplyRunsAgain = within 10 $ do
+    (ran, bump) <- counter
+    let o = node "cheap-dir" $ \x -> reapplying x{up = bump}
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null (reached Up rs)))
+        assertEqual "upped once on the way in" 1 =<< readIORef ran
+        await trace (\rs -> not (null [() | Reapplying{} <- rs]))
+        rs0 <- seen trace
+        assertEqual "never parked, since it opted out of that" 0 (length [() | Parked{} <- rs0])
+        void (Upkeep.instruct sup (refOf "cheap-dir") Recheck)
+        await trace (\rs -> evalsOf "cheap-dir" rs >= 2)
+        assertEqual "reapplied rather than merely looked at" 2 =<< readIORef ran
+
+{- | A successful reapply is not a restart: it must not go back through
+'Salmon.Actions.Upkeep.WaitUp' \/ 'Upping', or a node reapplying once a
+minute would announce itself exactly like one flapping. 'Upping' is reported
+only for this machine's original arrival at 'Up'.
+-}
+reapplyStaysInUp :: IO ()
+reapplyStaysInUp = within 10 $ do
+    (ran, bump) <- counter
+    let o = node "steady" $ \x -> reapplying x{up = bump}
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null (reached Up rs)))
+        void (Upkeep.instruct sup (refOf "steady") Recheck)
+        void (Upkeep.instruct sup (refOf "steady") Recheck)
+        await trace (\rs -> evalsOf "steady" rs >= 3)
+        rs <- seen trace
+        assertEqual "Upping was only ever the original arrival" 1 (reachedBy "steady" Upping rs)
+        assertEqual "and Up was only ever entered once" 1 (reachedBy "steady" Up rs)
+
+{- | The interaction 'Salmon.Op.Supervision.supReapply' has to get right
+with 'RestForOne': re-applying is not the dependency "going away and coming
+back" from a dependant's point of view, so a dependant that opted in must
+not be sent back merely because the dependency reapplied successfully —
+only a genuine departure (a real 'Salmon.Actions.UpDown.Failure', or an
+operator's 'Force') may do that.
+-}
+reapplyDoesNotDemoteDependants :: IO ()
+reapplyDoesNotDemoteDependants = within 10 $ do
+    (depRan, depBump) <- counter
+    let dep = node "cheap-dir" $ \x -> reapplyingRestForOne x{up = depBump}
+    (svc, svcRan) <- counted "svc" [dep] id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        assertEqual "svc came up once" 1 =<< readIORef svcRan
+        -- several successful reapplies, forced rather than waited for
+        mapM_
+            (const (void (Upkeep.instruct sup (refOf "cheap-dir") Recheck)))
+            [1 :: Int .. 3]
+        await trace (\rs -> evalsOf "cheap-dir" rs >= 4)
+        rs <- seen trace
+        assertEqual "reapplied several times" [] (demotions rs)
+        assertEqual "svc was never sent back" 1 =<< readIORef svcRan
+        assertBool "reapplying happened at all" (depRanAtLeast rs)
+  where
+    depRanAtLeast rs = evalsOf "cheap-dir" rs >= 4
+
+{- | A reapply that throws is a genuine failure, not a shrug: it goes
+through the same 'Salmon.Actions.Upkeep.failed' machinery a one-shot @up@
+failure does, with the same backoff and the same
+'Salmon.Op.Supervision.supGiveUpAfter'. A tight give-up limit makes this
+deterministic — one throwing reapply is enough to exhaust it.
+-}
+failingReapplyGivesUp :: IO ()
+failingReapplyGivesUp = within 10 $ do
+    calls <- newIORef (0 :: Int)
+    let o =
+            node "flaky-dir" $ \x ->
+                reapplyingGivesUpFast
+                    x
+                        { up = do
+                            n <- atomicModifyIORef' calls (\k -> (k + 1, k))
+                            unless (n == 0) (ioError (userError "boom"))
+                        }
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null (reached Up rs)))
+        assertEqual "the first up succeeded" 1 =<< readIORef calls
+        void (Upkeep.instruct sup (refOf "flaky-dir") Recheck)
+        await trace (\rs -> not (null [() | GaveUp{} <- rs]))
+        rs <- seen trace
+        assertBool "the failing reapply was reported as a failure" (not (null [() | Acted (UpDown.Failed{}) <- rs]))
+
+{- | 'Salmon.Op.Supervision.supReapply' is read only by a node with no
+action to hold: a managed node's @up@ throws by convention
+("Salmon.Builtin.Nodes.Daemon"), so re-running it on a schedule would
+crash-loop a service that is otherwise fine. Declaring both must therefore
+still park — never announce 'Reapplying', never spawn a second time.
+-}
+managedIgnoresSupReapply :: IO ()
+managedIgnoresSupReapply = within 10 $ do
+    gate <- newEmptyMVar
+    spawns <- spawnCounter
+    let o = holder "svc" spawns (takeMVar gate >> pure ExitSuccess) reapplying
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null (reached Up rs)))
+        awaitSpawns spawns 1
+        void (Upkeep.instruct sup (refOf "svc") Recheck)
+        await trace (\rs -> not (null [() | Parked{} <- rs]))
+        rs <- seen trace
+        assertEqual "never announced as reapplying" 0 (length [() | Reapplying{} <- rs])
+        assertEqual "and never spawned a second time" 1 =<< spawnsSoFar spawns
+
+{- | (R9), end to end: the real 'Salmon.Builtin.Nodes.Filesystem.dir'
+builtin, not a stand-in, under a real supervisor and a real filesystem. It
+declares 'Salmon.Op.Supervision.supReapply' itself (see its haddock), so
+this is the payoff the whole field exists for — a directory removed behind
+salmon's back comes back with nobody re-declaring anything, the same
+guarantee 'vanishedComesBack' pins for a checked node.
+-}
+dirSelfHeals :: IO ()
+dirSelfHeals = within 10 $ withTempDir $ \tmp -> do
+    let path = tmp </> "managed"
+        theRef = mkRef "directory" path
+        o = FS.dir (FS.Directory path)
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null (reached Up rs)))
+        assertBool "created on the way in" =<< doesDirectoryExist path
+        removeDirectory path
+        assertBool "really gone" . not =<< doesDirectoryExist path
+        void (Upkeep.instruct sup theRef Recheck)
+        await trace (\rs -> evalsOf "directory" rs >= 2)
+        assertBool "put back without anybody re-declaring it" =<< doesDirectoryExist path
+        rs <- seen trace
+        assertEqual "nothing ever demoted, since this node has no dependants" [] (demotions rs)

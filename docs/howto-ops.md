@@ -86,6 +86,14 @@ one most node authors will want to copy: it compares the bytes it would write
 with the bytes that are there, which is exact where `skipIfFileExists` would
 call a file holding the wrong thing satisfied.
 
+There is one alternative to writing a `check`, and it is narrow:
+`Salmon.Op.Supervision.supReapply` opts a parked node into re-running `up` on
+the loop instead of asking. Only sound when `up` is both genuinely cheap and
+genuinely idempotent — `Filesystem.dir` sets it (`createDirectoryIfMissing`
+costs about what `doesDirectoryExist` would, so there's nothing to compare);
+a build, a clone, or anything that talks to the network should write a
+`check` instead, or leave itself parked.
+
 `up` and `down` default to `pure ()` (a no-op) if you don't set them — this is
 useful for pure "grouping" nodes (see §3) that only exist to bundle
 dependencies, with no effect of their own.

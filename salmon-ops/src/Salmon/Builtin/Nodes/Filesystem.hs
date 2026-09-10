@@ -15,6 +15,7 @@ import qualified Data.Text.Encoding as Text
 import GHC.TypeLits (Symbol)
 import Salmon.Actions.UpDown (CheckResult (..), skipIfDirectoryIsMissing)
 import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Supervision (defaultSupervision, supReapply, supervised)
 import Salmon.Op.Track
 import System.Directory
 import System.FilePath
@@ -22,6 +23,20 @@ import System.FilePath
 newtype Directory = Directory {directoryPath :: FilePath}
     deriving (Eq, Ord, Show)
 
+{- | (R9). No 'check', by design rather than by omission: there is nothing
+about a directory's existence worth a separate question, since
+'createDirectoryIfMissing' already costs about what 'doesDirectoryExist'
+would. So this declares 'Salmon.Op.Supervision.supReapply' instead — under
+@run serve@ a tending machine for this node re-runs @up@ on the adaptive
+delay rather than parking, which is what makes a directory removed behind
+salmon's back come back on its own. Under a one-shot @run up@\/@run down@
+this changes nothing at all: the field is read only by
+"Salmon.Actions.Upkeep", and the check still answers
+'Salmon.Actions.UpDown.Immaterial' either way.
+
+This is the node 'Salmon.Op.Supervision.supReapply' was written for — see
+its haddock for why almost nothing else in this tree should set it.
+-}
 dir :: Directory -> Op
 dir directory =
     op "directory" nodeps $ \actions ->
@@ -30,10 +45,12 @@ dir directory =
             , notes =
                 [ "create dir recursively"
                 , "does not delete contents of the directory"
+                , "reapplies rather than parking under supervision; see supReapply"
                 ]
             , ref = mkRef "directory" path
             , up = createDirectoryIfMissing True path
             , down = removeDirectory path
+            , dynamics = [supervised defaultSupervision{supReapply = True}]
             }
   where
     path :: FilePath

@@ -669,6 +669,12 @@ renderTended t =
         -- reason: it is a machine saying what it is waiting on, which is
         -- most nodes most of the time. `status` is where to see it.
         Upkeep.Parked{} -> []
+        -- also filtered, and for the same reason as 'Parked' — it is
+        -- announced on every sleep of a node that declared
+        -- `Op.Supervision.supReapply`, which for a busy directory tree could
+        -- be every few seconds. `status` is where to see whether a node is
+        -- being reapplied rather than polled.
+        Upkeep.Reapplying{} -> []
         Upkeep.Untended{} -> []
 
 renderDirection :: Direction -> Text
@@ -914,6 +920,12 @@ superviseHelp =
     , "  `recheck` and by a dependency that takes its dependants with it, but no longer woken"
     , "  on a timer to be told the same thing. A node whose effect can go away behind salmon's"
     , "  back wants a real check; that is what makes it noticeable at all."
+    , ""
+    , "  A node may instead opt into `supReapply`: rather than being parked, it re-runs `up`"
+    , "  on the same adaptive delay, in place of asking. Only sound for an `up` that is both"
+    , "  cheap and genuinely idempotent — a directory is the case it exists for, a build or a"
+    , "  clone is not — and ignored for a node that owns a running process, whose `up` is not"
+    , "  meant to be re-run at all."
     , ""
     , "  A node may also declare a watchdog: how long it may go without doing anything"
     , "  observable before that silence should be reported. Nodes that declare none are never"

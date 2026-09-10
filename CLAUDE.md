@@ -190,7 +190,17 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   on the way in is that its `up` ran, not what a check would say), then it blocks on its
   mailbox, its demoting dependencies and its own action, with no delay ladder at all. It is
   still reachable by `Force`/`Recheck` and still bounced by a `RestForOne` dependency; it has
-  only stopped asking a question nobody wrote an answer to. **A failing `up` backs off** (doubles) while a *vanished effect*
+  only stopped asking a question nobody wrote an answer to. A node may opt out of parking with
+  `supReapply`: instead of blocking, it re-runs `up` on the same ladder — inverted, now a rate
+  limit on how often `up` reruns rather than on how often a check is asked. Sound only for an
+  `up` that is genuinely cheap *and* genuinely idempotent (`Filesystem.dir` is the node it
+  exists for; a build or a clone is not), ignored for a node holding a running action (whose
+  `up` throws by convention), and deliberately outside the `unsettle`/`WaitUp` path so a
+  successful reapply never bumps `statusEpoch` and never fires a `RestForOne` watcher — a
+  reapply is not the node going away and coming back, so nothing should be told it did. A
+  reapply that *fails* rejoins the ordinary failure machinery (`supRestart`, `supGiveUpAfter`)
+  exactly as a one-shot `up` failure would. See (R9) and `Test/UpkeepSpec.hs`'s `supReapply`
+  group. **A failing `up` backs off** (doubles) while a *vanished effect*
   tightens (halves); only the latter is evidence to look sooner. **Failure is waited out, not
   contained**: where a one-shot pass reports `Blocked` and ends, here the dependency's own
   machine is still retrying, so the dependant keeps waiting and proceeds the moment it
@@ -266,8 +276,11 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   reading it, because only the file's author knows the content is load-bearing. Its default is
   the opposite kind from `supRestart`'s, deliberately: putting a node back is an active choice
   about that node, while bouncing its dependants is a decision about other people's nodes, so
-  nothing happens until somebody says it should. Prefer amending `defaultSupervision` to
-  spelling out every field — the record has grown twice and will again.
+  nothing happens until somebody says it should. `supReapply` is the field that opts a node out
+  of parking on `Immaterial` and into re-running `up` on the loop instead — see
+  `Actions/Upkeep.hs`'s summary above for what it does and why it is narrow; `Filesystem.dir` is
+  the one builtin that sets it. Prefer amending `defaultSupervision` to spelling out every
+  field — the record has grown three times now and will again.
   The watchdog only ever *reports*: killing a wedged `up` would need a bracket the node does not
   necessarily have.
 - **`Op/Dag.hs`** is that collapse, lifted out and made pure: `foldDag` turns an expanded

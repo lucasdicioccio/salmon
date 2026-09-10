@@ -36,28 +36,38 @@ And three things that are not milestones:
 | `salmon-ops-serve-fixture --daemon`, so 8 and 9 can be seen by hand | `12fb625` |
 | (R1), the other half: `CheckResult.Immaterial`, and a node that answers it parks | `1a53d95` |
 | (R1), second of three nodes: `Filesystem.filecontents` has a `check` | `126e0d4` |
+| (R9): `supReapply`, and `Filesystem.dir` sets it — settles (R1)'s third node too | *this change* |
 
-150 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
+156 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
 in place there; this table is the index, not the record.
 
 The honest summary of where this leaves things: **the execution model is
-finished and the nodes have only just started catching up with it.** Nine
-milestones built a per-node state machine, a ledger, a rewrite phase, two
-concurrent drivers and a supervisor that can own a process and bounce what
-stands on it — all of which ask each node one question, "is your effect still
-in place?", that roughly a fifth of the nodes here can answer, and that until
-`f7aec15` no long-running one could.
+finished, and the nodes have started catching up with it, but only three
+have.** Nine milestones built a per-node state machine, a ledger, a rewrite
+phase, two concurrent drivers and a supervisor that can own a process and
+bounce what stands on it — all of which ask each node one question, "is your
+effect still in place, or is it cheap enough to just make sure?", that only
+`systemdService`, `filecontents` and `dir` answer today, out of roughly
+ninety builtins. That is (R1) properly closed rather than (R1) proven
+worthwhile: the mechanism now visibly *works* on a real graph — the fixture
+self-heals a removed directory with nobody typing anything — but most of
+this repository's nodes still have no opinion about their own effect going
+away, and giving them one remains exactly the per-node work it always was.
 
 ### Left
 
-Nothing is blocking anything else. (R1) is the one that decides whether any
-of the above does anything on a real graph.
+Nothing is blocking anything else. (R1) is done — every builtin that most
+recipes actually declare (`systemdService`, `filecontents`, `dir`) now has
+an opinion about its own effect going away, one way or another. What
+remains is visibility and reach: seeing what the engine is doing (R3),
+addressing it from the `serve` input language (R2), and the smaller,
+independent items below.
 
 | id | what | size | note |
 |----|------|------|------|
-| **R1** | one node left needs a `check`: `dir` — and it may want (R9) instead | small | §R1 |
-| R9 | a `Supervision` opt-in for "re-apply me on the loop, it is cheaper than asking" | medium | the second half of the `Immaterial` design; §R9 |
+| ~~**R1**~~ | ~~all three nodes done~~: `systemdService`, `filecontents` have a `check`; `dir` has `supReapply` instead | — | done; §R1 |
+| ~~R9~~ | ~~a `Supervision` opt-in for "re-apply me on the loop, it is cheaper than asking"~~ | — | done; §R9 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
 | R3 | `statusOutput` has no reader — nobody can see a failed node's last lines | small | how you would *see* R1 working |
 | R2 | no operator command addresses a node, so the mailbox is unreachable | small | `pause`/`force`/`recheck` mean something now |
@@ -95,6 +105,14 @@ reading further:
   Unknown` and go back to sleep, so nothing is lost except the illusion that
   it was being looked after — which is the point. It makes the (R1) gap
   legible instead of hiding it behind a busy-looking loop.
+- **One builtin, `Filesystem.dir`, now re-applies on a timer under
+  supervision rather than sitting parked** (R9, `supReapply`). It is opt-in,
+  narrow (an author-declared claim that `up` is cheap and idempotent), and
+  read nowhere but `Actions/Upkeep`, so nothing about `run up`\/`run down`
+  changed to land it — but it is a real behaviour change under `run serve`:
+  a `dir` node that used to sit silent between commands now calls
+  `createDirectoryIfMissing` again every time its delay elapses, for as
+  long as the effect is stable that is at most once a minute, never zero.
 
 -------------------------------------------------------------------------------
 
@@ -404,12 +422,19 @@ Three candidates, in the order I would do them:
      rewrite its file on every pass. Safe direction, but documented on the
      function; such a node wants a stable encoder or a `check` of its own.
      Nothing in the tree uses that instance today.
-3. **`Filesystem.dir`** — `doesDirectoryExist`. Trivial;
-   `skipIfDirectoryIsMissing` is right there, inverted. This is the one
-   where (R9) is a live alternative rather than a footnote: a `stat` per
-   directory per minute buys the ability to notice an `rmdir`, and
-   `createDirectoryIfMissing` costs about the same as the `stat`. Decide
-   which, rather than doing both.
+3. **`Filesystem.dir`** — *settled, and not with a `check`*. (R9) landed
+   and `dir` is what it was written for: it declares `supReapply` rather
+   than comparing `doesDirectoryExist`, so under `run serve` it re-runs
+   `createDirectoryIfMissing` on the tending loop instead of asking a
+   question that would have cost the same `stat` for no extra information —
+   `doesDirectoryExist` and `createDirectoryIfMissing` are within noise of
+   each other, so there was nothing to buy by asking first. Nothing changes
+   under a one-shot `run up`\/`run down`: the field is read only by
+   `Actions/Upkeep`, and `dir`'s check still answers `Immaterial` either
+   way. See (R9) for the mechanism and `Test/UpkeepSpec.hs`'s
+   `dirSelfHeals` for the end-to-end case — a real `dir` node, a real
+   `rmdir` behind salmon's back, put back with nobody re-declaring
+   anything.
 
 Milestone 8 narrows this in one respect and widens it in another. A node that
 owns its process needs no `check` at all to be supervised — the action's exit
@@ -466,9 +491,10 @@ Three things that buys, none of them the obvious one:
 
 What it does *not* do is make those nodes self-healing: a parked `dir` whose
 directory somebody removed stays parked. Doing something about that is (R9),
-and it is deliberately not part of this change — it is a second, independent
+and it was deliberately not part of this change — it is a second, independent
 decision about whether re-applying on a loop is acceptable, and it belongs to
-the node author rather than to `CheckResult`.
+the node author rather than to `CheckResult`. (R9) has since landed and
+`Filesystem.dir` now makes that decision; see §R9.
 
 #### The behaviour change the remaining two carry
 
@@ -603,51 +629,74 @@ would then have to decide whether salmon or systemd is supervising it.
 
 -------------------------------------------------------------------------------
 
-### R9. "Re-apply me on the loop; it is cheaper than asking"
+### R9. "Re-apply me on the loop; it is cheaper than asking" — *done*
 
 The second half of the `Immaterial` design, deliberately not landed with the
-first. `Immaterial` says *don't poll me*; it says nothing about what a
+first. `Immaterial` says *don't poll me*; it said nothing about what a
 supervisor should do for a node whose effect is cheap to re-apply and can
-still go away — `Filesystem.dir` being the whole argument. A `dir` that
-somebody `rmdir`s is not noticed today, is not noticed after this change, and
-would not be noticed by (R1) candidate 3 either — a check there would notice
-it, but at the cost of a `doesDirectoryExist` per node per minute, which is
-the trade `Immaterial` exists to avoid making silently.
+still go away — `Filesystem.dir` was the whole argument. A `dir` that
+somebody `rmdir`s was not noticed before `Immaterial`, was not noticed after
+it either, and would not have been noticed by (R1) candidate 3 as a `check`
+would have — at the cost of a `doesDirectoryExist` per node per minute,
+which is the trade `Immaterial` exists to avoid making silently.
 
-The shape: a `Supervision` field, opt-in on the node, meaning "on the tending
-loop, just run `up` again rather than asking". The node keeps the delay
-ladder it would otherwise have parked out of, and the ladder's meaning
-inverts — it is now a rate limit on re-application rather than on looking.
+The shape landed as sketched: `Salmon.Op.Supervision.supReapply`, a `Bool`
+field on `Supervision`, opt-in on the node, meaning "on the tending loop,
+just run `up` again rather than asking". The node keeps the delay ladder it
+would otherwise have parked out of, and the ladder's meaning inverts — it is
+now a rate limit on re-application rather than on looking. `Filesystem.dir`
+sets it; nothing else in the tree does.
 
-Three things to get right, none of which the constructor alone had to face:
+The three things flagged as needing to be got right, and how each landed:
 
-- **It re-runs `up` on a schedule, forever.** That is safe only if `up` is
-  genuinely cheap *and* genuinely idempotent, which is a strictly stronger
-  claim than `Immaterial` makes and cannot be the default. `Bash.run`,
-  `cabal-build`, `git-repo`'s `clone >> pull` and `rsync:send-dir` are all
-  `Immaterial` today and none of them may ever be this.
-- **It interacts with `RestForOne`.** A node re-applied on the loop has not
-  "gone away and come back", so it must not demote anybody — the epoch is
-  bumped by `unsettle`, and going through `Upping` on purpose every 60s
-  would bounce every dependant that opted in.
-- **The reporting has to distinguish it from a restart.** `Acted (Eval …)`
-  once a minute on a node nothing is wrong with is noise, and it is the same
-  line a genuinely flapping node produces.
+- **It re-runs `up` on a schedule, forever.** Still true, still not the
+  default, still narrow: `supReapply` defaults to `False`, `defaultSupervision`
+  sets it `False`, and it is documented on the field as sound only for an
+  `up` that is genuinely cheap *and* genuinely idempotent. `Bash.run`,
+  `cabal-build`, `git-repo`'s `clone >> pull` and `rsync:send-dir` remain
+  `Immaterial` and none of them set it.
+- **It interacts with `RestForOne`.** Landed by *not* going through
+  `unsettle`\/`Upping` at all: a successful reapply calls neither, so
+  `statusEpoch` never moves and a `RestForOne` watcher sees nothing — which
+  is correct, since the node never stopped being up from a dependant's point
+  of view. A reapply that *fails* still reaches a watching dependant, but
+  through the existing `markFailed`\/failed-set path `crossing` already
+  reads, not through the epoch — so no new mechanism was needed for the one
+  case that does need to be seen. Pinned by
+  `reapplyDoesNotDemoteDependants` (success, several times, nobody sent
+  back) and `failingReapplyGivesUp` (failure, folded into the ordinary
+  `supGiveUpAfter`\/backoff machinery via the same `failed` function a
+  one-shot `up` failure uses).
+- **The reporting has to distinguish it from a restart.** A new `Reapplying`
+  report takes `NextLook`'s place for such a node — filtered from `serve`'s
+  output the same way `Parked` is, visible in `status`. Distinguishing it
+  from a real restart turned out to need no extra signal beyond that: a
+  restart passes back through `Upkeep act Upping`, and a reapply never does
+  — pinned by `reapplyStaysInUp`, which asserts `Upping` is reported exactly
+  once (the original arrival) across several successful reapplies.
 
-`filecontents` is now the evidence for the first half of that: it wanted a
-real check, because comparing bytes is *better* than re-applying — it is
-exact, it is one `stat` in the common case, and re-applying would have
-churned the mtime that `systemdService` reads. `dir` has none of those
-properties: there is nothing to compare beyond existence, and
-`createDirectoryIfMissing` costs about what `doesDirectoryExist` costs. So
-`dir` is the node this field exists for, if it exists at all, and it is the
-next thing to decide.
+One thing not anticipated when this was written: a node holding a running
+action (`managed`) had to be excluded explicitly. Such a node's `up` throws
+by convention (see `Nodes/Daemon.hs`), so `supReapply` is read only by
+`resting` (the non-holding loop); `watch` (the holding one) treats anything
+other than `Poll` as `Park`, regardless of the field. Pinned by
+`managedIgnoresSupReapply`.
+
+`filecontents` was the evidence for the other half of the original argument:
+it wanted a real check, because comparing bytes is *better* than
+re-applying — it is exact, it is one `stat` in the common case, and
+re-applying would have churned the mtime that `systemdService` reads. `dir`
+has none of those properties: there is nothing to compare beyond existence,
+and `createDirectoryIfMissing` costs about what `doesDirectoryExist` costs.
+So `dir` got this field rather than a check, and nothing else in the tree
+has both properties at once — the two R1 nodes and this one between them
+cover the shapes that exist today; a fourth node wanting either treatment
+should re-read this section's argument rather than copy whichever one is
+closer.
 
 ## The order I would do it in
 
-(R1) is now the whole of what stands between this engine and its doing
-anything on a real graph — with one thing to settle first, because (R1) is
-what makes it bite.
+(R1) and (R9) are done. What is left is visibility and reach, not coverage.
 
 0. ~~**I1**~~, ~~**R1**'s first node~~ and ~~**R1**'s default~~ — done.
    The first two together, because the node with a real check is what proved
@@ -662,19 +711,19 @@ what makes it bite.
    It also mostly closes (I6), and it let the fixture's config node drop its
    hand-rolled check for `checkFileContents`.
 
-   **`dir` is what is left**, and it is the one to decide rather than do:
-   see (R9), and candidate 3 in §R1.
-2. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
+2. ~~**R9, and with it `dir`**~~ — done. `supReapply` landed as sketched: a
+   `Bool` on `Supervision`, read only by the non-holding loop, deliberately
+   outside `unsettle`\/`Upping` so a successful reapply cannot fire
+   `RestForOne`, folded back into the ordinary failure machinery when it
+   throws. `Filesystem.dir` sets it and is now the third (R1) node — closed
+   without a check, which is the answer §R1 candidate 3 was undecided about.
+3. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
    live `TVar` for a holding machine. Small, and it is how you will *see*
-   whether (R1) is working. Milestone 8 also gave the output ring real
-   content, so this is now the difference between having a failed service's
-   last log lines and not.
-3. **R2** — the four instruction commands. Cheap, and much more useful now
+   whether (R1)\/(R9) are working. Milestone 8 also gave the output ring
+   real content, so this is now the difference between having a failed
+   service's last log lines and not.
+4. **R2** — the four instruction commands. Cheap, and much more useful now
    that `pause` and `force` mean something to a node that owns a process.
-4. **R9**, but only after (1): whether `Filesystem.dir` wants a
-   re-apply-on-the-loop policy or just a `check` is the question that decides
-   whether that field is worth having, and it is not answerable until
-   `filecontents` has shown what a real check on a cheap node looks like.
 5. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
    anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
    is most of what a supervisor-level restart would have needed to hand a

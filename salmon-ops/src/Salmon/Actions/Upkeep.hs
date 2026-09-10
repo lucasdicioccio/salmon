@@ -326,6 +326,13 @@ data Report ext
       -- a timer. Takes the place 'NextLook' has for a node that does have
       -- something to ask.
       Parked !(Act ext)
+    | -- | resting in 'Up' and about to sleep before re-running @up@ again,
+      -- because this node declared 'Salmon.Op.Supervision.supReapply'
+      -- rather than being asked. Takes the place 'NextLook' has for a node
+      -- with a real check, and is kept distinct from it precisely so a scan
+      -- of the log can tell "checked and found fine" from "never asked,
+      -- just applied again" at a glance.
+      Reapplying !(Act ext) !Micros
     | -- | told to stop tending this node; its effect is left exactly as it is
       Paused !(Act ext)
     | Resumed !(Act ext)
@@ -1087,11 +1094,16 @@ upkeep standing ctx =
     the thing telling it anything. -}
     watch :: Async ExitCode -> CheckResult -> Delay -> Tally -> Armed -> IO (IO ())
     watch running verdict d tally armed = do
-        w <- case restOf verdict of
+        -- 'supReapply' is read only by 'resting': a node holding a running
+        -- action has an @up@ that throws by convention (see
+        -- "Salmon.Builtin.Nodes.Daemon"), so re-running it on a schedule
+        -- would crash-loop a service that is working fine. 'Reapply' and
+        -- 'Park' therefore mean the same thing here.
+        w <- case restOf policy verdict of
             Poll -> do
                 say (NextLook act verdict (delayMicros d))
                 naptimeHolding ctx running armed (delayMicros d)
-            Park -> do
+            _ -> do
                 say (Parked act)
                 parkHolding ctx running armed
         told <- announce ctx w
@@ -1236,17 +1248,27 @@ upkeep standing ctx =
 
     {- | 'Up' without an action to hold: sleep, look, and adapt — back off
     while the effect is there, tighten and go back to 'Upping' when it is
-    not. -}
+    not.
+
+    A 'Reapply' node sleeps on the same ladder but wakes into 'reapply'
+    rather than 'look' — see 'Salmon.Op.Supervision.supReapply'. -}
     resting :: CheckResult -> Delay -> Tally -> Armed -> IO ()
     resting verdict d tally armed = do
-        w <- case restOf verdict of
+        let rest = restOf policy verdict
+        w <- case rest of
             Poll -> do
                 say (NextLook act verdict (delayMicros d))
                 napWatching ctx armed (delayMicros d)
             Park -> do
                 say (Parked act)
                 parkWatching ctx armed
+            Reapply -> do
+                say (Reapplying act (delayMicros d))
+                napWatching ctx armed (delayMicros d)
         told <- announce ctx w
+        let onElapsed = case rest of
+                Reapply -> reapply
+                _ -> look
         case w of
             Halt -> pure ()
             Ended _ -> pure ()
@@ -1269,8 +1291,45 @@ upkeep standing ctx =
                     case override told of
                         Just Force -> attempt told (Regardless (Failure "forced")) tally
                         Just Satisfy -> satisfy
-                        _ -> look (soonIf told d) tally armed
-            Elapsed -> look d tally armed
+                        -- 'Recheck' on a 'Reapply' node means the same thing
+                        -- it always meant — "do the thing you'd do sooner" —
+                        -- which for this node is re-applying, not asking.
+                        _ -> onElapsed (soonIf told d) tally armed
+            Elapsed -> onElapsed d tally armed
+
+    {- | 'resting' for a 'Reapply' node: re-run @up@ instead of asking, and
+    fold the outcome back into the ordinary machinery rather than inventing
+    a parallel one.
+
+    On success this is exactly 'look' with the check hard-coded to
+    'Immaterial' \/ satisfied — same ladder, same 'markOk', same return to
+    'resting'. On failure it hands off to 'failed' precisely as 'oneShot'
+    does, which is what gives a flaky @up@ the normal backoff and
+    'Salmon.Op.Supervision.supGiveUpAfter' rather than a re-apply loop with
+    its own opinion about retrying.
+
+    Deliberately does __not__ go through 'unsettle' \/ 'entering': this node
+    never stopped being up, from a dependant's point of view, so
+    'Salmon.Op.Status.statusEpoch' must not move and a 'RestForOne' watcher
+    must see nothing at all — see 'Salmon.Op.Supervision.supReapply'. A
+    failing re-apply still reaches every dependant that needs to know,
+    through 'markFailed' \/ the failed-set 'crossing' already reads, without
+    needing the epoch to move.
+    -}
+    reapply :: Delay -> Tally -> Armed -> IO ()
+    reapply d tally armed = do
+        say (Acted (UpDown.Eval act))
+        note status "reapply"
+        outcome <- try @SomeException act.extension.up
+        case outcome of
+            Right () -> do
+                markOk ctx
+                say (Acted (UpDown.Done act))
+                resting Immaterial (relaxed d) tally armed
+            Left e -> do
+                say (Acted (UpDown.Failed act e))
+                note status (Text.pack (show e))
+                failed (Failure (Text.pack (show e))) tally
 
     {- | A demoting dependency has moved. Either this node is going back to
     'WaitUp', or it was sent back too recently for a second departure to be a
@@ -1792,21 +1851,33 @@ that is an actual event: an operator's 'Salmon.Op.Mailbox.Instruction', a
 exiting, the supervisor standing down. It has only stopped asking a question
 nobody wrote an answer to.
 
-Two consequences worth knowing. Such a node is __never reported 'Wedged'__,
-and that needs no code: 'Salmon.Op.Status.wedged' asks about a node that has
-not settled, and a parked one has. And it is __never restarted by its own
-check__, because there is no check — which is the same statement as "this
-node has no way to notice its effect going away", true of it before and
-after, and the reason a node whose effect can vanish should write one.
+Two consequences worth knowing. A parked node is __never reported
+'Wedged'__, and that needs no code: 'Salmon.Op.Status.wedged' asks about a
+node that has not settled, and a parked one has. And it is __never
+restarted by its own check__, because there is no check — which is the same
+statement as "this node has no way to notice its effect going away", true
+of it before and after, and the reason a node whose effect can vanish
+should write one.
+
+A node may say otherwise: 'Salmon.Op.Supervision.supReapply' opts a node
+whose check answers 'Immaterial' out of parking and into __re-applying on
+the loop instead of asking__. The ladder's meaning inverts for such a node —
+it is now a rate limit on how often @up@ is re-run rather than on how often
+a check is consulted — but it is the same ladder, doubling toward the cap
+while nothing throws. See 'Salmon.Op.Supervision.supReapply' for why this
+is opt-in and narrow (safe only for an @up@ that is genuinely cheap /and/
+genuinely idempotent) and ignored for a node that holds a running action
+(see 'watch' above, which reads only whether this is 'Poll' or not).
 -}
 data Rest
     = Poll
     | Park
+    | Reapply
     deriving (Show, Eq)
 
-restOf :: CheckResult -> Rest
-restOf Immaterial = Park
-restOf _ = Poll
+restOf :: Supervision -> CheckResult -> Rest
+restOf sup Immaterial = if supReapply sup then Reapply else Park
+restOf _ _ = Poll
 
 -- | 'Success', 'Skipped' and 'Completed' all mean "the effect is in place";
 -- see 'Salmon.Op.Supervision.Restart' on why 'Unknown' is in neither camp.
