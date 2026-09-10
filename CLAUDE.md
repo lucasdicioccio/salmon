@@ -323,9 +323,15 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   records what it stands in for via `introduce`; `membersOf` is how the drivers keep speaking in
   declared terms — a batch is worth touching iff some member is, and what happens to it happened
   to all of them. Register phases with `CommandLine.execCommandOrSeedWithRewrites` /
-  `Serve.serveWith`; they apply to `run up`/`run down`/`run serve` but **not** to `run
-  tree`/`run dag`/`query`, which still print the declared graph (a rewritten `Dag` has no paths
-  for a `--select` pattern to match). See milestone 5 and `Test/RewriteSpec.hs`.
+  `Serve.serveWith`; they apply to `run up`/`run down`/`run serve` and, as of (R4), `run
+  tree`/`run dag` — both now print the *computed* `Dag` (`Help.printDagTree` /
+  `Dot.printDagCograph`: one line/node per `Ref`, dependencies indented underneath, no
+  red/orange/gray edge coloring since a `Dag` has already collapsed `Connect`/`Overlay` into
+  plain "depends on"). `query` is the one holdout still printing the *declared* graph: it
+  resolves `--select`/`--exclude` as path globs, and a rewritten `Dag` has refs and edges but no
+  paths for a pattern to match — fixing that needs either a path-free selection language or
+  resolving against the declared graph and translating through `membersOf`, and neither is worth
+  doing speculatively. See milestone 5 and `Test/RewriteSpec.hs`.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
   `World` — a `worldLedger` of who's asked for what, a `worldMagma` of one representative per
   `Ref` (what each node *is*), a `NodeState` per node (a `Direction` it's wanted in plus whether

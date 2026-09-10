@@ -6,6 +6,7 @@
 module Salmon.Actions.Dot (
     printDigraph,
     printCograph,
+    printDagCograph,
     PlaceHolder (..),
     OpaqueNode (..),
     DotGraphExt,
@@ -17,6 +18,7 @@ import GHC.Records
 
 import Data.Dynamic (Dynamic, fromDynamic)
 import qualified Data.List as List
+import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,6 +26,8 @@ import qualified Data.Text.IO as Text
 
 import Salmon.FoldBranch
 import Salmon.Op.Actions
+import Salmon.Op.Dag (Dag)
+import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.GraphFold (Branch (..), Shape (..), foldWithContext)
@@ -166,3 +170,34 @@ printCograph gr1 = do
     traverse_ Text.putStrLn $ nodes
     traverse_ Text.putStrLn $ edges
     putStrLn "}"
+
+{- | (R4) 'printCograph' for a folded, and possibly rewritten, 'Dag' rather
+than the declared @Cofree Graph@ — what @run dag@ prints once any
+"Salmon.Op.Rewrite" phases are registered, so a batch is one node in the
+picture rather than however many nodes it replaced.
+
+A 'Dag' has already collapsed 'Connect'\/'Overlay' into plain dependency
+edges, so the red\/orange\/gray distinction 'printCograph' draws from
+'Salmon.Op.GraphFold.Shape' has nothing left to key off — every edge here is
+"depends on", drawn the same way 'OV' edges always were.
+-}
+printDagCograph ::
+    forall ext.
+    (DotGraphExt ext) =>
+    Dag ext ->
+    IO ()
+printDagCograph dag = do
+    let nodes = fmap dotNode [mkDagNode aref act | (aref, act) <- Map.toList (Dag.dagNodes dag)]
+    let edges =
+            [ dotEdge (Edge (OV, V) (dref, aref))
+            | aref <- Dag.dagOrder dag
+            , dref <- Dag.dependenciesOf dag aref
+            ]
+    putStrLn "digraph {"
+    putStrLn "rankdir=LR;"
+    traverse_ Text.putStrLn $ nodes
+    traverse_ Text.putStrLn $ edges
+    putStrLn "}"
+  where
+    mkDagNode :: Ref -> Act ext -> Node ext
+    mkDagNode aref act = Just (aref, act.shorthand, act.extension)

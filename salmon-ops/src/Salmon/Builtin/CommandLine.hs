@@ -226,11 +226,18 @@ by hand inside its own 'Track''. The difference is not stylistic: a phase runs
 after the fold, so it sees every declaration and which way each node is
 wanted, neither of which a @directive -> Op@ can see. See "Salmon.Op.Rewrite".
 
-The phases apply to @run up@, @run down@ and @run serve@ — the commands that
-execute something. @run tree@\/@run dag@\/@query@ still print the /declared/
-graph, which is what the operator wrote and will edit; printing the computed
-one is a separate job, since a rewritten 'Salmon.Op.Dag.Dag' has refs and
-edges but no paths for a @--select@ pattern to match against.
+The phases apply to @run up@, @run down@, @run serve@ — the commands that
+execute something — and, as of (R4), @run tree@\/@run dag@: both now print
+the /computed/ 'Salmon.Op.Dag.Dag' through 'Salmon.Actions.Help.printDagTree'
+\/'Salmon.Actions.Dot.printDagCograph' rather than the declared @Cofree
+Graph@, so a batched node shows up once, the way it will actually run.
+@query@ is the one holdout still printing the /declared/ graph: it resolves
+@--select@\/@--exclude@ as path globs (see 'Salmon.Actions.Query.resolveSelectors'),
+and a rewritten 'Salmon.Op.Dag.Dag' has refs and edges but no paths for a
+pattern to match against — fixing that needs either a path-free renderer with
+its own selection language, or resolving a pattern against the declared graph
+and translating the result through 'Salmon.Op.Rewrite.membersOf', neither of
+which is worth doing speculatively.
 -}
 execCommandOrSeedWithRewrites ::
     forall directive seed.
@@ -281,9 +288,13 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             result <- withGraph runDown
             when (result == Just False) exitFailure
         (Run RunTree) -> do
-            void $ withGraph (Help.printHelpCograph . (runIdentity . expand))
+            -- (R4): the computed 'Dag' is what @run up@ would actually walk
+            -- once any "Salmon.Op.Rewrite" phases are registered; with none
+            -- registered `computed` is the declared graph, still collapsed
+            -- to one line per 'Ref' rather than one per path.
+            void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
-            void $ withGraph (Dot.printCograph . (runIdentity . expand) . injectRemoteSubgraphs 0)
+            void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
         (Run RunServe) -> do
             void $ Serve.serveWith rewrites serveR r parseSeedArgs genBase traceBase stdin
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
@@ -340,6 +351,15 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
         dag <- UpDown.expandDag r nat op
         let computed = Rewrite.rewrite rewrites (Phase Set.empty Set.empty) dag
         UpDown.downDag UpDown.alwaysRequired r (Rewrite.computedDag computed)
+
+    -- | (R4): the computed 'Dag' `run tree`\/`run dag` print — everything in
+    -- the declared graph is "desired" and nothing is "ignored", the same
+    -- 'Phase' 'Rewrite.wholeGraph' builds for a bare @run down@'s rewrite
+    -- pass, since neither command is about one direction of travel.
+    computedTreeDag :: Op -> IO (Dag.Dag Extension)
+    computedTreeDag op = do
+        dag <- UpDown.expandDag r nat op
+        pure (Rewrite.computedDag (Rewrite.rewrite rewrites (Rewrite.wholeGraph dag) dag))
 
     excluding :: Rewritten Extension -> Set Ref -> UpDown.Gate Extension
     excluding computed excluded
