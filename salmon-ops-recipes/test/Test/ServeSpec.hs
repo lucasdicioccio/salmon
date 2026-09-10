@@ -35,7 +35,7 @@ import System.IO.Temp (withSystemTempFile)
 import System.Process (createPipe, proc)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
@@ -49,6 +49,7 @@ import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite)
+import qualified Salmon.Op.Status as MachineStatus
 import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
@@ -85,6 +86,7 @@ tests =
         , testCase "`supervise off` leaves a vanished effect alone" superviseOffLeavesItAlone
         , testCase "a node that owns a process keeps it across commands, and loses it on clear" ownedProcessSurvivesCommands
         , testCase "an adopted process still follows the config it stands on" adoptedDaemonFollowsItsConfig
+        , testCase "status shows a failing node's check and its last output" statusShowsAFailingNodesOutput
         ]
 
 -------------------------------------------------------------------------------
@@ -382,6 +384,20 @@ flaky attempts = Track $ \spec ->
             , up = do
                 n <- atomicModifyIORef' attempts (\k -> (k + 1, k))
                 when (n == 0) $ throwIO (userError "flaky node failing on purpose")
+            }
+
+-- | Like 'flaky', but never recovers: every attempt throws. Used to pin
+-- (R3) — a node whose failure is genuinely the /tending/ loop's doing, not
+-- the declaring pass's, needs one that is still broken when the loop gets
+-- to it.
+flakyForever :: IORef Int -> Track' Spec
+flakyForever attempts = Track $ \spec ->
+    op "flaky-forever" nodeps $ \actions ->
+        actions
+            { ref = mkRef "flaky-forever" spec.specNames
+            , up = do
+                atomicModifyIORef' attempts (\k -> (k + 1, ()))
+                throwIO (userError "flaky-forever node failing on purpose")
             }
 
 {- | The mirror of 'flaky': one node whose @down@ throws the first time, so
@@ -812,3 +828,58 @@ awaitTicks path n = expect ("the process to write " <> show n <> " line(s)") go
     go = do
         k <- countTicks path
         if k >= n then pure k else threadDelay 25000 >> go
+
+-- | Block until an attempt counter has reached at least this many — the way
+-- a case confirms the /idle tending loop/, not just the declaring pass, has
+-- had a go at a node.
+awaitAttempts :: IORef Int -> Int -> IO ()
+awaitAttempts ref n = expect ("at least " <> show n <> " attempt(s)") go
+  where
+    go = do
+        k <- readIORef ref
+        if k >= n then pure () else threadDelay 25000 >> go
+
+{- | (R3): a node's own last word about itself is visible after its machine
+stands down, not lost the moment 'Salmon.Actions.Serve.stopTending' drops
+the 'Salmon.Actions.Upkeep.Supervisor' holding its
+'Salmon.Op.Status.Status'. The node here never recovers, so the idle tending
+loop — not the declaring pass — is what produces the failing status this
+pins: @up a@ fails synchronously ('Errored'), the idle loop picks it up
+because it is not yet 'Converged', and every retry settles a fresh
+'Salmon.Actions.UpDown.Failure' (with its own narration already in the
+output ring) into the 'Salmon.Op.Status.Status' that @status@ then reads.
+-}
+statusShowsAFailingNodesOutput :: IO ()
+statusShowsAFailingNodesOutput =
+    withTempDir $ \root -> do
+        attempts <- newIORef (0 :: Int)
+        _ <- withSession (flakyForever attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 1)
+            -- one retry beyond the declaring pass's own attempt, so the
+            -- failing status this pins is genuinely the tending machine's.
+            awaitAttempts attempts 2
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> any isFailingSnapshot (flakyStates rs))
+            rs <- atomically (reverse <$> readTVar session.sessionServe)
+            case flakyStates rs of
+                (st : _) -> case st.nodeStatus of
+                    Just ms -> do
+                        assertBool "remembered as a failure" (isFailure (MachineStatus.statusCheck ms))
+                        assertBool
+                            "and its last output was captured"
+                            (not (null (MachineStatus.ringLines (MachineStatus.statusOutput ms))))
+                    Nothing -> assertFailure "expected a status snapshot for the failing node"
+                [] -> assertFailure "expected the flaky node in a status report"
+        pure ()
+  where
+    flakyStates :: [Serve.Report] -> [NodeState]
+    flakyStates rs =
+        [st | Serve.StatusReport xs <- rs, (_, st) <- xs, st.nodeShorthand == "flaky-forever"]
+
+    isFailingSnapshot :: NodeState -> Bool
+    isFailingSnapshot st = maybe False (isFailure . MachineStatus.statusCheck) st.nodeStatus
+
+    isFailure :: CheckResult -> Bool
+    isFailure (Failure _) = True
+    isFailure _ = False

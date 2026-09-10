@@ -121,7 +121,7 @@ module Salmon.Actions.Serve (
 
 import Control.Comonad.Cofree (Cofree)
 import Control.Concurrent (forkIO, killThread)
-import Control.Concurrent.STM (TChan, atomically, isEmptyTChan, newTChanIO, readTChan, writeTChan)
+import Control.Concurrent.STM (TChan, TVar, atomically, isEmptyTChan, newTChanIO, readTChan, writeTChan)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
@@ -162,6 +162,7 @@ import qualified Salmon.Op.Rewrite as Rewrite
 -- per-node state now that a node has state of its own, and is re-exported
 -- from this module so nothing that named 'Serve.TurnUp' had to change.
 import Salmon.Op.Status (Direction (..))
+import qualified Salmon.Op.Status as MachineStatus
 import Salmon.Op.Supervision (Micros (..))
 import Salmon.Op.Track (run)
 import Salmon.Reporter
@@ -190,6 +191,25 @@ data NodeState = NodeState
     , nodeHelp :: !Text
     , nodeDirection :: !Direction
     , nodeConvergence :: !Convergence
+    , nodeStatus :: !(Maybe MachineStatus.Status)
+    -- ^ (R3). What this node's machine last had to say for itself: its own
+    -- 'Salmon.Actions.UpDown.CheckResult', how long ago it last did
+    -- anything observable, and its ring of output — the same 'Status' a
+    -- machine's neighbours block on while tending is running, snapshotted
+    -- by 'stopTending' at the one moment it is readable from outside: after
+    -- the machine has stood down (or been detached into
+    -- 'Salmon.Actions.Upkeep.Kept') but before the 'Upkeep.Supervisor'
+    -- holding its 'TVar' is dropped. 'Nothing' for a node that has never
+    -- been tended — declared while supervision is off, or not yet reached
+    -- by a first idle pass.
+    --
+    -- Freshness rides the existing rhythm rather than adding one: every
+    -- command runs 'stopTending' first (see 'loop'), so a node that /was/
+    -- tended has a snapshot from mere moments before whatever just read it.
+    -- A holding machine is adopted back into the next 'Upkeep.Supervisor'
+    -- the next time tending starts, which is what keeps its snapshot
+    -- refreshing across commands too, rather than freezing at whenever it
+    -- first started holding.
     }
     deriving (Show)
 
@@ -557,12 +577,12 @@ renderReport rep =
                 ]
             ]
         StatusReport [] -> ["serve: no nodes"]
-        StatusReport xs -> "serve: nodes:" : fmap renderNode (sortOn statusOrder xs)
+        StatusReport xs -> "serve: nodes:" : concatMap renderNode (sortOn statusOrder xs)
         HistoryReport [] -> ["serve: no seed declared yet"]
         HistoryReport xs -> "serve: seeds:" : fmap renderEpochLine xs
         HistoryElided n -> ["serve: " <> tshow n <> " earlier declaration(s) elided"]
         QueryReport [] _ _ -> ["serve: no nodes"]
-        QueryReport xs sel exc -> "serve: nodes:" : fmap (renderQueryNode sel exc) (sortOn statusOrder xs)
+        QueryReport xs sel exc -> "serve: nodes:" : concatMap (renderQueryNode sel exc) (sortOn statusOrder xs)
         HelpText mtopic ->
             case mtopic >>= lookupTopic of
                 Just detailed -> detailed
@@ -571,18 +591,54 @@ renderReport rep =
     statusOrder :: (Ref, NodeState) -> (Direction, Convergence, ShortHand, Text)
     statusOrder (r, st) = (st.nodeDirection, st.nodeConvergence, st.nodeShorthand, unRef r)
 
-    renderNode :: (Ref, NodeState) -> Text
-    renderNode (r, st) =
-        Text.unwords
-            [ " "
-            , renderDirection st.nodeDirection
-            , Text.justifyLeft 9 ' ' (tshow st.nodeConvergence)
-            , Text.justifyLeft 10 ' ' (unRef r)
-            , st.nodeShorthand
-            ]
+    {- | One summary line, plus (R3) a trailing detail block for a node whose
+    last known check was 'Salmon.Actions.UpDown.Failure' — its own ring of
+    output, tail-capped so one wedged node cannot bury the rest of the
+    listing. A node this has never tended (never supervised, or not yet
+    reached by an idle pass) says so rather than showing stale silence as if
+    it meant something. -}
+    renderNode :: (Ref, NodeState) -> [Text]
+    renderNode (r, st) = summary : detail
+      where
+        summary =
+            Text.unwords
+                [ " "
+                , renderDirection st.nodeDirection
+                , Text.justifyLeft 9 ' ' (tshow st.nodeConvergence)
+                , Text.justifyLeft 10 ' ' (unRef r)
+                , st.nodeShorthand
+                , renderVerdict st.nodeStatus
+                ]
+        detail = case st.nodeStatus of
+            Just ms | UpDown.Failure _ <- ms.statusCheck -> renderRingTail ms.statusOutput
+            _ -> []
 
-    renderQueryNode :: Set Ref -> Set Ref -> (Ref, NodeState) -> Text
-    renderQueryNode sel exc entry@(r, _) = renderNode entry <> annotation
+    renderVerdict :: Maybe MachineStatus.Status -> Text
+    renderVerdict Nothing = "[not yet tended]"
+    renderVerdict (Just ms) = "[" <> tshow ms.statusCheck <> "]"
+
+    -- | The last few lines of a node's output ring, oldest of the shown
+    -- ones first — enough to see what a failing node was last saying
+    -- without dumping the whole (up to 256-line) ring into a status listing.
+    renderRingTail :: MachineStatus.Ring -> [Text]
+    renderRingTail ring =
+        case MachineStatus.ringLines ring of
+            [] -> []
+            ls ->
+                let shown = drop (max 0 (length ls - ringTailLines)) ls
+                    omitted = length ls - length shown
+                    header
+                        | omitted > 0 = "     last output (" <> tshow omitted <> " earlier line(s) omitted):"
+                        | otherwise = "     last output:"
+                 in header : fmap ("       " <>) shown
+
+    ringTailLines :: Int
+    ringTailLines = 10
+
+    renderQueryNode :: Set Ref -> Set Ref -> (Ref, NodeState) -> [Text]
+    renderQueryNode sel exc entry@(r, _) = case renderNode entry of
+        [] -> []
+        (summary : rest) -> (summary <> annotation) : rest
       where
         annotation
             | r `Set.member` exc = " [excluded]"
@@ -856,6 +912,12 @@ statusHelp =
     , "  (including nodes still on their way down). With --select/--exclude given, narrows the"
     , "  listing to the resolved selection (see `help select`) — this can, unlike the unfiltered"
     , "  form, only show nodes belonging to a currently active seed."
+    , ""
+    , "  Each line also carries what the node's own machine last had to say for itself (its"
+    , "  check, in brackets) once it has been tended at least once; `[not yet tended]` means"
+    , "  supervision has not reached it yet. A node whose last word was a failure additionally"
+    , "  shows the tail of its own output ring underneath — what it was doing right before it"
+    , "  failed, which is otherwise nowhere to see."
     ]
 
 historyHelp :: [Text]
@@ -1000,7 +1062,7 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
     -- arriving.
     reader <- forkIO (readInto inbox)
     runReporter r Started
-    loop tending world inbox `finally` (stopTending tending >> killThread reader)
+    loop tending world inbox `finally` (stopTending tending world >> killThread reader)
     readIORef world
   where
     -- | 'Nothing' marks end of input, after which the reader stops.
@@ -1044,7 +1106,7 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
         line <- atomically (readTChan inbox)
         -- a command is about to act on these nodes, so the machines stand
         -- down. Waits for anything in flight rather than cutting it.
-        stopTending tending
+        stopTending tending world
         case line of
             Nothing -> runReporter r Stopped
             Just l -> do
@@ -1096,14 +1158,34 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
     @down@ in flight rather than interrupting it. A machine /holding/ an
     effect up keeps running: this is called before every command, @status@
     included, and a supervisor that took its processes with it would restart
-    every service every time anybody typed anything. -}
-    stopTending :: Tending -> IO ()
-    stopTending tending = do
+    every service every time anybody typed anything.
+
+    (R3). Before the supervisor's 'TVar's go out of reach, every machine's
+    'Status' is read and stored on its node — the only place this is ever
+    readable from, since a running machine's own 'TVar' is not part of
+    'World' and a discarded 'Upkeep.Supervisor' offers no way back in. Read
+    from @sup@ itself rather than from 'Upkeep.stopUpkeep''s result, so a
+    holding machine's status is captured here too and not only a one-shot
+    one's — 'Upkeep.supervisorStatuses' covers every machine this supervisor
+    had, before 'Upkeep.stopUpkeep' partitions them into stopped and kept. -}
+    stopTending :: Tending -> IORef (World seed directive) -> IO ()
+    stopTending tending world = do
         current <- readIORef (tendingSup tending)
         forM_ current $ \sup -> do
+            snapshotStatuses world (Upkeep.supervisorStatuses sup)
             kept <- Upkeep.stopUpkeep sup
             writeIORef (tendingKept tending) kept
         writeIORef (tendingSup tending) Nothing
+
+    -- | Read every machine's live 'Status' and file it on its node. See
+    -- 'stopTending'.
+    snapshotStatuses :: IORef (World seed directive) -> Map Ref (TVar MachineStatus.Status) -> IO ()
+    snapshotStatuses world statuses = do
+        snapshot <- traverse MachineStatus.readStatus statuses
+        modifyIORef' world $ \w ->
+            w{worldNodes = Map.foldrWithKey record w.worldNodes snapshot}
+      where
+        record aref st = Map.adjust (\ns -> ns{nodeStatus = Just st}) aref
 
     {- | Tear down the machines still holding effects for nodes this world no
     longer wants up, and record those nodes as down.
@@ -1301,7 +1383,7 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                         -- turning it off has to take effect now; turning it
                         -- on happens the moment this loop is next idle,
                         -- which is immediately after this command.
-                        unless on (stopTending tending)
+                        unless on (stopTending tending world)
                         runReporter r (Supervised on)
                         pure True
 
@@ -1621,7 +1703,7 @@ retune w =
                 Just st
                     | st.nodeDirection == dir ->
                         st{nodeShorthand = sh, nodeHelp = hlp}
-                _ -> NodeState sh hlp dir Pending
+                _ -> NodeState sh hlp dir Pending Nothing
 
 {- | Drops what is finished, which is what keeps a long-lived @serve@
 bounded. Three rules that have to agree with each other:
@@ -1740,12 +1822,10 @@ worldDag w = Dag.fromMagma w.worldMagma (Ledger.precedenceOf w.worldLedger)
 {- | Read off 'worldLog', not 'worldEpochs' — a declaration is still worth
 printing long after 'prune' has collected the graph it made. The
 @[active]@\/@[retired]@ flag stays exact regardless: a collected epoch is
-never in 'worldActive'.
+never in 'worldActive'. The only caller is 'HistoryReport', with a predicate
+of @const True@ for a plain @history@; there is no unfiltered version left
+to call directly, since there was never a caller for one.
 -}
-historyLines :: World seed directive -> [(EpochId, Declaration, Bool, [String])]
-historyLines = historyLinesMatching (const True)
-
--- | Like 'historyLines', but only for declarations satisfying a predicate.
 historyLinesMatching ::
     (LogEntry -> Bool) ->
     World seed directive ->

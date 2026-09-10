@@ -332,7 +332,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it has `Converged` there), and `worldEpochs`, the declared seed / directive / graph, kept only
   for declarations that are still live. Everything else is derived: a node some live declaration
   asks for is wanted `TurnUp`, a node no live declaration still asks for is wanted `TurnDown`,
-  and flipping a node's direction resets it to `Pending`. Converging is then one teardown pass
+  and flipping a node's direction resets it to `Pending`. (R3): `NodeState` also carries a
+  `nodeStatus` snapshot — the node's own last `CheckResult` and output ring, taken by
+  `stopTending` from the live `TVar` the instant before the `Upkeep.Supervisor` holding it is
+  dropped, since that `TVar` is otherwise unreachable once the machine has stood down. Freshness
+  rides the loop's own rhythm rather than needing its own: every command runs `stopTending`
+  first, so `status`'s snapshot is never more than one command old, and a holding machine is
+  re-adopted (and re-snapshotted) into the next supervisor rather than frozen at whenever it
+  first started holding. Converging is then one teardown pass
   and one bring-up pass (both concurrent, see `Actions/Concurrent.hs`) with a gate that filters
   to "wanted in this pass, not yet converged" — so
   ordering, dedup and failure containment are exactly `run up`/`run down`'s, and all this module
