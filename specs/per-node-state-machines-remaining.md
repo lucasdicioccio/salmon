@@ -35,8 +35,9 @@ And three things that are not milestones:
 | (I1) fixed: a bounce is believed over a stale check | `f7aec15` |
 | `salmon-ops-serve-fixture --daemon`, so 8 and 9 can be seen by hand | `12fb625` |
 | (R1), the other half: `CheckResult.Immaterial`, and a node that answers it parks | `1a53d95` |
+| (R1), second of three nodes: `Filesystem.filecontents` has a `check` | *this change* |
 
-141 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
+150 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
 in place there; this table is the index, not the record.
 
@@ -55,9 +56,9 @@ of the above does anything on a real graph.
 
 | id | what | size | note |
 |----|------|------|------|
-| **R1** | the other two nodes need a `check`: `filecontents`, then `dir` | small each | **the item that matters**; §R1 |
+| **R1** | one node left needs a `check`: `dir` — and it may want (R9) instead | small | §R1 |
 | R9 | a `Supervision` opt-in for "re-apply me on the loop, it is cheaper than asking" | medium | the second half of the `Immaterial` design; §R9 |
-| **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | not a taste question; settle with R1 |
+| **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
 | R3 | `statusOutput` has no reader — nobody can see a failed node's last lines | small | how you would *see* R1 working |
 | R2 | no operator command addresses a node, so the mailbox is unreachable | small | `pause`/`force`/`recheck` mean something now |
 | R4 | `query`/`tree`/`dag` print the declared graph, not the rewritten one | medium | = `specs/advance-querying.md` |
@@ -283,6 +284,17 @@ This is (R1) wearing a different hat, and it is the strongest argument for
 (R1) so far: the checks are not only how drift is noticed, they are currently
 the only way a *deliberate* change is applied at all.
 
+**Mostly closed since, by (R1)'s second node.** `filecontents` now compares
+its bytes, so a re-declaration that changes a config file's content *is*
+picked up — by the tending machine rather than by the pass, which is the
+second of the two paths described below and the one this document said to
+lean on. Two things that leaves. The pass still reports `converging (0 down,
+0 up)`, so an operator watching the pass still cannot tell that anything
+changed; the change lands quietly, a moment later, when the machine looks.
+And it still only works for a node with a `check` — `dir` is the remaining
+one that has none, though for `dir` there is nothing content-bearing to
+re-declare, so the residual case is narrow.
+
 **The fork.** Reset a node's convergence when its representative changes,
 which needs `sameRepresentative`'s comparison to be trusted for this purpose
 (it compares shorthand, help, notes and the rendering of `dynamics` — not
@@ -310,10 +322,11 @@ changed underneath the other two — see "What `Immaterial` settled" below.**
 Counting assignments across `salmon-ops/src/Salmon/Builtin/Nodes/` and
 `salmon-ops-recipes/src/`: 21 sites in 12 files, against ~91 `op` nodes in
 the builtins alone. And the misses are the *common* nodes —
-`Filesystem.filecontents` and `Filesystem.dir` have none — the module's two
-checks are `replaceDirectory`'s inner move and `destroyDirectory`, both
-`skipIfDirectoryIsMissing` — nor does `Bash.run`, nor does
-`Systemd.systemdService`. A node with no `check` answers `Immaterial` (it
+`Filesystem.filecontents` and `Filesystem.dir` had none — the module's two
+checks were `replaceDirectory`'s inner move and `destroyDirectory`, both
+`skipIfDirectoryIsMissing` — nor does `Bash.run`, nor did
+`Systemd.systemdService`. Two of those are now done; `dir` and `Bash.run`
+are not. A node with no `check` answers `Immaterial` (it
 answered `Unknown` until this change), which the upkeep FSM parks, so it is
 brought up once and thereafter watched by nothing. The engine is real and
 tested; on a real graph today it does nearly nothing.
@@ -358,15 +371,45 @@ Three candidates, in the order I would do them:
    its own `Restart=` is already supervised by systemd, so salmon's
    `Supervision` for it should be `OnFailure` or `Never` and never `Always`
    — two supervisors fighting over one service is worse than one.
-2. **`Filesystem.filecontents`** — compare the file's contents with what the
-   node holds. Correct rather than approximate (`skipIfFileExists` would say
-   `Success` for a file with the wrong bytes), and cheap in the only sense
-   that matters here: the node's whole content is *already* in memory as
-   `Text`, so reading it back costs what is already spent. An invalid-UTF-8
-   read throws, which `runCheck` contains as `Failure`, which runs `up` —
-   the safe direction.
+2. **`Filesystem.filecontents`** — *done*. `Filesystem.checkFileContents`
+   compares the bytes on disk with the bytes the node would write. Correct
+   rather than approximate (`skipIfFileExists` would say `Success` for a file
+   with the wrong bytes), and cheap in the only sense that matters here: the
+   node's content is *already* in hand, since `up` is about to encode it
+   anyway. Comparing bytes rather than decoded text also sidesteps the
+   invalid-UTF-8 question the sketch worried about, and covers the
+   `ByteString`/`Aeson.Value` instances for free. Four things found in the
+   writing:
+
+   - **The size is compared first**, and a mismatch answers without reading.
+     One `stat`, and it bounds what a node holding a few hundred bytes reads
+     if something else has clobbered its path with something enormous.
+   - **The reason must not quote the contents.** Failure text goes into
+     reports, and this node writes `pgbouncer` userlists and `postgrest`
+     configurations with signing keys in them. `Test/FilesystemSpec.hs` pins
+     that.
+   - **This is what made (R1)'s *first* node actually work.** `systemdService`
+     writes its unit file through `filecontents` and then asks systemd
+     whether the unit needs reloading — and systemd answers that from the
+     file's mtime. Rewriting byte-identical contents on every pass therefore
+     set `NeedDaemonReload=yes` on every pass, so `checkService` said
+     `Failure` on every pass and reloaded-and-restarted a healthy service.
+     The claim in `f7aec15` that a healthy unit is now *skipped* was true of
+     `checkService` in isolation and false of the graph it sits in, until
+     this landed. Verified against a real `systemctl --user` unit: rewriting
+     identical bytes flips `NeedDaemonReload` to `yes`.
+   - **The `EncodeFileContents (IO a)` instance is a hazard**, and the only
+     one. The check runs the encoder, so a side-effecting generator runs once
+     more per look and a non-deterministic one (a timestamp) makes the node
+     rewrite its file on every pass. Safe direction, but documented on the
+     function; such a node wants a stable encoder or a `check` of its own.
+     Nothing in the tree uses that instance today.
 3. **`Filesystem.dir`** — `doesDirectoryExist`. Trivial;
-   `skipIfDirectoryIsMissing` is right there, inverted.
+   `skipIfDirectoryIsMissing` is right there, inverted. This is the one
+   where (R9) is a live alternative rather than a footnote: a `stat` per
+   directory per minute buys the ability to notice an `rmdir`, and
+   `createDirectoryIfMissing` costs about the same as the `stat`. Decide
+   which, rather than doing both.
 
 Milestone 8 narrows this in one respect and widens it in another. A node that
 owns its process needs no `check` at all to be supervised — the action's exit
@@ -591,10 +634,14 @@ Three things to get right, none of which the constructor alone had to face:
   once a minute on a node nothing is wrong with is noise, and it is the same
   line a genuinely flapping node produces.
 
-Do it after (R1)'s two remaining nodes, not before: `filecontents` wants a
-real check (it can compare bytes, which is *better* than re-applying), and
-whether `dir` wants this or a check is the question that decides whether the
-field is worth having at all.
+`filecontents` is now the evidence for the first half of that: it wanted a
+real check, because comparing bytes is *better* than re-applying — it is
+exact, it is one `stat` in the common case, and re-applying would have
+churned the mtime that `systemdService` reads. `dir` has none of those
+properties: there is nothing to compare beyond existence, and
+`createDirectoryIfMissing` costs about what `doesDirectoryExist` costs. So
+`dir` is the node this field exists for, if it exists at all, and it is the
+next thing to decide.
 
 ## The order I would do it in
 
@@ -609,16 +656,14 @@ what makes it bite.
    rather than per-node work, and that makes the rest of it visible — a node
    nobody can supervise now says so instead of emitting a `NextLook` a minute.
 
-1. **The rest of R1, one node at a time** — `Filesystem.filecontents` next,
-   then `dir`. This is what turns nine landed milestones into something that
-   does anything on a real graph, and it is the only item here whose value
-   does not depend on another item landing. One small commit each, with its
-   own Layer-1 test. Milestone 9 sharpens the case for `filecontents` in
-   particular: a config node with no `check` cannot notice its own file
-   changing, so `RestForOne` on it can never fire — which is exactly why
-   `salmon-ops-serve-fixture --daemon` had to write a config node of its own
-   rather than use `filecontents`. (I6) says the same thing from the other
-   end and should be settled around the same time.
+1. ~~**`filecontents`**~~ — done, and it turned out to be the node that made
+   (R1)'s first one work: `systemdService`'s unit file goes through it, and
+   rewriting identical bytes was setting `NeedDaemonReload` on every pass.
+   It also mostly closes (I6), and it let the fixture's config node drop its
+   hand-rolled check for `checkFileContents`.
+
+   **`dir` is what is left**, and it is the one to decide rather than do:
+   see (R9), and candidate 3 in §R1.
 2. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
    live `TVar` for a holding machine. Small, and it is how you will *see*
    whether (R1) is working. Milestone 8 also gave the output ring real
@@ -640,11 +685,12 @@ what makes it bite.
    handed, and (I2) and (I4) are questions about what the feature *means*
    that are better answered after somebody has used it on a real graph.
 
-(I6) has no place in that order because it is not a step: it is a fact about
-what a convergence pass does that should be decided before (R1) is done
-node-by-node, since which way it goes changes whether adding a `check` to
-`filecontents` is a nicety or the only thing that makes re-declaring content
-work.
+(I6) has no place in that order because it is not a step, and it has largely
+answered itself: giving `filecontents` a check made re-declared content land
+(through the tending machine, not the pass), which is the second of the two
+forks §I6 described. What is left of it is a reporting question — the pass
+still says `converging (0 down, 0 up)` while something is in fact about to
+change — and that belongs with (R3), not here.
 
 ## How milestones 8 and 9 actually went
 

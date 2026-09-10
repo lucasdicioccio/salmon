@@ -84,6 +84,7 @@ test-suite salmon-ops-recipes-test
                     , Test.DaemonSpec
                     , Test.DagSpec
                     , Test.DownTreeSpec
+                    , Test.FilesystemSpec
                     , Test.JWTSigningSpec
                     , Test.LedgerSpec
                     , Test.PodmanSpec

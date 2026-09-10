@@ -80,8 +80,11 @@ tell" as "so run `up`" would spin.) So if your node is something that can stop
 being true on its own — a service, a mount, a firewall rule, a file something
 else might clobber — write a `check`; it is the difference between a node that
 gets *applied* and a node that gets *supervised*. `Netfilter.rule`'s
-`skipIfNftRuleExists` is the template, and `Systemd.checkService` is the worked
-example of what a real one costs.
+`skipIfNftRuleExists` is the template, `Systemd.checkService` is the worked
+example of what a real one costs, and `Filesystem.checkFileContents` is the
+one most node authors will want to copy: it compares the bytes it would write
+with the bytes that are there, which is exact where `skipIfFileExists` would
+call a file holding the wrong thing satisfied.
 
 `up` and `down` default to `pure ()` (a no-op) if you don't set them — this is
 useful for pure "grouping" nodes (see §3) that only exist to bundle
@@ -195,6 +198,7 @@ filecontents fcontents =
         actions
             { help = Text.pack $ "writes " <> path <> " with some contents"
             , ref = mkRef "file-contents" path
+            , check = checkFileContents fcontents
             , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
             , down = removeFile path
             }

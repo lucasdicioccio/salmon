@@ -430,11 +430,12 @@ upkeep FSM parks rather than polls (see `Actions/Upkeep.hs` above), so such a no
 up once and thereafter watched by nothing at all. That is not a loss of coverage relative to
 before — a 60s poll that could only ever return "I cannot tell" was never coverage — but it
 does make the shape of the gap explicit: **the only thing standing between a node and being
-supervised is somebody writing its `check`**. Almost no builtin implements one today —
-`filecontents` does not, so a managed file deleted behind salmon's back is still not
-restored. Adding one is per-node work and changes what `run up` does for existing callers (a
-node whose check says `Success` stops being re-applied), so it is a deliberate decision rather
-than a mechanical sweep. `Netfilter.rule`'s `skipIfNftRuleExists` is the template, and
+supervised is somebody writing its `check`**. Two builtins have had one written for them so
+far, `Systemd.systemdService` and `Filesystem.filecontents`; most still don't, and
+`Filesystem.dir` in particular means a directory removed behind salmon's back is not put back.
+Adding one is per-node work and changes what `run up` does for existing callers (a node whose
+check says `Success` stops being re-applied), so it is a deliberate decision rather than a
+mechanical sweep. `Netfilter.rule`'s `skipIfNftRuleExists` is the template, and
 `Op/Supervision.hs` is where a node states what should happen when its check says the effect
 is gone.
 
@@ -456,6 +457,24 @@ the running service is stale, and systemd's own record of "the file changed sinc
 is the only thing that remembers. The behaviour change lands here too — a unit that is
 installed, enabled, loaded and running is now **skipped** by `run up` rather than
 reloaded-enabled-restarted every time.
+
+`Filesystem.checkFileContents` is the second, and it is the one that made the first actually
+work. It compares the bytes on disk with the bytes the node would write — not
+`skipIfFileExists`, which would call a file holding the wrong thing satisfied, which is the
+failure mode a config node most needs to catch. Reading them back costs nothing that isn't
+already spent, since `up` is about to encode the same contents anyway; the file's *size* is
+compared first so that a node holding a few hundred bytes doesn't read whatever enormous thing
+has replaced its path. The reason text names the file and never quotes it, because failure text
+goes into reports and these files include pgbouncer userlists and postgrest configs with
+signing keys in them. The consequence worth knowing: **`systemdService` writes its unit file
+through this node, and systemd decides `NeedDaemonReload` from that file's mtime.** Rewriting
+byte-identical contents on every pass therefore reported a changed unit on every pass, which
+made `checkService` say `Failure` on every pass and restart a healthy service — so the "a
+healthy unit is now skipped" claim above was true of `checkService` alone and false of the
+graph it sits in until this landed. One hazard, confined to the `EncodeFileContents (IO a)`
+instance: the check runs the encoder, so a non-deterministic generator (a timestamp) makes the
+node rewrite its file every pass. That is the safe direction, and nothing in the tree uses that
+instance today. See `Test/FilesystemSpec.hs`.
 
 **Failure must not be swallowed.** `Extension.up :: IO ()` has no way to signal failure in its
 type — the only way a failure becomes visible to `upTree` (see above) is if `up` *throws*.

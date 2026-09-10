@@ -1117,15 +1117,18 @@ wakeup channel, and the `run_stopping` flag.
    `Resume` mean something for the first time.
 
    **What this does not yet buy, and it is worth being blunt about it.**
-   Supervision is exactly as good as nodes' `check`s, and in this tree almost
-   no node has one: `filecontents` does not, so a managed file deleted behind
-   salmon's back is still not noticed. The engine is here and tested; making
-   it *do* anything for a real graph is now a per-node question — which is
+   Supervision is exactly as good as nodes' `check`s, and at this milestone
+   almost no node had one: `filecontents` did not, so a managed file deleted
+   behind salmon's back was not noticed. The engine is here and tested;
+   making it *do* anything for a real graph is a per-node question — which is
    the ordering question §"Open questions" already logged against `todo`, now
    sharper: it is not "does this shape work", it is "which nodes get a
    `check`". `filecontents` comparing its own contents is the obvious first
-   one, and it changes what `run up` does for every existing caller, so it is
-   deliberately not smuggled in here.
+   one, and it changes what `run up` does for every existing caller, so it
+   was deliberately not smuggled in here. (It, and
+   `Systemd.systemdService`, have since been done — see (R1) in the
+   companion document, including the part where the file node turned out to
+   be what made the unit node's promise true.)
 
    Nothing demotes a node's *dependants* when it stops being up; that is step
    9. A node that has actually failed does hold off a dependant still in

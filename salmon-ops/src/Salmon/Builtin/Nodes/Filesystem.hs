@@ -13,7 +13,7 @@ import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.TypeLits (Symbol)
-import Salmon.Actions.UpDown (skipIfDirectoryIsMissing)
+import Salmon.Actions.UpDown (CheckResult (..), skipIfDirectoryIsMissing)
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
 import System.Directory
@@ -57,6 +57,7 @@ filecontents fcontents =
                 [ "depends on the enclosing directory"
                 ]
             , ref = mkRef "file-contents" path
+            , check = checkFileContents fcontents
             , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
             , down = removeFile path
             }
@@ -64,6 +65,79 @@ filecontents fcontents =
     enclosingdir :: Op
     enclosingdir = dir (Directory $ takeDirectory path)
 
+    path :: FilePath
+    path = fcontents.filePath
+
+{- | Are the bytes on disk already the bytes this node would write?
+
+The second builtin to get a real @check@, after
+'Salmon.Builtin.Nodes.Systemd.checkService', and the one that reaches the
+most graphs: nearly every recipe here writes a config file. Two things it
+buys that are worth separating.
+
+Under a one-shot @run up@ it is an /optimisation with a visible consequence/:
+a file whose contents already match is 'Salmon.Actions.UpDown.Skipped', so
+its mtime stops moving. That is not cosmetic downstream —
+'Salmon.Builtin.Nodes.Systemd.systemdService' writes its unit file through
+this node and then asks systemd whether the unit needs reloading, and
+systemd answers that from the file's mtime. Rewriting identical bytes every
+pass therefore made @NeedDaemonReload@ true every pass, which made
+@checkService@ say 'Salmon.Actions.UpDown.Failure' every pass, which
+reloaded and restarted a perfectly healthy service. The unit check could not
+deliver what it promised until this one existed.
+
+Under @run serve@ it is what makes a config file /supervised/: a
+'Salmon.Actions.UpDown.Immaterial' node is parked and never looks again,
+where this one notices the file being edited, truncated or deleted behind
+salmon's back and puts it back. It is also the answer to a re-declaration
+that changes a node's contents without changing its 'Salmon.Op.Ref.Ref' —
+the convergence pass still records that node as converged and skips it (see
+(I6) in @specs/per-node-state-machines-remaining.md@), and the tending
+machine's check is the only thing that then notices the new content.
+
+Comparing bytes rather than mere existence is deliberate:
+'Salmon.Actions.UpDown.skipIfFileExists' would call a file with the wrong
+contents satisfied, which is the failure mode this node most needs to avoid.
+The comparison is cheap in the sense that matters — the node's contents are
+already in hand, since 'up' is about to encode them anyway.
+
+Three details:
+
+* __The size is compared first__, and a mismatch answers without reading the
+  file. It is one @stat@, and it bounds what a node holding a few hundred
+  bytes will read if something else has clobbered its path with something
+  enormous.
+* __The reason never quotes the contents.__ Failure text goes into reports,
+  and the files this node writes include @pgbouncer@ userlists and
+  @postgrest@ configurations with signing keys in them.
+* __Contents are all it answers about__, because contents are all 'up' sets.
+  A file whose mode somebody changed still matches; nothing here ever set
+  the mode, so there is nothing to restore.
+
+One hazard, for the @'EncodeFileContents' (IO a)@ instance only: the check
+runs the encoder, so a generator with side effects runs once more per look,
+and one that is not deterministic (a timestamp) makes this always answer
+'Salmon.Actions.UpDown.Failure' and rewrite the file on every pass. That is
+the safe direction rather than a correctness problem, but a node built that
+way should either be given a stable encoder or set its own 'check'.
+-}
+checkFileContents :: (EncodeFileContents a) => FileContents a -> IO CheckResult
+checkFileContents fcontents = do
+    exists <- doesFileExist path
+    if not exists
+        then pure (Failure ("missing: " <> Text.pack path))
+        else do
+            wanted <- encodeFileContents fcontents.contents
+            size <- getFileSize path
+            if size /= fromIntegral (ByteString.length wanted)
+                then pure (Failure ("wrong size: " <> Text.pack path))
+                else do
+                    there <- ByteString.readFile path
+                    pure $
+                        if there == wanted
+                            then Success
+                            else Failure ("contents differ: " <> Text.pack path)
+  where
     path :: FilePath
     path = fcontents.filePath
 

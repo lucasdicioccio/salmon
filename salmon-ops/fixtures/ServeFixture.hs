@@ -218,16 +218,18 @@ program = Track $ \spec ->
 -------------------------------------------------------------------------------
 -- the --daemon half: a process salmon owns, and the config it stands on
 
-{- | The daemon's configuration file, and the only node in this fixture with
-a @check@ of its own.
+{- | The daemon's configuration file.
 
-That is the whole reason it exists rather than reusing
-'Salmon.Builtin.Nodes.Filesystem.filecontents'. @filecontents@ has no
-@check@, so it answers @Immaterial@ — "nothing here worth asking about" —
-and is parked the moment it is up. A parked node can never be seen to have
-stopped being up, which means it can never demote anything either. Supervision is only as good as the nodes' ability to answer
-"is my effect still there", and this is what that answer looks like: read the
-file, compare it with what it should say.
+It is written out rather than reusing
+'Salmon.Builtin.Nodes.Filesystem.filecontents' for one reason now, where it
+used to be two. The remaining one is the __policy__: this node declares
+'RestForOne', and @filecontents@ takes no modifier through which a caller
+could attach one. The reason that has gone away is the __check__ —
+@filecontents@ had none when this fixture was written, so it answered
+@Immaterial@ and was parked the moment it was up, which made it unable to
+notice its own file changing and therefore unable to demote anything. It has
+'Salmon.Builtin.Nodes.Filesystem.checkFileContents' now, and this node's
+@check@ is that same function rather than a hand-rolled copy of it.
 
 'RestForOne' is authored here, on the file, rather than on the daemon that
 reads it. Only the file's author knows its content is load-bearing.
@@ -238,23 +240,14 @@ configOp d =
         actions
             { help = Text.pack ("keeps " <> d.daemonConf <> " saying " <> Text.unpack d.daemonGreeting)
             , notes =
-                [ "has a check, unlike `filecontents`, so a supervisor can notice it changing"
+                [ "checks its own contents, so a supervisor can notice it changing"
                 , "declares RestForOne, so whatever reads it is bounced when it does"
                 ]
             , -- keyed on the path alone, so re-declaring the bundle with a
               -- different --greeting is the /same node/ with different
               -- content rather than a second node.
               ref = mkRef "daemon-config" d.daemonConf
-            , check = do
-                there <- doesFileExist d.daemonConf
-                if not there
-                    then pure (Failure "no config file yet")
-                    else do
-                        actual <- Text.IO.readFile d.daemonConf
-                        pure $
-                            if actual == body
-                                then Success
-                                else Failure "the config file no longer says what it should"
+            , check = FS.checkFileContents (FS.FileContents d.daemonConf body)
             , up = Text.IO.writeFile d.daemonConf body
             , down = removeFile d.daemonConf
             , dynamics = [supervised defaultSupervision{supStrategy = RestForOne}]
