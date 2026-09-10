@@ -596,7 +596,7 @@ directory read-only, declare a `dir` under it, and `status` shows
 `[Failure "...: permission denied"]` with the repeated `up` / error lines
 underneath.
 
-### R4. `query`/`run tree`/`run dag` still print the *declared* graph
+### R4. `query`/`run tree`/`run dag` still print the *declared* graph — partially done
 
 Known and recorded at milestone 5. Registered `Rewrite`s apply to `run
 up`/`run down`/`run serve` but not to the three commands that *describe* a
@@ -605,8 +605,32 @@ graph, so `query` shows twenty `deb` nodes where `run up` will run one
 `Dag` has `Ref`s and edges and no **paths**, and `--select` matches path
 globs (`Query.resolveSelectors` walks a `Cofree`). Printing the computed
 graph needs either a renderer that does not exist or ref-addressed patterns.
-Worth doing before anyone relies on `query` to predict a run; not worth doing
-speculatively.
+
+Landed for the half of this that has no `--select` to reconcile with paths in
+the first place: `run tree`/`run dag` take no selection at all, so nothing
+about them needed the fork above resolved before writing the renderer.
+`CommandLine.hs`'s `Run RunTree`/`Run RunDAG` now fold and rewrite the graph
+the same way `runUp`/`runDown` do (`computedTreeDag`, sharing
+`Rewrite.wholeGraph`'s "everything desired, nothing ignored" `Phase`) and
+print the resulting `Dag` through two new renderers: `Help.printDagTree` and
+`Dot.printDagCograph`. Both are one line per `Ref` rather than one per path
+— a node reached from several declarations is printed once, the way it is
+walked once — with dependencies listed underneath (`printDagTree`) or as
+plain edges (`printDagCograph`, which necessarily drops the
+red/orange/gray `Connect`/`Overlay` distinction `Dot.printCograph` draws
+from `Shape`, since a `Dag` has already collapsed both into "depends on").
+With no rewrites registered this is the same nodes and edges as before,
+just collapsed to one line/node instead of one per tree position — verified
+by hand against the `salmon-ops-serve-fixture` binary (no rewrites
+registered): `run tree`/`run dag` on a plain bundle directive show the same
+four nodes either way, just without the duplicate positions a shared node
+used to get.
+
+`query` is the holdout, and is the part that actually needs the fork this
+section opened with resolved — it is the one of the three whose whole job is
+resolving a `--select`/`--exclude` pattern, which only paths can do today.
+Left as recorded: worth doing before anyone relies on `query` to predict a
+run under a registered rewrite; not worth doing speculatively.
 
 ### R5. Supervisor-level restart — "let it crash" is only half wired
 
@@ -634,6 +658,15 @@ across *different* rewrites — is explicitly deferred and still is. Nothing
 has needed it. Worth remembering that convergence has been parallel and
 unbounded since milestone 6 and the only protection is an edge or a
 collection.
+
+No per-resource primitive is wanted here — two nodes contending for one
+thing is still an edge or a collection's job. What might be worth adding
+later is smaller and orthogonal: a single global knob capping how many
+`up`/`down`/`check`s run at once across the whole traversal, for machines
+where unbounded parallelism itself is the problem (CPU/IO contention, an
+outbound connection limit) rather than any particular pair of nodes fighting
+over a particular resource. Not designed, not scheduled — noted so it is not
+confused with the per-resource primitive above if it comes up again.
 
 ### R8. `Restart` means two different things
 
