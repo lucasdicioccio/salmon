@@ -39,8 +39,9 @@ And three things that are not milestones:
 | (R9): `supReapply`, and `Filesystem.dir` sets it — settles (R1)'s third node too | `72e1d55` |
 | (R7): dropped `postOrderM` (dead since milestone 4), deleted unused `historyLines` | `69692a9`/`8a3dc9e` |
 | (R3): `stopTending` snapshots every machine's `Status` onto its node; `status`\/`query` show it | `8a3dc9e` |
+| (R2): `force`\/`recheck`\/`pause`\/`resume [--select P]...` reach the mailbox | `484c738` |
 
-157 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
+159 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
 in place there; this table is the index, not the record.
 
@@ -61,11 +62,11 @@ away, and giving them one remains exactly the per-node work it always was.
 
 Nothing is blocking anything else. (R1) is done — every builtin that most
 recipes actually declare (`systemdService`, `filecontents`, `dir`) now has
-an opinion about its own effect going away, one way or another, and (R3) is
+an opinion about its own effect going away, one way or another; (R3) is
 done — a node's last word about itself, and a failing one's last output, are
-now visible in `status`/`query` rather than write-only. What remains is
-reach: addressing a node from the `serve` input language (R2), and the
-smaller, independent items below.
+now visible in `status`/`query` rather than write-only; and (R2) is done —
+`force`/`recheck`/`pause`/`resume` reach a node from the `serve` input
+language. What remains is the smaller, independent items below.
 
 | id | what | size | note |
 |----|------|------|------|
@@ -73,8 +74,8 @@ smaller, independent items below.
 | ~~R9~~ | ~~a `Supervision` opt-in for "re-apply me on the loop, it is cheaper than asking"~~ | — | done; §R9 |
 | ~~R3~~ | ~~`statusOutput` has no reader~~ — snapshotted onto `NodeState`, shown in `status`\/`query` | — | done; §R3 |
 | ~~R7~~ | ~~two dead bindings~~ (`postOrderM`, `historyLines`) — dropped and deleted | — | done; §R7 |
+| ~~R2~~ | ~~no operator command addresses a node~~ — `force`/`recheck`/`pause`/`resume` do now | — | done; §R2 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
-| R2 | no operator command addresses a node, so the mailbox is unreachable | small | `pause`/`force`/`recheck` mean something now |
 | R4 | `query`/`tree`/`dag` print the declared graph, not the rewritten one | medium | = `specs/advance-querying.md` |
 | R5 | supervisor-level restart is half wired (monitored, not restarted) | small | milestone 9's `Under` did most of it |
 | R6 | no concurrency-bounding primitive; convergence is unbounded | medium | deliberate so far |
@@ -509,16 +510,12 @@ author's own infra, which is why milestone 7 deliberately did not smuggle any
 of them in. Land them one at a time, each with its own commit and its own
 Layer-1 test, so a regression is attributable.
 
-### R2. An operator cannot address a node, so the mailbox is unreachable
+### R2. An operator cannot address a node, so the mailbox is unreachable — *done*
 
-`Salmon.Op.Mailbox` is built, `Upkeep.instruct` is built and tested, and
-`Force`/`Satisfy`/`Recheck`/`Pause`/`Resume` all mean something to the FSM.
-Nothing in the `serve` input language can name a node, so none of it is
-reachable except from Haskell.
-
-The route is already there and cheap: `parseSelection` /
-`resolveWorldSelectors` turn `--select P`/`--exclude P` path globs into a
-`Set Ref`, which is exactly `instruct`'s argument. So:
+`Salmon.Op.Mailbox` was built, `Upkeep.instruct` was built and tested, and
+`Force`/`Satisfy`/`Recheck`/`Pause`/`Resume` all meant something to the FSM —
+but nothing in the `serve` input language could name a node, so none of it
+was reachable except from Haskell. Four commands close that:
 
 ```
 force   [--select P]... [--exclude P]...
@@ -527,19 +524,43 @@ pause   [--select P]... [--exclude P]...
 resume  [--select P]... [--exclude P]...
 ```
 
-Milestone 8 raised the value of this considerably: `pause` on a node that
-owns a process is a real operational verb (stop tending without killing the
-service), and `force` on one means "restart it", which is the thing an
-operator most often wants and currently cannot say.
+(`Satisfy` gets no command, matching this section's own "the four instruction
+commands" — it is `Query.forceSkip`'s territory, decided at declare time, not
+an operator's run-time say.) They reuse `parseSelection` /
+`resolveWorldSelectors` exactly as sketched — the same `Set Ref` `status`\/
+`query`\/`converge --select` already compute — and an empty selection means
+every node, same as those three.
 
-One caveat to design for, now half-solved. A *holding* machine survives
-commands, so posting to its mailbox works as-is. A one-shot machine does not:
-`Serve.startTending` rebuilds it, and posting to a mailbox about to be
-discarded does nothing. So either these commands act on the *next* supervisor
-for one-shot nodes (hold the instruction in the world and hand it to
-`startUpkeep`), or one-shot machines start being kept too. The first is
-smaller and is probably the right semantics anyway: "force this node next
-time you look at it".
+The caveat this section flagged landed as the smaller option it named: **the
+instruction is queued, not posted.** `Tending` gained `tendingPending :: IORef
+(Map Ref [Instruction])`; the command handler resolves the selection and
+queues onto it (oldest first per node, so a `pause` then a `resume` is
+delivered in that order) and immediately reports how many nodes matched
+(`Instructed`). Nothing is posted into a mailbox at that moment — `loop`
+already runs `stopTending` before every command, `status` included, so there
+is never a live one to post into regardless of whether the target is a
+one-shot or a holding machine. `startTending` drains the whole queue into
+`Upkeep.instruct` the moment the next supervisor's machine table exists —
+after adoption, so both a freshly-started machine and an adopted one see it —
+and clears it. This is exactly "force this node next time you look at it",
+and needed no change to `Upkeep.startUpkeep`'s signature: the queue is
+delivered from the caller's side, after the call returns, not threaded
+through it.
+
+A selected node that no live machine ever answers to (excluded from every
+active epoch, retired, or simply never reached by tending) silently drops the
+instruction at delivery time, same as `Upkeep.instruct` already does for any
+unknown `Ref` — there was nothing to queue it *for* once its target never
+showed up. `Instructed`'s count is therefore a statement about the selection,
+not a delivery receipt; the two can differ and that is not a bug.
+
+Milestone 8's promise is now real: `pause` on a node that owns a process
+stops tending it without touching the running service, and `force` on one is
+how to restart something that is healthy and currently has no other way to
+be told to. See `Test.ServeSpec`'s `forceOverridesASatisfiedCheck` (a second
+`up` with the check never once unsatisfied — the only thing that can explain
+it is `force` itself) and `pauseThenResume` (an effect allowed to vanish
+while paused, and confirmed *not* put back until `resume`).
 
 ### R3. `statusOutput` has no reader — *done*
 
@@ -745,8 +766,13 @@ independent small items, not coverage or visibility.
 4. ~~**R7**~~ — done in passing: `postOrderM` dropped (dead since milestone
    4), `historyLines` deleted (dead since it was written). Both trivial,
    both cost nothing to do the moment they were noticed rather than later.
-5. **R2** — the four instruction commands. Cheap, and much more useful now
-   that `pause` and `force` mean something to a node that owns a process.
+5. ~~**R2**~~ — done. `force`/`recheck`/`pause`/`resume [--select P]...
+   [--exclude P]...` parse the same way `status`/`query`/`converge --select`
+   already do, and land in a `Tending`-owned queue rather than a mailbox: the
+   supervisor is always stopped by the time a command is handled, so there is
+   never one to post into at parse time. `startTending` drains the queue into
+   the next supervisor's machines — freshly started or adopted — the moment
+   they exist.
 6. **R4**, **R5**, **R6** as they become annoying. None is blocking
    anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
    is most of what a supervisor-level restart would have needed to hand a
