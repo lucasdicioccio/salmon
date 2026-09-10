@@ -37,8 +37,10 @@ And three things that are not milestones:
 | (R1), the other half: `CheckResult.Immaterial`, and a node that answers it parks | `1a53d95` |
 | (R1), second of three nodes: `Filesystem.filecontents` has a `check` | `126e0d4` |
 | (R9): `supReapply`, and `Filesystem.dir` sets it — settles (R1)'s third node too | `72e1d55` |
+| (R7): dropped `postOrderM` (dead since milestone 4), deleted unused `historyLines` | `69692a9`/`8a3dc9e` |
+| (R3): `stopTending` snapshots every machine's `Status` onto its node; `status`\/`query` show it | `8a3dc9e` |
 
-156 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
+157 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
 in place there; this table is the index, not the record.
 
@@ -59,23 +61,24 @@ away, and giving them one remains exactly the per-node work it always was.
 
 Nothing is blocking anything else. (R1) is done — every builtin that most
 recipes actually declare (`systemdService`, `filecontents`, `dir`) now has
-an opinion about its own effect going away, one way or another. What
-remains is visibility and reach: seeing what the engine is doing (R3),
-addressing it from the `serve` input language (R2), and the smaller,
-independent items below.
+an opinion about its own effect going away, one way or another, and (R3) is
+done — a node's last word about itself, and a failing one's last output, are
+now visible in `status`/`query` rather than write-only. What remains is
+reach: addressing a node from the `serve` input language (R2), and the
+smaller, independent items below.
 
 | id | what | size | note |
 |----|------|------|------|
 | ~~**R1**~~ | ~~all three nodes done~~: `systemdService`, `filecontents` have a `check`; `dir` has `supReapply` instead | — | done; §R1 |
 | ~~R9~~ | ~~a `Supervision` opt-in for "re-apply me on the loop, it is cheaper than asking"~~ | — | done; §R9 |
+| ~~R3~~ | ~~`statusOutput` has no reader~~ — snapshotted onto `NodeState`, shown in `status`\/`query` | — | done; §R3 |
+| ~~R7~~ | ~~two dead bindings~~ (`postOrderM`, `historyLines`) — dropped and deleted | — | done; §R7 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
-| R3 | `statusOutput` has no reader — nobody can see a failed node's last lines | small | how you would *see* R1 working |
 | R2 | no operator command addresses a node, so the mailbox is unreachable | small | `pause`/`force`/`recheck` mean something now |
 | R4 | `query`/`tree`/`dag` print the declared graph, not the rewritten one | medium | = `specs/advance-querying.md` |
 | R5 | supervisor-level restart is half wired (monitored, not restarted) | small | milestone 9's `Under` did most of it |
 | R6 | no concurrency-bounding primitive; convergence is unbounded | medium | deliberate so far |
-| R7 | two dead bindings (`postOrderM`, `historyLines`) | trivial | |
-| R8 | `Restart` means two different things (`Systemd` vs `Supervision`) | trivial | did *not* bite doing R1's first node |
+| R8 | `Restart` means two different things (`Systemd` vs `Supervision`) | trivial | speculative — nothing imports both yet; do it when something does |
 | I2 | `supStrategy` is authored on the dependency, not the dependant | — | taste; §I2 |
 | I3 | `supStableAfter` carries two unrelated meanings | 15 min | taste; §I3 |
 | I4 | the `RestForOne` cascade needs opting in at every hop | — | taste; §I4 |
@@ -538,27 +541,39 @@ for one-shot nodes (hold the instruction in the world and hand it to
 smaller and is probably the right semantics anyway: "force this node next
 time you look at it".
 
-### R3. `statusOutput` has no reader
+### R3. `statusOutput` has no reader — *done*
 
 The bounded per-node ring is written (the machine narrates its transitions,
-and milestone 8 gives it real process output) and nothing reads it. `status`
-cannot: the supervisor is stopped while any command is handled, so the
-`TVar`s are gone by the time it runs.
+and milestone 8 gives it real process output) and nothing read it. `status`
+couldn't: the supervisor is stopped while any command is handled, so the
+`TVar`s were gone by the time it ran.
 
-Two options, and the second is better. Have `stopTending` snapshot each
-machine's final `Status` into the `World` before discarding it — which also
-gives `status` a live `CheckResult` and a "last active" age per node, not
-just `Pending`/`Converged`/`Errored`. That is a genuinely better `status`
-output and it is the thing an operator wants when a node is `Errored`. (The
-alternative, keeping supervisors alive across read-only commands, buys
-liveness at the cost of the determinism §7 deliberately bought.)
+Landed as the first of the two options sketched here: `stopTending`
+snapshots every machine's `Status` — read from the `Upkeep.Supervisor` via
+`Upkeep.supervisorStatuses`, before `Upkeep.stopUpkeep` partitions it into
+stopped and kept — onto a new `nodeStatus :: Maybe Status` field on
+`NodeState`. `status`/`query` render it: a `[CheckResult]` on every node's
+summary line, and — the thing milestone 8 made worth more than it was, since
+the ring now carries a managed process's actual stdout/stderr — the tail of
+a failing node's output ring underneath, capped at ten lines so one wedged
+node cannot bury the rest of the listing.
 
-Milestone 8 made this worth more than it was: the ring now carries a managed
-process's actual stdout and stderr, so a service that failed has its last
-lines sitting in a structure nothing can print. That is the single most
-useful thing an operator could be shown and it is currently write-only.
-A holding machine's `Status` is also genuinely live between commands, so for
-those nodes `status` could read the `TVar` directly rather than a snapshot.
+Freshness needed no new mechanism: every command already runs `stopTending`
+before it is handled (see `loop`), so a snapshot is never more than one
+command old, and a holding machine is re-adopted (and so re-snapshotted)
+into the next supervisor the next time tending starts — which happens
+before every command too. The second option sketched here (read a holding
+machine's `TVar` live rather than snapshotting it) turned out to buy nothing
+extra given that rhythm, so it was not built.
+
+Pinned by `Test.ServeSpec.statusShowsAFailingNodesOutput`: a node whose `up`
+never stops throwing is declared, fails synchronously once, and is then
+picked up by the idle tending loop (it is `Unsettled`, not yet `Converged`)
+— which is what actually produces the `Failure` this test reads back
+through `status`, not the declaring pass. Verified by hand too: chmod a
+directory read-only, declare a `dir` under it, and `status` shows
+`[Failure "...: permission denied"]` with the repeated `up` / error lines
+underneath.
 
 ### R4. `query`/`run tree`/`run dag` still print the *declared* graph
 
@@ -617,15 +632,18 @@ both — which is likely to be soon, since a systemd service node with a
 `check` (R1) is exactly the node that would want a `Supervision` too, and
 would then have to decide whether salmon or systemd is supervising it.
 
-### R7. Two dead bindings
+### R7. Two dead bindings — *done*
 
-- `Salmon.Op.GraphFold.postOrderM` (`salmon-core`) has no in-repo caller
-  since milestone 4 moved both drivers onto `Dag`. Kept deliberately as a
-  `salmon-core` primitive — it is a reasonable thing for a library to offer —
-  but nothing in this repository exercises it any more, so it should be
-  either used or dropped rather than left ambiguous.
-- `Salmon.Actions.Serve.historyLines` is unused (`historyLinesMatching (const
-  True)`; `history` goes through the `Matching` version). One line to delete.
+- `Salmon.Op.GraphFold.postOrderM` (`salmon-core`) had no in-repo caller
+  since milestone 4 moved both drivers onto `Dag`, and its own module doc
+  still named `upTree` as the caller it was written for — stale as well as
+  dead. Dropped rather than kept speculative (it was untested, and this
+  document's own "used or dropped" framing asked for a decision); recover it
+  from history if a caller needs it again. `foldWithContext`, the module's
+  other export, is not dead — `Actions/Dot.hs` uses it — and is untouched.
+- `Salmon.Actions.Serve.historyLines` was unused and not even in the
+  module's export list (`historyLinesMatching (const True)`; `history` goes
+  through the `Matching` version directly). Deleted.
 
 -------------------------------------------------------------------------------
 
@@ -696,7 +714,8 @@ closer.
 
 ## The order I would do it in
 
-(R1) and (R9) are done. What is left is visibility and reach, not coverage.
+(R1), (R9) and (R3) are done. What is left is reach and a handful of
+independent small items, not coverage or visibility.
 
 0. ~~**I1**~~, ~~**R1**'s first node~~ and ~~**R1**'s default~~ — done.
    The first two together, because the node with a real check is what proved
@@ -717,18 +736,24 @@ closer.
    `RestForOne`, folded back into the ordinary failure machinery when it
    throws. `Filesystem.dir` sets it and is now the third (R1) node — closed
    without a check, which is the answer §R1 candidate 3 was undecided about.
-3. **R3** — snapshot `Status` into the `World` on `stopTending`, and read the
-   live `TVar` for a holding machine. Small, and it is how you will *see*
-   whether (R1)\/(R9) are working. Milestone 8 also gave the output ring
-   real content, so this is now the difference between having a failed
-   service's last log lines and not.
-4. **R2** — the four instruction commands. Cheap, and much more useful now
+3. ~~**R3**~~ — done. `stopTending` snapshots every machine's `Status` onto
+   its `NodeState` before the `Upkeep.Supervisor` holding the live `TVar` is
+   dropped; a holding machine gets a fresh snapshot too, since it is
+   re-adopted before every command. `status`\/`query` show a `[CheckResult]`
+   per node and a failing one's last output lines underneath — milestone 8's
+   ring finally has a reader.
+4. ~~**R7**~~ — done in passing: `postOrderM` dropped (dead since milestone
+   4), `historyLines` deleted (dead since it was written). Both trivial,
+   both cost nothing to do the moment they were noticed rather than later.
+5. **R2** — the four instruction commands. Cheap, and much more useful now
    that `pause` and `force` mean something to a node that owns a process.
-5. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
+6. **R4**, **R5**, **R6** as they become annoying. None is blocking
    anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
    is most of what a supervisor-level restart would have needed to hand a
-   replacement machine.
-6. **I2**–**I5** whenever there is an opinion to apply. None of them is
+   replacement machine. **R8** is deliberately not in this list at all — its
+   own section says to do it "when something first needs both", which
+   nothing does yet.
+7. **I2**–**I5** whenever there is an opinion to apply. None of them is
    urgent and none is a bug; (I3) is fifteen minutes, (I5) is worth doing
    with (R5) since both are about what an adopted or replaced machine is
    handed, and (I2) and (I4) are questions about what the feature *means*
