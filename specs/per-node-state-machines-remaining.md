@@ -40,6 +40,7 @@ And three things that are not milestones:
 | (R7): dropped `postOrderM` (dead since milestone 4), deleted unused `historyLines` | `69692a9`/`8a3dc9e` |
 | (R3): `stopTending` snapshots every machine's `Status` onto its node; `status`\/`query` show it | `8a3dc9e` |
 | (R2): `force`\/`recheck`\/`pause`\/`resume [--select P]...` reach the mailbox | `484c738` |
+| (R4), half of it: `run tree`\/`run dag` print the *computed* `Dag`, not the declared graph | `d57f2a5` |
 
 159 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
@@ -76,7 +77,7 @@ language. What remains is the smaller, independent items below.
 | ~~R7~~ | ~~two dead bindings~~ (`postOrderM`, `historyLines`) — dropped and deleted | — | done; §R7 |
 | ~~R2~~ | ~~no operator command addresses a node~~ — `force`/`recheck`/`pause`/`resume` do now | — | done; §R2 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
-| R4 | `query`/`tree`/`dag` print the declared graph, not the rewritten one | medium | = `specs/advance-querying.md` |
+| R4 | `query` prints the declared graph, not the rewritten one (`tree`/`dag` done) | small | §R4; = `specs/advance-querying.md` |
 | R5 | supervisor-level restart is half wired (monitored, not restarted) | small | milestone 9's `Under` did most of it |
 | R6 | no concurrency-bounding primitive; convergence is unbounded | medium | deliberate so far |
 | R8 | `Restart` means two different things (`Systemd` vs `Supervision`) | trivial | speculative — nothing imports both yet; do it when something does |
@@ -806,7 +807,8 @@ independent small items, not coverage or visibility.
    never one to post into at parse time. `startTending` drains the queue into
    the next supervisor's machines — freshly started or adopted — the moment
    they exist.
-6. **R4**, **R5**, **R6** as they become annoying. None is blocking
+6. **R4** (`run tree`/`run dag` done; `query` still open), **R5**, **R6** as
+   they become annoying. None is blocking
    anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
    is most of what a supervisor-level restart would have needed to hand a
    replacement machine. **R8** is deliberately not in this list at all — its
