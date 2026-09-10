@@ -359,6 +359,21 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   pass must be the only thing touching anything. This is what replaced `serveWakingWith`, a
   "these nodes want attention" hook nothing ever drove: it existed because a node had no state
   of its own to block on.
+  (R2): `force`/`recheck`/`pause`/`resume [--select P]... [--exclude P]...` finally make
+  `Op/Mailbox.hs`'s `Instruction`s reachable from the input language, reusing
+  `parseSelection`/`resolveWorldSelectors` the same way `status`/`query`/`converge --select`
+  already do. The one thing that isn't free: `stopTending` runs before *every* command, `status`
+  included, so there is never a live mailbox to post into at the moment one of these is typed —
+  a one-shot machine doesn't survive the command that named it the way a `Kept` one does. So the
+  instruction is queued on `Tending` (`tendingPending`, a `Map Ref [Instruction]`) instead of
+  posted, and `startTending` delivers the whole queue the moment the *next* supervisor's
+  machines exist — both freshly started and adopted — then clears it: "force this node next
+  time you look at it", the smaller of the two options and, per the node's own machine already
+  treating a queued `Pause` followed by a `Resume` correctly in delivery order, the right one.
+  A selected node that no live machine ever answers to (excluded, retired, never tended) drops
+  the instruction silently, same as `Upkeep.instruct` always has; the operator already saw how
+  many nodes matched at declare time (`Instructed`), which is a count of the selection, not a
+  delivery receipt.
   A node with a `managed` action is handled differently again, and the difference is all about
   ordering. It is **invisible to both passes** (`gateFor` skips it, and `stateWriter` ignores
   that skip so the pass cannot claim it converged): there is nothing a one-shot `up` could do

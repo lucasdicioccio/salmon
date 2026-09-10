@@ -87,6 +87,8 @@ tests =
         , testCase "a node that owns a process keeps it across commands, and loses it on clear" ownedProcessSurvivesCommands
         , testCase "an adopted process still follows the config it stands on" adoptedDaemonFollowsItsConfig
         , testCase "status shows a failing node's check and its last output" statusShowsAFailingNodesOutput
+        , testCase "`force` re-applies a node its own check still calls satisfied" forceOverridesASatisfiedCheck
+        , testCase "`pause` stops a node coming back, `resume` lets it" pauseThenResume
         ]
 
 -------------------------------------------------------------------------------
@@ -883,3 +885,55 @@ statusShowsAFailingNodesOutput =
     isFailure :: CheckResult -> Bool
     isFailure (Failure _) = True
     isFailure _ = False
+
+{- | (R2). @force@ posts straight into a node's mailbox once its next
+machine exists, and the FSM already treats that as "run @up@ regardless of
+what the check says" (see @Test.UpkeepSpec@'s "Force restarts it rather than
+skipping it"). What that leaves untested is the command-language plumbing
+that gets an instruction there at all: parse the command, resolve the
+selection against the world, queue it, and deliver it the moment tending
+next starts.
+
+The node here never goes unsatisfied (@there@ stays 'True' throughout), so a
+second @up@ can only be explained by @force@ itself — not by the ordinary
+"the effect went away" path 'idleLoopTends' already covers.
+-}
+forceOverridesASatisfiedCheck :: IO ()
+forceOverridesASatisfiedCheck =
+    withTempDir $ \root -> do
+        there <- newIORef False
+        attempts <- newIORef (0 :: Int)
+        _ <- withSession (watched there attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe tending
+            assertEqual "the pass brought it up once" 1 =<< readIORef attempts
+            hPutStrLn session.sessionIn "force"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Instructed _ n <- rs, n > 0]))
+            awaitAttempts attempts 2
+            assertBool "the check never had a reason to fail" =<< readIORef there
+        pure ()
+
+{- | (R2). @pause@ stops a node's machine reacting to its effect going away;
+@resume@ lets it react again. Both travel the same queue-then-deliver path
+'forceOverridesASatisfiedCheck' pins, and are worth their own case because an
+instruction whose whole effect is "do nothing" is otherwise invisible: this
+is the one place a wrong delivery (skipped, or delivered to the wrong
+machine) would show up as a spurious @up@ instead of a missing one.
+-}
+pauseThenResume :: IO ()
+pauseThenResume =
+    withTempDir $ \root -> do
+        there <- newIORef False
+        attempts <- newIORef (0 :: Int)
+        _ <- withSession (watched there attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe tending
+            assertEqual "the pass brought it up once" 1 =<< readIORef attempts
+            hPutStrLn session.sessionIn "pause"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Tended (Upkeep.Paused _) <- rs]))
+            atomicModifyIORef' there (const (False, ()))
+            threadDelay 300000
+            assertEqual "paused, so nothing put it back" 1 =<< readIORef attempts
+            hPutStrLn session.sessionIn "resume"
+            awaitAttempts attempts 2
+        pure ()

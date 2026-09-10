@@ -155,6 +155,7 @@ import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ledger (Ledger)
 import qualified Salmon.Op.Ledger as Ledger
+import qualified Salmon.Op.Mailbox as Mailbox
 import Salmon.Op.Ref (Ref, unRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
 import qualified Salmon.Op.Rewrite as Rewrite
@@ -312,6 +313,16 @@ data Tending = Tending
     , tendingOn :: !(IORef Bool)
     -- ^ @supervise off@ clears this; nothing is tended between passes, and
     -- @serve@ behaves as it did before per-node machines existed.
+    , tendingPending :: !(IORef (Map Ref [Mailbox.Instruction]))
+    -- ^ (R2). instructions an operator posted while no supervisor was
+    -- running to hand them to. A one-shot machine does not survive a
+    -- command the way a holding one does (see 'tendingKept'), so
+    -- @force@\/@recheck@\/@pause@\/@resume@ cannot post straight into a
+    -- mailbox that is about to be discarded — 'startTending' delivers these
+    -- the moment the /next/ supervisor's machines exist (both freshly
+    -- started and adopted), then clears the queue. "Force this node next
+    -- time you look at it" rather than keeping every one-shot machine alive
+    -- just so it has a mailbox to post into.
     }
 
 emptyWorld :: World seed directive
@@ -365,6 +376,11 @@ data ServeCommand
     | -- | @supervise on@\/@supervise off@: whether to keep tending nodes
       -- between convergence passes. On by default.
       Supervise !Bool
+    | -- | @force@\/@recheck@\/@pause@\/@resume@ [--select P]... [--exclude
+      -- P]...: queue a 'Mailbox.Instruction' for the matching nodes, to be
+      -- delivered the next time this world's nodes are tended (R2). An
+      -- empty selection means every node, same as @status@\/@query@.
+      Instruct !Mailbox.Instruction !Selection
     | -- | @help@\/@help TOPIC@: print the command reference, or (when
       -- 'Just' a recognised 'Topic') a lengthier explanation of just that
       -- one command. 'Nothing', or a topic 'lookupTopic' doesn't recognise,
@@ -411,6 +427,10 @@ parseServeCommand line =
                     "history" -> History <$> parseSelection args
                     "query" -> QueryCmd <$> parseSelection args
                     "supervise" -> onOff w args
+                    "force" -> Instruct Mailbox.Force <$> parseSelection args
+                    "recheck" -> Instruct Mailbox.Recheck <$> parseSelection args
+                    "pause" -> Instruct Mailbox.Pause <$> parseSelection args
+                    "resume" -> Instruct Mailbox.Resume <$> parseSelection args
                     "help" -> Help <$> helpTopic w args
                     "?" -> Help <$> helpTopic w args
                     "quit" -> nullary w args Quit
@@ -507,6 +527,9 @@ data Report
       Cleared !Int
     | -- | @supervise on@\/@supervise off@
       Supervised !Bool
+    | -- | (R2). a @force@\/@recheck@\/@pause@\/@resume@ was queued for this
+      -- many nodes; takes effect once tending next starts, not immediately
+      Instructed !Mailbox.Instruction !Int
     | -- | something a node's own machine had to say between convergence
       -- passes. See 'Salmon.Actions.Upkeep.Report'; the chatty half of that
       -- stream is filtered out before it reaches here.
@@ -561,6 +584,15 @@ renderReport rep =
         Cleared n -> ["serve: retired " <> tshow n <> " seed(s)"]
         Supervised True -> ["serve: supervising (nodes are tended between passes)"]
         Supervised False -> ["serve: not supervising (nodes are left alone between passes)"]
+        Instructed instr n ->
+            [ Text.unwords
+                [ "serve: queued"
+                , Text.toLower (tshow instr)
+                , "for"
+                , tshow n
+                , "node(s), to take effect once tending next starts"
+                ]
+            ]
         Tended t -> renderTended t
         ConvergeStart ndown nup ->
             ["serve: converging (" <> tshow ndown <> " down, " <> tshow nup <> " up)"]
@@ -771,12 +803,20 @@ commandReference =
     , "  query [--select P]... [--exclude P]..."
     , "                                 annotate nodes [selected]/[excluded], without acting on anything"
     , "  supervise on|off               whether to keep tending nodes between passes (default on)"
+    , "  force   [--select P]... [--exclude P]..."
+    , "                                 run `up` on matching nodes even though their check says not to"
+    , "  recheck [--select P]... [--exclude P]..."
+    , "                                 look at matching nodes now, rather than at their next delay"
+    , "  pause   [--select P]... [--exclude P]..."
+    , "                                 stop tending matching nodes, without touching their effect"
+    , "  resume  [--select P]... [--exclude P]..."
+    , "                                 start tending matching nodes again"
     , "  help, ? [TOPIC]                print this reference, or (given a topic) more about just it"
     , "  quit, exit                     leave the loop, changing nothing on the way out"
     , "serve: --select/--exclude patterns are /-separated node-path globs (* one segment, ** any depth);"
     , "       may repeat; omitting --select entirely means everything."
     , "serve: `help TOPIC` for more, where TOPIC is one of:"
-    , "       up, directive, load, clear, converge, status, history, query, select, supervise"
+    , "       up, directive, load, clear, converge, status, history, query, select, supervise, force"
     ]
 
 {- | @help TOPIC@'s lookup table, matched case-insensitively (several names
@@ -801,6 +841,10 @@ helpTopics =
     , ("query", queryHelp)
     , ("supervise", superviseHelp)
     , ("watchdog", superviseHelp)
+    , ("force", instructHelp)
+    , ("recheck", instructHelp)
+    , ("pause", instructHelp)
+    , ("resume", instructHelp)
     , ("select", selectHelp)
     , ("exclude", selectHelp)
     , ("pattern", selectHelp)
@@ -995,6 +1039,35 @@ superviseHelp =
     , "  said what silence would mean."
     ]
 
+instructHelp :: [Text]
+instructHelp =
+    [ "serve: force | recheck | pause | resume [--select PATTERN]... [--exclude PATTERN]..."
+    , ""
+    , "  Tell the matching nodes' own machines something a check cannot: (see `help supervise`"
+    , "  for what those machines are). Omitting --select entirely means every node, same as"
+    , "  `status`/`query`."
+    , ""
+    , "    force    run `up` even though the check says not to — the operator knows something"
+    , "             it does not. For a node that owns a process, this is how to restart one"
+    , "             that is healthy, which is otherwise not sayable at all."
+    , "    recheck  look now instead of waiting out the current delay."
+    , "    pause    stop tending, without touching the effect. For a node that owns a process,"
+    , "             this leaves it running, unwatched — the operational verb for \"stop caring"
+    , "             about this without stopping it\"."
+    , "    resume   start tending again."
+    , ""
+    , "  These act on a node's machine, and a node only has one while supervision is tending it"
+    , "  (see `help supervise`) — a piped script, or `supervise off`, means there is nothing to"
+    , "  instruct. A one-shot machine (most nodes) does not survive the command that named it"
+    , "  either: `serve` stands every one-shot machine down before handling any command, `status`"
+    , "  included, so there is no live mailbox to post into at the moment this is typed. So the"
+    , "  instruction is queued instead and delivered the moment tending next starts — the next"
+    , "  time this loop goes idle, immediately after the command that queued it. A node a"
+    , "  selection matched that never gets a machine (excluded, retired, or simply never tended)"
+    , "  is not an error: the count this command reports is how many nodes matched, not how many"
+    , "  machines heard it."
+    ]
+
 selectHelp :: [Text]
 selectHelp =
     [ "serve: --select PATTERN / --exclude PATTERN"
@@ -1054,7 +1127,7 @@ serveWith ::
     IO (World seed directive)
 serveWith rewrites r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
-    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True
+    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef Map.empty
     inbox <- newTChanIO
     -- the input handle is read on its own thread so that the loop is never
     -- itself blocked in a read: the supervisor's machines run while it
@@ -1149,6 +1222,32 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                     -- and released the rest.
                     writeIORef (tendingKept tending) Upkeep.noKept
                     writeIORef (tendingSup tending) (Just sup)
+                    deliverPending tending sup
+
+    {- | (R2). Hand every queued instruction to the machine it was meant for,
+    now that one exists, and forget it. Delivered in the order they were
+    posted, which matters for e.g. a @pause@ followed by a @resume@.
+
+    A node an instruction named that this supervisor is not tending at all
+    (excluded by the selection at declare time, retired, or simply never
+    matched a live node) silently drops it here exactly as 'Upkeep.instruct'
+    always has — there was nothing to queue it *for* once its target never
+    showed up, and the operator already saw how many nodes matched when the
+    command was typed ('Instructed'). -}
+    deliverPending :: Tending -> Upkeep.Supervisor Extension -> IO ()
+    deliverPending tending sup = do
+        pending <- readIORef (tendingPending tending)
+        unless (Map.null pending) $ do
+            forM_ (Map.toList pending) $ \(aref, instrs) ->
+                forM_ instrs (Upkeep.instruct sup aref)
+            writeIORef (tendingPending tending) Map.empty
+
+    -- | (R2). Queue an instruction for every named node, oldest first per
+    -- node, for 'deliverPending' to hand to the next supervisor.
+    queueInstruction :: Tending -> Set Ref -> Mailbox.Instruction -> IO ()
+    queueInstruction tending refs instr =
+        modifyIORef' (tendingPending tending) $ \pending ->
+            Set.foldr (\aref -> Map.insertWith (flip (<>)) aref [instr]) pending refs
 
     {- | Stop tending, without tearing anything down.
 
@@ -1385,6 +1484,13 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                         -- which is immediately after this command.
                         unless on (stopTending tending world)
                         runReporter r (Supervised on)
+                        pure True
+                    Instruct instr sel -> do
+                        w <- readIORef world
+                        let (selr, excr) = resolveWorldSelectors w sel
+                            allowed = selr `Set.difference` excr
+                        queueInstruction tending allowed instr
+                        runReporter r (Instructed instr (Set.size allowed))
                         pure True
 
     -- | Filters 'worldNodes' by a 'Selection', preserving today's exact
