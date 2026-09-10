@@ -223,9 +223,9 @@ a @check@ of its own.
 
 That is the whole reason it exists rather than reusing
 'Salmon.Builtin.Nodes.Filesystem.filecontents'. @filecontents@ has no
-@check@, so it answers @Unknown@ forever, and a node that answers @Unknown@
-can never be seen to have stopped being up — which means it can never demote
-anything either. Supervision is only as good as the nodes' ability to answer
+@check@, so it answers @Immaterial@ — "nothing here worth asking about" —
+and is parked the moment it is up. A parked node can never be seen to have
+stopped being up, which means it can never demote anything either. Supervision is only as good as the nodes' ability to answer
 "is my effect still there", and this is what that answer looks like: read the
 file, compare it with what it should say.
 
@@ -282,7 +282,11 @@ daemonOp d =
             , managed = Just (Daemon.runDaemon chatter spawn)
             , check =
                 if not d.daemonStaleCheck
-                    then pure Unknown
+                    then -- nothing to ask: this machine holds the process,
+                    -- and the process exiting is raced in the same
+                    -- transaction as the mailbox. So the node parks and the
+                    -- delay ladder never runs at all.
+                        pure Immaterial
                     else do
                         -- A health check somebody might plausibly write, and
                         -- which is wrong in the way health checks are wrong:

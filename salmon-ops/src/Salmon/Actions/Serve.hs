@@ -665,6 +665,10 @@ renderTended t =
         Upkeep.Upkeep{} -> []
         Upkeep.Downkeep{} -> []
         Upkeep.NextLook{} -> []
+        -- the same kind of thing as 'NextLook', and filtered for the same
+        -- reason: it is a machine saying what it is waiting on, which is
+        -- most nodes most of the time. `status` is where to see it.
+        Upkeep.Parked{} -> []
         Upkeep.Untended{} -> []
 
 renderDirection :: Direction -> Text
@@ -903,10 +907,13 @@ superviseHelp =
     , "    Never      report it and leave it; an operator decides."
     , "    Always     also rerun a node whose check says it ran to completion and stopped."
     , ""
-    , "  A check that cannot tell (`Unknown` — which includes every node with no check of its"
-    , "  own, i.e. most of them) never triggers a restart. Such a node is brought up once and"
-    , "  then only polled; nothing here re-runs `up` on a node that has said nothing about"
-    , "  itself."
+    , "  A check that cannot tell (`Unknown`) never triggers a restart: nothing here re-runs"
+    , "  `up` on a node that looked and could not say. A node with no check of its own — most"
+    , "  of them — answers `Immaterial` instead (\"asking would cost what applying costs\"), is"
+    , "  brought up once, and is then parked rather than polled: still reachable by `force`,"
+    , "  `recheck` and by a dependency that takes its dependants with it, but no longer woken"
+    , "  on a timer to be told the same thing. A node whose effect can go away behind salmon's"
+    , "  back wants a real check; that is what makes it noticeable at all."
     , ""
     , "  A node may also declare a watchdog: how long it may go without doing anything"
     , "  observable before that silence should be reported. Nodes that declare none are never"

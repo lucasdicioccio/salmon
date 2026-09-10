@@ -140,10 +140,15 @@ noop short =
                 -- nothing to hold: the default node's effect, whatever it
                 -- turns out to be, persists without anybody watching it.
                 Nothing
-                -- a node that says nothing about its own effect cannot tell,
-                -- which 'requirement' reads as "run up" — the same behaviour
-                -- the old @pure Required@ default had.
-                (pure Unknown)
+                -- a node that says nothing about its own effect is taken
+                -- to be saying that asking would cost what applying costs,
+                -- which 'requirement' reads as "run up" — the same
+                -- behaviour the old @pure Required@ default had, and the
+                -- reason the one-shot drivers cannot tell the difference.
+                -- Under "Salmon.Actions.Upkeep" they part company: such a
+                -- node parks instead of being polled forever for an answer
+                -- it has already given.
+                (pure Immaterial)
                 skip
                 noDynamics
         )

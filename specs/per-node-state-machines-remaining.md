@@ -34,8 +34,9 @@ And three things that are not milestones:
 | (R1), first of three nodes: `Systemd.systemdService` has a `check` | `f7aec15` |
 | (I1) fixed: a bounce is believed over a stale check | `f7aec15` |
 | `salmon-ops-serve-fixture --daemon`, so 8 and 9 can be seen by hand | `12fb625` |
+| (R1), the other half: `CheckResult.Immaterial`, and a node that answers it parks | `21ef434` |
 
-139 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
+141 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
 in place there; this table is the index, not the record.
 
@@ -55,6 +56,7 @@ of the above does anything on a real graph.
 | id | what | size | note |
 |----|------|------|------|
 | **R1** | the other two nodes need a `check`: `filecontents`, then `dir` | small each | **the item that matters**; §R1 |
+| R9 | a `Supervision` opt-in for "re-apply me on the loop, it is cheaper than asking" | medium | the second half of the `Immaterial` design; §R9 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | not a taste question; settle with R1 |
 | R3 | `statusOutput` has no reader — nobody can see a failed node's last lines | small | how you would *see* R1 working |
 | R2 | no operator command addresses a node, so the mailbox is unreachable | small | `pause`/`force`/`recheck` mean something now |
@@ -86,6 +88,12 @@ reading further:
 - **`Unknown` never restarts anything** (milestone 7). Right, given nearly no
   node has a `check` — and the reason (R1) is worth more than any remaining
   milestone was.
+- **A node with no `check` is no longer watched at all**, it is *parked*
+  (`Immaterial`). Strictly speaking this removes something: before, such a
+  node was woken once a minute. What it was woken to do was call `pure
+  Unknown` and go back to sleep, so nothing is lost except the illusion that
+  it was being looked after — which is the point. It makes the (R1) gap
+  legible instead of hiding it behind a busy-looking loop.
 
 -------------------------------------------------------------------------------
 
@@ -295,7 +303,8 @@ milestones left behind. (R1) is the one that matters.
 ### R1. Nodes have no `check`, so almost nothing is actually supervised
 
 **The single highest-value item in this document, milestones 8 and 9
-included. One of the three candidates below is now done.**
+included. One of the three candidates below is now done, and the framing has
+changed underneath the other two — see "What `Immaterial` settled" below.**
 
 `check` is the only thing in the model that can notice an effect going away.
 Counting assignments across `salmon-ops/src/Salmon/Builtin/Nodes/` and
@@ -304,10 +313,10 @@ the builtins alone. And the misses are the *common* nodes —
 `Filesystem.filecontents` and `Filesystem.dir` have none — the module's two
 checks are `replaceDirectory`'s inner move and `destroyDirectory`, both
 `skipIfDirectoryIsMissing` — nor does `Bash.run`, nor does
-`Systemd.systemdService`. A node with no `check` answers `Unknown`, which
-milestone 7 deliberately never acts on, so it is brought up once and
-thereafter politely polled to no effect. The engine is real and tested; on
-a real graph today it does nearly nothing.
+`Systemd.systemdService`. A node with no `check` answers `Immaterial` (it
+answered `Unknown` until this change), which the upkeep FSM parks, so it is
+brought up once and thereafter watched by nothing. The engine is real and
+tested; on a real graph today it does nearly nothing.
 
 This was already logged as an ordering question in §"Open questions"
 ("wants exercising on two or three real long-running nodes before milestone 7
@@ -372,6 +381,53 @@ Doing it also produced the first evidence that this list is in the right
 order. Giving a real node a real check is what turned (I1) from a fork into a
 demonstrated bug — a service node *has* a check, so it walked straight into
 being torn down and left down — and the two landed together for that reason.
+
+#### What `Immaterial` settled
+
+The complaint above bundled two things that turn out to be separable, and
+separating them is most of what this item needed.
+
+The first is **coverage**: a node that can stop being true on its own, with
+nothing in the model able to notice. That is unchanged, and it is what the
+two remaining candidates fix.
+
+The second was **a category error in the default**. "This node has no check"
+and "this node's check ran and could not tell" were the same answer,
+`Unknown`, and the FSM had to treat them the same way — which meant polling
+78 of 100 builtins once a minute to call `pure Unknown`. `CheckResult` now
+has a sixth constructor for the first case. `Immaterial` means *there is
+nothing here worth asking about*: applying the effect costs about what
+finding out would, which is exactly the property that makes those nodes
+idempotent in the first place (`mkdir -p`, `ip route replace`, `ALTER SYSTEM
+SET`, an append-if-missing). It is the default, so no node author writes it;
+the one-shot drivers map it to `Required` and cannot tell it from `Unknown`,
+so `run up` is byte-for-byte unchanged; and under `Actions/Upkeep` a node
+that answers it **parks** — blocked on its mailbox, its demoting
+dependencies and its own action, with no delay ladder — instead of polling.
+
+Three things that buys, none of them the obvious one:
+
+- **`Unknown` now means only what it says.** It was carrying two meanings,
+  and every rule about it had to be written for the weaker one. The systemd
+  check's transitional states are the case that wants the real `Unknown`,
+  and they now have it to themselves.
+- **The gap is legible.** A parked node is visibly not being watched.
+  Before, a node nobody could supervise looked identical, from the outside,
+  to one being supervised successfully — same `NextLook` line every 60s.
+  Making the engine stop pretending is what turns (R1) from a note in a
+  document into something an operator can see in `status`.
+- **The cost of the default is now proportional to what it claims.** A node
+  that says "don't ask, just apply me when something would have applied me"
+  is asked exactly once, learns that, and stops. It costs one check per
+  supervisor rather than one per minute.
+
+What it does *not* do is make those nodes self-healing: a parked `dir` whose
+directory somebody removed stays parked. Doing something about that is (R9),
+and it is deliberately not part of this change — it is a second, independent
+decision about whether re-applying on a loop is acceptable, and it belongs to
+the node author rather than to `CheckResult`.
+
+#### The behaviour change the remaining two carry
 
 **Each of these changes what `run up` does for every existing caller**: a
 node whose check says `Success` stops being re-applied. That is an
@@ -504,16 +560,54 @@ would then have to decide whether salmon or systemd is supervising it.
 
 -------------------------------------------------------------------------------
 
+### R9. "Re-apply me on the loop; it is cheaper than asking"
+
+The second half of the `Immaterial` design, deliberately not landed with the
+first. `Immaterial` says *don't poll me*; it says nothing about what a
+supervisor should do for a node whose effect is cheap to re-apply and can
+still go away — `Filesystem.dir` being the whole argument. A `dir` that
+somebody `rmdir`s is not noticed today, is not noticed after this change, and
+would not be noticed by (R1) candidate 3 either — a check there would notice
+it, but at the cost of a `doesDirectoryExist` per node per minute, which is
+the trade `Immaterial` exists to avoid making silently.
+
+The shape: a `Supervision` field, opt-in on the node, meaning "on the tending
+loop, just run `up` again rather than asking". The node keeps the delay
+ladder it would otherwise have parked out of, and the ladder's meaning
+inverts — it is now a rate limit on re-application rather than on looking.
+
+Three things to get right, none of which the constructor alone had to face:
+
+- **It re-runs `up` on a schedule, forever.** That is safe only if `up` is
+  genuinely cheap *and* genuinely idempotent, which is a strictly stronger
+  claim than `Immaterial` makes and cannot be the default. `Bash.run`,
+  `cabal-build`, `git-repo`'s `clone >> pull` and `rsync:send-dir` are all
+  `Immaterial` today and none of them may ever be this.
+- **It interacts with `RestForOne`.** A node re-applied on the loop has not
+  "gone away and come back", so it must not demote anybody — the epoch is
+  bumped by `unsettle`, and going through `Upping` on purpose every 60s
+  would bounce every dependant that opted in.
+- **The reporting has to distinguish it from a restart.** `Acted (Eval …)`
+  once a minute on a node nothing is wrong with is noise, and it is the same
+  line a genuinely flapping node produces.
+
+Do it after (R1)'s two remaining nodes, not before: `filecontents` wants a
+real check (it can compare bytes, which is *better* than re-applying), and
+whether `dir` wants this or a check is the question that decides whether the
+field is worth having at all.
+
 ## The order I would do it in
 
 (R1) is now the whole of what stands between this engine and its doing
 anything on a real graph — with one thing to settle first, because (R1) is
 what makes it bite.
 
-0. ~~**I1**~~ and ~~**R1**'s first node~~ — both done, and together, because
-   the second is what proved the first was a bug rather than a preference.
-   `Systemd.systemdService` has a check; a demoted node that was holding its
-   effect is put back regardless of what its own check claims.
+0. ~~**I1**~~, ~~**R1**'s first node~~ and ~~**R1**'s default~~ — done.
+   The first two together, because the node with a real check is what proved
+   the bounce-over-stale-check question was a bug rather than a preference.
+   Then `CheckResult.Immaterial`: the half of (R1) that is one decision
+   rather than per-node work, and that makes the rest of it visible — a node
+   nobody can supervise now says so instead of emitting a `NextLook` a minute.
 
 1. **The rest of R1, one node at a time** — `Filesystem.filecontents` next,
    then `dir`. This is what turns nine landed milestones into something that
@@ -532,11 +626,15 @@ what makes it bite.
    last log lines and not.
 3. **R2** — the four instruction commands. Cheap, and much more useful now
    that `pause` and `force` mean something to a node that owns a process.
-4. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
+4. **R9**, but only after (1): whether `Filesystem.dir` wants a
+   re-apply-on-the-loop policy or just a `check` is the question that decides
+   whether that field is worth having, and it is not answerable until
+   `filecontents` has shown what a real check on a cheap node looks like.
+5. **R4**, **R5**, **R6**, **R7** as they become annoying. None is blocking
    anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
    is most of what a supervisor-level restart would have needed to hand a
    replacement machine.
-5. **I2**–**I5** whenever there is an opinion to apply. None of them is
+6. **I2**–**I5** whenever there is an opinion to apply. None of them is
    urgent and none is a bug; (I3) is fifteen minutes, (I5) is worth doing
    with (R5) since both are about what an adopted or replaced machine is
    handed, and (I2) and (I4) are questions about what the feature *means*

@@ -46,17 +46,24 @@ why a check is allowed to be expensive: the adaptive value is a delay
 /between/ checks rather than a period, so a slow check reduces its own
 frequency and the load is self-limiting.
 
-Two refinements this module makes to that rule, both places where the
+Three refinements this module makes to that rule, all places where the
 one-shot reading does not survive contact with a loop:
 
 * __'Salmon.Actions.UpDown.Unknown' does not restart anything.__
   'Salmon.Actions.UpDown.requirement' maps it to
   'Salmon.Actions.UpDown.Required', which is right for one pass over an
-  idempotent action and wrong here: a node with no @check@ of its own answers
-  'Salmon.Actions.UpDown.Unknown' forever, and "run @up@ again" would spin it
-  at the delay floor for as long as @serve@ is up. "I could not look" is not
-  evidence the effect went away. Such a node therefore settles into a 60s
-  no-op poll, which is what a node that says nothing about itself has earned.
+  idempotent action and wrong here: "I looked and could not tell" is not
+  evidence the effect went away, and acting on it would spin the node at the
+  delay floor for as long as @serve@ is up. Such a node keeps being asked,
+  and keeps being left alone.
+* __'Salmon.Actions.UpDown.Immaterial' is not polled at all.__ It is the
+  answer from a node whose author declined to write a check because asking
+  costs what applying costs — which, being the default, is most of the nodes
+  in this tree. There is then no cheaper question to put on a timer, so such
+  a node /parks/: it blocks on its mailbox, its demoting dependencies and
+  (if it holds one) its own action, with no delay ladder at all. See 'Rest'.
+  It takes one look to learn this, because what a machine knows on the way in
+  is that its @up@ ran, not what a check would say.
 * __A failing @up@ backs off rather than tightening.__ The spec's rule
   adapts the delay on what the /check/ said; it says nothing about how often
   to retry an @up@ that keeps throwing. Tightening there would hammer
@@ -313,6 +320,12 @@ data Report ext
       -- 'Up', so this node went back to 'WaitUp' to be brought up again on
       -- top of whatever that dependency becomes
       Demoted !(Act ext) !Ref
+    | -- | resting in 'Up' with nothing to poll for: this node's check
+      -- answered 'Salmon.Actions.UpDown.Immaterial', so the machine is
+      -- blocked on its mailbox and its demoting dependencies instead of on
+      -- a timer. Takes the place 'NextLook' has for a node that does have
+      -- something to ask.
+      Parked !(Act ext)
     | -- | told to stop tending this node; its effect is left exactly as it is
       Paused !(Act ext)
     | Resumed !(Act ext)
@@ -1067,13 +1080,20 @@ upkeep standing ctx =
 
     {- | 'Up' with an action in hand: the nap, the mailbox, the action's own
     exit and any demoting dependency, raced. The check still runs on the
-    adaptive delay, so a managed node that also supplies a @check@ gets both;
-    one that does not pays a @pure Unknown@ per delay, which is the price of
-    not being able to tell "no check" from "a check that could not tell". -}
+    adaptive delay, so a managed node that also supplies a @check@ gets both
+    the health probe and the exit. One that does not answers 'Immaterial' and
+    parks, which for /this/ machine costs nothing at all: the exit of the
+    thing it holds is raced in the same transaction, so the timer was never
+    the thing telling it anything. -}
     watch :: Async ExitCode -> CheckResult -> Delay -> Tally -> Armed -> IO (IO ())
     watch running verdict d tally armed = do
-        say (NextLook act verdict (delayMicros d))
-        w <- naptimeHolding ctx running armed (delayMicros d)
+        w <- case restOf verdict of
+            Poll -> do
+                say (NextLook act verdict (delayMicros d))
+                naptimeHolding ctx running armed (delayMicros d)
+            Park -> do
+                say (Parked act)
+                parkHolding ctx running armed
         told <- announce ctx w
         case w of
             -- 'naptimeHolding' answers 'IgnoreHalt', so this cannot happen:
@@ -1219,8 +1239,13 @@ upkeep standing ctx =
     not. -}
     resting :: CheckResult -> Delay -> Tally -> Armed -> IO ()
     resting verdict d tally armed = do
-        say (NextLook act verdict (delayMicros d))
-        w <- napWatching ctx armed (delayMicros d)
+        w <- case restOf verdict of
+            Poll -> do
+                say (NextLook act verdict (delayMicros d))
+                napWatching ctx armed (delayMicros d)
+            Park -> do
+                say (Parked act)
+                parkWatching ctx armed
         told <- announce ctx w
         case w of
             Halt -> pure ()
@@ -1510,6 +1535,18 @@ napWatching ctx armed d = do
                     over <- readTVar timer
                     if over then pure Elapsed else retry
 
+{- | 'napWatching' with no timer at all, for a node whose check answered
+'Salmon.Actions.UpDown.Immaterial' — see 'Rest'. Everything else it waits on
+is unchanged, so the node still hears an instruction, a demoting dependency
+and the supervisor standing down; there is simply no 'Elapsed' to be had.
+-}
+parkWatching :: Ctx ext -> Armed -> IO Wake
+parkWatching ctx armed =
+    atomically $
+        halting HeedHalt ctx $
+            crossing ctx armed $
+                listen ctx retry
+
 {- | 'napWatching' for a machine holding a running action: plus the action's
 own exit, and no 'Halt'.
 
@@ -1528,6 +1565,19 @@ naptimeHolding ctx running armed d = do
                     listen ctx $ do
                         over <- readTVar timer
                         if over then pure Elapsed else retry
+
+{- | 'parkWatching' for a machine holding a running action. The one place
+parking costs nothing at all to reason about: the exit of the thing this
+node holds is raced in the same transaction, so dropping the timer removes
+the only wake-up that was never going to tell anybody anything.
+-}
+parkHolding :: Ctx ext -> Async ExitCode -> Armed -> IO Wake
+parkHolding ctx running armed =
+    atomically $
+        halting IgnoreHalt ctx $
+            crossing ctx armed $
+                ended running $
+                    listen ctx retry
 
 -- | Block until somebody says something. For a holding machine, which has no
 -- other reason to stop waiting.
@@ -1727,6 +1777,37 @@ has told i = i `elem` told
 soonIf :: [Instruction] -> Delay -> Delay
 soonIf told d = if told `has` Recheck then initialDelay else d
 
+{- | What a node in 'Up' does between looks: wake on a timer, or not at all.
+
+'Salmon.Actions.UpDown.Immaterial' is a node author saying that asking what
+state their effect is in costs about what putting it back would, so they did
+not write a check. There is then no cheaper question to put on a timer, and
+a machine that keeps waking to ask it learns nothing each time — which, since
+that verdict is the /default/, is what the delay ladder was doing for the
+great majority of the nodes in this tree.
+
+A parked node is not an unwatched one. It still comes back for everything
+that is an actual event: an operator's 'Salmon.Op.Mailbox.Instruction', a
+'Salmon.Op.Supervision.RestForOne' dependency going away, its own action
+exiting, the supervisor standing down. It has only stopped asking a question
+nobody wrote an answer to.
+
+Two consequences worth knowing. Such a node is __never reported 'Wedged'__,
+and that needs no code: 'Salmon.Op.Status.wedged' asks about a node that has
+not settled, and a parked one has. And it is __never restarted by its own
+check__, because there is no check — which is the same statement as "this
+node has no way to notice its effect going away", true of it before and
+after, and the reason a node whose effect can vanish should write one.
+-}
+data Rest
+    = Poll
+    | Park
+    deriving (Show, Eq)
+
+restOf :: CheckResult -> Rest
+restOf Immaterial = Park
+restOf _ = Poll
+
 -- | 'Success', 'Skipped' and 'Completed' all mean "the effect is in place";
 -- see 'Salmon.Op.Supervision.Restart' on why 'Unknown' is in neither camp.
 satisfiedBy :: CheckResult -> Bool
@@ -1735,6 +1816,9 @@ satisfiedBy Skipped = True
 satisfiedBy Completed = True
 satisfiedBy (Failure _) = False
 satisfiedBy Unknown = False
+-- an author who declined to write a check has said nothing about whether
+-- the effect is there, so this is 'up''s business, not a claim it is done.
+satisfiedBy Immaterial = False
 
 -- | Does this policy put the node back, given what the check said?
 restarts :: Supervision -> CheckResult -> Bool

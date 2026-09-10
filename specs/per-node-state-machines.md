@@ -864,6 +864,19 @@ wakeup channel, and the `run_stopping` flag.
    Mechanical across 22 node call sites plus `Query.forceSkip`, and a
    prerequisite for everything else. One deliberate behaviour change comes
    with it: a throwing check stops killing the traversal.
+
+   One departure, added later and after milestone 9, once there was a loop to
+   feel it: **the type has a sixth constructor, `Immaterial`, and it is the
+   default**. The sketch above has `Unknown` doing two jobs — "a check ran and
+   could not tell" and "nobody wrote a check" — which is harmless for the
+   one-shot drivers this milestone was written for and not harmless for a
+   supervisor, which has to decide whether to keep asking. `Immaterial` says
+   *there is nothing here worth asking about*: applying the effect costs about
+   what finding out would, which is the same property that makes these nodes
+   idempotent. `requirement` maps it to `Required`, so `run up` is unchanged
+   and the two are indistinguishable to it; `Actions/Upkeep` parks such a node
+   instead of polling it. See (R1) in the companion document for why this was
+   the half of that item worth doing first.
 2. **`Salmon.Op.Dag`** — *landed*. The comonadic fold to magma + both
    adjacency directions, lifted out of `downTreeWith`. Pure and unit-testable,
    and `downTree` keeps using it, so it is a refactor with no behaviour change
@@ -1037,10 +1050,14 @@ wakeup channel, and the `run_stopping` flag.
      `_ -> fsm (decreaseDelay delay) Upping`, which lumps `Unknown` in with
      `Failure`. That is right for the one-shot drivers, where
      `requirement Unknown = Required` errs safely over an idempotent action,
-     and a spin loop here: a node with no `check` answers `Unknown` forever,
+     and a spin loop here: a node with no `check` answered `Unknown` forever,
      so it would re-run `up` at the 500ms floor for as long as `serve` lived.
      "I could not look" is not evidence the effect went away. Only `Failure`
-     demotes a node out of `Up`.
+     demotes a node out of `Up`. (A node with no `check` now answers
+     `Immaterial` rather than `Unknown`, and is parked rather than polled —
+     see milestone 1's departure. The rule stated here is unchanged; it just
+     applies to far fewer nodes than it did when it was written, which is the
+     improvement.)
    - **A failing `up` backs off; only a vanished effect tightens.** The spec
      adapts the delay on what the *check* said and is silent on how often to
      retry an `up` that keeps throwing. Tightening there would retry
@@ -1056,8 +1073,8 @@ wakeup channel, and the `run_stopping` flag.
    - **A supervisor is told what the last pass achieved** (`Standing`). This
      is not in the spec at all and is load-bearing: almost nothing in this
      repository implements `check`, so a supervisor started after a
-     convergence pass would consult every node, get `Unknown`, and run every
-     `up` in the graph a second time. `Settled` skips the first `up` and
+     convergence pass would consult every node, get no usable answer, and run
+     every `up` in the graph a second time. `Settled` skips the first `up` and
      nothing else — the node is still watched, and still put back if its
      check later says the effect is gone.
    - **`serve` supervises only while it is idle**, rather than "`serve` uses

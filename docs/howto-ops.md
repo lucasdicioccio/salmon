@@ -58,25 +58,30 @@ needs idempotency beyond what `up` itself can guarantee — `check`. `managed`
 is `Nothing` for all but a handful of nodes; see §2.2 if yours is one of
 them.
 
-`check` answers one question about the node's own effect, with five possible
+`check` answers one question about the node's own effect, with six possible
 answers: `Success` (it is in place), `Skipped` (someone decided to treat it as
 satisfied — only `Query.forceSkip` produces this), `Completed` (it ran to
 completion and stopped on purpose), `Failure reason` (it is not in place —
-the *ordinary* answer on a first run, not an error report), and `Unknown` (the
-check could not tell, which includes "this node has no check"). `upTree` skips
-the first three and runs `up` for the last two.
+the *ordinary* answer on a first run, not an error report), `Unknown` (a check
+ran and could not tell), and `Immaterial` (there is nothing here worth asking
+about — applying the effect costs about what finding out would; this is the
+**default** when you write no `check`). `upTree` skips the first three and runs
+`up` for the last three.
 
 `check` earns its keep twice, and the second time is easy to miss. In a one-shot
 `run up` it is an optimisation: it saves an `up` you didn't need. Under `run
 serve`, which *tends* its nodes between commands (`Salmon.Actions.Upkeep`), it
 is the **only** thing that can notice your effect going away — nothing else in
-the model looks. A node with no `check` answers `Unknown`, which the upkeep FSM
-deliberately never acts on (a loop that treated "I could not tell" as "so run
-`up`" would re-run every check-less node forever), so it gets brought up once
-and then only pointlessly polled. If your node is something that can stop being
-true on its own — a service, a mount, a firewall rule, a file something else
-might clobber — write a `check`. `Netfilter.rule`'s `skipIfNftRuleExists` is the
-template.
+the model looks. A node with no `check` answers `Immaterial`, and the upkeep
+FSM *parks* it: brought up once, then blocked on its mailbox rather than woken
+on a timer to be told the same thing. (An explicit `Unknown` is different: the
+FSM keeps asking, and keeps not acting on it — a loop that treated "I could not
+tell" as "so run `up`" would spin.) So if your node is something that can stop
+being true on its own — a service, a mount, a firewall rule, a file something
+else might clobber — write a `check`; it is the difference between a node that
+gets *applied* and a node that gets *supervised*. `Netfilter.rule`'s
+`skipIfNftRuleExists` is the template, and `Systemd.checkService` is the worked
+example of what a real one costs.
 
 `up` and `down` default to `pure ()` (a no-op) if you don't set them — this is
 useful for pure "grouping" nodes (see §3) that only exist to bundle
@@ -309,9 +314,12 @@ order of preference:
    `skipIfXExists :: ... -> IO CheckResult` that shells out to a read-only
    "does X exist" check, and wire it into `check`.
 
-`check` defaults to `pure Unknown` — "I have no way to tell", which `upTree`
-reads as "run `up`" — if you don't set it, so options 1–5 above need no
-`check` at all; only option 6 does. Note also that a `check` that *throws* is
+`check` defaults to `pure Immaterial` — "asking would cost what applying costs",
+which `upTree` reads as "run `up`" — if you don't set it, so options 1–5 above
+need no `check` at all; only option 6 does. That default is a claim, not an
+absence, and for options 1–5 it is a true one: the whole reason those nodes are
+idempotent is that re-applying them is cheap. It is *false* for anything that
+can stop being true on its own, which is why such a node needs option 6. Note also that a `check` that *throws* is
 contained: it is read as `Failure`, so the node is evaluated and the rest of
 the traversal is unaffected.
 

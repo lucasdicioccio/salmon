@@ -183,14 +183,20 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   and nothing answers "is it still gone", so a downkeep machine that arrives exits while an
   upkeep machine that arrives has only started. **`Unknown` restarts nothing**: the one-shot
   drivers map it to `Required` (safe over one pass of an idempotent action), but a loop that
-  did the same would re-run `up` at the delay floor forever for every node with no `check` —
-  i.e. nearly all of them. **A failing `up` backs off** (doubles) while a *vanished effect*
+  did the same would re-run `up` at the delay floor forever. **`Immaterial` is not even
+  polled**: it is the verdict from a node with no `check` — the default, and so nearly every
+  node in the tree — and it says asking costs what applying costs, which leaves nothing
+  cheaper to put on a timer. Such a node *parks*: one look to learn it (what a machine knows
+  on the way in is that its `up` ran, not what a check would say), then it blocks on its
+  mailbox, its demoting dependencies and its own action, with no delay ladder at all. It is
+  still reachable by `Force`/`Recheck` and still bounced by a `RestForOne` dependency; it has
+  only stopped asking a question nobody wrote an answer to. **A failing `up` backs off** (doubles) while a *vanished effect*
   tightens (halves); only the latter is evidence to look sooner. **Failure is waited out, not
   contained**: where a one-shot pass reports `Blocked` and ends, here the dependency's own
   machine is still retrying, so the dependant keeps waiting and proceeds the moment it
   recovers. And **`Standing`** — the caller says whether a node is already where it wants to
   be, because a supervisor is normally started right after something else did the work, and
-  an `Unknown` node would otherwise have that work done again immediately.
+  a node with no `check` would otherwise have that work done again immediately.
   `Recheck`/`Pause`/`Resume` finally mean something here. See milestone 7 and
   `Test/UpkeepSpec.hs`.
   A node with a `managed` action runs the same three states with one difference: `Up`
@@ -397,22 +403,35 @@ skip via `check`, rather than trying to force the command itself to be idempoten
 **`check`, not `prelim`.** `Extension` used to carry both a `prelim :: IO Requirement`
 (implemented by 22 nodes, consulted by `upTree`) and a never-implemented `check :: IO ()` with a
 never-called `Actions/Check.hs` behind it, plus an equally dead `notify`. Those are merged: there
-is one `check :: IO CheckResult` (`Success`/`Skipped`/`Completed`/`Failure Text`/`Unknown`),
-`UpDown.requirement` maps it to the old `Required`/`Skippable`, and `Actions/Check.hs` /
-`Actions/Notify.hs` are gone. `Skipped` has exactly one producer — `Query.forceSkip` — and means
-"someone decided to treat this as satisfied", as opposed to `Success` which is a statement about
-the effect. A node that sets no `check` gets `Unknown`, which means `up` runs, matching the old
-`pure Required` default. A `check` that *throws* is contained as a `Failure` rather than killing
+is one `check :: IO CheckResult`
+(`Success`/`Skipped`/`Completed`/`Failure Text`/`Unknown`/`Immaterial`), `UpDown.requirement`
+maps it to the old `Required`/`Skippable`, and `Actions/Check.hs` / `Actions/Notify.hs` are
+gone. Four of the six describe the effect; the other two describe a decision somebody made
+about the node. `Skipped` has exactly one producer — `Query.forceSkip` — and means "someone
+decided to treat this as satisfied", as opposed to `Success` which is a statement about the
+effect. `Immaterial` is the node *author's* equivalent: "there is nothing here worth asking
+about", because applying the effect costs about what finding out would (`mkdir -p` against
+`doesDirectoryExist`, `ip route replace` — the whole family whose idempotency comes from the
+underlying tool having a "set" verb). It is the **default** for a node that sets no `check`,
+which `Unknown` used to be, and it means `up` runs, matching the old `pure Required` default;
+the one-shot drivers cannot tell the two apart, since running an idempotent `up` once is
+precisely the cheap thing being claimed. They part company under `Actions/Upkeep.hs`, where
+`Immaterial` parks a node instead of polling it — and the split leaves `Unknown` meaning only
+what it says, a check that ran and could not tell, which it could not do while it doubled as
+"nobody wrote a check". A `check` that *throws* is contained as a `Failure` rather than killing
 the traversal, which `prelim` (evaluated outside `upTree`'s `try`) did not do. See
 `specs/per-node-state-machines.md` milestone 1 and `Test/CheckSpec.hs`.
 
 Two consequences worth naming now that `run serve` tends its nodes. **A node's `check` is the
 only thing that can notice its effect going away**, and it is therefore also the only thing that
 can fire a `RestForOne` — a config node with no `check` never notices its own file changing, so
-nothing standing on it is ever bounced. A node with no `check` answers `Unknown`,
-which the upkeep FSM deliberately never acts on (see `Actions/Upkeep.hs` above), so such a node
-is brought up once and thereafter only polled pointlessly. Almost no builtin implements one
-today — `filecontents` does not, so a managed file deleted behind salmon's back is still not
+nothing standing on it is ever bounced. A node with no `check` answers `Immaterial`, which the
+upkeep FSM parks rather than polls (see `Actions/Upkeep.hs` above), so such a node is brought
+up once and thereafter watched by nothing at all. That is not a loss of coverage relative to
+before — a 60s poll that could only ever return "I cannot tell" was never coverage — but it
+does make the shape of the gap explicit: **the only thing standing between a node and being
+supervised is somebody writing its `check`**. Almost no builtin implements one today —
+`filecontents` does not, so a managed file deleted behind salmon's back is still not
 restored. Adding one is per-node work and changes what `run up` does for existing callers (a
 node whose check says `Success` stops being re-applied), so it is a deliberate decision rather
 than a mechanical sweep. `Netfilter.rule`'s `skipIfNftRuleExists` is the template, and
@@ -420,7 +439,9 @@ than a mechanical sweep. `Netfilter.rule`'s `skipIfNftRuleExists` is the templat
 is gone.
 
 `Systemd.systemdService` is the one that has been done, and it is the worked example of what
-writing a real one costs. `checkService` shells out once to `systemctl show` for three
+writing a real one costs — and of why the default is a claim rather than an absence: left
+alone, a unit that can be stopped, crash, or be `systemctl disable`d behind salmon's back
+would answer `Immaterial`, i.e. "nothing here worth asking about", which is simply false. `checkService` shells out once to `systemctl show` for three
 properties and `interpretShow` (pure, so it is testable without a systemd — see
 `Test/SystemdSpec.hs`) draws the verdict. Each property earns its place for a reason that only
 shows up in the writing. **`ActiveState`** is the effect itself, but its *transitional* values

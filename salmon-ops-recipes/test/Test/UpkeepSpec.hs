@@ -60,7 +60,7 @@ tests =
         [ testCase "the adaptive delay clamps at both ends" delayClamps
         , testCase "a satisfied node is not upped, and rests" satisfiedRests
         , testCase "an unsatisfied node is upped, then rests" unsatisfiedIsUpped
-        , testCase "a node with no check is upped once and never again" unknownDoesNotSpin
+        , testCase "a check that cannot tell is not evidence to act on" unknownDoesNotSpin
         , testCase "the effect going away brings the node back" vanishedComesBack
         , testCase "Restart Never leaves a fallen-over node alone" neverLeavesItAlone
         , testCase "Restart Always acts on a Completed node" alwaysActsOnCompleted
@@ -74,6 +74,8 @@ tests =
         , testCase "two supervision policies on one node are reported" policyConflict
         , testCase "stopping waits for an up in flight rather than cutting it" stopWaitsForUp
         , testCase "a node already standing is watched, not re-upped" settledIsNotReUpped
+        , testCase "a node with no check parks instead of polling" immaterialParks
+        , testCase "a parked node still hears a dependency go away" parkedNodeIsStillDemotable
         , testCase "a node waiting on a slow dependency is not itself wedged" watchdogSkipsWaiters
         , testGroup
             "a node that owns its effect"
@@ -180,8 +182,20 @@ reached want rs = [act.shorthand | Upkeep act st <- rs, st == want]
 reachedDown :: DownkeepState -> [Report Extension] -> [Text]
 reachedDown want rs = [act.shorthand | Downkeep act st <- rs, st == want]
 
+{- | How many times any machine has come round its 'Up' loop and settled
+down to wait again. 'Parked' counts alongside 'NextLook' because it is the
+same event said about a node with nothing to poll for: the machine finished
+a turn and is waiting on its mailbox rather than on a timer. A case that
+counted only 'NextLook' would hang forever on a node with no @check@, which
+is most of them.
+-}
 looks :: [Report Extension] -> Int
-looks rs = length [() | NextLook{} <- rs]
+looks rs = length [() | r <- rs, waiting r]
+
+waiting :: Report Extension -> Bool
+waiting NextLook{} = True
+waiting Parked{} = True
+waiting _ = False
 
 -- | Which node was sent back to 'WaitUp', and by which dependency.
 demotions :: [Report Extension] -> [(Text, Ref)]
@@ -190,7 +204,18 @@ demotions rs = [(act.shorthand, dep) | Demoted act dep <- rs]
 -- | How many times this one node has said what it is waiting on next: the
 -- way a case waits for one machine to have been round its loop again.
 looksAt :: Text -> [Report Extension] -> Int
-looksAt name rs = length [() | NextLook a _ _ <- rs, a.shorthand == name]
+looksAt name rs = length (filter (== name) (waiters rs))
+
+-- | Which node said it was settling down to wait, in order. See 'looks'.
+waiters :: [Report Extension] -> [Text]
+waiters rs =
+    [ a.shorthand
+    | r <- rs
+    , a <- case r of
+        NextLook a' _ _ -> [a']
+        Parked a' -> [a']
+        _ -> []
+    ]
 
 -- | How many times this one node ran its @up@ (or spawned its action).
 evalsOf :: Text -> [Report Extension] -> Int
@@ -253,18 +278,21 @@ unsatisfiedIsUpped = within 10 $ do
     assertEqual "evaluated" ["unsat"] (evals rs)
     assertEqual "passed through Upping on the way" ["unsat"] (reached Upping rs)
 
-{- | The refinement this module makes to the spec's rule, and the one that
-matters most in a repository where almost no node has a check: 'Unknown' is
-not evidence the effect went away, so it must not restart anything. Were it
+{- | The refinement this module makes to the spec's rule: 'Unknown' is not
+evidence the effect went away, so it must not restart anything. Were it
 treated the way the one-shot drivers treat it — as
 'Salmon.Actions.UpDown.Required' — this node would re-run @up@ at the delay
 floor for as long as the process lived.
+
+The check here answers 'Unknown' explicitly. That used to be the same thing
+as having no check at all; it is not any more (see 'immaterialParks'), and
+the two rules are worth pinning separately: this one is about a check that
+ran and could not tell, which is a node that keeps being asked.
 -}
 unknownDoesNotSpin :: IO ()
 unknownDoesNotSpin = within 10 $ do
     (ran, bump) <- counter
-    -- no `check` at all, so `runCheck` answers Unknown.
-    let o = node "quiet" $ \x -> x{up = bump}
+    let o = node "quiet" $ \x -> x{check = pure Unknown, up = bump}
     supervising (dagOf o) allUp $ \sup trace -> do
         await trace (\rs -> not (null (reached Up rs)))
         assertEqual "upped once on the way in" 1 =<< readIORef ran
@@ -273,6 +301,62 @@ unknownDoesNotSpin = within 10 $ do
         void (Upkeep.instruct sup (refOf "quiet") Recheck)
         await trace (\rs -> looks rs >= 2)
         assertEqual "and looking again did not re-up it" 1 =<< readIORef ran
+        rs <- seen trace
+        assertEqual "a node with a check is polled, not parked" 0 (length [() | Parked{} <- rs])
+
+{- | The other half of the same story, and the one that covers most of this
+repository. A node with no @check@ answers 'Immaterial' — "asking costs what
+applying costs" — and there is then nothing for a timer to be for, so the
+machine parks on its mailbox instead of waking to be told the same thing at
+the delay cap forever.
+
+It takes exactly one look to get there, and that is not an oversight: what
+a machine knows on the way in is that its @up@ ran, not what its check would
+say about it. It announces one 'NextLook', asks once, is told 'Immaterial',
+and never asks again — which is the difference between one wasted check per
+supervisor and one per minute forever.
+
+Parked is not unwatched: the operator still gets through, which is what the
+'Recheck' here shows. That it is answered with another 'Parked' rather than
+a 'NextLook' is the point — the node looked, learned nothing again, and went
+straight back to waiting.
+-}
+immaterialParks :: IO ()
+immaterialParks = within 10 $ do
+    (ran, bump) <- counter
+    -- no `check` at all, so `runCheck` answers Immaterial.
+    let o = node "cheap" $ \x -> x{up = bump}
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null (reached Up rs)))
+        assertEqual "upped once on the way in" 1 =<< readIORef ran
+        await trace (\rs -> not (null [() | Parked{} <- rs]))
+        rs0 <- seen trace
+        assertEqual "one look, and then it knew" 1 (length [() | NextLook{} <- rs0])
+        void (Upkeep.instruct sup (refOf "cheap") Recheck)
+        await trace (\rs -> looks rs >= 3)
+        rs <- seen trace
+        assertEqual "and no further look was ever announced" 1 (length [() | NextLook{} <- rs])
+        assertEqual "being woken did not re-up it" 1 =<< readIORef ran
+
+{- | Parking must not cost the node the one thing supervision is for. A
+'Salmon.Op.Supervision.RestForOne' dependency going away is an event, not a
+timer, so a parked dependant still hears it and is brought up again on top
+of whatever the dependency turns into.
+-}
+parkedNodeIsStillDemotable :: IO ()
+parkedNodeIsStillDemotable = within 20 $ do
+    (cfg, _, there) <- breakable "cfg" [] restForOne
+    -- no check, so it parks the moment it is up
+    (svc, svcRan) <- counted "svc" [cfg] id
+    supervising (dagOf svc) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "svc" Up rs >= 1)
+        await trace (\rs -> not (null [() | Parked a <- rs, a.shorthand == "svc"]))
+        assertEqual "up once so far" 1 =<< readIORef svcRan
+        breakIt sup there "cfg"
+        await trace (\rs -> reachedBy "svc" Up rs >= 2)
+        rs <- seen trace
+        assertEqual "the parked node was sent back" [("svc", refOf "cfg")] (demotions rs)
+        assertEqual "and brought up again on the new config" 2 =<< readIORef svcRan
 
 {- | The point of the whole module: a node that was up and is not any more
 gets put back, with nobody re-declaring anything.
@@ -541,7 +625,7 @@ settledIsNotReUpped = within 10 $ do
         -- but it is genuinely being watched
         void (Upkeep.instruct sup (refOf "already") Recheck)
         await trace (\rs -> looks rs >= 2)
-        assertEqual "looking still does not re-up an Unknown node" 0 =<< readIORef ran
+        assertEqual "looking still does not re-up a checkless node" 0 =<< readIORef ran
 
 {- | The false positive the "has it said anything at all" clause in
 'Salmon.Op.Status.wedged' exists to avoid. Both nodes here declare a short

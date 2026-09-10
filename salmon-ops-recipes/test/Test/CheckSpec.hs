@@ -30,7 +30,7 @@ tests :: TestTree
 tests =
     testGroup
         "Salmon.Builtin.Extension.check"
-        [ testCase "Success/Skipped/Completed are Skippable, Failure/Unknown are Required" requirementMapping
+        [ testCase "Success/Skipped/Completed are Skippable, Failure/Unknown/Immaterial are Required" requirementMapping
         , testCase "a satisfied check skips the node, an unsatisfied one evaluates it" checkDecidesEval
         , testCase "a node that implements no check is still evaluated" noCheckMeansEval
         , testCase "a check that throws fails only its own node, not the traversal" throwingCheckIsContained
@@ -43,10 +43,11 @@ requirementMapping = do
     assertEqual "Completed" Skippable (requirement Completed)
     assertEqual "Failure" Required (requirement (Failure "not there"))
     assertEqual "Unknown" Required (requirement Unknown)
+    assertEqual "Immaterial" Required (requirement Immaterial)
 
 {- | One leaf per 'CheckResult', all under a common root, run in a single
 traversal: the three satisfied answers must report 'Skip' and leave 'up'
-alone, the two unsatisfied ones must report 'Eval' and run it.
+alone, the three unsatisfied ones must report 'Eval' and run it.
 -}
 checkDecidesEval :: IO ()
 checkDecidesEval = do
@@ -65,13 +66,14 @@ checkDecidesEval = do
             , leaf "done" Completed
             , leaf "absent" (Failure "not there")
             , leaf "dunno" Unknown
+            , leaf "cheap" Immaterial
             ]
         root = op "root" (deps leaves) $ \x -> x{ref = mkRef "check-root" ()}
     reports <- runUpCapturing root
     ran <- readIORef ranRef
     assertEqual
         "only the unsatisfied checks ran their up"
-        ["absent", "dunno"]
+        ["absent", "cheap", "dunno"]
         (sortNames ran)
     assertEqual
         "the satisfied checks were reported Skip"
@@ -79,11 +81,12 @@ checkDecidesEval = do
         (sortNames [shorthand act | Skip act <- reports])
     assertEqual
         "the unsatisfied checks were reported Eval"
-        ["absent", "dunno", "root"]
+        ["absent", "cheap", "dunno", "root"]
         (sortNames [shorthand act | Eval act <- reports])
 
--- | The default 'check' is 'Unknown' ("I have no way to tell"), which has to
--- keep the pre-merge default's behaviour: run 'up'.
+-- | The default 'check' is 'Immaterial' ("asking would cost what applying
+-- costs"), which has to keep the pre-merge default's behaviour: run 'up'.
+-- The one-shot drivers must not be able to tell it from 'Unknown'.
 noCheckMeansEval :: IO ()
 noCheckMeansEval = do
     ranRef <- newIORef []

@@ -74,9 +74,10 @@ implemented by none and consulted only by a module with no callers. See
 describes are driven by exactly this answer, so it has to say more than
 "should I act".
 
-Four of the five constructors describe the /effect/. 'Skipped' is the odd one
-out: it describes a decision someone made /about/ the node, and
-'Salmon.Actions.Query.forceSkip' is what produces it.
+Four of the six constructors describe the /effect/. The other two describe a
+decision somebody made /about/ the node: 'Skipped' is an operator's ("treat
+this as satisfied", from 'Salmon.Actions.Query.forceSkip') and 'Immaterial'
+is the node author's ("there is nothing here worth asking about").
 -}
 data CheckResult
     = -- | the effect is in place
@@ -92,11 +93,29 @@ data CheckResult
       -- answer to the only question 'upTreeWith' asks, which is whether to
       -- run 'up'.
       Failure !Text
-    | -- | the check could not tell — including because the node has no check
-      -- of its own. Acts like 'Failure' when deciding whether to run 'up',
-      -- and is kept distinct so that a supervisor can tell "I looked and it
-      -- is gone" from "I could not look".
+    | -- | the check looked and could not tell. Acts like 'Failure' when
+      -- deciding whether to run 'up', and is kept distinct so that a
+      -- supervisor can tell "I looked and it is gone" from "I could not
+      -- look" — see "Salmon.Builtin.Nodes.Systemd", where a unit part-way
+      -- through starting is exactly this and calling it gone is how a slow
+      -- starter becomes a restart loop.
       Unknown
+    | -- | there is nothing here worth asking about: applying the effect
+      -- costs about what finding out would, so the node's author declined
+      -- to write a check and said so. @mkdir -p@ against
+      -- 'System.Directory.doesDirectoryExist' is the shape of it, and so is
+      -- @ip route replace@ — the whole family of nodes whose idempotency
+      -- comes from the underlying tool having a "set" verb.
+      --
+      -- __This is the default__ for a node that supplies no 'check', which
+      -- 'Unknown' used to be. The one-shot drivers cannot tell the two
+      -- apart, both being 'Required': running an idempotent @up@ once is
+      -- precisely the cheap thing being claimed. The difference is under
+      -- "Salmon.Actions.Upkeep", where a node that answers this /parks/
+      -- rather than waking on a timer to be told the same thing again. It
+      -- also leaves 'Unknown' meaning only what it says, which it could not
+      -- while it doubled as "nobody wrote a check".
+      Immaterial
     deriving (Show, Eq)
 
 {- | Least-satisfied wins, mirroring 'Requirement''s "'Required' wins": if
@@ -110,6 +129,8 @@ instance Semigroup CheckResult where
     _ <> Failure b = Failure b
     Unknown <> _ = Unknown
     _ <> Unknown = Unknown
+    Immaterial <> _ = Immaterial
+    _ <> Immaterial = Immaterial
     Completed <> _ = Completed
     _ <> Completed = Completed
     Skipped <> b = b
@@ -126,10 +147,11 @@ instance Semigroup Requirement where
 
 {- | What 'upTreeWith' does with a 'CheckResult'.
 
-'Failure' and 'Unknown' both mean 'Required'. Erring that way is safe because
-'Salmon.Builtin.Extension.up' is required to be idempotent regardless (see
-CLAUDE.md), and it is the direction that keeps a node with a broken check
-converging rather than stalling.
+'Failure', 'Unknown' and 'Immaterial' all mean 'Required'. Erring that way
+is safe because 'Salmon.Builtin.Extension.up' is required to be idempotent
+regardless (see CLAUDE.md), and it is the direction that keeps a node with a
+broken check converging rather than stalling. It is also why a one-shot
+@run up@ behaves exactly as it did before 'Immaterial' existed.
 -}
 requirement :: CheckResult -> Requirement
 requirement Success = Skippable
@@ -137,6 +159,7 @@ requirement Skipped = Skippable
 requirement Completed = Skippable
 requirement (Failure _) = Required
 requirement Unknown = Required
+requirement Immaterial = Required
 
 skipIfDirectoryIsMissing :: FilePath -> IO CheckResult
 skipIfDirectoryIsMissing path = do

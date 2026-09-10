@@ -63,11 +63,14 @@ systemdService r systemctl t cfg =
 
 The first @check@ on a long-running effect salmon does __not__ own, which is
 the largest category of node in this repository and the one supervision was
-built for. Without it, @systemdService@ answers
-'Salmon.Actions.UpDown.Unknown' forever, and
-"Salmon.Actions.Upkeep" deliberately never acts on @Unknown@: a service that
-died would be brought up once by the declaring pass and then watched
-pointlessly for the rest of the process's life.
+built for. Without it, @systemdService@ takes the default answer,
+'Salmon.Actions.UpDown.Immaterial' — and that verdict is a claim, made on
+the node author's behalf, that there is nothing here worth asking about. For
+a unit that can be stopped, crash, or be disabled behind salmon's back it is
+simply false: the node would be brought up once by the declaring pass and
+then parked, with nothing left in the system able to notice it had died.
+Writing this check is what turns @systemdService@ from a node that is
+applied into a node that is /supervised/.
 
 Three properties, one @systemctl show@ (which exits 0 even for a unit it has
 never heard of, so there is no error path to distinguish from an answer):
