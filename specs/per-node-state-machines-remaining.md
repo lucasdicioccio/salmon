@@ -35,7 +35,7 @@ And three things that are not milestones:
 | (I1) fixed: a bounce is believed over a stale check | `f7aec15` |
 | `salmon-ops-serve-fixture --daemon`, so 8 and 9 can be seen by hand | `12fb625` |
 | (R1), the other half: `CheckResult.Immaterial`, and a node that answers it parks | `1a53d95` |
-| (R1), second of three nodes: `Filesystem.filecontents` has a `check` | *this change* |
+| (R1), second of three nodes: `Filesystem.filecontents` has a `check` | `126e0d4` |
 
 150 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
