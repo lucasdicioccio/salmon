@@ -36,7 +36,7 @@ And three things that are not milestones:
 | `salmon-ops-serve-fixture --daemon`, so 8 and 9 can be seen by hand | `12fb625` |
 | (R1), the other half: `CheckResult.Immaterial`, and a node that answers it parks | `1a53d95` |
 | (R1), second of three nodes: `Filesystem.filecontents` has a `check` | `126e0d4` |
-| (R9): `supReapply`, and `Filesystem.dir` sets it — settles (R1)'s third node too | *this change* |
+| (R9): `supReapply`, and `Filesystem.dir` sets it — settles (R1)'s third node too | `72e1d55` |
 
 156 tests pass, Layer 3 included. `cabal test salmon-ops-recipes --test-option=-j1`.
 Each milestone is marked *landed* in the design, with its deviations recorded
