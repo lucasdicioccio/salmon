@@ -435,7 +435,7 @@ runServeWith rewrites prog root script = do
     (nodeReporter, readNodeReports) <- capture
     w <-
         withScript script $
-            Serve.serveWith rewrites serveReporter nodeReporter (parseSpec root) (Configure pure) prog
+            Serve.serveWith rewrites Nothing serveReporter nodeReporter (parseSpec root) (Configure pure) prog
     (,,) w <$> readServeReports <*> readNodeReports
 
 withScript :: [String] -> (Handle -> IO a) -> IO a
@@ -606,7 +606,7 @@ withSession prog root body = do
     done <- newEmptyMVar
     _ <-
         forkIO $ do
-            w <- Serve.serveWith [] serveReporter nodeReporter (parseSpec root) (Configure pure) prog readEnd
+            w <- Serve.serveWith [] Nothing serveReporter nodeReporter (parseSpec root) (Configure pure) prog readEnd
             putMVar done w
     let session = Session writeEnd serveTrace nodeTrace
     result <- body session

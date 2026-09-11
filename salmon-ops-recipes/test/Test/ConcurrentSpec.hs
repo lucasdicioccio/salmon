@@ -18,6 +18,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
 import Control.Concurrent.STM (atomically)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (elemIndex, sort)
+import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -29,6 +30,7 @@ import qualified Salmon.Actions.Concurrent as Concurrent
 import Salmon.Actions.UpDown (CheckResult (..), Report (..), Requirement (..), alwaysRequired)
 import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, evalDeps, help, nodeps, notes, op, opAct, ref, up)
 import Salmon.Op.Actions (Act (..))
+import qualified Salmon.Op.Concurrency as Concurrency
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..))
 import qualified Salmon.Op.Mailbox as Mailbox
@@ -49,6 +51,8 @@ tests =
         , testCase "a mailbox Force overrides a satisfied check" mailboxForces
         , testCase "a mailbox Satisfy stops a node acting" mailboxSatisfies
         , testCase "an overflowing mailbox drops the oldest and says so" mailboxOverflows
+        , testCase "a ConcurrencyLimit of 1 serialises otherwise-concurrent nodes" limitSerialisesNodes
+        , testCase "a ConcurrencyLimit does not deadlock an ordinary graph" limitDoesNotDeadlockOrdinaryGraph
         ]
 
 -------------------------------------------------------------------------------
@@ -57,15 +61,18 @@ dagOf :: Op -> Dag.Dag Extension
 dagOf = Dag.foldDag Dag.sameRepresentative . evalDeps
 
 runUp :: Op -> IO ([Report Extension], Bool)
-runUp o = do
+runUp = runUpLimited Nothing
+
+runUpLimited :: Maybe Concurrency.ConcurrencyLimit -> Op -> IO ([Report Extension], Bool)
+runUpLimited limit o = do
     (r, readBack) <- capture
-    ok <- Concurrent.upDagConcurrent alwaysRequired r Concurrent.noMailboxes (dagOf o)
+    ok <- Concurrent.upDagConcurrent alwaysRequired r Concurrent.noMailboxes limit (dagOf o)
     (,) <$> readBack <*> pure ok
 
 runDown :: Op -> IO ([Report Extension], Bool)
 runDown o = do
     (r, readBack) <- capture
-    ok <- Concurrent.downDagConcurrent alwaysRequired r Concurrent.noMailboxes (dagOf o)
+    ok <- Concurrent.downDagConcurrent alwaysRequired r Concurrent.noMailboxes Nothing (dagOf o)
     (,) <$> readBack <*> pure ok
 
 -- | Fail the test rather than hanging forever if ordering deadlocks.
@@ -135,6 +142,47 @@ trulyConcurrent = within 10 $ do
     (_, ok) <- runUp root
     assertBool "both nodes were in flight at once" ok
 
+{- | The mirror of 'trulyConcurrent': the same two nodes, each unable to
+finish until the /other/ has started, but under a 'Concurrency.ConcurrencyLimit'
+of 1. With no limit this graph completes ('trulyConcurrent' above); with the
+limit it provably cannot, since whichever node acquires the sole slot then
+blocks forever waiting on the other, which can never acquire a slot to run
+and signal back. A short 'timeout' standing in for "never" is the only way to
+observe a real deadlock rather than a slow success, and is deterministic
+here: the run either completes almost immediately (the limit did nothing) or
+hangs until the deadline (it serialised the two nodes), never something in
+between.
+-}
+limitSerialisesNodes :: IO ()
+limitSerialisesNodes = do
+    limit <- Concurrency.newConcurrencyLimit 1
+    aStarted <- newEmptyMVar
+    bStarted <- newEmptyMVar
+    let a = op "a" nodeps $ \x -> x{ref = mkRef "mid" ("a" :: Text), up = putMVar aStarted () >> readMVar bStarted}
+        b = op "b" nodeps $ \x -> x{ref = mkRef "mid" ("b" :: Text), up = putMVar bStarted () >> readMVar aStarted}
+        root = op "root" (deps [a, b]) $ \x -> x{ref = mkRef "root" ()}
+    result <- timeout 500000 (runUpLimited (Just limit) root)
+    assertBool "each node needs the other to finish, but only one may ever hold the slot" (isNothing result)
+
+{- | The limit must not introduce a deadlock of its own on a graph with real
+dependency edges: a node's slot is released before its dependants even
+attempt to acquire one (see "Salmon.Actions.Concurrent"'s module header), so
+a limit of 1 should still let a whole DAG converge, one node at a time.
+-}
+limitDoesNotDeadlockOrdinaryGraph :: IO ()
+limitDoesNotDeadlockOrdinaryGraph = within 10 $ do
+    limit <- Concurrency.newConcurrencyLimit 1
+    logRef <- newIORef []
+    let rec name = atomicModifyIORef' logRef (\xs -> (name : xs, ()))
+        shared = op "shared" nodeps $ \x -> x{ref = mkRef "leaf" ("shared" :: Text), up = rec "shared"}
+        a = op "a" (deps [shared]) $ \x -> x{ref = mkRef "mid" ("a" :: Text), up = rec "a"}
+        b = op "b" (deps [shared]) $ \x -> x{ref = mkRef "mid" ("b" :: Text), up = rec "b"}
+        root = op "root" (deps [a, b]) $ \x -> x{ref = mkRef "root" (), up = rec "root"}
+    (_, ok) <- runUpLimited (Just limit) root
+    order <- reverse <$> readIORef logRef
+    assertBool "clean, despite the limit" ok
+    assertEqual "each node still applied exactly once" (sort ["root", "a", "b", "shared"]) (sort order)
+
 {- | The teardown ordering guarantee, under concurrency: the directory two
 files live in must not be removed until both files are, and the two files may
 go at the same time.
@@ -172,7 +220,7 @@ cycleDoesNotHang = within 10 $ do
                 ]
         looped = Set.fromList [(mkRef "cyc" ("a" :: Text), mkRef "cyc" ("b" :: Text)), (mkRef "cyc" ("b" :: Text), mkRef "cyc" ("a" :: Text))]
     (r, readBack) <- capture
-    ok <- Concurrent.upDagConcurrent alwaysRequired r Concurrent.noMailboxes (Dag.fromMagma magma looped)
+    ok <- Concurrent.upDagConcurrent alwaysRequired r Concurrent.noMailboxes Nothing (Dag.fromMagma magma looped)
     reports <- readBack
     assertBool "reported as a failure rather than hanging" (not ok)
     assertEqual "both nodes named" 2 (length [() | Blocked _ <- reports])
@@ -193,7 +241,7 @@ withMailbox o instructions = do
     mapM_ (Mailbox.post box) instructions
     (r, readBack) <- capture
     let dag = dagOf o
-    ok <- Concurrent.upDagConcurrent alwaysRequired r (Map.fromList [(rf, box) | rf <- Dag.dagOrder dag]) dag
+    ok <- Concurrent.upDagConcurrent alwaysRequired r (Map.fromList [(rf, box) | rf <- Dag.dagOrder dag]) Nothing dag
     (,) <$> readBack <*> pure ok
 
 mailboxForces :: IO ()

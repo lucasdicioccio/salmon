@@ -52,6 +52,16 @@ as already done. The last of those two in the mailbox wins, since a later
 instruction supersedes an earlier statement of intent. 'Recheck', 'Pause' and
 'Resume' are meaningful only to a driver that tends a node continuously; here
 they are read, reported and otherwise ignored.
+
+= Bounding width
+
+Ordering is unbounded by design (an edge or a collection is the only thing
+that ever serialises two nodes here — see "Salmon.Op.Concurrency"'s header
+for why that is deliberate and what it does not cover). Both drivers below
+take an optional 'ConcurrencyLimit' that bounds something orthogonal to
+ordering: how many nodes may be inside their own 'check'\/'up'\/'down' at
+once, across the whole pass. 'Nothing' reproduces this module's behaviour
+before the limit existed.
 -}
 module Salmon.Actions.Concurrent (
     upDagConcurrent,
@@ -73,6 +83,7 @@ import GHC.Records (HasField)
 
 import Salmon.Actions.UpDown (CheckResult (..), Gate, Report (..), Requirement (..), requirement, runCheck)
 import Salmon.Op.Actions (Act (..))
+import Salmon.Op.Concurrency (ConcurrencyLimit, withConcurrencyLimit)
 import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..), Mailbox)
@@ -99,10 +110,13 @@ upDagConcurrent ::
     Gate ext ->
     Reporter (Report ext) ->
     Map Ref Mailbox ->
+    -- | caps how many nodes are inside 'check'\/'up' at once across this
+    -- pass; 'Nothing' is unbounded. See "Salmon.Op.Concurrency".
+    Maybe ConcurrencyLimit ->
     Dag ext ->
     IO Bool
-upDagConcurrent gate r boxes dag =
-    walkConcurrent TurnUp r boxes dag Dag.dependenciesOf apply
+upDagConcurrent gate r boxes limit dag =
+    walkConcurrent TurnUp r boxes limit dag Dag.dependenciesOf apply
   where
     apply :: Say ext -> TVar Status -> Act ext -> [Instruction] -> IO CheckResult
     apply say status act instructions = do
@@ -152,10 +166,13 @@ downDagConcurrent ::
     Gate ext ->
     Reporter (Report ext) ->
     Map Ref Mailbox ->
+    -- | caps how many nodes are inside 'down' at once across this pass;
+    -- 'Nothing' is unbounded. See "Salmon.Op.Concurrency".
+    Maybe ConcurrencyLimit ->
     Dag ext ->
     IO Bool
-downDagConcurrent gate r boxes dag =
-    walkConcurrent TurnDown r boxes dag Dag.dependantsOf apply
+downDagConcurrent gate r boxes limit dag =
+    walkConcurrent TurnDown r boxes limit dag Dag.dependantsOf apply
   where
     apply :: Say ext -> TVar Status -> Act ext -> [Instruction] -> IO CheckResult
     apply say status act instructions = do
@@ -213,11 +230,12 @@ walkConcurrent ::
     Direction ->
     Reporter (Report ext) ->
     Map Ref Mailbox ->
+    Maybe ConcurrencyLimit ->
     Dag ext ->
     (Dag ext -> Ref -> [Ref]) ->
     (Say ext -> TVar Status -> Act ext -> [Instruction] -> IO CheckResult) ->
     IO Bool
-walkConcurrent dir r boxes dag waitsOn apply = do
+walkConcurrent dir r boxes limit dag waitsOn apply = do
     let order = Dag.dagOrder dag
     let stuckRefs = Dag.stuck waitsOn dag
 
@@ -255,7 +273,12 @@ walkConcurrent dir r boxes dag waitsOn apply = do
                         -- a node's own thread throwing would leave its
                         -- neighbours waiting forever, so nothing is allowed
                         -- to escape here even though `apply` catches already.
-                        escaped <- try @SomeException (apply say status act instructions)
+                        -- the slot is held only around this call: every
+                        -- neighbour this node waited on above has already
+                        -- released its own by the time `waitStability`
+                        -- returns, so this can never wait on a slot held by
+                        -- something in turn waiting on this node.
+                        escaped <- try @SomeException (withConcurrencyLimit limit (apply say status act instructions))
                         case escaped of
                             Right result -> pure result
                             Left e -> do

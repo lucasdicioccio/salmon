@@ -123,6 +123,38 @@ Three things keep that affordable:
   settling delay, deliberately: a settling delay would swallow the case the
   feature is for, since a rewritten config file is back within milliseconds.
 
+= A machine that throws is restarted, not lost
+
+'Salmon.Actions.UpDown.Blocked' has no equivalent here for a node's own
+/machine/ throwing — as opposed to its @up@\/@down@\/@check@ throwing, which
+is caught inside 'upkeep'\/'downkeep' and handled entirely in-band. A machine
+escaping those is this module's own bug, not the node's, and it used to mean
+the node was simply gone until the next 'startUpkeep' rebuilt every machine
+from scratch — tolerable while a supervisor's lifetime was one convergence
+pass, and not once one is left running across commands ('Kept', and the
+mailbox queue 'startTending' drains into it — see @specs/per-node-state-machines-remaining.md@'s
+R2/R5).
+
+'restarting' is the layer that closes that gap: it is what 'startUpkeep' now
+runs instead of 'machine' directly, and it restarts the node's machine in
+place — reporting 'Escaped' on every attempt, since a restart that happened
+silently would defeat the point of calling this a bug. The restart re-enters
+as 'Unsettled' rather than wherever the dead machine's closure remembered:
+nothing survived the crash, not even the assumption that the effect is still
+there, and 'Unsettled' is what makes the very next step a fresh 'Consult'
+rather than a blind @up@. A short, fixed pause ('delayFloor') separates one
+attempt from the next, only so a bug that fires on every entry cannot spin a
+core; it is not the adaptive ladder; 'Salmon.Op.Supervision' has no opinion
+about it, being a policy about the /node/, not about this module's own bugs.
+
+The one thing 'restarting' must not catch is an /asynchronous/ exception —
+'Control.Concurrent.Async.AsyncCancelled' above all, since 'releaseKept'
+tears a holding machine down by throwing exactly that into it and then
+waiting for the async to finish. Swallowing it as though it were a crash
+would restart the machine 'releaseKept' is trying to stop, and its caller's
+wait would never return. Anything matching 'SomeAsyncException' is re-thrown
+untouched instead of restarted.
+
 = The watchdog
 
 'Salmon.Op.Supervision.supWatchdog' is a node author saying how long their
@@ -172,10 +204,11 @@ module Salmon.Actions.Upkeep (
     Report (..),
 ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, poll, waitCatch, waitCatchSTM, withAsync)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTVar)
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, throwIO, try)
 import Control.Monad (forM, forM_, unless)
 import Data.Dynamic (Dynamic)
 import Data.Foldable (traverse_)
@@ -659,7 +692,7 @@ startUpkeep report (Kept prior) tend dag = do
         -- a managed node that was not adopted starts from scratch whatever
         -- the caller believes about it: there is no process, so it is not up.
         let t' = if holds then t{tendStanding = Unsettled} else t
-        thread <- async (machine t' ctx)
+        thread <- async (restarting ctx t')
         pure
             ( aref
             , Machine
@@ -735,9 +768,11 @@ stopUpkeep sup = do
         outcome <- waitCatch (machineThread m)
         case outcome of
             Right () -> pure ()
-            -- a machine is not supposed to be able to throw: `up` and
-            -- `down` are caught inside it. If one does, that is this
-            -- module's bug and not the node's, so it is reported as such.
+            -- 'restarting' already restarts and reports a crashing machine
+            -- in place, so this only fires for an asynchronous exception
+            -- that reached the thread some other way than 'releaseKept'
+            -- (which 'restarting' lets through rather than restarting) —
+            -- reported here as a last resort rather than dropped silently.
             Left e -> supSay sup (Escaped (machineAct m) e)
     -- a holding machine ignores the halt flag by construction, so these are
     -- all still running — except one whose node never got past 'WaitUp' (it
@@ -942,6 +977,39 @@ machine ::
     IO ()
 machine (Tend TurnUp standing) ctx = upkeep standing ctx
 machine (Tend TurnDown standing) ctx = downkeep standing ctx
+
+{- | What 'startUpkeep' actually runs: 'machine', restarted in place if it
+throws. See the module header's "A machine that throws is restarted, not
+lost" for why, and why 'SomeAsyncException' is the one thing this must let
+through rather than treat as a crash.
+-}
+restarting ::
+    ( HasField "up" ext (IO ())
+    , HasField "down" ext (IO ())
+    , HasField "managed" ext (Maybe ((Text -> IO ()) -> IO ExitCode))
+    , HasField "check" ext (IO CheckResult)
+    , HasField "ref" ext Ref
+    ) =>
+    Ctx ext ->
+    Tend ->
+    IO ()
+restarting ctx t = do
+    outcome <- try @SomeException (machine t ctx)
+    case outcome of
+        Right () -> pure ()
+        Left e
+            | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+            | otherwise -> do
+                ctxSay ctx (Escaped (ctxAct ctx) e)
+                u <- readTVarIO (ctxUnder ctx)
+                halted <- readTVarIO (underHalt u)
+                unless halted $ do
+                    -- a fixed floor, not the adaptive ladder: this is a
+                    -- bug in this module, not a node's own retry cadence,
+                    -- and all it needs is enough of a pause that a bug
+                    -- firing on every entry does not spin a core.
+                    threadDelay (fromIntegral (unMicros delayFloor))
+                    restarting ctx t{tendStanding = Unsettled}
 
 -------------------------------------------------------------------------------
 

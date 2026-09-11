@@ -270,7 +270,12 @@ data Start
     , start_args :: [Text]
     }
 
-data Restart
+-- | The @Restart=@ directive salmon writes into a unit file, for systemd
+-- itself to act on. Not to be confused with 'Salmon.Op.Supervision.Restart',
+-- salmon's own restart decision about a node — the two used to share a name
+-- ((R8) in @specs/per-node-state-machines-remaining.md@) until a systemd
+-- node with a 'Salmon.Op.Supervision.Supervision' needed both in scope.
+data RestartDirective
     = OnFailure
 
 data KillMode
@@ -283,7 +288,7 @@ data Service
     , service_group :: Group
     , service_umask :: UMask
     , service_execStart :: Start
-    , service_restart :: Restart
+    , service_restart :: RestartDirective
     , service_killmode :: KillMode
     , service_working_dir :: FilePath
     }
@@ -325,7 +330,7 @@ render_service scope s =
             "\"" <> Text.replace "\"" "\\\"" (Text.replace "\\" "\\\\" a) <> "\""
         | otherwise = a
 
-    render_restart :: Restart -> Text
+    render_restart :: RestartDirective -> Text
     render_restart OnFailure = "on-failure"
 
     render_killmode :: KillMode -> Text

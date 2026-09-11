@@ -18,6 +18,7 @@ import System.Exit (exitFailure)
 import System.IO (stdin)
 
 import Salmon.Op.Actions (Act (..))
+import qualified Salmon.Op.Concurrency as Concurrency
 import Salmon.Op.Configure
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ref (Ref)
@@ -73,7 +74,11 @@ data RunCommand
     | RunDown
     | RunTree
     | RunDAG
-    | RunServe
+    | -- | @run serve@, optionally capping how many nodes converge at once
+      -- per pass (R6 in @specs/per-node-state-machines-remaining.md@;
+      -- 'Nothing' is unbounded, matching every version of @serve@ before
+      -- this flag existed).
+      RunServe !(Maybe Int)
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
@@ -129,9 +134,19 @@ runCommandParser =
             , command "down" (info (pure RunDown) (progDesc "Tears down (down) the directive on stdin."))
             , command "tree" (info (pure RunTree) (progDesc "Prints a human-readable dependency tree."))
             , command "dag" (info (pure RunDAG) (progDesc "Prints Graphviz dot output."))
-            , command "serve" (info (pure RunServe) (progDesc "Reads a stream of seed declarations on stdin and converges."))
+            , command "serve" (info serveP (progDesc "Reads a stream of seed declarations on stdin and converges."))
             ]
   where
+    serveP =
+        RunServe
+            <$> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "max-concurrency"
+                        <> Options.Applicative.metavar "N"
+                        <> Options.Applicative.help "Cap how many nodes converge (check/up/down) at once per pass. Omitted = unbounded."
+                    )
+                )
     upP =
         RunUp
             <$> optional
@@ -295,8 +310,9 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run RunServe) -> do
-            void $ Serve.serveWith rewrites serveR r parseSeedArgs genBase traceBase stdin
+        (Run (RunServe maxConcurrency)) -> do
+            limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
+            void $ Serve.serveWith rewrites limit serveR r parseSeedArgs genBase traceBase stdin
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)

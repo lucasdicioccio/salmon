@@ -149,6 +149,7 @@ import Salmon.Actions.UpDown (Requirement (..))
 -- HasField for fields that are in scope.
 import Salmon.Builtin.Extension (Extension (..), Op, Track', evalDeps)
 import Salmon.Op.Actions (Act (..), ShortHand)
+import Salmon.Op.Concurrency (ConcurrencyLimit)
 import Salmon.Op.Configure (Configure, gen)
 import Salmon.Op.Graph (Graph)
 import Salmon.Op.Dag (Dag)
@@ -1105,7 +1106,7 @@ serve ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serve = serveWith []
+serve = serveWith [] Nothing
 
 {- | 'serve', with "Salmon.Op.Rewrite" phases registered. They run after every
 fold, so a convergence walks the /computed/ graph — the one where a
@@ -1113,11 +1114,19 @@ collection node has replaced the nodes it batches — while the ledger and
 'worldNodes' keep speaking in terms of what was declared. See
 'Salmon.Op.Rewrite' for why that split is the only place cross-declaration
 knowledge can live.
+
+The 'Maybe' 'ConcurrencyLimit' bounds each convergence pass's two concurrent
+walks (see "Salmon.Actions.Concurrent"): 'Nothing' is unbounded, matching
+'serve's behaviour before the limit existed. One limit covers both the
+teardown and the bring-up half of every pass, not one each, since the two
+never run at the same time (teardown is awaited before bring-up starts) and
+so never contend with each other for it.
 -}
 serveWith ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
     [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
     Reporter Report ->
     Reporter (UpDown.Report Extension) ->
     ([String] -> Either Text seed) ->
@@ -1125,7 +1134,7 @@ serveWith ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serveWith rewrites r nodeReporter parseSeed configure program h = do
+serveWith rewrites limit r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
     tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef Map.empty
     inbox <- newTChanIO
@@ -1623,6 +1632,7 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                         (gateFor world computed TurnDown restriction)
                         (recorder world computed TurnDown restriction)
                         Concurrent.noMailboxes
+                        limit
                         dag
         okUp <-
             if nup == 0
@@ -1632,6 +1642,7 @@ serveWith rewrites r nodeReporter parseSeed configure program h = do
                         (gateFor world computed TurnUp restriction)
                         (recorder world computed TurnUp restriction)
                         Concurrent.noMailboxes
+                        limit
                         dag
         -- this pass is what turns nodes converged-'TurnDown', so it is also
         -- where the graphs that described them stop being needed.

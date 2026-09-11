@@ -78,13 +78,13 @@ language. What remains is the smaller, independent items below.
 | ~~R2~~ | ~~no operator command addresses a node~~ — `force`/`recheck`/`pause`/`resume` do now | — | done; §R2 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
 | R4 | `query` prints the declared graph, not the rewritten one (`tree`/`dag` done) | small | §R4; = `specs/advance-querying.md` |
-| R5 | supervisor-level restart is half wired (monitored, not restarted) | small | milestone 9's `Under` did most of it |
-| R6 | no concurrency-bounding primitive; convergence is unbounded | medium | deliberate so far |
-| R8 | `Restart` means two different things (`Systemd` vs `Supervision`) | trivial | speculative — nothing imports both yet; do it when something does |
+| ~~R5~~ | ~~supervisor-level restart is half wired~~ — a crashing machine now restarts in place | — | done; §R5 |
+| ~~R6~~ | ~~no concurrency-bounding primitive~~ — a global, optional cap now exists | — | done; §R6 |
+| ~~R8~~ | ~~`Restart` means two different things~~ (`Systemd` vs `Supervision`) | — | done; §R8 |
 | I2 | `supStrategy` is authored on the dependency, not the dependant | — | taste; §I2 |
 | I3 | `supStableAfter` carries two unrelated meanings | 15 min | taste; §I3 |
 | I4 | the `RestForOne` cascade needs opting in at every hop | — | taste; §I4 |
-| I5 | adoption refreshes a machine's supervisor but not its policy | small | do with R5 |
+| I5 | adoption refreshes a machine's supervisor but not its policy | small | now that R5 restarts a machine in place too, worth a second pass together |
 
 ### The tradeoffs, in one place
 
@@ -221,6 +221,36 @@ the other end of it.
 **The fork.** Keep it on the dependency; move it to the dependant ("bounce me
 when anything I stand on moves"); or have both and require them to agree,
 which is the conservative option and the expensive one.
+
+**A reframing that dissolves most of the "long lever" worry.** The argument
+against assumed a bounce is a cost the dependant's author didn't sign up for.
+But the tree already asks every node's `up` to be idempotent — safe to run
+twice — as a base convention (see "Conventions for node authors" in
+CLAUDE.md). Read `RestForOne` as *"go recheck yourself"* rather than
+*"you are being torn down and rebuilt whether you like it or not"*, and an
+unwanted bounce on a well-written node is just a wasted no-op `check`, not a
+disruption. That reframes the shared-resource case in the worked example
+above (§I2's `tlsCert`/A/B/C): service C being bounced unnecessarily is a
+cheap re-verification, not an incident, *provided* C's own `up`/`check` are
+actually idempotent — which is already the convention every node is supposed
+to follow regardless of `RestForOne`.
+
+What this does **not** cover: a node whose reapplication is genuinely
+expensive or unsafe to repeat — slow warmup, an expensive connection pool
+rebuild, a migration that isn't safely re-runnable. Such a node has no way
+today to resist a demotion sent by an upstream `RestForOne`; `supStrategy`
+only speaks from the dependency's side, there is no dependant-side veto.
+
+**Conclusion for now: no implementation change to I2.** The current
+dependency-side authoring is fine as long as the idempotency convention
+holds. The real gap is a *future*, separate piece of flexibility: a
+dependant-side mechanism for a node to declare "don't force-reapply me from
+a `RestForOne` demotion" (or otherwise resist/absorb it), for the nodes that
+are the exception rather than the rule. That belongs in `Extension`
+alongside `up`/`check`/`down` — a per-node capability the node author
+supplies, the same way `check` itself is — rather than as another top-level
+field bolted onto `Supervision`. Not scoped further than that; noted here so
+it isn't lost, not because it's next.
 
 ### I3. `supStableAfter` now carries two unrelated meanings
 
@@ -633,59 +663,133 @@ resolving a `--select`/`--exclude` pattern, which only paths can do today.
 Left as recorded: worth doing before anyone relies on `query` to predict a
 run under a registered rewrite; not worth doing speculatively.
 
-### R5. Supervisor-level restart — "let it crash" is only half wired
+### R5. Supervisor-level restart — *done*
 
 §"The supervision tree" wants two levels: the upkeep FSM handles *the managed
 effect stopped*, and a supervisor handles *the machine managing it died*.
-Milestone 7 has the monitoring (`stopUpkeep` does `waitCatch` on every
-machine and reports `Escaped`) and not the restart — a machine that throws is
-reported and gone until the next idle period rebuilds every machine anyway.
-That is a tolerable accident of "supervisors are rebuilt per idle period" and
-stops being tolerable the moment one outlives a command (see R2). A machine
-throwing is a bug in `Salmon.Actions.Upkeep` rather than a node failure, so
-the honest fix is to keep it loud rather than to make it survivable.
+Milestone 7 had the monitoring (`stopUpkeep` does `waitCatch` on every
+machine and reports `Escaped`) and not the restart — a machine that threw was
+reported and gone until the next idle period rebuilt every machine anyway.
+That was a tolerable accident of "supervisors are rebuilt per idle period"
+and stopped being tolerable the moment one outlives a command (see R2).
 
-Milestone 9 made this smaller without meaning to. Restarting a machine in
-place means handing the replacement its supervisor's state rather than
-whatever the dead one closed over, and `Upkeep.Under` is exactly that,
-written into an adopted machine already.
+Landed as milestone 9 made it smaller: restarting a machine in place needs
+nothing beyond handing the replacement its supervisor's current state, and
+`Upkeep.Under` — a `TVar` a machine re-reads on every wait rather than
+closing over — already *is* that, since it exists precisely so an adopted
+machine sees a live supervisor rather than a dead one's maps. `startUpkeep`
+now runs every machine through a new wrapper, `restarting`, instead of
+`machine` directly: a crash is reported (`Escaped`, on every attempt — "the
+honest fix is to keep it loud" turned out to mean *report each restart
+loudly*, not *decline to restart*) and the machine restarts in place,
+re-entering as `Unsettled` rather than wherever the dead one's closure
+remembered. `Unsettled` is what makes the very next step a fresh `Consult`
+rather than a blind `up` — nothing survived the crash, not even the
+assumption that the effect is still there. A fixed `delayFloor` pause (not
+the adaptive ladder, which is a policy about the node, not about this
+module's own bugs) separates one restart attempt from the next, so a bug
+that fires on every entry cannot spin a core.
 
-### R6. Bounding concurrency: still no primitive
+One hazard found in the writing, not anticipated by the sketch above: the
+restart wrapper's `try @SomeException` must not catch an *asynchronous*
+exception. `releaseKept` tears a holding machine down by `cancel`ling its
+thread — throwing `AsyncCancelled` into it — specifically because such a
+machine ignores the halt flag and has no other way to be stopped; a wrapper
+that treated that as a crash and restarted the machine would defeat the
+teardown `releaseKept`'s caller is waiting on. `SomeAsyncException` is
+matched via `fromException` and re-thrown untouched instead.
+
+Named `restarting` rather than `supervised`, which was the obvious name and
+already taken — `Salmon.Op.Supervision.supervised :: Supervision -> Dynamic`
+is the smart constructor that attaches a policy to a node's `dynamics`, an
+unrelated thing. Recorded so a future reader does not reach for the same
+name a second time; see (R8) for the collision this project already has of
+this shape.
+
+### R6. Bounding concurrency — *done*
 
 §"Bounding concurrency" decided in two parts and shipped the first
 (collections, milestone 5). The second — a bounding primitive for the case a
 collection cannot express, e.g. two batches fighting over the dpkg lock
-across *different* rewrites — is explicitly deferred and still is. Nothing
-has needed it. Worth remembering that convergence has been parallel and
-unbounded since milestone 6 and the only protection is an edge or a
-collection.
+across *different* rewrites — was explicitly deferred and still is: **no
+per-resource primitive is added here**, deliberately. Two nodes contending
+for one specific thing is still an edge or a collection's job, and nothing
+in this item changes that.
 
-No per-resource primitive is wanted here — two nodes contending for one
-thing is still an edge or a collection's job. What might be worth adding
-later is smaller and orthogonal: a single global knob capping how many
-`up`/`down`/`check`s run at once across the whole traversal, for machines
-where unbounded parallelism itself is the problem (CPU/IO contention, an
-outbound connection limit) rather than any particular pair of nodes fighting
-over a particular resource. Not designed, not scheduled — noted so it is not
-confused with the per-resource primitive above if it comes up again.
+What landed is the smaller, orthogonal thing this section used to only note:
+a single global knob capping how many nodes are inside their own
+`check`/`up`/`down` at once across one pass, for machines where unbounded
+*width* itself is the problem (CPU/IO contention, an outbound connection
+limit, file descriptors) rather than any particular pair of nodes fighting
+over a particular resource. `Salmon.Op.Concurrency.ConcurrencyLimit` is a
+thin wrapper over a `QSem`; `newConcurrencyLimit` builds one from a positive
+`Int` (`error`s on `<= 0`, since a limit of zero would deadlock every gated
+action rather than mean "run nothing" — that is what excluding every node
+from the pass already says) and `withConcurrencyLimit` holds one slot for
+the duration of an `IO` action, a no-op for `Nothing`.
 
-### R8. `Restart` means two different things
+`Salmon.Actions.Concurrent.upDagConcurrent`/`downDagConcurrent` (and the
+`walkConcurrent` both share) take a `Maybe ConcurrencyLimit`; `Nothing`
+reproduces every caller's behaviour from before this landed. The slot is
+held only around `walkConcurrent`'s `apply` call — a node's own
+`check`/`up`/`down` — never around the `STM` wait on its neighbours'
+`waitStability`, which is what makes this safe to reason about without a
+deadlock analysis: a node cannot even attempt to acquire a slot until every
+node it depends on has settled and released its own, so two nodes never
+hold a slot each while blocked on one another through this mechanism — the
+only thing a wait through it can ever be for is a free slot, never another
+node's turn.
+
+`Salmon.Actions.Serve.serveWith` takes the same `Maybe ConcurrencyLimit` and
+passes it to *both* halves of a convergence pass — the teardown walk and the
+bring-up walk share one limit rather than getting one each, which is correct
+because `converge` already awaits the first before starting the second, so
+the two never contend for it at the same time. `serve` (no rewrites, for
+callers that don't need them) passes `Nothing`, matching its signature
+before this landed for anyone not opting in.
+
+`run serve --max-concurrency N` is the CLI surface: `RunServe` gained a
+`Maybe Int` (parsed with `optional (option auto (long "max-concurrency"
+...))`, so omitting the flag is `Nothing`), and
+`execCommandOrSeedWithRewrites` builds the `ConcurrencyLimit` from it right
+before calling `serveWith`. `run up`/`run down` are untouched — they run
+through the *sequential* drivers (`UpDown.upDag`/`downDag`), which are
+already bounded to one node at a time by construction, so there was nothing
+for this knob to do there.
+
+One thing worth being explicit about: this bounds a **pass**, not the
+tending loop `Actions/Upkeep.hs` runs between commands. A wide `serve`
+declaration can still start as many supervised machines as it has nodes;
+each one is normally idle (parked, or waiting out its own delay ladder)
+rather than doing work, so the unbounded-width problem this item was written
+for is specific to a convergence pass actually *doing* many things at once,
+which is exactly what `--max-concurrency` now caps. Bounding the tending
+loop itself was not asked for and is a different, larger question — the
+loop's own steady-state cost is designed to be near zero per idle node
+(see `Actions/Upkeep.hs`'s summary), so there is little evidence yet that it
+needs one.
+
+### R8. `Restart` means two different things — *done*
 
 `Salmon.Builtin.Nodes.Systemd.Restart` (rendered into a unit file's
 `Restart=` directive; one constructor, `OnFailure`) and
-`Salmon.Op.Supervision.Restart` (`Always`/`OnFailure`/`Never`) share both a
-name and a constructor. Nothing imports both today, so nothing is broken —
-but this is the fourth collision of this kind in this work (`CheckResult`'s
+`Salmon.Op.Supervision.Restart` (`Always`/`OnFailure`/`Never`) shared both a
+name and a constructor. Nothing imported both, so nothing was broken — but
+this was the fourth collision of this kind in this work (`CheckResult`'s
 `Success`/`Failure` vs optparse's `ParserResult`, `Mailbox.Skip` vs
 `Report.Skip`, and two `Direction`s, the last resolved by *merging* them,
-which is not available here).
+which was not available here).
 
 The two are genuinely different things: one is a string salmon writes into a
-file for systemd to read, the other is a decision salmon makes itself. Rename
-`Systemd.Restart` to `Systemd.RestartDirective` when something first needs
-both — which is likely to be soon, since a systemd service node with a
-`check` (R1) is exactly the node that would want a `Supervision` too, and
-would then have to decide whether salmon or systemd is supervising it.
+file for systemd to read, the other is a decision salmon makes itself.
+Renamed `Systemd.Restart` to `Systemd.RestartDirective` (constructor
+`OnFailure` untouched, only the type name moved) rather than waiting for a
+caller that needs both in scope, since the section's own prediction — a
+systemd node with a `check` (R1) is exactly the node that would want a
+`Supervision` too — is exactly the situation (R1) already created for
+`systemdService`. Nothing outside `Systemd.hs` named the old type (checked
+across both `cabal.project` and `cabal.perso.project`'s package sets), so
+this was a same-module rename with no call-site fallout.
 
 ### R7. Two dead bindings — *done*
 
@@ -807,18 +911,26 @@ independent small items, not coverage or visibility.
    never one to post into at parse time. `startTending` drains the queue into
    the next supervisor's machines — freshly started or adopted — the moment
    they exist.
-6. **R4** (`run tree`/`run dag` done; `query` still open), **R5**, **R6** as
-   they become annoying. None is blocking
-   anything, and milestone 9 shrank (R5): the `Under` refresh it had to add
-   is most of what a supervisor-level restart would have needed to hand a
-   replacement machine. **R8** is deliberately not in this list at all — its
-   own section says to do it "when something first needs both", which
-   nothing does yet.
-7. **I2**–**I5** whenever there is an opinion to apply. None of them is
-   urgent and none is a bug; (I3) is fifteen minutes, (I5) is worth doing
-   with (R5) since both are about what an adopted or replaced machine is
-   handed, and (I2) and (I4) are questions about what the feature *means*
-   that are better answered after somebody has used it on a real graph.
+6. ~~**R5**~~ — done. `startUpkeep` now runs every machine through
+   `restarting` rather than `machine` directly: milestone 9's `Under` refresh
+   turned out to be most of what a supervisor-level restart needed to hand a
+   replacement machine, so the remaining work was the restart loop itself
+   (re-entering `Unsettled`, reporting `Escaped` on every attempt) and making
+   sure it lets an asynchronous exception — `releaseKept`'s `cancel` above
+   all — through untouched rather than treating it as a crash.
+7. **R4** (`run tree`/`run dag` done; `query` still open) as it becomes
+   annoying — not blocking anything. ~~**R6**~~ is done — a global, optional
+   `ConcurrencyLimit` bounds a convergence pass's width, reachable as `run
+   serve --max-concurrency N`; the per-resource primitive it was explicitly
+   *not* about is still nothing more than an edge or a collection.
+   ~~**R8**~~ is done — the rename cost nothing to do ahead of a caller
+   needing both, once checked.
+8. **I2**–**I5** whenever there is an opinion to apply. None of them is
+   urgent and none is a bug; (I3) is fifteen minutes, (I5) is worth doing now
+   that (R5) also restarts a machine in place — both are about what an
+   adopted or replaced machine is handed — and (I2) and (I4) are questions
+   about what the feature *means* that are better answered after somebody
+   has used it on a real graph.
 
 (I6) has no place in that order because it is not a step, and it has largely
 answered itself: giving `filecontents` a check made re-declared content land
