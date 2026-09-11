@@ -89,6 +89,7 @@ tests =
         , testCase "status shows a failing node's check and its last output" statusShowsAFailingNodesOutput
         , testCase "`force` re-applies a node its own check still calls satisfied" forceOverridesASatisfiedCheck
         , testCase "`pause` stops a node coming back, `resume` lets it" pauseThenResume
+        , testCase "(I6) a re-declaration with changed content is applied by the pass itself, not just the tending loop" reDeclareWithChangedContentIsAppliedByThePass
         ]
 
 -------------------------------------------------------------------------------
@@ -937,3 +938,72 @@ pauseThenResume =
             hPutStrLn session.sessionIn "resume"
             awaitAttempts attempts 2
         pure ()
+
+-------------------------------------------------------------------------------
+-- (I6): a maintained Ref whose content changed goes 'Serve.Stale', not
+-- silently 'Serve.Converged'.
+
+-- | Unlike 'Spec' above, content is independent of the declared name — the
+-- whole point here is to redeclare the *same* path with *different*
+-- content, which 'Spec'\/'program' cannot express (its content is
+-- deterministic from the file name).
+data GreetingSpec = GreetingSpec
+    { greetingPath :: FilePath
+    , greetingText :: Text
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON GreetingSpec
+instance FromJSON GreetingSpec
+
+parseGreetingSpec :: [String] -> Either Text GreetingSpec
+parseGreetingSpec [path, txt] = Right (GreetingSpec path (Text.pack txt))
+parseGreetingSpec _ = Left "expected: <path> <text>"
+
+greetingProgram :: Track' GreetingSpec
+greetingProgram = Track $ \spec -> FS.filecontents (FS.FileContents spec.greetingPath spec.greetingText)
+
+runGreetingServe :: [String] -> IO (World GreetingSpec GreetingSpec, [Serve.Report], [UpDown.Report Extension])
+runGreetingServe script = do
+    (serveReporter, readServeReports) <- capture
+    (nodeReporter, readNodeReports) <- capture
+    w <-
+        withScript script $
+            Serve.serveWith [] Nothing serveReporter nodeReporter parseGreetingSpec (Configure pure) greetingProgram
+    (,,) w <$> readServeReports <*> readNodeReports
+
+assertFileContentIs :: FilePath -> String -> IO ()
+assertFileContentIs path expected = do
+    got <- Prelude.readFile path
+    assertEqual (path <> ": content") expected got
+
+{- | The scenario @salmon-ops-serve-fixture@'s own haddock uses to demonstrate
+(I6) — re-declaring a config file with new content reports @converging (0
+down, 0 up)@ and (before this) relied entirely on the tending machine's own
+next look to apply it. A piped script is deliberately never supervised (see
+"Salmon.Actions.Serve"'s own module haddock: idle-only tending is what keeps
+@serve < script@ a deterministic sequence of passes), so this is also the
+sharpest possible demonstration of the bug: under the old behaviour, this
+exact test would leave the file saying "hello" forever, since nothing here
+ever gives a tending machine a chance to run.
+
+'FS.filecontents' backs onto 'Text.Text', which has a
+'Salmon.Builtin.Nodes.Filesystem.EncodeFileContents' 'contentFingerprint'
+(see (I6) in @specs\/per-node-state-machines-remaining.md@), so the second
+declaration's 'notes' differ from the first's and 'Serve.record' marks the
+'Ref' 'Serve.Stale' rather than leaving it 'Serve.Converged' — which is what
+lets the second 'Serve.ConvergeStart' actually have a node to apply, instead
+of the @(0, 0)@ a fully-converged, untouched graph would report.
+-}
+reDeclareWithChangedContentIsAppliedByThePass :: IO ()
+reDeclareWithChangedContentIsAppliedByThePass =
+    withTempDir $ \root -> do
+        let path = root </> "daemon.conf"
+        (w, reports, _) <-
+            runGreetingServe ["up " <> path <> " hello", "only " <> path <> " goodbye"]
+        assertFileContentIs path "goodbye"
+        assertEqual
+            "the first declaration converges the file and its enclosing directory; the second, only the changed file"
+            [(0, 2), (0, 1)]
+            (convergeStarts reports)
+        assertAllConverged TurnUp w

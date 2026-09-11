@@ -177,6 +177,22 @@ data Convergence
     = -- | never applied in the current direction (new node, or the
       -- direction just flipped under it)
       Pending
+    | -- | (I6): was 'Converged', but a later declaration replaced this
+      -- 'Ref''s representative with one 'Dag.sameRepresentative' calls
+      -- different — so what it means to be converged may have changed too.
+      -- Treated exactly like 'Pending' by 'gateFor' (anything but
+      -- 'Converged' is worth a pass's attention): the node is handed to
+      -- 'UpDown.upDag' again, which asks its own @check@ before doing
+      -- anything, same as ever. A node with a content-comparing @check@
+      -- (e.g. 'Salmon.Builtin.Nodes.Filesystem.filecontents') settles
+      -- straight back to 'Converged' at the cost of one @check@ if the new
+      -- declaration didn't actually change what it writes; a node with no
+      -- @check@ gets exactly what it already gets under a bare 'Pending' —
+      -- an unconditional @up@, which the idempotency convention every node
+      -- author is already asked to follow makes safe. Kept as its own
+      -- constructor rather than folded into 'Pending' so @status@ can tell
+      -- "never touched" from "was up, now re-verifying".
+      Stale
     | -- | applied in the current direction, or found to already be there
       Converged
     | -- | the last attempt threw; will be retried
@@ -948,8 +964,8 @@ statusHelp =
     [ "serve: status [--select PATTERN]... [--exclude PATTERN]..."
     , ""
     , "  Lists every node this world is still concerned with, unified by Ref across every seed"
-    , "  that shares it, with its wanted direction (up/down) and convergence (Pending/Converged/"
-    , "  Errored/Blocked). A node that has finished going down is dropped, so a world whose seeds"
+    , "  that shares it, with its wanted direction (up/down) and convergence (Pending/Stale/"
+    , "  Converged/Errored/Blocked). A node that has finished going down is dropped, so a world whose seeds"
     , "  have all been retired and converged lists nothing at all — `history` still shows they"
     , "  were declared."
     , ""
@@ -1760,6 +1776,10 @@ record decl ep dag w =
           -- 'Salmon.Op.Dag''s last-writer-wins across declarations.
           worldMagma = Map.union (Dag.dagNodes dag) w.worldMagma
         , worldLedger = retraction (Ledger.declare ep.epochKey contrib w.worldLedger)
+        , -- (I6): a 'Ref' this declaration redescribes goes 'Stale' rather
+          -- than staying silently 'Converged' under a representative it was
+          -- never actually applied against.
+          worldNodes = foldr demoteIfChanged w.worldNodes (Set.toList changed)
         }
   where
     contrib = Ledger.contribution dag
@@ -1768,6 +1788,30 @@ record decl ep dag w =
         Add -> id
         Replace -> Ledger.retractOthers ep.epochKey
         Remove -> Ledger.retract ep.epochKey
+
+    {- | Every 'Ref' this declaration describes differently than whatever is
+    already in the magma — the same 'Dag.sameRepresentative' comparison
+    'Dag.foldDag' itself uses to decide a re-declaration is a genuine
+    conflict rather than the overwhelmingly common "one node, reached
+    again" case. A brand-new 'Ref' (absent from 'worldMagma') is not
+    "changed": it has nothing to differ from, and 'retune' already gives it
+    a fresh 'Pending' on its own.
+    -}
+    changed :: Set Ref
+    changed =
+        Set.fromList
+            [ rf
+            | (rf, newAct) <- Map.toList (Dag.dagNodes dag)
+            , Just oldAct <- [Map.lookup rf w.worldMagma]
+            , not (Dag.sameRepresentative oldAct newAct)
+            ]
+
+    -- only a node currently believed 'Converged' has anything to lose by
+    -- this: one already 'Pending'\/'Stale'\/'Errored'\/'Blocked' is getting
+    -- a fresh look regardless, and relabelling it would only blur why.
+    demoteIfChanged :: Ref -> Map Ref NodeState -> Map Ref NodeState
+    demoteIfChanged rf =
+        Map.adjust (\st -> if st.nodeConvergence == Converged then st{nodeConvergence = Stale} else st) rf
 
     entry =
         LogEntry

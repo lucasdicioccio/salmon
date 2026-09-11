@@ -350,7 +350,19 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it has `Converged` there), and `worldEpochs`, the declared seed / directive / graph, kept only
   for declarations that are still live. Everything else is derived: a node some live declaration
   asks for is wanted `TurnUp`, a node no live declaration still asks for is wanted `TurnDown`,
-  and flipping a node's direction resets it to `Pending`. (R3): `NodeState` also carries a
+  and flipping a node's direction resets it to `Pending`. (I6): a re-declaration that keeps a
+  node's `Ref` but changes what `Dag.sameRepresentative` can see about it (`help`/`notes`/
+  `dynamics`) resets it to `Stale` instead of leaving it silently `Converged` — `record` compares
+  the incoming declaration's representative against whatever was already in `worldMagma` for that
+  `Ref`. `Stale` is read exactly like `Pending` by `gateFor` (anything but `Converged` gets a
+  pass's attention, and the node's own `check` decides from there, same as ever) but is kept as
+  its own constructor rather than folded into `Pending` so `status` can tell "never touched" from
+  "was up, now re-verifying". This is `Dag.sameRepresentative`'s usual blind spot — content baked
+  into `up`'s closure with nothing else about the declaration changed compares *equal* — which is
+  why `filecontents` now puts a `contentFingerprint` into its `notes` (see `Nodes/Filesystem.hs`
+  above): without that, a re-declared config file's content change is invisible to this check too,
+  and only its own `check` running on the tending loop (unaffected by any of this) would ever
+  notice. (R3): `NodeState` also carries a
   `nodeStatus` snapshot — the node's own last `CheckResult` and output ring, taken by
   `stopTending` from the live `TVar` the instant before the `Upkeep.Supervisor` holding it is
   dropped, since that `TVar` is otherwise unreachable once the machine has stood down. Freshness
@@ -528,6 +540,15 @@ graph it sits in until this landed. One hazard, confined to the `EncodeFileConte
 instance: the check runs the encoder, so a non-deterministic generator (a timestamp) makes the
 node rewrite its file every pass. That is the safe direction, and nothing in the tree uses that
 instance today. See `Test/FilesystemSpec.hs`.
+
+(I6): `EncodeFileContents` also carries `contentFingerprint :: a -> Maybe Text`, a pure,
+stable hash of the content an instance would write (`Nothing` by default — the `IO a` instance
+keeps it, since its whole point is that content isn't known until the encoder runs).
+`filecontents` puts the fingerprint into `notes` when its instance has one, which is what lets a
+re-declaration that only changes a node's content register as a genuine
+`Salmon.Op.Dag.Representative` change under `run serve` — see `Serve.record`'s `Stale` below —
+rather than one indistinguishable from "nothing changed" at all. `Text`/`ByteString`/`String`/
+`Aeson.Value` all have one; only the `IO a` hazard instance opts out.
 
 **Failure must not be swallowed.** `Extension.up :: IO ()` has no way to signal failure in its
 type — the only way a failure becomes visible to `upTree` (see above) is if `up` *throws*.

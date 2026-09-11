@@ -65,9 +65,12 @@ Nothing is blocking anything else. (R1) is done — every builtin that most
 recipes actually declare (`systemdService`, `filecontents`, `dir`) now has
 an opinion about its own effect going away, one way or another; (R3) is
 done — a node's last word about itself, and a failing one's last output, are
-now visible in `status`/`query` rather than write-only; and (R2) is done —
+now visible in `status`/`query` rather than write-only; (R2) is done —
 `force`/`recheck`/`pause`/`resume` reach a node from the `serve` input
-language. What remains is the smaller, independent items below.
+language; and (I6) is done — a re-declaration that changes a node's content
+is now noticed by the convergence pass itself, not only, eventually, by the
+tending loop. What remains is **I2** and **I4**, both "taste" — not urgent,
+not bugs, better decided after real use than speculatively now.
 
 | id | what | size | note |
 |----|------|------|------|
@@ -76,7 +79,7 @@ language. What remains is the smaller, independent items below.
 | ~~R3~~ | ~~`statusOutput` has no reader~~ — snapshotted onto `NodeState`, shown in `status`\/`query` | — | done; §R3 |
 | ~~R7~~ | ~~two dead bindings~~ (`postOrderM`, `historyLines`) — dropped and deleted | — | done; §R7 |
 | ~~R2~~ | ~~no operator command addresses a node~~ — `force`/`recheck`/`pause`/`resume` do now | — | done; §R2 |
-| **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
+| ~~I6~~ | ~~a re-declaration that changes a node's *content* does not re-apply it~~ — the pass itself now notices, via a new `Stale` state and `filecontents`' content fingerprint | — | done; §I6 |
 | ~~R4~~ | ~~`query` prints the declared graph, not the rewritten one~~ (`tree`/`dag` done; `query`'s selection is now rewrite-aware via a `#ref` fallback) | — | done; §R4; = `specs/advance-querying.md` |
 | ~~R5~~ | ~~supervisor-level restart is half wired~~ — a crashing machine now restarts in place | — | done; §R5 |
 | ~~R6~~ | ~~no concurrency-bounding primitive~~ — a global, optional cap now exists | — | done; §R6 |
@@ -128,12 +131,12 @@ implemented and shipped, and — (I1) excepted — the code does something
 coherent today. They are the places where the *shape* was decided under a single milestone's
 pressure and a different answer was defensible — so they want a second pass
 with the whole thing built, rather than a bug report. (I1) turned out to be a
-bug and is fixed; (I6) is the one left that is not a matter of taste.
+bug and is fixed; (I6), the one that was not a matter of taste, is also
+fixed. What's left here (I2, I4) genuinely is taste.
 
 (I1) is fixed — it lost a running process outright, which was not a matter of
-taste. (I6) is now the one that matters most here: it is not a milestone-9
-decision at all, and it says something uncomfortable about what a convergence
-pass currently does.
+taste. (I6) said something uncomfortable about what a convergence pass
+currently does, and is fixed too — see below.
 
 ### I1. A demoted node consults its own `check` — *fixed*
 
@@ -346,7 +349,7 @@ calls. Verified the first of those two actually depends on the fix by
 reverting `Dag.showDynamic` and confirming `changedPolicyIsNotAdopted` times
 out (the stale machine is adopted and never re-runs).
 
-### I6. A re-declaration that changes what a node *is* does not re-apply it
+### I6. A re-declaration that changes what a node *is* does not re-apply it — done
 
 Not a milestone-9 decision at all — it predates it, and milestone 9 is only
 how it came to light. `Serve` records convergence per `Ref`, and a
@@ -378,14 +381,68 @@ And it still only works for a node with a `check` — `dir` is the remaining
 one that has none, though for `dir` there is nothing content-bearing to
 re-declare, so the residual case is narrow.
 
-**The fork.** Reset a node's convergence when its representative changes,
-which needs `sameRepresentative`'s comparison to be trusted for this purpose
-(it compares shorthand, help, notes and the rendering of `dynamics` — not
-`up`, which is where the content actually lives, so a `filecontents` whose
-bytes changed compares *equal* and this does not work without giving nodes a
-content-bearing identity). Or accept it and lean on (R1), making "a node
-worth re-declaring with different content is a node that needs a `check`" an
-explicit convention in the node-author docs.
+**The fork was resolved with the first option**: reset a node's convergence
+when its representative changes. `Serve.Convergence` gained a `Stale`
+constructor — read exactly like `Pending` by `gateFor` (anything but
+`Converged` gets the pass's attention; the node's own `check` decides Skip
+vs Eval+`up` from there, same as ever), but kept distinct so `status` can
+tell "never touched" from "was up, now re-verifying". `Serve.record`
+compares each incoming declaration's `Ref` against whatever `worldMagma`
+already had for it via `Dag.sameRepresentative` — the same comparison
+`foldDag` uses to decide a conflict — and demotes a currently-`Converged`
+node to `Stale` when they differ.
+
+That much closes every case `sameRepresentative` can already see (a changed
+`help`/`notes`/non-`Supervision` `dynamics` on a plain node — a `Supervision`
+change on a `managed` node is (I5)'s territory instead, since `gateFor`
+skips every `managed` node regardless of convergence state). It does **not**
+close the flagship `filecontents` case on its own: `sameRepresentative`
+deliberately excludes `up`/`check`/`down` (functions, incomparable), and
+that is exactly where `filecontents`' content lives — its `help` is the
+static `"writes <path> with some contents"` regardless of what bytes it
+writes, so two declarations differing only in content compared *equal*.
+
+**So the second half was needed too**: `EncodeFileContents` gained
+`contentFingerprint :: a -> Maybe Text`, a pure, stable hash of the content
+an instance would write (`Nothing` by default; the `EncodeFileContents (IO
+a)` instance keeps the default deliberately, since its whole point —
+already documented as a hazard on `checkFileContents` — is that the content
+isn't known until the encoder actually runs, so nothing pure is available).
+`Text`/`ByteString`/`String`/`Aeson.Value` all provide one (SHA256 of the
+encoded bytes, truncated the same way `Query.shortRef` truncates a `Ref`'s
+hash). `filecontents` appends `"content-hash: " <> h` to its `notes` when
+its instance has one — which is what makes a content-only re-declaration a
+genuine `Representative` change, closing the flagship case: `daemon.conf`
+going from `"greeting = hello"` to `"greeting = goodbye"` is now `Stale` the
+moment it is re-declared, not just eventually noticed by the tending
+machine.
+
+Verified two ways. `Test.ServeSpec`'s `reDeclareWithChangedContentIsAppliedByThePass`
+is deliberately run through a **piped script** — under
+`Salmon.Actions.Serve`'s own idle-only tending model that is the case with
+*zero* chance for a tending machine to ever run, so it is the sharpest
+possible demonstration: before this landed, the exact same test left the
+file saying its first content forever, proven by reverting the `Serve.hs`
+half of the change and watching the assertion fail with `expected: "goodbye"
+but got: "hello"`. `Test.DagSpec`/`Test.UpkeepSpec`'s (I5) cases already
+pin `sameRepresentative`'s general behaviour; no separate pure test was
+needed for the `Stale`-vs-`Pending` gating itself, since `gateFor`'s
+`/= Converged` check already treats every non-`Converged` constructor
+alike.
+
+What's left, narrow and pre-existing rather than new: a node whose content
+lives purely inside `up`'s closure and whose `EncodeFileContents` instance
+(if it even goes through `filecontents` at all) has no `contentFingerprint`
+— the `IO a` case, and any hand-rolled node that writes content without
+going through `filecontents`/`checkFileContents` at all (the fixture's own
+`configOp`, kept hand-rolled because it also needs `RestForOne`, sidesteps
+this by putting the greeting directly into its own `help` text instead).
+Such a node still relies entirely on its own `check`, running later on the
+tending loop, exactly as before this landed — which is `Serve.record`'s own
+documented limit: it can only demote what it can see, and a node author who
+wants a re-declaration's content change to register through the pass itself
+either needs a content-derived `Representative` field (as `filecontents`
+now has) or a `check`, per the convention (R1) already established.
 
 -------------------------------------------------------------------------------
 
@@ -967,8 +1024,9 @@ independent small items, not coverage or visibility.
 1. ~~**`filecontents`**~~ — done, and it turned out to be the node that made
    (R1)'s first one work: `systemdService`'s unit file goes through it, and
    rewriting identical bytes was setting `NeedDaemonReload` on every pass.
-   It also mostly closes (I6), and it let the fixture's config node drop its
-   hand-rolled check for `checkFileContents`.
+   It let the fixture's config node drop its hand-rolled check for
+   `checkFileContents`, and later (see (I6) below) grew a `contentFingerprint`
+   that closes the rest of what `filecontents` alone left open.
 
 2. ~~**R9, and with it `dir`**~~ — done. `supReapply` landed as sketched: a
    `Bool` on `Supervision`, read only by the non-holding loop, deliberately
@@ -1012,14 +1070,13 @@ independent small items, not coverage or visibility.
 8. **I2** and **I4** whenever there is an opinion to apply. Neither is
    urgent and neither is a bug — both are questions about what the feature
    *means* that are better answered after somebody has used it on a real
-   graph. ~~(I3)~~ and ~~(I5)~~ are done.
+   graph. ~~(I3)~~, ~~(I5)~~ and ~~(I6)~~ are done.
 
-(I6) has no place in that order because it is not a step, and it has largely
-answered itself: giving `filecontents` a check made re-declared content land
-(through the tending machine, not the pass), which is the second of the two
-forks §I6 described. What is left of it is a reporting question — the pass
-still says `converging (0 down, 0 up)` while something is in fact about to
-change — and that belongs with (R3), not here.
+~~(I6) has no place in that order~~ — it is done now: `Serve.Convergence`
+gained `Stale`, `Serve.record` demotes a `Ref` off `Converged` when its
+representative changes, and `filecontents` gives `sameRepresentative` a
+content-derived field to see in the flagship case that comparison alone
+could not. See §I6 for the two-part fix and how each half was verified.
 
 ## How milestones 8 and 9 actually went
 

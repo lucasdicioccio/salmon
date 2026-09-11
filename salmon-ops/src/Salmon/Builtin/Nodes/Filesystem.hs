@@ -8,10 +8,12 @@ import Salmon.Op.Ref
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64.URL as Base64.URL
 import qualified Data.ByteString.Char8 as C8
 import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.TypeLits (Symbol)
 import Salmon.Actions.UpDown (CheckResult (..), skipIfDirectoryIsMissing)
 import Salmon.Op.OpGraph (inject)
@@ -73,6 +75,11 @@ filecontents fcontents =
             , notes =
                 [ "depends on the enclosing directory"
                 ]
+                    -- (I6): a content-derived note, when the instance can
+                    -- give one, is what makes a content-only re-declaration
+                    -- a genuine 'Salmon.Op.Dag.Representative' change —
+                    -- see 'EncodeFileContents.contentFingerprint'.
+                    <> maybe [] (\h -> ["content-hash: " <> h]) (contentFingerprint fcontents.contents)
             , ref = mkRef "file-contents" path
             , check = checkFileContents fcontents
             , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
@@ -106,11 +113,16 @@ deliver what it promised until this one existed.
 Under @run serve@ it is what makes a config file /supervised/: a
 'Salmon.Actions.UpDown.Immaterial' node is parked and never looks again,
 where this one notices the file being edited, truncated or deleted behind
-salmon's back and puts it back. It is also the answer to a re-declaration
-that changes a node's contents without changing its 'Salmon.Op.Ref.Ref' —
-the convergence pass still records that node as converged and skips it (see
-(I6) in @specs/per-node-state-machines-remaining.md@), and the tending
-machine's check is the only thing that then notices the new content.
+salmon's back and puts it back. It also backstops a re-declaration that
+changes a node's contents without changing its 'Salmon.Op.Ref.Ref': for an
+instance without a 'EncodeFileContents.contentFingerprint' (the @IO a@
+one), the convergence pass still records that node as converged and skips
+it, and this check — on the tending machine's own next look — is the only
+thing that then notices the new content (see (I6) in
+@specs/per-node-state-machines-remaining.md@). For every other instance,
+'filecontents' puts the fingerprint into 'notes', so the pass itself
+notices the change and re-runs this check right away instead of waiting on
+the tending loop.
 
 Comparing bytes rather than mere existence is deliberate:
 'Salmon.Actions.UpDown.skipIfFileExists' would call a file with the wrong
@@ -164,20 +176,44 @@ The Text instance encodes contents in UTF8.
 class EncodeFileContents a where
     encodeFileContents :: a -> IO ByteString.ByteString
 
+    {- | A pure, stable fingerprint of the content this would write — (I6):
+    what lets 'filecontents' put something content-derived into 'notes', so
+    a re-declaration that only changes this node's content is a genuine
+    'Salmon.Op.Dag.Representative' change (@Serve.record@'s 'changed' set)
+    rather than one indistinguishable from "nothing changed". 'Nothing' —
+    the default, and what the @IO a@ instance below must keep — opts a type
+    out: its whole point is that the content isn't known until
+    'encodeFileContents' actually runs, so nothing pure is available to put
+    here, and (per 'checkFileContents'\'s haddock) that generator already
+    has its own hazards to manage.
+    -}
+    contentFingerprint :: a -> Maybe Text.Text
+    contentFingerprint _ = Nothing
+
 instance EncodeFileContents Text.Text where
     encodeFileContents = pure . Text.encodeUtf8
+    contentFingerprint = Just . hashBytes . Text.encodeUtf8
 
 instance EncodeFileContents ByteString.ByteString where
     encodeFileContents = pure . id
+    contentFingerprint = Just . hashBytes
 
 instance EncodeFileContents String where
     encodeFileContents = pure . C8.pack
+    contentFingerprint = Just . hashBytes . C8.pack
 
 instance EncodeFileContents Aeson.Value where
     encodeFileContents = pure . LBytestring.toStrict . Aeson.encode
+    contentFingerprint = Just . hashBytes . LBytestring.toStrict . Aeson.encode
 
 instance (EncodeFileContents a) => EncodeFileContents (IO a) where
     encodeFileContents ioX = ioX >>= encodeFileContents
+    -- default (Nothing) is correct here: deliberately not overridden.
+
+-- | The same short, stable, content-derived tag 'Salmon.Actions.Query.shortRef'
+-- uses for a 'Salmon.Op.Ref.Ref', applied to a file's content instead.
+hashBytes :: ByteString.ByteString -> Text.Text
+hashBytes = Text.take 12 . Text.decodeUtf8 . Base64.URL.encode . SHA256.hash
 
 -------------------------------------------------------------------------------
 
