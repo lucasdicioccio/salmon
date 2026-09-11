@@ -24,6 +24,7 @@ import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, eva
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (Ref, mkRef)
+import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Op.Actions (Act (..))
 import qualified Data.Map.Strict as Map
@@ -47,6 +48,8 @@ tests =
         , testCase "downTree reports a conflict to its caller" downTreeReportsConflict
         , testCase "fromMagma rebuilds what dagEdges flattened" fromMagmaRoundTrips
         , testCase "a cycle is reported Blocked, not silently skipped" cycleIsBlocked
+        , testCase "a changed Supervision policy is a differing representative" changedSupervisionIsAConflict
+        , testCase "an identical Supervision policy is not a differing representative" sameSupervisionIsNotAConflict
         ]
 
 -------------------------------------------------------------------------------
@@ -197,6 +200,39 @@ fromMagmaRoundTrips = do
         "and the direction a teardown needs survives"
         (Set.fromList (Dag.dependantsOf dag (refOf "apex")))
         (Set.fromList (Dag.dependantsOf rebuilt (refOf "apex")))
+
+{- | (I5): 'Data.Dynamic.Dynamic' renders as its type alone by default, which
+used to make two 'Salmon.Op.Supervision.Supervision' declarations compare
+equal here regardless of content — the gap that let
+'Salmon.Actions.Upkeep.startUpkeep' adopt a machine whose policy had changed
+underneath it. 'Dag.representative' now special-cases 'Supervision' to
+compare by value, so a re-declaration that only changes the policy is a
+genuine conflict, exactly like 'twoWriters' changing @help@ is.
+-}
+changedSupervisionIsAConflict :: IO ()
+changedSupervisionIsAConflict = do
+    let dag = foldOf (supervisionTwoWriters OneForOne RestForOne)
+    case Dag.dagConflicts dag of
+        [c] -> assertEqual "on the contested ref" (refOf "contested") c.conflictRef
+        other -> assertEqual "exactly one conflict" 1 (length other)
+
+-- | The overwhelmingly common re-declaration case — same policy, reached
+-- again — must not be reported, same reasoning as 'noSelfConflict'.
+sameSupervisionIsNotAConflict :: IO ()
+sameSupervisionIsNotAConflict = do
+    let dag = foldOf (supervisionTwoWriters OneForOne OneForOne)
+    assertEqual "no conflict when the policy did not change" 0 (length (Dag.dagConflicts dag))
+
+-- | One effect site, two declarations differing only in their
+-- 'Salmon.Op.Supervision.Strategy', everything else ('help' included)
+-- identical.
+supervisionTwoWriters :: Strategy -> Strategy -> Op
+supervisionTwoWriters s1 s2 =
+    op "root" (deps [first, second]) $ \x -> x{ref = refOf "root"}
+  where
+    withStrategy s = supervised defaultSupervision{supStrategy = s}
+    first = op "contested" nodeps $ \x -> x{ref = refOf "contested", dynamics = [withStrategy s1]}
+    second = op "contested" nodeps $ \x -> x{ref = refOf "contested", dynamics = [withStrategy s2]}
 
 {- | A 'Dag' built from a flat edge set can describe a cycle, which a 'Dag'
 folded from an expanded 'Cofree' cannot — so this is a hazard that only

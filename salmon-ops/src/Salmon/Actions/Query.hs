@@ -20,6 +20,7 @@ module Salmon.Actions.Query (
     pathedRefs,
     pathedNodes,
     resolveSelectors,
+    resolveRewrittenSelectors,
 
     -- * Applying an exclusion set
     forceSkip,
@@ -41,6 +42,7 @@ import qualified Data.ByteString.Base64.URL as Base64.URL
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Foldable (toList, traverse_)
+import qualified Data.List as List
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -56,8 +58,11 @@ import Salmon.Actions.Help (pathText)
 import Salmon.Builtin.Extension (Extension (..), Op)
 import Salmon.Op.Actions
 import Salmon.Op.Graph (Graph)
+import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref (Ref, unRef)
+import Salmon.Op.Rewrite (Rewritten)
+import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Actions.UpDown (CheckResult (Skipped))
 
 -------------------------------------------------------------------------------
@@ -127,6 +132,81 @@ resolveSelectors cograph selectPatterns excludePatterns =
     selectedBase = if null selectPatterns then allRefs else matches selectPatterns
     excluded = matches excludePatterns
     selected = selectedBase `Set.difference` excluded
+
+{- | Like 'resolveSelectors', but rewrite-aware (see @specs\/advance-querying.md@
+and (R4) in @specs\/per-node-state-machines-remaining.md@): a pattern is
+resolved as a path glob against the /declared/ @cograph@ exactly as before,
+__except__ one beginning with @#@, which instead matches by 'Ref' — either a
+declared node's own, or (via 'Salmon.Op.Rewrite.membersOf') a
+rewrite-introduced node's, expanded back to the declared nodes it stands in
+for.
+
+That fallback exists because a path glob fundamentally cannot address a
+rewrite-introduced node (a package-install batch, say): such a node was
+never declared, so it has no position in @cograph@ for a pattern to match —
+it only exists in 'computed', produced after the fold. Its 'Ref' is the one
+thing about it a pattern /can/ name, and it is exactly the text
+'shortRef'\/'renderAnnotated' already print (the @#@ prefix mirrors
+'renderAnnotated's own @" #" <> shortRef ref@ disambiguation suffix, so what
+a render prints can be pasted straight back in as a selector). A fragment
+matches as a prefix of either the short or the full 'Ref' text, so an
+operator can paste the short form from a tree\/dag render or a longer,
+disambiguating chunk of a full ref if a short one turns out ambiguous.
+
+Every result is still a __declared__ 'Ref' set — this does not change what
+'query plan'\/'query show' consume, since 'run up'/'run down''s
+@phaseIgnored@ and 'Salmon.Op.Rewrite.collectDynamic' are both keyed on
+declared refs. Addressing a batch by its own ref is therefore equivalent to
+addressing every declared node it was built from — excluding \"the batch\"
+/is/ excluding all 20 packages that went into it, which is the only
+coherent meaning a plan (a set of declared exclusions consulted /before/ any
+rewrite runs) can give it.
+-}
+resolveRewrittenSelectors ::
+    Cofree Graph Op ->
+    Rewritten Extension ->
+    [Text] ->
+    [Text] ->
+    (Set Ref, Set Ref)
+resolveRewrittenSelectors cograph computed selectPatterns excludePatterns =
+    (selected, excluded)
+  where
+    entries = pathedRefs cograph
+    allRefs = Set.fromList (map snd entries)
+
+    (selRefPats, selPathPats) = List.partition isRefPattern selectPatterns
+    (excRefPats, excPathPats) = List.partition isRefPattern excludePatterns
+
+    matchesOf :: [Text] -> [Text] -> Set Ref
+    matchesOf pathPats refPats =
+        Set.fromList [ref | (path, ref) <- entries, pat <- map parsePattern pathPats, matchPattern pat path]
+            `Set.union` Set.unions (map matchRefPattern refPats)
+
+    -- an empty select list still means "everything", exactly as
+    -- 'resolveSelectors' — checked against the *combined* pattern list, not
+    -- just its path half, or a select made of nothing but '#'-patterns
+    -- would silently widen to "everything" instead of narrowing to what was
+    -- actually asked for.
+    selectedBase = if null selectPatterns then allRefs else matchesOf selPathPats selRefPats
+    excluded = matchesOf excPathPats excRefPats
+    selected = selectedBase `Set.difference` excluded
+
+    isRefPattern :: Text -> Bool
+    isRefPattern = Text.isPrefixOf "#"
+
+    -- every declared 'Ref' a '#'-pattern resolves to: its direct matches
+    -- among declared nodes, plus every declared member of a matching
+    -- computed (rewrite-introduced) node.
+    matchRefPattern :: Text -> Set Ref
+    matchRefPattern pat = declaredHits `Set.union` viaComputed
+      where
+        fragment = Text.drop 1 pat
+        declaredHits = Set.fromList [ref | (_, ref) <- entries, matchesRefFragment fragment ref]
+        computedHits = [cref | cref <- Map.keys (Dag.dagNodes computed.computedDag), matchesRefFragment fragment cref]
+        viaComputed = Set.unions (map (Rewrite.membersOf computed) computedHits)
+
+    matchesRefFragment :: Text -> Ref -> Bool
+    matchesRefFragment fragment ref = fragment `Text.isPrefixOf` shortRef ref || fragment `Text.isPrefixOf` unRef ref
 
 -------------------------------------------------------------------------------
 

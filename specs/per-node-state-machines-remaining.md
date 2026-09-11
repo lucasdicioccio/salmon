@@ -77,14 +77,14 @@ language. What remains is the smaller, independent items below.
 | ~~R7~~ | ~~two dead bindings~~ (`postOrderM`, `historyLines`) — dropped and deleted | — | done; §R7 |
 | ~~R2~~ | ~~no operator command addresses a node~~ — `force`/`recheck`/`pause`/`resume` do now | — | done; §R2 |
 | **I6** | a re-declaration that changes a node's *content* does not re-apply it | medium | mostly closed by `filecontents`' check; §I6 |
-| R4 | `query` prints the declared graph, not the rewritten one (`tree`/`dag` done) | small | §R4; = `specs/advance-querying.md` |
+| ~~R4~~ | ~~`query` prints the declared graph, not the rewritten one~~ (`tree`/`dag` done; `query`'s selection is now rewrite-aware via a `#ref` fallback) | — | done; §R4; = `specs/advance-querying.md` |
 | ~~R5~~ | ~~supervisor-level restart is half wired~~ — a crashing machine now restarts in place | — | done; §R5 |
 | ~~R6~~ | ~~no concurrency-bounding primitive~~ — a global, optional cap now exists | — | done; §R6 |
 | ~~R8~~ | ~~`Restart` means two different things~~ (`Systemd` vs `Supervision`) | — | done; §R8 |
 | I2 | `supStrategy` is authored on the dependency, not the dependant | — | taste; §I2 |
-| I3 | `supStableAfter` carries two unrelated meanings | 15 min | taste; §I3 |
+| ~~I3~~ | ~~`supStableAfter` carries two unrelated meanings~~ — split into `supDemoteEvery` | — | done; §I3 |
 | I4 | the `RestForOne` cascade needs opting in at every hop | — | taste; §I4 |
-| I5 | adoption refreshes a machine's supervisor but not its policy | small | now that R5 restarts a machine in place too, worth a second pass together |
+| ~~I5~~ | ~~adoption refreshes a machine's supervisor but not its policy~~ — a changed policy is now a differing representative, so it is not adopted at all | — | done; §I5 |
 
 ### The tradeoffs, in one place
 
@@ -252,7 +252,7 @@ supplies, the same way `check` itself is — rather than as another top-level
 field bolted onto `Supervision`. Not scoped further than that; noted here so
 it isn't lost, not because it's next.
 
-### I3. `supStableAfter` now carries two unrelated meanings
+### I3. `supStableAfter` carried two unrelated meanings — *done*
 
 It was "having been up this long forgets the earlier failures", read by
 `countFailure`. Milestone 9 also made it "do not demote this node twice
@@ -268,11 +268,13 @@ the record is *meant* to grow, `defaultSupervision` makes growing it free for
 every node that does not care, and this is precisely the situation the "amend
 `defaultSupervision`" convention exists to make cheap.
 
-**The fork.** Split out `supDemoteEvery :: Micros` (defaulting to
-`supStableAfter`'s value, so nothing changes for anybody), or accept the
-overload and document it as one concept — "the timescale on which this node's
-state is meaningful" — which is a defensible reading and is roughly the
-justification the current doc gives.
+Landed as the fork's first option: `Salmon.Op.Supervision.supDemoteEvery ::
+Micros` is a new field read only by `tooSoon`; `countFailure` keeps reading
+`supStableAfter`. `defaultSupervision` sets both to `seconds 10`, so nothing
+changes for a node that has not thought about it — every existing
+`defaultSupervision{...}` record update is untouched, since the constructor
+call sites that needed updating were only `defaultSupervision` itself
+(positional `Supervision` construction has no other caller in the tree).
 
 ### I4. The cascade needs opting in at every hop
 
@@ -293,7 +295,7 @@ loudly); or make the cascade transitive from the declaring node, which means
 a demotion carries an "originating ref" out to the whole transitive cone
 rather than only to the immediate dependants that opted in.
 
-### I5. Adoption refreshes a machine's supervisor, but not its policy
+### I5. Adoption refreshes a machine's supervisor, but not its policy — *done*
 
 `startUpkeep` writes a new `Under` into every machine it adopts, so an
 adopted machine follows its current supervisor's statuses, failure set,
@@ -302,19 +304,47 @@ neighbour lists and halt flag. It does not rewrite `ctxPolicy`
 the old one for as long as it stays adopted — which under `serve` is
 indefinitely.
 
-Nor is the change detectable: `Dag.sameRepresentative` compares the
-*rendering* of `dynamics`, and a `Dynamic` renders as its type alone, so a
-node whose policy changed and whose ref did not is "unchanged" and is
-adopted rather than replaced. This predates milestone 9 — but milestone 9 put
-a second thing in `Supervision` that matters to other nodes, so a stale
-policy now has reach beyond its own node.
+Nor was the change detectable: `Dag.sameRepresentative` compared the
+*rendering* of `dynamics`, and a `Dynamic` renders as its type alone by
+default, so a node whose policy changed and whose ref did not was
+"unchanged" and got adopted rather than replaced. This predates milestone 9
+— but milestone 9 put a second thing in `Supervision` that matters to other
+nodes, so a stale policy has reach beyond its own node.
 
-**The fork.** Refresh the policy on adoption (cheap, but changing a running
-machine's policy mid-flight has its own questions — a node that has given up
-under an old `supGiveUpAfter` would need to be reconsidered); or make
-`sameRepresentative` able to see it, which means `Supervision` rendering as a
-value rather than as a `Dynamic`'s type name, and is the more honest fix
-because it makes the change visible to the magma's conflict reporting too.
+**The fork was resolved with the second option**: `sameRepresentative` now
+sees a changed policy. `Dag.showDynamic` special-cases
+`Salmon.Op.Supervision.Supervision` to render by value (via its own `Show`
+instance) rather than by the `Dynamic` default of its type name alone; every
+other `Dynamic` payload (`Package` and the rest) is untouched. A node
+re-declared with a changed `Supervision` is therefore a genuine
+`Representative` change: `startUpkeep`'s adoption test
+(`Dag.sameRepresentative (machineAct m) act`) fails for it, so the old
+machine is `Released` (its action cancelled through its bracket, tearing
+down whatever it held) rather than adopted, and a fresh machine starts under
+the new policy — no separate "refresh the policy in place" step was needed,
+because a fresh machine already starts with the right one. A node
+re-declared with an *unchanged* policy still compares equal and is adopted
+exactly as before, which is the overwhelmingly common case this must not
+regress.
+
+This was the "more honest fix" the fork called out: the same comparison
+feeds `dagConflicts`/`UpDown.Conflicting`, so a policy-only disagreement
+between two live declarations sharing a `Ref` is now reported there too, not
+just silently resolved by adoption's own logic.
+
+Pinned two ways. `Test.DagSpec` (`changedSupervisionIsAConflict` /
+`sameSupervisionIsNotAConflict`) checks the pure comparison directly: two
+declarations of one `Ref` differing only in `supStrategy` are a
+`dagConflicts` entry; two declarations with identical `Supervision` are not.
+`Test.UpkeepSpec` (`changedPolicyIsNotAdopted` / `unchangedPolicyIsAdopted`,
+group "adoption sees a changed Supervision policy (I5)") checks it end to
+end through the real mechanism: a managed node's action never returns on its
+own, so `startUpkeep` called a second time either releases it and starts a
+fresh one — observed as a second spawn of the action — or adopts it and
+does not, depending only on whether the policy differs between the two
+calls. Verified the first of those two actually depends on the fix by
+reverting `Dag.showDynamic` and confirming `changedPolicyIsNotAdopted` times
+out (the stale machine is adopted and never re-runs).
 
 ### I6. A re-declaration that changes what a node *is* does not re-apply it
 
@@ -627,7 +657,7 @@ directory read-only, declare a `dir` under it, and `status` shows
 `[Failure "...: permission denied"]` with the repeated `up` / error lines
 underneath.
 
-### R4. `query`/`run tree`/`run dag` still print the *declared* graph — partially done
+### R4. `query`/`run tree`/`run dag` still print the *declared* graph — done
 
 Known and recorded at milestone 5. Registered `Rewrite`s apply to `run
 up`/`run down`/`run serve` but not to the three commands that *describe* a
@@ -657,11 +687,62 @@ registered): `run tree`/`run dag` on a plain bundle directive show the same
 four nodes either way, just without the duplicate positions a shared node
 used to get.
 
-`query` is the holdout, and is the part that actually needs the fork this
+`query` was the holdout, and the part that actually needed the fork this
 section opened with resolved — it is the one of the three whose whole job is
-resolving a `--select`/`--exclude` pattern, which only paths can do today.
-Left as recorded: worth doing before anyone relies on `query` to predict a
-run under a registered rewrite; not worth doing speculatively.
+resolving a `--select`/`--exclude` pattern, which only paths could do.
+
+**Resolved with option (2)**: resolve a pattern against the declared graph
+as before, and translate the result through `membersOf`. Landed as
+`Query.resolveRewrittenSelectors` (`Salmon.Actions.Query`), a drop-in for
+`resolveSelectors` that `CommandLine.hs`'s `QueryShow`/`QueryPlan` handlers
+now call, passing the same whole-graph `Rewritten` `run tree`/`run dag`
+already compute (`computedTreeDag` factored into `computedRewritten`, so the
+`Rewritten` — not just its `computedDag` — is available to `query` too).
+Ordinary path-glob patterns are untouched — `resolveRewrittenSelectors`
+degrades exactly to `resolveSelectors`'s behaviour when no `#`-pattern is
+given, checked by test.
+
+**The fallback lookup**, added alongside rather than instead of (2): a
+declared path genuinely cannot address a rewrite-introduced node (a
+package-install batch, say) at all — such a node has no position in the
+declared tree, since it was never declared, only ever produced after the
+fold. So a pattern beginning with `#` matches by `Ref` instead of by path: a
+prefix of either `shortRef` or the full ref text, checked against every
+declared node *and* every computed (rewrite-introduced) node, with a
+computed match expanded through `membersOf` back to the declared nodes it
+stands in for. This deliberately mirrors `renderAnnotated`'s own `"
+#" <> shortRef ref` disambiguation suffix (already printed today next to a
+colliding path, and — since `run tree`/`run dag` moved to `Dag`-based
+renderers — the same short-ref text that would identify a batch node there)
+so that text a render prints can be pasted straight back in as a selector,
+symmetric with how `git` short hashes work.
+
+Both kinds of pattern union rather than override each other within one
+`--select`/`--exclude`, and an empty `--select` list still means
+"everything" when checked against the *combined* pattern list (not just its
+path half) — the bug the first draft had, caught by
+`rewrittenEmptySelectStillMeansEverything` before it shipped: an
+exclude-only `--exclude '#...'` with no `--select` at all must still select
+everything else, not silently narrow to nothing.
+
+Every result is still a set of *declared* refs, deliberately: `query
+plan`'s `phaseIgnored` and a rewrite's own `collectDynamic` are both keyed
+on declared refs (`runUp`'s `Phase` is built and consumed before any
+rewrite's batching decision), so this needed no change to what `run up`
+consumes — addressing a batch by its ref and excluding it is exactly
+equivalent to excluding every declared package that went into it, which is
+the only coherent meaning available to a plan computed before any rewrite
+runs. `query show`'s rendering is unchanged too (still the annotated
+*declared* tree via `printAnnotated`) — only what a `--select`/`--exclude`
+pattern can *match* changed; nothing needed the tree it annotates to become
+the computed one, since the declared identities are still the more useful
+thing to show next to `[selected]`/`[excluded]`.
+
+See `Test/QuerySpec.hs`'s `resolveRewrittenSelectors`-prefixed cases, which
+cover: plain path patterns unchanged; a `#ref` pattern addressing a plain
+declared node directly; one addressing a batch and expanding to its
+declared members; a path and a `#ref` pattern combining within one
+selection; and the empty-select-still-means-everything edge case above.
 
 ### R5. Supervisor-level restart — *done*
 
@@ -918,19 +999,20 @@ independent small items, not coverage or visibility.
    (re-entering `Unsettled`, reporting `Escaped` on every attempt) and making
    sure it lets an asynchronous exception — `releaseKept`'s `cancel` above
    all — through untouched rather than treating it as a crash.
-7. **R4** (`run tree`/`run dag` done; `query` still open) as it becomes
-   annoying — not blocking anything. ~~**R6**~~ is done — a global, optional
+7. ~~**R4**~~ — done. `run tree`/`run dag` print the computed `Dag`;
+   `query`'s selection is now rewrite-aware too, via
+   `Query.resolveRewrittenSelectors` (declared-path patterns, translated
+   through `membersOf`, plus a `#ref` fallback for addressing a
+   rewrite-introduced node directly). ~~**R6**~~ is done — a global, optional
    `ConcurrencyLimit` bounds a convergence pass's width, reachable as `run
    serve --max-concurrency N`; the per-resource primitive it was explicitly
    *not* about is still nothing more than an edge or a collection.
    ~~**R8**~~ is done — the rename cost nothing to do ahead of a caller
    needing both, once checked.
-8. **I2**–**I5** whenever there is an opinion to apply. None of them is
-   urgent and none is a bug; (I3) is fifteen minutes, (I5) is worth doing now
-   that (R5) also restarts a machine in place — both are about what an
-   adopted or replaced machine is handed — and (I2) and (I4) are questions
-   about what the feature *means* that are better answered after somebody
-   has used it on a real graph.
+8. **I2** and **I4** whenever there is an opinion to apply. Neither is
+   urgent and neither is a bug — both are questions about what the feature
+   *means* that are better answered after somebody has used it on a real
+   graph. ~~(I3)~~ and ~~(I5)~~ are done.
 
 (I6) has no place in that order because it is not a step, and it has largely
 answered itself: giving `filecontents` a check made re-declared content land

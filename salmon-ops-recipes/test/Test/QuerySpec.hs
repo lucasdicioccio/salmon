@@ -9,18 +9,23 @@ module Test.QuerySpec (tests) where
 
 import Control.Monad.Identity (runIdentity)
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 import qualified Salmon.Actions.Query as Query
 import Salmon.Actions.UpDown (Report (..))
-import Salmon.Builtin.Extension (Extension (..), Op, deps, nodeps, op, ref, up)
+import Salmon.Builtin.Extension (Extension (..), Op, deps, evalDeps, nodeps, op, ref, up)
+import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import Salmon.Op.Actions (extension)
 import Salmon.Op.Eval (expand)
+import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph (inject)
-import Salmon.Op.Ref (mkRef)
+import Salmon.Op.Ref (Ref, mkRef)
+import qualified Salmon.Op.Rewrite as Rewrite
+import Salmon.Reporter (silent)
 
 import Test.Harness (runUpCapturing)
 
@@ -34,6 +39,11 @@ tests =
         , testCase "forceSkip makes upTree report Skip for the excluded node, Eval for the rest" forceSkipSkipsOnlyExcluded
         , testCase "pathedNodes carries each node's help text alongside its path/Ref" pathedNodesCarriesHelp
         , testCase "renderAnnotated tags same-path, distinct-Ref siblings with a stable shortRef so they aren't mistaken for duplicates" renderAnnotatedDisambiguatesSameTextSiblings
+        , testCase "resolveRewrittenSelectors: a plain path selector behaves exactly as resolveSelectors" rewrittenPathSelectorUnchanged
+        , testCase "resolveRewrittenSelectors: a #ref selector addresses a declared node directly" rewrittenRefSelectorAddressesDeclaredNode
+        , testCase "resolveRewrittenSelectors: a #ref selector addressing a batch expands to its declared members" rewrittenRefSelectorExpandsABatch
+        , testCase "resolveRewrittenSelectors: a path and a #ref selector combine" rewrittenPathAndRefSelectorsCombine
+        , testCase "resolveRewrittenSelectors: an empty --select still means everything when --exclude is #ref-only" rewrittenEmptySelectStillMeansEverything
         ]
 
 patternMatching :: IO ()
@@ -152,3 +162,95 @@ renderAnnotatedDisambiguatesSameTextSiblings = do
     assertBool "each sibling's own description follows its own tagged line" ("  # runs a" `elem` rendered && "  # runs b" `elem` rendered)
     assertEqual "no plain, untagged occurrence of the colliding path remains" 0 (length (Prelude.filter (== "/root/pg-script") rendered))
     assertBool "the non-colliding root path itself is left untagged" ("/root" `elem` rendered)
+
+-------------------------------------------------------------------------------
+-- resolveRewrittenSelectors (R4)
+
+pkg :: Text -> Op
+pkg = Debian.deb . Debian.Package
+
+pkgRef :: Text -> Ref
+pkgRef name = mkRef "debian-deb" name
+
+-- | The computed 'Rewritten' 'Salmon.Op.Rewrite.batchPackages' would produce
+-- from this graph, everything desired, nothing ignored — the same 'Phase'
+-- @run tree@\/@run dag@\/@query@ use for a whole-graph view.
+computedFor :: [Rewrite.Rewrite Extension] -> Op -> Rewrite.Rewritten Extension
+computedFor rewrites o =
+    let dag = Dag.foldDag Dag.sameRepresentative (evalDeps o)
+     in Rewrite.rewrite rewrites (Rewrite.wholeGraph dag) dag
+
+onlyBatch :: Rewrite.Rewritten Extension -> IO Ref
+onlyBatch c =
+    case Map.keys (Rewrite.computedMembers c) of
+        [r] -> pure r
+        rs -> assertFailure ("expected exactly one batch, got " <> show (length rs))
+
+-- | Two independent packages, no rewrite registered: a plain-path selector
+-- must resolve exactly as 'Query.resolveSelectors' already does, since
+-- 'resolveRewrittenSelectors' must not change existing behaviour when no
+-- '#'-pattern is involved.
+rewrittenPathSelectorUnchanged :: IO ()
+rewrittenPathSelectorUnchanged = do
+    let root = op "root" (deps [pkg "curl", pkg "git"]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        computed = computedFor [] root
+        (plainSel, plainExc) = Query.resolveSelectors cograph ["/root/deb"] []
+        (rwSel, rwExc) = Query.resolveRewrittenSelectors cograph computed ["/root/deb"] []
+    assertEqual "same selection with no '#' patterns involved" plainSel rwSel
+    assertEqual "same exclusion with no '#' patterns involved" plainExc rwExc
+
+-- | A '#' pattern matches a plain (un-batched) declared node by its own
+-- 'Query.shortRef', the same text a tree\/dag render would show it as.
+rewrittenRefSelectorAddressesDeclaredNode :: IO ()
+rewrittenRefSelectorAddressesDeclaredNode = do
+    let root = op "root" (deps [pkg "curl", pkg "git"]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        computed = computedFor [] root
+        frag = Query.shortRef (pkgRef "curl")
+        (selected, _) = Query.resolveRewrittenSelectors cograph computed ["#" <> frag] []
+    assertEqual "exactly the matching declared node" (Set.singleton (pkgRef "curl")) selected
+
+-- | A '#' pattern matching a rewrite-introduced (batch) node's own ref
+-- expands, through 'Salmon.Op.Rewrite.membersOf', to every declared node the
+-- batch stands in for — this is the fallback lookup a path glob cannot give,
+-- since the batch was never declared and so has no path of its own.
+rewrittenRefSelectorExpandsABatch :: IO ()
+rewrittenRefSelectorExpandsABatch = do
+    let root = op "root" (deps [pkg "curl", pkg "git"]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        computed = computedFor [Debian.batchPackages silent] root
+    batchRef <- onlyBatch computed
+    let frag = Query.shortRef batchRef
+        (selected, _) = Query.resolveRewrittenSelectors cograph computed ["#" <> frag] []
+    assertEqual
+        "both declared packages the batch was built from, not the batch's own ref"
+        (Set.fromList [pkgRef "curl", pkgRef "git"])
+        selected
+
+-- | The two kinds of selector union rather than override each other.
+rewrittenPathAndRefSelectorsCombine :: IO ()
+rewrittenPathAndRefSelectorsCombine = do
+    let root = op "root" (deps [pkg "curl", pkg "git", pkg "vim"]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        computed = computedFor [] root
+        frag = Query.shortRef (pkgRef "vim")
+        (selected, _) = Query.resolveRewrittenSelectors cograph computed ["/root/**"] ["#" <> frag]
+    assertBool "the root itself, matched by path" (mkRef "root" () `Set.member` selected)
+    assertBool "curl and git, matched by path under root" (pkgRef "curl" `Set.member` selected && pkgRef "git" `Set.member` selected)
+    assertBool "vim is excluded by its '#' pattern" (pkgRef "vim" `Set.notMember` selected)
+
+-- | The bug this function's first draft had: 'resolveSelectors' treats an
+-- empty select list as "everything", and that must still hold when the
+-- overall select list is empty even though the exclude list is '#'-only —
+-- checked against the *combined* pattern list, not just its path half.
+rewrittenEmptySelectStillMeansEverything :: IO ()
+rewrittenEmptySelectStillMeansEverything = do
+    let root = op "root" (deps [pkg "curl", pkg "git"]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        computed = computedFor [] root
+        frag = Query.shortRef (pkgRef "git")
+        (selected, excluded) = Query.resolveRewrittenSelectors cograph computed [] ["#" <> frag]
+        allRefs = Set.fromList (map snd (Query.pathedRefs cograph))
+    assertEqual "everything but the excluded ref" (allRefs `Set.difference` Set.singleton (pkgRef "git")) selected
+    assertEqual "exactly the excluded ref" (Set.singleton (pkgRef "git")) excluded

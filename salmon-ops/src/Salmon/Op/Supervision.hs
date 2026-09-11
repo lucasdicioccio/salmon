@@ -185,10 +185,18 @@ data Supervision = Supervision
     -- eventually being treated as a crash loop — only /consecutive quick/
     -- failures count. Without it, 'supGiveUpAfter' would latch off any
     -- long-lived node given enough days.
+    , supDemoteEvery :: !Micros
+    -- ^ 'RestForOne' rate limit: a node is demoted by a dependency at most
+    -- once per this interval, so a dependency that is flapping cannot
+    -- rebuild the whole cone behind it on every flap.
     --
-    -- 'RestForOne' reads it for a second purpose: a node is demoted by a
-    -- dependency at most once per this interval, so a dependency that is
-    -- flapping cannot rebuild the whole cone behind it on every flap.
+    -- A separate field from 'supStableAfter' on purpose (see (I3) in
+    -- @specs\/per-node-state-machines-remaining.md@) — "how long before a
+    -- crash counts as a new one" and "how often may this node's dependants
+    -- legitimately be rebuilt" are different questions with no reason to
+    -- share a timescale. Defaults to 'supStableAfter''s value in
+    -- 'defaultSupervision', so nothing changes for a node that has not
+    -- thought about it.
     , supGiveUpAfter :: !(Maybe Int)
     -- ^ stop putting the node back after this many consecutive failures.
     -- 'Nothing' — the default — never gives up.
@@ -213,7 +221,7 @@ systemd is not converging a declared graph). Never giving up is the passive
 choice: latching off is a decision only the node's author can justify.
 -}
 defaultSupervision :: Supervision
-defaultSupervision = Supervision OnFailure OneForOne False Nothing (seconds 10) Nothing
+defaultSupervision = Supervision OnFailure OneForOne False Nothing (seconds 10) (seconds 10) Nothing
 
 {- | State a supervision policy on a node, for a later pass to read back:
 

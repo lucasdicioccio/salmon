@@ -79,7 +79,7 @@ module Salmon.Op.Dag (
 ) where
 
 import Control.Comonad.Cofree (Cofree (..))
-import Data.Dynamic (Dynamic)
+import Data.Dynamic (Dynamic, fromDynamic)
 import Data.Foldable (toList)
 import Data.List (foldl')
 import Data.Map.Strict (Map)
@@ -93,6 +93,7 @@ import Salmon.Op.Actions
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
+import Salmon.Op.Supervision (Supervision)
 
 -------------------------------------------------------------------------------
 
@@ -435,8 +436,12 @@ mergeDag same into from = foldl' step into (dagOrder from)
 Everything an 'Salmon.Builtin.Extension.Extension' is /for/ — @up@, @check@,
 @down@ — is a function and therefore outside any equality, so this is the
 whole of the available evidence. 'Data.Dynamic.Dynamic' renders as its type
-alone, so two 'Supervision' dynamics with different restart policies compare
-equal here.
+alone by default, which would make two 'Salmon.Op.Supervision.Supervision'
+dynamics with different restart policies compare equal here — 'showDynamic'
+special-cases 'Salmon.Op.Supervision.Supervision' to render its 'Show'
+instance instead, precisely so that this comparison (and so adoption, see
+"Salmon.Actions.Upkeep"'s @startUpkeep@) can see a changed policy. Every
+other 'Dynamic' payload still renders as its type name alone.
 -}
 data Representative = Representative
     { repShorthand :: !ShortHand
@@ -445,6 +450,16 @@ data Representative = Representative
     , repDynamics :: ![String]
     }
     deriving (Show, Eq)
+
+{- | Render one 'Dynamic' for 'Representative' comparison: by value where a
+type's value matters to identity ('Salmon.Op.Supervision.Supervision', so a
+changed policy is a changed representative — see (I5) in
+@specs\/per-node-state-machines-remaining.md@), by type name otherwise
+(the 'Dynamic' default, e.g. 'Salmon.Builtin.Nodes.Debian.Package.Package'
+dynamics, whose identity 'foldDag' does not need to track this way).
+-}
+showDynamic :: Dynamic -> String
+showDynamic d = maybe (show d) show (fromDynamic d :: Maybe Supervision)
 
 representative ::
     ( HasField "help" ext Text
@@ -458,7 +473,7 @@ representative act =
         { repShorthand = act.shorthand
         , repHelp = getField @"help" act.extension
         , repNotes = getField @"notes" act.extension
-        , repDynamics = fmap show (getField @"dynamics" act.extension)
+        , repDynamics = fmap showDynamic (getField @"dynamics" act.extension)
         }
 
 -- | The default conflict test for 'foldDag': equality on 'Representative'.

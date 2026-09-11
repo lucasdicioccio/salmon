@@ -117,6 +117,11 @@ tests =
             , testCase "a node holding an action ignores supReapply and parks" managedIgnoresSupReapply
             , testCase "Filesystem.dir puts itself back, unsupervised by anybody else" dirSelfHeals
             ]
+        , testGroup
+            "adoption sees a changed Supervision policy (I5)"
+            [ testCase "a policy-only change is not adopted, and the process restarts" changedPolicyIsNotAdopted
+            , testCase "an unchanged policy is adopted, and the process is not restarted" unchangedPolicyIsAdopted
+            ]
         ]
 
 -------------------------------------------------------------------------------
@@ -1068,7 +1073,7 @@ noDependantsCostsNothing = within 20 $ do
 {- | The hazard this milestone had to be designed against: a dependency that
 flaps would otherwise rebuild the whole cone behind it on every flap.
 
-'Salmon.Op.Supervision.supStableAfter' bounds it to once per interval, and
+'Salmon.Op.Supervision.supDemoteEvery' bounds it to once per interval, and
 the default of ten seconds is well beyond what this case takes — so the
 second departure is dropped rather than delayed.
 -}
@@ -1328,3 +1333,68 @@ dirSelfHeals = within 10 $ withTempDir $ \tmp -> do
         assertBool "put back without anybody re-declaring it" =<< doesDirectoryExist path
         rs <- seen trace
         assertEqual "nothing ever demoted, since this node has no dependants" [] (demotions rs)
+
+-------------------------------------------------------------------------------
+-- (I5): adoption has to see a changed Supervision policy, not just a
+-- changed Ref/shorthand/help/notes.
+
+{- | A managed node identified only by its name — same 'Ref', shorthand,
+help and notes every time — whose 'Supervision' is the caller's to vary.
+Its action never returns on its own, so the only way it stops running is a
+real teardown ('releaseKept' cancelling it), which is exactly what
+distinguishes /adopted/ (survives) from /released/ (does not) here.
+-}
+policyHolder :: Strategy -> TVar Int -> Op
+policyHolder s spawns =
+    holder "svc" spawns (newEmptyMVar >>= takeMVar) $ \x ->
+        x{dynamics = [supervised defaultSupervision{supStrategy = s}]}
+
+{- | Before (I5): 'Salmon.Op.Dag.representative' rendered every 'Supervision'
+dynamic as its bare type name, so two declarations of "svc" differing only in
+'supStrategy' compared equal, and 'startUpkeep' adopted the old machine —
+silently keeping its stale policy forever, since nothing else about the node
+ever changes to force a fresh one. After (I5), 'Supervision' compares by
+value, so this is a differing representative: the old machine is 'Released'
+(its action cancelled) and a fresh one is started, which is observable here
+as a second spawn of the action.
+-}
+changedPolicyIsNotAdopted :: IO ()
+changedPolicyIsNotAdopted = within 10 $ do
+    spawns <- spawnCounter
+    trace <- newTVarIO []
+    let r = ReporterM $ \rep -> atomically (modifyTVar' trace (rep :))
+    sup1 <- Upkeep.startUpkeep r Upkeep.noKept allUp (dagOf (policyHolder OneForOne spawns))
+    awaitSpawns spawns 1
+    kept1 <- Upkeep.stopUpkeep sup1
+    sup2 <- Upkeep.startUpkeep r kept1 allUp (dagOf (policyHolder RestForOne spawns))
+    awaitSpawns spawns 2
+    rs <- seen trace
+    assertBool "the old machine was released, not carried over" (not (null [() | Released _ <- rs]))
+    assertEqual "nothing was adopted" 0 (length [() | Adopted _ <- rs])
+    kept2 <- Upkeep.stopUpkeep sup2
+    void (Upkeep.releaseKept r (const False) kept2)
+
+{- | The control case: re-declaring "svc" with the /same/ policy is still the
+overwhelmingly common shape (a command that changes nothing about this node)
+and must still adopt, exactly as it did before (I5) — the fix only had to
+stop treating a genuine change as none, not start treating "unchanged" as
+"changed".
+-}
+unchangedPolicyIsAdopted :: IO ()
+unchangedPolicyIsAdopted = within 10 $ do
+    spawns <- spawnCounter
+    trace <- newTVarIO []
+    let r = ReporterM $ \rep -> atomically (modifyTVar' trace (rep :))
+    sup1 <- Upkeep.startUpkeep r Upkeep.noKept allUp (dagOf (policyHolder OneForOne spawns))
+    awaitSpawns spawns 1
+    kept1 <- Upkeep.stopUpkeep sup1
+    sup2 <- Upkeep.startUpkeep r kept1 allUp (dagOf (policyHolder OneForOne spawns))
+    -- nothing to await for a non-event: give the (adopted, still-running)
+    -- action a moment it could have used to spawn again, then check it did not.
+    threadDelay 200000
+    rs <- seen trace
+    assertEqual "still just the one spawn: the machine was adopted" 1 =<< spawnsSoFar spawns
+    assertBool "the machine was reported adopted" (not (null [() | Adopted _ <- rs]))
+    assertEqual "nothing was released" 0 (length [() | Released _ <- rs])
+    kept2 <- Upkeep.stopUpkeep sup2
+    void (Upkeep.releaseKept r (const False) kept2)

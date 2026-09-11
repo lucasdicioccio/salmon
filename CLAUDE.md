@@ -296,7 +296,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   and reported by `downTree` as `UpDown.Conflicting`. The comparison behind that is
   `sameRepresentative`, on the only fields that *are* comparable (`shorthand`/`help`/`notes`/the
   rendering of `dynamics` — `up`/`check`/`down` are functions, and `Dynamic` renders as its type
-  alone), so it is a heuristic; it is still strictly more than the zero available before. See
+  alone by default). One exception: `Salmon.Op.Supervision.Supervision` is rendered by value
+  (`Dag.showDynamic`), specifically so a re-declaration that only changes a node's supervision
+  policy is a differing representative and is not silently adopted by
+  `Salmon.Actions.Upkeep.startUpkeep` with its old policy still in force (see (I5) in
+  `specs/per-node-state-machines-remaining.md`). It is still a heuristic — every other `Dynamic`
+  payload is unaffected — but strictly more than the zero available before. See
   `specs/per-node-state-machines.md` milestone 2 and `Test/DagSpec.hs`.
 - **`Op/Ledger.hs`** is the other half: who still *wants* which nodes. One `Contribution` per
   declaration — a `Set Ref` and a `Set (Ref, Ref)` of precedence edges, plus a `contribLive`
@@ -327,11 +332,18 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   tree`/`run dag` — both now print the *computed* `Dag` (`Help.printDagTree` /
   `Dot.printDagCograph`: one line/node per `Ref`, dependencies indented underneath, no
   red/orange/gray edge coloring since a `Dag` has already collapsed `Connect`/`Overlay` into
-  plain "depends on"). `query` is the one holdout still printing the *declared* graph: it
-  resolves `--select`/`--exclude` as path globs, and a rewritten `Dag` has refs and edges but no
-  paths for a pattern to match — fixing that needs either a path-free selection language or
-  resolving against the declared graph and translating through `membersOf`, and neither is worth
-  doing speculatively. See milestone 5 and `Test/RewriteSpec.hs`.
+  plain "depends on"). `query` (`Actions/Query.hs`) still displays the *declared* graph — its
+  whole job is resolving `--select`/`--exclude` against `pathedNodes`'s tree positions, and a
+  rewritten `Dag` has refs and edges but no paths for a pattern to match — but (R4)'s resolved
+  fork means a pattern *can* now reach a rewrite-introduced node with no declared position of its
+  own: `resolveRewrittenSelectors` resolves ordinary patterns as path globs exactly as before, and
+  a `#`-prefixed one by `Ref` instead (a prefix of `shortRef`/the full ref text — the same text
+  `renderAnnotated`'s own disambiguation suffix already prints, so a render's output pastes back in
+  as a selector), expanded through `membersOf` to the declared nodes it stands in for. `query
+  plan`'s exclusion set is still declared refs throughout (`phaseIgnored` and `collectDynamic` are
+  both keyed that way), so addressing a batch by ref is equivalent to excluding every declared node
+  that went into it. See milestone 5, (R4) in
+  `specs/per-node-state-machines-remaining.md`, and `Test/QuerySpec.hs`.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
   `World` — a `worldLedger` of who's asked for what, a `worldMagma` of one representative per
   `Ref` (what each node *is*), a `NodeState` per node (a `Direction` it's wanted in plus whether

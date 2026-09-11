@@ -316,12 +316,14 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
-                let (selected, excluded) = Query.resolveSelectors cograph sel exc
+                computed <- computedRewritten op
+                let (selected, excluded) = Query.resolveRewrittenSelectors cograph computed sel exc
                 Query.printAnnotated cograph selected excluded dedupe showDescriptions
         (Query (QueryPlan (QuerySelection sel exc) embedDirective)) -> do
             void $ withGraphAndBytes $ \dirBytes op -> do
                 let cograph = runIdentity (expand op)
-                let (_, excluded) = Query.resolveSelectors cograph sel exc
+                computed <- computedRewritten op
+                let (_, excluded) = Query.resolveRewrittenSelectors cograph computed sel exc
                 let embedded = if embedDirective then Just (Text.decodeUtf8 (LBysteString.toStrict dirBytes)) else Nothing
                 let plan = Query.Plan (Query.digestBytes dirBytes) (Set.toList excluded) exc embedded
                 LBysteString.putStr (encode plan)
@@ -368,14 +370,21 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
         let computed = Rewrite.rewrite rewrites (Phase Set.empty Set.empty) dag
         UpDown.downDag UpDown.alwaysRequired r (Rewrite.computedDag computed)
 
-    -- | (R4): the computed 'Dag' `run tree`\/`run dag` print — everything in
-    -- the declared graph is "desired" and nothing is "ignored", the same
-    -- 'Phase' 'Rewrite.wholeGraph' builds for a bare @run down@'s rewrite
-    -- pass, since neither command is about one direction of travel.
-    computedTreeDag :: Op -> IO (Dag.Dag Extension)
-    computedTreeDag op = do
+    {- | (R4): the whole-graph 'Rewritten' `run tree`\/`run dag`\/`query`
+    all read from — everything in the declared graph is "desired" and
+    nothing is "ignored", the same 'Phase' 'Rewrite.wholeGraph' builds for a
+    bare @run down@'s rewrite pass, since none of the three is about one
+    direction of travel. Kept as the full 'Rewritten' (not just
+    'Rewrite.computedDag') because `query` also needs 'Rewrite.membersOf' —
+    see 'Query.resolveRewrittenSelectors'.
+    -}
+    computedRewritten :: Op -> IO (Rewritten Extension)
+    computedRewritten op = do
         dag <- UpDown.expandDag r nat op
-        pure (Rewrite.computedDag (Rewrite.rewrite rewrites (Rewrite.wholeGraph dag) dag))
+        pure (Rewrite.rewrite rewrites (Rewrite.wholeGraph dag) dag)
+
+    computedTreeDag :: Op -> IO (Dag.Dag Extension)
+    computedTreeDag op = Rewrite.computedDag <$> computedRewritten op
 
     excluding :: Rewritten Extension -> Set Ref -> UpDown.Gate Extension
     excluding computed excluded

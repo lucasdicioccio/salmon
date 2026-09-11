@@ -897,8 +897,8 @@ data Tally = Tally
     -- ^ monotonic nanoseconds at the moment the node last reached 'Up'.
     , tallyDemotedAt :: !(Maybe Word64)
     -- ^ monotonic nanoseconds at the moment a dependency last sent this node
-    -- back to 'WaitUp'. What rate-limits 'Salmon.Op.Supervision.RestForOne';
-    -- see 'tooSoon'.
+    -- back to 'WaitUp'. What rate-limits 'Salmon.Op.Supervision.RestForOne'
+    -- against 'Salmon.Op.Supervision.supDemoteEvery'; see 'tooSoon'.
     }
 
 freshTally :: Tally
@@ -934,13 +934,13 @@ than a settling delay__ — a settling delay would swallow the very case
 'Salmon.Op.Supervision.RestForOne' exists for, since the config file a
 service stands on is rewritten in milliseconds and is back long before any
 window could expire. What is dropped is the /second/ demotion inside the
-node's own 'Salmon.Op.Supervision.supStableAfter', which is what a flap looks
+node's own 'Salmon.Op.Supervision.supDemoteEvery', which is what a flap looks
 like and a change does not.
 -}
 tooSoon :: Supervision -> Word64 -> Tally -> Bool
 tooSoon sup now t =
     case t.tallyDemotedAt of
-        Just at | now >= at -> now - at < toNanos sup.supStableAfter
+        Just at | now >= at -> now - at < toNanos sup.supDemoteEvery
         _ -> False
 
 {- | How long to wait before the n-th consecutive retry: the floor doubled
