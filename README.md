@@ -161,6 +161,10 @@ package set — see [Build](#build)): `KitchenSinkBlog`,
 - [`docs/howto-ops.md`](docs/howto-ops.md) — a concrete, example-heavy
   cookbook for declaring and testing `salmon-ops` nodes, written to be usable
   as a reference even by less-context-heavy tooling.
+- [`docs/serve-supervision.md`](docs/serve-supervision.md) — what `run serve`
+  gives you for free (convergence, `status`/`force`/`pause`, self-healing on
+  re-declaration), how to try it, and what to decorate a node with (`check`,
+  `Supervision`, `managed`) to get more out of it.
 - [`CLAUDE.md`](CLAUDE.md) — repository-level conventions (package layering,
   idempotency conventions, failure-propagation rules) for anyone (human or
   AI) working in this codebase.
