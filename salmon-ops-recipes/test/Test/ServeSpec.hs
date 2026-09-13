@@ -92,6 +92,7 @@ tests =
         , testCase "(I6) a re-declaration with changed content is applied by the pass itself, not just the tending loop" reDeclareWithChangedContentIsAppliedByThePass
         , testCase "`autoconverge off` records a declaration without converging it" autoConvergeOffDefersConvergence
         , testCase "`autoconverge off` also keeps the idle tending loop from applying a deferred declaration" autoConvergeOffAlsoStopsIdleTending
+        , testCase "`autoconverge off` keeps a checkless node's `up` from ever running" autoConvergeOffKeepsAChecklessNodeFromRunning
         ]
 
 -------------------------------------------------------------------------------
@@ -678,6 +679,21 @@ watchedOp there attempts f spec =
   where
     writeIORefTrue v = atomicModifyIORef' v (const (True, ()))
 
+{- | A stub node with no @check@ at all — the default 'Immaterial' verdict
+almost every builtin in this repository actually has, per
+"Salmon.Actions.Serve"'s own note that this is the common case a fix here
+has to hold for. Unlike 'watched', nothing here can ever say "already
+done"; the only way to tell whether the loop left it alone is to count how
+many times @up@ itself ran.
+-}
+neverRuns :: IORef Int -> Track' Spec
+neverRuns attempts = Track $ \spec ->
+    op "never-runs" nodeps $ \actions ->
+        actions
+            { ref = mkRef "never-runs" spec.specNames
+            , up = atomicModifyIORef' attempts (\k -> (k + 1, ()))
+            }
+
 idleLoopTends :: IO ()
 idleLoopTends =
     withTempDir $ \root -> do
@@ -722,6 +738,36 @@ autoConvergeOffAlsoStopsIdleTending =
             awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
             assertEqual "the idle loop must not apply a deferred declaration" 0 =<< readIORef attempts
         assertEqual "the node is still pending, not silently converged" [Pending] (fmap nodeConvergence (Map.elems w.worldNodes))
+
+{- | The same property as 'autoConvergeOffAlsoStopsIdleTending', pinned
+directly on the node's own 'up' rather than through 'watched''s @check@
+detour: 'neverRuns' has no @check@ at all (the ordinary 'Immaterial'
+default, not a hand-written "gone" verdict), so there is nothing here that
+can claim the effect is already in place — the only way this test could
+pass wrongly is if @up@ genuinely never ran, which is the whole point.
+-}
+autoConvergeOffKeepsAChecklessNodeFromRunning :: IO ()
+autoConvergeOffKeepsAChecklessNodeFromRunning =
+    withTempDir $ \root -> do
+        attempts <- newIORef (0 :: Int)
+        (_, w) <- withSession (neverRuns attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "autoconverge off"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged False <- rs]))
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Declared{} <- rs]))
+            -- a real idle gap: enough time for the loop to have started
+            -- tending and applied the node, if it were going to.
+            threadDelay 300000
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            assertEqual "up must never have run" 0 =<< readIORef attempts
+            -- the deferred work is still there, waiting for an explicit
+            -- `converge` — this isn't "up never runs at all", only "not
+            -- before I say so".
+            hPutStrLn session.sessionIn "converge"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.ConvergeStop{} <- rs]))
+            assertEqual "the explicit converge finally runs it, exactly once" 1 =<< readIORef attempts
+        assertEqual "and the world now agrees it converged" [Converged] (fmap nodeConvergence (Map.elems w.worldNodes))
 
 superviseOffLeavesItAlone :: IO ()
 superviseOffLeavesItAlone =
