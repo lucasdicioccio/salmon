@@ -47,6 +47,7 @@ import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
+import qualified Salmon.Op.Mailbox as Mailbox
 import Salmon.Op.Ref (Ref, mkRef, unRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite)
 import qualified Salmon.Op.Status as MachineStatus
@@ -100,6 +101,7 @@ tests =
         , testCase "turning autoconverge back on lets idle tending pick up what was deferred, with no explicit converge" autoConvergeBackOnLetsTendingCatchUp
         , testCase "`status` prints each node's path, and it round-trips as a `--select` pattern" statusPathsRoundTripAsSelectors
         , testCase "two nodes sharing one shorthand-derived path are told apart by `#ref` instead" ambiguousPathsAreDisambiguatedByRef
+        , testCase "`force` still reaches a node deferred by `autoconverge off`, without converging anything else" autoConvergeOffForceStillReachesANamedNode
         ]
 
 -------------------------------------------------------------------------------
@@ -761,6 +763,20 @@ neverRuns attempts = Track $ \spec ->
             , up = atomicModifyIORef' attempts (\k -> (k + 1, ()))
             }
 
+{- | Like 'neverRuns', but two independently-countered, independently-named
+variants selected by the seed's own args ("a" vs. anything else) — so a test
+can tell "the node I named" apart from "some other node" by shorthand alone,
+which plain 'never-runs' (one shorthand for every seed) cannot.
+-}
+neverRunsNamed :: IORef Int -> IORef Int -> Track' Spec
+neverRunsNamed attemptsA attemptsB = Track $ \spec ->
+    let isA = "a" `elem` spec.specNames
+     in op (if isA then "never-runs-a" else "never-runs-b") nodeps $ \actions ->
+            actions
+                { ref = mkRef "never-runs" spec.specNames
+                , up = atomicModifyIORef' (if isA then attemptsA else attemptsB) (\k -> (k + 1, ()))
+                }
+
 idleLoopTends :: IO ()
 idleLoopTends =
     withTempDir $ \root -> do
@@ -930,7 +946,50 @@ ambiguousPathsAreDisambiguatedByRef =
         assertEqual "the #ref pattern selected only its own node" (Set.singleton target) selected
         assertBool "not the other node sharing its path" (not (other `Set.member` selected))
 
-superviseOffLeavesItAlone :: IO ()
+{- | Queuing an instruction for a node has nowhere to deliver it at all
+unless a machine exists for it — and 'tendOf' (see its own haddock)
+otherwise refuses to start one for anything not-yet-converged while
+autoconverge is off, which would make @force@\/@recheck@\/@pause@\/@resume@
+silently useless in exactly the state they are most useful in: reviewing a
+stack of deferred declarations before committing to a full @converge@. Two
+independently-countered nodes here so "only the named one moved" is checked,
+not just "the named one moved eventually".
+-}
+autoConvergeOffForceStillReachesANamedNode :: IO ()
+autoConvergeOffForceStillReachesANamedNode =
+    withTempDir $ \root -> do
+        attemptsA <- newIORef (0 :: Int)
+        attemptsB <- newIORef (0 :: Int)
+        (_, w) <- withSession (neverRunsNamed attemptsA attemptsB) root $ \session -> do
+            hPutStrLn session.sessionIn "autoconverge off"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged False <- rs]))
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Declared{} <- rs]))
+            hPutStrLn session.sessionIn "up b"
+            awaitOn session.sessionServe (\rs -> length [() | Serve.Declared{} <- rs] >= 2)
+            -- a real idle gap: enough time for the loop to have started
+            -- tending either node, if autoconverge off did not stop it.
+            threadDelay 300000
+            (a0, b0) <- (,) <$> readIORef attemptsA <*> readIORef attemptsB
+            assertEqual "both nodes are still deferred" (0, 0) (a0, b0)
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
+            reports <- readTVarIO session.sessionServe
+            let nodes = last [xs | Serve.StatusReport xs _ <- reports]
+            targetRef <- case [r | (r, st) <- nodes, st.nodeShorthand == "never-runs-a"] of
+                [r] -> pure r
+                rs -> assertFailure ("expected exactly one never-runs-a node, got " <> show (length rs))
+            hPutStrLn session.sessionIn ("force --select #" <> Text.unpack (unRef targetRef))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Instructed Mailbox.Force n <- rs, n > 0]))
+            awaitAttempts attemptsA 1
+            -- give the untargeted node the same idle window before checking
+            -- it stayed put, rather than a race against 'awaitAttempts'.
+            threadDelay 300000
+            assertEqual "the untargeted node was left alone" 0 =<< readIORef attemptsB
+        assertEqual
+            "both still wanted up in the world's own bookkeeping"
+            [TurnUp, TurnUp]
+            (fmap nodeDirection (Map.elems w.worldNodes))
 superviseOffLeavesItAlone =
     withTempDir $ \root -> do
         there <- newIORef False

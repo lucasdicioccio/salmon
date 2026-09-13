@@ -1313,11 +1313,12 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                     -- terms.
                     let computed = Rewrite.rewrite rewrites (phaseOf w Nothing) (worldDag w)
                     kept <- readIORef (tendingKept tending)
+                    forced <- Map.keysSet <$> readIORef (tendingPending tending)
                     sup <-
                         Upkeep.startUpkeep
                             (tendReporter world computed)
                             kept
-                            (tendOf auto w computed)
+                            (tendOf auto forced w computed)
                             (Rewrite.computedDag computed)
                     -- the supervisor owns them now: it adopted what it could
                     -- and released the rest.
@@ -1449,21 +1450,33 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
     'UpDown.Unknown'; without it, starting a supervisor after a pass would
     re-run every @up@ in the graph.
 
-    The 'Bool' is @autoconverge@'s current value, and it narrows "acted on"
-    for a plain (non-'managed') node: with autoconverge off, a not-yet-
-    'Converged' one-shot node is left untended (returns 'Nothing') rather
-    than 'Unsettled', because applying it is exactly the convergence work an
-    operator just asked to defer to an explicit @converge@ — without this, a
-    node the idle loop reached before that @converge@ would get 'up' run on
-    it anyway, since almost every node's @check@ answers 'UpDown.Immaterial'\/
-    'UpDown.Unknown' and 'Unsettled' treats either as "go ahead". A 'managed'
-    node is exempt: it has no other path to ever start (the convergence pass
-    ignores it categorically, see 'settleManaged'), so autoconverge being off
-    must not also mean "never". Already-'Converged' nodes are unaffected
-    either way — self-healing an effect already brought up is not the
-    convergence work being deferred. -}
-    tendOf :: Bool -> World seed directive -> Rewritten Extension -> Ref -> Maybe Upkeep.Tend
-    tendOf autoConverge w computed aref =
+    The first 'Bool' is @autoconverge@'s current value, and it narrows
+    "acted on" for a plain (non-'managed') node: with autoconverge off, a
+    not-yet-'Converged' one-shot node is left untended (returns 'Nothing')
+    rather than 'Unsettled', because applying it is exactly the convergence
+    work an operator just asked to defer to an explicit @converge@ — without
+    this, a node the idle loop reached before that @converge@ would get 'up'
+    run on it anyway, since almost every node's @check@ answers
+    'UpDown.Immaterial'\/'UpDown.Unknown' and 'Unsettled' treats either as
+    "go ahead". A 'managed' node is exempt: it has no other path to ever
+    start (the convergence pass ignores it categorically, see
+    'settleManaged'), so autoconverge being off must not also mean "never".
+    Already-'Converged' nodes are unaffected either way — self-healing an
+    effect already brought up is not the convergence work being deferred.
+
+    The 'Set' 'Ref' is every node with an instruction still queued in
+    'tendingPending' — a @force@\/@recheck@\/@pause@\/@resume@ typed while
+    autoconverge is off. Deferring convergence must not also swallow an
+    operator naming a node explicitly: that instruction has nowhere to be
+    delivered at all (no machine exists to post it to, see
+    'deliverPending') unless a machine starts for it here, autoconverge or
+    not. This is the same exemption 'managed' gets and for the same reason
+    — an explicit, targeted ask is not the batched convergence work
+    @autoconverge off@ defers — it just reaches that ask through a
+    different field than @managed@ does.
+    -}
+    tendOf :: Bool -> Set Ref -> World seed directive -> Rewritten Extension -> Ref -> Maybe Upkeep.Tend
+    tendOf autoConverge forced w computed aref =
         case [st | rf <- Set.toList (Rewrite.membersOf computed aref), Just st <- [Map.lookup rf w.worldNodes]] of
             [] -> Nothing
             sts ->
@@ -1477,7 +1490,8 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                     mine = if null ups then sts else ups
                     converged = all (\st -> st.nodeConvergence == Converged) mine
                     managed = maybe False (isJust . (.extension.managed)) (Map.lookup aref (Dag.dagNodes (Rewrite.computedDag computed)))
-                 in if not converged && not autoConverge && not managed
+                    instructed = not (Set.null (Set.intersection forced (Rewrite.membersOf computed aref)))
+                 in if not converged && not autoConverge && not managed && not instructed
                         then Nothing
                         else
                             Just
