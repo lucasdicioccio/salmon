@@ -330,6 +330,14 @@ data Tending = Tending
     , tendingOn :: !(IORef Bool)
     -- ^ @supervise off@ clears this; nothing is tended between passes, and
     -- @serve@ behaves as it did before per-node machines existed.
+    , tendingAutoConverge :: !(IORef Bool)
+    -- ^ @autoconverge off@ clears this: a declaring command
+    -- (@up@\/@only@\/@down@\/@clear@\/the @-directive@ forms) still records
+    -- the epoch and updates 'worldNodes'/'worldLedger' as usual, but the
+    -- convergence pass that would otherwise follow it immediately is
+    -- skipped, leaving whatever @status@\/@query@ already show unchanged
+    -- until an explicit @converge@. On by default, matching every existing
+    -- caller's behaviour.
     , tendingPending :: !(IORef (Map Ref [Mailbox.Instruction]))
     -- ^ (R2). instructions an operator posted while no supervisor was
     -- running to hand them to. A one-shot machine does not survive a
@@ -393,6 +401,12 @@ data ServeCommand
     | -- | @supervise on@\/@supervise off@: whether to keep tending nodes
       -- between convergence passes. On by default.
       Supervise !Bool
+    | -- | @autoconverge on@\/@autoconverge off@: whether a declaring
+      -- command (@up@\/@only@\/@down@\/@clear@\/the @-directive@ forms)
+      -- triggers a convergence pass on its own. On by default; @off@ lets
+      -- several declarations (or an inspection via @status@\/@query@) sit
+      -- between the declaration and an explicit @converge@.
+      AutoConverge !Bool
     | -- | @force@\/@recheck@\/@pause@\/@resume@ [--select P]... [--exclude
       -- P]...: queue a 'Mailbox.Instruction' for the matching nodes, to be
       -- delivered the next time this world's nodes are tended (R2). An
@@ -443,7 +457,8 @@ parseServeCommand line =
                     "status" -> Status <$> parseSelection args
                     "history" -> History <$> parseSelection args
                     "query" -> QueryCmd <$> parseSelection args
-                    "supervise" -> onOff w args
+                    "supervise" -> onOff w args Supervise
+                    "autoconverge" -> onOff w args AutoConverge
                     "force" -> Instruct Mailbox.Force <$> parseSelection args
                     "recheck" -> Instruct Mailbox.Recheck <$> parseSelection args
                     "pause" -> Instruct Mailbox.Pause <$> parseSelection args
@@ -469,10 +484,10 @@ parseServeCommand line =
             [path] -> Right (mk path)
             _ -> Left (Text.pack w <> " takes exactly one file argument")
 
-    onOff w args =
+    onOff w args mk =
         case args of
-            ["on"] -> Right (Supervise True)
-            ["off"] -> Right (Supervise False)
+            ["on"] -> Right (mk True)
+            ["off"] -> Right (mk False)
             _ -> Left (Text.pack w <> " takes exactly one of `on` or `off`")
 
 {- | Scans a token list for repeated @--select PATTERN@\/@--exclude
@@ -544,6 +559,8 @@ data Report
       Cleared !Int
     | -- | @supervise on@\/@supervise off@
       Supervised !Bool
+    | -- | @autoconverge on@\/@autoconverge off@
+      AutoConverged !Bool
     | -- | (R2). a @force@\/@recheck@\/@pause@\/@resume@ was queued for this
       -- many nodes; takes effect once tending next starts, not immediately
       Instructed !Mailbox.Instruction !Int
@@ -601,6 +618,8 @@ renderReport rep =
         Cleared n -> ["serve: retired " <> tshow n <> " seed(s)"]
         Supervised True -> ["serve: supervising (nodes are tended between passes)"]
         Supervised False -> ["serve: not supervising (nodes are left alone between passes)"]
+        AutoConverged True -> ["serve: auto-converging (each declaration converges immediately)"]
+        AutoConverged False -> ["serve: not auto-converging (declarations wait for an explicit `converge`)"]
         Instructed instr n ->
             [ Text.unwords
                 [ "serve: queued"
@@ -820,6 +839,7 @@ commandReference =
     , "  query [--select P]... [--exclude P]..."
     , "                                 annotate nodes [selected]/[excluded], without acting on anything"
     , "  supervise on|off               whether to keep tending nodes between passes (default on)"
+    , "  autoconverge on|off            whether a declaration converges immediately (default on)"
     , "  force   [--select P]... [--exclude P]..."
     , "                                 run `up` on matching nodes even though their check says not to"
     , "  recheck [--select P]... [--exclude P]..."
@@ -833,7 +853,8 @@ commandReference =
     , "serve: --select/--exclude patterns are /-separated node-path globs (* one segment, ** any depth);"
     , "       may repeat; omitting --select entirely means everything."
     , "serve: `help TOPIC` for more, where TOPIC is one of:"
-    , "       up, directive, load, clear, converge, status, history, query, select, supervise, force"
+    , "       up, directive, load, clear, converge, status, history, query, select, supervise,"
+    , "       autoconverge, force"
     ]
 
 {- | @help TOPIC@'s lookup table, matched case-insensitively (several names
@@ -858,6 +879,7 @@ helpTopics =
     , ("query", queryHelp)
     , ("supervise", superviseHelp)
     , ("watchdog", superviseHelp)
+    , ("autoconverge", autoConvergeHelp)
     , ("force", instructHelp)
     , ("recheck", instructHelp)
     , ("pause", instructHelp)
@@ -888,7 +910,9 @@ declareHelp =
     , "  already-active, unchanged seed is a no-op (nothing pending, nothing re-run)."
     , ""
     , "  Every declaration converges automatically right after being recorded (as if `converge`"
-    , "  had been typed next); it is never itself scoped by --select/--exclude."
+    , "  had been typed next); it is never itself scoped by --select/--exclude. `autoconverge off`"
+    , "  turns this off, so several declarations can be recorded and inspected (`status`/`query`)"
+    , "  before an explicit `converge` acts on any of them — see `help autoconverge`."
     , ""
     , "  See also: `help directive` (declaring from a pre-generated directive file instead of"
     , "  seed args), `help load` (batch-declaring several seeds from a script file)."
@@ -1056,6 +1080,29 @@ superviseHelp =
     , "  said what silence would mean."
     ]
 
+autoConvergeHelp :: [Text]
+autoConvergeHelp =
+    [ "serve: autoconverge on|off"
+    , ""
+    , "  Whether a declaring command (`up`/`only`/`down`/`clear`, and the `-directive` forms)"
+    , "  triggers a convergence pass immediately after recording its epoch. On by default, which"
+    , "  is what makes `up <seed>` on its own bring the seed's nodes up: the declaration and the"
+    , "  pass that acts on it happen as one step."
+    , ""
+    , "  `autoconverge off` splits that in two. A declaration still updates the active set and"
+    , "  `worldLedger`/`worldNodes` right away — `status`/`query`/`history` see it immediately —"
+    , "  but nothing is applied until an explicit `converge` (optionally restricted with"
+    , "  --select/--exclude). This is the way to record several declarations (e.g. `up a`, then"
+    , "  `down b`, then `up c`) and inspect the combined result with `query`/`status` before"
+    , "  anything actually runs, or to review a directive-driven declaration for a mistake before"
+    , "  committing to it."
+    , ""
+    , "  Supervision (`help supervise`) is unaffected either way: a node already up and already"
+    , "  supervised keeps being tended regardless of this setting, which only governs whether a"
+    , "  *new* declaration's own pass fires on its own. `converge` (with no autoconverge caveat)"
+    , "  always still runs a pass, whichever way this is set."
+    ]
+
 instructHelp :: [Text]
 instructHelp =
     [ "serve: force | recheck | pause | resume [--select PATTERN]... [--exclude PATTERN]..."
@@ -1122,7 +1169,7 @@ serve ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serve = serveWith [] Nothing
+serve = serveWith [] Nothing True
 
 {- | 'serve', with "Salmon.Op.Rewrite" phases registered. They run after every
 fold, so a convergence walks the /computed/ graph — the one where a
@@ -1137,12 +1184,20 @@ walks (see "Salmon.Actions.Concurrent"): 'Nothing' is unbounded, matching
 teardown and the bring-up half of every pass, not one each, since the two
 never run at the same time (teardown is awaited before bring-up starts) and
 so never contend with each other for it.
+
+The 'Bool' is the starting value of @autoconverge@ (see 'AutoConverge'):
+'True' matches every version of 'serve' before the setting existed (each
+declaration converges immediately), 'False' starts the loop the way an
+in-session @autoconverge off@ would, for a caller (e.g. a CLI flag) that
+wants declarations held back from the very first line rather than needing
+the operator to type it first.
 -}
 serveWith ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
     [Rewrite Extension] ->
     Maybe ConcurrencyLimit ->
+    Bool ->
     Reporter Report ->
     Reporter (UpDown.Report Extension) ->
     ([String] -> Either Text seed) ->
@@ -1150,9 +1205,9 @@ serveWith ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serveWith rewrites limit r nodeReporter parseSeed configure program h = do
+serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure program h = do
     world <- newIORef emptyWorld
-    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef Map.empty
+    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
     inbox <- newTChanIO
     -- the input handle is read on its own thread so that the loop is never
     -- itself blocked in a read: the supervisor's machines run while it
@@ -1493,7 +1548,7 @@ serveWith rewrites limit r nodeReporter parseSeed configure program h = do
                         w <- readIORef world
                         writeIORef world (resettle w{worldLedger = Ledger.retractAll w.worldLedger})
                         runReporter r (Cleared (Ledger.liveCount w.worldLedger))
-                        converge tending world Nothing
+                        convergeIfAuto tending world
                         pure True
                     Declare decl args -> do
                         declare tending world decl args
@@ -1509,6 +1564,10 @@ serveWith rewrites limit r nodeReporter parseSeed configure program h = do
                         -- which is immediately after this command.
                         unless on (stopTending tending world)
                         runReporter r (Supervised on)
+                        pure True
+                    AutoConverge on -> do
+                        writeIORef (tendingAutoConverge tending) on
+                        runReporter r (AutoConverged on)
                         pure True
                     Instruct instr sel -> do
                         w <- readIORef world
@@ -1598,7 +1657,8 @@ serveWith rewrites limit r nodeReporter parseSeed configure program h = do
                         commitEpoch tending world w0 decl ep
 
     -- | Appends and records a freshly-built epoch, then converges (fully:
-    -- a declaration is never itself scoped by a 'Selection').
+    -- a declaration is never itself scoped by a 'Selection') — unless
+    -- @autoconverge off@ has asked declarations to just record and wait.
     commitEpoch :: Tending -> IORef (World seed directive) -> World seed directive -> Declaration -> Epoch seed directive -> IO ()
     commitEpoch tending world w0 decl ep = do
         let dag = Dag.foldDag Dag.sameRepresentative ep.epochGraph
@@ -1615,7 +1675,15 @@ serveWith rewrites limit r nodeReporter parseSeed configure program h = do
                 ep.epochDirection
                 (Map.size (Dag.dagNodes dag))
                 (length w1.worldEpochs)
-        converge tending world Nothing
+        convergeIfAuto tending world
+
+    -- | 'converge's the whole world, unless @autoconverge off@ is in
+    -- effect, in which case a declaring command's own report is the only
+    -- thing the operator sees until an explicit @converge@.
+    convergeIfAuto :: Tending -> IORef (World seed directive) -> IO ()
+    convergeIfAuto tending world = do
+        auto <- readIORef (tendingAutoConverge tending)
+        when auto (converge tending world Nothing)
 
     -- | Runs one down-then-up convergence pass. @restriction@, when
     -- present, additionally 'Skippable'-gates any node whose 'Ref' isn't in

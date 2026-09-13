@@ -90,6 +90,7 @@ tests =
         , testCase "`force` re-applies a node its own check still calls satisfied" forceOverridesASatisfiedCheck
         , testCase "`pause` stops a node coming back, `resume` lets it" pauseThenResume
         , testCase "(I6) a re-declaration with changed content is applied by the pass itself, not just the tending loop" reDeclareWithChangedContentIsAppliedByThePass
+        , testCase "`autoconverge off` records a declaration without converging it" autoConvergeOffDefersConvergence
         ]
 
 -------------------------------------------------------------------------------
@@ -130,6 +131,23 @@ declaredSeedConverges =
         assertFileExists root "a" True
         assertAllConverged TurnUp w
         assertEqual "one converge, nothing left over" [True] (convergeOutcomes reports)
+
+-- | `autoconverge off` lets a declaration record itself (visible to
+-- `status`) without touching the filesystem, until a later `converge`
+-- catches it up.
+autoConvergeOffDefersConvergence :: IO ()
+autoConvergeOffDefersConvergence =
+    withTempDir $ \root -> do
+        (w1, reports1, _) <- runServe program root ["autoconverge off", "up a"]
+        assertFileExists root "a" False
+        assertEqual "the declaration itself does not converge" [] (convergeOutcomes reports1)
+        assertBool
+            "declared node is recorded but still pending"
+            (all (\st -> st.nodeConvergence == Pending) (Map.elems w1.worldNodes))
+        (w2, reports2, _) <- runServe program root ["autoconverge off", "up a", "converge"]
+        assertFileExists root "a" True
+        assertEqual "the explicit converge runs exactly once" [True] (convergeOutcomes reports2)
+        assertAllConverged TurnUp w2
 
 reDeclareIsNoop :: IO ()
 reDeclareIsNoop =
@@ -436,7 +454,7 @@ runServeWith rewrites prog root script = do
     (nodeReporter, readNodeReports) <- capture
     w <-
         withScript script $
-            Serve.serveWith rewrites Nothing serveReporter nodeReporter (parseSpec root) (Configure pure) prog
+            Serve.serveWith rewrites Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) prog
     (,,) w <$> readServeReports <*> readNodeReports
 
 withScript :: [String] -> (Handle -> IO a) -> IO a
@@ -607,7 +625,7 @@ withSession prog root body = do
     done <- newEmptyMVar
     _ <-
         forkIO $ do
-            w <- Serve.serveWith [] Nothing serveReporter nodeReporter (parseSpec root) (Configure pure) prog readEnd
+            w <- Serve.serveWith [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) prog readEnd
             putMVar done w
     let session = Session writeEnd serveTrace nodeTrace
     result <- body session
@@ -969,7 +987,7 @@ runGreetingServe script = do
     (nodeReporter, readNodeReports) <- capture
     w <-
         withScript script $
-            Serve.serveWith [] Nothing serveReporter nodeReporter parseGreetingSpec (Configure pure) greetingProgram
+            Serve.serveWith [] Nothing True serveReporter nodeReporter parseGreetingSpec (Configure pure) greetingProgram
     (,,) w <$> readServeReports <*> readNodeReports
 
 assertFileContentIs :: FilePath -> String -> IO ()

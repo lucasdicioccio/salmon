@@ -83,6 +83,16 @@ Take any existing salmon binary — built the ordinary way, via
   what makes `run serve` usable for CI/scripted setups, not only interactive
   sessions. Reach for `supervise off` if you want the same determinism in an
   interactive session, and `supervise on` (the default) to get it back.
+- **Declaring and converging can be split apart.** By default every `up`/
+  `only`/`down`/`clear` converges immediately, as if `converge` had been
+  typed right after it. `autoconverge off` turns that off: declarations
+  still record and are visible to `status`/`query` right away, but nothing
+  is applied until you type an explicit `converge` (optionally restricted
+  with `--select`/`--exclude`). Useful for stacking up several declarations
+  — `up a`, `down b`, `up c` — and reviewing the combined result with
+  `query`/`status` before anything actually runs. `run serve
+  --no-autoconverge` starts a session already in that state, for a script
+  or session that always wants to review before acting.
 
 None of this requires writing a single `check` or `Supervision` dynamic.
 What it does *not* give you for free: a node whose effect can be perturbed

@@ -77,8 +77,10 @@ data RunCommand
     | -- | @run serve@, optionally capping how many nodes converge at once
       -- per pass (R6 in @specs/per-node-state-machines-remaining.md@;
       -- 'Nothing' is unbounded, matching every version of @serve@ before
-      -- this flag existed).
-      RunServe !(Maybe Int)
+      -- this flag existed), and optionally starting with @autoconverge@ off
+      -- (@--no-autoconverge@; 'False' is the default, matching every
+      -- version of @serve@ before the setting existed).
+      RunServe !(Maybe Int) !Bool
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
@@ -146,6 +148,11 @@ runCommandParser =
                         <> Options.Applicative.metavar "N"
                         <> Options.Applicative.help "Cap how many nodes converge (check/up/down) at once per pass. Omitted = unbounded."
                     )
+                )
+            <*> switch
+                ( long "no-autoconverge"
+                    <> Options.Applicative.help
+                        "Start with `autoconverge off`: declarations are recorded but not converged until an explicit `converge`."
                 )
     upP =
         RunUp
@@ -310,9 +317,9 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
-            void $ Serve.serveWith rewrites limit serveR r parseSeedArgs genBase traceBase stdin
+            void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR r parseSeedArgs genBase traceBase stdin
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
