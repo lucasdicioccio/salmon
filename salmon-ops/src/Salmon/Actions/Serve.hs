@@ -1284,6 +1284,7 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
             Just _ -> pure ()
             Nothing -> do
                 on <- readIORef (tendingOn tending)
+                auto <- readIORef (tendingAutoConverge tending)
                 w <- readIORef world
                 unless (not on || Map.null w.worldNodes) $ do
                     -- the same computed dag a pass walks: a rewrite's
@@ -1296,7 +1297,7 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                         Upkeep.startUpkeep
                             (tendReporter world computed)
                             kept
-                            (tendOf w computed)
+                            (tendOf auto w computed)
                             (Rewrite.computedDag computed)
                     -- the supervisor owns them now: it adopted what it could
                     -- and released the rest.
@@ -1426,9 +1427,23 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
     That distinction is load-bearing rather than an optimisation. Almost no
     node in this repository has a @check@, so almost every node answers
     'UpDown.Unknown'; without it, starting a supervisor after a pass would
-    re-run every @up@ in the graph. -}
-    tendOf :: World seed directive -> Rewritten Extension -> Ref -> Maybe Upkeep.Tend
-    tendOf w computed aref =
+    re-run every @up@ in the graph.
+
+    The 'Bool' is @autoconverge@'s current value, and it narrows "acted on"
+    for a plain (non-'managed') node: with autoconverge off, a not-yet-
+    'Converged' one-shot node is left untended (returns 'Nothing') rather
+    than 'Unsettled', because applying it is exactly the convergence work an
+    operator just asked to defer to an explicit @converge@ — without this, a
+    node the idle loop reached before that @converge@ would get 'up' run on
+    it anyway, since almost every node's @check@ answers 'UpDown.Immaterial'\/
+    'UpDown.Unknown' and 'Unsettled' treats either as "go ahead". A 'managed'
+    node is exempt: it has no other path to ever start (the convergence pass
+    ignores it categorically, see 'settleManaged'), so autoconverge being off
+    must not also mean "never". Already-'Converged' nodes are unaffected
+    either way — self-healing an effect already brought up is not the
+    convergence work being deferred. -}
+    tendOf :: Bool -> World seed directive -> Rewritten Extension -> Ref -> Maybe Upkeep.Tend
+    tendOf autoConverge w computed aref =
         case [st | rf <- Set.toList (Rewrite.membersOf computed aref), Just st <- [Map.lookup rf w.worldNodes]] of
             [] -> Nothing
             sts ->
@@ -1440,14 +1455,19 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                 -- everywhere else.
                 let ups = [st | st <- sts, st.nodeDirection == TurnUp]
                     mine = if null ups then sts else ups
-                 in Just
-                        Upkeep.Tend
-                            { Upkeep.tendDirection = if null ups then TurnDown else TurnUp
-                            , Upkeep.tendStanding =
-                                if all (\st -> st.nodeConvergence == Converged) mine
-                                    then Upkeep.Settled
-                                    else Upkeep.Unsettled
-                            }
+                    converged = all (\st -> st.nodeConvergence == Converged) mine
+                    managed = maybe False (isJust . (.extension.managed)) (Map.lookup aref (Dag.dagNodes (Rewrite.computedDag computed)))
+                 in if not converged && not autoConverge && not managed
+                        then Nothing
+                        else
+                            Just
+                                Upkeep.Tend
+                                    { Upkeep.tendDirection = if null ups then TurnDown else TurnUp
+                                    , Upkeep.tendStanding =
+                                        if converged
+                                            then Upkeep.Settled
+                                            else Upkeep.Unsettled
+                                    }
 
     {- | Where a machine's reports go.
 

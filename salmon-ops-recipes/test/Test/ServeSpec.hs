@@ -91,6 +91,7 @@ tests =
         , testCase "`pause` stops a node coming back, `resume` lets it" pauseThenResume
         , testCase "(I6) a re-declaration with changed content is applied by the pass itself, not just the tending loop" reDeclareWithChangedContentIsAppliedByThePass
         , testCase "`autoconverge off` records a declaration without converging it" autoConvergeOffDefersConvergence
+        , testCase "`autoconverge off` also keeps the idle tending loop from applying a deferred declaration" autoConvergeOffAlsoStopsIdleTending
         ]
 
 -------------------------------------------------------------------------------
@@ -694,6 +695,33 @@ idleLoopTends =
             "and the world still says converged"
             [Converged]
             (fmap nodeConvergence (Map.elems w.worldNodes))
+
+{- | The bug this pinned: 'commitEpoch' skipping its own auto-@converge@ is
+not enough on its own, because the idle tending loop ('tendOf') used to
+treat any not-yet-'Converged' node as work to do regardless of
+@autoconverge@ — so a script that declared, then merely went idle for a
+moment before its next command, got the deferred node applied anyway by the
+tending loop rather than by the pass. This drives a real idle gap (a
+'threadDelay', not a queued script) so the loop actually gets the chance to
+tend before asserting it did not.
+-}
+autoConvergeOffAlsoStopsIdleTending :: IO ()
+autoConvergeOffAlsoStopsIdleTending =
+    withTempDir $ \root -> do
+        there <- newIORef False
+        attempts <- newIORef (0 :: Int)
+        (_, w) <- withSession (watched there attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "autoconverge off"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged False <- rs]))
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Declared{} <- rs]))
+            -- a real idle gap: enough time for the loop to have started
+            -- tending and applied the node, if it were going to.
+            threadDelay 300000
+            hPutStrLn session.sessionIn "status"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            assertEqual "the idle loop must not apply a deferred declaration" 0 =<< readIORef attempts
+        assertEqual "the node is still pending, not silently converged" [Pending] (fmap nodeConvergence (Map.elems w.worldNodes))
 
 superviseOffLeavesItAlone :: IO ()
 superviseOffLeavesItAlone =
