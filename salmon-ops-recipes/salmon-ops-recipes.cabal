@@ -94,11 +94,13 @@ test-suite salmon-ops-recipes-test
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
                     , Test.RewriteSpec
+                    , Test.ServeModelSpec
                     , Test.ServeSpec
                     , Test.SystemdSpec
                     , Test.UpTreeSpec
                     , Test.UpkeepSpec
-    build-depends:    base
+    build-depends:    QuickCheck
+                    , base
                     , aeson
                     , bytestring
                     , comonad
@@ -116,6 +118,7 @@ test-suite salmon-ops-recipes-test
                     , salmon-ops-recipes
                     , tasty
                     , tasty-hunit
+                    , tasty-quickcheck
                     , temporary
                     , text
                     , unix
