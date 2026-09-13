@@ -131,7 +131,8 @@ import Data.Char (isSpace)
 import Data.Foldable (traverse_)
 import Data.Maybe (isJust)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
+import qualified Data.List as List
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -572,14 +573,16 @@ data Report
       ConvergeStart !Int !Int
     | -- | everything applied cleanly, nodes still not converged
       ConvergeStop !Bool !Int
-    | StatusReport ![(Ref, NodeState)]
+    | -- | nodes, plus every live declaration's path(s) to each one (see 'worldPaths') —
+      -- the thing a @--select@\/@--exclude@ pattern is actually built from.
+      StatusReport ![(Ref, NodeState)] !(Map Ref [Text])
     | -- | epoch, declaration, still active, argv
       HistoryReport ![(EpochId, Declaration, Bool, [String])]
     | -- | declarations too old to still be in 'worldLog'; emitted after a
       -- 'HistoryReport' so @history@ never silently claims to be complete
       HistoryElided !Int
-    | -- | world nodes annotated against a resolved selection: selected, excluded
-      QueryReport ![(Ref, NodeState)] !(Set Ref) !(Set Ref)
+    | -- | world nodes annotated against a resolved selection: selected, excluded, paths
+      QueryReport ![(Ref, NodeState)] !(Set Ref) !(Set Ref) !(Map Ref [Text])
     | -- | @help@: the full reference ('Nothing', or a 'Topic' 'lookupTopic'
       -- didn't recognise), or a lengthier explanation of just that one
       -- recognised 'Topic'.
@@ -644,13 +647,13 @@ renderReport rep =
                 , if ok then ")" else ", including a failure)"
                 ]
             ]
-        StatusReport [] -> ["serve: no nodes"]
-        StatusReport xs -> "serve: nodes:" : concatMap renderNode (sortOn statusOrder xs)
+        StatusReport [] _ -> ["serve: no nodes"]
+        StatusReport xs paths -> "serve: nodes:" : concatMap (renderNode paths) (sortOn statusOrder xs)
         HistoryReport [] -> ["serve: no seed declared yet"]
         HistoryReport xs -> "serve: seeds:" : fmap renderEpochLine xs
         HistoryElided n -> ["serve: " <> tshow n <> " earlier declaration(s) elided"]
-        QueryReport [] _ _ -> ["serve: no nodes"]
-        QueryReport xs sel exc -> "serve: nodes:" : concatMap (renderQueryNode sel exc) (sortOn statusOrder xs)
+        QueryReport [] _ _ _ -> ["serve: no nodes"]
+        QueryReport xs sel exc paths -> "serve: nodes:" : concatMap (renderQueryNode paths sel exc) (sortOn statusOrder xs)
         HelpText mtopic ->
             case mtopic >>= lookupTopic of
                 Just detailed -> detailed
@@ -665,8 +668,8 @@ renderReport rep =
     listing. A node this has never tended (never supervised, or not yet
     reached by an idle pass) says so rather than showing stale silence as if
     it meant something. -}
-    renderNode :: (Ref, NodeState) -> [Text]
-    renderNode (r, st) = summary : detail
+    renderNode :: Map Ref [Text] -> (Ref, NodeState) -> [Text]
+    renderNode paths (r, st) = summary : pathLines ++ detail
       where
         summary =
             Text.unwords
@@ -677,6 +680,10 @@ renderReport rep =
                 , st.nodeShorthand
                 , renderVerdict st.nodeStatus
                 ]
+        pathLines = case Map.findWithDefault [] r paths of
+            [] -> ["     path: (none — not reached by any live declaration's graph)"]
+            [p] -> ["     path: " <> p]
+            ps -> "     paths:" : [ "       " <> p | p <- ps ]
         detail = case st.nodeStatus of
             Just ms | UpDown.Failure _ <- ms.statusCheck -> renderRingTail ms.statusOutput
             _ -> []
@@ -703,8 +710,8 @@ renderReport rep =
     ringTailLines :: Int
     ringTailLines = 10
 
-    renderQueryNode :: Set Ref -> Set Ref -> (Ref, NodeState) -> [Text]
-    renderQueryNode sel exc entry@(r, _) = case renderNode entry of
+    renderQueryNode :: Map Ref [Text] -> Set Ref -> Set Ref -> (Ref, NodeState) -> [Text]
+    renderQueryNode paths sel exc entry@(r, _) = case renderNode paths entry of
         [] -> []
         (summary : rest) -> (summary <> annotation) : rest
       where
@@ -1003,6 +1010,12 @@ statusHelp =
     , "  supervision has not reached it yet. A node whose last word was a failure additionally"
     , "  shows the tail of its own output ring underneath — what it was doing right before it"
     , "  failed, which is otherwise nowhere to see."
+    , ""
+    , "  Underneath each summary line is the path (or paths, if more than one live seed's graph"
+    , "  reaches the same node) a --select/--exclude PATTERN would match to name it — the same"
+    , "  slash-separated form `run tree`/`query` print, pasteable straight back in. This is the"
+    , "  only place those paths are discoverable at all; a node with none listed belongs to no"
+    , "  currently active seed (it is on its way down after being retired)."
     ]
 
 historyHelp :: [Text]
@@ -1147,6 +1160,13 @@ selectHelp =
     , ""
     , "  The same node (a shared predecessor, e.g. a directory two files sit in) can occur at"
     , "  several paths; matching any one of them is enough to select or exclude it."
+    , ""
+    , "  `status`/`query` are where these paths actually come from — each node's listing there"
+    , "  shows every path it currently has, pasteable straight back in as a PATTERN. A path built"
+    , "  from op kinds alone (`directory`, `file-contents`, ...) can be the same for two different"
+    , "  nodes when a recipe reuses the same shorthand at each position; when that happens, prefix"
+    , "  the node's own Ref (also printed on its `status` line) with `#` instead — `#fragment`"
+    , "  matches any node whose Ref starts with that text, which is always unique."
     ]
 
 -------------------------------------------------------------------------------
@@ -1537,7 +1557,7 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                         pure True
                     Status sel -> do
                         w <- readIORef world
-                        runReporter r (StatusReport (filterNodes w sel))
+                        runReporter r (StatusReport (filterNodes w sel) (worldPaths w))
                         pure True
                     History sel -> do
                         w <- readIORef world
@@ -1552,7 +1572,7 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                     QueryCmd sel -> do
                         w <- readIORef world
                         let (selr, excr) = resolveWorldSelectors w sel
-                        runReporter r (QueryReport (Map.toList w.worldNodes) selr excr)
+                        runReporter r (QueryReport (Map.toList w.worldNodes) selr excr (worldPaths w))
                         pure True
                     Converge sel -> do
                         restriction <-
@@ -2088,20 +2108,49 @@ historyLinesMatching p w =
     activeIds = activeEpochIds w
 
 {- | Resolves a 'Selection' against every currently-/active/ epoch's graph,
-unioning the per-epoch @(selected, excluded)@ pairs 'Query.resolveSelectors'
-returns — there is no single unified cograph for the whole 'World', only the
-unified 'worldNodes' map. An empty 'selSelect' still resolves to "everything"
-per epoch, so the union over active epochs is exactly every active node,
-mirroring 'retune''s own @desired@ computation.
+unioning the per-epoch matches — there is no single unified cograph for the
+whole 'World', only the unified 'worldNodes' map. An empty 'selSelect' still
+resolves to "everything" per epoch, so the union over active epochs is
+exactly every active node, mirroring 'retune''s own @desired@ computation.
+
+A pattern beginning with @#@ is, exactly as 'Query.resolveRewrittenSelectors'
+already does for @run up@\/@run down@, matched by 'Ref' instead of by path: a
+fragment of the text 'status'\/'query' now print on every node's line (either
+the short, disambiguating tag or the full 'Ref'). This is what makes a node
+addressable at all when two of them share every path — a recipe that reuses
+the same shorthand (\"directory\", \"file-contents\", ...) at each position
+gives 'Query.pathedRefs' no way to tell them apart by path, and printing the
+paths in 'worldPaths' cannot invent a distinction that was never there.
 -}
 resolveWorldSelectors :: World seed directive -> Selection -> (Set Ref, Set Ref)
 resolveWorldSelectors w sel =
-    (Set.unions (map fst perEpoch), Set.unions (map snd perEpoch))
+    (selectedBase `Set.difference` excluded, excluded)
   where
-    perEpoch =
-        [ Query.resolveSelectors ep.epochGraph sel.selSelect sel.selExclude
-        | ep <- w.worldEpochs
-        ]
+    (selRefPats, selPathPats) = List.partition isRefFragment sel.selSelect
+    (excRefPats, excPathPats) = List.partition isRefFragment sel.selExclude
+
+    allRefs = Set.unions [Set.fromList (map snd (Query.pathedRefs ep.epochGraph)) | ep <- w.worldEpochs]
+
+    pathMatches :: [Text] -> Set Ref
+    pathMatches [] = Set.empty
+    pathMatches pats = Set.unions [fst (Query.resolveSelectors ep.epochGraph pats []) | ep <- w.worldEpochs]
+
+    refMatches :: [Text] -> Set Ref
+    refMatches pats = Set.fromList [rf | rf <- Set.toList allRefs, pat <- pats, matchesRefFragment pat rf]
+
+    matchesRefFragment :: Text -> Ref -> Bool
+    matchesRefFragment pat rf =
+        let fragment = Text.drop 1 pat
+         in fragment `Text.isPrefixOf` Query.shortRef rf || fragment `Text.isPrefixOf` unRef rf
+
+    isRefFragment :: Text -> Bool
+    isRefFragment = Text.isPrefixOf "#"
+
+    matchesOf :: [Text] -> [Text] -> Set Ref
+    matchesOf pathPats refPats = pathMatches pathPats `Set.union` refMatches refPats
+
+    selectedBase = if null sel.selSelect then allRefs else matchesOf selPathPats selRefPats
+    excluded = matchesOf excPathPats excRefPats
 
 {- | The epochs 'prune' retained are exactly the live declarations' newest
 ones, so this needs no separate active-seed index — the ledger's liveness is
@@ -2109,3 +2158,27 @@ the only source of truth for what is declared up.
 -}
 activeEpochIds :: World seed directive -> Set EpochId
 activeEpochIds w = Set.fromList (fmap epochId w.worldEpochs)
+
+{- | Every path (rendered @\/@-separated, root-to-node, exactly the shape
+@--select@\/@--exclude@ patterns match against) at which a live declaration's
+graph reaches each 'Ref' — the thing @status@\/@query@ never showed despite
+being the only practical way to /build/ a selector pattern in the first
+place: without this, a node was nameable only by its 'Ref' (opaque) or by
+guessing the path back from its 'nodeShorthand' and hoping there is exactly
+one node with that shorthand. A node reached by more than one seed, or twice
+within one seed's graph, can have more than one path; all of them are shown,
+since any one is a valid selector. Sourced from 'worldEpochs' only, same as
+'resolveWorldSelectors' — a retired seed's graph is gone, and a node with no
+entry here (nothing in it, or absent from the map) is one no /live/
+declaration's graph currently reaches by path at all, addressable only by its
+'Ref' (the @#@-prefixed form 'Query.resolveRewrittenSelectors' understands).
+-}
+worldPaths :: World seed directive -> Map Ref [Text]
+worldPaths w =
+    Map.map (nub . sortOn Text.length) $
+        Map.fromListWith
+            (++)
+            [ (ref, [Text.intercalate "/" path])
+            | ep <- w.worldEpochs
+            , (path, ref) <- Query.pathedRefs ep.epochGraph
+            ]

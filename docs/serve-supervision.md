@@ -44,10 +44,14 @@ Take any existing salmon binary — built the ordinary way, via
   this world still cares about, its wanted direction (up/down), and its
   convergence (`Pending`/`Stale`/`Converged`/`Errored`/`Blocked`) — plus, if
   the node has ever been tended, its own last `check` verdict and (for a
-  failing node) the tail of its output. `history` lists what was declared,
-  when. `query` annotates nodes `[selected]`/`[excluded]` against a
-  `--select`/`--exclude` pattern without acting on anything — useful for
-  checking a pattern before you `force`/`pause` with it for real.
+  failing node) the tail of its output, and (underneath) every path a
+  currently-active seed's graph reaches it at — the exact text a
+  `--select`/`--exclude` pattern matches, pasteable straight back in.
+  Without this a pattern could only be *guessed*; `status` is where it comes
+  from. `history` lists what was declared, when. `query` annotates nodes
+  `[selected]`/`[excluded]` against a `--select`/`--exclude` pattern without
+  acting on anything — useful for checking a pattern before you `force`/
+  `pause` with it for real.
 - **Re-declaring with *different* content is noticed by the pass itself**,
   not just eventually by a background loop — as long as something about the
   declaration that changed is visible to `Salmon.Op.Dag.sameRepresentative`
@@ -165,6 +169,8 @@ quit
 | convergence bookkeeping, re-declare/retire semantics | ✅ | — |
 | `status`/`history`/`query` | ✅ | — |
 | `force`/`recheck`/`pause`/`resume` reachability | ✅ | — |
+| discovering a node's `--select`/`--exclude` path | ✅ (`status`/`query` print it) | — |
+| disambiguating two nodes that share one path (identical shorthand) | ✅ | a `#ref` selector (§9) |
 | `Stale` on a re-declaration that changes `help`/`notes`/most `dynamics` | ✅ | — |
 | `Stale` on a re-declaration that only changes content baked into `up` | ❌ | a `check`, or a content-derived `notes`/`dynamics` field (§8) |
 | self-healing when an effect is perturbed from outside | ❌ | a `check` (§5) |
@@ -373,22 +379,31 @@ Patterns may repeat (union within each of `--select`/`--exclude`); omitting
 --select '/**' --exclude '/root/db/**'   everything except the db subtree
 ```
 
-If your binary registers a `Rewrite` (e.g. `Debian.Package.batchPackages`,
-which collapses every declared `deb` node into one `apt-get` batch — see
-`howto-ops.md`/`CLAUDE.md`'s `Op/Rewrite.hs` section if this is new to you),
-a rewrite-introduced node (the batch itself) was never declared and so has
-no tree position for a pattern to match. Address it directly instead with a
-`#`-prefixed pattern, matching by `Ref` rather than by path — the same short
-hash text a `run tree`/`run dag`/`query show` render already prints next to
-a colliding path:
+A path is built from op *kinds* (`shorthand`, e.g. `directory`,
+`file-contents`), not from any identifying value a recipe passed in — two
+nodes at the same tree position with the same shorthand (say, two files a
+recipe declares in a loop) get the exact same path, and a path pattern
+necessarily selects both together. `status`'s path line is where you'd
+notice this: two nodes printing the identical path is the tell. When that
+happens, address one of them directly instead with a `#`-prefixed pattern,
+matching by `Ref` rather than by path — the same (short or full) hash text
+`status`/`run tree`/`run dag`/`query show` already print next to it:
 
 ```
 --select '#AbCd1234'    matches by a Ref fragment (short or full)
 ```
 
-A `#`-match against a batch expands to every declared node it stands in
-for — excluding "the batch" is exactly excluding every package that went
-into it.
+If your binary registers a `Rewrite` (e.g. `Debian.Package.batchPackages`,
+which collapses every declared `deb` node into one `apt-get` batch — see
+`howto-ops.md`/`CLAUDE.md`'s `Op/Rewrite.hs` section if this is new to you),
+the rewrite-introduced node (the batch itself) was never declared and so has
+no tree position — and no `status` line — of its own either; a `#`-match
+against it expands to every declared node it stands in for, but only for
+`run up`/`run down`/`query show`/`query plan`, which see the *computed*,
+post-rewrite graph. `serve`'s own `status`/`query`/`converge --select` (this
+section, otherwise) resolve against the *declared* graph and so cannot name
+a batch this way at all — restrict by the declared nodes that feed it
+instead.
 
 ## 10. Bounding concurrency
 

@@ -47,7 +47,7 @@ import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
-import Salmon.Op.Ref (Ref, mkRef)
+import Salmon.Op.Ref (Ref, mkRef, unRef)
 import Salmon.Op.Rewrite (Phase (..), Rewrite)
 import qualified Salmon.Op.Status as MachineStatus
 import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
@@ -98,6 +98,8 @@ tests =
         , testCase "several declarations made while autoconverge is off land in one combined converge" autoConvergeOffStacksDeclarationsIntoOneConverge
         , testCase "a managed node still starts under `autoconverge off` — it has no other path to" managedNodeStartsDespiteAutoConvergeOff
         , testCase "turning autoconverge back on lets idle tending pick up what was deferred, with no explicit converge" autoConvergeBackOnLetsTendingCatchUp
+        , testCase "`status` prints each node's path, and it round-trips as a `--select` pattern" statusPathsRoundTripAsSelectors
+        , testCase "two nodes sharing one shorthand-derived path are told apart by `#ref` instead" ambiguousPathsAreDisambiguatedByRef
         ]
 
 -------------------------------------------------------------------------------
@@ -405,7 +407,7 @@ statusExcludeAllHidesEverything =
         (_, reports, _) <- runServe program root ["up a", "status --exclude **"]
         -- `up a`'s own auto-converge never emits a StatusReport, so the only
         -- one here is the explicit `status` call's.
-        assertEqual "every node excluded" [0] [length xs | Serve.StatusReport xs <- reports]
+        assertEqual "every node excluded" [0] [length xs | Serve.StatusReport xs _ <- reports]
 
 historyExcludeAllHidesEverything :: IO ()
 historyExcludeAllHidesEverything =
@@ -800,7 +802,7 @@ autoConvergeOffAlsoStopsIdleTending =
             -- tending and applied the node, if it were going to.
             threadDelay 300000
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
             assertEqual "the idle loop must not apply a deferred declaration" 0 =<< readIORef attempts
         assertEqual "the node is still pending, not silently converged" [Pending] (fmap nodeConvergence (Map.elems w.worldNodes))
 
@@ -824,7 +826,7 @@ autoConvergeOffKeepsAChecklessNodeFromRunning =
             -- tending and applied the node, if it were going to.
             threadDelay 300000
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
             assertEqual "up must never have run" 0 =<< readIORef attempts
             -- the deferred work is still there, waiting for an explicit
             -- `converge` — this isn't "up never runs at all", only "not
@@ -880,6 +882,54 @@ autoConvergeBackOnLetsTendingCatchUp =
             awaitAttempts attempts 1
         assertEqual "and the world now agrees it converged" [Converged] (fmap nodeConvergence (Map.elems w.worldNodes))
 
+{- | The whole point of printing paths on `status` is that they are usable:
+whatever text a node's line shows must itself select that node back out
+again via `--select`. Picks the shared root node's path (unique — only one
+node in this fixture's graph has the shorthand `serve-spec-root`) rather than
+a file's, since the two files share one shorthand and thus one identical
+path (see 'ambiguousPathsAreDisambiguatedByRef' for that case).
+-}
+statusPathsRoundTripAsSelectors :: IO ()
+statusPathsRoundTripAsSelectors =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServe program root ["up a b", "status"]
+        let paths = last [ps | Serve.StatusReport _ ps <- reports]
+            nodes = last [xs | Serve.StatusReport xs _ <- reports]
+        rootRef <- case [r | (r, st) <- nodes, st.nodeShorthand == "serve-spec-root"] of
+            [r] -> pure r
+            rs -> assertFailure ("expected exactly one serve-spec-root node, got " <> show (length rs))
+        rootPath <- case Map.lookup rootRef paths of
+            Just [p] -> pure p
+            other -> assertFailure ("expected exactly one path for the root node, got " <> show other)
+        (w2, reports2, _) <- runServe program root ["up a b", "query --select " <> Text.unpack rootPath]
+        let selected = last [sel | Serve.QueryReport _ sel _ _ <- reports2]
+        assertEqual "the path selected exactly the root node it came from" (Set.singleton rootRef) selected
+        assertBool "and the query touched nothing" (Map.size w2.worldNodes > 0)
+
+{- | 'fileOp' gives every file the same shorthand ("file-contents"), so two
+files declared under one seed reach the same path in 'Query.pathedRefs' —
+printing paths on `status` cannot invent a distinction that was never there.
+This is exactly the case @help select@ now documents: fall back to a `#`-Ref
+fragment, which is unique because a 'Ref' is content-addressed.
+-}
+ambiguousPathsAreDisambiguatedByRef :: IO ()
+ambiguousPathsAreDisambiguatedByRef =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServe program root ["up a b", "status"]
+        let paths = last [ps | Serve.StatusReport _ ps <- reports]
+            nodes = last [xs | Serve.StatusReport xs _ <- reports]
+            fileRefs = [r | (r, st) <- nodes, st.nodeShorthand == "file-contents"]
+        assertEqual "both files are nodes here" 2 (length fileRefs)
+        let filePaths = Data.List.nub [p | r <- fileRefs, Just ps <- [Map.lookup r paths], p <- ps]
+        assertEqual "and they share the exact same path" 1 (length filePaths)
+        (target, other) <- case fileRefs of
+            [t, o] -> pure (t, o)
+            _ -> assertFailure "expected exactly two file-contents nodes"
+        (_, reports2, _) <- runServe program root ["up a b", "query --select #" <> Text.unpack (unRef target)]
+        let selected = last [sel | Serve.QueryReport _ sel _ _ <- reports2]
+        assertEqual "the #ref pattern selected only its own node" (Set.singleton target) selected
+        assertBool "not the other node sharing its path" (not (other `Set.member` selected))
+
 superviseOffLeavesItAlone :: IO ()
 superviseOffLeavesItAlone =
     withTempDir $ \root -> do
@@ -895,7 +945,7 @@ superviseOffLeavesItAlone =
             -- loop to do something else and check nothing happened in the
             -- meantime.
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
             assertEqual "nothing put it back" 1 =<< readIORef attempts
             assertBool "and supervision never started" . not . tending
                 =<< atomically (reverse <$> readTVar session.sessionServe)
@@ -924,7 +974,7 @@ ownedProcessSurvivesCommands =
             n0 <- awaitTicks ticks 2
             -- a read-only command: the machines stand down, but not this one
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
             n1 <- awaitTicks ticks (n0 + 2)
             assertBool "it kept running across the command" (n1 > n0)
             -- ...and now nothing wants it
@@ -1081,7 +1131,7 @@ statusShowsAFailingNodesOutput =
   where
     flakyStates :: [Serve.Report] -> [NodeState]
     flakyStates rs =
-        [st | Serve.StatusReport xs <- rs, (_, st) <- xs, st.nodeShorthand == "flaky-forever"]
+        [st | Serve.StatusReport xs _ <- rs, (_, st) <- xs, st.nodeShorthand == "flaky-forever"]
 
     isFailingSnapshot :: NodeState -> Bool
     isFailingSnapshot st = maybe False (isFailure . MachineStatus.statusCheck) st.nodeStatus
