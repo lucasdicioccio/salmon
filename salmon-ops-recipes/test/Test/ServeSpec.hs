@@ -93,6 +93,11 @@ tests =
         , testCase "`autoconverge off` records a declaration without converging it" autoConvergeOffDefersConvergence
         , testCase "`autoconverge off` also keeps the idle tending loop from applying a deferred declaration" autoConvergeOffAlsoStopsIdleTending
         , testCase "`autoconverge off` keeps a checkless node's `up` from ever running" autoConvergeOffKeepsAChecklessNodeFromRunning
+        , testCase "`autoconverge off` defers a `down` the same way it defers an `up`" autoConvergeOffDefersTeardown
+        , testCase "`autoconverge off` defers a `clear` the same way" autoConvergeOffDefersClear
+        , testCase "several declarations made while autoconverge is off land in one combined converge" autoConvergeOffStacksDeclarationsIntoOneConverge
+        , testCase "a managed node still starts under `autoconverge off` — it has no other path to" managedNodeStartsDespiteAutoConvergeOff
+        , testCase "turning autoconverge back on lets idle tending pick up what was deferred, with no explicit converge" autoConvergeBackOnLetsTendingCatchUp
         ]
 
 -------------------------------------------------------------------------------
@@ -150,6 +155,66 @@ autoConvergeOffDefersConvergence =
         assertFileExists root "a" True
         assertEqual "the explicit converge runs exactly once" [True] (convergeOutcomes reports2)
         assertAllConverged TurnUp w2
+
+-- | @down@ is exactly as deferrable as @up@: the ledger records the
+-- retraction and the node's direction flips to 'TurnDown' right away, but
+-- the file itself is untouched until an explicit @converge@.
+autoConvergeOffDefersTeardown :: IO ()
+autoConvergeOffDefersTeardown =
+    withTempDir $ \root -> do
+        (w1, reports1, _) <- runServe program root ["up a", "autoconverge off", "down a"]
+        assertFileExists root "a" True
+        assertEqual "only the initial `up` converged; the `down` did not" [True] (convergeOutcomes reports1)
+        assertBool
+            "wanted down, but not yet converged there"
+            (all (\st -> st.nodeDirection == TurnDown && st.nodeConvergence /= Converged) (Map.elems w1.worldNodes))
+        (w2, reports2, _) <- runServe program root ["up a", "autoconverge off", "down a", "converge"]
+        assertFileExists root "a" False
+        assertEqual "one converge for the `up`, one for the explicit `converge`" [True, True] (convergeOutcomes reports2)
+        assertWorldSettled w2
+
+-- | @clear@ retires every seed at once but goes through the same
+-- 'commitEpoch' path as any other declaration, so it defers exactly the
+-- same way.
+autoConvergeOffDefersClear :: IO ()
+autoConvergeOffDefersClear =
+    withTempDir $ \root -> do
+        (w, reports, _) <- runServe program root ["up a", "autoconverge off", "clear"]
+        assertFileExists root "a" True
+        assertEqual "the `clear` itself did not converge" [True] (convergeOutcomes reports)
+        assertBool
+            "every node wanted down, none converged there yet"
+            (all (\st -> st.nodeDirection == TurnDown && st.nodeConvergence /= Converged) (Map.elems w.worldNodes))
+
+{- | Several declarations made back to back while autoconverge is off — a
+teardown and a bring-up — land in the /one/ pass the next explicit
+@converge@ runs, exactly as if they had been typed as a single combined
+change. This is the scenario the feature exists for: stack up several
+declarations, inspect, then act on all of them at once.
+-}
+autoConvergeOffStacksDeclarationsIntoOneConverge :: IO ()
+autoConvergeOffStacksDeclarationsIntoOneConverge =
+    withTempDir $ \root -> do
+        (w, reports, _) <-
+            runServe
+                program
+                root
+                [ "up a" -- converges immediately: autoconverge is still on
+                , "autoconverge off"
+                , "down a"
+                , "up b"
+                , "converge" -- the one pass that actually does both
+                ]
+        assertFileExists root "a" False
+        assertFileExists root "b" True
+        assertEqual
+            "one converge for the initial `up a`, one for the combined explicit `converge`"
+            [True, True]
+            (convergeOutcomes reports)
+        let (finalDown, finalUp) = last [(ndown, nup) | Serve.ConvergeStart ndown nup <- reports]
+        assertBool "the explicit converge's own pass saw the teardown" (finalDown >= 1)
+        assertBool "...and the bring-up, together in the same pass" (finalUp >= 1)
+        assertAllConverged TurnUp w
 
 reDeclareIsNoop :: IO ()
 reDeclareIsNoop =
@@ -767,6 +832,52 @@ autoConvergeOffKeepsAChecklessNodeFromRunning =
             hPutStrLn session.sessionIn "converge"
             awaitOn session.sessionServe (\rs -> not (null [() | Serve.ConvergeStop{} <- rs]))
             assertEqual "the explicit converge finally runs it, exactly once" 1 =<< readIORef attempts
+        assertEqual "and the world now agrees it converged" [Converged] (fmap nodeConvergence (Map.elems w.worldNodes))
+
+{- | The exemption 'tendOf' carves out for a 'managed' node: the convergence
+pass ignores such a node categorically (see 'settleManaged'), so idle
+tending is its /only/ path to ever start at all. If autoconverge-off also
+blocked tending from acting on a not-yet-converged managed node, it could
+never come up — no explicit @converge@ would help, since @converge@ never
+touches it either. This is the regression a future "just block every
+not-yet-converged node uniformly" simplification would introduce.
+-}
+managedNodeStartsDespiteAutoConvergeOff :: IO ()
+managedNodeStartsDespiteAutoConvergeOff =
+    withTempDir $ \root -> do
+        let ticks = root </> "ticks"
+        _ <- withSession (ticker ticks) root $ \session -> do
+            hPutStrLn session.sessionIn "autoconverge off"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged False <- rs]))
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Declared{} <- rs]))
+            -- no explicit `converge` is ever typed: the daemon's only route
+            -- up is the idle tending loop, autoconverge notwithstanding.
+            _ <- awaitTicks ticks 2
+            pure ()
+        pure ()
+
+{- | @autoconverge@ is read fresh by 'tendOf' every time tending starts, not
+captured at declare time — so turning it back on is enough on its own to
+let the idle loop pick up whatever was left pending, with no explicit
+@converge@ needed. This is what makes "stack declarations, inspect, then
+flip autoconverge back on" as valid a way to resume as typing @converge@.
+-}
+autoConvergeBackOnLetsTendingCatchUp :: IO ()
+autoConvergeBackOnLetsTendingCatchUp =
+    withTempDir $ \root -> do
+        attempts <- newIORef (0 :: Int)
+        (_, w) <- withSession (neverRuns attempts) root $ \session -> do
+            hPutStrLn session.sessionIn "autoconverge off"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged False <- rs]))
+            hPutStrLn session.sessionIn "up a"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.Declared{} <- rs]))
+            threadDelay 300000
+            assertEqual "still deferred while autoconverge is off" 0 =<< readIORef attempts
+            hPutStrLn session.sessionIn "autoconverge on"
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged True <- rs]))
+            -- no `converge` typed here: the next idle tick alone must do it
+            awaitAttempts attempts 1
         assertEqual "and the world now agrees it converged" [Converged] (fmap nodeConvergence (Map.elems w.worldNodes))
 
 superviseOffLeavesItAlone :: IO ()
