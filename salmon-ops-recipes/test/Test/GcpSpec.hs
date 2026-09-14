@@ -10,16 +10,20 @@ what makes it testable without a real GCP project.
 module Test.GcpSpec (tests) where
 
 import GHC.IO.Exception (ExitCode (..))
+import System.Process.ListLike (CmdSpec (..), CreateProcess, cmdspec)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
 import Salmon.Actions.UpDown (CheckResult (..))
+import Salmon.Builtin.Nodes.Binary (prepare)
 import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
+import qualified Salmon.Builtin.Nodes.Gcp.Billing as Billing
 import qualified Salmon.Builtin.Nodes.Gcp.CloudRun as CloudRun
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
 import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
+import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 
 tests :: TestTree
@@ -33,7 +37,16 @@ tests =
         , testGroup "CloudRun.interpretServiceDescribe" cloudRunTests
         , testGroup "Iam" iamTests
         , testGroup "LoadBalancing" lbTests
+        , testGroup "ServiceUsage" serviceUsageTests
+        , testGroup "Billing.interpretBillingDescribe" billingTests
         ]
+
+-- | Extracts the argument list of a prepared gcloud 'CreateProcess', for
+-- asserting on rendered command-line shape without actually invoking gcloud.
+processArgs :: CreateProcess -> [String]
+processArgs p = case cmdspec p of
+    RawCommand _path args -> args
+    ShellCommand s -> [s]
 
 isFailure :: CheckResult -> Bool
 isFailure (Failure _) = True
@@ -133,6 +146,30 @@ iamTests =
             )
     , testCase "get-iam-policy failing outright is not satisfied" $
         assertBool "" (isFailure (Iam.interpretBindingPolicy binding (ExitFailure 1) ""))
+    , testCase "a secrets/ resource binds against the secrets group" $
+        assertEqual
+            ""
+            ["secrets", "add-iam-policy-binding", "my-secret", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/secretmanager.secretAccessor"]
+            (processArgs (prepare Iam.iamCommand (Iam.IamPolicyAddBinding secretBinding)))
+    , testCase "an artifacts/repositories/ resource carries its location as a trailing flag, after the resource" $
+        assertEqual
+            ""
+            ["artifacts", "repositories", "add-iam-policy-binding", "my-repo", "--location", "us-west1", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/uploader"]
+            (processArgs (prepare Iam.iamCommand (Iam.IamPolicyAddBinding repoBinding)))
+    , testCase "role describe succeeding means the custom role exists" $
+        assertEqual "" Success (Iam.interpretRoleDescribe "registryUploader" ExitSuccess)
+    , testCase "role describe failing means the custom role is absent" $
+        assertBool "" (isFailure (Iam.interpretRoleDescribe "registryUploader" (ExitFailure 1)))
+    , testCase "a custom role is created from its definition file" $
+        assertEqual
+            ""
+            ["iam", "roles", "create", "registryUploader", "--file", "infra/roles/registryUploader.yaml", "--project", "p"]
+            (processArgs (prepare Iam.iamCommand (Iam.RolesCreate role)))
+    , testCase "a service account key is written to its target path" $
+        assertEqual
+            ""
+            ["iam", "service-accounts", "keys", "create", "secrets/gh-ci/uploader.key.json", "--iam-account", "uploader@p.iam.gserviceaccount.com", "--project", "p"]
+            (processArgs (prepare Iam.iamCommand (Iam.ServiceAccountKeysCreate key)))
     ]
   where
     binding =
@@ -141,6 +178,45 @@ iamTests =
             , Iam.iamRole = "roles/storage.objectViewer"
             , Iam.iamResource = "projects/p"
             }
+    secretBinding =
+        binding
+            { Iam.iamRole = "roles/secretmanager.secretAccessor"
+            , Iam.iamResource = "secrets/my-secret"
+            }
+    repoBinding =
+        binding
+            { Iam.iamRole = "roles/uploader"
+            , Iam.iamResource = "artifacts/repositories/us-west1/my-repo"
+            }
+    role =
+        Iam.CustomRole
+            { Iam.roleId = "registryUploader"
+            , Iam.roleProject = Core.Project "p"
+            , Iam.roleDefinitionFile = "infra/roles/registryUploader.yaml"
+            }
+    key =
+        Iam.ServiceAccountKey
+            { Iam.sakProject = Core.Project "p"
+            , Iam.sakAccountId = "uploader"
+            , Iam.sakPath = "secrets/gh-ci/uploader.key.json"
+            }
+
+-------------------------------------------------------------------------------
+
+serviceUsageTests :: [TestTree]
+serviceUsageTests =
+    [ testCase "the API appearing in the enabled listing is satisfied" $
+        assertEqual
+            ""
+            Success
+            (ServiceUsage.interpretServiceList (ServiceUsage.Api "run.googleapis.com") ExitSuccess "NAME\nrun.googleapis.com\n")
+    , testCase "the API absent from the enabled listing is not satisfied" $
+        assertBool
+            ""
+            (isFailure (ServiceUsage.interpretServiceList (ServiceUsage.Api "run.googleapis.com") ExitSuccess "NAME\n"))
+    , testCase "listing failing outright is not satisfied" $
+        assertBool "" (isFailure (ServiceUsage.interpretServiceList (ServiceUsage.Api "run.googleapis.com") (ExitFailure 1) ""))
+    ]
 
 -------------------------------------------------------------------------------
 
@@ -157,3 +233,26 @@ lbTests =
             "'tenant'\\''; rm -rf / #'"
             (LoadBalancing.shellQuote "tenant'; rm -rf / #")
     ]
+
+-------------------------------------------------------------------------------
+
+billingTests :: [TestTree]
+billingTests =
+    [ testCase "a project linked and billing-enabled is satisfied" $
+        assertEqual
+            ""
+            Success
+            (Billing.interpretBillingDescribe account ExitSuccess "billingAccountName: billingAccounts/XXXXXX-XXXXXX-XXXXXX\nbillingEnabled: true\nname: projects/p\n")
+    , testCase "a project linked to a different account is not satisfied" $
+        assertBool
+            ""
+            (isFailure (Billing.interpretBillingDescribe account ExitSuccess "billingAccountName: billingAccounts/OTHER-ACCOUNT\nbillingEnabled: true\n"))
+    , testCase "a project with billing disabled is not satisfied" $
+        assertBool
+            ""
+            (isFailure (Billing.interpretBillingDescribe account ExitSuccess "billingAccountName: billingAccounts/XXXXXX-XXXXXX-XXXXXX\nbillingEnabled: false\n"))
+    , testCase "describe failing outright is not satisfied" $
+        assertBool "" (isFailure (Billing.interpretBillingDescribe account (ExitFailure 1) ""))
+    ]
+  where
+    account = Billing.BillingAccount "XXXXXX-XXXXXX-XXXXXX"
