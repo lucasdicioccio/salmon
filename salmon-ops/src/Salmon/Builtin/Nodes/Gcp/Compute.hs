@@ -5,6 +5,7 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     BootDisk (..),
     Instance (..),
     gceInstance,
+    interpretInstanceStatus,
     Report (..),
     ComputeCommand (..),
     computeCommand,
@@ -80,21 +81,20 @@ data Instance = Instance
 gceInstance :: Reporter Report -> Track' (Binary "gcloud") -> Instance -> Op
 gceInstance r gcloudTrack inst =
     withBinary gcloudTrack computeCommand (InstancesCreate inst) $ \create ->
-        withBinary gcloudTrack computeCommand (InstancesDescribe inst) $ \describe ->
-            withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
-                op "gcp-instance" nodeps $ \actions ->
-                    actions
-                        { help = Text.unwords ["creates GCE instance", inst.instanceName]
-                        , ref = mkRef "gcp-instance" inst.instanceName
-                        , up = create r'
-                        , down = delete r'
-                        , check = checkInstance describe
-                        }
+        withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
+            op "gcp-instance" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["creates GCE instance", inst.instanceName]
+                    , ref = mkRef "gcp-instance" inst.instanceName
+                    , up = create r'
+                    , down = delete r'
+                    , check = checkInstance
+                    }
   where
     r' = contramap (RunComputeCommand (InstancesCreate inst)) r
 
-    checkInstance :: (Reporter Binary.Report -> IO ()) -> IO CheckResult
-    checkInstance _describeInst = do
+    checkInstance :: IO CheckResult
+    checkInstance = do
         (code, out, _err) <-
             readCreateProcessWithExitCode
                 ( prepare
@@ -102,18 +102,21 @@ gceInstance r gcloudTrack inst =
                     (InstancesDescribeStatus inst)
                 )
                 ""
-        pure $ case code of
-            ExitSuccess ->
-                let status = Text.strip (Text.decodeUtf8 out)
-                 in case status of
-                        "RUNNING" -> Success
-                        "PROVISIONING" -> Unknown
-                        "STAGING" -> Unknown
-                        "STOPPING" -> Unknown
-                        "TERMINATED" -> Failure "instance is TERMINATED"
-                        _ -> Failure ("unexpected instance status: " <> status)
-            ExitFailure n ->
-                Failure ("could not describe instance (exit " <> Text.pack (show n) <> ")")
+        pure $ interpretInstanceStatus code (Text.strip (Text.decodeUtf8 out))
+
+-- | The verdict drawn from @gcloud compute instances describe
+-- --format=value(status)@, split out for testability.
+interpretInstanceStatus :: ExitCode -> Text -> CheckResult
+interpretInstanceStatus (ExitFailure n) _ =
+    Failure ("could not describe instance (exit " <> Text.pack (show n) <> ")")
+interpretInstanceStatus ExitSuccess status =
+    case status of
+        "RUNNING" -> Success
+        "PROVISIONING" -> Unknown
+        "STAGING" -> Unknown
+        "STOPPING" -> Unknown
+        "TERMINATED" -> Failure "instance is TERMINATED"
+        _ -> Failure ("unexpected instance status: " <> status)
 
 -------------------------------------------------------------------------------
 

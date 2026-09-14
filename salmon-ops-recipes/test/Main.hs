@@ -7,6 +7,7 @@ import qualified Test.DagSpec as DagSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
+import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanSpec as PodmanSpec
@@ -36,6 +37,7 @@ main =
             , DebootstrapSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
+            , GcpSpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests
             , PodmanSpec.tests

@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Salmon.Builtin.Nodes.Gcp.Core (
@@ -7,14 +6,13 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     Zone (..),
     Region (..),
 
-    -- * Errors
-    GcpError (..),
-
     -- * gcloud binary
     gcloud,
 
     -- * Application Default Credentials
     applicationDefaultCredentials,
+    interpretAdc,
+    printAccessToken,
     Report (..),
     GcloudCommand (..),
     gcloudCommand,
@@ -26,10 +24,13 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     withRegion,
 ) where
 
-import Control.Exception (Exception)
+import Control.Exception (throwIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextError
 import GHC.IO.Exception (ExitCode (..))
+import System.IO.Error (userError)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
 
@@ -54,10 +55,6 @@ newtype Zone = Zone {zoneName :: Text}
 -- | A GCP region.
 newtype Region = Region {regionName :: Text}
     deriving (Eq, Ord, Show)
-
--- | Errors raised by GCP operations.
-data GcpError = GcpCliError Text Int Text
-    deriving (Exception, Show)
 
 -------------------------------------------------------------------------------
 
@@ -108,9 +105,34 @@ applicationDefaultCredentials r gcloudTrack =
             readCreateProcessWithExitCode
                 (gcloudProc ["auth", "application-default", "print-access-token"])
                 ""
-        pure $ case code of
-            ExitSuccess -> Success
-            ExitFailure n -> Failure ("gcloud ADC not available (exit " <> Text.pack (show n) <> ")")
+        pure $ interpretAdc code
+
+-- | The verdict drawn from @gcloud auth application-default
+-- print-access-token@'s exit code, split out for testability.
+interpretAdc :: ExitCode -> CheckResult
+interpretAdc ExitSuccess = Success
+interpretAdc (ExitFailure n) = Failure ("gcloud ADC not available (exit " <> Text.pack (show n) <> ")")
+
+{- | Fetches a fresh OAuth2 access token for the active gcloud identity
+(ADC, unless a service account or user has been separately configured).
+
+This is the credential a container registry expects for username
+@oauth2accesstoken@ -- see "SreBox.Gcp.CloudRunDeploy", which feeds this
+straight into "Salmon.Builtin.Nodes.Podman".@login@'s @IO Text@ password
+argument so a fresh token is fetched right when @up@ runs rather than
+baked into the graph when it was built (tokens like this are short-lived,
+typically ~1h).
+-}
+printAccessToken :: IO Text
+printAccessToken = do
+    (code, out, err) <-
+        readCreateProcessWithExitCode
+            (gcloudProc ["auth", "print-access-token"])
+            ""
+    case code of
+        ExitSuccess -> pure (Text.strip (Text.decodeUtf8 out))
+        ExitFailure n ->
+            throwIO (userError ("gcloud auth print-access-token failed (exit " <> show n <> "): " <> Text.unpack (Text.decodeUtf8With TextError.lenientDecode err)))
 
 -------------------------------------------------------------------------------
 -- CLI helpers

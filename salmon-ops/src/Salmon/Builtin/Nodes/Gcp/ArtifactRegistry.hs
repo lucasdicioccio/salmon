@@ -5,6 +5,7 @@ module Salmon.Builtin.Nodes.Gcp.ArtifactRegistry (
     ArtifactRepo (..),
     artifactRepository,
     configureDockerAuth,
+    interpretRepoDescribe,
     Report (..),
     ArtifactRegistryCommand (..),
     artifactRegistryCommand,
@@ -64,27 +65,30 @@ data ArtifactRepo = ArtifactRepo
 artifactRepository :: Reporter Report -> Track' (Binary "gcloud") -> ArtifactRepo -> Op
 artifactRepository r gcloudTrack repo =
     withBinary gcloudTrack artifactRegistryCommand (ReposCreate repo) $ \create ->
-        withBinary gcloudTrack artifactRegistryCommand (ReposDescribe repo) $ \describe ->
-            withBinary gcloudTrack artifactRegistryCommand (ReposDelete repo) $ \delete ->
-                op "gcp-artifact-registry" nodeps $ \actions ->
-                    actions
-                        { help = Text.unwords ["creates Artifact Registry repository", repo.repoName]
-                        , ref = mkRef "gcp-artifact-registry" repo.repoName
-                        , up = create r'
-                        , down = delete r'
-                        , check = checkRepo describe
-                        }
+        withBinary gcloudTrack artifactRegistryCommand (ReposDelete repo) $ \delete ->
+            op "gcp-artifact-registry" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["creates Artifact Registry repository", repo.repoName]
+                    , ref = mkRef "gcp-artifact-registry" repo.repoName
+                    , up = create r'
+                    , down = delete r'
+                    , check = checkRepo
+                    }
   where
     r' = contramap (RunArtifactRegistryCommand (ReposCreate repo)) r
-    checkRepo :: (Reporter Binary.Report -> IO ()) -> IO CheckResult
-    checkRepo _describe = do
+    checkRepo :: IO CheckResult
+    checkRepo = do
         (code, _out, _err) <-
             readCreateProcessWithExitCode
                 (prepare artifactRegistryCommand (ReposDescribe repo))
                 ""
-        pure $ case code of
-            ExitSuccess -> Success
-            ExitFailure _ -> Failure ("repository not found: " <> repo.repoName)
+        pure $ interpretRepoDescribe repo.repoName code
+
+-- | The verdict drawn from @gcloud artifacts repositories describe@'s exit
+-- code, split out for testability.
+interpretRepoDescribe :: Text -> ExitCode -> CheckResult
+interpretRepoDescribe _name ExitSuccess = Success
+interpretRepoDescribe name (ExitFailure _) = Failure ("repository not found: " <> name)
 
 -- | Configures the local docker client to authenticate with Artifact Registry.
 configureDockerAuth :: Reporter Report -> Track' (Binary "gcloud") -> Project -> Region -> Op

@@ -5,6 +5,8 @@ module Salmon.Builtin.Nodes.Gcp.Iam (
     IamBinding (..),
     serviceAccount,
     iamBinding,
+    interpretServiceAccountDescribe,
+    interpretBindingPolicy,
     Report (..),
     IamCommand (..),
     iamCommand,
@@ -58,28 +60,31 @@ renderPrincipal (Group x) = "group:" <> x
 serviceAccount :: Reporter Report -> Track' (Binary "gcloud") -> Project -> Text -> Op
 serviceAccount r gcloudTrack project accountId =
     withBinary gcloudTrack iamCommand (ServiceAccountsCreate project accountId) $ \create ->
-        withBinary gcloudTrack iamCommand (ServiceAccountsDescribe project accountId) $ \describe ->
-            withBinary gcloudTrack iamCommand (ServiceAccountsDelete project accountId) $ \delete ->
-                op "gcp-service-account" nodeps $ \actions ->
-                    actions
-                        { help = Text.unwords ["creates service account", accountId]
-                        , ref = mkRef "gcp-service-account" accountId
-                        , up = create r'
-                        , down = delete r'
-                        , check = checkServiceAccount describe
-                        }
+        withBinary gcloudTrack iamCommand (ServiceAccountsDelete project accountId) $ \delete ->
+            op "gcp-service-account" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["creates service account", accountId]
+                    , ref = mkRef "gcp-service-account" accountId
+                    , up = create r'
+                    , down = delete r'
+                    , check = checkServiceAccount
+                    }
   where
     r' = contramap (RunIamCommand (ServiceAccountsCreate project accountId)) r
 
-    checkServiceAccount :: (Reporter Binary.Report -> IO ()) -> IO CheckResult
-    checkServiceAccount _describe = do
+    checkServiceAccount :: IO CheckResult
+    checkServiceAccount = do
         (code, _out, _err) <-
             readCreateProcessWithExitCode
                 (prepare iamCommand (ServiceAccountsDescribe project accountId))
                 ""
-        pure $ case code of
-            ExitSuccess -> Success
-            ExitFailure _ -> Failure ("service account not found: " <> accountId)
+        pure $ interpretServiceAccountDescribe accountId code
+
+-- | The verdict drawn from @gcloud iam service-accounts describe@'s exit
+-- code, split out for testability.
+interpretServiceAccountDescribe :: Text -> ExitCode -> CheckResult
+interpretServiceAccountDescribe _accountId ExitSuccess = Success
+interpretServiceAccountDescribe accountId (ExitFailure _) = Failure ("service account not found: " <> accountId)
 
 -- | Grants a role to a principal on a resource.
 --
@@ -89,39 +94,42 @@ iamBinding :: Reporter Report -> Track' (Binary "gcloud") -> IamBinding -> Op
 iamBinding r gcloudTrack binding =
     withBinary gcloudTrack iamCommand (IamPolicyAddBinding binding) $ \add ->
         withBinary gcloudTrack iamCommand (IamPolicyRemoveBinding binding) $ \remove ->
-            withBinary gcloudTrack iamCommand (IamPolicyGetBinding binding) $ \getPolicy ->
-                op "gcp-iam-binding" nodeps $ \actions ->
-                    actions
-                        { help = Text.unwords ["grants", binding.iamRole, "to", renderPrincipal binding.iamPrincipal]
-                        , ref = mkRef "gcp-iam-binding" (renderPrincipal binding.iamPrincipal, binding.iamRole, binding.iamResource)
-                        , up = add r'
-                        , down = remove r'
-                        , check = checkBinding getPolicy
-                        }
+            op "gcp-iam-binding" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["grants", binding.iamRole, "to", renderPrincipal binding.iamPrincipal]
+                    , ref = mkRef "gcp-iam-binding" (renderPrincipal binding.iamPrincipal, binding.iamRole, binding.iamResource)
+                    , up = add r'
+                    , down = remove r'
+                    , check = checkBinding
+                    }
   where
     r' = contramap (RunIamCommand (IamPolicyAddBinding binding)) r
 
-    checkBinding :: (Reporter Binary.Report -> IO ()) -> IO CheckResult
-    checkBinding _getPolicy = do
+    checkBinding :: IO CheckResult
+    checkBinding = do
         (code, out, _err) <-
             readCreateProcessWithExitCode
                 (prepare iamCommand (IamPolicyGetBinding binding))
                 ""
-        pure $ case code of
-            ExitSuccess ->
-                let member = renderPrincipal binding.iamPrincipal
-                    role = binding.iamRole
-                    outText = Text.decodeUtf8 out
-                 in if isBindingPresent member role outText
-                        then Success
-                        else Failure ("binding not present for " <> member <> " with role " <> role)
-            ExitFailure n ->
-                Failure ("could not read IAM policy (exit " <> Text.pack (show n) <> ")")
+        pure $ interpretBindingPolicy binding code (Text.decodeUtf8 out)
 
-    isBindingPresent :: Text -> Text -> Text -> Bool
-    isBindingPresent member role outText =
-        -- Very simple heuristic: look for the role and the member on nearby
-        -- lines. A robust implementation would parse the YAML/JSON policy.
+{- | The verdict drawn from @gcloud ... get-iam-policy@'s exit code and
+output, split out for testability.
+
+Very simple heuristic: look for the role and the member on nearby lines. A
+robust implementation would parse the YAML/JSON policy.
+-}
+interpretBindingPolicy :: IamBinding -> ExitCode -> Text -> CheckResult
+interpretBindingPolicy _binding (ExitFailure n) _outText =
+    Failure ("could not read IAM policy (exit " <> Text.pack (show n) <> ")")
+interpretBindingPolicy binding ExitSuccess outText =
+    if isBindingPresent
+        then Success
+        else Failure ("binding not present for " <> member <> " with role " <> role)
+  where
+    member = renderPrincipal binding.iamPrincipal
+    role = binding.iamRole
+    isBindingPresent =
         let roleLine = "role: " <> role
             memberLine = "- " <> member
          in Text.isInfixOf roleLine outText && Text.isInfixOf memberLine outText

@@ -3,6 +3,7 @@
 module Salmon.Builtin.Nodes.Gcp.Storage (
     Bucket (..),
     bucket,
+    interpretBucketDescribe,
     Report (..),
     StorageCommand (..),
     storageCommand,
@@ -48,37 +49,31 @@ data Bucket = Bucket
 bucket :: Reporter Report -> Track' (Binary "gcloud") -> Bucket -> Op
 bucket r gcloudTrack bkt =
     withBinary gcloudTrack storageCommand (BucketsCreate bkt) $ \create ->
-        withBinary gcloudTrack storageCommand (BucketsDescribe bkt) $ \describe ->
-            withBinary gcloudTrack storageCommand (BucketsDelete bkt) $ \delete ->
-                op "gcp-bucket" nodeps $ \actions ->
-                    actions
-                        { help = Text.unwords ["creates GCS bucket", bkt.bucketName]
-                        , ref = mkRef "gcp-bucket" bkt.bucketName
-                        , up = create r'
-                        , down = delete r'
-                        , check = checkBucket describe
-                        }
+        withBinary gcloudTrack storageCommand (BucketsDelete bkt) $ \delete ->
+            op "gcp-bucket" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["creates GCS bucket", bkt.bucketName]
+                    , ref = mkRef "gcp-bucket" bkt.bucketName
+                    , up = create r'
+                    , down = delete r'
+                    , check = checkBucket
+                    }
   where
     r' = contramap (RunStorageCommand (BucketsCreate bkt)) r
 
-    checkBucket :: (Reporter Binary.Report -> IO ()) -> IO CheckResult
-    checkBucket describeBucket = do
-        -- describe exits non-zero when the bucket is absent, which would throw.
-        -- We catch the exception and treat it as Failure.
-        res <- tryDescribe describeBucket
-        pure $ case res of
-            Just _ -> Success
-            Nothing -> Failure ("bucket not found: " <> bkt.bucketName)
-
-    tryDescribe :: (Reporter Binary.Report -> IO ()) -> IO (Maybe ())
-    tryDescribe describeBucket = do
+    checkBucket :: IO CheckResult
+    checkBucket = do
         (code, _out, _err) <-
             readCreateProcessWithExitCode
                 (prepare storageCommand (BucketsDescribe bkt))
                 ""
-        pure $ case code of
-            ExitSuccess -> Just ()
-            ExitFailure _ -> Nothing
+        pure $ interpretBucketDescribe bkt.bucketName code
+
+-- | The verdict drawn from @gcloud storage buckets describe@'s exit code,
+-- split out for testability.
+interpretBucketDescribe :: Text -> ExitCode -> CheckResult
+interpretBucketDescribe _name ExitSuccess = Success
+interpretBucketDescribe name (ExitFailure _) = Failure ("bucket not found: " <> name)
 
 -------------------------------------------------------------------------------
 

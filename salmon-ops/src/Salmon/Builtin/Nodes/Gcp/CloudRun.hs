@@ -4,6 +4,7 @@ module Salmon.Builtin.Nodes.Gcp.CloudRun (
     IngressSetting (..),
     CloudRunService (..),
     cloudRunService,
+    interpretServiceDescribe,
     Report (..),
     CloudRunCommand (..),
     cloudRunCommand,
@@ -65,33 +66,35 @@ data CloudRunService = CloudRunService
 cloudRunService :: Reporter Report -> Track' (Binary "gcloud") -> CloudRunService -> Op
 cloudRunService r gcloudTrack svc =
     withBinary gcloudTrack cloudRunCommand (RunDeploy svc) $ \deploy ->
-        withBinary gcloudTrack cloudRunCommand (RunDescribe svc) $ \describe ->
-            withBinary gcloudTrack cloudRunCommand (RunDelete svc) $ \delete ->
-                op "gcp-cloudrun-service" nodeps $ \actions ->
-                    actions
-                        { help = Text.unwords ["deploys CloudRun service", svc.crsName]
-                        , ref = mkRef "gcp-cloudrun-service" svc.crsName
-                        , up = deploy r'
-                        , down = delete r'
-                        , check = checkService describe
-                        }
+        withBinary gcloudTrack cloudRunCommand (RunDelete svc) $ \delete ->
+            op "gcp-cloudrun-service" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["deploys CloudRun service", svc.crsName]
+                    , ref = mkRef "gcp-cloudrun-service" svc.crsName
+                    , up = deploy r'
+                    , down = delete r'
+                    , check = checkService
+                    }
   where
     r' = contramap (RunCloudRunCommand (RunDeploy svc)) r
 
-    checkService :: (Reporter Binary.Report -> IO ()) -> IO CheckResult
-    checkService _describe = do
+    checkService :: IO CheckResult
+    checkService = do
         (code, out, _err) <-
             readCreateProcessWithExitCode
                 (prepare cloudRunCommand (RunDescribe svc))
                 ""
-        pure $ case code of
-            ExitSuccess ->
-                let outText = Text.decodeUtf8 out
-                 in if svc.crsImage `Text.isInfixOf` outText
-                        then Success
-                        else Failure ("CloudRun service found but image does not match " <> svc.crsImage)
-            ExitFailure n ->
-                Failure ("CloudRun service not found (exit " <> Text.pack (show n) <> ")")
+        pure $ interpretServiceDescribe svc.crsImage code (Text.decodeUtf8 out)
+
+-- | The verdict drawn from @gcloud run services describe@'s exit code and
+-- output, split out for testability.
+interpretServiceDescribe :: Text -> ExitCode -> Text -> CheckResult
+interpretServiceDescribe _image (ExitFailure n) _outText =
+    Failure ("CloudRun service not found (exit " <> Text.pack (show n) <> ")")
+interpretServiceDescribe image ExitSuccess outText =
+    if image `Text.isInfixOf` outText
+        then Success
+        else Failure ("CloudRun service found but image does not match " <> image)
 
 -------------------------------------------------------------------------------
 
