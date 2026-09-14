@@ -33,6 +33,7 @@ library
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
                    , SreBox.Gcp.VmProvision
+                   , SreBox.Gcp.CloudRunDeploy
     build-depends:    base >=4.16.3.0
                     , aeson
                     , base16-bytestring
@@ -87,6 +88,7 @@ test-suite salmon-ops-recipes-test
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
                     , Test.GcpSpec
+                    , Test.PodmanCommandSpec
                     , Test.JWTSigningSpec
                     , Test.LedgerSpec
                     , Test.PodmanSpec

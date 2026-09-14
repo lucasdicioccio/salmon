@@ -10,6 +10,7 @@ import qualified Test.FilesystemSpec as FilesystemSpec
 import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
+import qualified Test.PodmanCommandSpec as PodmanCommandSpec
 import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
@@ -40,6 +41,7 @@ main =
             , GcpSpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests
+            , PodmanCommandSpec.tests
             , PodmanSpec.tests
             , PostgresInitSpec.tests
             , PostgresReplicationSpec.tests
