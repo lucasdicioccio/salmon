@@ -32,6 +32,7 @@ library
                    , SreBox.Postgrest
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
+                   , SreBox.Gcp.VmProvision
     build-depends:    base >=4.16.3.0
                     , aeson
                     , base16-bytestring
