@@ -14,6 +14,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+import System.Directory (doesDirectoryExist)
 import System.FilePath (makeRelative, (</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
@@ -45,6 +46,20 @@ data Repo = Repo {repoClonedir :: FilePath, repoLocalName :: Text, repoRemote ::
 clonedir :: Repo -> FilePath
 clonedir r = r.repoClonedir </> Text.unpack r.repoLocalName
 
+{- | @git clone@ fails outright if its destination already exists and is
+non-empty — unlike the rest of the tree's builtins, it has no "set" verb of
+its own to lean on. So a plain @clone >> pull@ 'up' is only idempotent on
+the very first run: every run afterwards re-attempts the clone into an
+already-populated directory and fails, despite the "force sync" this node's
+help text promises. Skipping the clone once a @.git@ subdir is already
+there — and always still pulling — is what actually delivers that.
+-}
+cloneThenPull :: FilePath -> IO () -> IO () -> IO ()
+cloneThenPull path doClone doPull = do
+    alreadyCloned <- doesDirectoryExist (path </> ".git")
+    if alreadyCloned then pure () else doClone
+    doPull
+
 -- | Clones a repository.
 repo :: Reporter Report -> Track' (Binary "git") -> Repo -> Op
 repo r git repository =
@@ -54,7 +69,7 @@ repo r git repository =
                 actions
                     { help = "clones and force sync a repo"
                     , ref = mkRef "repo" (clonedir repository)
-                    , up = clone r1' >> pull r2'
+                    , up = cloneThenPull (clonedir repository) (clone r1') (pull r2')
                     }
   where
     r1' = contramap (CloneRepo repository) r
@@ -79,7 +94,7 @@ repoFull r git repository =
                 actions
                     { help = "clones and force sync a repo"
                     , ref = mkRef "repo" (clonedir repository)
-                    , up = clone r1' >> pull r2'
+                    , up = cloneThenPull (clonedir repository) (clone r1') (pull r2')
                     }
   where
     r1' = contramap (CloneRepo repository) r
