@@ -14,6 +14,8 @@ import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Crypto.Hash.SHA256 as SHA256
+import Control.Monad (when)
+import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
 import GHC.TypeLits (Symbol)
 import Salmon.Actions.UpDown (CheckResult (..), skipIfDirectoryIsMissing)
 import Salmon.Op.OpGraph (inject)
@@ -57,6 +59,42 @@ dir directory =
   where
     path :: FilePath
     path = directory.directoryPath
+
+{- | Like 'dir', except 'down' renames the directory to a timestamped suffix
+instead of deleting it, for a directory whose contents are worth keeping
+around after teardown rather than losing (e.g. retired certificate material —
+see "Salmon.Builtin.Nodes.Certificates"). Idempotent the same way every other
+@down@ is: a directory already gone is left alone rather than erroring.
+-}
+retainedDir :: Directory -> Op
+retainedDir directory =
+    op "retained-directory" nodeps $ \actions ->
+        actions
+            { help = Text.pack $ "ensures " <> path <> " exists, including subdirs"
+            , notes =
+                [ "create dir recursively"
+                , "does not delete contents of the directory"
+                , "down renames the directory to a timestamped suffix instead of deleting it"
+                , "reapplies rather than parking under supervision; see supReapply"
+                ]
+            , ref = mkRef "retained-directory" path
+            , up = createDirectoryIfMissing True path
+            , down = retireDirectory path
+            , dynamics = [supervised defaultSupervision{supReapply = True}]
+            }
+  where
+    path :: FilePath
+    path = directory.directoryPath
+
+-- | Renames @path@ to @path@ suffixed with the current UTC timestamp. A
+-- no-op if @path@ is already gone.
+retireDirectory :: FilePath -> IO ()
+retireDirectory path = do
+    exists <- doesDirectoryExist path
+    when exists $ do
+        now <- getCurrentTime
+        let suffix = formatTime defaultTimeLocale "%Y%m%dT%H%M%SZ" now
+        renameDirectory path (path <> "." <> suffix)
 
 -------------------------------------------------------------------------------
 

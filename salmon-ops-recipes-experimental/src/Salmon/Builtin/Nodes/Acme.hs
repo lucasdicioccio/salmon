@@ -15,7 +15,6 @@ import Acme.NotAJoke.CertManagement (loadDER)
 import Acme.NotAJoke.Dancer (AcmeDancer (..), DanceStep, ghciDance, runAcmeDance_dns01)
 import Acme.NotAJoke.KeyManagement (loadJWKFile)
 import Data.Maybe
-import Salmon.Actions.UpDown (skipIfFileExists)
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Certificates as Cert
 import Salmon.Builtin.Nodes.Continuation (Continue, withContinuation)
@@ -65,15 +64,17 @@ acmeChallenge_dns01 t chall =
             actions
                 { help = "sign a certificate with an ACME challenge"
                 , ref = mkRef "acme-challenge" chall.challengerPEMPath
-                , check = skipIfFileExists chall.challengerPEMPath
+                , check = Cert.checkCertNotExpiringSoon chall.challengerPEMPath
                 , up = up stepdance
                 }
   where
     acc :: Account
     acc = chall.challengerAccount
 
+    -- retained rather than plain 'dir': an ACME cert directory going down
+    -- should leave old cert material around under a timestamped name.
     enclosingdir :: Op
-    enclosingdir = FS.dir (FS.Directory $ takeDirectory chall.challengerPEMPath)
+    enclosingdir = FS.retainedDir (FS.Directory $ takeDirectory chall.challengerPEMPath)
 
     contacts = ["mailto:" <> getEmail acc.accountEmail]
 

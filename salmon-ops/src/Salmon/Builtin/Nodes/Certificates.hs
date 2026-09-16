@@ -1,6 +1,6 @@
 module Salmon.Builtin.Nodes.Certificates where
 
-import Salmon.Actions.UpDown (skipIfFileExists)
+import Salmon.Actions.UpDown (CheckResult (..), skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
@@ -12,8 +12,13 @@ import Salmon.Reporter
 import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text
 
+import System.Directory (doesFileExist)
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
 
 -------------------------------------------------------------------------------
@@ -80,8 +85,11 @@ tlsKey r bin key =
     path :: FilePath
     path = keyPath key
 
+    -- retained rather than plain 'dir': tearing down a cert down the line
+    -- should leave old key/cert material lying around under a timestamped
+    -- name rather than deleting it.
     enclosingdir :: Op
-    enclosingdir = dir (Directory key.keyDir)
+    enclosingdir = retainedDir (Directory key.keyDir)
 
 keyPath :: Key -> FilePath
 keyPath key = key.keyDir </> Text.unpack key.keyName
@@ -115,7 +123,7 @@ signingRequest r bin req =
     derpath = derPath req
 
     enclosingdir :: Op
-    enclosingdir = dir (Directory csrdir)
+    enclosingdir = retainedDir (Directory csrdir)
 
     csrdir :: FilePath
     csrdir = req.certCSRDir
@@ -130,7 +138,7 @@ selfSign r bin selfsigned =
             actions
                 { help = "self sign a certificate"
                 , ref = mkRef "openssl-selfsign" pempath
-                , check = skipIfFileExists pempath
+                , check = checkCertNotExpiringSoon pempath
                 , up = up r'
                 }
   where
@@ -144,6 +152,34 @@ selfSign r bin selfsigned =
 
     pempath :: FilePath
     pempath = selfsigned.selfSignedPEMPath
+
+{- | 'Failure' if @path@ is missing, or if the certificate there is already
+expired or will expire within a day (@openssl x509 -checkend 86400@) —
+'Success' otherwise. Used in place of a plain 'skipIfFileExists' wherever a
+node's effect is a certificate rather than an arbitrary file, so an
+out-of-date self-signed or ACME-signed certificate is noticed and
+regenerated rather than being treated as satisfied forever after the first
+run. See "Salmon.Builtin.Nodes.Acme".@acmeChallenge_dns01@ for the ACME
+side.
+-}
+checkCertNotExpiringSoon :: FilePath -> IO CheckResult
+checkCertNotExpiringSoon path = do
+    exists <- doesFileExist path
+    if not exists
+        then pure (Failure $ "missing: " <> Text.pack path)
+        else do
+            (code, _out, err) <-
+                readCreateProcessWithExitCode
+                    (proc "openssl" ["x509", "-checkend", "86400", "-noout", "-in", path])
+                    ""
+            pure $ case code of
+                ExitSuccess -> Success
+                ExitFailure _ ->
+                    Failure $
+                        "expired or expiring within a day: "
+                            <> Text.pack path
+                            <> ": "
+                            <> Text.decodeUtf8With Text.lenientDecode err
 
 data OpenSSLCommand
     = GenCSR FilePath FilePath Domain
