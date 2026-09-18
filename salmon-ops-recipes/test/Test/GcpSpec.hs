@@ -47,6 +47,7 @@ tests =
         , testGroup "Billing.interpretBillingDescribe" billingTests
         , testGroup "ResourceManager" projectTests
         , testGroup "Compute (tier 2 resources)" vmTests
+        , testGroup "Compute (tier 3 resources)" lbBackendTests
         , testGroup "Ssh.ClientOpts" clientOptsTests
         ]
 
@@ -264,6 +265,48 @@ serviceUsageTests =
 
 -------------------------------------------------------------------------------
 
+lbBackendTests :: [TestTree]
+lbBackendTests =
+    [ testCase "a proxy-only subnet is created ACTIVE, with its purpose" $ do
+        let args = processArgs (prepare Compute.computeCommand (Compute.SubnetsCreate proxySubnet))
+        assertBool (show args) (["--purpose", "REGIONAL_MANAGED_PROXY"] `isSubsequenceOf` args)
+        assertBool (show args) (["--role", "ACTIVE"] `isSubsequenceOf` args)
+        assertBool (show args) (["--range", "192.168.100.0/24"] `isSubsequenceOf` args)
+    , testCase "an ordinary subnet is not given a role" $ do
+        let args = processArgs (prepare Compute.computeCommand (Compute.SubnetsCreate proxySubnet{Compute.subnetPurpose = Compute.PrivateSubnet}))
+        assertBool (show args) (not ("--role" `elem` args))
+    , testCase "a subnet of the wrong purpose is not the subnet that was asked for" $ do
+        assertEqual "" Success (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" ExitSuccess "REGIONAL_MANAGED_PROXY")
+        assertBool "a plain subnet under that name" (isFailure (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" ExitSuccess "PRIVATE"))
+        assertBool "absent" (isFailure (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" (ExitFailure 1) ""))
+    , testCase "gcloud leaving an ordinary subnet's purpose empty still satisfies PRIVATE" $
+        assertEqual "" Success (Compute.interpretSubnetDescribe "s" "PRIVATE" ExitSuccess "")
+    , testCase "the instance group is unmanaged and zonal" $ do
+        let args = processArgs (prepare Compute.computeCommand (Compute.InstanceGroupsCreate group))
+        assertBool (show args) (["instance-groups", "unmanaged", "create", "ig"] `isSubsequenceOf` args)
+        assertBool (show args) (["--zone", "europe-west1-b"] `isSubsequenceOf` args)
+    , testCase "membership is read off the listing's last path segment" $ do
+        let listing = "https://www.googleapis.com/compute/v1/projects/p/zones/europe-west1-b/instances/web\n"
+        assertEqual "" Success (Compute.interpretGroupMembership "web" ExitSuccess listing)
+        -- the whole reason not to use a substring match
+        assertBool "a longer name containing this one" (isFailure (Compute.interpretGroupMembership "web" ExitSuccess "projects/p/zones/z/instances/web-canary\n"))
+        assertBool "empty listing" (isFailure (Compute.interpretGroupMembership "web" ExitSuccess ""))
+        assertBool "listing failed" (isFailure (Compute.interpretGroupMembership "web" (ExitFailure 1) ""))
+    ]
+  where
+    proxySubnet =
+        Compute.Subnet
+            { Compute.subnetName = "proxy"
+            , Compute.subnetProject = Core.Project "p"
+            , Compute.subnetRegion = Core.Region "europe-west1"
+            , Compute.subnetNetwork = "default"
+            , Compute.subnetRange = "192.168.100.0/24"
+            , Compute.subnetPurpose = Compute.RegionalManagedProxy
+            }
+    group = Compute.InstanceGroup "ig" (Core.Project "p") (Core.Zone "europe-west1-b")
+
+-------------------------------------------------------------------------------
+
 lbTests :: [TestTree]
 lbTests =
     [ testCase "describe succeeding means the url map exists" $
@@ -282,6 +325,22 @@ lbTests =
     , testCase "scripts never swallow failures with || true" $ do
         let scripts = concatMap (processArgs . prepare LoadBalancing.loadBalancingCommand) [LoadBalancing.LbCreate alb, LoadBalancing.LbDelete alb]
         assertBool "" (not (any ("|| true" `isInfixOf`) scripts))
+    , testCase "a zonal instance group is addressed by zone, not by the balancer's region" $ do
+        -- The bug this pins: every gcloud call naming the group used to get
+        -- the balancer's --region, which an unmanaged (zonal) group rejects
+        -- outright -- so the one backend kind made of VMs salmon declared
+        -- could never be attached at all.
+        assertBool script ("--instance-group-zone='europe-west1-b'" `isInfixOf` script)
+        assertBool script (not ("--instance-group-region" `isInfixOf` script))
+        assertBool script ("set-named-ports 'ig' --project=\"$PROJECT\" --zone='europe-west1-b'" `isInfixOf` script)
+    , testCase "exists() is a bare predicate, so each caller says where its resource lives" $ do
+        -- It used to append --project/--region to whatever it was handed,
+        -- which silently made every describe a regional one.
+        assertBool script ("exists() { \"$@\" >/dev/null 2>&1; }" `isInfixOf` script)
+        assertBool script ("exists gcloud compute url-maps describe 'web-url-map' --project=\"$PROJECT\" --region=\"$REGION\"" `isInfixOf` script)
+    , testCase "a regional instance group keeps the regional flag" $ do
+        let regionalScript = createScript alb{LoadBalancing.albBackends = [LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupRegion "europe-west1") [8080]]}
+        assertBool regionalScript ("--instance-group-region='europe-west1'" `isInfixOf` regionalScript)
     , testCase "rendered scripts parse as bash" $ do
         let scripts = [s' | cmd <- [LoadBalancing.LbCreate alb, LoadBalancing.LbDelete alb], (_ : s' : _) <- [processArgs (prepare LoadBalancing.loadBalancingCommand cmd)]]
         mapM_
@@ -295,13 +354,20 @@ lbTests =
     isBash p = case cmdspec p of
         RawCommand "bash" ("-c" : _) -> True
         _ -> False
+    createScript a = case processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbCreate a)) of
+        (_ : s : _) -> s
+        other -> error (show other)
+    script = createScript alb
     alb =
         LoadBalancing.ApplicationLoadBalancer
             { LoadBalancing.albName = "web"
             , LoadBalancing.albProject = Core.Project "p"
             , LoadBalancing.albRegion = Core.Region "europe-west1"
             , LoadBalancing.albNetwork = Just "default"
-            , LoadBalancing.albBackends = [LoadBalancing.InstanceGroupBackend "ig" [8080, 8081], LoadBalancing.CloudRunBackend "svc"]
+            , LoadBalancing.albBackends =
+                [ LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b") [8080, 8081]
+                , LoadBalancing.CloudRunBackend "svc"
+                ]
             , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck "hc" 8080)
             }
 

@@ -3,6 +3,7 @@
 
 module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     Backend (..),
+    InstanceGroupLocation (..),
     HealthCheck (..),
     ApplicationLoadBalancer (..),
     applicationLoadBalancer,
@@ -43,9 +44,21 @@ data HealthCheck = HealthCheck
     }
     deriving (Eq, Show)
 
+{- | Where an instance group lives, which is not a detail the balancer can
+guess: an /unmanaged/ group is zonal and a /managed/ one is usually regional,
+and every gcloud call naming the group -- @describe@, @set-named-ports@,
+@add-backend@ -- wants the matching flag. Passing the balancer's own region
+for both (which this module used to do) simply fails against the common case,
+an unmanaged group holding VMs that already exist.
+-}
+data InstanceGroupLocation
+    = InstanceGroupZone Text
+    | InstanceGroupRegion Text
+    deriving (Eq, Show)
+
 -- | Backend kinds supported by the high-level recipe.
 data Backend
-    = InstanceGroupBackend Text [Int]
+    = InstanceGroupBackend Text InstanceGroupLocation [Int]
     | CloudRunBackend Text
     deriving (Eq, Show)
 
@@ -147,7 +160,10 @@ require.
 
 The balancer is a /regional external/ Application Load Balancer
 (@EXTERNAL_MANAGED@), which GCP only accepts in a VPC network that already
-has a proxy-only subnet in the region; this script does not create one.
+has a proxy-only subnet in the region. This script does not create one --
+see "Salmon.Builtin.Nodes.Gcp.Compute".@subnet@ with
+'Salmon.Builtin.Nodes.Gcp.Compute.RegionalManagedProxy', which is the node to
+put underneath this one.
 -}
 renderLbScript :: ApplicationLoadBalancer -> Text
 renderLbScript alb =
@@ -155,7 +171,11 @@ renderLbScript alb =
         [ "set -euo pipefail"
         , "PROJECT=" <> shellQuote alb.albProject.projectId
         , "REGION=" <> shellQuote alb.albRegion.regionName
-        , "exists() { \"$@\" --project=\"$PROJECT\" --region=\"$REGION\" >/dev/null 2>&1; }"
+        , -- A bare predicate: every caller appends its own location flags,
+          -- because not every resource named here is regional (an unmanaged
+          -- instance group is zonal) and this used to append --region to all
+          -- of them.
+          "exists() { \"$@\" >/dev/null 2>&1; }"
         ]
             <> healthCheckLines
             <> backendLines
@@ -177,7 +197,8 @@ renderLbScript alb =
     attachUnlessPresent groupPathSuffix addCmd =
         "gcloud compute backend-services describe "
             <> backendName
-            <> " --project=\"$PROJECT\" --region=\"$REGION\" --format='value(backends[].group)'"
+            <> regional
+            <> " --format='value(backends[].group)'"
             <> " | tr ';' '\\n' | grep -q -- "
             <> shellQuote (groupPathSuffix <> "$")
             <> " || "
@@ -186,9 +207,10 @@ renderLbScript alb =
     createBackendService :: Text
     createBackendService =
         ensure
-            ("gcloud compute backend-services describe " <> backendName)
+            ("gcloud compute backend-services describe " <> backendName <> regional)
             ( "gcloud compute backend-services create " <> backendName
-                <> " --project=\"$PROJECT\" --region=\"$REGION\" --protocol=HTTP --load-balancing-scheme=EXTERNAL_MANAGED"
+                <> regional
+                <> " --protocol=HTTP --load-balancing-scheme=EXTERNAL_MANAGED"
                 <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> " --health-checks-region=\"$REGION\"") (instanceGroupHealthCheck)
             )
 
@@ -196,15 +218,16 @@ renderLbScript alb =
         if any isInstanceGroup alb.albBackends then alb.albHealthCheck else Nothing
 
     isInstanceGroup = \case
-        InstanceGroupBackend _ _ -> True
+        InstanceGroupBackend{} -> True
         CloudRunBackend _ -> False
 
     healthCheckLines = case alb.albHealthCheck of
         Just hc ->
             [ ensure
-                ("gcloud compute health-checks describe " <> shellQuote hc.healthCheckName)
+                ("gcloud compute health-checks describe " <> shellQuote hc.healthCheckName <> regional)
                 ( "gcloud compute health-checks create tcp " <> shellQuote hc.healthCheckName
-                    <> " --project=\"$PROJECT\" --region=\"$REGION\" --port="
+                    <> regional
+                    <> " --port="
                     <> Text.pack (show hc.healthCheckPort)
                 )
             ]
@@ -212,25 +235,28 @@ renderLbScript alb =
 
     backendLines =
         createBackendService : flip concatMap alb.albBackends (\case
-            InstanceGroupBackend ig ports ->
-                namedPortsLine ig ports
+            InstanceGroupBackend ig loc ports ->
+                namedPortsLine ig loc ports
                     <> [ attachUnlessPresent
                             ("/instanceGroups/" <> ig)
                             ( "gcloud compute backend-services add-backend " <> backendName
-                                <> " --project=\"$PROJECT\" --region=\"$REGION\" --instance-group=" <> shellQuote ig
-                                <> " --instance-group-region=\"$REGION\""
+                                <> regional
+                                <> " --instance-group=" <> shellQuote ig
+                                <> groupBackendFlag loc
                             )
                        ]
             CloudRunBackend svc ->
                 [ ensure
-                    ("gcloud compute network-endpoint-groups describe " <> resourceName "-neg")
+                    ("gcloud compute network-endpoint-groups describe " <> resourceName "-neg" <> regional)
                     ( "gcloud compute network-endpoint-groups create " <> resourceName "-neg"
-                        <> " --project=\"$PROJECT\" --region=\"$REGION\" --network-endpoint-type=serverless --cloud-run-service=" <> shellQuote svc
+                        <> regional
+                        <> " --network-endpoint-type=serverless --cloud-run-service=" <> shellQuote svc
                     )
                 , attachUnlessPresent
                     ("/networkEndpointGroups/" <> alb.albName <> "-neg")
                     ( "gcloud compute backend-services add-backend " <> backendName
-                        <> " --project=\"$PROJECT\" --region=\"$REGION\" --network-endpoint-group=" <> resourceName "-neg"
+                        <> regional
+                        <> " --network-endpoint-group=" <> resourceName "-neg"
                         <> " --network-endpoint-group-region=\"$REGION\""
                     )
                 ])
@@ -238,10 +264,11 @@ renderLbScript alb =
     -- set-named-ports replaces the whole set, so one call carrying every
     -- port (the first one named @http@, the backend service's default
     -- @--port-name@) rather than one call per port, each erasing the last.
-    namedPortsLine _ [] = []
-    namedPortsLine ig ports =
+    namedPortsLine _ _ [] = []
+    namedPortsLine ig loc ports =
         [ "gcloud compute instance-groups set-named-ports " <> shellQuote ig
-            <> " --project=\"$PROJECT\" --region=\"$REGION\" --named-ports="
+            <> groupLocation loc
+            <> " --named-ports="
             <> Text.intercalate "," (zipWith namedPort [0 :: Int ..] ports)
         ]
     namedPort 0 p = "http:" <> Text.pack (show p)
@@ -249,32 +276,50 @@ renderLbScript alb =
 
     urlMapLines =
         [ ensure
-            ("gcloud compute url-maps describe " <> resourceName "-url-map")
+            ("gcloud compute url-maps describe " <> resourceName "-url-map" <> regional)
             ( "gcloud compute url-maps create " <> resourceName "-url-map"
-                <> " --project=\"$PROJECT\" --region=\"$REGION\" --default-service=" <> backendName
+                <> regional
+                <> " --default-service=" <> backendName
             )
         ]
 
     proxyLines =
         [ ensure
-            ("gcloud compute target-http-proxies describe " <> resourceName "-proxy")
+            ("gcloud compute target-http-proxies describe " <> resourceName "-proxy" <> regional)
             ( "gcloud compute target-http-proxies create " <> resourceName "-proxy"
-                <> " --project=\"$PROJECT\" --region=\"$REGION\" --url-map=" <> resourceName "-url-map"
+                <> regional
+                <> " --url-map=" <> resourceName "-url-map"
                 <> " --url-map-region=\"$REGION\""
             )
         ]
 
     forwardingRuleLines =
         [ ensure
-            ("gcloud compute forwarding-rules describe " <> resourceName "-fw")
+            ("gcloud compute forwarding-rules describe " <> resourceName "-fw" <> regional)
             ( "gcloud compute forwarding-rules create " <> resourceName "-fw"
-                <> " --project=\"$PROJECT\" --region=\"$REGION\" --load-balancing-scheme=EXTERNAL_MANAGED"
+                <> regional
+                <> " --load-balancing-scheme=EXTERNAL_MANAGED"
                 <> maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
                 <> " --target-http-proxy=" <> resourceName "-proxy"
                 <> " --target-http-proxy-region=\"$REGION\""
                 <> " --ports=80"
             )
         ]
+
+-- | The @--project@\/@--region@ pair every regional resource in these scripts
+-- is addressed by, reading the variables the script sets up front.
+regional :: Text
+regional = " --project=\"$PROJECT\" --region=\"$REGION\""
+
+-- | How to address the instance group itself.
+groupLocation :: InstanceGroupLocation -> Text
+groupLocation (InstanceGroupZone z) = " --project=\"$PROJECT\" --zone=" <> shellQuote z
+groupLocation (InstanceGroupRegion rg) = " --project=\"$PROJECT\" --region=" <> shellQuote rg
+
+-- | How @backend-services add-backend@ names the group's location.
+groupBackendFlag :: InstanceGroupLocation -> Text
+groupBackendFlag (InstanceGroupZone z) = " --instance-group-zone=" <> shellQuote z
+groupBackendFlag (InstanceGroupRegion rg) = " --instance-group-region=" <> shellQuote rg
 
 {- | Renders a bash script that deletes the LB components, dependants first.
 A component that is already gone is skipped; one that exists and fails to
@@ -286,7 +331,7 @@ renderLbDeleteScript alb =
         [ "set -euo pipefail"
         , "PROJECT=" <> shellQuote alb.albProject.projectId
         , "REGION=" <> shellQuote alb.albRegion.regionName
-        , "exists() { \"$@\" --project=\"$PROJECT\" --region=\"$REGION\" >/dev/null 2>&1; }"
+        , "exists() { \"$@\" >/dev/null 2>&1; }"
         , deleteIfPresent "forwarding-rules" (resourceName "-fw")
         , deleteIfPresent "target-http-proxies" (resourceName "-proxy")
         , deleteIfPresent "url-maps" (resourceName "-url-map")
@@ -300,10 +345,13 @@ renderLbDeleteScript alb =
 
     deleteIfPresent :: Text -> Text -> Text
     deleteIfPresent collection name =
-        "if exists gcloud compute " <> collection <> " describe " <> name
+        "if exists gcloud compute " <> collection <> " describe " <> name <> regional
             <> "; then gcloud compute " <> collection <> " delete " <> name
-            <> " --project=\"$PROJECT\" --region=\"$REGION\" --quiet; fi"
+            <> regional <> " --quiet; fi"
 
+    -- The instance group is not deleted here: this recipe did not create it
+    -- (it is the caller's, and may well outlive the balancer). Detaching is
+    -- implicit in deleting the backend service.
     deleteBackendSpecificLines = flip concatMap alb.albBackends $ \case
-        InstanceGroupBackend _ig _ports -> []
+        InstanceGroupBackend{} -> []
         CloudRunBackend _svc -> [deleteIfPresent "network-endpoint-groups" (resourceName "-neg")]

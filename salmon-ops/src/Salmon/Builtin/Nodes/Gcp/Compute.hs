@@ -12,6 +12,16 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     FirewallRule (..),
     firewallRule,
     interpretFirewallDescribe,
+    SubnetPurpose (..),
+    renderSubnetPurpose,
+    Subnet (..),
+    subnet,
+    interpretSubnetDescribe,
+    InstanceGroup (..),
+    instanceGroup,
+    interpretInstanceGroupDescribe,
+    instanceGroupMember,
+    interpretGroupMembership,
     interpretInstanceStatus,
     InstanceUpPlan (..),
     planInstanceUp,
@@ -294,6 +304,170 @@ interpretFirewallDescribe name (ExitFailure _) = Failure ("firewall rule not fou
 
 -------------------------------------------------------------------------------
 
+{- | What a subnetwork is /for/, which for one kind of subnet is the whole
+point of creating it.
+
+@REGIONAL_MANAGED_PROXY@ is the proxy-only subnet a regional
+@EXTERNAL_MANAGED@ Application Load Balancer runs its Envoy proxies in.
+Nothing is ever placed in it by hand -- it holds no instances, and its range
+is where the load balancer's connections to the backends /come from/, which
+is what a backend's firewall rule has to allow. One @ACTIVE@ proxy-only
+subnet may exist per network per region, and until it does, every attempt to
+create such a balancer's forwarding rule fails.
+-}
+data SubnetPurpose
+    = PrivateSubnet
+    | RegionalManagedProxy
+    deriving (Eq, Show)
+
+renderSubnetPurpose :: SubnetPurpose -> Text
+renderSubnetPurpose PrivateSubnet = "PRIVATE"
+renderSubnetPurpose RegionalManagedProxy = "REGIONAL_MANAGED_PROXY"
+
+-- | A subnetwork of a VPC network, in one region.
+data Subnet = Subnet
+    { subnetName :: Text
+    , subnetProject :: Project
+    , subnetRegion :: Region
+    , subnetNetwork :: Text
+    , subnetRange :: Text
+    -- ^ CIDR. In an /auto mode/ network (which @default@ is), it must not
+    -- overlap @10.128.0.0\/9@: that whole block is reserved for the subnets
+    -- GCP creates per region on its own, including regions that do not exist
+    -- yet.
+    , subnetPurpose :: SubnetPurpose
+    }
+    deriving (Eq, Show)
+
+-- | Idempotently creates a subnetwork.
+subnet :: Reporter Report -> Track' (Binary "gcloud") -> Subnet -> Op
+subnet r gcloudTrack net =
+    withBinary gcloudTrack computeCommand (SubnetsCreate net) $ \create ->
+        withBinary gcloudTrack computeCommand (SubnetsDelete net) $ \delete ->
+            op "gcp-subnet" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["creates subnet", net.subnetName, "for", renderSubnetPurpose net.subnetPurpose]
+                    , ref = mkRef "gcp-subnet" (net.subnetProject.projectId, net.subnetRegion.regionName, net.subnetName)
+                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create (rSub (SubnetsCreate net)))
+                    , down = Core.downIfPresent checkSubnet (delete (rSub (SubnetsDelete net)))
+                    , check = checkSubnet
+                    }
+  where
+    rSub cmd = contramap (RunComputeCommand cmd) r
+
+    checkSubnet :: IO CheckResult
+    checkSubnet = do
+        (code, out, _err) <-
+            readCreateProcessWithExitCode (prepare computeCommand (SubnetsDescribe net)) ""
+        pure $ interpretSubnetDescribe net.subnetName (renderSubnetPurpose net.subnetPurpose) code (Text.strip (Text.decodeUtf8 out))
+
+{- | The verdict drawn from @gcloud compute networks subnets describe
+--format=value(purpose)@, split out for testability.
+
+The purpose is compared rather than merely noting the subnet exists, because
+a subnet of the wrong purpose is the one failure mode worth catching here: a
+plain subnet answers @describe@ perfectly well and then the balancer refuses
+to use it, at a point far away from this node.
+-}
+interpretSubnetDescribe :: Text -> Text -> ExitCode -> Text -> CheckResult
+interpretSubnetDescribe name _ (ExitFailure _) _ = Failure ("subnet not found: " <> name)
+interpretSubnetDescribe name wanted ExitSuccess out
+    | out == wanted = Success
+    -- gcloud renders an ordinary subnet's purpose as PRIVATE, but has also
+    -- left it empty in the past; an empty answer is only satisfying if that
+    -- is what was asked for.
+    | Text.null out && wanted == "PRIVATE" = Success
+    | otherwise = Failure ("subnet " <> name <> " has purpose " <> out <> ", wanted " <> wanted)
+
+-------------------------------------------------------------------------------
+
+{- | An /unmanaged/, zonal instance group: a bag of instances that already
+exist, which is what makes it the right backend for a load balancer in front
+of VMs salmon itself declared. (A managed group is the other way round -- it
+creates the instances, from a template.)
+-}
+data InstanceGroup = InstanceGroup
+    { groupName :: Text
+    , groupProject :: Project
+    , groupZone :: Zone
+    }
+    deriving (Eq, Show)
+
+-- | Idempotently creates an unmanaged instance group.
+instanceGroup :: Reporter Report -> Track' (Binary "gcloud") -> InstanceGroup -> Op
+instanceGroup r gcloudTrack grp =
+    withBinary gcloudTrack computeCommand (InstanceGroupsCreate grp) $ \create ->
+        withBinary gcloudTrack computeCommand (InstanceGroupsDelete grp) $ \delete ->
+            op "gcp-instance-group" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["creates unmanaged instance group", grp.groupName]
+                    , ref = mkRef "gcp-instance-group" (grp.groupProject.projectId, grp.groupZone.zoneName, grp.groupName)
+                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create (rGrp (InstanceGroupsCreate grp)))
+                    , down = Core.downIfPresent checkGroup (delete (rGrp (InstanceGroupsDelete grp)))
+                    , check = checkGroup
+                    }
+  where
+    rGrp cmd = contramap (RunComputeCommand cmd) r
+
+    checkGroup :: IO CheckResult
+    checkGroup = do
+        (code, _out, _err) <-
+            readCreateProcessWithExitCode (prepare computeCommand (InstanceGroupsDescribe grp)) ""
+        pure $ interpretInstanceGroupDescribe grp.groupName code
+
+-- | The verdict drawn from @gcloud compute instance-groups unmanaged describe@.
+interpretInstanceGroupDescribe :: Text -> ExitCode -> CheckResult
+interpretInstanceGroupDescribe _name ExitSuccess = Success
+interpretInstanceGroupDescribe name (ExitFailure _) = Failure ("instance group not found: " <> name)
+
+{- | One instance's membership of an unmanaged group, as a node of its own
+rather than a field of 'InstanceGroup'.
+
+Separate because the two effects have genuinely different lifetimes and
+different failure modes: the group can exist while the instance does not,
+@add-instances@ is an error if the instance is already in, and a teardown
+has to take the membership out before either end can go. Keeping them apart
+also means the dependency edge that matters -- "the instance must exist
+first" -- is expressible, which it would not be if membership were a field
+of the group.
+-}
+instanceGroupMember :: Reporter Report -> Track' (Binary "gcloud") -> InstanceGroup -> Text -> Op
+instanceGroupMember r gcloudTrack grp instName =
+    withBinary gcloudTrack computeCommand (InstanceGroupsAddInstance grp instName) $ \add ->
+        withBinary gcloudTrack computeCommand (InstanceGroupsRemoveInstance grp instName) $ \remove ->
+            op "gcp-instance-group-member" nodeps $ \actions ->
+                actions
+                    { help = Text.unwords ["adds", instName, "to instance group", grp.groupName]
+                    , ref = mkRef "gcp-instance-group-member" (grp.groupProject.projectId, grp.groupZone.zoneName, grp.groupName, instName)
+                    , up = add (rMem (InstanceGroupsAddInstance grp instName))
+                    , down = Core.downIfPresent checkMember (remove (rMem (InstanceGroupsRemoveInstance grp instName)))
+                    , check = checkMember
+                    }
+  where
+    rMem cmd = contramap (RunComputeCommand cmd) r
+
+    checkMember :: IO CheckResult
+    checkMember = do
+        (code, out, _err) <-
+            readCreateProcessWithExitCode (prepare computeCommand (InstanceGroupsListInstances grp)) ""
+        pure $ interpretGroupMembership instName code (Text.decodeUtf8 out)
+
+{- | The verdict drawn from @gcloud compute instance-groups list-instances
+--format=value(instance)@, whose lines are full resource URLs.
+
+Matching on the last path segment rather than by substring, so that an
+instance named @web@ is not read as present because @web-canary@ is.
+-}
+interpretGroupMembership :: Text -> ExitCode -> Text -> CheckResult
+interpretGroupMembership name (ExitFailure _) _ = Failure ("could not list the group's instances (looking for " <> name <> ")")
+interpretGroupMembership name ExitSuccess out
+    | name `elem` map lastSegment (Text.lines out) = Success
+    | otherwise = Failure ("instance not in the group: " <> name)
+  where
+    lastSegment = last . Text.splitOn "/" . Text.strip
+
+-------------------------------------------------------------------------------
+
 data ComputeCommand
     = InstancesCreate Instance
     | InstancesDescribe Instance
@@ -307,6 +481,15 @@ data ComputeCommand
     | FirewallCreate FirewallRule
     | FirewallDescribe FirewallRule
     | FirewallDelete FirewallRule
+    | SubnetsCreate Subnet
+    | SubnetsDescribe Subnet
+    | SubnetsDelete Subnet
+    | InstanceGroupsCreate InstanceGroup
+    | InstanceGroupsDescribe InstanceGroup
+    | InstanceGroupsDelete InstanceGroup
+    | InstanceGroupsAddInstance InstanceGroup Text
+    | InstanceGroupsRemoveInstance InstanceGroup Text
+    | InstanceGroupsListInstances InstanceGroup
     deriving (Show)
 
 computeCommand :: Command "gcloud" ComputeCommand
@@ -453,3 +636,110 @@ computeCommand = Command $ \cmd -> case cmd of
                 , Text.unpack fw.firewallName
                 , "--quiet"
                 ]
+    SubnetsCreate net ->
+        gcloudProc $
+            withProject net.subnetProject
+                [ "compute"
+                , "networks"
+                , "subnets"
+                , "create"
+                , Text.unpack net.subnetName
+                , "--network"
+                , Text.unpack net.subnetNetwork
+                , "--region"
+                , Text.unpack net.subnetRegion.regionName
+                , "--range"
+                , Text.unpack net.subnetRange
+                , "--purpose"
+                , Text.unpack (renderSubnetPurpose net.subnetPurpose)
+                ]
+                -- a proxy-only subnet is either the region's ACTIVE one or a
+                -- BACKUP held for a migration; gcloud demands the choice.
+                <> case net.subnetPurpose of
+                    RegionalManagedProxy -> ["--role", "ACTIVE"]
+                    PrivateSubnet -> []
+    SubnetsDescribe net ->
+        gcloudProc $
+            withProject net.subnetProject
+                [ "compute"
+                , "networks"
+                , "subnets"
+                , "describe"
+                , Text.unpack net.subnetName
+                , "--region"
+                , Text.unpack net.subnetRegion.regionName
+                , "--format=value(purpose)"
+                ]
+    SubnetsDelete net ->
+        gcloudProc $
+            withProject net.subnetProject
+                [ "compute"
+                , "networks"
+                , "subnets"
+                , "delete"
+                , Text.unpack net.subnetName
+                , "--region"
+                , Text.unpack net.subnetRegion.regionName
+                , "--quiet"
+                ]
+    InstanceGroupsCreate grp ->
+        gcloudProc $
+            withProject grp.groupProject
+                ( withZone
+                    grp.groupZone
+                    ["compute", "instance-groups", "unmanaged", "create", Text.unpack grp.groupName]
+                )
+    InstanceGroupsDescribe grp ->
+        gcloudProc $
+            withProject grp.groupProject
+                ( withZone
+                    grp.groupZone
+                    ["compute", "instance-groups", "unmanaged", "describe", Text.unpack grp.groupName]
+                )
+    InstanceGroupsDelete grp ->
+        gcloudProc $
+            withProject grp.groupProject
+                ( withZone
+                    grp.groupZone
+                    ["compute", "instance-groups", "unmanaged", "delete", Text.unpack grp.groupName, "--quiet"]
+                )
+    InstanceGroupsAddInstance grp instName ->
+        gcloudProc $
+            withProject grp.groupProject
+                ( withZone
+                    grp.groupZone
+                    [ "compute"
+                    , "instance-groups"
+                    , "unmanaged"
+                    , "add-instances"
+                    , Text.unpack grp.groupName
+                    , "--instances"
+                    , Text.unpack instName
+                    ]
+                )
+    InstanceGroupsRemoveInstance grp instName ->
+        gcloudProc $
+            withProject grp.groupProject
+                ( withZone
+                    grp.groupZone
+                    [ "compute"
+                    , "instance-groups"
+                    , "unmanaged"
+                    , "remove-instances"
+                    , Text.unpack grp.groupName
+                    , "--instances"
+                    , Text.unpack instName
+                    ]
+                )
+    InstanceGroupsListInstances grp ->
+        gcloudProc $
+            withProject grp.groupProject
+                ( withZone
+                    grp.groupZone
+                    [ "compute"
+                    , "instance-groups"
+                    , "list-instances"
+                    , Text.unpack grp.groupName
+                    , "--format=value(instance)"
+                    ]
+                )
