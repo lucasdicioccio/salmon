@@ -21,7 +21,8 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
-import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject, withRegion)
+import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject)
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -69,8 +70,8 @@ artifactRepository r gcloudTrack repo =
             op "gcp-artifact-registry" nodeps $ \actions ->
                 actions
                     { help = Text.unwords ["creates Artifact Registry repository", repo.repoName]
-                    , ref = mkRef "gcp-artifact-registry" repo.repoName
-                    , up = create r'
+                    , ref = mkRef "gcp-artifact-registry" (repo.repoProject.projectId, repo.repoLocation.regionName, repo.repoName)
+                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create r')
                     , down = delete r'
                     , check = checkRepo
                     }
@@ -115,12 +116,19 @@ data ArtifactRegistryCommand
     | AuthConfigureDocker Project Region
     deriving (Show)
 
+{- | @gcloud artifacts@ spells its regional flag @--location@; @--region@ is
+rejected outright (@unrecognized arguments@), so this does not go through
+"Salmon.Builtin.Nodes.Gcp.Core".@withRegion@ the way @run@\/@compute@ do.
+-}
+withLocation :: Region -> [String] -> [String]
+withLocation rgn args = args <> ["--location", Text.unpack rgn.regionName]
+
 artifactRegistryCommand :: Command "gcloud" ArtifactRegistryCommand
 artifactRegistryCommand = Command $ \cmd -> case cmd of
     ReposCreate repo ->
         gcloudProc $
             withProject repo.repoProject
-                ( withRegion repo.repoLocation
+                ( withLocation repo.repoLocation
                     [ "artifacts"
                     , "repositories"
                     , "create"
@@ -132,7 +140,7 @@ artifactRegistryCommand = Command $ \cmd -> case cmd of
     ReposDescribe repo ->
         gcloudProc $
             withProject repo.repoProject
-                ( withRegion repo.repoLocation
+                ( withLocation repo.repoLocation
                     [ "artifacts"
                     , "repositories"
                     , "describe"
@@ -142,7 +150,7 @@ artifactRegistryCommand = Command $ \cmd -> case cmd of
     ReposDelete repo ->
         gcloudProc $
             withProject repo.repoProject
-                ( withRegion repo.repoLocation
+                ( withLocation repo.repoLocation
                     [ "artifacts"
                     , "repositories"
                     , "delete"

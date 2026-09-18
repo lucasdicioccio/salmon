@@ -24,6 +24,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject, withRegion)
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -70,8 +71,8 @@ cloudRunService r gcloudTrack svc =
             op "gcp-cloudrun-service" nodeps $ \actions ->
                 actions
                     { help = Text.unwords ["deploys CloudRun service", svc.crsName]
-                    , ref = mkRef "gcp-cloudrun-service" svc.crsName
-                    , up = deploy r'
+                    , ref = mkRef "gcp-cloudrun-service" (svc.crsProject.projectId, svc.crsRegion.regionName, svc.crsName)
+                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (deploy r')
                     , down = delete r'
                     , check = checkService
                     }

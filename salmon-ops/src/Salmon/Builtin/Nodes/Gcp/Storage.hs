@@ -20,6 +20,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject, withRegion)
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -54,7 +55,7 @@ bucket r gcloudTrack bkt =
                 actions
                     { help = Text.unwords ["creates GCS bucket", bkt.bucketName]
                     , ref = mkRef "gcp-bucket" bkt.bucketName
-                    , up = create r'
+                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create r')
                     , down = delete r'
                     , check = checkBucket
                     }

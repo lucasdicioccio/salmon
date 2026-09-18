@@ -9,7 +9,10 @@ what makes it testable without a real GCP project.
 -}
 module Test.GcpSpec (tests) where
 
+import Data.List (isInfixOf)
+import qualified Data.Map as Map
 import GHC.IO.Exception (ExitCode (..))
+import System.Process (readProcessWithExitCode)
 import System.Process.ListLike (CmdSpec (..), CreateProcess, cmdspec)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
@@ -23,6 +26,7 @@ import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
 import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
+import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 
@@ -39,6 +43,7 @@ tests =
         , testGroup "LoadBalancing" lbTests
         , testGroup "ServiceUsage" serviceUsageTests
         , testGroup "Billing.interpretBillingDescribe" billingTests
+        , testGroup "ResourceManager" projectTests
         ]
 
 -- | Extracts the argument list of a prepared gcloud 'CreateProcess', for
@@ -78,6 +83,16 @@ instanceTests =
         assertBool "" (isFailure (Compute.interpretInstanceStatus ExitSuccess "SOME-NEW-STATUS"))
     , testCase "describe failing outright (e.g. instance absent) is a Failure" $
         assertBool "" (isFailure (Compute.interpretInstanceStatus (ExitFailure 1) ""))
+    , testCase "up creates an absent instance" $
+        assertEqual "" Compute.CreateInstance (Compute.planInstanceUp (ExitFailure 1) "")
+    , testCase "up starts a stopped instance rather than re-creating it" $
+        assertEqual "" Compute.StartInstance (Compute.planInstanceUp ExitSuccess "TERMINATED")
+    , testCase "up resumes a suspended instance" $
+        assertEqual "" Compute.ResumeInstance (Compute.planInstanceUp ExitSuccess "SUSPENDED")
+    , testCase "up leaves a running instance alone" $
+        assertEqual "" Compute.AlreadyRunning (Compute.planInstanceUp ExitSuccess "RUNNING")
+    , testCase "up refuses to act on a transitional status" $
+        assertEqual "" (Compute.CannotActYet "STOPPING") (Compute.planInstanceUp ExitSuccess "STOPPING")
     ]
 
 -------------------------------------------------------------------------------
@@ -94,7 +109,17 @@ bucketTests =
 
 repoTests :: [TestTree]
 repoTests =
-    [ testCase "describe succeeding means the repo exists" $
+    [ testCase "gcloud artifacts takes --location, not --region" $
+        assertEqual
+            ""
+            ["artifacts", "repositories", "create", "my-repo", "--repository-format", "docker", "--location", "us-west1", "--project", "p"]
+            ( processArgs
+                ( prepare
+                    ArtifactRegistry.artifactRegistryCommand
+                    (ArtifactRegistry.ReposCreate (ArtifactRegistry.ArtifactRepo "my-repo" (Core.Project "p") (Core.Region "us-west1") ArtifactRegistry.Docker))
+                )
+            )
+    , testCase "describe succeeding means the repo exists" $
         assertEqual "" Success (ArtifactRegistry.interpretRepoDescribe "my-repo" ExitSuccess)
     , testCase "describe failing means the repo is absent" $
         assertBool "" (isFailure (ArtifactRegistry.interpretRepoDescribe "my-repo" (ExitFailure 1)))
@@ -156,6 +181,21 @@ iamTests =
             ""
             ["artifacts", "repositories", "add-iam-policy-binding", "my-repo", "--location", "us-west1", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/uploader"]
             (processArgs (prepare Iam.iamCommand (Iam.IamPolicyAddBinding repoBinding)))
+    , testCase "a project-qualified repository passes --project rather than relying on gcloud's configured project" $
+        assertEqual
+            ""
+            ["artifacts", "repositories", "get-iam-policy", "my-repo", "--location", "us-west1", "--project", "p"]
+            (processArgs (prepare Iam.iamCommand (Iam.IamPolicyGetBinding (binding {Iam.iamResource = "projects/p/locations/us-west1/repositories/my-repo"}))))
+    , testCase "a project-qualified secret passes --project" $
+        assertEqual
+            ""
+            ["secrets", "get-iam-policy", "my-secret", "--project", "p"]
+            (processArgs (prepare Iam.iamCommand (Iam.IamPolicyGetBinding (binding {Iam.iamResource = "projects/p/secrets/my-secret"}))))
+    , testCase "a bucket resource is rendered as the gs:// URL gcloud storage requires" $
+        assertEqual
+            ""
+            ["storage", "buckets", "get-iam-policy", "gs://my-bucket"]
+            (processArgs (prepare Iam.iamCommand (Iam.IamPolicyGetBinding (binding {Iam.iamResource = "buckets/my-bucket"}))))
     , testCase "role describe succeeding means the custom role exists" $
         assertEqual "" Success (Iam.interpretRoleDescribe "registryUploader" ExitSuccess)
     , testCase "role describe failing means the custom role is absent" $
@@ -232,7 +272,34 @@ lbTests =
             "an embedded single quote and shell metacharacters stay inside the quoting"
             "'tenant'\\''; rm -rf / #'"
             (LoadBalancing.shellQuote "tenant'; rm -rf / #")
+    , testCase "create/delete run the script with bash, not as a gcloud subcommand" $ do
+        assertBool "create" (isBash (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbCreate alb)))
+        assertBool "delete" (isBash (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbDelete alb)))
+    , testCase "scripts never swallow failures with || true" $ do
+        let scripts = concatMap (processArgs . prepare LoadBalancing.loadBalancingCommand) [LoadBalancing.LbCreate alb, LoadBalancing.LbDelete alb]
+        assertBool "" (not (any ("|| true" `isInfixOf`) scripts))
+    , testCase "rendered scripts parse as bash" $ do
+        let scripts = [s' | cmd <- [LoadBalancing.LbCreate alb, LoadBalancing.LbDelete alb], (_ : s' : _) <- [processArgs (prepare LoadBalancing.loadBalancingCommand cmd)]]
+        mapM_
+            ( \script -> do
+                (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", script] ""
+                assertEqual err ExitSuccess code
+            )
+            scripts
     ]
+  where
+    isBash p = case cmdspec p of
+        RawCommand "bash" ("-c" : _) -> True
+        _ -> False
+    alb =
+        LoadBalancing.ApplicationLoadBalancer
+            { LoadBalancing.albName = "web"
+            , LoadBalancing.albProject = Core.Project "p"
+            , LoadBalancing.albRegion = Core.Region "europe-west1"
+            , LoadBalancing.albNetwork = Just "default"
+            , LoadBalancing.albBackends = [LoadBalancing.InstanceGroupBackend "ig" [8080, 8081], LoadBalancing.CloudRunBackend "svc"]
+            , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck "hc" 8080)
+            }
 
 -------------------------------------------------------------------------------
 
@@ -256,3 +323,26 @@ billingTests =
     ]
   where
     account = Billing.BillingAccount "XXXXXX-XXXXXX-XXXXXX"
+
+-------------------------------------------------------------------------------
+
+projectTests :: [TestTree]
+projectTests =
+    [ testCase "an ACTIVE project is satisfied" $
+        assertEqual "" Success (ResourceManager.interpretProjectState "p" ExitSuccess "ACTIVE")
+    , testCase "a project pending deletion is not satisfied, and says why" $
+        case ResourceManager.interpretProjectState "p" ExitSuccess "DELETE_REQUESTED" of
+            Failure msg -> assertBool "mentions the id cannot be reused" ("cannot be reused" `isInfixOf` show msg)
+            other -> assertBool ("expected Failure, got " <> show other) False
+    , testCase "describe failing means the project is absent" $
+        assertBool "" (isFailure (ResourceManager.interpretProjectState "p" (ExitFailure 1) ""))
+    , testCase "create passes the parent and labels" $ do
+        let args =
+                processArgs $
+                    prepare
+                        ResourceManager.resourceManagerCommand
+                        ( ResourceManager.ProjectsCreate
+                            (ResourceManager.ProjectSpec (Core.Project "p") (ResourceManager.Folder "123") (Map.fromList [("purpose", "salmon-toy")]))
+                        )
+        assertEqual "" ["projects", "create", "p", "--folder", "123", "--labels", "purpose=salmon-toy"] args
+    ]

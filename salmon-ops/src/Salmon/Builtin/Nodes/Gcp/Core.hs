@@ -17,6 +17,11 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     GcloudCommand (..),
     gcloudCommand,
 
+    -- * eventual consistency
+    retryingIO,
+    afterEnableRetries,
+    afterEnableDelay,
+
     -- * CLI helpers
     gcloudProc,
     withProject,
@@ -24,7 +29,8 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     withRegion,
 ) where
 
-import Control.Exception (throwIO)
+import Control.Concurrent (threadDelay)
+import Control.Exception (SomeException, throwIO, try)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -133,6 +139,43 @@ printAccessToken = do
         ExitSuccess -> pure (Text.strip (Text.decodeUtf8 out))
         ExitFailure n ->
             throwIO (userError ("gcloud auth print-access-token failed (exit " <> show n <> "): " <> Text.unpack (Text.decodeUtf8With TextError.lenientDecode err)))
+
+-------------------------------------------------------------------------------
+-- Eventual consistency
+
+{- | Runs an action, retrying on failure with a fixed delay, rethrowing the
+last failure.
+
+GCP grants access asynchronously, past the point where the thing granting it
+reports success. Two cases hit this tree, both found by
+@salmon-apps@'s @salmon-gcp-toy@ against a real project:
+
+* a __freshly enabled API__ answers @PERMISSION_DENIED ... (or it may not
+  exist)@ to the very next create, for up to about a minute, even for a
+  project owner;
+* a __freshly created service account__ is not yet resolvable by the service
+  owning the resource a binding names it on.
+
+So a node whose @up@ can run moments after such a grant retries rather than
+failing the whole traversal, since a one-shot driver has no other way to
+wait. A genuine permission error still fails the node, just later.
+-}
+retryingIO :: Int -> Int -> IO () -> IO ()
+retryingIO attempts delay act = do
+    result <- try act
+    case result of
+        Right () -> pure ()
+        Left (e :: SomeException)
+            | attempts <= 1 -> throwIO e
+            | otherwise -> threadDelay delay >> retryingIO (attempts - 1) delay act
+
+-- | Attempts for a create that may follow an API enablement: 6 over ~50s.
+afterEnableRetries :: Int
+afterEnableRetries = 6
+
+-- | Delay between those attempts.
+afterEnableDelay :: Int
+afterEnableDelay = 10000000
 
 -------------------------------------------------------------------------------
 -- CLI helpers

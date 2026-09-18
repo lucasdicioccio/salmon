@@ -138,7 +138,7 @@ provisionedVm r gcloudTrack keygenTrack cfg =
     sshReady =
         SshAccess.sshAvailable
             rSshAccess
-            (SshAccess.SshEndpoint cfg.vmp_sshHost cfg.vmp_sshPort (Keys.privateKeyPath cfg.vmp_clientIdentity))
+            (SshAccess.SshEndpoint (Just cfg.vmp_sshUser) cfg.vmp_sshHost cfg.vmp_sshPort (Keys.privateKeyPath cfg.vmp_clientIdentity))
             `inject` vm
             `inject` sshCa
             `inject` signedClient

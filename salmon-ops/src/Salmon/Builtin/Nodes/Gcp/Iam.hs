@@ -17,6 +17,8 @@ module Salmon.Builtin.Nodes.Gcp.Iam (
     iamCommand,
 ) where
 
+import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -30,7 +32,8 @@ import Salmon.Actions.UpDown (CheckResult (..), skipIfFileExists)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
-import Salmon.Builtin.Nodes.Gcp.Core (Project (..), gcloudProc, withProject)
+import Salmon.Builtin.Nodes.Gcp.Core (Project (..), gcloudProc, retryingIO, withProject)
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -71,13 +74,29 @@ serviceAccount r gcloudTrack project accountId =
             op "gcp-service-account" nodeps $ \actions ->
                 actions
                     { help = Text.unwords ["creates service account", accountId]
-                    , ref = mkRef "gcp-service-account" accountId
-                    , up = create r'
+                    , ref = mkRef "gcp-service-account" (project.projectId, accountId)
+                    , up = retryingIO Core.afterEnableRetries Core.afterEnableDelay (create r') >> awaitVisible 30
                     , down = delete r'
                     , check = checkServiceAccount
                     }
   where
     r' = contramap (RunIamCommand (ServiceAccountsCreate project accountId)) r
+
+    {- | Creating a service account is eventually consistent: @create@ returns
+    before the account is resolvable, and a binding declared against it in the
+    same graph then fails with "does not exist". Waiting here (rather than
+    retrying in every dependant) is what makes the declared dependency edge
+    mean what it looks like it means.
+    -}
+    awaitVisible :: Int -> IO ()
+    awaitVisible remaining = do
+        result <- checkServiceAccount
+        case result of
+            Success -> pure ()
+            _
+                | remaining <= 0 ->
+                    throwIO (userError ("service account never became visible: " <> Text.unpack accountId))
+                | otherwise -> threadDelay 2000000 >> awaitVisible (remaining - 1)
 
     checkServiceAccount :: IO CheckResult
     checkServiceAccount = do
@@ -105,7 +124,7 @@ iamBinding r gcloudTrack binding =
                 actions
                     { help = Text.unwords ["grants", binding.iamRole, "to", renderPrincipal binding.iamPrincipal]
                     , ref = mkRef "gcp-iam-binding" (renderPrincipal binding.iamPrincipal, binding.iamRole, binding.iamResource)
-                    , up = add r'
+                    , up = retryingIO 5 3000000 (add r')
                     , down = remove r'
                     , check = checkBinding
                     }
@@ -348,22 +367,38 @@ iamCommand = Command $ \cmd -> case cmd of
                 , Text.unpack key.sakAccountId <> "@" <> Text.unpack key.sakProject.projectId <> ".iam.gserviceaccount.com"
                 ]
 
--- | Maps a resource reference to the gcloud group arguments, the resource
--- argument, and any trailing flags to pass to
--- add\/remove\/get-iam-policy-binding.
---
--- A resource under a regional collection (currently only
--- @artifacts/repositories@) carries its location as a second path segment,
--- e.g. @artifacts\/repositories\/LOCATION\/REPO@, since @gcloud artifacts
--- repositories ... --location=...@ needs it as a flag placed after the verb
--- rather than as part of the resource name the way @secrets@\/@buckets@\/
--- service accounts don't.
+{- | Maps a resource reference to the gcloud group arguments, the resource
+argument, and any trailing flags to pass to
+add\/remove\/get-iam-policy-binding.
+
+Accepted forms:
+
+* @projects\/PROJECT@ (or a bare project id)
+* @buckets\/BUCKET@ -- rendered as @gs:\/\/BUCKET@, the URL form
+  @gcloud storage buckets@ requires
+* @serviceAccounts\/EMAIL@ -- the email already names its project
+* @projects\/PROJECT\/secrets\/SECRET@ and
+  @projects\/PROJECT\/locations\/LOCATION\/repositories\/REPO@ -- the
+  project-qualified forms, which pass @--project@ explicitly
+* @secrets\/SECRET@ and @artifacts\/repositories\/LOCATION\/REPO@ -- the
+  short forms, which pass no @--project@ and so act on whatever project
+  gcloud is configured with /on the machine running salmon/. Prefer the
+  qualified forms: the short ones are only right by coincidence.
+
+A resource under a regional collection carries its location, since
+@gcloud artifacts repositories ... --location=...@ needs it as a flag placed
+after the verb rather than as part of the resource name.
+-}
 iamResourceArgs :: Text -> ([String], String, [String])
 iamResourceArgs res
+    | ["projects", pid, "secrets", sec] <- segments =
+        (["secrets"], Text.unpack sec, ["--project", Text.unpack pid])
+    | ["projects", pid, "locations", location, "repositories", repo] <- segments =
+        (["artifacts", "repositories"], Text.unpack repo, ["--location", Text.unpack location, "--project", Text.unpack pid])
     | Just pid <- Text.stripPrefix "projects/" res =
         (["projects"], Text.unpack pid, [])
     | Just bkt <- Text.stripPrefix "buckets/" res =
-        (["storage", "buckets"], Text.unpack bkt, [])
+        (["storage", "buckets"], "gs://" <> Text.unpack (Text.dropWhile (== '/') (dropGs bkt)), [])
     | Just sa <- Text.stripPrefix "serviceAccounts/" res =
         (["iam", "service-accounts"], Text.unpack sa, [])
     | Just sec <- Text.stripPrefix "secrets/" res =
@@ -375,3 +410,6 @@ iamResourceArgs res
     | otherwise =
         -- Default: treat as a project id.
         (["projects"], Text.unpack res, [])
+  where
+    segments = Text.splitOn "/" res
+    dropGs t = maybe t id (Text.stripPrefix "gs://" t)

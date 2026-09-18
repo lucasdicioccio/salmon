@@ -6,11 +6,14 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     Instance (..),
     gceInstance,
     interpretInstanceStatus,
+    InstanceUpPlan (..),
+    planInstanceUp,
     Report (..),
     ComputeCommand (..),
     computeCommand,
 ) where
 
+import Control.Exception (throwIO)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Text (Text)
@@ -18,7 +21,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.IO.Exception (ExitCode (..))
 import System.Process.ByteString (readCreateProcessWithExitCode)
-import System.Process.ListLike (proc)
+import System.IO.Error (userError)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
@@ -75,34 +78,48 @@ data Instance = Instance
 
 -- | Idempotently manages a GCE instance.
 --
--- * 'up': create the instance if absent.
+-- * 'up': create the instance if absent, start it if stopped (@TERMINATED@),
+--   resume it if @SUSPENDED@. See 'planInstanceUp'.
 -- * 'down': delete the instance.
 -- * 'check': report 'Success' if the instance is @RUNNING@.
 gceInstance :: Reporter Report -> Track' (Binary "gcloud") -> Instance -> Op
 gceInstance r gcloudTrack inst =
     withBinary gcloudTrack computeCommand (InstancesCreate inst) $ \create ->
-        withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
-            op "gcp-instance" nodeps $ \actions ->
-                actions
-                    { help = Text.unwords ["creates GCE instance", inst.instanceName]
-                    , ref = mkRef "gcp-instance" inst.instanceName
-                    , up = create r'
-                    , down = delete r'
-                    , check = checkInstance
-                    }
+        withBinary gcloudTrack computeCommand (InstancesStart inst) $ \start ->
+            withBinary gcloudTrack computeCommand (InstancesResume inst) $ \resume ->
+                withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
+                    op "gcp-instance" nodeps $ \actions ->
+                        actions
+                            { help = Text.unwords ["creates GCE instance", inst.instanceName]
+                            , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
+                            , up = bringUp create start resume
+                            , down = delete (contramap (RunComputeCommand (InstancesDelete inst)) r)
+                            , check = uncurry interpretInstanceStatus <$> describeStatus
+                            }
   where
-    r' = contramap (RunComputeCommand (InstancesCreate inst)) r
+    rFor cmd = contramap (RunComputeCommand cmd) r
 
-    checkInstance :: IO CheckResult
-    checkInstance = do
+    describeStatus :: IO (ExitCode, Text)
+    describeStatus = do
         (code, out, _err) <-
             readCreateProcessWithExitCode
-                ( prepare
-                    computeCommand
-                    (InstancesDescribeStatus inst)
-                )
+                (prepare computeCommand (InstancesDescribeStatus inst))
                 ""
-        pure $ interpretInstanceStatus code (Text.strip (Text.decodeUtf8 out))
+        pure (code, Text.strip (Text.decodeUtf8 out))
+
+    -- 'create' alone is what 'up' used to be, which made a stopped instance
+    -- unrecoverable: the check says 'Failure', 'up' runs @create@, and
+    -- @create@ refuses because the instance exists. Asking first costs one
+    -- describe that the check has usually just done.
+    bringUp create start resume = do
+        plan <- uncurry planInstanceUp <$> describeStatus
+        case plan of
+            CreateInstance -> create (rFor (InstancesCreate inst))
+            StartInstance -> start (rFor (InstancesStart inst))
+            ResumeInstance -> resume (rFor (InstancesResume inst))
+            AlreadyRunning -> pure ()
+            CannotActYet status ->
+                throwIO (userError ("instance " <> Text.unpack inst.instanceName <> " is " <> Text.unpack status <> "; retry once it settles"))
 
 -- | The verdict drawn from @gcloud compute instances describe
 -- --format=value(status)@, split out for testability.
@@ -115,8 +132,35 @@ interpretInstanceStatus ExitSuccess status =
         "PROVISIONING" -> Unknown
         "STAGING" -> Unknown
         "STOPPING" -> Unknown
+        "SUSPENDING" -> Unknown
+        "REPAIRING" -> Unknown
         "TERMINATED" -> Failure "instance is TERMINATED"
+        "SUSPENDED" -> Failure "instance is SUSPENDED"
         _ -> Failure ("unexpected instance status: " <> status)
+
+-- | What 'gceInstance'\'s 'up' does given the instance's current status.
+data InstanceUpPlan
+    = CreateInstance
+    | StartInstance
+    | ResumeInstance
+    | AlreadyRunning
+    | -- | a transitional (or unrecognized) status: nothing safe to run now
+      CannotActYet Text
+    deriving (Eq, Show)
+
+{- | Split out of 'gceInstance' for testability. A failing describe is read
+as "absent": if it failed for another reason (credentials, a missing API)
+the @create@ that follows fails too, and says why more clearly than a
+describe would.
+-}
+planInstanceUp :: ExitCode -> Text -> InstanceUpPlan
+planInstanceUp (ExitFailure _) _ = CreateInstance
+planInstanceUp ExitSuccess status =
+    case status of
+        "RUNNING" -> AlreadyRunning
+        "TERMINATED" -> StartInstance
+        "SUSPENDED" -> ResumeInstance
+        _ -> CannotActYet status
 
 -------------------------------------------------------------------------------
 
@@ -124,6 +168,8 @@ data ComputeCommand
     = InstancesCreate Instance
     | InstancesDescribe Instance
     | InstancesDescribeStatus Instance
+    | InstancesStart Instance
+    | InstancesResume Instance
     | InstancesDelete Instance
     deriving (Show)
 
@@ -171,6 +217,26 @@ computeCommand = Command $ \cmd -> case cmd of
                     , "describe"
                     , Text.unpack inst.instanceName
                     , "--format=value(status)"
+                    ]
+                )
+    InstancesStart inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "start"
+                    , Text.unpack inst.instanceName
+                    ]
+                )
+    InstancesResume inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "resume"
+                    , Text.unpack inst.instanceName
                     ]
                 )
     InstancesDelete inst ->
