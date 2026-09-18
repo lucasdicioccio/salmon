@@ -52,7 +52,39 @@ directory as the podman build context. Whatever you deploy must serve HTTP on
 deployed *without* `--allow-unauthenticated`: the toy asserts the deploy
 happened and runs the expected image, it never issues an HTTP request to it.
 
-There is no VM tier yet — see [Gaps](#gaps-this-does-not-cover) below.
+**Tier 2** (an `e2-micro`'s hourly rate, plus a reserved IP) is
+`specs/gcloud-support.md` §6's "objective": a VM salmon boots, trusts and
+then provisions with *this same binary*.
+
+| Node | Resource |
+|---|---|
+| `Gcp.Compute.address` | a reserved regional external IP, `<prefix>-ip` |
+| `Gcp.Compute.firewallRule` | `tcp:22` from `--ssh-source-range` to instances tagged `<prefix>-ssh` |
+| `Filesystem.filecontents` | the startup script, passed as `--metadata-from-file` |
+| `Keys.sshKey` ×2, `Keys.signKey` | a CA and a client key, and a certificate for `--vm-user` |
+| `Gcp.SshAccess.installMetadataCaKey` | the CA's public key, into project metadata |
+| `Gcp.Compute.gceInstance` | the VM, claiming the address and carrying the tag |
+| `Gcp.SshAccess.sshAvailable` | waits for sshd to answer *as that user, with that certificate* |
+| `Self.uploadAndCallSelfAsSudoWithIdentity` | rsyncs this binary over and runs `run up` on it there |
+
+The startup script is what closes the gap `installMetadataCaKey` leaves:
+nothing on a GCE instance reads that metadata key by itself. It fetches the
+CA from the metadata server into `/etc/ssh/salmon_ca.pub`, points sshd's
+`TrustedUserCAKeys` at it, creates the login user the certificate names as
+its principal (with no OS Login, a principal must be a local account), gives
+it passwordless sudo, and makes sure `rsync` is there for the upload.
+
+**Tier 2 runs in two passes, and the script drives both.** GCP picks the
+address, so the first pass reserves it and stops; the driver then reads the
+IP (`Compute.readAddress`) and re-issues the directive with `--vm-ip`, and
+the second pass declares the same graph plus the provisioning step. That is
+not a wart of the toy: an `Op` naming the host has to be built before any
+`up` runs, so *something* outside the graph has to carry the address across.
+
+What proves it worked is the file the uploaded binary writes on the VM,
+`/var/lib/salmon-toy/provisioned`; the script reads it back over ssh. The
+binary runs there with the same directive, tagged `OnVm`, which is why the
+payload is declared in the same `Track'` as everything else.
 
 ## Step 1 — dry run, no GCP calls
 
@@ -117,7 +149,11 @@ salmon-apps/scripts/gcp-toy-validate.sh -- \
 ```
 
 Then, once tier 0 is clean, the same with `--tier 1` (needs `podman`), and/or
-`--containerfile ./myapp/Containerfile` to deploy your own app.
+`--containerfile ./myapp/Containerfile` to deploy your own app. Tier 2 adds
+`--vm-zone` (default `<region>-b`), `--vm-machine-type` (`e2-micro`),
+`--vm-image-family`/`--vm-image-project` (Ubuntu 24.04 LTS), `--vm-user`
+(`salmon`) and `--ssh-source-range` (`0.0.0.0/0` — narrow it to your own
+address if the sandbox is not disposable).
 
 Script options, before the `--`: `-y` skips the confirmation prompt, `--keep`
 skips teardown (it then prints the `run down` command to finish up later).
@@ -138,9 +174,19 @@ because the `up` that follows is going to fail on the id, not on credentials.
 | `up` #2 | every node with a real `check` reports `Skip` | a node listed as "RE-APPLIED DESPITE A CHECK" has a `check` that never says `Success`, i.e. it is not idempotent under `run up` |
 | `down` | succeeds, then the project is `DELETE_REQUESTED` (or, with `--existing-project`, every resource fails to `describe`) | a failed `down` leaves that node standing and `Blocked`s everything it depends on — including, deliberately, the project delete, so the leftovers are still there to look at |
 
-Nodes that legitimately have no `check` today (`gcloud`, the `gcp-toy` root,
-`podman-build`/`login`/`push`, `directory`) re-apply on every pass; the script
-lists them separately rather than counting them as findings. The logs
+Nodes that legitimately have no `check` today re-apply on every pass; the
+script lists them separately rather than counting them as findings. Tier 2
+adds the expensive members of that list: `rsync:sendfile` re-uploads the
+binary and `ssh:call` re-runs the remote directive every pass. The remote run
+is itself idempotent — it streams its own report back over ssh, and on the
+second pass it reports `Skip` for its file node, which the script surfaces.
+
+Two nodes also cannot go *down* on a workstation, by design rather than by
+accident, and the script says so instead of calling the teardown failed:
+`deb` tears down with `apt-get remove`, which needs root and would uninstall
+a system package salmon did not put there; and `directory` refuses a
+non-empty directory, which the ssh key dir always is, because `Keys.sshKey`
+deliberately "keeps keys around". The logs
 (`gcp-toy-runs/<timestamp>/up-1.log`, `up-2.log`, `down.log`, plus `tree.txt`
 and `directive.json`) hold the full `UpDown` report stream.
 
@@ -189,15 +235,27 @@ leftover.
   `CommandStart` reports for one node, which is how to tell "needed the retry"
   from "worked first time".
 
+- **Tier 2 needs a local glibc no newer than the VM's.** The binary is
+  rsynced and run as-is, so the image family has to be at least as new as the
+  machine running the toy. Ubuntu 24.04 (glibc 2.39) is the default because
+  that is what this was developed against; an older image will fail at
+  exec time with a version error, not at build time.
+- **Tier 2's `--ssh-source-range` defaults to the whole internet.** A
+  throwaway VM reachable on 22 by anybody, trusting only a certificate, is an
+  acceptable risk for an hour; narrow it anyway when the project is not
+  disposable.
+
 ## Gaps this does not cover
 
-- **VMs and SSH.** `Gcp.Compute` and `SreBox.Gcp.VmProvision` are not exercised.
-  `SshAccess.installMetadataCaKey` writes an `ssh-ca` project-metadata key, but
-  nothing on the instance reads it: trusting the CA needs a startup script
-  writing sshd's `TrustedUserCAKeys`. A VM tier also needs a static address (the
-  recipe takes the SSH host as an input, and an ephemeral address is not known
-  until after `up`), a firewall rule for port 22, and a self binary that runs on
-  the guest's libc.
+- **The VM's own teardown is the project delete.** `down` removes the
+  instance, the address and the firewall rule as declared nodes, but nothing
+  checks that the guest was left in any particular state.
+- **Host identity is trust-on-first-use, per recipe.** The user is
+  authenticated by certificate, but the *host* is not: `VmProvision` keeps a
+  known-hosts file next to the client key and accepts a new host on sight.
+  Signing host certificates with the same CA would close that, and needs
+  `ssh-keygen -s -h` support in `Keys` plus a way to get each VM's host key
+  signed at boot.
 - **Load balancing.** `Gcp.LoadBalancing` renders a regional external ALB, and
   GCP only accepts one in a network that already has a proxy-only subnet, which
   nothing here creates. Unexercised.

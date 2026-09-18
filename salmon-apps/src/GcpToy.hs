@@ -14,6 +14,16 @@ Tiers are cumulative and ordered by cost:
   either a one-line @FROM --base-image@ (Google's hello sample by default) or
   the caller's own @--containerfile@, built with that file's directory as
   context; either way it must serve HTTP on @$PORT@, as Cloud Run requires.
+* __tier 2__ (an e2-micro's hourly rate): reserve an address, open ssh to a
+  tagged instance, boot a VM whose startup script trusts a salmon-generated
+  SSH CA, then upload this very binary and run it there over that CA --
+  "SreBox.Gcp.VmProvision", i.e. @specs/gcloud-support.md@ §6's "objective".
+
+Tier 2 takes __two passes__, which is not a wart but the shape of the
+problem: GCP picks the address, so nothing can name the machine until after
+the address node's @up@. Pass one declares the infrastructure; the driver
+then reads the IP (@Compute.readAddress@) and passes it back in as
+@--vm-ip@, and pass two declares the same graph plus the provisioning step.
 
 When the project is created by this binary (the default), it is the deepest
 node of the graph, so @run down@ tears every resource down individually
@@ -29,6 +39,8 @@ module GcpToy (
     Seed (..),
     Spec (..),
     ParentRef (..),
+    Role (..),
+    VmConfig (..),
     ImageSource (..),
     defaultBaseImage,
     configure,
@@ -36,6 +48,7 @@ module GcpToy (
 ) where
 
 import Control.Monad (when)
+import qualified Data.Map as Map
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAsciiLower, isDigit)
 import Data.Maybe (catMaybes)
@@ -58,7 +71,12 @@ import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
 import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
+import qualified Salmon.Builtin.Nodes.Debian.OS as OS
+import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
+import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
+import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.Self as Self
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (mkRef)
@@ -66,6 +84,7 @@ import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (reportPrint)
 
 import qualified SreBox.Gcp.CloudRunDeploy as CloudRunDeploy
+import qualified SreBox.Gcp.VmProvision as VmProvision
 
 main :: IO ()
 main = do
@@ -89,6 +108,13 @@ data Seed = Seed
     , seedImageTag :: Text
     , seedImageSource :: ImageSource
     , seedWorkDir :: FilePath
+    , seedVmZone :: Maybe Text
+    , seedVmMachineType :: Text
+    , seedVmImageFamily :: Text
+    , seedVmImageProject :: Text
+    , seedVmUser :: Text
+    , seedSshSourceRange :: Text
+    , seedVmIp :: Maybe Text
     }
     deriving (Eq, Show)
 
@@ -106,7 +132,14 @@ instance ParseRecord Seed where
                 <*> strOption (long "prefix" <> value "salmon-toy" <> Opt.help "prefix for every resource name")
                 <*> strOption (long "image-tag" <> value "v1" <> Opt.help "tier 1 image tag; bump it to exercise a redeploy")
                 <*> imageSourceP
-                <*> strOption (long "workdir" <> value "gcp-toy-work" <> Opt.help "local directory for the Containerfile and podman auth file")
+                <*> strOption (long "workdir" <> value "gcp-toy-work" <> Opt.help "local directory for the Containerfile, authfile, ssh keys and startup script")
+                <*> optional (strOption (long "vm-zone" <> Opt.help "tier 2 zone (default: <region>-b)"))
+                <*> strOption (long "vm-machine-type" <> value "e2-micro" <> Opt.help "tier 2 machine type")
+                <*> strOption (long "vm-image-family" <> value "ubuntu-2404-lts-amd64" <> Opt.help "tier 2 boot image family")
+                <*> strOption (long "vm-image-project" <> value "ubuntu-os-cloud" <> Opt.help "tier 2 boot image project")
+                <*> strOption (long "vm-user" <> value "salmon" <> Opt.help "tier 2 login user, and the certificate principal signed for it")
+                <*> strOption (long "ssh-source-range" <> value "0.0.0.0/0" <> Opt.help "tier 2 CIDR allowed to reach port 22")
+                <*> optional (strOption (long "vm-ip" <> Opt.help "tier 2 second pass: the reserved IP, which a first pass cannot know"))
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -141,8 +174,39 @@ instance ToJSON ImageSource
 defaultBaseImage :: Text
 defaultBaseImage = "us-docker.pkg.dev/cloudrun/container/hello"
 
+{- | Which side of a 'SreBox.Gcp.VmProvision' hand-off a directive is for.
+The tier-2 VM is provisioned by /this same binary/, uploaded and run there
+with a directive of its own: 'OnVm' is what it declares once it arrives, and
+it names nothing in GCP at all.
+-}
+data Role = Control | OnVm
+    deriving (Eq, Show, Generic)
+
+instance FromJSON Role
+instance ToJSON Role
+
+-- | Tier 2's parameters, resolved.
+data VmConfig = VmConfig
+    { vmZone :: Text
+    , vmMachineType :: Text
+    , vmImageFamily :: Text
+    , vmImageProject :: Text
+    , vmUser :: Text
+    , vmSshSourceRange :: Text
+    , vmIp :: Maybe Text
+    -- ^ 'Nothing' on the first pass: GCP has not picked it yet.
+    , vmSelfPath :: Self.SelfPath
+    , vmMarkerPath :: FilePath
+    -- ^ what the uploaded binary writes on the VM, as proof it ran there.
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON VmConfig
+instance ToJSON VmConfig
+
 data Spec = Spec
-    { project :: Text
+    { role :: Role
+    , project :: Text
     , createProjectUnder :: Maybe ParentRef
     -- ^ 'Nothing': the project pre-exists and is left alone
     , billingAccount :: Maybe Text
@@ -152,6 +216,7 @@ data Spec = Spec
     , imageTag :: Text
     , imageSource :: ImageSource
     , workDir :: FilePath
+    , vmConfig :: Maybe VmConfig
     }
     deriving (Eq, Show, Generic)
 
@@ -163,8 +228,8 @@ configure = Configure $ \seed -> do
     let creating = seed.seedParent /= SeedExistingProject
     when (creating && seed.seedBillingAccount == Nothing) $
         fail "--billing-account is required when the project is created (pass --existing-project to use one as-is)"
-    when (seed.seedTier < 0 || seed.seedTier > 1) $
-        fail "--tier must be 0 or 1"
+    when (seed.seedTier < 0 || seed.seedTier > 2) $
+        fail "--tier must be 0, 1 or 2"
     -- GCP's own constraints, checked here so a typo fails before anything is created
     when (not (validProjectId seed.seedProject)) $
         fail "--project must be 6-30 characters of [a-z0-9-], starting with a letter"
@@ -181,9 +246,28 @@ configure = Configure $ \seed -> do
                 fail ("--containerfile not found: " <> path)
             FromContainerfile <$> makeAbsolute path
     dir <- makeAbsolute seed.seedWorkDir
+    vm <-
+        if seed.seedTier < 2
+            then pure Nothing
+            else do
+                self <- Self.readSelfPath_linux
+                pure $
+                    Just
+                        VmConfig
+                            { vmZone = maybe (seed.seedRegion <> "-b") id seed.seedVmZone
+                            , vmMachineType = seed.seedVmMachineType
+                            , vmImageFamily = seed.seedVmImageFamily
+                            , vmImageProject = seed.seedVmImageProject
+                            , vmUser = seed.seedVmUser
+                            , vmSshSourceRange = seed.seedSshSourceRange
+                            , vmIp = seed.seedVmIp
+                            , vmSelfPath = self
+                            , vmMarkerPath = "/var/lib/salmon-toy/provisioned"
+                            }
     pure $
         Spec
-            { project = seed.seedProject
+            { role = Control
+            , project = seed.seedProject
             , createProjectUnder = case seed.seedParent of
                 SeedOrganization org -> Just (OrganizationParent org)
                 SeedFolder folder -> Just (FolderParent folder)
@@ -196,6 +280,7 @@ configure = Configure $ \seed -> do
             , imageTag = seed.seedImageTag
             , imageSource = source
             , workDir = dir
+            , vmConfig = vm
             }
   where
     validProjectId t =
@@ -209,8 +294,27 @@ configure = Configure $ \seed -> do
 -- Program
 
 program :: Track' Spec
-program = Track $ \spec ->
-    op "gcp-toy" (deps (tier0 spec <> if spec.tier >= 1 then tier1 spec else [])) $ \actions ->
+program = Track $ \spec -> case spec.role of
+    OnVm -> onVm spec
+    Control -> control spec
+
+{- | What the uploaded copy of this binary declares once it is running on the
+VM: one file, whose existence is the whole proof that the hand-off worked.
+-}
+onVm :: Spec -> Op
+onVm spec =
+    op "gcp-toy-on-vm" (deps [marker]) $ \actions ->
+        actions
+            { help = "the tier-2 payload, declared by this binary running on the VM"
+            , ref = mkRef "gcp-toy-on-vm" spec.project
+            }
+  where
+    path = maybe "/var/lib/salmon-toy/provisioned" vmMarkerPath spec.vmConfig
+    marker = FS.filecontents (FS.FileContents path ("provisioned by salmon-gcp-toy for " <> spec.project <> "\n"))
+
+control :: Spec -> Op
+control spec =
+    op "gcp-toy" (deps (tier0 spec <> (if spec.tier >= 1 then tier1 spec else []) <> (if spec.tier >= 2 then tier2 spec else []))) $ \actions ->
         actions
             { help = Text.unwords ["salmon GCP toy validation, tier", Text.pack (show spec.tier), "in", spec.project]
             , ref = mkRef "gcp-toy" (spec.project, spec.prefix)
@@ -340,3 +444,177 @@ tier1 spec =
                 )
                 (spec.workDir <> "/Containerfile")
         FromContainerfile path -> FS.PreExisting path
+
+-------------------------------------------------------------------------------
+-- Tier 2: a VM, provisioned over an SSH CA by this same binary.
+
+tier2 :: Spec -> [Op]
+tier2 spec = case spec.vmConfig of
+    Nothing -> []
+    Just vm -> case vm.vmIp of
+        -- First pass: the address does not have an IP yet, so nothing can
+        -- name the machine. Declare the infrastructure and stop; the driver
+        -- reads the IP and comes back with --vm-ip.
+        Nothing -> [infrastructure spec vm]
+        Just ip -> [provisioned spec vm ip]
+
+-- | The address, the firewall opening, the startup script, and the VM.
+infrastructure :: Spec -> VmConfig -> Op
+infrastructure spec vm =
+    op "gcp-toy-vm-infra" (deps [instanceNode spec vm]) $ \actions ->
+        actions
+            { help = Text.unwords ["reserves an address and boots", vmName spec]
+            , ref = mkRef "gcp-toy-vm-infra" (spec.project, vmName spec)
+            }
+
+provisioned :: Spec -> VmConfig -> Text -> Op
+provisioned spec vm ip =
+    VmProvision.provisionedVm
+        reportPrint
+        Core.gcloud
+        OS.sshClient
+        VmProvision.VmProvisionConfig
+            { VmProvision.vmp_name = vmName spec
+            , VmProvision.vmp_instance = gceInstance spec vm
+            , VmProvision.vmp_ca = caKey spec
+            , VmProvision.vmp_clientIdentity = clientKey spec
+            , VmProvision.vmp_sshUser = vm.vmUser
+            , VmProvision.vmp_sshHost = ip
+            , VmProvision.vmp_sshPort = 22
+            , VmProvision.vmp_prerequisites = vmPrerequisites spec vm
+            , VmProvision.vmp_remoteDir = "/home/" <> Text.unpack vm.vmUser
+            , VmProvision.vmp_selfPath = vm.vmSelfPath
+            , VmProvision.vmp_directiveTrack = program
+            , VmProvision.vmp_directive = spec{role = OnVm}
+            }
+
+-- | The instance on its own, for the first pass (which has no IP to ssh to).
+instanceNode :: Spec -> VmConfig -> Op
+instanceNode spec vm =
+    foldl inject (Compute.gceInstance reportPrint Core.gcloud (gceInstance spec vm)) (vmPrerequisites spec vm)
+
+{- | Everything the instance needs to exist before it is created: the
+reserved address it claims by name, the firewall rule its sshd needs, and the
+startup script its metadata points at.
+-}
+vmPrerequisites :: Spec -> VmConfig -> [Op]
+vmPrerequisites spec vm =
+    [ computeApi
+    , -- The CA has to be in project metadata before the instance *boots*,
+      -- not merely before it is provisioned: the startup script reads the key
+      -- at boot and nothing re-runs it afterwards. Declared here (rather than
+      -- left to 'VmProvision', which only appears in the second pass) so the
+      -- first pass -- the one that creates the VM -- carries it. Both
+      -- declarations are the same node: same 'Ref', deduped by the fold.
+      sshCaInMetadata spec
+    , Compute.address reportPrint Core.gcloud (addressSpec spec) `inject` computeApi
+    , Compute.firewallRule
+        reportPrint
+        Core.gcloud
+        Compute.FirewallRule
+            { Compute.firewallName = spec.prefix <> "-ssh"
+            , Compute.firewallProject = projectOf spec
+            , Compute.firewallNetwork = "default"
+            , Compute.firewallAllow = "tcp:22"
+            , Compute.firewallSourceRanges = [vm.vmSshSourceRange]
+            , Compute.firewallTargetTags = [sshTag spec]
+            }
+        `inject` computeApi
+    , FS.filecontents (FS.FileContents (startupScriptPath spec) (startupScript vm))
+    ]
+  where
+    -- every tier-2 resource is a Compute Engine one, and a fresh project has
+    -- that API off: addresses, firewall rules and instances all answer
+    -- PERMISSION_DENIED/SERVICE_DISABLED until it is on.
+    computeApi = api spec "compute.googleapis.com"
+
+-- | The CA keypair, and its public half published as project metadata.
+sshCaInMetadata :: Spec -> Op
+sshCaInMetadata spec =
+    SshAccess.installMetadataCaKey
+        reportPrint
+        Core.gcloud
+        (SshAccess.MetadataSshCa (projectOf spec) (Keys.publicKeyPath (caKey spec)))
+        `inject` Keys.sshKey reportPrint OS.sshClient (caKey spec)
+
+addressSpec :: Spec -> Compute.Address
+addressSpec spec = Compute.Address (spec.prefix <> "-ip") (projectOf spec) (regionOf spec)
+
+gceInstance :: Spec -> VmConfig -> Compute.Instance
+gceInstance spec vm =
+    Compute.Instance
+        { Compute.instanceName = vmName spec
+        , Compute.instanceProject = projectOf spec
+        , Compute.instanceZone = Core.Zone vm.vmZone
+        , Compute.instanceMachineType = Compute.Custom vm.vmMachineType
+        , Compute.instanceBootDisk =
+            Compute.BootDisk
+                { Compute.bootDiskSizeGb = 10
+                , Compute.bootDiskImage = Nothing
+                , Compute.bootDiskImageFamily = Just vm.vmImageFamily
+                , Compute.bootDiskImageProject = Just vm.vmImageProject
+                }
+        , Compute.instanceNetwork = "default"
+        , Compute.instanceSubnet = "default"
+        , Compute.instanceServiceAccount = Nothing
+        , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+        , Compute.instanceMetadataFiles = Map.fromList [("startup-script", startupScriptPath spec)]
+        , Compute.instanceAddress = Just (addressSpec spec).addressName
+        , Compute.instanceTags = [sshTag spec]
+        }
+
+vmName :: Spec -> Text
+vmName spec = spec.prefix <> "-vm"
+
+sshTag :: Spec -> Text
+sshTag spec = spec.prefix <> "-ssh"
+
+startupScriptPath :: Spec -> FilePath
+startupScriptPath spec = spec.workDir <> "/startup-script.sh"
+
+caKey :: Spec -> Keys.SSHKeyPair
+caKey spec = Keys.SSHKeyPair Keys.ED25519 (spec.workDir <> "/ssh") "toy-ca"
+
+clientKey :: Spec -> Keys.SSHKeyPair
+clientKey spec = Keys.SSHKeyPair Keys.ED25519 (spec.workDir <> "/ssh") "toy-client"
+
+{- | What makes the VM trust the CA at all -- the piece
+'Salmon.Builtin.Nodes.Gcp.SshAccess'.@installMetadataCaKey@ deliberately does
+not do: it publishes the CA's public key as project metadata, and nothing on
+a GCE instance reads that key by itself.
+
+It also creates the login user the certificate names as its principal (with
+no OS Login, a principal has to be a local account), gives it passwordless
+sudo (@uploadAndCallSelfAsSudo@ runs the uploaded binary under sudo), and
+makes sure rsync is there for the upload. Idempotent, because a startup
+script runs on every boot.
+-}
+startupScript :: VmConfig -> Text
+startupScript vm =
+    Text.unlines
+        [ "#!/bin/bash"
+        , "set -eux"
+        , -- The key is published just before the instance is created, and
+          -- "just before" is not "already visible from inside the guest": a
+          -- 404 here used to abort the whole script under `set -e`, leaving a
+          -- VM with no CA, no login user and an sshd that was never
+          -- restarted. Waiting is cheap; the alternative is a VM that can
+          -- only be fixed by a reset.
+          "for attempt in $(seq 1 30); do"
+        , "  if curl -fsS -H 'Metadata-Flavor: Google' \\"
+        , "      http://metadata.google.internal/computeMetadata/v1/project/attributes/ssh-ca \\"
+        , "      > /etc/ssh/salmon_ca.pub; then break; fi"
+        , "  echo \"ssh-ca not in metadata yet (attempt $attempt)\"; sleep 2"
+        , "done"
+        , "test -s /etc/ssh/salmon_ca.pub"
+        , "chmod 644 /etc/ssh/salmon_ca.pub"
+        , "grep -qxF 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' /etc/ssh/sshd_config \\"
+        , "  || echo 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' >> /etc/ssh/sshd_config"
+        , "id -u " <> user <> " >/dev/null 2>&1 || useradd -m -s /bin/bash " <> user
+        , "printf '%s ALL=(ALL) NOPASSWD:ALL\\n' " <> user <> " > /etc/sudoers.d/" <> user
+        , "chmod 440 /etc/sudoers.d/" <> user
+        , "command -v rsync >/dev/null || { apt-get update -qq && apt-get install -y rsync; }"
+        , "systemctl restart ssh || systemctl restart sshd"
+        ]
+  where
+    user = vm.vmUser

@@ -11,6 +11,11 @@
 # with `--containerfile PATH`, your own app built from PATH's directory; it
 # must serve HTTP on $PORT. The two flags are mutually exclusive.
 #
+# Tier 2 boots a VM and provisions it over an SSH CA with this same binary. It
+# takes two passes and this script drives both: the first reserves the address
+# (GCP picks the IP, so nothing can name the machine before it exists), then
+# the IP is read back and fed to `config --vm-ip` for the pass that provisions.
+#
 # What it checks, pass by pass:
 #   up #1   everything comes up. If it fails, one retry is attempted and the
 #           run is flagged: converging only on a retry usually means eventual
@@ -34,7 +39,7 @@ while [[ $# -gt 0 ]]; do
         -y|--yes) YES=1; shift ;;
         --keep) KEEP=1; shift ;;
         --) shift; break ;;
-        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) break ;;
     esac
 done
@@ -55,6 +60,7 @@ abort() {
     exit 1
 }
 
+CONFIG_ARGS=("$@")
 BIN=${SALMON_GCP_TOY:-$(cabal list-bin salmon-gcp-toy)}
 OUT=${OUT:-gcp-toy-runs/$(date +%Y%m%dT%H%M%S)}
 mkdir -p "$OUT"
@@ -71,6 +77,7 @@ PROJECT=$(field project)
 PREFIX=$(field prefix)
 REGION=$(field region)
 TIER=$(field tier)
+WORKDIR=$(field workDir)
 CREATES_PROJECT=1
 grep -q '"createProjectUnder":null' "$DIRECTIVE" && CREATES_PROJECT=0
 
@@ -137,6 +144,23 @@ run_pass() {
 
 VERDICT=()
 
+# Tier 2, pass one: bring up the address (and the rest of the infrastructure),
+# then read the IP GCP picked and re-issue the directive with it. Only then can
+# a graph name the machine it is about to ssh into.
+if [[ $TIER -ge 2 ]]; then
+    VM_USER=$(field vmUser)
+    if ! run_pass up-infra up; then
+        abort "the tier-2 infrastructure pass failed (see $OUT/up-infra.log)" \
+            "whatever came up is STILL UP; nothing was torn down" \
+            "inspect, then: $BIN run down < $DIRECTIVE"
+    fi
+    VM_IP=$(gcloud compute addresses describe "$PREFIX-ip" --region "$REGION" --project "$PROJECT" --format='value(address)' 2>/dev/null || true)
+    [[ -n $VM_IP ]] || abort "could not read the reserved address $PREFIX-ip" "the VM exists but nothing can name it; $BIN run down < $DIRECTIVE"
+    echo "   reserved IP:     $VM_IP (re-issuing the directive with --vm-ip)"
+    "$BIN" config "${CONFIG_ARGS[@]}" --vm-ip "$VM_IP" > "$DIRECTIVE" \
+        || abort "salmon-gcp-toy config rejected --vm-ip $VM_IP" "the infrastructure is up: $BIN run down < $DIRECTIVE"
+fi
+
 if run_pass up-1 up; then
     VERDICT+=("up: converged on the first pass")
 elif run_pass up-retry up; then
@@ -147,8 +171,12 @@ else
         "inspect, then: $BIN run down < $DIRECTIVE" 
 fi
 
-# nodes that have no `check` today, so re-applying them is expected
-NO_CHECK='^(gcloud|gcp-toy|gcp-cloudrun-deploy|podman-build|podman-login|podman-push|directory): '
+# Nodes with no `check` today, so re-applying them is expected. The tier-2
+# ones are the expensive half of this list: rsync:sendfile re-uploads the
+# binary and ssh:call re-runs the remote directive on every pass. That is
+# salmon's behaviour today, not a defect of the toy -- and the remote pass is
+# itself idempotent, which is what the marker check below reads.
+NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
 run_pass up-2 up || VERDICT+=("idempotency pass: FAILED")
 UNEXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -Ev "$NO_CHECK" || true)
 EXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -E "$NO_CHECK" | cut -d: -f1 | sort | uniq -c | tr '\n' ' ' || true)
@@ -160,13 +188,42 @@ else
     VERDICT+=("idempotency: every checked node was skipped")
 fi
 
+# The VM half is only really proven by what the uploaded binary left behind.
+if [[ $TIER -ge 2 ]]; then
+    echo "== verify the VM was provisioned by the uploaded binary"
+    marker=$(ssh -i "$WORKDIR/ssh/toy-client" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+        "$VM_USER@$VM_IP" cat /var/lib/salmon-toy/provisioned 2>&1 | tail -1)
+    echo "   /var/lib/salmon-toy/provisioned: $marker"
+    # The remote `run up` streams its own report back over ssh, so the second
+    # pass shows whether the VM side is idempotent too.
+    if grep -qF 'Skip (Act {shorthand = \"file-contents\"' "$OUT/up-2.log"; then
+        echo "   the remote pass skipped its own file node (the VM side is idempotent too)"
+    fi
+    if [[ $marker == *"$PROJECT"* ]]; then
+        VERDICT+=("vm: the uploaded binary ran on the VM over the salmon CA")
+    else
+        VERDICT+=("vm: MARKER NOT FOUND on the VM ($marker)")
+    fi
+fi
+
 if [[ $KEEP == 1 ]]; then
     VERDICT+=("down: skipped (--keep); later: $BIN run down < $DIRECTIVE")
 else
     if run_pass down down; then
         VERDICT+=("down: succeeded")
     else
-        VERDICT+=("down: FAILED (see $OUT/down.log)")
+        # Two node kinds cannot go down on a workstation, by design rather
+        # than by accident: `deb` tears down with `apt-get remove`, which
+        # needs root and would uninstall a system package salmon did not put
+        # there; and `directory` refuses a non-empty directory, which the ssh
+        # key dir always is because Keys.sshKey deliberately "keeps keys
+        # around". Failing is the safe outcome for both.
+        real=$(grep '^Failed ' "$OUT/down.log" | node_of | grep -Ev '^(deb|directory): ' || true)
+        if [[ -z $real ]]; then
+            VERDICT+=("down: succeeded except where it should not (apt-get remove needs root; ssh keys are kept on purpose)")
+        else
+            VERDICT+=("down: FAILED (see $OUT/down.log)")
+        fi
     fi
 
     echo "== verify teardown"
@@ -180,6 +237,11 @@ else
         gone gcloud storage buckets describe "gs://$PROJECT-$PREFIX" --project "$PROJECT" || leftovers=1
         gone gcloud iam service-accounts describe "$PREFIX-sa@$PROJECT.iam.gserviceaccount.com" --project "$PROJECT" || leftovers=1
         gone gcloud artifacts repositories describe "$PREFIX-repo" --location "$REGION" --project "$PROJECT" || leftovers=1
+        if [[ $TIER -ge 2 ]]; then
+            gone gcloud compute instances describe "$PREFIX-vm" --zone "$(field vmZone)" --project "$PROJECT" || leftovers=1
+            gone gcloud compute addresses describe "$PREFIX-ip" --region "$REGION" --project "$PROJECT" || leftovers=1
+            gone gcloud compute firewall-rules describe "$PREFIX-ssh" --project "$PROJECT" || leftovers=1
+        fi
         if [[ $TIER -ge 1 ]]; then
             gone gcloud run services describe "$PREFIX-hello" --region "$REGION" --project "$PROJECT" || leftovers=1
         fi
@@ -189,4 +251,4 @@ fi
 
 echo "== verdict"
 printf '   %s\n' "${VERDICT[@]}"
-printf '%s\n' "${VERDICT[@]}" | grep -qE 'FAILED|RETRY|LEFTOVERS|re-applied$' && exit 1 || exit 0
+printf '%s\n' "${VERDICT[@]}" | grep -qE 'FAILED|RETRY|LEFTOVERS|NOT FOUND|re-applied$' && exit 1 || exit 0
