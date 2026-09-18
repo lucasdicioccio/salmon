@@ -24,6 +24,7 @@ import System.Process.ListLike (CreateProcess, proc)
 data Report
     = MakeSshKey !SSHKeyPair Binary.Report
     | SignKeyReport !SSHKeyPair Binary.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 

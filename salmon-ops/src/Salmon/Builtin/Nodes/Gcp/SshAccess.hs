@@ -16,6 +16,7 @@ module Salmon.Builtin.Nodes.Gcp.SshAccess (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, throwIO)
+import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.IO.Exception (ExitCode (..))
@@ -29,6 +30,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), gcloudProc, withProject)
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -49,7 +51,10 @@ data SshEndpoint = SshEndpoint
     -- which is rarely the principal a signed certificate was issued for.
     , sshHost :: Text
     , sshPort :: Int
-    , sshIdentity :: FilePath
+    , sshClientOpts :: Ssh.ClientOpts
+    -- ^ the key to authenticate with, and where to keep host keys -- the
+    -- same options the upload and the remote call will use, or the probe is
+    -- not answering the question they are about to ask.
     }
     deriving (Eq, Show)
 
@@ -109,9 +114,26 @@ sshAvailableWithin policy _r endpoint =
             result <- probe
             case result of
                 Right () -> pure ()
-                Left err -> do
-                    threadDelay policy.probeDelayMicros
-                    waitReachable (remaining - 1) err
+                Left err
+                    -- A host key that no longer matches never resolves by
+                    -- waiting: this is a machine rebuilt at an address salmon
+                    -- reserved, so "same address, new host" is the expected
+                    -- case rather than an attack. Forget the recorded key and
+                    -- retry at once; if the mismatch somehow persists, the
+                    -- ordinary budget still runs out and still throws.
+                    | Ssh.isHostKeyMismatch err
+                    , Just hosts <- endpoint.sshClientOpts.optKnownHosts -> do
+                        forgetHostKey hosts endpoint.sshHost
+                        waitReachable (remaining - 1) err
+                    | otherwise -> do
+                        threadDelay policy.probeDelayMicros
+                        waitReachable (remaining - 1) err
+
+    -- ssh-keygen -R rewrites the file in place, and succeeds when there was
+    -- nothing to remove.
+    forgetHostKey :: FilePath -> Text -> IO ()
+    forgetHostKey hosts host =
+        void $ readCreateProcessWithExitCode (proc "ssh-keygen" ["-R", Text.unpack host, "-f", hosts]) ""
 
     probe :: IO (Either Text ())
     probe = do
@@ -119,19 +141,18 @@ sshAvailableWithin policy _r endpoint =
             readCreateProcessWithExitCode
                 ( proc
                     "ssh"
-                    [ "-o"
-                    , "ConnectTimeout=5"
-                    , "-o"
-                    , "BatchMode=yes"
-                    , "-o"
-                    , "StrictHostKeyChecking=accept-new"
-                    , "-i"
-                    , endpoint.sshIdentity
-                    , "-p"
-                    , show endpoint.sshPort
-                    , Text.unpack (maybe endpoint.sshHost (\u -> u <> "@" <> endpoint.sshHost) endpoint.sshUser)
-                    , "true"
-                    ]
+                    ( [ "-o"
+                      , "ConnectTimeout=5"
+                      , "-o"
+                      , "BatchMode=yes"
+                      ]
+                        <> Ssh.clientArgs endpoint.sshClientOpts
+                        <> [ "-p"
+                           , show endpoint.sshPort
+                           , Text.unpack (maybe endpoint.sshHost (\u -> u <> "@" <> endpoint.sshHost) endpoint.sshUser)
+                           , "true"
+                           ]
+                    )
                 )
                 ""
         pure $ case code of

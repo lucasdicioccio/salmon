@@ -9,7 +9,7 @@ what makes it testable without a real GCP project.
 -}
 module Test.GcpSpec (tests) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isSubsequenceOf)
 import qualified Data.Map as Map
 import GHC.IO.Exception (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -29,6 +29,8 @@ import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
 import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
+import qualified Salmon.Builtin.Nodes.Rsync as Rsync
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 
 tests :: TestTree
 tests =
@@ -44,6 +46,8 @@ tests =
         , testGroup "ServiceUsage" serviceUsageTests
         , testGroup "Billing.interpretBillingDescribe" billingTests
         , testGroup "ResourceManager" projectTests
+        , testGroup "Compute (tier 2 resources)" vmTests
+        , testGroup "Ssh.ClientOpts" clientOptsTests
         ]
 
 -- | Extracts the argument list of a prepared gcloud 'CreateProcess', for
@@ -346,3 +350,106 @@ projectTests =
                         )
         assertEqual "" ["projects", "create", "p", "--folder", "123", "--labels", "purpose=salmon-toy"] args
     ]
+
+-------------------------------------------------------------------------------
+
+vmTests :: [TestTree]
+vmTests =
+    [ testCase "an address is reserved regionally, and read back as a bare IP" $ do
+        assertEqual
+            "create"
+            ["compute", "addresses", "create", "toy-ip", "--region", "europe-west1", "--project", "p"]
+            (processArgs (prepare Compute.computeCommand (Compute.AddressesCreate addr)))
+        assertEqual
+            "describe asks for the address itself, which is what a driver needs"
+            ["compute", "addresses", "describe", "toy-ip", "--region", "europe-west1", "--format=value(address)", "--project", "p"]
+            (processArgs (prepare Compute.computeCommand (Compute.AddressesDescribe addr)))
+    , testCase "a reserved address with no IP yet is not satisfied" $
+        assertBool "" (isFailure (Compute.interpretAddressDescribe "toy-ip" ExitSuccess ""))
+    , testCase "a reserved address with an IP is satisfied" $
+        assertEqual "" Success (Compute.interpretAddressDescribe "toy-ip" ExitSuccess "34.1.2.3")
+    , testCase "a firewall rule carries its allow, ranges and target tags" $
+        assertEqual
+            ""
+            [ "compute", "firewall-rules", "create", "toy-ssh"
+            , "--network", "default", "--allow", "tcp:22"
+            , "--source-ranges", "0.0.0.0/0", "--project", "p"
+            , "--target-tags", "toy-ssh"
+            ]
+            (processArgs (prepare Compute.computeCommand (Compute.FirewallCreate fw)))
+    , testCase "an instance boots from an image family, in its publisher's project" $
+        assertBool
+            "--image-family and --image-project are passed"
+            (["--image-family", "ubuntu-2404-lts-amd64"] `isSubsequenceOf` args && ["--image-project", "ubuntu-os-cloud"] `isSubsequenceOf` args)
+    , testCase "a multi-line startup script goes through --metadata-from-file" $
+        assertBool
+            "a newline-bearing value cannot ride in --metadata KEY=VALUE"
+            (["--metadata-from-file", "startup-script=/tmp/w/startup-script.sh"] `isSubsequenceOf` args)
+    , testCase "the instance claims the reserved address by name" $
+        assertBool "" (["--address", "toy-ip"] `isSubsequenceOf` args)
+    ]
+  where
+    args = processArgs (prepare Compute.computeCommand (Compute.InstancesCreate inst))
+    addr = Compute.Address "toy-ip" (Core.Project "p") (Core.Region "europe-west1")
+    fw =
+        Compute.FirewallRule
+            { Compute.firewallName = "toy-ssh"
+            , Compute.firewallProject = Core.Project "p"
+            , Compute.firewallNetwork = "default"
+            , Compute.firewallAllow = "tcp:22"
+            , Compute.firewallSourceRanges = ["0.0.0.0/0"]
+            , Compute.firewallTargetTags = ["toy-ssh"]
+            }
+    inst =
+        Compute.Instance
+            { Compute.instanceName = "toy-vm"
+            , Compute.instanceProject = Core.Project "p"
+            , Compute.instanceZone = Core.Zone "europe-west1-b"
+            , Compute.instanceMachineType = Compute.Custom "e2-micro"
+            , Compute.instanceBootDisk = Compute.BootDisk 10 Nothing (Just "ubuntu-2404-lts-amd64") (Just "ubuntu-os-cloud")
+            , Compute.instanceNetwork = "default"
+            , Compute.instanceSubnet = "default"
+            , Compute.instanceServiceAccount = Nothing
+            , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
+            , Compute.instanceAddress = Just "toy-ip"
+            , Compute.instanceTags = ["toy-ssh"]
+            }
+
+-------------------------------------------------------------------------------
+
+clientOptsTests :: [TestTree]
+clientOptsTests =
+    [ testCase "no options means ssh authenticates as it always did" $
+        assertEqual "" [] (Ssh.clientArgs Ssh.noClientOpts)
+    , testCase "an identity is offered exclusively" $
+        assertEqual
+            "IdentitiesOnly, or an agent key can be tried first and the cert never reached"
+            ["-i", "/w/ssh/toy-client", "-o", "IdentitiesOnly=yes"]
+            (Ssh.clientArgs Ssh.noClientOpts{Ssh.optIdentity = Just "/w/ssh/toy-client"})
+    , testCase "a known-hosts file comes with accept-new" $
+        assertEqual
+            ""
+            ["-o", "UserKnownHostsFile=/w/ssh/known_hosts", "-o", "StrictHostKeyChecking=accept-new"]
+            (Ssh.clientArgs Ssh.noClientOpts{Ssh.optKnownHosts = Just "/w/ssh/known_hosts"})
+    , testCase "rsync carries the same options through --rsh" $
+        assertEqual
+            "rsync has no -i of its own"
+            [ "--copy-links"
+            , "--rsh"
+            , "ssh -i /w/ssh/toy-client -o IdentitiesOnly=yes -o UserKnownHostsFile=/w/ssh/known_hosts -o StrictHostKeyChecking=accept-new"
+            , "/local/bin"
+            , "salmon@1.2.3.4:/home/salmon/bin"
+            ]
+            (processArgs (prepare Rsync.rsyncRun (Rsync.SendFile "/local/bin" (Rsync.Remote "salmon" "1.2.3.4") "/home/salmon/bin" opts)))
+    , testCase "a changed host key is recognised as such" $
+        assertBool
+            "the one ssh failure that never resolves by waiting"
+            (Ssh.isHostKeyMismatch "@@@@\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n")
+    , testCase "an ordinary refusal is not a host key mismatch" $
+        assertBool
+            "a VM still booting must be waited out, not have its host key forgotten"
+            (not (Ssh.isHostKeyMismatch "salmon@1.2.3.4: Permission denied (publickey)."))
+    ]
+  where
+    opts = Ssh.ClientOpts (Just "/w/ssh/toy-client") (Just "/w/ssh/known_hosts")

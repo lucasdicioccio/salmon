@@ -4,6 +4,7 @@ import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
+import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
@@ -35,6 +36,7 @@ main =
             , ConcurrentSpec.tests
             , DaemonSpec.tests
             , DagSpec.tests
+            , DebianPackageSpec.tests
             , DebootstrapSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests

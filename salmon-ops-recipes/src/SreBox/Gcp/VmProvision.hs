@@ -40,6 +40,7 @@ import Salmon.Builtin.Nodes.Keys (SSHKeyPair)
 import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.Self as Self
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
+import System.FilePath (takeDirectory, (</>))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref
 import Salmon.Op.Track
@@ -47,12 +48,12 @@ import Salmon.Reporter
 
 -------------------------------------------------------------------------------
 
--- | 'Keys.Report' carries no 'Show' instance, so this can't derive one either.
 data Report
     = RunCompute !Compute.Report
     | RunSshAccess !SshAccess.Report
     | RunKeys !Keys.Report
     | RunSelf !Self.Report
+    deriving (Show)
 
 -------------------------------------------------------------------------------
 
@@ -80,12 +81,39 @@ data VmProvisionConfig directive = VmProvisionConfig
     , vmp_sshUser :: Text
     , vmp_sshHost :: Text
     , vmp_sshPort :: Int
+    , vmp_prerequisites :: [Op]
+    -- ^ nodes that must be up /before the instance is created/ -- a
+    -- startup-script file the instance's metadata points at, a firewall rule
+    -- its sshd needs, the address it claims. They inject into the instance
+    -- rather than into this recipe's root, because a root only orders itself
+    -- after both, which would let the instance boot first.
     , vmp_remoteDir :: FilePath
     -- ^ where the self binary is uploaded on the VM.
     , vmp_selfPath :: Self.SelfPath
     , vmp_directiveTrack :: Track' directive
     , vmp_directive :: directive
     }
+
+{- | How this recipe's ssh, rsync and probe all authenticate: the signed
+client key, and a known-hosts file kept beside it rather than in the calling
+user's @~\/.ssh@.
+
+The second half matters as much as the first. These machines are disposable
+and their addresses are not: rebuild a VM behind a reserved IP and every
+later connection fails with @REMOTE HOST IDENTIFICATION HAS CHANGED@ against
+the entry the /previous/ machine left behind. Keeping the file next to the
+key scopes that record to this recipe (and lets
+'SshAccess.sshAvailable' clear a stale entry when it sees one), instead of
+leaving a landmine in a file the operator shares with everything else.
+-}
+clientOpts :: VmProvisionConfig directive -> Ssh.ClientOpts
+clientOpts cfg =
+    Ssh.ClientOpts
+        { Ssh.optIdentity = Just key
+        , Ssh.optKnownHosts = Just (takeDirectory key </> "known_hosts")
+        }
+  where
+    key = Keys.privateKeyPath cfg.vmp_clientIdentity
 
 {- | Creates the instance, installs SSH-CA trust, waits for SSH to answer,
 then uploads and runs a copy of the calling binary against 'vmp_directive'.
@@ -110,8 +138,16 @@ provisionedVm r gcloudTrack keygenTrack cfg =
     rKeys = contramap RunKeys r
     rSelf = contramap RunSelf r
 
+    -- The CA's public key has to be in project metadata *before* the
+    -- instance boots: the instance's startup script reads it from there to
+    -- set sshd's TrustedUserCAKeys, and a boot that happens first trusts
+    -- nobody until the next one.
     vm :: Op
-    vm = Compute.gceInstance rCompute gcloudTrack cfg.vmp_instance
+    vm =
+        foldl
+            inject
+            (Compute.gceInstance rCompute gcloudTrack cfg.vmp_instance)
+            (sshCa : cfg.vmp_prerequisites)
 
     caKey :: Op
     caKey = Keys.sshKey rKeys keygenTrack cfg.vmp_ca
@@ -138,14 +174,16 @@ provisionedVm r gcloudTrack keygenTrack cfg =
     sshReady =
         SshAccess.sshAvailable
             rSshAccess
-            (SshAccess.SshEndpoint (Just cfg.vmp_sshUser) cfg.vmp_sshHost cfg.vmp_sshPort (Keys.privateKeyPath cfg.vmp_clientIdentity))
+            (SshAccess.SshEndpoint (Just cfg.vmp_sshUser) cfg.vmp_sshHost cfg.vmp_sshPort (clientOpts cfg))
             `inject` vm
-            `inject` sshCa
             `inject` signedClient
 
     call :: Tracked' (Self.RemoteCall directive)
     call =
-        Self.uploadAndCallSelfAsSudo
+        -- The key this recipe just had signed lives at a path of its own
+        -- choosing, which ssh has no reason to offer otherwise.
+        Self.uploadAndCallSelfAsSudoWith
+            (clientOpts cfg)
             rSelf
             rSelf
             cfg.vmp_remoteDir

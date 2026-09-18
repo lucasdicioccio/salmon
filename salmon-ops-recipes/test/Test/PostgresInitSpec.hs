@@ -49,7 +49,12 @@ tests =
 -- pg_ctlcluster/pg_lsclusters *inside* the container, so those two don't
 -- need their own shims) to detect and start the cluster.
 shimmedCommands :: [String]
-shimmedCommands = ["apt-get", "sudo", "bash", "chmod"]
+-- "dpkg-query" is here because 'Salmon.Builtin.Nodes.Debian.Package.deb'
+-- now /checks/ before installing, and a check that shells out has to be
+-- redirected into the sandbox exactly like the `up` it guards. Unshimmed, it
+-- answers about the host: this machine has postgresql installed, so the
+-- container never got it and the recipe failed one step later.
+shimmedCommands = ["apt-get", "dpkg-query", "sudo", "bash", "chmod"]
 
 setupNakedPGAgainstSandbox :: IO ()
 setupNakedPGAgainstSandbox = requireExecutable "podman" $
