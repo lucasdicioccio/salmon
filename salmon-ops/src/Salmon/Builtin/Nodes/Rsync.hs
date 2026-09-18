@@ -4,6 +4,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Op.Ref
 import Salmon.Reporter
 
@@ -27,10 +28,17 @@ data Report
 data Remote = Remote {remoteUser :: Text, remoteHost :: Text}
     deriving (Show, Ord, Eq)
 
+-- | Copies a file to a remote, authenticating however ssh would by default.
 sendFile :: Reporter Report -> Track' (Binary "rsync") -> File "source" -> Remote -> FilePath -> Op
-sendFile r rsync src remote remotepath =
+sendFile = sendFileWith Ssh.noClientOpts
+
+{- | 'sendFile', with explicit ssh client options -- rsync has no @-i@, so
+they go through @--rsh@. See "Salmon.Builtin.Nodes.Ssh".'Salmon.Builtin.Nodes.Ssh.ClientOpts'.
+-}
+sendFileWith :: Ssh.ClientOpts -> Reporter Report -> Track' (Binary "rsync") -> File "source" -> Remote -> FilePath -> Op
+sendFileWith opts r rsync src remote remotepath =
     withFile src $ \filepath ->
-        let cmd = (SendFile filepath remote remotepath)
+        let cmd = (SendFile filepath remote remotepath opts)
          in withBinary rsync rsyncRun cmd $ \up ->
                 op "rsync:sendfile" nodeps $ \actions ->
                     actions
@@ -57,14 +65,18 @@ sendDir r rsync mkdir dir remote remotepath =
     dirpath = dir.directoryPath
 
 data RsyncCommand
-    = SendFile FilePath Remote FilePath
+    = SendFile FilePath Remote FilePath Ssh.ClientOpts
     | SendDir FilePath Remote FilePath
     deriving (Show)
 
 rsyncRun :: Command "rsync" RsyncCommand
 rsyncRun = Command $ \run ->
     case run of
-        (SendFile src rem dst) -> proc "rsync" ["--copy-links", src, Text.unpack (loginAtHost rem) <> ":" <> dst]
+        (SendFile src rem dst opts) ->
+            proc "rsync" $
+                ["--copy-links"]
+                    <> (case Ssh.clientArgs opts of [] -> []; args -> ["--rsh", unwords ("ssh" : args)])
+                    <> [src, Text.unpack (loginAtHost rem) <> ":" <> dst]
         (SendDir src rem dst) -> proc "rsync" ["--copy-links", "--recursive", src, Text.unpack (loginAtHost rem) <> ":" <> dst]
 
 loginAtHost :: Remote -> Text

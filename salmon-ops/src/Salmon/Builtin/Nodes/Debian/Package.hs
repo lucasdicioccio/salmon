@@ -20,8 +20,13 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import GHC.IO.Exception (ExitCode (..))
 import System.Environment (getEnvironment)
+import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, env, proc)
+import qualified Data.Text.Encoding as Text
+
+import Salmon.Actions.UpDown (CheckResult (..))
 
 data Package = Package {pkgName :: Text}
     deriving (Eq, Ord, Show)
@@ -52,6 +57,7 @@ debWith r pkg =
             , ref = mkRef "debian-deb" pkg.pkgName
             , up = upAction
             , down = downAction
+            , check = checkPackagesInstalled pkgs
             , dynamics = [toDyn pkg]
             }
   where
@@ -79,6 +85,7 @@ debsWith r pkgs =
             , ref = mkRef "debian-deb-set" (pkgName <$> Set.toList pkgset)
             , up = upAction
             , down = downAction
+            , check = checkPackagesInstalled dedupedPkgs
             }
   where
     pkgset :: Set.Set Package
@@ -224,6 +231,71 @@ removeSinglePackages root
     packages :: Op -> [Package]
     packages root = getDynamics root
 {-# DEPRECATED removeSinglePackages "Register `batchPackages` as a rewrite instead; it redirects precedence edges rather than blanking nodes." #-}
+
+{- | Whether every one of these packages is already installed.
+
+Written because @apt-get install@ needs root even when it has nothing to do,
+so a graph naming packages it already has could not run at all as an ordinary
+user -- which is what any local recipe going through
+"Salmon.Builtin.Nodes.Self" does, via its @rsync@\/@ssh@ dependencies.
+
+It has to understand __virtual packages__, or it is worse than no check at
+all: several names used in this tree ("Salmon.Builtin.Nodes.Debian.OS" asks
+for @ssh-client@) are virtual ones that @apt-get@ happily resolves to their
+single provider, while @dpkg-query@ answers @not-installed@ for the name
+itself forever. So this reads the whole catalogue once and counts a name as
+installed when an installed package either /is/ it or @Provides@ it.
+
+The behaviour change is worth stating: a @deb@ node for a package that is
+installed but out of date is now skipped rather than handed to @apt-get
+install@, which would have upgraded it. "Is this package installed" is what
+this node's effect is; tracking the latest version is a different job, and
+one nothing in this tree asked for.
+
+One consequence for test harnesses: this check shells out, so it answers
+about whatever machine it runs on. Anything redirecting a node's @up@
+elsewhere has to redirect the check too, or the check answers about the host
+while @up@ acts on the sandbox -- see @Test.PostgresInitSpec@'s shim list,
+where leaving @dpkg-query@ out made a container skip an install the host
+already had.
+-}
+checkPackagesInstalled :: NEList.NonEmpty Package -> IO CheckResult
+checkPackagesInstalled pkgs = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            (proc "dpkg-query" ["-W", "-f=${db:Status-Status}|${binary:Package}|${Provides}\n"])
+            ""
+    pure $ interpretDpkgCatalog (fmap pkgName (toList pkgs)) code (Text.decodeUtf8 out)
+
+{- | The verdict drawn from a @dpkg-query -W@ catalogue of
+@status|package|provides@ lines, split out for testability.
+-}
+interpretDpkgCatalog :: [Text] -> ExitCode -> Text -> CheckResult
+interpretDpkgCatalog _ (ExitFailure n) _ =
+    Failure ("could not list installed packages (exit " <> Text.pack (show n) <> ")")
+interpretDpkgCatalog wanted ExitSuccess catalogue =
+    case filter (not . (`Set.member` available)) wanted of
+        [] -> Success
+        missing -> Failure ("not installed: " <> Text.intercalate ", " missing)
+  where
+    available :: Set Text
+    available = Set.fromList (concatMap namesOf (Text.lines catalogue))
+
+    namesOf :: Text -> [Text]
+    namesOf line =
+        case Text.splitOn "|" line of
+            (status : name : provides : _)
+                | Text.strip status == "installed" ->
+                    stripArch (Text.strip name) : fmap providedName (Text.splitOn "," provides)
+            _ -> []
+
+    -- "libfoo (= 1.2), bar" -> "libfoo" / "bar"
+    providedName :: Text -> Text
+    providedName = stripArch . Text.strip . Text.takeWhile (/= '(')
+
+    -- dpkg prints "name:arch" for a package from a foreign architecture
+    stripArch :: Text -> Text
+    stripArch = Text.strip . Text.takeWhile (/= ':')
 
 aptInstallCommand :: [(String, String)] -> Binary.Command "apt-get" (NEList.NonEmpty Package)
 aptInstallCommand baseEnv = Binary.Command $ \pkgs -> aptInstallProcess pkgs baseEnv

@@ -165,6 +165,10 @@ package set — see [Build](#build)): `KitchenSinkBlog`,
   gives you for free (convergence, `status`/`force`/`pause`, self-healing on
   re-declaration), how to try it, and what to decorate a node with (`check`,
   `Supervision`, `managed`) to get more out of it.
+- [`docs/gcp-toy-validation.md`](docs/gcp-toy-validation.md) — how to exercise
+  the GCP builtins against a real, throwaway project with the `salmon-gcp-toy`
+  binary: what it declares, how to read an `up`/`up`/`down` run, and what the
+  automated (Layer 0) tests cannot tell you.
 - [`CLAUDE.md`](CLAUDE.md) — repository-level conventions (package layering,
   idempotency conventions, failure-propagation rules) for anyone (human or
   AI) working in this codebase.

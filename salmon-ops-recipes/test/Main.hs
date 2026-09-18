@@ -4,11 +4,14 @@ import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
+import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
+import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
+import qualified Test.PodmanCommandSpec as PodmanCommandSpec
 import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
@@ -33,11 +36,14 @@ main =
             , ConcurrentSpec.tests
             , DaemonSpec.tests
             , DagSpec.tests
+            , DebianPackageSpec.tests
             , DebootstrapSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
+            , GcpSpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests
+            , PodmanCommandSpec.tests
             , PodmanSpec.tests
             , PostgresInitSpec.tests
             , PostgresReplicationSpec.tests

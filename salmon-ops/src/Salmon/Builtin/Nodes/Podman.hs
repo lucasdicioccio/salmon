@@ -2,7 +2,7 @@ module Salmon.Builtin.Nodes.Podman where
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), CommandIO (..), checkExitCode, withBinary, withBinaryIO)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -11,13 +11,17 @@ import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 
 import GHC.IO.Exception (ExitCode (..))
+import GHC.IO.Handle (Handle, hClose)
+import System.Directory (doesFileExist, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.Process (StdStream (CreatePipe), waitForProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
 
@@ -25,6 +29,9 @@ import System.Process.ListLike (CreateProcess (..), proc)
 data Report
     = PullImage !Registry !Image !Binary.Report
     | BuildImage !FilePath !TagName !Binary.Report
+    | PushImage !(Maybe AuthFile) !TagName !Binary.Report
+    | LoginRegistry !AuthFile !Registry !Username
+    | LogoutRegistry !AuthFile !Registry !Binary.Report
     | RunContainer !Registry !Image !ContainerName !RunOptions !Binary.Report
     | CreateNetwork !NetworkName !Binary.Report
     | RemoveImage !Registry !Image !Binary.Report
@@ -42,6 +49,27 @@ newtype Image = Image {getImage :: Text}
     deriving (Eq, Ord, Show)
 
 type TagName = Text
+
+{- | An explicit @--authfile@ path (podman's isolated credential store,
+distinct from Docker's @~\/.docker\/config.json@ and podman's own default
+@\$XDG_RUNTIME_DIR\/containers\/auth.json@).
+
+The whole point of threading one of these through explicitly, rather than
+letting 'login'\/'push'\/'pullImage' fall back to the ambient default: two
+salmon processes on the same user authenticating to the __same__ registry
+under __different__ credentials (e.g. two tenants each with their own
+Artifact Registry push token) would otherwise clobber each other's login by
+sharing one global credential file. Pointing each process at its own
+'AuthFile' path makes that impossible by construction — there is no shared
+mutable state left to race on.
+-}
+newtype AuthFile = AuthFile {getAuthFile :: FilePath}
+    deriving (Eq, Ord, Show)
+
+-- | The username 'login' authenticates as (e.g. @oauth2accesstoken@ for GCP
+-- Artifact Registry, where the password is a short-lived access token).
+newtype Username = Username {getUsername :: Text}
+    deriving (Eq, Ord, Show)
 
 -- | A container needs a stable, caller-chosen identity: podman assigns a
 -- random name otherwise, which would leave 'down' with nothing to target.
@@ -133,6 +161,95 @@ buildImage r podman containerfile tagname =
     r' containerfilepath = contramap (BuildImage containerfilepath tagname) r
     r'' = contramap (RemoveBuiltImage tagname) r
 
+{- | Logs in to a registry, writing credentials to an explicit 'AuthFile'
+rather than the ambient default (see 'AuthFile'’s own note on why that
+isolation matters).
+
+The password is read as @IO Text@ rather than a plain 'Text' so a
+short-lived, freshly-fetched credential (a GCP access token, say) can be
+obtained right when 'up' runs rather than baked into the graph when it was
+built — and it is piped over stdin via @--password-stdin@, never passed as
+a CLI argument, so it never shows up in @ps@ output or a process-start log
+line.
+
+There is deliberately no 'check': whether the credential already in
+'AuthFile' is still valid is not answerable without hitting the registry
+(and for a short-lived token, "still in the file" and "still valid" are
+different questions anyway), so — like 'push' — this defaults to
+'Salmon.Actions.UpDown.Immaterial' and simply re-authenticates on every
+'up'. 'down' runs @podman logout --authfile@ against the same file (only if that
+file actually holds credentials for this registry -- logging out of nothing
+is an error, and a failing 'down' blocks a whole sub-DAG) and then removes
+the file, which logout itself leaves behind, emptied.
+-}
+login :: Reporter Report -> Track' (Binary "podman") -> AuthFile -> Registry -> Username -> IO Text -> Op
+login r podman authfile reg user getPassword =
+    withBinaryIO podman logincommand (LoginCmd authfile reg user) $ \mkProc ->
+        op "podman-login" (deps [enclosingdir]) $ \actions ->
+            actions
+                { help = Text.unwords ["logs in to", getRegistry reg, "via", Text.pack (getAuthFile authfile)]
+                , ref = mkRef "podman-login" (getAuthFile authfile, getRegistry reg, getUsername user)
+                , up = do
+                    runReporter r (LoginRegistry authfile reg user)
+                    pw <- getPassword
+                    (mStdin, _, _, ph) <- mkProc ()
+                    case mStdin of
+                        Just hin -> Text.hPutStr hin pw >> hClose hin
+                        Nothing -> pure ()
+                    waitForProcess ph >>= checkExitCode "podman login"
+                , down = do
+                    -- `podman logout` is an error ("not logged into ...",
+                    -- exit 125) when there is nothing to log out of, and a
+                    -- failing `down` blocks the teardown of everything this
+                    -- node was declared on top of. So ask first -- the
+                    -- credentials live in this node's own authfile, which
+                    -- makes that a file read.
+                    exists <- doesFileExist (getAuthFile authfile)
+                    when exists $ do
+                        creds <- ByteString.readFile (getAuthFile authfile)
+                        when (ByteString.pack (Text.unpack (getRegistry reg)) `ByteString.isInfixOf` creds) $
+                            Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
+                        -- logout only empties the credentials, leaving the
+                        -- file ({"auths":{}}) behind to block the enclosing
+                        -- Filesystem.dir's own `down`. This node caused the
+                        -- file to exist, so this node removes it.
+                        removeFile (getAuthFile authfile)
+                }
+  where
+    r'' = contramap (LogoutRegistry authfile reg) r
+    enclosingdir = FS.dir (FS.Directory (takeDirectory (getAuthFile authfile)))
+
+{- | Pushes a locally-tagged image to whatever registry its tag names.
+
+Deliberately takes only the one 'TagName' rather than a separate
+local-tag\/remote-ref pair: the simplest way to make @podman build@,
+@podman push@, and a downstream consumer (e.g.
+"Salmon.Builtin.Nodes.Gcp.CloudRun"'s @crsImage@) agree on what image is
+meant is to tag the build with the fully-qualified remote reference (e.g.
+@us-docker.pkg.dev\/project\/repo\/image:tag@) in the first place — see
+'buildImage' — rather than push introducing a second name for the same
+thing. The optional 'AuthFile' should be the same one passed to 'login';
+'Nothing' falls back to podman's ambient default, which is fine for a
+public registry but defeats the isolation 'login'\/'AuthFile' exist for.
+
+There is no 'check': whether a remote registry already has the bytes this
+tag would push is not answerable any cheaper than pushing, so like
+'buildImage' this defaults to 'Salmon.Actions.UpDown.Immaterial'. 'down' is
+a no-op — @podman@ has no "unpush", and deleting a remote artifact is a
+registry-side operation (e.g. `Gcp.ArtifactRegistry`), not a podman one.
+-}
+push :: Reporter Report -> Track' (Binary "podman") -> Maybe AuthFile -> TagName -> Op
+push r podman mAuthFile tagname =
+    withBinary podman podmanCommand (Push mAuthFile tagname) $ \doPush ->
+        op "podman-push" (deps []) $ \actions ->
+            actions
+                { help = "pushes " <> tagname <> " to its registry"
+                , ref = mkRef "podman-push" (tagname, fmap getAuthFile mAuthFile)
+                , up = doPush r'
+                }
+  where
+    r' = contramap (PushImage mAuthFile tagname) r
+
 -- | Runs a detached container under a caller-chosen 'ContainerName' (so
 -- 'down' has a stable target to remove), with the given ports/env/volumes/network.
 runContainer :: Reporter Report -> Track' (Binary "podman") -> Registry -> Image -> ContainerName -> RunOptions -> Op
@@ -179,6 +296,8 @@ data PodmanCommand
     = Pull !Registry !Image
     | Run !Registry !Image !ContainerName !RunOptions
     | Build !FilePath !TagName
+    | Push !(Maybe AuthFile) !TagName
+    | Logout !AuthFile !Registry
     | CreateNetworkCmd !NetworkName
     | Rmi !Registry !Image
     | RmiTag !TagName
@@ -205,6 +324,15 @@ podmanCommand = Command $ \cmd -> case cmd of
         )
             { cwd = Just $ takeDirectory fullpath
             }
+    (Push mAuthFile tagname) ->
+        proc "podman" $
+            -- --authfile is a flag of `podman push`, not a global option:
+            -- podman rejects it before the subcommand with "unknown flag".
+            ["push"]
+                <> maybe [] (\af -> ["--authfile", getAuthFile af]) mAuthFile
+                <> [Text.unpack tagname]
+    (Logout authfile reg) ->
+        proc "podman" ["logout", "--authfile", getAuthFile authfile, Text.unpack (getRegistry reg)]
     (Run r i cname opts) ->
         proc "podman" $
             mconcat
@@ -248,11 +376,39 @@ podmanCommand = Command $ \cmd -> case cmd of
     (CreateNetworkCmd name) ->
         proc "podman" ["network", "create", Text.unpack (getNetworkName name)]
     (RmiTag tagname) ->
-        proc "podman" ["rmi", Text.unpack tagname]
+        -- --ignore: `podman rmi` on an absent image is an error ("image not
+        -- known"), and this is a `down`, where a failure blocks the teardown
+        -- of everything the node was declared on top of. An image that is
+        -- already gone is this node's effect being gone.
+        proc "podman" ["rmi", "--ignore", Text.unpack tagname]
     (Rm cname) ->
         proc "podman" ["rm", "-f", Text.unpack (getContainerName cname)]
     (RemoveNetworkCmd name) ->
         proc "podman" ["network", "rm", Text.unpack (getNetworkName name)]
+
+-------------------------------------------------------------------------------
+
+data LoginCommand
+    = LoginCmd !AuthFile !Registry !Username
+
+{- | @podman login@'s password has to arrive over stdin
+(@--password-stdin@, never a CLI argument -- see 'login'), so this needs a
+pipe created before the process starts and written to after, which the
+plain 'Command' framework (a fixed 'CreateProcess' plus a fixed stdin
+'System.Process.ByteString.ByteString' known up front) has no room for.
+@CommandIO@'s @ioarg@ would normally carry caller-supplied handles (see
+"Salmon.Builtin.Nodes.WireGuard"), but here there is nothing to redirect
+*in* — only a pipe this command itself asks 'System.Process.createProcess'
+to allocate — so 'logincommand' ignores its @()@ and 'login' reads the pipe
+back out of the 'RunningCommand' tuple 'withBinaryIO' hands it.
+-}
+logincommand :: CommandIO "podman" LoginCommand ()
+logincommand = CommandIO $ \(LoginCmd authfile reg user) () ->
+    pure
+        ( (proc "podman" ["login", "--authfile", getAuthFile authfile, "--username", Text.unpack (getUsername user), "--password-stdin", Text.unpack (getRegistry reg)])
+            { std_in = CreatePipe
+            }
+        )
 
 -------------------------------------------------------------------------------
 -- some builtins
