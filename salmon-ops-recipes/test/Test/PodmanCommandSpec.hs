@@ -18,6 +18,7 @@ tests =
         [ testCase "push with no authfile runs `podman push <tag>`, the same tag build produced" pushRendersTagNoAuth
         , testCase "push with an authfile passes --authfile to push, not to podman itself" pushRendersTagWithAuth
         , testCase "logout targets the same authfile login wrote to" logoutRendersAuthFile
+        , testCase "rmi tolerates an image that is already gone" rmiIgnoresMissing
         ]
 
 pushRendersTagNoAuth :: IO ()
@@ -40,3 +41,10 @@ logoutRendersAuthFile =
         ""
         (RawCommand "podman" ["logout", "--authfile", "/tmp/auth.json", "us-docker.pkg.dev"])
         (cmdspec (prepare Podman.podmanCommand (Podman.Logout (Podman.AuthFile "/tmp/auth.json") (Podman.Registry "us-docker.pkg.dev"))))
+
+rmiIgnoresMissing :: IO ()
+rmiIgnoresMissing =
+    assertEqual
+        ""
+        (RawCommand "podman" ["rmi", "--ignore", "us-docker.pkg.dev/p/r/img:1"])
+        (cmdspec (prepare Podman.podmanCommand (Podman.RmiTag "us-docker.pkg.dev/p/r/img:1")))

@@ -72,7 +72,7 @@ artifactRepository r gcloudTrack repo =
                     { help = Text.unwords ["creates Artifact Registry repository", repo.repoName]
                     , ref = mkRef "gcp-artifact-registry" (repo.repoProject.projectId, repo.repoLocation.regionName, repo.repoName)
                     , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create r')
-                    , down = delete r'
+                    , down = Core.downIfPresent checkRepo (delete r')
                     , check = checkRepo
                     }
   where

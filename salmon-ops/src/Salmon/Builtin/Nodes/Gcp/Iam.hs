@@ -76,7 +76,7 @@ serviceAccount r gcloudTrack project accountId =
                     { help = Text.unwords ["creates service account", accountId]
                     , ref = mkRef "gcp-service-account" (project.projectId, accountId)
                     , up = retryingIO Core.afterEnableRetries Core.afterEnableDelay (create r') >> awaitVisible 30
-                    , down = delete r'
+                    , down = Core.downIfPresent checkServiceAccount (delete r')
                     , check = checkServiceAccount
                     }
   where
@@ -125,7 +125,7 @@ iamBinding r gcloudTrack binding =
                     { help = Text.unwords ["grants", binding.iamRole, "to", renderPrincipal binding.iamPrincipal]
                     , ref = mkRef "gcp-iam-binding" (renderPrincipal binding.iamPrincipal, binding.iamRole, binding.iamResource)
                     , up = retryingIO 5 3000000 (add r')
-                    , down = remove r'
+                    , down = Core.downIfPresent checkBinding (remove r')
                     , check = checkBinding
                     }
   where
@@ -190,7 +190,7 @@ customRole r gcloudTrack role =
                     { help = Text.unwords ["creates custom IAM role", role.roleId]
                     , ref = mkRef "gcp-custom-role" (role.roleProject.projectId, role.roleId)
                     , up = create r'
-                    , down = delete r'
+                    , down = Core.downIfPresent checkRole (delete r')
                     , check = checkRole
                     }
   where

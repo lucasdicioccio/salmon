@@ -56,7 +56,7 @@ bucket r gcloudTrack bkt =
                     { help = Text.unwords ["creates GCS bucket", bkt.bucketName]
                     , ref = mkRef "gcp-bucket" bkt.bucketName
                     , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create r')
-                    , down = delete r'
+                    , down = Core.downIfPresent checkBucket (delete r')
                     , check = checkBucket
                     }
   where

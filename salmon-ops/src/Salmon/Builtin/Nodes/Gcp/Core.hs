@@ -17,6 +17,9 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     GcloudCommand (..),
     gcloudCommand,
 
+    -- * teardown
+    downIfPresent,
+
     -- * eventual consistency
     retryingIO,
     afterEnableRetries,
@@ -139,6 +142,34 @@ printAccessToken = do
         ExitSuccess -> pure (Text.strip (Text.decodeUtf8 out))
         ExitFailure n ->
             throwIO (userError ("gcloud auth print-access-token failed (exit " <> show n <> "): " <> Text.unpack (Text.decodeUtf8With TextError.lenientDecode err)))
+
+-------------------------------------------------------------------------------
+-- Teardown
+
+{- | Runs a teardown action only if the node's own check says the effect is
+actually there.
+
+@gcloud@ treats "delete something absent" as an error (@404@, @Service ...
+could not be found@, or even @API has not been used in project ...@ when the
+service was never enabled), and "Salmon.Actions.UpDown" contains a failing
+@down@ by leaving that node standing and marking every /predecessor/
+'Blocked'. A node that was never created therefore blocks the teardown of
+everything it was declared on top of -- including, for a recipe that owns its
+project, the project delete that would have swept it all. That is how four
+half-built sandbox projects survived their own @run down@.
+
+A node's check is deliberately never consulted /for/ teardown (it answers
+"does my effect need creating", not "is it still there"), so this is the node
+author's own business rather than something the driver can do. Erring toward
+not-running is the safe direction here: 'Failure' means the effect is gone or
+unreachable, and re-running @down@ costs nothing.
+-}
+downIfPresent :: IO CheckResult -> IO () -> IO ()
+downIfPresent runCheck act = do
+    result <- runCheck
+    case result of
+        Success -> act
+        _ -> pure ()
 
 -------------------------------------------------------------------------------
 -- Eventual consistency

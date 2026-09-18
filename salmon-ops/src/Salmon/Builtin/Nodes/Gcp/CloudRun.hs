@@ -73,7 +73,7 @@ cloudRunService r gcloudTrack svc =
                     { help = Text.unwords ["deploys CloudRun service", svc.crsName]
                     , ref = mkRef "gcp-cloudrun-service" (svc.crsProject.projectId, svc.crsRegion.regionName, svc.crsName)
                     , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (deploy r')
-                    , down = delete r'
+                    , down = Core.downIfPresent checkService (delete r')
                     , check = checkService
                     }
   where

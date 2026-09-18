@@ -28,6 +28,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Zone (..), gcloudProc, withProject, withZone)
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -93,7 +94,7 @@ gceInstance r gcloudTrack inst =
                             { help = Text.unwords ["creates GCE instance", inst.instanceName]
                             , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
                             , up = bringUp create start resume
-                            , down = delete (contramap (RunComputeCommand (InstancesDelete inst)) r)
+                            , down = Core.downIfPresent (uncurry interpretInstanceStatus <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
                             , check = uncurry interpretInstanceStatus <$> describeStatus
                             }
   where

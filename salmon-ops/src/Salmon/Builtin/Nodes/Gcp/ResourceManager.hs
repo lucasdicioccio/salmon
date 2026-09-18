@@ -41,6 +41,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), gcloudProc)
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -83,7 +84,7 @@ project r gcloudTrack spec =
                     , notes = ["down deletes the project and everything still in it"]
                     , ref = mkRef "gcp-project" pid
                     , up = create r'
-                    , down = delete r'
+                    , down = Core.downIfPresent checkProject (delete r')
                     , check = checkProject
                     }
   where

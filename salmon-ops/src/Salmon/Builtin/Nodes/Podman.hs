@@ -177,8 +177,10 @@ There is deliberately no 'check': whether the credential already in
 (and for a short-lived token, "still in the file" and "still valid" are
 different questions anyway), so — like 'push' — this defaults to
 'Salmon.Actions.UpDown.Immaterial' and simply re-authenticates on every
-'up'. 'down' runs @podman logout --authfile@ against the same file and then removes
-the file, which logout itself leaves behind (emptied).
+'up'. 'down' runs @podman logout --authfile@ against the same file (only if that
+file actually holds credentials for this registry -- logging out of nothing
+is an error, and a failing 'down' blocks a whole sub-DAG) and then removes
+the file, which logout itself leaves behind, emptied.
 -}
 login :: Reporter Report -> Track' (Binary "podman") -> AuthFile -> Registry -> Username -> IO Text -> Op
 login r podman authfile reg user getPassword =
@@ -196,14 +198,22 @@ login r podman authfile reg user getPassword =
                         Nothing -> pure ()
                     waitForProcess ph >>= checkExitCode "podman login"
                 , down = do
-                    Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
-                    -- `podman logout` empties the file's credentials but
-                    -- leaves the file itself ({"auths":{}}), which then keeps
-                    -- the enclosing directory from being removed when *it*
-                    -- goes down. This node is what caused the file to exist,
-                    -- so this node removes it.
+                    -- `podman logout` is an error ("not logged into ...",
+                    -- exit 125) when there is nothing to log out of, and a
+                    -- failing `down` blocks the teardown of everything this
+                    -- node was declared on top of. So ask first -- the
+                    -- credentials live in this node's own authfile, which
+                    -- makes that a file read.
                     exists <- doesFileExist (getAuthFile authfile)
-                    when exists (removeFile (getAuthFile authfile))
+                    when exists $ do
+                        creds <- ByteString.readFile (getAuthFile authfile)
+                        when (ByteString.pack (Text.unpack (getRegistry reg)) `ByteString.isInfixOf` creds) $
+                            Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
+                        -- logout only empties the credentials, leaving the
+                        -- file ({"auths":{}}) behind to block the enclosing
+                        -- Filesystem.dir's own `down`. This node caused the
+                        -- file to exist, so this node removes it.
+                        removeFile (getAuthFile authfile)
                 }
   where
     r'' = contramap (LogoutRegistry authfile reg) r
@@ -366,7 +376,11 @@ podmanCommand = Command $ \cmd -> case cmd of
     (CreateNetworkCmd name) ->
         proc "podman" ["network", "create", Text.unpack (getNetworkName name)]
     (RmiTag tagname) ->
-        proc "podman" ["rmi", Text.unpack tagname]
+        -- --ignore: `podman rmi` on an absent image is an error ("image not
+        -- known"), and this is a `down`, where a failure blocks the teardown
+        -- of everything the node was declared on top of. An image that is
+        -- already gone is this node's effect being gone.
+        proc "podman" ["rmi", "--ignore", Text.unpack tagname]
     (Rm cname) ->
         proc "podman" ["rm", "-f", Text.unpack (getContainerName cname)]
     (RemoveNetworkCmd name) ->

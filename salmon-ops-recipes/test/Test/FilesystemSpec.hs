@@ -21,7 +21,7 @@ module Test.FilesystemSpec (tests) where
 
 import qualified Data.ByteString.Char8 as C8
 import Data.Text (Text)
-import System.Directory (getModificationTime, removeFile)
+import System.Directory (doesDirectoryExist, doesFileExist, getModificationTime, removeFile)
 import System.FilePath ((</>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
@@ -31,7 +31,7 @@ import Salmon.Builtin.Extension (Extension)
 import Salmon.Op.Actions (shorthand)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 
-import Test.Harness (runUp, runUpCapturing, withTempDir)
+import Test.Harness (runDown, runUp, runUpCapturing, withTempDir)
 
 tests :: TestTree
 tests =
@@ -46,6 +46,13 @@ tests =
         , testCase "a clobbered file is written again" clobberedIsRewritten
         , testCase "a deleted file is written again" deletedIsRewritten
         , testCase "the same path redeclared with new contents is rewritten" redeclaredContentsAreRewritten
+        , testGroup
+            "down tolerates an effect that was never created"
+            [ testCase "a file already gone is not a teardown failure" downOfAbsentFileSucceeds
+            , testCase "a directory already gone is not a teardown failure" downOfAbsentDirSucceeds
+            , testCase "a file's down still takes the enclosing directory with it" downRemovesBoth
+            , testCase "but a directory holding something undeclared still fails" downOfNonEmptyDirFails
+            ]
         ]
 
 -- | The node under test, and the check it carries, for one path/contents pair.
@@ -165,6 +172,47 @@ redeclaredContentsAreRewritten = withTempDir $ \d -> do
     reports <- runUpCapturing (FS.filecontents (contentsAt path "second\n"))
     assertEqual "the second was evaluated, not skipped" ["file-contents"] (evals reports)
     assertEqual "and the file says the new thing" "second\n" =<< readFile path
+
+{- | A @down@ that throws is contained by marking every /predecessor/
+'Salmon.Actions.UpDown.Blocked', so a node whose effect was never created
+blocks the teardown of everything it was declared on top of. Absence is this
+node's effect being absent, and teardown never consults a node's check (that
+answers "does my effect need creating"), so tolerating it is the node's own
+business. Found by a GCP sandbox that could not remove its working directory
+because an earlier teardown had already removed the file inside it.
+-}
+downOfAbsentFileSucceeds :: IO ()
+downOfAbsentFileSucceeds = withTempDir $ \d -> do
+    let path = d </> "never-written.conf"
+    assertBool "tearing down a file that was never written succeeds" =<< runDown (FS.filecontents (contentsAt path "unused\n"))
+
+downOfAbsentDirSucceeds :: IO ()
+downOfAbsentDirSucceeds = withTempDir $ \d -> do
+    let path = d </> "never-created"
+    assertBool "tearing down a directory that was never created succeeds" =<< runDown (FS.dir (FS.Directory path))
+
+-- | Tolerating absence must not turn `down` into a no-op.
+downRemovesBoth :: IO ()
+downRemovesBoth = withTempDir $ \d -> do
+    let dir = d </> "workdir"
+    let path = dir </> "written.conf"
+    assertBool "the node went up" =<< nodeOf (contentsAt path "body\n")
+    assertBool "the file is there" =<< doesFileExist path
+    assertBool "teardown succeeded" =<< runDown (FS.filecontents (contentsAt path "body\n"))
+    assertEqual "the file is gone" False =<< doesFileExist path
+    assertEqual "and so is the directory it brought with it" False =<< doesDirectoryExist dir
+
+{- | The signal worth keeping: something in the directory was never declared
+(or did not go down), which is exactly the case that caught 'Podman.login'
+leaving its authfile behind.
+-}
+downOfNonEmptyDirFails :: IO ()
+downOfNonEmptyDirFails = withTempDir $ \d -> do
+    let dir = d </> "occupied"
+    assertBool "the directory went up" =<< runUp (FS.dir (FS.Directory dir))
+    writeFile (dir </> "undeclared.txt") "left behind\n"
+    assertEqual "teardown of a non-empty directory fails" False =<< runDown (FS.dir (FS.Directory dir))
+    assertBool "and leaves it standing" =<< doesDirectoryExist dir
 
 -------------------------------------------------------------------------------
 

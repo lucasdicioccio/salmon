@@ -53,7 +53,11 @@ dir directory =
                 ]
             , ref = mkRef "directory" path
             , up = createDirectoryIfMissing True path
-            , down = removeDirectory path
+            , -- same reasoning as 'filecontents': an absent directory is
+              -- this node's effect being absent. A *non-empty* one still
+              -- throws, which is a real signal (something in it was not
+              -- declared, or did not go down).
+              down = removeDirectoryIfPresent path
             , dynamics = [supervised defaultSupervision{supReapply = True}]
             }
   where
@@ -121,7 +125,13 @@ filecontents fcontents =
             , ref = mkRef "file-contents" path
             , check = checkFileContents fcontents
             , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
-            , down = removeFile path
+            , -- a `down` that throws blocks the teardown of everything the
+              -- node was declared on top of (here: the enclosing directory),
+              -- and a file that is already gone is this node's effect being
+              -- gone. Found by a teardown that could not remove its own
+              -- working directory because an earlier pass had already removed
+              -- the file inside it.
+              down = removeFileIfPresent path
             }
   where
     enclosingdir :: Op
@@ -331,6 +341,18 @@ withFile (Generated mkp path) f = tracking mkp (\x -> (x, x)) path f
 generateFileContents :: (EncodeFileContents a) => a -> FilePath -> File b
 generateFileContents c path =
     Generated (Track $ \_ -> filecontents $ FileContents path c) path
+
+-- | 'removeFile', tolerating a file that is already gone.
+removeFileIfPresent :: FilePath -> IO ()
+removeFileIfPresent path = do
+    exists <- doesFileExist path
+    when exists (removeFile path)
+
+-- | 'removeDirectory', tolerating a directory that is already gone.
+removeDirectoryIfPresent :: FilePath -> IO ()
+removeDirectoryIfPresent path = do
+    exists <- doesDirectoryExist path
+    when exists (removeDirectory path)
 
 -------------------------------------------------------------------------------
 
