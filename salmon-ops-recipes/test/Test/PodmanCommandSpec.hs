@@ -16,7 +16,7 @@ tests =
     testGroup
         "Salmon.Builtin.Nodes.Podman.podmanCommand"
         [ testCase "push with no authfile runs `podman push <tag>`, the same tag build produced" pushRendersTagNoAuth
-        , testCase "push with an authfile passes --authfile before push" pushRendersTagWithAuth
+        , testCase "push with an authfile passes --authfile to push, not to podman itself" pushRendersTagWithAuth
         , testCase "logout targets the same authfile login wrote to" logoutRendersAuthFile
         ]
 
@@ -31,7 +31,7 @@ pushRendersTagWithAuth :: IO ()
 pushRendersTagWithAuth =
     assertEqual
         ""
-        (RawCommand "podman" ["--authfile", "/tmp/auth.json", "push", "us-docker.pkg.dev/p/r/img:1"])
+        (RawCommand "podman" ["push", "--authfile", "/tmp/auth.json", "us-docker.pkg.dev/p/r/img:1"])
         (cmdspec (prepare Podman.podmanCommand (Podman.Push (Just (Podman.AuthFile "/tmp/auth.json")) "us-docker.pkg.dev/p/r/img:1")))
 
 logoutRendersAuthFile :: IO ()

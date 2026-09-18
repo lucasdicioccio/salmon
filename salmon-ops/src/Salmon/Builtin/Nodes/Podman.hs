@@ -11,7 +11,7 @@ import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -19,6 +19,7 @@ import qualified Data.Text.IO as Text
 
 import GHC.IO.Exception (ExitCode (..))
 import GHC.IO.Handle (Handle, hClose)
+import System.Directory (doesFileExist, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Process (StdStream (CreatePipe), waitForProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
@@ -176,7 +177,8 @@ There is deliberately no 'check': whether the credential already in
 (and for a short-lived token, "still in the file" and "still valid" are
 different questions anyway), so — like 'push' — this defaults to
 'Salmon.Actions.UpDown.Immaterial' and simply re-authenticates on every
-'up'. 'down' runs @podman logout --authfile@ against the same file.
+'up'. 'down' runs @podman logout --authfile@ against the same file and then removes
+the file, which logout itself leaves behind (emptied).
 -}
 login :: Reporter Report -> Track' (Binary "podman") -> AuthFile -> Registry -> Username -> IO Text -> Op
 login r podman authfile reg user getPassword =
@@ -193,7 +195,15 @@ login r podman authfile reg user getPassword =
                         Just hin -> Text.hPutStr hin pw >> hClose hin
                         Nothing -> pure ()
                     waitForProcess ph >>= checkExitCode "podman login"
-                , down = Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
+                , down = do
+                    Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
+                    -- `podman logout` empties the file's credentials but
+                    -- leaves the file itself ({"auths":{}}), which then keeps
+                    -- the enclosing directory from being removed when *it*
+                    -- goes down. This node is what caused the file to exist,
+                    -- so this node removes it.
+                    exists <- doesFileExist (getAuthFile authfile)
+                    when exists (removeFile (getAuthFile authfile))
                 }
   where
     r'' = contramap (LogoutRegistry authfile reg) r
@@ -306,8 +316,11 @@ podmanCommand = Command $ \cmd -> case cmd of
             }
     (Push mAuthFile tagname) ->
         proc "podman" $
-            maybe [] (\af -> ["--authfile", getAuthFile af]) mAuthFile
-                <> ["push", Text.unpack tagname]
+            -- --authfile is a flag of `podman push`, not a global option:
+            -- podman rejects it before the subcommand with "unknown flag".
+            ["push"]
+                <> maybe [] (\af -> ["--authfile", getAuthFile af]) mAuthFile
+                <> [Text.unpack tagname]
     (Logout authfile reg) ->
         proc "podman" ["logout", "--authfile", getAuthFile authfile, Text.unpack (getRegistry reg)]
     (Run r i cname opts) ->
