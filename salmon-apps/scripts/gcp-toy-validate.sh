@@ -16,6 +16,13 @@
 # (GCP picks the IP, so nothing can name the machine before it exists), then
 # the IP is read back and fed to `config --vm-ip` for the pass that provisions.
 #
+# Tier 3 puts a regional external load balancer in front of that VM and checks
+# it by fetching a page the VM only serves because the tier-2 hand-off
+# installed a systemd unit there. A balancer that exists proves nothing (one
+# in front of no server answers 502 just as well), so the verdict is a 200
+# carrying the project id -- allow a few minutes for the backend to pass its
+# first health checks.
+#
 # What it checks, pass by pass:
 #   up #1   everything comes up. If it fails, one retry is attempted and the
 #           run is flagged: converging only on a retry usually means eventual
@@ -39,7 +46,7 @@ while [[ $# -gt 0 ]]; do
         -y|--yes) YES=1; shift ;;
         --keep) KEEP=1; shift ;;
         --) shift; break ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
         *) break ;;
     esac
 done
@@ -206,6 +213,37 @@ if [[ $TIER -ge 2 ]]; then
     fi
 fi
 
+# Tier 3 is only validated by what comes back *through* the balancer: a
+# forwarding rule that exists in front of nothing answers 502 just as readily
+# as a working one answers 200.
+if [[ $TIER -ge 3 ]]; then
+    echo "== verify the load balancer serves the VM"
+    LB_IP=$(gcloud compute forwarding-rules describe "$PREFIX-lb-fw" --region "$REGION" --project "$PROJECT" --format='value(IPAddress)' 2>/dev/null || true)
+    if [[ -z $LB_IP ]]; then
+        VERDICT+=("lb: NO FORWARDING RULE ($PREFIX-lb-fw has no address)")
+    else
+        echo "   forwarding rule $PREFIX-lb-fw: http://$LB_IP/"
+        # A backend is UNHEALTHY until it has passed its first health checks,
+        # so this is a wait, not a probe: up to ~5 minutes.
+        body=""
+        for attempt in $(seq 1 30); do
+            body=$(curl -sS --max-time 10 "http://$LB_IP/" 2>&1 || true)
+            [[ $body == *"$PROJECT"* ]] && break
+            [[ $attempt == 1 || $((attempt % 6)) == 0 ]] && echo "   still waiting for a healthy backend (attempt $attempt): ${body:0:80}"
+            sleep 10
+        done
+        if [[ $body == *"$PROJECT"* ]]; then
+            VERDICT+=("lb: the balancer served the VM's page")
+        else
+            # The usual cause is a firewall rule, and the health of the
+            # backend says so more precisely than the response body does.
+            gcloud compute backend-services get-health "$PREFIX-lb-backend" --region "$REGION" --project "$PROJECT" \
+                --format='value(status.healthStatus[].healthState)' 2>&1 | sed 's/^/   backend health: /' || true
+            VERDICT+=("lb: NOT SERVING (last response: ${body:0:120})")
+        fi
+    fi
+fi
+
 if [[ $KEEP == 1 ]]; then
     VERDICT+=("down: skipped (--keep); later: $BIN run down < $DIRECTIVE")
 else
@@ -242,6 +280,13 @@ else
             gone gcloud compute addresses describe "$PREFIX-ip" --region "$REGION" --project "$PROJECT" || leftovers=1
             gone gcloud compute firewall-rules describe "$PREFIX-ssh" --project "$PROJECT" || leftovers=1
         fi
+        if [[ $TIER -ge 3 ]]; then
+            gone gcloud compute forwarding-rules describe "$PREFIX-lb-fw" --region "$REGION" --project "$PROJECT" || leftovers=1
+            gone gcloud compute url-maps describe "$PREFIX-lb-url-map" --region "$REGION" --project "$PROJECT" || leftovers=1
+            gone gcloud compute backend-services describe "$PREFIX-lb-backend" --region "$REGION" --project "$PROJECT" || leftovers=1
+            gone gcloud compute instance-groups unmanaged describe "$PREFIX-ig" --zone "$(field vmZone)" --project "$PROJECT" || leftovers=1
+            gone gcloud compute networks subnets describe "$PREFIX-proxy" --region "$REGION" --project "$PROJECT" || leftovers=1
+        fi
         if [[ $TIER -ge 1 ]]; then
             gone gcloud run services describe "$PREFIX-hello" --region "$REGION" --project "$PROJECT" || leftovers=1
         fi
@@ -251,4 +296,4 @@ fi
 
 echo "== verdict"
 printf '   %s\n' "${VERDICT[@]}"
-printf '%s\n' "${VERDICT[@]}" | grep -qE 'FAILED|RETRY|LEFTOVERS|NOT FOUND|re-applied$' && exit 1 || exit 0
+printf '%s\n' "${VERDICT[@]}" | grep -qE 'FAILED|RETRY|LEFTOVERS|NOT FOUND|NOT SERVING|NO FORWARDING RULE|re-applied$' && exit 1 || exit 0

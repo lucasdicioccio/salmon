@@ -18,6 +18,12 @@ Tiers are cumulative and ordered by cost:
   tagged instance, boot a VM whose startup script trusts a salmon-generated
   SSH CA, then upload this very binary and run it there over that CA --
   "SreBox.Gcp.VmProvision", i.e. @specs/gcloud-support.md@ §6's "objective".
+* __tier 3__ (a forwarding rule's hourly rate on top): put a regional
+  external Application Load Balancer in front of that VM -- a proxy-only
+  subnet, an unmanaged instance group holding the instance, a health check,
+  and the balancer itself. The VM serves the page through a systemd unit the
+  /tier-2 hand-off/ installed, so a @200@ from the balancer's address is
+  evidence for both halves at once.
 
 Tier 2 takes __two passes__, which is not a wart but the shape of the
 problem: GCP picks the address, so nothing can name the machine until after
@@ -41,6 +47,7 @@ module GcpToy (
     ParentRef (..),
     Role (..),
     VmConfig (..),
+    LbConfig (..),
     ImageSource (..),
     defaultBaseImage,
     configure,
@@ -72,8 +79,11 @@ import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 import qualified Salmon.Builtin.Nodes.Debian.OS as OS
+import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
+import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
 import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
+import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Self as Self
@@ -115,6 +125,8 @@ data Seed = Seed
     , seedVmUser :: Text
     , seedSshSourceRange :: Text
     , seedVmIp :: Maybe Text
+    , seedLbProxyRange :: Text
+    , seedLbPort :: Int
     }
     deriving (Eq, Show)
 
@@ -140,6 +152,12 @@ instance ParseRecord Seed where
                 <*> strOption (long "vm-user" <> value "salmon" <> Opt.help "tier 2 login user, and the certificate principal signed for it")
                 <*> strOption (long "ssh-source-range" <> value "0.0.0.0/0" <> Opt.help "tier 2 CIDR allowed to reach port 22")
                 <*> optional (strOption (long "vm-ip" <> Opt.help "tier 2 second pass: the reserved IP, which a first pass cannot know"))
+                -- The default is outside 10.128.0.0/9 on purpose: the whole
+                -- of that block belongs to the subnets an auto-mode network
+                -- (which `default` is) creates per region on its own,
+                -- including for regions that do not exist yet.
+                <*> strOption (long "lb-proxy-range" <> value "192.168.100.0/24" <> Opt.showDefault <> Opt.help "tier 3 proxy-only subnet range (/26 or larger, must not overlap 10.128.0.0/9)")
+                <*> option auto (long "lb-port" <> value (8080 :: Int) <> Opt.showDefault <> Opt.help "tier 3 port the VM serves on, behind the balancer")
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -204,6 +222,22 @@ data VmConfig = VmConfig
 instance FromJSON VmConfig
 instance ToJSON VmConfig
 
+{- | Tier 3's parameters, resolved.
+
+Carried on the directive rather than being tier-2 fields because the /VM
+side/ needs them too: the port the balancer's backend is configured for is
+the same port the systemd unit the uploaded binary installs has to listen
+on, and there is exactly one place to say it.
+-}
+data LbConfig = LbConfig
+    { lbProxyRange :: Text
+    , lbPort :: Int
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON LbConfig
+instance ToJSON LbConfig
+
 data Spec = Spec
     { role :: Role
     , project :: Text
@@ -217,6 +251,7 @@ data Spec = Spec
     , imageSource :: ImageSource
     , workDir :: FilePath
     , vmConfig :: Maybe VmConfig
+    , lbConfig :: Maybe LbConfig
     }
     deriving (Eq, Show, Generic)
 
@@ -228,8 +263,8 @@ configure = Configure $ \seed -> do
     let creating = seed.seedParent /= SeedExistingProject
     when (creating && seed.seedBillingAccount == Nothing) $
         fail "--billing-account is required when the project is created (pass --existing-project to use one as-is)"
-    when (seed.seedTier < 0 || seed.seedTier > 2) $
-        fail "--tier must be 0, 1 or 2"
+    when (seed.seedTier < 0 || seed.seedTier > 3) $
+        fail "--tier must be 0, 1, 2 or 3"
     -- GCP's own constraints, checked here so a typo fails before anything is created
     when (not (validProjectId seed.seedProject)) $
         fail "--project must be 6-30 characters of [a-z0-9-], starting with a letter"
@@ -264,6 +299,10 @@ configure = Configure $ \seed -> do
                             , vmSelfPath = self
                             , vmMarkerPath = "/var/lib/salmon-toy/provisioned"
                             }
+    let lb =
+            if seed.seedTier < 3
+                then Nothing
+                else Just (LbConfig seed.seedLbProxyRange seed.seedLbPort)
     pure $
         Spec
             { role = Control
@@ -281,6 +320,7 @@ configure = Configure $ \seed -> do
             , imageSource = source
             , workDir = dir
             , vmConfig = vm
+            , lbConfig = lb
             }
   where
     validProjectId t =
@@ -303,7 +343,7 @@ VM: one file, whose existence is the whole proof that the hand-off worked.
 -}
 onVm :: Spec -> Op
 onVm spec =
-    op "gcp-toy-on-vm" (deps [marker]) $ \actions ->
+    op "gcp-toy-on-vm" (deps (marker : maybe [] (\lb -> [webServer spec lb]) spec.lbConfig)) $ \actions ->
         actions
             { help = "the tier-2 payload, declared by this binary running on the VM"
             , ref = mkRef "gcp-toy-on-vm" spec.project
@@ -312,9 +352,73 @@ onVm spec =
     path = maybe "/var/lib/salmon-toy/provisioned" vmMarkerPath spec.vmConfig
     marker = FS.filecontents (FS.FileContents path ("provisioned by salmon-gcp-toy for " <> spec.project <> "\n"))
 
+{- | Tier 3's backend: a page, and a systemd unit serving it.
+
+Declared on the /VM side/ deliberately. A load balancer whose forwarding rule
+merely exists proves nothing -- a balancer in front of no server answers
+@502@ just as readily -- so what tier 3 actually checks is a @200@ carrying
+the project id, and the only thing that can put that body there is salmon
+running on the machine. It is therefore also a second, independent proof
+that the tier-2 hand-off worked, this time through the front door.
+
+@python3@ is on every Ubuntu cloud image (cloud-init is written in it), so
+the 'Debian.deb' node here is nearly always a 'Skip' -- it is declared
+anyway, because "nearly always" is not a dependency.
+-}
+webServer :: Spec -> LbConfig -> Op
+webServer spec lb =
+    Systemd.systemdService reportPrint OS.systemctl trackConfig config
+  where
+    root :: FilePath
+    root = "/var/www/salmon-toy"
+
+    trackConfig :: Track' Systemd.Config
+    trackConfig = Track $ \_ ->
+        op "setup-salmon-toy-web" (deps [indexFile, Debian.deb (Debian.Package "python3")]) id
+
+    indexFile :: Op
+    indexFile =
+        FS.filecontents
+            ( FS.FileContents
+                (root <> "/index.html")
+                ("served by salmon-gcp-toy from " <> spec.project <> "\n")
+            )
+
+    config :: Systemd.Config
+    config =
+        Systemd.Config
+            Systemd.System
+            "/etc/systemd/system"
+            "salmon-toy-web.service"
+            (Systemd.Unit "salmon-gcp-toy tier-3 backend" "network-online.target")
+            ( Systemd.Service
+                Systemd.Simple
+                "root"
+                "root"
+                "022"
+                start
+                Systemd.OnFailure
+                Systemd.Process
+                root
+            )
+            (Systemd.Install "multi-user.target")
+
+    start :: Systemd.Start
+    start =
+        Systemd.Start
+            "/usr/bin/python3"
+            [ "-m"
+            , "http.server"
+            , Text.pack (show lb.lbPort)
+            , "--bind"
+            , "0.0.0.0"
+            , "--directory"
+            , Text.pack root
+            ]
+
 control :: Spec -> Op
 control spec =
-    op "gcp-toy" (deps (tier0 spec <> (if spec.tier >= 1 then tier1 spec else []) <> (if spec.tier >= 2 then tier2 spec else []))) $ \actions ->
+    op "gcp-toy" (deps (tier0 spec <> (if spec.tier >= 1 then tier1 spec else []) <> (if spec.tier >= 2 then tier2 spec else []) <> (if spec.tier >= 3 then tier3 spec else []))) $ \actions ->
         actions
             { help = Text.unwords ["salmon GCP toy validation, tier", Text.pack (show spec.tier), "in", spec.project]
             , ref = mkRef "gcp-toy" (spec.project, spec.prefix)
@@ -560,14 +664,131 @@ gceInstance spec vm =
         , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
         , Compute.instanceMetadataFiles = Map.fromList [("startup-script", startupScriptPath spec)]
         , Compute.instanceAddress = Just (addressSpec spec).addressName
-        , Compute.instanceTags = [sshTag spec]
+        , -- tags are fixed at create time, so the tier-3 one has to be on the
+          -- instance from the first pass -- there is no adding it later to a
+          -- machine the balancer has already been pointed at.
+          Compute.instanceTags = [sshTag spec] <> [lbTag spec | spec.tier >= 3]
         }
+
+-------------------------------------------------------------------------------
+-- Tier 3: a regional external ALB in front of that VM.
+
+{- | The balancer and everything GCP insists on having first.
+
+Three of the four nodes below exist only because a /regional external/
+Application Load Balancer is an Envoy fleet rather than a Google frontend,
+and that changes what has to be true before one can be created:
+
+* it runs its proxies inside the VPC, in a __proxy-only subnet__ that must
+  already exist in the region, be @ACTIVE@, and belong to the same network
+  as the backends;
+* those proxies reach the backends __from that subnet's range__, so the
+  backend VMs' own firewall has to allow it -- as does the separate
+  @35.191.0.0\/16@ + @130.211.0.0\/22@ pair the health checks come from,
+  which is a different source entirely and the usual reason a balancer that
+  came up cleanly still answers @502@;
+* and a VM is not a backend: an __instance group__ is, so the instance has
+  to be put in one.
+-}
+tier3 :: Spec -> [Op]
+tier3 spec = case (spec.vmConfig, spec.lbConfig) of
+    (Just vm, Just lb) -> [balancer spec vm lb]
+    _ -> []
+
+balancer :: Spec -> VmConfig -> LbConfig -> Op
+balancer spec vm lb =
+    foldl
+        inject
+        (LoadBalancing.applicationLoadBalancer reportPrint Core.gcloud alb)
+        ([proxySubnet, membership, backendFirewall] <> served)
+  where
+    computeApi = api spec "compute.googleapis.com"
+
+    alb :: LoadBalancing.ApplicationLoadBalancer
+    alb =
+        LoadBalancing.ApplicationLoadBalancer
+            { LoadBalancing.albName = spec.prefix <> "-lb"
+            , LoadBalancing.albProject = projectOf spec
+            , LoadBalancing.albRegion = regionOf spec
+            , -- omitted rather than "default": the forwarding rule falls back
+              -- to the default network, which is the one everything else here
+              -- is on, and naming it is one more thing to get wrong.
+              LoadBalancing.albNetwork = Nothing
+            , LoadBalancing.albBackends =
+                [ LoadBalancing.InstanceGroupBackend
+                    (instanceGroupSpec spec vm).groupName
+                    (LoadBalancing.InstanceGroupZone vm.vmZone)
+                    [lb.lbPort]
+                ]
+            , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck (spec.prefix <> "-hc") lb.lbPort)
+            }
+
+    proxySubnet :: Op
+    proxySubnet =
+        Compute.subnet
+            reportPrint
+            Core.gcloud
+            Compute.Subnet
+                { Compute.subnetName = spec.prefix <> "-proxy"
+                , Compute.subnetProject = projectOf spec
+                , Compute.subnetRegion = regionOf spec
+                , Compute.subnetNetwork = "default"
+                , Compute.subnetRange = lb.lbProxyRange
+                , Compute.subnetPurpose = Compute.RegionalManagedProxy
+                }
+            `inject` computeApi
+
+    membership :: Op
+    membership =
+        Compute.instanceGroupMember
+            reportPrint
+            Core.gcloud
+            (instanceGroupSpec spec vm)
+            (vmName spec)
+            `inject` group
+            `inject` instanceNode spec vm
+
+    group :: Op
+    group =
+        Compute.instanceGroup reportPrint Core.gcloud (instanceGroupSpec spec vm)
+            `inject` computeApi
+
+    backendFirewall :: Op
+    backendFirewall =
+        Compute.firewallRule
+            reportPrint
+            Core.gcloud
+            Compute.FirewallRule
+                { Compute.firewallName = spec.prefix <> "-lb-backend"
+                , Compute.firewallProject = projectOf spec
+                , Compute.firewallNetwork = "default"
+                , Compute.firewallAllow = "tcp:" <> Text.pack (show lb.lbPort)
+                , Compute.firewallSourceRanges = [lb.lbProxyRange, "35.191.0.0/16", "130.211.0.0/22"]
+                , Compute.firewallTargetTags = [lbTag spec]
+                }
+            `inject` computeApi
+
+    -- On the pass that knows the IP, the balancer is declared *after* the
+    -- machine has been provisioned, so the backend is already serving by the
+    -- time the first health check runs. On the first pass there is no such
+    -- node and the balancer simply comes up in front of an unhealthy backend,
+    -- which is legal and is what the second pass fixes.
+    served :: [Op]
+    served = maybe [] (\ip -> [provisioned spec vm ip]) vm.vmIp
+
+instanceGroupSpec :: Spec -> VmConfig -> Compute.InstanceGroup
+instanceGroupSpec spec vm =
+    Compute.InstanceGroup (spec.prefix <> "-ig") (projectOf spec) (Core.Zone vm.vmZone)
 
 vmName :: Spec -> Text
 vmName spec = spec.prefix <> "-vm"
 
 sshTag :: Spec -> Text
 sshTag spec = spec.prefix <> "-ssh"
+
+-- | The tag the tier-3 backend firewall rule targets.
+lbTag :: Spec -> Text
+lbTag spec = spec.prefix <> "-lb"
 
 startupScriptPath :: Spec -> FilePath
 startupScriptPath spec = spec.workDir <> "/startup-script.sh"

@@ -86,6 +86,34 @@ What proves it worked is the file the uploaded binary writes on the VM,
 binary runs there with the same directive, tagged `OnVm`, which is why the
 payload is declared in the same `Track'` as everything else.
 
+**Tier 3** (a forwarding rule's hourly rate on top of tier 2) puts a
+*regional external* Application Load Balancer in front of that VM.
+
+| Node | Resource |
+|---|---|
+| `Gcp.Compute.subnet` | the proxy-only subnet, `<prefix>-proxy`, `REGIONAL_MANAGED_PROXY`/`ACTIVE` |
+| `Gcp.Compute.instanceGroup` | an unmanaged, zonal group, `<prefix>-ig` |
+| `Gcp.Compute.instanceGroupMember` | the tier-2 VM, put in it |
+| `Gcp.Compute.firewallRule` | `tcp:<--lb-port>` from the proxy range **and** the health-check ranges, to instances tagged `<prefix>-lb` |
+| `Gcp.LoadBalancing.applicationLoadBalancer` | health check, backend service, named ports, URL map, target proxy, forwarding rule |
+| `Systemd.systemdService` (on the VM) | `salmon-toy-web.service`, a `python3 -m http.server` over a page salmon wrote |
+
+Three of those exist only because a regional external ALB is an Envoy fleet
+rather than a Google frontend, and that is what the tier is really testing:
+the proxies run *inside* the VPC, in a proxy-only subnet that must already
+exist in the region; they reach the backends **from that subnet's range**, so
+the backend firewall has to allow it — as does the separate
+`35.191.0.0/16` + `130.211.0.0/22` pair the *health checks* come from, which
+is a different source entirely and the usual reason a balancer that came up
+cleanly still answers `502`; and a VM is not a backend, an instance group is.
+
+The web server is declared on the **VM side**, by the tier-2 payload. That is
+deliberate: a forwarding rule that merely exists proves nothing, so what the
+script checks is a `200` carrying the project id, and the only thing that can
+put that body there is salmon running on the machine. A green tier 3 is
+therefore a second, independent proof that the tier-2 hand-off worked — this
+time through the front door.
+
 ## Step 1 — dry run, no GCP calls
 
 `run tree` only expands the graph; it never shells out to `gcloud`. Do this
@@ -153,7 +181,8 @@ Then, once tier 0 is clean, the same with `--tier 1` (needs `podman`), and/or
 `--vm-zone` (default `<region>-b`), `--vm-machine-type` (`e2-micro`),
 `--vm-image-family`/`--vm-image-project` (Ubuntu 24.04 LTS), `--vm-user`
 (`salmon`) and `--ssh-source-range` (`0.0.0.0/0` — narrow it to your own
-address if the sandbox is not disposable).
+address if the sandbox is not disposable). Tier 3 adds `--lb-proxy-range`
+(`192.168.100.0/24`) and `--lb-port` (`8080`).
 
 Script options, before the `--`: `-y` skips the confirmation prompt, `--keep`
 skips teardown (it then prints the `run down` command to finish up later).
@@ -245,6 +274,19 @@ leftover.
   acceptable risk for an hour; narrow it anyway when the project is not
   disposable.
 
+- **Tier 3's proxy range must avoid `10.128.0.0/9`.** The `default` network is
+  an *auto mode* VPC, and that whole block belongs to the subnets GCP creates
+  per region on its own — including for regions that do not exist yet. Hence
+  the `192.168.100.0/24` default. It also has to be `/26` or larger, and only
+  one `ACTIVE` proxy-only subnet may exist per network per region, so a second
+  concurrent tier-3 run in the *same* project (not the same organization) will
+  collide.
+- **A tier-3 backend is `UNHEALTHY` for a minute or two after `up`.** The
+  balancer answers `502` until the first health checks pass, which is why the
+  script waits up to five minutes for the page rather than fetching once. If
+  it never arrives, the script prints the backend's health, because the
+  cause is nearly always a firewall rule rather than the balancer.
+
 ## Gaps this does not cover
 
 - **The VM's own teardown is the project delete.** `down` removes the
@@ -256,9 +298,16 @@ leftover.
   Signing host certificates with the same CA would close that, and needs
   `ssh-keygen -s -h` support in `Keys` plus a way to get each VM's host key
   signed at boot.
-- **Load balancing.** `Gcp.LoadBalancing` renders a regional external ALB, and
-  GCP only accepts one in a network that already has a proxy-only subnet, which
-  nothing here creates. Unexercised.
+- **The serverless-NEG backend is still unexercised.** Tier 3 drives
+  `Gcp.LoadBalancing`'s `InstanceGroupBackend`; the `CloudRunBackend` branch
+  (a serverless NEG in front of tier 1's Cloud Run service) renders but has
+  never been run. Mixing the two in one balancer is not an option — a backend
+  service holds one kind of backend — so exercising it means a second
+  balancer.
+- **HTTPS, and anything past the default route.** The URL map has one default
+  service and the forwarding rule is plain `:80`; managed certificates, host
+  and path rules, and the `--network`-carrying form of the forwarding rule are
+  all rendered-but-unrun.
 - **Two credentials, one identity assumed.** `gcp-adc` validates ADC;
   `Core.printAccessToken` (the registry login password) uses the active account.
   Log both in as the same identity.
