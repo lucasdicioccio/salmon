@@ -41,8 +41,12 @@ tests =
             case interpretDpkgCatalog ["podman", "rsync"] ExitSuccess catalogue of
                 Failure msg -> assertEqual "" "not installed: podman" msg
                 other -> assertBool ("expected Failure, got " <> show other) False
-        , testCase "dpkg-query failing outright is not satisfied" $
-            assertBool "" (isFailure (interpretDpkgCatalog ["rsync"] (ExitFailure 2) ""))
+        , testCase "dpkg-query failing outright is 'cannot tell', not 'missing'" $
+            -- It exits non-zero when something else holds the dpkg lock
+            -- (unattended-upgrades, typically). Reading that as "missing"
+            -- makes the node run apt-get, which fails on the same lock --
+            -- seen for real in a full test-suite run.
+            assertEqual "" Unknown (interpretDpkgCatalog ["rsync"] (ExitFailure 2) "")
         ]
   where
     isFailure (Failure _) = True

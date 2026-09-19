@@ -63,14 +63,15 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import Data.List (isInfixOf)
 import System.Directory (doesFileExist, findExecutable, listDirectory)
+import System.Environment (getEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import qualified Data.Text as Text
-import System.Process (readProcessWithExitCode)
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase)
 
-import Test.Harness (VmAccess (..), hasVmPrivileges, quoteForRemoteShell, sshToVm, testVmAddr, withTempDir, withVm)
+import Test.Harness (VmAccess (..), hasVmPrivileges, quoteForRemoteShell, sshToVm, testVmAddr3, withTempDir, withVmAt)
 
 tests :: TestTree
 tests =
@@ -96,7 +97,10 @@ canaryRow = "salmon-backup-canary-42"
 
 dumpsAndSchedules :: IO ()
 dumpsAndSchedules = requirePrereqs $ \binary ->
-    withVm pgRootfs $ \vm -> withTempDir $ \tmp -> do
+    -- An address of this spec's own, for the same reason as the rootfs: a
+    -- VM still shutting down on a shared address answers for the next one,
+    -- and ssh reports a connection closed by a host that is not under test.
+    withVmAt testVmAddr3 pgRootfs $ \vm -> withTempDir $ \tmp -> do
         -- `withVm` waits for sshd, which says nothing about Postgres: the
         -- cluster is still replaying when the first psql lands, and answers
         -- "the database system is starting up".
@@ -165,7 +169,7 @@ dumpsAndSchedules = requirePrereqs $ \binary ->
             ("the cron entry does not run the backup script: " <> cronOut)
             (("backup-" <> testDatabase <> ".sh") `isInfixOf` cronOut)
   where
-    vmAddr = Text.unpack testVmAddr
+    vmAddr = Text.unpack testVmAddr3
 
 -- | A setup step that failed silently would make the real assertion fail much
 -- later and much less clearly.
@@ -208,10 +212,10 @@ protocol every salmon binary speaks, and fails loudly with both streams.
 -}
 salmon :: FilePath -> [String] -> IO ()
 salmon binary args = do
-    (code, directive, err) <- readProcessWithExitCode binary ("config" : args) ""
+    (code, directive, err) <- runSalmon binary ("config" : args) ""
     unless (code == ExitSuccess) $
         assertBool ("config rejected " <> show args <> ":\n" <> err) False
-    (upCode, upOut, upErr) <- readProcessWithExitCode binary ["run", "up"] directive
+    (upCode, upOut, upErr) <- runSalmon binary ["run", "up"] directive
     unless (upCode == ExitSuccess) $
         assertBool
             ( "run up failed for "
@@ -224,6 +228,27 @@ salmon binary args = do
                 <> upErr
             )
             False
+
+{- | Runs the binary with a __clean PATH__ rather than this process's.
+
+Not fussiness. "Test.PostgresInitSpec" shims @apt-get@ and @dpkg-query@ onto
+@PATH@ so a recipe's package nodes act on its podman sandbox instead of the
+developer's machine, and @PATH@ is process-global: a subprocess spawned from
+this test inherits whatever is in effect. The symptom is memorable —
+salmon's own @deb@ nodes report
+
+> E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1269
+
+naming a PID that does not exist on the host, because the apt-get really ran
+inside somebody else's container.
+-}
+runSalmon :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
+runSalmon binary args input = do
+    -- the real HOME: ssh reads it even when told which identity to use
+    home <- getEnv "HOME"
+    readCreateProcessWithExitCode
+        (proc binary args){env = Just [("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"), ("HOME", home)]}
+        input
 
 -------------------------------------------------------------------------------
 

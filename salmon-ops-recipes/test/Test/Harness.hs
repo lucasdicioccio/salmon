@@ -43,6 +43,7 @@ module Test.Harness (
     testBridgeCidr,
     testVmAddr,
     testVmAddr2,
+    testVmAddr3,
     ensureTestBridge,
     withVm,
     withVmAt,
@@ -395,6 +396,18 @@ testVmAddr = "10.99.0.2"
 -- (e.g. a primary\/standby pair) via two nested 'withVmAt' calls.
 testVmAddr2 :: Text.Text
 testVmAddr2 = "10.99.0.3"
+
+{- | A third address, so a spec that is not part of the primary\/standby pair
+can boot without waiting for one of theirs to be free.
+
+Sharing an address between specs does not stop at "they must not run at the
+same time": a VM that is still shutting down answers for the next spec's VM,
+and ssh reports @Connection closed by 10.99.0.2@ from a host that is not the
+one under test. Serializing the specs makes that window small, not absent, so
+a spec with no reason to share should not.
+-}
+testVmAddr3 :: Text.Text
+testVmAddr3 = "10.99.0.4"
 
 -- | Ensures the shared test bridge (and its address) exist. Idempotent via
 -- the production 'LinuxBridge.bridgeAddr' op's own @check@ — safe to call
