@@ -53,6 +53,7 @@ library
                    , Salmon.Builtin.Nodes.Gcp.Iam
                    , Salmon.Builtin.Nodes.Gcp.LoadBalancing
                    , Salmon.Builtin.Nodes.Gcp.ResourceManager
+                   , Salmon.Builtin.Nodes.Gcp.SecretManager
                    , Salmon.Builtin.Nodes.Gcp.ServiceUsage
                    , Salmon.Builtin.Nodes.Gcp.SshAccess
                    , Salmon.Builtin.Nodes.Gcp.Storage

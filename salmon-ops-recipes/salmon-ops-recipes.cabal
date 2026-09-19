@@ -30,10 +30,13 @@ library
                    , SreBox.MicroDNS
                    , SreBox.PostgresInit
                    , SreBox.Postgrest
+                   , SreBox.PostgresTls
+                   , SreBox.PostgresBackup
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
                    , SreBox.Gcp.VmProvision
                    , SreBox.Gcp.CloudRunDeploy
+                   , SreBox.Gcp.PostgrestCloudRun
     build-depends:    base >=4.16.3.0
                     , aeson
                     , base16-bytestring
@@ -64,6 +67,7 @@ library
                     , salmon-core
                     , salmon-ops
                     , text
+                    , time
                     , tls
     hs-source-dirs:   src
     default-language: Haskell2010
@@ -92,9 +96,13 @@ test-suite salmon-ops-recipes-test
                     , Test.PodmanCommandSpec
                     , Test.JWTSigningSpec
                     , Test.LedgerSpec
+                    , Test.PgBackupSpec
                     , Test.PodmanSpec
+                    , Test.PostgresBackupSpec
                     , Test.PostgresInitSpec
                     , Test.PostgresReplicationSpec
+                    , Test.PostgresTlsSpec
+                    , Test.PostgrestCloudRunSpec
                     , Test.QemuResolveKernelSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
@@ -126,6 +134,7 @@ test-suite salmon-ops-recipes-test
                     , tasty-quickcheck
                     , temporary
                     , text
+                    , time
                     , unix
     -- Salmon.Actions.Serve reads its input handle on a forked thread, so a
     -- test driving the loop wants a runtime where a blocking read does not

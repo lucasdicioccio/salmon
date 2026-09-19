@@ -76,6 +76,9 @@ data CloudRunDeployConfig = CloudRunDeployConfig
     , crd_serviceAccount :: Text
     , crd_ingress :: CloudRun.IngressSetting
     , crd_maxInstances :: Maybe Int
+    , crd_options :: CloudRun.CloudRunOptions
+    -- ^ secrets, cpu/memory, concurrency, port; 'CloudRun.defaultCloudRunOptions'
+    -- is the deploy this recipe made before any of them existed.
     }
 
 -- | Builds, pushes, and deploys 'crd_image' as 'crd_service'.
@@ -131,6 +134,7 @@ buildPushDeploy r gcloudTrack podmanTrack cfg =
                 , CloudRun.crsServiceAccount = cfg.crd_serviceAccount
                 , CloudRun.crsIngress = cfg.crd_ingress
                 , CloudRun.crsMaxInstances = cfg.crd_maxInstances
+                , CloudRun.crsOptions = cfg.crd_options
                 }
             )
             `inject` pushed

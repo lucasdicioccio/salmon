@@ -2,6 +2,10 @@
 
 module Salmon.Builtin.Nodes.Gcp.CloudRun (
     IngressSetting (..),
+    SecretBinding (..),
+    renderSecretBinding,
+    CloudRunOptions (..),
+    defaultCloudRunOptions,
     CloudRunService (..),
     cloudRunService,
     interpretServiceDescribe,
@@ -49,6 +53,65 @@ renderIngress All = "all"
 renderIngress Internal = "internal"
 renderIngress InternalAndLoadBalancing = "internal-and-cloud-load-balancing"
 
+{- | One Secret Manager secret made visible to the container, either as a
+file or as an environment variable.
+
+The file form is what credentials want. An environment variable is readable
+by anything that can list the process's environment and tends to end up in
+logs and crash reports; a mounted file can be read once at start-up and has
+a path that is not printed by accident.
+
+Mounting has one wrinkle that has bitten everyone who has done this with
+@libpq@: __Cloud Run's secret volumes are read-only and cannot be chmod'ed__,
+and libpq refuses a client key whose mode is wider than @0600@. The way
+through is to mount somewhere neutral and have the entrypoint copy the
+files, which is what "SreBox.Gcp.PostgrestCloudRun" generates.
+-}
+data SecretBinding
+    = -- | mounted at this absolute path
+      SecretFile FilePath Text Text
+    | -- | injected as this environment variable
+      SecretEnvVar Text Text Text
+    deriving (Eq, Show)
+
+-- | gcloud's own @--set-secrets@ syntax: @TARGET=SECRET:VERSION@.
+renderSecretBinding :: SecretBinding -> Text
+renderSecretBinding (SecretFile path name version) =
+    Text.pack path <> "=" <> name <> ":" <> version
+renderSecretBinding (SecretEnvVar var name version) =
+    var <> "=" <> name <> ":" <> version
+
+{- | The knobs beyond "run this image", grouped so that adding one does not
+break every record construction in the tree.
+-}
+data CloudRunOptions = CloudRunOptions
+    { croSecrets :: [SecretBinding]
+    , croCpu :: Maybe Text
+    , croMemory :: Maybe Text
+    , croConcurrency :: Maybe Int
+    , croTimeoutSeconds :: Maybe Int
+    , croPort :: Maybe Int
+    , croAllowUnauthenticated :: Bool
+    -- ^ whether the service answers unauthenticated callers. 'False' (the
+    -- default) leaves the deploy alone rather than passing
+    -- @--no-allow-unauthenticated@, so a service fronted by a load balancer
+    -- or governed by an org policy is not fought with on every pass.
+    }
+    deriving (Eq, Show)
+
+-- | Nothing set: the same deploy this module made before these knobs existed.
+defaultCloudRunOptions :: CloudRunOptions
+defaultCloudRunOptions =
+    CloudRunOptions
+        { croSecrets = []
+        , croCpu = Nothing
+        , croMemory = Nothing
+        , croConcurrency = Nothing
+        , croTimeoutSeconds = Nothing
+        , croPort = Nothing
+        , croAllowUnauthenticated = False
+        }
+
 -- | A CloudRun service.
 data CloudRunService = CloudRunService
     { crsName :: Text
@@ -59,6 +122,7 @@ data CloudRunService = CloudRunService
     , crsServiceAccount :: Text
     , crsIngress :: IngressSetting
     , crsMaxInstances :: Maybe Int
+    , crsOptions :: CloudRunOptions
     }
     deriving (Eq, Show)
 
@@ -105,6 +169,25 @@ data CloudRunCommand
     | RunDelete CloudRunService
     deriving (Show)
 
+{- | The @--set-secrets@ family. One flag carrying every binding, not one
+flag per binding: gcloud treats a repeated @--set-secrets@ as a replacement
+rather than an addition, so the per-binding form silently deploys with only
+the last one.
+-}
+optionArgs :: CloudRunOptions -> [String]
+optionArgs opts =
+    concat
+        [ if null opts.croSecrets
+            then []
+            else ["--set-secrets", Text.unpack (Text.intercalate "," (map renderSecretBinding opts.croSecrets))]
+        , maybe [] (\v -> ["--cpu", Text.unpack v]) opts.croCpu
+        , maybe [] (\v -> ["--memory", Text.unpack v]) opts.croMemory
+        , maybe [] (\v -> ["--concurrency", show v]) opts.croConcurrency
+        , maybe [] (\v -> ["--timeout", show v]) opts.croTimeoutSeconds
+        , maybe [] (\v -> ["--port", show v]) opts.croPort
+        , ["--allow-unauthenticated" | opts.croAllowUnauthenticated]
+        ]
+
 cloudRunCommand :: Command "gcloud" CloudRunCommand
 cloudRunCommand = Command $ \cmd -> case cmd of
     RunDeploy svc ->
@@ -123,6 +206,7 @@ cloudRunCommand = Command $ \cmd -> case cmd of
                       ]
                         <> concatMap (\(k, v) -> ["--set-env-vars", Text.unpack k <> "=" <> Text.unpack v]) (Map.toList svc.crsEnv)
                         <> maybe [] (\n -> ["--max-instances", show n]) svc.crsMaxInstances
+                        <> optionArgs svc.crsOptions
                     )
                 )
     RunDescribe svc ->

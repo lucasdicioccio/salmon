@@ -527,6 +527,7 @@ tier1 spec =
             , CloudRunDeploy.crd_serviceAccount = serviceAccountEmail spec
             , CloudRunDeploy.crd_ingress = CloudRun.All
             , CloudRunDeploy.crd_maxInstances = Just 1
+            , CloudRunDeploy.crd_options = CloudRun.defaultCloudRunOptions
             }
         `inject` api spec "run.googleapis.com"
         `inject` repository spec

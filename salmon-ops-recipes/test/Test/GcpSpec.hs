@@ -27,6 +27,7 @@ import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
 import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
 import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
+import qualified Salmon.Builtin.Nodes.Gcp.SecretManager as SecretManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
@@ -48,6 +49,8 @@ tests =
         , testGroup "ResourceManager" projectTests
         , testGroup "Compute (tier 2 resources)" vmTests
         , testGroup "Compute (tier 3 resources)" lbBackendTests
+        , testGroup "SecretManager" secretTests
+        , testGroup "CloudRun options" cloudRunOptionTests
         , testGroup "Ssh.ClientOpts" clientOptsTests
         ]
 
@@ -264,6 +267,69 @@ serviceUsageTests =
     ]
 
 -------------------------------------------------------------------------------
+
+secretTests :: [TestTree]
+secretTests =
+    [ testCase "a version is added from a file, never from argv" $ do
+        -- argv is world-readable through /proc for the life of the process.
+        let args = processArgs (prepare SecretManager.secretManagerCommand (SecretManager.VersionsAdd version))
+        assertBool (show args) (["--data-file", "/certs/db.key"] `isSubsequenceOf` args)
+        assertBool (show args) (["secrets", "versions", "add", "db-key"] `isSubsequenceOf` args)
+    , testCase "reading back compares the exact bytes, trailing newline included" $ do
+        -- Trimming would make a node that had just uploaded its own PEM
+        -- report a difference on every later pass.
+        assertEqual "" Success (SecretManager.interpretSecretContents "s" "abc\n" ExitSuccess "abc\n")
+        assertBool "" (isFailure (SecretManager.interpretSecretContents "s" "abc\n" ExitSuccess "abc"))
+        assertBool "" (isFailure (SecretManager.interpretSecretContents "s" "abc" (ExitFailure 1) ""))
+    , testCase "a secret that does not describe is absent" $ do
+        assertEqual "" Success (SecretManager.interpretSecretDescribe "s" ExitSuccess)
+        assertBool "" (isFailure (SecretManager.interpretSecretDescribe "s" (ExitFailure 1)))
+    ]
+  where
+    sec = SecretManager.Secret "db-key" (Core.Project "p") "automatic"
+    version = SecretManager.SecretVersion sec "/certs/db.key"
+
+cloudRunOptionTests :: [TestTree]
+cloudRunOptionTests =
+    [ testCase "every secret rides on ONE --set-secrets flag" $ do
+        -- gcloud treats a repeated --set-secrets as a replacement, so the
+        -- one-flag-per-binding form silently deploys with only the last.
+        let args = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc))
+            flags = length (filter (== "--set-secrets") args)
+        assertEqual (show args) 1 flags
+        assertBool (show args) ("/opt/vault/cert.pem=svc-cert:latest,PGRST_JWT_SECRET=svc-jwt:latest" `elem` args)
+    , testCase "resource knobs are passed only when set" $ do
+        let bare = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc{CloudRun.crsOptions = CloudRun.defaultCloudRunOptions}))
+        assertBool (show bare) (not ("--set-secrets" `elem` bare))
+        assertBool (show bare) (not ("--cpu" `elem` bare))
+        assertBool (show bare) (not ("--allow-unauthenticated" `elem` bare))
+        let full = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc))
+        assertBool (show full) (["--cpu", "1000m"] `isSubsequenceOf` full)
+        assertBool (show full) (["--memory", "256Mi"] `isSubsequenceOf` full)
+        assertBool (show full) (["--concurrency", "80"] `isSubsequenceOf` full)
+    ]
+  where
+    svc =
+        CloudRun.CloudRunService
+            { CloudRun.crsName = "svc"
+            , CloudRun.crsProject = Core.Project "p"
+            , CloudRun.crsRegion = Core.Region "europe-west1"
+            , CloudRun.crsImage = "img:1"
+            , CloudRun.crsEnv = Map.empty
+            , CloudRun.crsServiceAccount = "sa@p.iam.gserviceaccount.com"
+            , CloudRun.crsIngress = CloudRun.All
+            , CloudRun.crsMaxInstances = Just 1
+            , CloudRun.crsOptions =
+                CloudRun.defaultCloudRunOptions
+                    { CloudRun.croSecrets =
+                        [ CloudRun.SecretFile "/opt/vault/cert.pem" "svc-cert" "latest"
+                        , CloudRun.SecretEnvVar "PGRST_JWT_SECRET" "svc-jwt" "latest"
+                        ]
+                    , CloudRun.croCpu = Just "1000m"
+                    , CloudRun.croMemory = Just "256Mi"
+                    , CloudRun.croConcurrency = Just 80
+                    }
+            }
 
 lbBackendTests :: [TestTree]
 lbBackendTests =
