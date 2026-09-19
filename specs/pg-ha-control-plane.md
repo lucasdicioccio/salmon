@@ -3,6 +3,10 @@
 Status: draft / not implemented. This is a design sketch to react to, not a
 committed plan.
 
+The database tier (§1–2) has moved to `pg-switchover.md` (operator-driven,
+two nodes) and `pg-patroni.md` (automatic failover). This spec keeps the
+bouncer/app/LB/DNS/monitoring picture around them.
+
 ## Problem
 
 We want to host a service (multiple services, eventually) on top of:
@@ -60,14 +64,10 @@ below is new work:
 
 What's genuinely missing:
 
-1. A recipe that composes the **diagonal replication pair** into one
-   reusable unit (today `Postgres.hs` only has the two standalone
-   primary/standby roles; nothing ties "these two machines are each other's
-   primary and standby" together, or derives each bouncer's upstream from
-   whichever side is *currently* primary).
-2. A way for a **seed to carry forward previously-converged state** — most
-   importantly "which side is primary right now" — across separate `config`
-   invocations. Nothing like this exists yet.
+1. A recipe for **a replicated pair and moving its primary**, which is now
+   `pg-switchover.md`, and for **automatic failover**, now `pg-patroni.md`.
+2. (Was: a seed carrying forward "which side is primary" from one `config` to
+   the next. Neither design needs it; see §1–2.)
 3. **Sizing tiers / hardware profiles** (shared vs. dedicated) as a
    first-class concept threaded through machine/cluster seeds.
 4. A **control-plane seed** that unfolds into the sub-seeds for
@@ -90,20 +90,17 @@ Goals:
   new recipes take pre-provisioned secrets/certs/files, never invent a way
   to move them (matches the existing constraint on `salmon-ops-recipes`
   modules).
-- Make "which side is primary" an explicit, operator-declared fact carried
-  through the seed, not something salmon infers or automates — salmon's
-  `up`/`down`/`check` model is declarative convergence, not a control loop;
-  automatic failover detection is out of scope for salmon itself (it can be
-  *fed by* an external health-checker, see open questions).
+- Salmon never decides *when* to fail over. Either an operator declares
+  where the primary is (`pg-switchover.md`), or Patroni decides and salmon
+  never mentions the primary at all (`pg-patroni.md`). There is no third
+  mode where salmon guesses.
 - Sizing tiers should be data (a profile value in the seed), not a code
   fork — a shared-tier deployment and a dedicated-tier deployment should go
   through the same recipes with different profile values.
 
 Non-goals (v1):
-- Automatic failover orchestration (deciding *when* to promote a standby).
-  Salmon's job is to converge the system to whatever the seed currently
-  declares, including "pg.a's primary is now machine.ab.1" — the decision
-  to flip that declaration is an operator (or external tool) action.
+- Automatic failover built into salmon. Salmon has no consensus, so it
+  delegates that to Patroni; see `pg-patroni.md`.
 - A generic multi-service control plane. Build this for the pg/bouncer/app/
   LB shape in the diagram; generalize later only if a second, differently-
   shaped service shows the abstraction is right.
@@ -112,94 +109,35 @@ Non-goals (v1):
 
 ## Proposed architecture
 
-### 1. `PgClusterPair`: the diagonal replication unit
+### 1–2. The database tier: superseded by two specs
 
-A new `SreBox.PostgresHA` (or similar) recipe, one level above
-`Postgres.primaryReplicationSetup`/`standbyReplicationSetup`, that takes:
+This section used to sketch a `PgClusterPair` recipe whose seed carried
+`pair_primary_side`, and a state-file convention to carry that side forward
+from one `config` to the next. Both are replaced. Which one applies depends
+on who decides where the primary is:
 
-```haskell
-data Side = SideA | SideB
-    deriving (Eq, Show, Generic)
+- **`pg-switchover.md`**: the operator decides. Two machines, the primary's
+  location is a per-pair field in the directive, and salmon moves it with a
+  resumable switchover (or a failover the operator vouches for). No state file
+  is needed: without automatic failover, the declaration *is* the truth. This
+  is the tier for test harnesses, disaster scenarios and low-SLA services.
+- **`pg-patroni.md`**: Patroni decides, with etcd for consensus. The primary's
+  location must **never** appear in a directive, or the first automatic
+  failover makes every `run up` fight it. Admin nodes and bouncers reach the
+  leader through a routed endpoint (HAProxy, a VIP, or libpq multi-host)
+  instead.
 
-data PgClusterPair
-    = PgClusterPair
-    { pair_machine_a :: Text          -- host/address of machine.ab.0
-    , pair_machine_b :: Text          -- host/address of machine.ab.1
-    , pair_cluster_a :: Postgres.ClusterName   -- "pg.a"
-    , pair_cluster_b :: Postgres.ClusterName   -- "pg.b"
-    , pair_primary_side :: Side       -- carried forward, see state section below
-    , pair_repl_role :: Postgres.RoleName
-    , pair_repl_password :: Postgres.Password  -- pre-provisioned, not generated here
-    , pair_repl_slot :: Postgres.ReplicationSlotName
-    }
-```
+The cross-replicated two-machine layout (`pg.a` primary on machine.ab.0,
+`pg.b` primary on machine.ab.1) works for the first, as a data choice rather
+than a code fork. For the second it needs a third, small machine running only
+etcd, since two machines cannot form a quorum.
 
-`up` for this seeded value produces the four `Postgres` ops (primary-a,
-standby-a on the other box, primary-b, standby-b), each exactly the existing
-`Postgres.primaryReplicationSetup`/`standbyReplicationSetup` calls the
-fixture already demonstrates — the new code is just "call these four times
-with swapped machine/cluster arguments," plus:
+`bouncerUpstream` survives only in the first: under Patroni the bouncers'
+upstream is the routed endpoint, which never changes.
 
-```haskell
-bouncerUpstream :: PgClusterPair -> Postgres.ClusterName -> PgBouncer.UpstreamDb
-```
-
-which looks at `pair_primary_side` to decide whether `pg.a`'s bouncer
-upstream is `pair_machine_a` or `pair_machine_b`. This is the function that
-makes bouncer config "dynamic" per the ask — the bouncer recipe itself
-doesn't change at all, only which host/port `setupPostgrest`/`PgBouncer`-
-config-building code plugs in.
-
-Promoting a standby (flipping `pair_primary_side`) is **not** this recipe's
-job — see previous-seed section. This recipe only ever converges to
-whatever `pair_primary_side` currently says; a real failover still needs an
-operator (or a health-check tool) to run `pg_ctl promote`/equivalent on the
-actual standby out of band, then update the declared state so the next
-`salmon-x config ...` reflects reality. Modeling *that* promotion as a
-salmon `Op` is future work (see below) — v1 treats it as an external fact.
-
-### 2. Previous-seed state: no new core mechanism needed
-
-The key realization: `Configure m seed a = Configure { gen :: seed -> m a }`
-(`Salmon.Op.Configure`) already allows `gen` to be arbitrarily impure. There
-is no need for a new "previous-seed" abstraction in `salmon-core` — a seed
-can simply carry the *path to a small state file*, and `gen` reads it (if
-present) as part of building the directive:
-
-```haskell
-data ClusterSeed
-    = ClusterSeed
-    { seed_machine_a :: Text
-    , seed_machine_b :: Text
-    , seed_previous_state :: Maybe FilePath   -- e.g. state/pg-ab.json
-    , ...
-    }
-
-data PairState = PairState { state_primary_side :: Side }
-    deriving (Generic)
-instance FromJSON PairState
-instance ToJSON PairState
-
-configure :: Configure IO ClusterSeed PgClusterPair
-configure = Configure $ \seed -> do
-    prev <- maybe (pure Nothing) readPairState seed.seed_previous_state
-    let side = maybe SideA state_primary_side prev
-    pure PgClusterPair { pair_primary_side = side, ... }
-```
-
-`run serve`'s `status`/`history` output (`Salmon.Actions.Serve`) is already
-a superset of what a state file needs, so an even lighter option is: after
-every converge, a tiny script/CLI extracts `{"primary_side": ...}` from
-`serve status` and writes it to the state file the *next* `config`
-invocation reads — no changes to `Serve.hs` at all. Whether that extraction
-lives in a shell wrapper or a new `run status --extract pg-pair` subcommand
-is an open question below.
-
-This generalizes beyond pg-pair: any seed that wants "remember what I last
-converged to" (stable secrets, stable port allocations, stable primary/
-standby role) uses the same `Maybe FilePath` + small JSON state pattern.
-Worth documenting as a convention once the first instance (pg-pair) proves
-it out, rather than building a generic "stateful seed" typeclass speculatively.
+The general idea of a seed that reads back what it last converged to (stable
+secrets, stable port allocations) is still worth having, but nothing here
+needs it any more. Build it when the first real case appears.
 
 ### 3. Sizing tiers / hardware profiles
 
@@ -242,7 +180,7 @@ protocol" section) instead of inventing a new pattern:
 data ControlPlaneSeed
     = ControlPlaneSeed
     { cp_tier :: Tier
-    , cp_pair :: ClusterSeed              -- previous-state-aware, see above
+    , cp_pair :: ClusterSeed              -- see pg-switchover.md / pg-patroni.md
     , cp_app_instances :: [AppInstanceSeed]  -- internaltool.a.0, internaltool.b.0, ...
     , cp_postgrest :: [PostgrestSeed]
     , cp_lb :: LbSeed
@@ -253,7 +191,7 @@ data ControlPlaneSeed
 -- ControlPlane/Spec.hs — FromJSON/ToJSON directive, output of `config`
 data ControlPlaneSpec
     = ControlPlaneSpec
-    { cps_pair :: PgClusterPair
+    { cps_pair :: Pair               -- SreBox.PostgresPair, or a Patroni cluster
     , cps_bouncers :: [PgBouncer.BouncerConfig]
     , cps_app_instances :: [AppInstanceSetup]     -- mirrors PostgrestSetup
     , cps_postgrest :: [PostgrestSetup]
@@ -309,16 +247,9 @@ Two independently-shippable pieces, not one:
 
 ## Open questions
 
-- **Failover signal**: is "which side is primary" ever going to be
-  automatically detected (an external health-checker writes the state
-  file), or always an explicit operator action (`salmon-x config ... 
-  --primary-side b`)? Changes whether the state-file convention in §2 needs
-  to be racy-write-safe (atomic rename) from day one.
-- **`run status --extract` vs. a wrapper script**: does the previous-state
-  read belong as a first-class `Serve`/CLI feature, or is a small external
-  script (parse `serve status` JSON, write the state file) enough for v1?
-  Leaning toward the external script — avoids growing `Serve.hs` for a
-  need that isn't proven out yet.
+- **Which database tier per deployment tier**: does the shared tier run on
+  `pg-switchover.md` and only the dedicated tier on `pg-patroni.md`, or does
+  everything that serves real traffic go to Patroni?
 - **Monitoring stack**: Prometheus + node_exporter + something for alerts
   (Alertmanager? a hosted service?) — needs a decision before §5 can be
   more than a stub.
@@ -338,15 +269,11 @@ Two independently-shippable pieces, not one:
 
 ## Phased plan
 
-1. `SreBox.PostgresHA` (§1) as a standalone recipe + fixture, no
-   control-plane wiring yet — proves out the diagonal-pair composition and
-   `bouncerUpstream` derivation against real (podman) machines, same style
-   as the existing replication fixture.
-2. Previous-seed state convention (§2), proven out against the §1 fixture:
-   manually flip `pair_primary_side` via a state file, confirm bouncer
-   config follows.
+1. The database tier: `pg-switchover.md`'s phased plan, then
+   `pg-patroni.md`'s. Each has its own Layer 3 disaster scenarios.
+2. (Was: the previous-seed state convention; dropped, see §1–2.)
 3. `AppInstanceSeed`/internaltool recipe (§4, mirroring `SreBox.Postgrest`),
-   wired to a single `PgClusterPair` — no LB/DNS/monitoring yet.
+   wired to a single pair — no LB/DNS/monitoring yet.
 4. LB + DNS wiring (§6, DNS-fanout option first).
 5. `ControlPlaneSeed` (§4) tying 1–4 together end to end for one tier.
 6. `HardwareProfile`/`Tier` (§3) threaded through, second tier added.
@@ -354,9 +281,6 @@ Two independently-shippable pieces, not one:
 
 ## Future work
 
-- Modeling promotion itself (`pg_ctl promote` + updating the declared state)
-  as a salmon `Op`, once the manual-declaration workflow in the phased plan
-  is proven out and its pain points are known.
 - VRRP/keepalived-based LB HA (§6), if DNS fanout turns out insufficient.
 - Generalizing the control-plane seed pattern beyond this one service shape,
   if/when a second differently-shaped service needs the same treatment.
