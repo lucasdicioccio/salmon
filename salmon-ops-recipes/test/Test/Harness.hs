@@ -44,6 +44,7 @@ module Test.Harness (
     testVmAddr,
     testVmAddr2,
     testVmAddr3,
+    testVmAddr4,
     ensureTestBridge,
     withVm,
     withVmAt,
@@ -408,6 +409,10 @@ a spec with no reason to share should not.
 -}
 testVmAddr3 :: Text.Text
 testVmAddr3 = "10.99.0.4"
+
+-- | A fourth, for "Test.MigratorTemplateSpec", on the same reasoning as 'testVmAddr3'.
+testVmAddr4 :: Text.Text
+testVmAddr4 = "10.99.0.5"
 
 -- | Ensures the shared test bridge (and its address) exist. Idempotent via
 -- the production 'LinuxBridge.bridgeAddr' op's own @check@ — safe to call

@@ -12,6 +12,7 @@ import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanCommandSpec as PodmanCommandSpec
+import qualified Test.MigratorTemplateSpec as MigratorTemplateSpec
 import qualified Test.PgBackupSpec as PgBackupSpec
 import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresBackupSpec as PostgresBackupSpec
@@ -60,6 +61,7 @@ main =
                 , -- these two shim PATH, which is process-global
                   PostgresInitSpec.tests
                 , PostgresTemplateSpec.sandboxTests
+                , MigratorTemplateSpec.tests
                 ]
             , CheckSpec.tests
             , ConcurrentSpec.tests
