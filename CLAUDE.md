@@ -448,6 +448,28 @@ migrated in place. And **both can drop databases**, so each is marked in its com
 is the caller's to choose and nothing else says who made it. `database`, `cloneDatabase` and
 `template` share the `Ref` key `"pg-db" (port, name)`, because they are the same effect site.
 
+Streaming replication (`primaryReplicationSetup`/`standbyReplicationSetup`, and the switchover
+recipe sketched in `specs/pg-switchover.md` on top of them). **`standbyReplicationSetup` is the
+one builtin in the tree whose `up` runs `rm -rf` on somebody's data**, so what guards it is the
+point: the *system identifier*, read from the primary over a physical replication connection
+(`IDENTIFY_SYSTEM`, which is `replication=true` — `replication=database` is the logical kind and
+`pg_hba.conf` matches it against the database name, so the replication role's own line refuses
+it) and locally from `pg_controldata`. Same identifier means the directory already belongs to
+that cluster, promoted or not, and is left alone; a different one is cloned over only if that
+cluster is pristine (nothing in `base/` at or above OID 16384) and otherwise refused. The guard
+it replaced was `standby.signal`'s presence, which *promotion deletes* — so a promoted standby
+read as "never cloned" and the next `run up` deleted the machine that had just become the
+primary. `defaultReplicationTuning` turns on `wal_log_hints` (without it, or checksums,
+`pg_rewind` can never rejoin an old primary, and it is restart-only so it has to be set before
+there is data to lose) and caps `max_slot_wal_keep_size` (an uncapped slot lets a standby that
+stays down fill the *primary's* disk). `startCluster`/`stopCluster` check `pg_lsclusters` rather
+than running commands that exit non-zero when there is nothing to do, and
+`restartClusterIfPending` — what `primaryReplicationSetup` uses — checks
+`pg_settings.pending_restart`, the same "the file changed, the running thing is stale" shape as
+systemd's `NeedDaemonReload`. `restartCluster` and `promoteCluster` stay unconditional: a
+restart is not a state, and "not in recovery" is a fact about a *pair* of machines that one of
+them cannot answer alone.
+
 ## Conventions for node authors
 
 None of this is enforced by the type system — these are conventions every existing builtin
@@ -554,7 +576,6 @@ graph it sits in until this landed. One hazard, confined to the `EncodeFileConte
 instance: the check runs the encoder, so a non-deterministic generator (a timestamp) makes the
 node rewrite its file every pass. That is the safe direction, and nothing in the tree uses that
 instance today. See `Test/FilesystemSpec.hs`.
-
 (I6): `EncodeFileContents` also carries `contentFingerprint :: a -> Maybe Text`, a pure,
 stable hash of the content an instance would write (`Nothing` by default — the `IO a` instance
 keeps it, since its whole point is that content isn't known until the encoder runs).

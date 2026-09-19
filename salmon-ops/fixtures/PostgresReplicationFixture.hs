@@ -51,6 +51,7 @@ import Salmon.Actions.UpDown (upTree)
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (justInstall)
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
+import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Track
@@ -67,6 +68,10 @@ replPassword = Postgres.Password "fixture-replication-password"
 
 replSlot :: Postgres.ReplicationSlotName
 replSlot = "standby_slot"
+
+-- | Where the standby keeps the replication password; see 'standbyOp'.
+replPassfile :: FilePath
+replPassfile = "/etc/postgresql/salmon-replication.pass"
 
 primaryPort :: Postgres.Port
 primaryPort = 5432
@@ -98,19 +103,34 @@ primaryOp standbyCidr =
   where
     replUser = Postgres.replicationUser reportPrint serverTrack Debian.psql primaryPort (Postgres.User replRole) replPassword
 
--- | Standby role: installs postgres (for pg_basebackup) and clones "main" off the given primary host.
+{- | Standby role: installs postgres (for pg_basebackup), writes the
+replication password where the clone can read it, and clones "main" off the
+given primary host.
+
+The password file is the fixture standing in for whatever a real deployment
+uses to get a secret onto a machine -- that is deliberately not this node's
+business (see the @salmon-ops-recipes@ convention). What matters is that
+'Postgres.StandbySetup' takes a /path/: the clone is a shell script, and a
+script ends up in @ps@ and in every report salmon prints.
+-}
 standbyOp :: Text.Text -> Op
 standbyOp primaryHost =
     Postgres.standbyReplicationSetup reportPrint Debian.pg_ctlcluster standbySetup
+        `inject` passfileOp
         `inject` justInstall Debian.postgres
   where
+    passfileOp :: Op
+    passfileOp =
+        FS.ownedFile (FS.FileOwnership replPassfile (Just "postgres") (Just "postgres") 0o600)
+            `inject` FS.filecontents (FS.FileContents replPassfile replPassword.revealPassword)
+
     standbySetup =
         Postgres.StandbySetup
             { Postgres.standby_cluster = Postgres.mainCluster
             , Postgres.standby_primary_host = primaryHost
             , Postgres.standby_primary_port = primaryPort
             , Postgres.standby_repl_user = Postgres.User replRole
-            , Postgres.standby_repl_password = replPassword
+            , Postgres.standby_repl_passfile = replPassfile
             , Postgres.standby_slot = Just replSlot
             }
 

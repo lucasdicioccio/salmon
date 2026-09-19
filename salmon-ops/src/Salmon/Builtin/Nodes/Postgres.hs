@@ -165,21 +165,72 @@ ensureHbaLineScript name line =
 {- | Clones the named cluster's data directory from a running primary via
 @pg_basebackup -R@ (which writes both @standby.signal@ and
 @primary_conninfo@, so the cluster comes up in streaming-standby mode as
-soon as it's started) and starts it. Guarded by @standby.signal@'s presence
-so a second 'up' is a no-op instead of re-cloning (and destroying) an
-already-running standby.
+soon as it's started) and starts it.
+
+= What decides whether to clone
+
+The clone begins @rm -rf@ on a data directory, so what guards it is the
+whole safety of this node. That guard is the __system identifier__: every
+cluster gets one at @initdb@ time and a @pg_basebackup@ copy inherits its
+primary's, so "this data directory holds a copy of that primary's cluster"
+is a question with an exact answer. The primary's is read over the
+replication protocol (@IDENTIFY_SYSTEM@), which is the one connection the
+replication role is already authorized for in @pg_hba.conf@; the local one
+comes from @pg_controldata@, no server needed.
+
+* __Same identifier__: this directory is already a member of the primary's
+  cluster. Leave it alone, and start it if it is down.
+* __No cluster here at all__: clone.
+* __A different identifier__: clone only if that cluster is /pristine/, i.e.
+  holds no database beyond the ones @initdb@ makes, which is what a freshly
+  @pg_createcluster@-d standby looks like. Otherwise refuse, loudly, and
+  touch nothing.
+
+The guard this replaces was @standby.signal@'s presence, which is deleted by
+/promotion/: a promoted standby therefore looked exactly like a cluster that
+had never been cloned, and the next @up@ with an unchanged directive would
+@rm -rf@ the data directory of what is now the primary -- then fail to clone
+from the old primary, which is typically the machine that just died. The
+identifier survives promotion, which is the point of using it.
+
+Pristineness is settled by looking at @base/@ for a directory whose name is
+at or above @FirstNormalObjectId@ (16384), rather than by starting the
+cluster and asking it: starting somebody else's cluster to find out whether
+it is somebody else's is already the side effect worth avoiding.
 -}
 cloneFromPrimaryScript :: StandbySetup -> String
 cloneFromPrimaryScript setup =
     unlines
         [ "set -e"
         , detectVersion
-        , "datadir=/var/lib/postgresql/$version/" <> Text.unpack setup.standby_cluster
-        , "if [ ! -e \"$datadir/standby.signal\" ]; then"
-        , "  pg_ctlcluster \"$version\" " <> Text.unpack setup.standby_cluster <> " stop || true"
-        , "  rm -rf \"$datadir\""
-        , "  PGPASSWORD="
-            <> shellQuote setup.standby_repl_password.revealPassword
+        , -- pg_controldata is a server program: postgresql-common puts a
+          -- wrapper on PATH for the client ones only.
+          "pg_controldata=/usr/lib/postgresql/$version/bin/pg_controldata"
+        , "[ -x \"$pg_controldata\" ] || pg_controldata=pg_controldata"
+        , "datadir=/var/lib/postgresql/$version/" <> cluster
+        , -- the replication protocol's own identity command: available to a
+          -- REPLICATION role over the `host replication` line the standby
+          -- already needs, with no rights on any database.
+          "primary_sysid=$(" <> pgpassword <> " psql -tAX -d " <> shellQuote replConninfo <> " -c 'IDENTIFY_SYSTEM' | head -n1 | cut -d'|' -f1)"
+        , "if [ -z \"$primary_sysid\" ]; then echo 'cannot read the primary system identifier' >&2; exit 1; fi"
+        , "local_sysid=''"
+        , "if [ -e \"$datadir/global/pg_control\" ]; then"
+        , "  local_sysid=$(\"$pg_controldata\" -D \"$datadir\" | sed -n 's/^Database system identifier: *//p')"
+        , "fi"
+        , "if [ \"$local_sysid\" = \"$primary_sysid\" ]; then"
+        , "  " <> pgctl "status" <> " >/dev/null || " <> pgctl "start"
+        , "  exit 0"
+        , "fi"
+        , "if [ -n \"$local_sysid\" ]; then"
+        , "  others=$(ls \"$datadir/base\" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $1+0 >= 16384' | wc -l)"
+        , "  if [ \"$others\" != 0 ]; then"
+        , "    echo \"refusing to clone over $datadir: it holds cluster $local_sysid with $others database(s), and the primary is $primary_sysid\" >&2"
+        , "    exit 1"
+        , "  fi"
+        , "fi"
+        , pgctl "stop" <> " || true"
+        , "rm -rf \"$datadir\""
+        , pgpassword
             <> " pg_basebackup -h "
             <> Text.unpack setup.standby_primary_host
             <> " -p "
@@ -188,11 +239,26 @@ cloneFromPrimaryScript setup =
             <> Text.unpack setup.standby_repl_user.userRole
             <> " -D \"$datadir\" -Fp -Xs -R"
             <> slotArg
-        , "  chown -R postgres:postgres \"$datadir\""
-        , "  pg_ctlcluster \"$version\" " <> Text.unpack setup.standby_cluster <> " start"
-        , "fi"
+        , "chown -R postgres:postgres \"$datadir\""
+        , pgctl "start"
         ]
   where
+    cluster = Text.unpack setup.standby_cluster
+    pgctl action = "pg_ctlcluster \"$version\" " <> cluster <> " " <> action
+    pgpassword = "PGPASSWORD=$(cat " <> shellQuote (Text.pack setup.standby_repl_passfile) <> ")"
+    replConninfo =
+        Text.unwords
+            [ "host=" <> setup.standby_primary_host
+            , "port=" <> Text.pack (show setup.standby_primary_port)
+            , "user=" <> setup.standby_repl_user.userRole
+            , "dbname=postgres"
+            , -- @true@, not @database@: a "database" replication connection
+              -- is the logical one, and @pg_hba.conf@ matches it against the
+              -- database name, so it is refused by the @host replication@
+              -- line this role has. @true@ is the physical connection that
+              -- line is for -- the same kind @pg_basebackup@ makes below.
+              "replication=true"
+            ]
     -- the slot (if any) is expected to already exist on the primary, created
     -- independently via 'replicationSlot'/'primaryReplicationSetup'
     slotArg = maybe "" (\slot -> " -S " <> Text.unpack slot) setup.standby_slot
@@ -676,23 +742,112 @@ createCluster r pg pgctl name port =
     cmd = CreateCluster name port
     r' = contramap (PGClusterOp cmd) r
 
-clusterCtl :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> PgCtl -> Text -> Op
-clusterCtl r pgctl name cmd label =
+clusterCtl :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> PgCtl -> Text -> IO CheckResult -> Op
+clusterCtl r pgctl name cmd label chk =
     withBinary pgctl pgctlRun cmd $ \run ->
         op "pg-cluster-ctl" nodeps $ \actions ->
             actions
                 { ref = mkRef "pg-cluster-ctl" (name, label)
                 , help = Text.unwords [label, "pg cluster", name]
+                , check = chk
                 , up = run r'
                 }
   where
     r' = contramap (PGClusterOp cmd) r
 
 startCluster, stopCluster, restartCluster, promoteCluster :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> Op
-startCluster r pgctl name = clusterCtl r pgctl name (StartCluster name) "start"
-stopCluster r pgctl name = clusterCtl r pgctl name (StopCluster name) "stop"
-restartCluster r pgctl name = clusterCtl r pgctl name (RestartCluster name) "restart"
-promoteCluster r pgctl name = clusterCtl r pgctl name (PromoteCluster name) "promote"
+-- | @pg_ctlcluster start@ exits 2 on a cluster that is already running, so this asks first.
+startCluster r pgctl name = clusterCtl r pgctl name (StartCluster name) "start" (checkClusterIs Online name)
+-- | The mirror image: @stop@ exits 2 on a cluster that is already down.
+stopCluster r pgctl name = clusterCtl r pgctl name (StopCluster name) "stop" (checkClusterIs Down name)
+
+{- | Restarts unconditionally, on every pass.
+
+There is no check to write here: a restart's effect is not a state the
+cluster can be found in afterwards. 'restartClusterIfPending' is the form
+with a reason to stop, and is what 'primaryReplicationSetup' uses.
+-}
+restartCluster r pgctl name = clusterCtl r pgctl name (RestartCluster name) "restart" (pure Immaterial)
+
+{- | Promotes unconditionally.
+
+Deliberately left without a check: "this cluster is not in recovery" is a
+fact about a /pair/ of machines, and answering it from one of them is how a
+promotion happens twice. The node that will own that question is the
+switchover node in @specs\/pg-switchover.md@.
+-}
+promoteCluster r pgctl name = clusterCtl r pgctl name (PromoteCluster name) "promote" (pure Immaterial)
+
+{- | Restarts the cluster if any setting is waiting for one.
+
+The check is @pg_settings.pending_restart@, which is Postgres's own record
+of "you changed something that only a restart applies" -- the same shape of
+answer as systemd's @NeedDaemonReload@, and for the same reason: the change
+is already on disk, so nothing on disk can still testify that the running
+server is stale.
+
+An unreachable cluster answers 'Unknown', which the one-shot drivers treat
+as "go ahead": @pg_ctlcluster restart@ on a stopped cluster starts it.
+-}
+restartClusterIfPending :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> Port -> ClusterName -> Op
+restartClusterIfPending r pgctl port name =
+    clusterCtl r pgctl name (RestartCluster name) "restart" (checkNoPendingRestart port)
+
+-- | The two states @pg_lsclusters@ reports that this module has an opinion about.
+data ClusterState = Online | Down
+    deriving (Eq, Show)
+
+-- | Is the named cluster in this state?
+checkClusterIs :: ClusterState -> ClusterName -> IO CheckResult
+checkClusterIs wanted name =
+    either (const Unknown) (interpretClusterStatus wanted name) <$> clusterStatusOutput
+
+{- | @pg_lsclusters --no-header@ is one line per cluster, @Ver Cluster Port
+Status Owner DataDirectory LogFile@, and the status column is the one word
+this reads. A cluster absent from the listing does not exist, which is not
+the same as being down, and is a 'Failure' either way: it is not in the
+state the caller asked for, and the reasons read differently to an operator.
+
+Statuses other than @online@ and @down@ exist, and none of them is a state
+to stop at: a cluster @online,recovery@ is still coming up, and
+@online,recovery@ read as "already started" would let a dependant run
+against a server still replaying WAL.
+-}
+interpretClusterStatus :: ClusterState -> ClusterName -> Text -> CheckResult
+interpretClusterStatus wanted name out =
+    case [fields | line <- Text.lines out, fields <- [Text.words line], take 1 (drop 1 fields) == [name]] of
+        [] -> Failure ("no cluster named " <> name)
+        (fields : _) -> case drop 3 fields of
+            (status : _) -> verdict status
+            [] -> Unknown
+  where
+    verdict status
+        | status == expected = Success
+        | status `elem` ["online", "down"] = Failure (name <> " is " <> status)
+        | otherwise = Failure (name <> " is " <> status <> ", neither online nor down")
+    expected = case wanted of
+        Online -> "online"
+        Down -> "down"
+
+clusterStatusOutput :: IO (Either Text Text)
+clusterStatusOutput = do
+    (code, out, err) <- readCreateProcessWithExitCode (proc "pg_lsclusters" ["--no-header"]) ""
+    pure $ case code of
+        ExitSuccess -> Right (Text.decodeUtf8With TextError.lenientDecode out)
+        ExitFailure _ -> Left (Text.decodeUtf8With TextError.lenientDecode err)
+
+-- | Is any setting on this cluster waiting for a restart?
+checkNoPendingRestart :: Port -> IO CheckResult
+checkNoPendingRestart port =
+    either (const Unknown) interpretPendingRestart
+        <$> psqlQuery_Sudo port "SELECT coalesce(string_agg(name, ','), '') FROM pg_settings WHERE pending_restart"
+
+-- | The verdict 'checkNoPendingRestart' draws, split out so it is testable without a cluster.
+interpretPendingRestart :: Text -> CheckResult
+interpretPendingRestart out =
+    case Text.strip out of
+        "" -> Success
+        names -> Failure ("settings waiting for a restart: " <> names)
 
 -------------------------------------------------------------------------------
 -- Physical (WAL streaming) replication
@@ -706,11 +861,54 @@ data ReplicationTuning
     = ReplicationTuning
     { repl_max_wal_senders :: Int
     , repl_max_replication_slots :: Int
+    , repl_wal_log_hints :: Bool
+    -- ^ whether @pg_rewind@ can ever be used on this cluster. See 'defaultReplicationTuning'.
+    , repl_max_slot_wal_keep_size :: Maybe Text
+    -- ^ a cap on the WAL a lagging standby's slot may pin, @Nothing@ for none.
     }
     deriving (Show)
 
+{- | Ten senders and ten slots, hint logging on, and ten gigabytes of WAL a
+slot may pin.
+
+The last two are opinions, and both are about what happens on a bad day.
+
+@wal_log_hints@ is what makes @pg_rewind@ possible, and it can only be
+turned on by a /restart/: a cluster that did not have it when its primary
+died cannot rewind the old primary onto the new one's history, so the only
+way to put that machine back is to copy the whole cluster over the network
+again. Deciding this after the fact is deciding it too late, and the cost
+while nothing is wrong is some extra WAL.
+
+@max_slot_wal_keep_size@ bounds that WAL. A replication slot with no cap
+keeps every segment its standby has not consumed, for as long as the standby
+is away -- so a standby that stays down long enough fills the primary's disk
+and takes the __primary__ down with it. Past the cap, the slot is
+invalidated instead and that standby has to be re-seeded, which is the
+better of the two bad outcomes: one machine to rebuild rather than two.
+-}
 defaultReplicationTuning :: ReplicationTuning
-defaultReplicationTuning = ReplicationTuning 10 10
+defaultReplicationTuning = ReplicationTuning 10 10 True (Just "10GB")
+
+{- | The @ALTER SYSTEM@ settings a primary needs, as (parameter, value)
+pairs. Split out of 'primaryReplicationSetup' so a test can read them
+without building a graph.
+
+@wal_level@ is set explicitly although Debian's @postgresql.conf@ already
+ships @replica@: a wrong value there fails silently, in the sense that
+replication simply never starts.
+-}
+replicationSettings :: ReplicationTuning -> [(Text, Text)]
+replicationSettings tuning =
+    [ ("wal_level", "replica")
+    , ("max_wal_senders", tshow tuning.repl_max_wal_senders)
+    , ("max_replication_slots", tshow tuning.repl_max_replication_slots)
+    , ("listen_addresses", "*")
+    , ("wal_log_hints", if tuning.repl_wal_log_hints then "on" else "off")
+    ]
+        <> foldMap (\cap -> [("max_slot_wal_keep_size", cap)]) tuning.repl_max_slot_wal_keep_size
+  where
+    tshow = Text.pack . show
 
 -- | A host or CIDR allowed to authenticate as the replication role, e.g. the standby's address.
 type AllowedCidr = Text
@@ -724,7 +922,12 @@ data StandbySetup
     , standby_primary_host :: Host
     , standby_primary_port :: Port
     , standby_repl_user :: User
-    , standby_repl_password :: Password
+    , standby_repl_passfile :: FilePath
+    -- ^ a file on the standby holding the replication role's password, and
+    -- nothing else. A path, not the password: this setup is rendered into a
+    -- shell script, and a script is visible in @ps@ and printed verbatim by
+    -- every 'Binary.Report' along the way. Pre-provisioned by the caller,
+    -- readable only by whoever runs this node.
     , standby_slot :: Maybe ReplicationSlotName
     }
     deriving (Show)
@@ -905,15 +1108,10 @@ primaryReplicationSetup ::
 primaryReplicationSetup r psql pgctl port name tuning replRole cidr slot =
     op "pg-primary-replication-setup" (deps [replicationSlot r psql port slot, allowReplicationFrom r pgctl name replRole cidr, restartOp]) id
   where
-    restartOp = restartCluster r pgctl name `inject` applySettings
-    applySettings = op "pg-primary-wal-settings" (deps $ fmap (uncurry (alterSystemSet r psql port)) settings) id
-    settings =
-        [ ("wal_level", "replica")
-        , ("max_wal_senders", tshow tuning.repl_max_wal_senders)
-        , ("max_replication_slots", tshow tuning.repl_max_replication_slots)
-        , ("listen_addresses", "*")
-        ]
-    tshow = Text.pack . show
+    -- restart-if-pending rather than restart: this node is re-applied on
+    -- every pass, and an unconditional restart here is an outage per pass.
+    restartOp = restartClusterIfPending r pgctl port name `inject` applySettings
+    applySettings = op "pg-primary-wal-settings" (deps $ fmap (uncurry (alterSystemSet r psql port)) (replicationSettings tuning)) id
 
 -- | Clones 'StandbySetup's cluster off its primary via @pg_basebackup -R@ and starts it as a streaming standby.
 standbyReplicationSetup :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> StandbySetup -> Op
