@@ -2,8 +2,10 @@
 
 module Migrator.Ops where
 
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 
 import Salmon.Builtin.Extension (Op, Track')
 import qualified Salmon.Builtin.Migrations as Migrations
@@ -13,6 +15,7 @@ import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified SreBox.PostgresInit as PGInit
 import qualified SreBox.PostgresMigrations as PGMigrate
+import qualified SreBox.PostgresTemplate as PGTemplate
 import System.FilePath (takeDirectory, (</>))
 
 import Salmon.Op.G (G (..))
@@ -96,3 +99,42 @@ migrate arg =
             Debian.psql
             initPg
             arg
+
+{- | The migrations of both sets, built into a template database.
+
+Same two migration graphs, same order, same users as 'migrate' and
+'migrateSuperUser' -- only walked from inside the template node, behind its
+check, so that a template already built from these files is not touched at
+all (see "SreBox.PostgresTemplate" for why it cannot be an ordinary
+dependency).
+-}
+buildTemplate :: Text -> PGMigrate.MigrationSetup -> PGMigrate.MigrationSetup -> Op
+buildTemplate fp superuser owner =
+    PGTemplate.template
+        reportPrint
+        (Track $ Postgres.pgLocalCluster reportPrint Debian.postgres Debian.pg_ctlcluster)
+        Debian.psql
+        Postgres.localServer
+        (PGTemplate.Template owner.setup_database.getDatabase fp)
+        (migrate owner `inject` migrateSuperUser superuser)
+
+{- | What a template is built from: every migration file's path and contents,
+each set tagged so moving a file from one to the other counts as a change,
+plus the database and roles, which end up baked into the template's
+ownership and grants.
+-}
+fingerprintInputs :: PGMigrate.MigrationSetup -> PGMigrate.MigrationSetup -> IO Text
+fingerprintInputs superuser owner = do
+    superuserFiles <- PGTemplate.fileFingerprintParts (paths superuser)
+    ownerFiles <- PGTemplate.fileFingerprintParts (paths owner)
+    pure $
+        PGTemplate.fingerprint $
+            ["superuser"]
+                <> superuserFiles
+                <> ["owner"]
+                <> ownerFiles
+                <> ["database", Text.encodeUtf8 owner.setup_database.getDatabase, "owner", Text.encodeUtf8 owner.setup_user.userRole]
+                <> ["user:" <> Text.encodeUtf8 u.userRole | (u, _) <- owner.setup_extra_users]
+  where
+    paths :: PGMigrate.MigrationSetup -> [FilePath]
+    paths setup = [m.path | m <- toList setup.setup_migration]

@@ -5,9 +5,17 @@ import Options.Applicative (command, commandGroup, fullDesc, header, help, helpe
 
 import Options.Generic (ParseRecord (..))
 
+-- | What the migrations are applied to.
+data Mode
+    = -- | a live database, moved forward in place
+      InPlace
+    | -- | a template database, rebuilt from nothing whenever they change
+      AsTemplate
+
 data Seed
     = Seed
-    { migrateRoot_superuser :: FilePath
+    { migrateMode :: Mode
+    , migrateRoot_superuser :: FilePath
     , migrateTip_superuser :: FilePath
     , migrateRoot :: FilePath
     , migrateTip :: FilePath
@@ -27,8 +35,25 @@ instance ParseRecord Seed where
                     [ commandGroup "pg"
                     , command
                         "migrate"
-                        (info build (header "Migrate" <> fullDesc <> progDesc description))
+                        (info (build InPlace) (header "Migrate" <> fullDesc <> progDesc description))
+                    , command
+                        "template"
+                        (info (build AsTemplate) (header "Template" <> fullDesc <> progDesc templateDescription))
                     ]
+        templateDescription :: String
+        templateDescription =
+            unlines
+                [ "Builds a template database from the same migrations `migrate` applies."
+                , ""
+                , "The database named by --db is created from nothing, migrated, then locked"
+                , "(IS_TEMPLATE, no connections), so `CREATE DATABASE x TEMPLATE <db>` copies it."
+                , "It is skipped while the migration files are unchanged, and dropped and"
+                , "rebuilt when any of them change -- never migrated in place."
+                , ""
+                , "Roles are cluster-wide: the owner and extra users are those of this cluster,"
+                , "and objects inside a clone keep the owners they have here."
+                , "Refuses to replace a database salmon did not build as a template."
+                ]
         description :: String
         description =
             unlines
@@ -38,8 +63,8 @@ instance ParseRecord Seed where
                 , "Admin migrations run first as the `postgres` system user."
                 , "User migrations run with a user-name and a password (in a password file)."
                 ]
-        build =
-            Seed
+        build mode =
+            Seed mode
                 <$> strOption
                     (long "superuser-root" <> Options.Applicative.help "root of migration files [database superuser]" <> value "migrations/superuser")
                 <*> strOption

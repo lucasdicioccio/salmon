@@ -54,12 +54,15 @@ program =
     specOp :: Int -> Spec -> [Op]
     -- meta
     specOp _ (Migrate setup1 setup2) = [migrate setup2 `inject` migrateSuperUser setup1]
+    specOp _ (BuildTemplate setup1 setup2 fp) = [buildTemplate fp setup1 setup2]
 
 configure :: Configure IO Seed Spec
 configure = Configure go
   where
     go :: Seed -> IO Spec
-    go (Seed root1 tip1 root2 tip2 dbname username passfile extrausers) =
-        Migrate
-            <$> prepare root1 tip1 dbname username extrausers passfile
-            <*> prepare root2 tip2 dbname username extrausers passfile
+    go (Seed mode root1 tip1 root2 tip2 dbname username passfile extrausers) = do
+        setup1 <- prepare root1 tip1 dbname username extrausers passfile
+        setup2 <- prepare root2 tip2 dbname username extrausers passfile
+        case mode of
+            InPlace -> pure $ Migrate setup1 setup2
+            AsTemplate -> BuildTemplate setup1 setup2 <$> fingerprintInputs setup1 setup2
