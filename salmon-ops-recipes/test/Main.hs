@@ -29,19 +29,36 @@ import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
 
-import Test.Tasty (defaultMain, testGroup)
+import Test.Tasty (TestTree, defaultMain, localOption, testGroup)
+import Test.Tasty.Runners (NumThreads (..))
+
+{- | The cheap tiers run concurrently, as tasty does by default; the tiers
+that reach for a machine-wide resource do not.
+
+Layer 2 and Layer 3 contend in ways that have nothing to do with what they
+assert. Every VM-based spec asks the harness for the same bridge address, so
+two of them at once fight over one tap and one IP; the podman specs mutate
+@PATH@ process-globally to shim binaries, which is not a thing two threads
+can do at once. Before this, three qemu specs in one suite failed together
+and individually passed — which reads exactly like a real bug and is not
+one.
+-}
+heavy :: [TestTree] -> TestTree
+heavy = localOption (NumThreads 1) . testGroup "containers and VMs (serialized)"
 
 main :: IO ()
 main =
     defaultMain $
         testGroup
             "salmon-ops-recipes"
-            [ CheckSpec.tests
+            [ heavy
+                [ DebootstrapSpec.tests
+                                    ]
+            , CheckSpec.tests
             , ConcurrentSpec.tests
             , DaemonSpec.tests
             , DagSpec.tests
             , DebianPackageSpec.tests
-            , DebootstrapSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
             , GcpSpec.tests

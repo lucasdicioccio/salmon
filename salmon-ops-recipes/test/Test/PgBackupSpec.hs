@@ -22,20 +22,39 @@ What the test drives, end to end:
 
 Everything "Test.PostgresReplicationSpec" needs (see its header: a
 debootstrapped rootfs, @qemu-system-x86_64@, and either root or the
-capability grant from @salmon-qemu-host-setup-fixture@), plus two of its own.
+capability grant from @salmon-qemu-host-setup-fixture@), plus a rootfs of its
+own:
 
-The rootfs must contain __rsync__, which the stock Postgres rootfs does not:
-@Self@ uploads over rsync and this test pulls the dump back the same way, and
-the test bridge has no route to the internet, so nothing can be installed at
-test time. Fix on the host with
+> sudo rsync -aHAX --numeric-ids /var/lib/salmon-test-vms/pg-master/root/ /var/lib/salmon-test-vms/pg-backup/root/
+> sudo chroot /var/lib/salmon-test-vms/pg-backup/root apt-get install -y rsync
+> sudo $(cabal list-bin salmon-qemu-host-setup-fixture) "$USER" /var/lib/salmon-test-vms/pg-backup/root
 
-> sudo chroot /var/lib/salmon-test-vms/pg-primary/root apt-get install -y rsync
+and the binary built first (@cabal build salmon-pg-backup@), the same way the
+replication fixture must be.
 
-And the binary must be built first (@cabal build salmon-pg-backup@), the same
-way the replication fixture must be.
+= Why a rootfs of its own
+
+__A rootfs must never back two VMs that are up at the same time.__ It is
+exported over 9p in @passthrough@ mode, so the guest writes straight into the
+host directory with no locking whatsoever; two kernels mounting it read and
+write the same bytes, and the first casualty is the Postgres data directory.
+This test was originally pointed at @pg-primary@, which
+"Test.PostgresReplicationSpec" also boots, and the pair of them destroyed
+that cluster's checkpoint record — @PANIC: could not locate a valid
+checkpoint record@, repaired only by re-syncing the rootfs from
+@pg-master@.
+
+Serializing the VM specs (see @test/Main.hs@) makes the overlap unlikely
+rather than impossible, because a VM that leaks past its own teardown is
+still up when the next one starts. Separate rootfses make it harmless.
+
+The @rsync@ requirement is this test's own: 'Self' uploads over rsync and the
+fetch pulls back the same way, and the test bridge has no route to the
+internet, so nothing can be installed at test time.
 -}
 module Test.PgBackupSpec (tests) where
 
+import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import Data.List (isInfixOf)
 import System.Directory (doesFileExist, findExecutable, listDirectory)
@@ -55,8 +74,11 @@ tests =
         [ testCase "dumps over ssh, fetches the dump back, and installs a schedule" dumpsAndSchedules
         ]
 
+{- | This test's __own__ rootfs — never one another VM spec boots. See the
+module header for why that is not a preference.
+-}
 pgRootfs :: FilePath
-pgRootfs = "/var/lib/salmon-test-vms/pg-primary/root"
+pgRootfs = "/var/lib/salmon-test-vms/pg-backup/root"
 
 testDatabase :: String
 testDatabase = "backup_test"
@@ -70,6 +92,18 @@ canaryRow = "salmon-backup-canary-42"
 dumpsAndSchedules :: IO ()
 dumpsAndSchedules = requirePrereqs $ \binary ->
     withVm pgRootfs $ \vm -> withTempDir $ \tmp -> do
+        -- `withVm` waits for sshd, which says nothing about Postgres: the
+        -- cluster is still replaying when the first psql lands, and answers
+        -- "the database system is starting up".
+        waitForPostgres vm
+
+        -- The rootfs is exported over 9p in passthrough mode, so everything
+        -- the guest writes lands in the host directory and survives the VM.
+        -- Without this the second run of this test fails on CREATE DATABASE,
+        -- and -- worse -- its cron assertion passes on the entry the *first*
+        -- run installed, which is a test that no longer tests anything.
+        resetGuest vm
+
         -- A database whose contents we know, so "the dump contains this" is a
         -- statement about the dump rather than about the fixture.
         run_ vm ["sudo", "-u", "postgres", "psql", "-tAc", quoteForRemoteShell ("CREATE DATABASE " <> testDatabase)]
@@ -128,12 +162,41 @@ dumpsAndSchedules = requirePrereqs $ \binary ->
   where
     vmAddr = Text.unpack testVmAddr
 
-    -- a setup step that fails silently would make the real assertion fail
-    -- much later and much less clearly
-    run_ vm args = do
-        (code, out, err) <- sshToVm vm args
-        unless (code == ExitSuccess) $
-            assertBool ("setup command failed: " <> show args <> "\n" <> out <> "\n" <> err) False
+-- | A setup step that failed silently would make the real assertion fail much
+-- later and much less clearly.
+run_ :: VmAccess -> [String] -> IO ()
+run_ vm args = do
+    (code, out, err) <- sshToVm vm args
+    unless (code == ExitSuccess) $
+        assertBool ("setup command failed: " <> show args <> "\n" <> out <> "\n" <> err) False
+
+{- | Undoes everything a previous run of this test left in the rootfs.
+
+Not a nicety: a persistent rootfs turns "the cron entry is present" from an
+assertion about this run into an assertion about the first run that ever
+passed.
+-}
+resetGuest :: VmAccess -> IO ()
+resetGuest vm = do
+    run_ vm ["rm", "-f", "/etc/cron.d/salmon-pg-backup-" <> testDatabase]
+    run_ vm ["rm", "-rf", "/var/backups/postgresql"]
+    run_ vm ["sudo", "-u", "postgres", "psql", "-tAc", quoteForRemoteShell ("DROP DATABASE IF EXISTS " <> testDatabase)]
+
+{- | Polls until the cluster accepts a connection, 30 × 2s.
+
+Separate from the harness's own wait because they are different questions
+with different answers: sshd is up within a second or two of boot, and
+Postgres takes as long as its last shutdown left it needing.
+-}
+waitForPostgres :: VmAccess -> IO ()
+waitForPostgres vm = go (30 :: Int)
+  where
+    go 0 = fail "postgres never accepted a connection in the VM"
+    go n = do
+        (code, _, _) <- sshToVm vm ["sudo", "-u", "postgres", "psql", "-tAc", quoteForRemoteShell "SELECT 1"]
+        if code == ExitSuccess
+            then pure ()
+            else threadDelay 2000000 >> go (n - 1)
 
 {- | Runs @salmon-pg-backup config … | salmon-pg-backup run up@, the two-phase
 protocol every salmon binary speaks, and fails loudly with both streams.
@@ -178,7 +241,19 @@ requirePrereqs act = do
         _
             | not privileged -> skip "no VM privileges (run salmon-qemu-host-setup-fixture, or use sudo)"
             | Nothing <- qemu -> skip "qemu-system-x86_64 not on PATH"
-            | not rootfsOk -> skip ("no rootfs at " <> pgRootfs <> " (see Test.PostgresReplicationSpec's header)")
+            | not rootfsOk ->
+                skip
+                    ( "no rootfs at "
+                        <> pgRootfs
+                        <> ". It must be this spec's own (two VMs on one 9p rootfs corrupt it). Build it with:\n"
+                        <> "  sudo rsync -aHAX --numeric-ids /var/lib/salmon-test-vms/pg-master/root/ "
+                        <> pgRootfs
+                        <> "/\n  sudo chroot "
+                        <> pgRootfs
+                        <> " apt-get install -y rsync\n"
+                        <> "  sudo $(cabal list-bin salmon-qemu-host-setup-fixture) \"$USER\" "
+                        <> pgRootfs
+                    )
             | not guestRsync ->
                 skip
                     ( "the guest rootfs has no rsync; salmon uploads itself with it and there is no route out of the test bridge. Fix with:\n"
