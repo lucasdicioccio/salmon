@@ -28,6 +28,23 @@ data Schedule
 everyMinute :: Schedule
 everyMinute = Schedule "*" "*" "*" "*" "*"
 
+-- | Every hour, on the given minute.
+hourlyAt :: Minute -> Schedule
+hourlyAt m = Schedule m "*" "*" "*" "*"
+
+{- | Once a day, at the given hour and minute.
+
+Both are taken rather than defaulted because a fleet of boxes all backing up
+at @0 0@ is a self-inflicted thundering herd against whatever the dumps are
+copied to.
+-}
+dailyAt :: Hour -> Minute -> Schedule
+dailyAt h m = Schedule m h "*" "*" "*"
+
+-- | Once a week, on a given day (@0@ or @7@ is Sunday).
+weeklyAt :: DOW -> Hour -> Minute -> Schedule
+weeklyAt d h m = Schedule m h "*" "*" d
+
 data CronTask
     = CronTask
     { name :: Text

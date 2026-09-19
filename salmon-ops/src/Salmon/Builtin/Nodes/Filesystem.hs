@@ -14,8 +14,13 @@ import qualified Data.ByteString.Lazy as LBytestring
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Bits ((.&.))
 import Control.Monad (when)
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
+import Numeric (showOct)
+import qualified System.Posix.Files as Posix
+import qualified System.Posix.Types as Posix
+import qualified System.Posix.User as PosixUser
 import GHC.TypeLits (Symbol)
 import Salmon.Actions.UpDown (CheckResult (..), skipIfDirectoryIsMissing)
 import Salmon.Op.OpGraph (inject)
@@ -390,3 +395,99 @@ appendLineIfMissing item =
         if item.appendLineText `elem` Text.lines contents
             then pure ()
             else ByteString.appendFile path (Text.encodeUtf8 $ item.appendLineText <> "\n")
+
+-------------------------------------------------------------------------------
+
+{- | The owner and mode a file must end up with, as a node of its own.
+
+Declared separately from whatever /creates/ the file because the two are
+usually authored by different parties: 'filecontents' or 'fileCopy' knows the
+bytes, and only the service that will read them knows it must be
+@postgres:postgres@ and @0600@. Keeping them apart also keeps the enforcement
+idempotent — this node's whole effect is a @chown@ and a @chmod@, so a
+re-run is a stat and nothing else.
+
+The motivating case, and the one worth knowing about: Postgres __refuses to
+start__ if @ssl_key_file@ is group- or world-readable, and @libpq@ applies
+the same rule to a client key. Both fail with a message about permissions
+rather than about TLS, some way from the node that wrote the file.
+-}
+data FileOwnership = FileOwnership
+    { ownedPath :: FilePath
+    , ownedUser :: Maybe Text.Text
+    -- ^ 'Nothing' leaves the owning user alone.
+    , ownedGroup :: Maybe Text.Text
+    , ownedMode :: Posix.FileMode
+    -- ^ the permission bits, e.g. @0o600@.
+    }
+
+{- | Ensures a file is owned by 'ownedUser'\/'ownedGroup' and has exactly
+'ownedMode'.
+
+The @check@ compares what is on disk, so a file already in the right state is
+skipped; a file that is *missing* is a 'Failure' rather than something this
+node creates, because the node that owns the bytes is the one that should
+have made it and reporting otherwise would hide that failure behind this one.
+-}
+ownedFile :: FileOwnership -> Op
+ownedFile owner =
+    op "file-ownership" nodeps $ \actions ->
+        actions
+            { help = Text.pack $ "owns " <> owner.ownedPath
+            , notes = [Text.pack $ "mode " <> showOctalMode owner.ownedMode]
+            , ref = mkRef "file-ownership" owner.ownedPath
+            , check = checkOwnership owner
+            , up = applyOwnership owner
+            , -- Ownership is not an effect that can be removed on its own:
+              -- there is no "unowned" state to return the file to, and the
+              -- node holding the bytes deletes it outright.
+              down = pure ()
+            }
+
+showOctalMode :: Posix.FileMode -> String
+showOctalMode m = "0o" <> showOct (toInteger m) ""
+
+{- | Resolves the wanted ids and compares them, plus the permission bits,
+against the file's current status.
+-}
+checkOwnership :: FileOwnership -> IO CheckResult
+checkOwnership owner = do
+    exists <- doesFileExist owner.ownedPath
+    if not exists
+        then pure (Failure $ "missing: " <> Text.pack owner.ownedPath)
+        else do
+            status <- Posix.getFileStatus owner.ownedPath
+            wantedUid <- traverse lookupUid owner.ownedUser
+            wantedGid <- traverse lookupGid owner.ownedGroup
+            let actualMode = Posix.fileMode status .&. permissionBits
+            pure $ case () of
+                _
+                    | actualMode /= owner.ownedMode ->
+                        Failure $
+                            Text.pack $
+                                owner.ownedPath <> " is " <> showOctalMode actualMode <> ", wanted " <> showOctalMode owner.ownedMode
+                    | maybe False (/= Posix.fileOwner status) wantedUid ->
+                        Failure $ "wrong owner: " <> Text.pack owner.ownedPath
+                    | maybe False (/= Posix.fileGroup status) wantedGid ->
+                        Failure $ "wrong group: " <> Text.pack owner.ownedPath
+                    | otherwise -> Success
+
+applyOwnership :: FileOwnership -> IO ()
+applyOwnership owner = do
+    uid <- maybe (pure (-1)) lookupUid owner.ownedUser
+    gid <- maybe (pure (-1)) lookupGid owner.ownedGroup
+    -- chown before chmod: chown clears setuid/setgid bits, so doing it the
+    -- other way round silently drops them.
+    Posix.setOwnerAndGroup owner.ownedPath uid gid
+    Posix.setFileMode owner.ownedPath owner.ownedMode
+
+-- | The bits 'ownedMode' speaks about: permissions and the set-id/sticky
+-- trio, never the file-type bits 'Posix.fileMode' also carries.
+permissionBits :: Posix.FileMode
+permissionBits = 0o7777
+
+lookupUid :: Text.Text -> IO Posix.UserID
+lookupUid name = PosixUser.userID <$> PosixUser.getUserEntryForName (Text.unpack name)
+
+lookupGid :: Text.Text -> IO Posix.GroupID
+lookupGid name = PosixUser.groupID <$> PosixUser.getGroupEntryForName (Text.unpack name)

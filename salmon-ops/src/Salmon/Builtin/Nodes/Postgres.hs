@@ -731,7 +731,11 @@ alterSystemSet r psql port param val =
     withBinary psql (psqlAdminRun_Sudo port) (AlterSystemSet param val) $ \up ->
         op "pg-alter-system" nodeps $ \actions ->
             actions
-                { ref = mkRef "pg-alter-system" param
+                { -- keyed by port as well as parameter: a box running two
+                  -- clusters has two genuinely different settings of the same
+                  -- name, and keying on the name alone deduped them into one
+                  -- node, silently dropping whichever was declared second.
+                  ref = mkRef "pg-alter-system" (port, param)
                 , help = Text.unwords ["ALTER SYSTEM SET", param, "=", val]
                 , up = up r'
                 }
@@ -743,7 +747,9 @@ reloadConf r psql port =
     withBinary psql (psqlAdminRun_Sudo port) ReloadConf $ \up ->
         op "pg-reload-conf" nodeps $ \actions ->
             actions
-                { ref = mkRef "pg-reload-conf" ("reload" :: Text)
+                { -- same reasoning as 'alterSystemSet': one reload per
+                  -- cluster, not one reload for the whole machine.
+                  ref = mkRef "pg-reload-conf" port
                 , up = up r'
                 }
   where
@@ -761,6 +767,92 @@ replicationSlot r psql port slot =
                 }
   where
     r' = contramap (PGReplicationSlot slot) r
+
+{- | Ensures an arbitrary line is present in a cluster's @pg_hba.conf@, then
+reloads it.
+
+'allowReplicationFrom' and 'allowClientCertFrom' are the two lines this repo
+has an opinion about; this is the escape hatch for the rest of
+@pg_hba.conf@'s vocabulary, which is large and changes between major
+versions. The line is matched verbatim (@grep -qxF@), so a line differing
+only in whitespace is a /second/ line rather than an update of the first --
+which is also why a caller changing its mind leaves the old line behind.
+-}
+hbaLine :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> Text -> Op
+hbaLine r pgctl name line =
+    withBinary pgctl pgctlRun cmd $ \run ->
+        op "pg-hba-line" nodeps $ \actions ->
+            actions
+                { ref = mkRef "pg-hba-line" (name, line)
+                , help = Text.unwords ["ensure pg_hba line on", name <> ":", line]
+                , notes = ["appended verbatim; changing it leaves the previous line in place"]
+                , up = run r'
+                }
+  where
+    cmd = EnsureHbaLine name line
+    r' = contramap (PGClusterOp cmd) r
+
+{- | Authenticates a role by __client certificate only__, over TLS:
+@hostssl \<db\> \<role\> \<cidr\> cert clientcert=verify-full@.
+
+Two properties make this the interesting @pg_hba@ line rather than just
+another one. @hostssl@ refuses a plaintext connection outright, so there is
+no password path left to get wrong, and @clientcert=verify-full@ requires the
+certificate's @CN@ to __equal the role name__ -- which turns "who may connect
+as this role" into "who holds a certificate this cluster's CA issued for that
+name", with no secret on the client that is not also a key.
+
+The cluster must already be serving TLS and trusting the right CA for this to
+be usable at all; that is 'serverTls'. A @hostssl@ line on a cluster with
+@ssl = off@ is accepted by @pg_hba.conf@ and matches nothing.
+-}
+allowClientCertFrom ::
+    Reporter Report ->
+    Track' (Binary "pg_ctlcluster") ->
+    ClusterName ->
+    DatabaseName ->
+    RoleName ->
+    AllowedCidr ->
+    Op
+allowClientCertFrom r pgctl name db role cidr =
+    hbaLine r pgctl name (Text.unwords ["hostssl", db, role, cidr, "cert", "clientcert=verify-full"])
+
+{- | Where a cluster's TLS material lives. Paths are on the /database/ host,
+and the key must be readable by the @postgres@ user and by nobody else --
+see "Salmon.Builtin.Nodes.Filesystem".@ownedFile@, which exists for this.
+-}
+data ServerTls
+    = ServerTls
+    { tls_certFile :: FilePath
+    , tls_keyFile :: FilePath
+    , tls_caFile :: FilePath
+    -- ^ the CA whose certificates this cluster will accept from clients.
+    }
+    deriving (Eq, Ord, Show)
+
+{- | Turns TLS on for a cluster and points it at its certificate, key and
+client CA.
+
+All four settings are @sighup@-able, so this reloads rather than restarting:
+a cluster serving traffic picks up a renewed certificate without dropping a
+connection. (That also means a __broken__ certificate is not noticed until
+something tries to connect, since the reload itself succeeds.)
+-}
+serverTls :: Reporter Report -> Track' (Binary "psql") -> Port -> ServerTls -> Op
+serverTls r psql port tls =
+    op "pg-server-tls" (deps [reload]) $ \actions ->
+        actions
+            { ref = mkRef "pg-server-tls" (port, tls.tls_certFile)
+            , help = Text.unwords ["serves TLS on port", Text.pack (show port)]
+            }
+  where
+    reload = foldl inject (reloadConf r psql port) settings
+    settings =
+        [ alterSystemSet r psql port "ssl" "on"
+        , alterSystemSet r psql port "ssl_cert_file" (Text.pack tls.tls_certFile)
+        , alterSystemSet r psql port "ssl_key_file" (Text.pack tls.tls_keyFile)
+        , alterSystemSet r psql port "ssl_ca_file" (Text.pack tls.tls_caFile)
+        ]
 
 allowReplicationFrom :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> RoleName -> AllowedCidr -> Op
 allowReplicationFrom r pgctl name replRole cidr =
