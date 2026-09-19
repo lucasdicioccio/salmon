@@ -17,6 +17,7 @@ import qualified Test.PostgresBackupSpec as PostgresBackupSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
+import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
@@ -51,6 +52,7 @@ main =
             , PostgresInitSpec.tests
             , PostgresReplicationSpec.tests
             , PostgresTlsSpec.tests
+            , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests
             , QemuSmokeSpec.tests
             , QuerySpec.tests

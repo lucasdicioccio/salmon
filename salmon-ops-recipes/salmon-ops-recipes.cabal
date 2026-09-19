@@ -36,6 +36,7 @@ library
                    , SreBox.WireGuardVpn
                    , SreBox.Gcp.VmProvision
                    , SreBox.Gcp.CloudRunDeploy
+                   , SreBox.Gcp.PostgrestCloudRun
     build-depends:    base >=4.16.3.0
                     , aeson
                     , base16-bytestring
@@ -100,6 +101,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresInitSpec
                     , Test.PostgresReplicationSpec
                     , Test.PostgresTlsSpec
+                    , Test.PostgrestCloudRunSpec
                     , Test.QemuResolveKernelSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
