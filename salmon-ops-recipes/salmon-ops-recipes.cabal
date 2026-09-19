@@ -103,6 +103,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresBackupSpec
                     , Test.PostgresInitSpec
                     , Test.PostgresReplicationSpec
+                    , Test.PostgresClusterSpec
                     , Test.PostgresTemplateSpec
                     , Test.PostgresTlsSpec
                     , Test.PostgrestCloudRunSpec

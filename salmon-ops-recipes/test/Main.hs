@@ -18,6 +18,7 @@ import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresBackupSpec as PostgresBackupSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
+import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
@@ -62,6 +63,12 @@ main =
                   PostgresInitSpec.tests
                 , PostgresTemplateSpec.sandboxTests
                 , MigratorTemplateSpec.tests
+                , -- the rest of the VM specs: they share one bridge and a
+                  -- handful of fixed addresses, so two at once is two guests
+                  -- claiming one address.
+                  QemuSmokeSpec.tests
+                , PostgresReplicationSpec.tests
+                , PgBackupSpec.tests
                 ]
             , CheckSpec.tests
             , ConcurrentSpec.tests
@@ -74,15 +81,13 @@ main =
             , JWTSigningSpec.tests
             , LedgerSpec.tests
             , PodmanCommandSpec.tests
-            , PgBackupSpec.tests
             , PodmanSpec.tests
             , PostgresBackupSpec.tests
-            , PostgresReplicationSpec.tests
+            , PostgresClusterSpec.tests
             , PostgresTemplateSpec.tests
             , PostgresTlsSpec.tests
             , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests
-            , QemuSmokeSpec.tests
             , QuerySpec.tests
             , RewriteSpec.tests
             , ServeModelSpec.tests
