@@ -13,8 +13,10 @@ import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanCommandSpec as PodmanCommandSpec
 import qualified Test.PodmanSpec as PodmanSpec
+import qualified Test.PostgresBackupSpec as PostgresBackupSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
+import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
@@ -45,8 +47,10 @@ main =
             , LedgerSpec.tests
             , PodmanCommandSpec.tests
             , PodmanSpec.tests
+            , PostgresBackupSpec.tests
             , PostgresInitSpec.tests
             , PostgresReplicationSpec.tests
+            , PostgresTlsSpec.tests
             , QemuResolveKernelSpec.tests
             , QemuSmokeSpec.tests
             , QuerySpec.tests
