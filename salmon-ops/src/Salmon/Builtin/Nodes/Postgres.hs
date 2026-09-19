@@ -52,7 +52,7 @@ data Server
     { serverHost :: Host
     , serverPort :: Port
     }
-    deriving (Generic)
+    deriving (Eq, Ord, Show, Generic)
 
 instance ToJSON Server
 instance FromJSON Server

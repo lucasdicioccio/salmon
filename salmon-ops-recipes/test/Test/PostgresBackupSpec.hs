@@ -39,7 +39,7 @@ script :: Backup.PgBackupConfig -> String
 script = Text.unpack . Backup.renderBackupScript
 
 plain :: Backup.PgBackupConfig
-plain = Backup.defaultBackupConfig "newco_api" "newco_api_owner"
+plain = Backup.defaultBackupConfig "newco_api" (Just "newco_api_owner")
 
 shipped :: Backup.PgBackupConfig
 shipped = plain{Backup.pgb_gcs = Just (Backup.GcsDestination "acme-backups" "newco/api")}
@@ -50,12 +50,19 @@ scriptTests =
         -- The regression this whole module exists around: `pg_dump | gzip`
         -- followed by a check of $? tests gzip, not pg_dump.
         assertBool (script plain) ("set -euo pipefail" `isInfixOf` script plain)
-    , testCase "dumps over the configured server, role and database" $ do
+    , testCase "the default connects over the unix socket as postgres, where peer auth lives" $ do
+        -- Naming 127.0.0.1 turns the same call into TCP, which pg_hba wants a
+        -- password for -- the most common way a backup job on the database
+        -- host fails.
         let s = script plain
-        assertBool s ("-h '127.0.0.1'" `isInfixOf` s)
-        assertBool s ("-p 5432" `isInfixOf` s)
+        assertBool s ("sudo -u 'postgres' pg_dump" `isInfixOf` s)
+        assertBool s (not ("-h " `isInfixOf` s))
+    , testCase "a TCP server and role are passed when asked for" $ do
+        let s = script plain{Backup.pgb_server = Just (Postgres.Server "db.example" 5433), Backup.pgb_sudoUser = Nothing}
+        assertBool s ("-h 'db.example'" `isInfixOf` s)
+        assertBool s ("-p 5433" `isInfixOf` s)
         assertBool s ("-U 'newco_api_owner'" `isInfixOf` s)
-        assertBool s ("pg_dump" `isInfixOf` s)
+        assertBool s (not ("sudo" `isInfixOf` s))
     , testCase "prunes only this database's dumps, by the configured age" $ do
         let s = script plain
         assertBool s ("-name 'newco_api_*.sql.gz'" `isInfixOf` s)
@@ -77,17 +84,25 @@ scriptTests =
             Just uploadAt = substringIndex "gcloud storage cp" s
             Just pruneAt = substringIndex "-delete" s
         assertBool s (uploadAt < pruneAt)
-    , testCase "a passfile is exported only when one is configured" $ do
+    , testCase "credentials become environment, never arguments" $ do
+        -- /proc/<pid>/cmdline is world-readable; /proc/<pid>/environ is not.
         assertBool (script plain) (not ("PGPASSFILE" `isInfixOf` script plain))
-        let s = script plain{Backup.pgb_passFile = Just "/var/lib/postgresql/.pgpass"}
+        let s = script plain{Backup.pgb_credentials = Backup.PassFile "/var/lib/postgresql/.pgpass"}
         assertBool s ("export PGPASSFILE='/var/lib/postgresql/.pgpass'" `isInfixOf` s)
+        let c = script plain{Backup.pgb_credentials = Backup.ClientCertificate "/c/c.pem" "/c/k.pem" "/c/ca.pem"}
+        assertBool c ("export PGSSLKEY='/c/k.pem'" `isInfixOf` c)
+        assertBool c ("export PGSSLMODE=verify-ca" `isInfixOf` c)
+    , testCase "a frozen timestamp is used verbatim, so another machine can name the dump" $ do
+        let s = script plain{Backup.pgb_fixedTimestamp = Just "20260919_101500"}
+        assertBool s ("TIMESTAMP='20260919_101500'" `isInfixOf` s)
+        assertBool s (not ("date +" `isInfixOf` s))
     , testCase "rendered scripts parse as bash" $
         mapM_
             ( \cfg -> do
                 (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", script cfg] ""
                 assertEqual err ExitSuccess code
             )
-            [plain, shipped, plain{Backup.pgb_passFile = Just "/tmp/pass"}]
+            [plain, shipped, plain{Backup.pgb_credentials = Backup.PassFile "/tmp/pass"}]
     ]
 
 substringIndex :: String -> String -> Maybe Int
@@ -138,12 +153,12 @@ scheduleTests =
     , testCase "weeklyAt pins the day of week" $
         assertEqual "" ("0", "4", "*", "*", "7") (fields (Cron.weeklyAt "7" "4" "0"))
     , testCase "the default config backs up a week's worth, daily, off the hour" $ do
-        let cfg = Backup.defaultBackupConfig "db" "owner"
+        let cfg = Backup.defaultBackupConfig "db" (Just "owner")
         assertEqual "" 7 cfg.pgb_retentionDays
         assertEqual "" ("17", "3", "*", "*", "*") (fields cfg.pgb_schedule)
         -- slack over the period, so a merely late run is not a missing backup
         assertBool "" (cfg.pgb_maxAge > 86400)
-        assertEqual "" (Postgres.localServer.serverHost, Postgres.localServer.serverPort) (cfg.pgb_server.serverHost, cfg.pgb_server.serverPort)
+        assertEqual "" Nothing cfg.pgb_server
     ]
   where
     fields :: Cron.Schedule -> (Text.Text, Text.Text, Text.Text, Text.Text, Text.Text)

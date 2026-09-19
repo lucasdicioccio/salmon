@@ -1,6 +1,10 @@
+{-# LANGUAGE DeriveGeneric #-}
+
 module Salmon.Builtin.Nodes.CronTask where
 
+import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString as ByteString
+import GHC.Generics (Generic)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -24,6 +28,10 @@ data Schedule
     , month :: Month
     , dayOfWeek :: DOW
     }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON Schedule
+instance ToJSON Schedule
 
 everyMinute :: Schedule
 everyMinute = Schedule "*" "*" "*" "*" "*"

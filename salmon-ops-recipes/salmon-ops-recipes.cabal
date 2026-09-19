@@ -96,6 +96,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PodmanCommandSpec
                     , Test.JWTSigningSpec
                     , Test.LedgerSpec
+                    , Test.PgBackupSpec
                     , Test.PodmanSpec
                     , Test.PostgresBackupSpec
                     , Test.PostgresInitSpec

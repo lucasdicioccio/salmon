@@ -26,6 +26,7 @@ library
                     Migrator
                     Initializer
                     GcpToy
+                    PgBackup
     other-modules:
                     Migrator.Ops
                     Migrator.Seed
@@ -43,6 +44,7 @@ library
                     , salmon-ops
                     , salmon-ops-recipes
                     , text
+                    , time
     ghc-options:   -Wall
     hs-source-dirs:   src
     default-language: Haskell2010
@@ -78,6 +80,15 @@ executable salmon-init-locally
     hs-source-dirs:   app
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
+    ghc-options:      -threaded
+    default-language: Haskell2010
+
+executable salmon-pg-backup
+    main-is:          PgBackupApp.hs
+
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
+    hs-source-dirs:   app
     ghc-options:      -threaded
     default-language: Haskell2010
 
