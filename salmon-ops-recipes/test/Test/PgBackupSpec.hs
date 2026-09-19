@@ -25,9 +25,14 @@ debootstrapped rootfs, @qemu-system-x86_64@, and either root or the
 capability grant from @salmon-qemu-host-setup-fixture@), plus a rootfs of its
 own:
 
+> sudo mkdir -p /var/lib/salmon-test-vms/pg-backup/root
 > sudo rsync -aHAX --numeric-ids /var/lib/salmon-test-vms/pg-master/root/ /var/lib/salmon-test-vms/pg-backup/root/
 > sudo chroot /var/lib/salmon-test-vms/pg-backup/root apt-get install -y rsync
 > sudo $(cabal list-bin salmon-qemu-host-setup-fixture) "$USER" /var/lib/salmon-test-vms/pg-backup/root
+
+(the @mkdir@ is not optional: @rsync@ creates the last component of a
+destination path and no more, so without it the copy fails on the missing
+parent and every later step fails on the missing rootfs.)
 
 and the binary built first (@cabal build salmon-pg-backup@), the same way the
 replication fixture must be.
@@ -246,7 +251,9 @@ requirePrereqs act = do
                     ( "no rootfs at "
                         <> pgRootfs
                         <> ". It must be this spec's own (two VMs on one 9p rootfs corrupt it). Build it with:\n"
-                        <> "  sudo rsync -aHAX --numeric-ids /var/lib/salmon-test-vms/pg-master/root/ "
+                        <> "  sudo mkdir -p "
+                        <> pgRootfs
+                        <> "\n  sudo rsync -aHAX --numeric-ids /var/lib/salmon-test-vms/pg-master/root/ "
                         <> pgRootfs
                         <> "/\n  sudo chroot "
                         <> pgRootfs
