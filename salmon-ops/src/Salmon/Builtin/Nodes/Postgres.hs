@@ -8,11 +8,17 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import GHC.Generics
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextError
+import System.Exit (ExitCode (..))
 import System.FilePath
+import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
 
+import Salmon.Actions.UpDown (CheckResult (..))
+
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall, untrackedExec, withBinary)
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall, untrackedExec, withBinary, withBinaryStdin)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem (File, withFile)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -40,6 +46,9 @@ data Report
     | PGAlterSystem !Text !Text !Binary.Report
     | PGReloadConf !Binary.Report
     | PGReplicationSlot !Text !Binary.Report
+    | PGTemplate !DatabaseName !Binary.Report
+    | PGCloneDatabase !Clone !Binary.Report
+    | PGDropClone !DatabaseName !Binary.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -116,7 +125,10 @@ just works, and a box with several installed versions picks the newest.
 -}
 detectVersionAndStartMainCluster :: String
 detectVersionAndStartMainCluster =
-    "set -e; version=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1); pg_ctlcluster \"$version\" main start"
+    -- `pg_ctlcluster start` exits 2 on a cluster that is already running, so
+    -- starting unconditionally failed every pass after the first (and every
+    -- pass on a box where apt's own service had started it).
+    "set -e; version=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1); pg_ctlcluster \"$version\" main status >/dev/null || pg_ctlcluster \"$version\" main start"
 
 -- | Shared preamble: detects the (single) installed major version, same way as 'detectVersionAndStartMainCluster'.
 detectVersion :: String
@@ -198,7 +210,11 @@ database r server psql port db =
     withBinary psql (psqlAdminRun_Sudo port) (CreateDB db.getDatabase) $ \up ->
         op "pg-database" (deps [run server localServer]) $ \actions ->
             actions
-                { ref = mkRef "pg-db" db.getDatabase
+                { -- keyed by port as well as name, for the reason given at
+                  -- 'alterSystemSet': two clusters on one box each hold their
+                  -- own "appdb". 'cloneDatabase' uses the same key on
+                  -- purpose, since a clone is a database at the same site.
+                  ref = mkRef "pg-db" (port, db.getDatabase)
                 , up = up r'
                 , help = Text.unwords ["create db", db.getDatabase]
                 }
@@ -912,3 +928,288 @@ standbyReplicationSetup r pgctl setup =
   where
     cmd = CloneFromPrimary setup
     r' = contramap (PGClusterOp cmd) r
+
+-------------------------------------------------------------------------------
+-- Template databases, and databases cloned from them
+
+{- $templates
+@CREATE DATABASE c TEMPLATE t@ copies @t@ at the file level, which is how a
+database that took a whole migration history to build is handed out in a
+second. What makes that safe to automate is almost entirely about who else
+is touching @t@:
+
+* Nothing may be connected to @t@ while it is copied, or the copy fails with
+  "source database is being accessed by other users". A template is therefore
+  /locked/ once built: @ALLOW_CONNECTIONS false@, and any session still
+  attached is terminated.
+* @IS_TEMPLATE true@ lets a role with only @CREATEDB@ clone it, and makes
+  @DROP DATABASE@ refuse, so every teardown has to flip it back first.
+
+Both the template and its clones are databases salmon /drops/ -- to rebuild a
+template, and to take a clone down -- so each carries a marker in its
+database comment ('templateMarker', 'cloneMarker') and every statement that
+would drop or adopt one refuses a database without it. That is what stops a
+template or clone named after an existing database from replacing it: the
+name is the caller's to choose, and nothing else about a database says who
+made it.
+
+The statements are fed to @psql@ on stdin rather than with @-c@, because
+@CREATE DATABASE@ cannot run inside a transaction or a @DO@ block, and
+@\\gexec@ is the one conditional form it tolerates. @DROP DATABASE ... WITH
+(FORCE)@ needs Postgres 13 or later.
+-}
+
+-- | The comment prefix on a database salmon built as a template.
+templateMarker :: Text
+templateMarker = "salmon-template:"
+
+-- | The comment prefix on a database salmon cloned from a template.
+cloneMarker :: Text
+cloneMarker = "salmon-clone:"
+
+-- | A double-quoted SQL identifier.
+quoteIdent :: Text -> Text
+quoteIdent t = "\"" <> Text.replace "\"" "\"\"" t <> "\""
+
+-- | A single-quoted SQL string literal (with @standard_conforming_strings@, the default since 9.1).
+quoteLiteral :: Text -> Text
+quoteLiteral t = "'" <> Text.replace "'" "''" t <> "'"
+
+{- | Dollar-quotes a @DO@ body with a tag that does not occur in it.
+
+A bare @$$@ is broken out of by a database name containing @$$@, and
+'quoteLiteral' does nothing about that because inside a dollar-quoted body
+nothing is a literal yet.
+-}
+dollarQuote :: Text -> Text
+dollarQuote body = tag <> body <> tag
+  where
+    -- the search terminates: a body of length n contains fewer than n tags
+    tag = case [t | n <- [0 :: Int ..], let t = "$salmon" <> Text.pack (show n) <> "$", not (t `Text.isInfixOf` body)] of
+        (t : _) -> t
+        [] -> error "unreachable: infinitely many candidate tags"
+
+-- | A batch of SQL, fed to @psql@ on stdin as the @postgres@ OS user.
+data PsqlBatch = PsqlBatch
+
+{- | @ON_ERROR_STOP@ is not optional: @psql@ reading a script carries on past
+a failed statement and exits @0@, so without it a refused drop would be
+followed by the @CREATE@ it was guarding, and the node would report success.
+-}
+psqlBatchRun_Sudo :: Port -> Command "psql" PsqlBatch
+psqlBatchRun_Sudo port = Command go
+  where
+    go PsqlBatch =
+        proc "sudo" ["-u", "postgres", "psql", "-p", show port, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", "postgres"]
+
+-- | Aborts the batch unless @name@ is absent or its comment starts with @marker@.
+refuseUnmarked :: Text -> Text -> DatabaseName -> Text
+refuseUnmarked marker verb name =
+    "DO " <> dollarQuote body <> ";\n"
+  where
+    body =
+        Text.unwords
+            [ "BEGIN IF EXISTS (SELECT FROM pg_database WHERE datname =" <> quoteLiteral name
+            , "AND coalesce(left(shobj_description(oid, 'pg_database'), " <> Text.pack (show (Text.length marker)) <> "), '') <>" <> quoteLiteral marker <> ")"
+            , "THEN RAISE EXCEPTION '%'," <> quoteLiteral ("refusing to " <> verb <> " database " <> name <> ": salmon did not create it") <> ";"
+            , "END IF; END"
+            ]
+
+-- | Drops a template salmon built, if it is there.
+dropTemplateSql :: DatabaseName -> Text
+dropTemplateSql name =
+    refuseUnmarked templateMarker "drop" name
+        <> Text.unlines
+            [ "SELECT format('ALTER DATABASE %I IS_TEMPLATE false', datname) FROM pg_database WHERE datname = " <> quoteLiteral name <> " \\gexec"
+            , "DROP DATABASE IF EXISTS " <> quoteIdent name <> " WITH (FORCE);"
+            ]
+
+{- | Starts a template build from nothing: whatever was there before is
+dropped, and the fresh database is marked as a build in progress, so that a
+build which dies half-way is recognisably salmon's to replace next time.
+-}
+prepareTemplateSql :: DatabaseName -> Text
+prepareTemplateSql name =
+    refuseUnmarked templateMarker "replace" name
+        <> Text.unlines
+            [ "SELECT format('ALTER DATABASE %I IS_TEMPLATE false', datname) FROM pg_database WHERE datname = " <> quoteLiteral name <> " \\gexec"
+            , "DROP DATABASE IF EXISTS " <> quoteIdent name <> " WITH (FORCE);"
+            , "CREATE DATABASE " <> quoteIdent name <> ";"
+            , "COMMENT ON DATABASE " <> quoteIdent name <> " IS " <> quoteLiteral (templateMarker <> "building") <> ";"
+            ]
+
+{- | Finishes a build: stamps the inputs it was built from, locks it, and
+evicts whatever is still connected -- a session left on the template is the
+thing that makes the next clone fail.
+-}
+lockTemplateSql :: DatabaseName -> Text -> Text
+lockTemplateSql name fingerprint =
+    Text.unlines
+        [ "COMMENT ON DATABASE " <> quoteIdent name <> " IS " <> quoteLiteral (templateMarker <> fingerprint) <> ";"
+        , "ALTER DATABASE " <> quoteIdent name <> " WITH IS_TEMPLATE true ALLOW_CONNECTIONS false;"
+        , "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = " <> quoteLiteral name <> " AND pid <> pg_backend_pid();"
+        ]
+
+-- | One row, @datistemplate|datallowconn|comment@, or none.
+inspectTemplateSql :: DatabaseName -> Text
+inspectTemplateSql name =
+    "SELECT datistemplate, datallowconn, coalesce(shobj_description(oid, 'pg_database'), '') FROM pg_database WHERE datname = " <> quoteLiteral name
+
+-- | Is @name@ a finished, locked template built from @fingerprint@.
+checkTemplate :: Port -> DatabaseName -> Text -> IO CheckResult
+checkTemplate port name fingerprint =
+    either (const Unknown) (interpretTemplateRow name fingerprint) <$> psqlQuery_Sudo port (inspectTemplateSql name)
+
+{- | The verdict 'checkTemplate' draws, split out so it is testable without a
+cluster.
+
+Everything short of "locked, and stamped with these inputs" is a 'Failure',
+and every one of them means the same thing to the node -- rebuild -- but the
+reasons are kept apart because they are different stories for an operator:
+a template built from older migrations is routine, a half-built one means a
+build died, and an unlocked one means somebody has been connected to it.
+-}
+interpretTemplateRow :: DatabaseName -> Text -> Text -> CheckResult
+interpretTemplateRow name fingerprint out =
+    case Text.lines (Text.strip out) of
+        [] -> Failure ("template " <> name <> " does not exist")
+        (row : _) -> case Text.splitOn "|" row of
+            (istemplate : allowconn : rest) -> verdict istemplate allowconn (Text.intercalate "|" rest)
+            _ -> Unknown
+  where
+    verdict istemplate allowconn comment
+        | not (templateMarker `Text.isPrefixOf` comment) =
+            Failure (name <> " exists and salmon did not build it as a template")
+        | comment == templateMarker <> "building" =
+            Failure ("template " <> name <> " is half-built: a previous build did not finish")
+        | comment /= templateMarker <> fingerprint =
+            Failure ("template " <> name <> " was built from different inputs")
+        | istemplate /= "t" || allowconn /= "f" =
+            Failure ("template " <> name <> " is not locked")
+        | otherwise = Success
+
+-- | A database copied from a template once, on creation.
+data Clone
+    = Clone
+    { clone_database :: DatabaseName
+    , clone_template :: DatabaseName
+    , clone_owner :: Maybe RoleName
+    -- ^ must already exist; 'Nothing' leaves it owned by @postgres@. The
+    -- objects /inside/ keep whichever owners they had in the template.
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON Clone
+instance FromJSON Clone
+
+cloneDatabaseSql :: Clone -> Text
+cloneDatabaseSql c =
+    refuseUnmarked cloneMarker "adopt" c.clone_database
+        <> Text.unlines
+            [ "SELECT " <> quoteLiteral create <> " WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = " <> quoteLiteral c.clone_database <> ") \\gexec"
+            , "COMMENT ON DATABASE " <> quoteIdent c.clone_database <> " IS " <> quoteLiteral (cloneMarker <> c.clone_template) <> ";"
+            ]
+  where
+    create =
+        Text.unwords $
+            ["CREATE DATABASE", quoteIdent c.clone_database, "TEMPLATE", quoteIdent c.clone_template]
+                <> maybe [] (\o -> ["OWNER", quoteIdent o]) c.clone_owner
+
+dropCloneSql :: DatabaseName -> Text
+dropCloneSql name =
+    refuseUnmarked cloneMarker "drop" name
+        <> Text.unlines ["DROP DATABASE IF EXISTS " <> quoteIdent name <> " WITH (FORCE);"]
+
+-- | One row, @row:\<comment\>@, or none; the prefix tells an uncommented database from a missing one.
+inspectCloneSql :: DatabaseName -> Text
+inspectCloneSql name =
+    "SELECT 'row:' || coalesce(shobj_description(oid, 'pg_database'), '') FROM pg_database WHERE datname = " <> quoteLiteral name
+
+checkClone :: Port -> DatabaseName -> IO CheckResult
+checkClone port name =
+    either (const Unknown) (interpretCloneRow name) <$> psqlQuery_Sudo port (inspectCloneSql name)
+
+{- | A clone that exists is satisfied whichever template it came from: a
+clone is somebody's data from the moment it is made, and re-declaring it
+from a newer template is not a reason to throw that away.
+-}
+interpretCloneRow :: DatabaseName -> Text -> CheckResult
+interpretCloneRow name out =
+    case Text.lines (Text.strip out) of
+        [] -> Failure ("database " <> name <> " does not exist")
+        (row : _)
+            | (("row:" <> cloneMarker) `Text.isPrefixOf` row) -> Success
+            | otherwise -> Failure (name <> " exists and salmon did not clone it")
+
+{- | What taking a clone down does to its data.
+
+The choice belongs to the declaration rather than to the clone, because the
+same database changes hands during its life. A clone backing a pull
+request's environment should survive that environment being torn down and
+redeployed while the PR is open (somebody's test data is in it), and should
+go once the PR is merged. That is one database declared 'Retain' and later
+'Discard' -- see 'retainedClone' and 'disposableClone'.
+-}
+data Retention
+    = -- | @down@ leaves the database in place.
+      Retain
+    | -- | @down@ drops the database, data included.
+      Discard
+    deriving (Eq, Show, Generic)
+
+instance ToJSON Retention
+instance FromJSON Retention
+
+{- | A database copied from a template.
+
+The copy is taken __once__: a template rebuilt later does not reach an
+existing clone. To pick up a newer template, take the clone down with
+'Discard' and bring it up again.
+
+With 'Discard', @down@ refuses a database salmon did not clone, same as @up@
+refuses to adopt one. The 'Retention' is in the node's @notes@, so under
+@run serve@ re-declaring a clone with the other one is seen as a change to
+it, and a graph holding both is reported as a conflict.
+-}
+cloneDatabase :: Reporter Report -> Track' (Binary "psql") -> Port -> Track' DatabaseName -> Retention -> Clone -> Op
+cloneDatabase r psql port mktemplate retention c =
+    withBinaryStdin psql (psqlBatchRun_Sudo port) PsqlBatch (Text.encodeUtf8 (cloneDatabaseSql c)) $ \create ->
+        withBinaryStdin psql (psqlBatchRun_Sudo port) PsqlBatch (Text.encodeUtf8 (dropCloneSql c.clone_database)) $ \dropIt ->
+            op "pg-clone" (deps [run mktemplate c.clone_template]) $ \actions ->
+                actions
+                    { ref = mkRef "pg-db" (port, c.clone_database)
+                    , help = Text.unwords ["clone", c.clone_database, "from template", c.clone_template]
+                    , notes = ["copied once: rebuilding the template does not refresh it", retentionNote]
+                    , check = checkClone port c.clone_database
+                    , up = create (contramap (PGCloneDatabase c) r)
+                    , down = case retention of
+                        Retain -> pure ()
+                        Discard -> dropIt (contramap (PGDropClone c.clone_database) r)
+                    }
+  where
+    retentionNote = case retention of
+        Retain -> "down keeps the database"
+        Discard -> "down drops the database"
+
+-- | A clone whose data outlives a teardown: an open PR's environment.
+retainedClone :: Reporter Report -> Track' (Binary "psql") -> Port -> Track' DatabaseName -> Clone -> Op
+retainedClone r psql port mktemplate = cloneDatabase r psql port mktemplate Retain
+
+-- | A clone that goes with its teardown: a test fixture, or a PR's environment once merged.
+disposableClone :: Reporter Report -> Track' (Binary "psql") -> Port -> Track' DatabaseName -> Clone -> Op
+disposableClone r psql port mktemplate = cloneDatabase r psql port mktemplate Discard
+
+{- | Runs one query as the @postgres@ OS user, unaligned and tuples-only.
+
+@Left@ when it could not be asked at all (cluster down, no @psql@), which the
+checks above read as 'Unknown' rather than as the effect being absent.
+-}
+psqlQuery_Sudo :: Port -> Text -> IO (Either Text Text)
+psqlQuery_Sudo port sql = do
+    (code, out, err) <-
+        readCreateProcessWithExitCode
+            (proc "sudo" ["-u", "postgres", "psql", "-p", show port, "-X", "-tA", "-F", "|", "-d", "postgres", "-c", Text.unpack sql])
+            ""
+    pure $ case code of
+        ExitSuccess -> Right (Text.decodeUtf8With TextError.lenientDecode out)
+        ExitFailure _ -> Left (Text.decodeUtf8With TextError.lenientDecode err)

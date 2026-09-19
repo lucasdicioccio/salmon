@@ -434,6 +434,20 @@ than always silently hitting whichever cluster happens to be on the default port
 that only ever manage `"main"` pass `Postgres.localServer.serverPort` (5432); a caller managing
 multiple clusters on one box passes each cluster's own port.
 
+Template databases: `Postgres.cloneDatabase` (a `CREATE DATABASE … TEMPLATE` node, whose
+`Retention` says whether `down` drops it — `retainedClone` for an open PR's environment,
+`disposableClone` for a test fixture or a merged PR) and
+`SreBox.PostgresTemplate.template` (build, then lock with `IS_TEMPLATE`/`ALLOW_CONNECTIONS false`),
+surfaced as `salmon-migrator config template …`. Two things about them are load-bearing. **The
+template's build is an opaque nested walk inside its `up`**, not an ordinary dependency: a walk
+applies dependencies before asking a dependant's check, so migrations as dependencies would run
+against the locked template on every pass after the first. The check compares a fingerprint of the
+inputs stamped in the database comment, and anything but a match is rebuilt *from nothing*, never
+migrated in place. And **both can drop databases**, so each is marked in its comment
+(`salmon-template:`/`salmon-clone:`) and every drop or adopt refuses an unmarked database: the name
+is the caller's to choose and nothing else says who made it. `database`, `cloneDatabase` and
+`template` share the `Ref` key `"pg-db" (port, name)`, because they are the same effect site.
+
 ## Conventions for node authors
 
 None of this is enforced by the type system — these are conventions every existing builtin

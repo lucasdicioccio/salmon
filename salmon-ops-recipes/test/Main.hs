@@ -12,11 +12,13 @@ import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanCommandSpec as PodmanCommandSpec
+import qualified Test.MigratorTemplateSpec as MigratorTemplateSpec
 import qualified Test.PgBackupSpec as PgBackupSpec
 import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresBackupSpec as PostgresBackupSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
+import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
@@ -29,8 +31,7 @@ import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
 
-import Test.Tasty (TestTree, defaultMain, localOption, testGroup)
-import Test.Tasty.Runners (NumThreads (..))
+import Test.Tasty (DependencyType (..), TestTree, defaultMain, sequentialTestGroup, testGroup)
 
 {- | The cheap tiers run concurrently, as tasty does by default; the tiers
 that reach for a machine-wide resource do not.
@@ -42,9 +43,13 @@ two of them at once fight over one tap and one IP; the podman specs mutate
 can do at once. Before this, three qemu specs in one suite failed together
 and individually passed — which reads exactly like a real bug and is not
 one.
+
+'sequentialTestGroup' rather than @localOption (NumThreads 1)@: tasty reads
+'NumThreads' once, for the whole run, so setting it on a subtree left these
+running alongside one another all the same.
 -}
 heavy :: [TestTree] -> TestTree
-heavy = localOption (NumThreads 1) . testGroup "containers and VMs (serialized)"
+heavy = sequentialTestGroup "containers and VMs (serialized)" AllFinish
 
 main :: IO ()
 main =
@@ -53,7 +58,11 @@ main =
             "salmon-ops-recipes"
             [ heavy
                 [ DebootstrapSpec.tests
-                                    ]
+                , -- these two shim PATH, which is process-global
+                  PostgresInitSpec.tests
+                , PostgresTemplateSpec.sandboxTests
+                , MigratorTemplateSpec.tests
+                ]
             , CheckSpec.tests
             , ConcurrentSpec.tests
             , DaemonSpec.tests
@@ -68,8 +77,8 @@ main =
             , PgBackupSpec.tests
             , PodmanSpec.tests
             , PostgresBackupSpec.tests
-            , PostgresInitSpec.tests
             , PostgresReplicationSpec.tests
+            , PostgresTemplateSpec.tests
             , PostgresTlsSpec.tests
             , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests
