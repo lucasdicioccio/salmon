@@ -272,7 +272,14 @@ checkPackagesInstalled pkgs = do
 -}
 interpretDpkgCatalog :: [Text] -> ExitCode -> Text -> CheckResult
 interpretDpkgCatalog _ (ExitFailure n) _ =
-    Failure ("could not list installed packages (exit " <> Text.pack (show n) <> ")")
+    -- 'Unknown', not 'Failure': dpkg-query exits non-zero when it cannot read
+    -- the status database, which on a live machine mostly means something
+    -- else holds the dpkg lock -- unattended-upgrades, typically. That is not
+    -- evidence the package is missing, and calling it missing makes the node
+    -- run `apt-get install`, which then fails on the same lock. A one-shot
+    -- `run up` still applies (Unknown maps to Required), but a supervisor
+    -- waits and looks again instead of installing on every busy moment.
+    Unknown
 interpretDpkgCatalog wanted ExitSuccess catalogue =
     case filter (not . (`Set.member` available)) wanted of
         [] -> Success

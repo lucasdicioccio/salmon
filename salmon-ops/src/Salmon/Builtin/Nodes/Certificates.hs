@@ -17,7 +17,7 @@ import qualified Data.Text.Encoding.Error as Text
 
 import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
 
@@ -63,6 +63,42 @@ data SelfSigned
     = SelfSigned
     { selfSignedPEMPath :: FilePath
     , selfSignedRequest :: SigningRequest
+    }
+    deriving (Show, Ord, Eq)
+
+{- | A certificate authority salmon owns: a key, and a self-signed certificate
+naming it.
+
+This exists for the case where the /verifier/ and the /issuer/ are both
+configured by the same graph, which public CAs (see
+"Salmon.Builtin.Nodes.Acme") are no help with at all. The motivating one is
+Postgres client-certificate authentication: the server is told to trust this
+CA and nothing else, and each client gets a certificate from it whose
+@CN@ /is/ the database role it logs in as.
+
+Two things follow from it being a long-lived root. Its key lives in a
+'retainedDir' like every other key here, so a teardown archives rather than
+deletes it -- losing it invalidates nothing, but it does mean no certificate
+can ever be issued again to the fleet that trusts it. And its validity is
+explicit ('caValidityDays'), because a CA that outlives its leaves by less
+than their own lifetime quietly breaks every renewal.
+-}
+data CertificateAuthority
+    = CertificateAuthority
+    { caKey :: Key
+    , caCertPath :: FilePath
+    , caCommonName :: Domain
+    , caValidityDays :: Int
+    }
+    deriving (Show, Ord, Eq)
+
+-- | A certificate signed by a 'CertificateAuthority' rather than by itself.
+data CaSigned
+    = CaSigned
+    { caSignedPEMPath :: FilePath
+    , caSignedRequest :: SigningRequest
+    , caSignedAuthority :: CertificateAuthority
+    , caSignedValidityDays :: Int
     }
     deriving (Show, Ord, Eq)
 
@@ -153,6 +189,68 @@ selfSign r bin selfsigned =
     pempath :: FilePath
     pempath = selfsigned.selfSignedPEMPath
 
+{- | Generates the CA's own self-signed certificate (its key comes from
+'tlsKey', as a dependency).
+
+Unlike 'selfSign' this goes through @openssl req -x509@ rather than
+@openssl x509 -req@, which is what marks the result as a CA
+(@basicConstraints=critical,CA:TRUE@ is added by @req -x509@) -- a
+certificate signed the other way is not accepted as an issuer, however much
+it looks like one.
+-}
+certificateAuthority :: Reporter Report -> Track' (Binary "openssl") -> CertificateAuthority -> Op
+certificateAuthority r bin ca =
+    withBinary bin openssl cmd $ \up ->
+        op "certificate-authority" (deps [enclosingdir, tlsKey r bin ca.caKey]) $ \actions ->
+            actions
+                { help = "self-signs the CA certificate " <> getDomain ca.caCommonName
+                , notes = ["losing this key means nothing can ever be issued to the fleet that trusts it"]
+                , ref = mkRef "openssl-ca" ca.caCertPath
+                , check = checkCertNotExpiringSoon ca.caCertPath
+                , up = up r'
+                }
+  where
+    cmd = GenSelfSignedCa (keyPath ca.caKey) ca.caCertPath ca.caCommonName ca.caValidityDays
+    r' = contramap (RunOpenSSLCommand cmd) r
+
+    enclosingdir :: Op
+    enclosingdir = retainedDir (Directory (takeDirectory ca.caCertPath))
+
+{- | Signs a 'SigningRequest' with a 'CertificateAuthority'.
+
+The @CN@ that ends up in the certificate is the request's
+'certDomain' -- which, for a Postgres client certificate, is not a domain at
+all but the database role the holder will be authenticated as. 'Domain' is
+just the @CN@ under an older name; nothing here parses it.
+
+The authority arrives as a 'Track'' rather than being built here, because
+the two cases a caller has are genuinely different graphs: a CA this graph
+also creates (pass @Track (certificateAuthority r bin)@) and one that was
+provisioned out of band and is simply present (pass 'ignoreTrack'). Baking
+in the first would make the second declare a node that tries to overwrite
+somebody else's root.
+-}
+caSign :: Reporter Report -> Track' (Binary "openssl") -> Track' CertificateAuthority -> CaSigned -> Op
+caSign r bin caTrack signed =
+    withBinary bin openssl cmd $ \up ->
+        op "certificate-ca-sign" (deps [signingRequest r bin signed.caSignedRequest, run caTrack ca]) $ \actions ->
+            actions
+                { help = "signs " <> getDomain signed.caSignedRequest.certDomain <> " with CA " <> getDomain ca.caCommonName
+                , ref = mkRef "openssl-ca-sign" signed.caSignedPEMPath
+                , check = checkCertNotExpiringSoon signed.caSignedPEMPath
+                , up = up r'
+                }
+  where
+    ca = signed.caSignedAuthority
+    cmd =
+        SignCSRWithCa
+            (csrPath signed.caSignedRequest)
+            ca.caCertPath
+            (keyPath ca.caKey)
+            signed.caSignedPEMPath
+            signed.caSignedValidityDays
+    r' = contramap (RunOpenSSLCommand cmd) r
+
 {- | 'Failure' if @path@ is missing, or if the certificate there is already
 expired or will expire within a day (@openssl x509 -checkend 86400@) —
 'Success' otherwise. Used in place of a plain 'skipIfFileExists' wherever a
@@ -186,6 +284,10 @@ data OpenSSLCommand
     | ConvertCSR2DER FilePath FilePath
     | SignCSR FilePath FilePath FilePath
     | GenTLSKey KeyType FilePath
+    | -- | key, output cert, CN, days
+      GenSelfSignedCa FilePath FilePath Domain Int
+    | -- | CSR, CA cert, CA key, output cert, days
+      SignCSRWithCa FilePath FilePath FilePath FilePath Int
     deriving (Show)
 
 openssl :: Command "openssl" OpenSSLCommand
@@ -227,6 +329,44 @@ openssl = Command $ \cmd ->
                 , csrPath
                 , "-signkey"
                 , keyPath
+                , "-out"
+                , pemPath
+                ]
+        (GenSelfSignedCa keyPath certPath dom days) ->
+            proc
+                "openssl"
+                [ "req"
+                , "-x509"
+                , "-new"
+                , "-sha256"
+                , "-key"
+                , keyPath
+                , "-days"
+                , show days
+                , "-subj"
+                , Text.unpack $ "/CN=" <> getDomain dom
+                , "-out"
+                , certPath
+                ]
+        (SignCSRWithCa csrPath caCertPath caKeyPath pemPath days) ->
+            proc
+                "openssl"
+                [ "x509"
+                , "-req"
+                , "-sha256"
+                , "-in"
+                , csrPath
+                , "-CA"
+                , caCertPath
+                , "-CAkey"
+                , caKeyPath
+                , -- without a serial file openssl refuses outright; with
+                  -- this it creates one next to the CA cert and increments
+                  -- it, which is what makes two certificates issued to the
+                  -- same CN distinguishable at revocation time.
+                  "-CAcreateserial"
+                , "-days"
+                , show days
                 , "-out"
                 , pemPath
                 ]
