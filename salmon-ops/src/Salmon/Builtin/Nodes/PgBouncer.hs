@@ -140,10 +140,19 @@ md5AuthHash password username = do
 
 -------------------------------------------------------------------------------
 
--- | Installs pgbouncer, renders its config, and runs it as a systemd service.
+{- | Installs pgbouncer, renders its config, and runs it as a systemd service.
+
+The ini and the userlist are 'Systemd.systemdServiceWatching'\'s watched
+files, without which a changed upstream or a rotated password is written to
+disk and never reaches the running process: the unit is untouched, so the
+service node is skipped. Note that acting on such a change is a restart,
+which drops the clients this process exists to hold on to -- a node that
+means to move traffic should @PAUSE@ the bouncers, change the config, and
+@RESUME@ them, rather than let this node notice on its own.
+-}
 setup :: Reporter Systemd.Report -> Track' (Binary "systemctl") -> Track' (Binary "pgbouncer") -> BouncerConfig -> Op
 setup r systemctl pgbouncerBin cfg =
-    Systemd.systemdService r systemctl trackConfig systemdCfg
+    Systemd.systemdServiceWatching [configPath cfg, userlistPath cfg] r systemctl trackConfig systemdCfg
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \_ -> op "pgbouncer-setup" (deps [configFiles cfg, justInstall pgbouncerBin]) id

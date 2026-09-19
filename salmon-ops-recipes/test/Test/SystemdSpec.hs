@@ -16,8 +16,11 @@ transition. Both were what made this node worth giving a check at all.
 module Test.SystemdSpec (tests) where
 
 import Data.Text (Text)
+import qualified Data.Text as Text
+import System.FilePath ((</>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Harness (withTempDir)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
@@ -33,7 +36,52 @@ tests =
         , testCase "a running but disabled unit is not satisfied" disabledIsFailure
         , testCase "a unit systemd has never heard of is not satisfied" unknownUnitIsFailure
         , testCase "properties are read by name, not by position" orderIndependent
+        , testGroup "watched config files" watchedTests
         ]
+
+{- | A service's config file leaves no trace in anything systemd knows, so
+'Systemd.systemdServiceWatching' folds it into the unit file, where
+@NeedDaemonReload@ already notices changes. These are assertions about that
+fold: same bytes, same unit; different bytes, different unit.
+-}
+watchedTests :: [TestTree]
+watchedTests =
+    [ testCase "a changed config changes the unit file" $ withTempDir $ \dir -> do
+        let ini = dir </> "pgbouncer.ini"
+        writeFile ini "[databases]\nx = host=a\n"
+        before <- Systemd.withWatchedFingerprint [ini] unit
+        writeFile ini "[databases]\nx = host=b\n"
+        after <- Systemd.withWatchedFingerprint [ini] unit
+        assertBool "the unit did not change with the config" (before /= after)
+    , testCase "an unchanged config leaves the unit alone" $ withTempDir $ \dir -> do
+        let ini = dir </> "pgbouncer.ini"
+        writeFile ini "[databases]\nx = host=a\n"
+        before <- Systemd.withWatchedFingerprint [ini] unit
+        after <- Systemd.withWatchedFingerprint [ini] unit
+        assertEqual "" before after
+    , testCase "a config appearing later is a change" $ withTempDir $ \dir -> do
+        let ini = dir </> "userlist.txt"
+        missing <- Systemd.withWatchedFingerprint [ini] unit
+        writeFile ini "\"u\" \"secret\"\n"
+        present <- Systemd.withWatchedFingerprint [ini] unit
+        assertBool "a file appearing went unnoticed" (missing /= present)
+    , testCase "the watched files are framed, not concatenated" $ withTempDir $ \dir -> do
+        let (a, b) = (dir </> "a", dir </> "b")
+        writeFile a "xy" >> writeFile b "z"
+        one <- Systemd.withWatchedFingerprint [a, b] unit
+        writeFile a "x" >> writeFile b "yz"
+        two <- Systemd.withWatchedFingerprint [a, b] unit
+        assertBool "moving a byte between two files went unnoticed" (one /= two)
+    , testCase "the unit text itself is kept, with the hash appended" $ withTempDir $ \dir -> do
+        let ini = dir </> "conf"
+        writeFile ini "anything"
+        out <- Systemd.withWatchedFingerprint [ini] unit
+        assertBool (Text.unpack out) (unit `Text.isPrefixOf` out)
+        assertBool (Text.unpack out) ("# salmon-watches: " `Text.isInfixOf` out)
+    ]
+  where
+    unit :: Text
+    unit = "[Unit]\nDescription=a service\n\n[Service]\nExecStart=/bin/true\n"
 
 shown :: [Text] -> CheckResult
 shown = Systemd.interpretShow
