@@ -1,9 +1,14 @@
 module Salmon.Builtin.Nodes.Systemd where
 
+import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Char8 as C8
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextError
+import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
@@ -32,7 +37,42 @@ systemdService ::
     Track' Config ->
     Config ->
     Op
-systemdService r systemctl t cfg =
+systemdService = systemdServiceWatching []
+
+{- | 'systemdService', told which files the service /reads/ at start.
+
+Without this, a service whose config file changed is not restarted, and
+nothing about that is visible: 'checkService' asks after the __unit__ file,
+and a config file the unit merely points at (a @pgbouncer.ini@, a
+@postgrest.conf@) leaves no trace in anything systemd knows. The unit is
+active, enabled and loaded as written, so the node is skipped and the
+running process keeps serving the old configuration -- silently, and
+indefinitely.
+
+The fix reuses the mechanism that already works rather than adding a second
+one: the watched files' contents are hashed into a comment at the end of the
+unit file. A changed config therefore changes the unit file, which is
+exactly what @NeedDaemonReload@ is for, and the ordinary path (reload,
+enable, restart) takes it from there. Nothing new to check, and a node with
+no watched files renders byte-identically to before.
+
+Two things to know. The hash is computed by the encoder, so this node uses
+the @IO Text@ 'EncodeFileContents' instance and inherits its hazard: it is
+read once by the check and once by @up@, and a file that changes between
+those two reads simply gets picked up on the next pass. And the reaction to
+a changed config is a __restart__, which for a connection-holding service
+(pgbouncer) drops its clients -- the gentler @PAUSE@\/@RELOAD@\/@RESUME@
+belongs to whatever node is orchestrating the change, see
+@specs\/pg-switchover.md@.
+-}
+systemdServiceWatching ::
+    [FilePath] ->
+    Reporter Report ->
+    Track' (Binary "systemctl") ->
+    Track' Config ->
+    Config ->
+    Op
+systemdServiceWatching watched r systemctl t cfg =
     withCommand (DaemonReload cfg.config_scope) $ \reload ->
         withCommand (Enable cfg.config_scope cfg.config_target) $ \enable ->
             withCommand (Up cfg.config_scope cfg.config_target) $ \up ->
@@ -57,7 +97,25 @@ systemdService r systemctl t cfg =
     unitPath = cfg.config_unit_dir </> Text.unpack cfg.config_target
 
     configContents :: Op
-    configContents = filecontents $ FileContents unitPath (render_config cfg)
+    configContents
+        | null watched = filecontents $ FileContents unitPath (render_config cfg)
+        | otherwise = filecontents $ FileContents unitPath (withWatchedFingerprint watched (render_config cfg))
+
+{- | The unit text, with a comment carrying a hash of the watched files'
+contents. A file that does not exist hashes as empty, so it appearing later
+is itself a change.
+-}
+withWatchedFingerprint :: [FilePath] -> Text -> IO Text
+withWatchedFingerprint paths unitText = do
+    parts <- concat <$> traverse framed paths
+    let digest = SHA256.finalize (SHA256.updates SHA256.init parts)
+    pure (unitText <> "# salmon-watches: " <> Text.decodeUtf8 (Base64.encode digest) <> "\n")
+  where
+    framed :: FilePath -> IO [ByteString.ByteString]
+    framed path = do
+        exists <- doesFileExist path
+        bytes <- if exists then ByteString.readFile path else pure ByteString.empty
+        pure [C8.pack (path <> ":" <> show (ByteString.length bytes) <> ":"), bytes]
 
 {- | Does this unit already exist, loaded as written, enabled and running?
 

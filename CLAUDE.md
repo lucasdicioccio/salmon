@@ -576,6 +576,19 @@ graph it sits in until this landed. One hazard, confined to the `EncodeFileConte
 instance: the check runs the encoder, so a non-deterministic generator (a timestamp) makes the
 node rewrite its file every pass. That is the safe direction, and nothing in the tree uses that
 instance today. See `Test/FilesystemSpec.hs`.
+
+`Systemd.systemdServiceWatching` is the same mechanism pointed at the *other* files a service
+reads — a `pgbouncer.ini`, a `postgrest.conf`. `checkService` asks only after the unit file, so
+a changed config file left the running process serving the old configuration forever: the unit
+is active, enabled and loaded as written, so the node is skipped. Rather than a second check,
+the watched files' contents are hashed into a comment at the end of the unit file, which makes
+a config change a *unit* change, which is what `NeedDaemonReload` already notices. It is the
+one caller of the `EncodeFileContents (IO a)` instance above, and so inherits its hazard
+harmlessly (the encoder reads the watched files twice, and a file changing between those reads
+is picked up next pass). `PgBouncer.setup` is the first user. Note what the reaction is: a
+**restart**, which drops the connections a bouncer exists to hold — moving traffic gently is a
+`PAUSE`/`RELOAD`/`RESUME` for the node orchestrating the move (`specs/pg-switchover.md`), not
+something this node should try to do on its own.
 (I6): `EncodeFileContents` also carries `contentFingerprint :: a -> Maybe Text`, a pure,
 stable hash of the content an instance would write (`Nothing` by default — the `IO a` instance
 keeps it, since its whole point is that content isn't known until the encoder runs).
