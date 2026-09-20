@@ -59,6 +59,12 @@ commandTests =
         assertBool s ("user=rewinder" `isInfixOf` s)
         assertBool s (not ("pg_basebackup" `isInfixOf` s))
         assertBool s (not ("rm -rf" `isInfixOf` s))
+    , testCase "a rejoined member comes back as a standby, whatever pg_rewind decided" $ do
+        let s = script (Pair.Rejoin Pair.A)
+        assertBool s ("standby.signal" `isInfixOf` s)
+        assertBool s ("primary_conninfo" `isInfixOf` s)
+        assertBool s ("host=10.0.0.2 port=5432 user=replicator" `isInfixOf` s)
+        assertBool s ("passfile=/etc/postgresql/repl.pgpass" `isInfixOf` s)
     , testCase "the rewind password is read from its file, never carried" $
         assertBool (script (Pair.Rejoin Pair.A)) ("PGPASSFILE='/etc/postgresql/rewind.pass'" `isInfixOf` script (Pair.Rejoin Pair.A))
     , testCase "the steps that are arrivals, waits or refusals run nothing" $
@@ -86,14 +92,15 @@ pair =
         , Pair.pair_b = member "10.0.0.2"
         , Pair.pair_primary = Pair.B
         , Pair.pair_may_discard = Nothing
+        , Pair.pair_repl_role = "replicator"
+        , Pair.pair_repl_passfile = "/etc/postgresql/repl.pgpass"
         , Pair.pair_rewind_role = "rewinder"
         , Pair.pair_rewind_passfile = "/etc/postgresql/rewind.pass"
-        , Pair.pair_ssh_identity = Nothing
         , Pair.pair_ssh_known_hosts = Nothing
         , Pair.pair_catch_up_seconds = 60
         }
   where
-    member host = Pair.Member "root" host "main" 5432
+    member host = Pair.Member "root" host "main" 5432 Nothing
 
 lsn :: Text -> Pair.Lsn
 lsn t = maybe (error ("bad lsn in test: " <> Text.unpack t)) id (Pair.parseLsn t)

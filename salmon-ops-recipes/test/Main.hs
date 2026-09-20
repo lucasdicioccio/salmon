@@ -20,6 +20,7 @@ import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
+import qualified Test.PostgresSwitchoverSpec as PostgresSwitchoverSpec
 import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
@@ -69,6 +70,7 @@ main =
                   -- claiming one address.
                   QemuSmokeSpec.tests
                 , PostgresReplicationSpec.tests
+                , PostgresSwitchoverSpec.tests
                 , PgBackupSpec.tests
                 ]
             , CheckSpec.tests
