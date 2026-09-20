@@ -4,15 +4,16 @@ Status: partly implemented, and the rest is still a sketch to react to.
 
 Done: the prerequisites P1-P5; the state table and the probe
 (`SreBox.PostgresPair`, phase 2), covered at Layer 0 including every
-refusal; the role node over ssh (phase 3), covered by a Layer 3 test that
-moves a real primary between two VMs and back (S1, minus the client
-assertions).
+refusal; the role node over ssh (phase 3), covered by Layer 3 tests that
+move a real primary between two VMs and back (S1, minus the client
+assertions) and that stop a controller after each step in turn and let an
+ordinary pass finish it (S2).
 
 Not done: symmetric member nodes and the seeding clone, so a pair is still
 built by hand, as `Test.PostgresSwitchoverSpec` does; bouncer routing (phase
 4), so `PauseBouncers`/`RepointBouncers` are in the table with nothing behind
 them; `pair_may_discard`'s failover path, written but tested only at Layer 0
-(phase 5); the slot budget and re-seeding (phase 6). Scenarios S2-S8 are
+(phase 5); the slot budget and re-seeding (phase 6). Scenarios S3-S8 are
 unwritten.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
