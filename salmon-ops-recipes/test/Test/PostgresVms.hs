@@ -29,6 +29,11 @@ module Test.PostgresVms (
     assertPrimaryIs,
     assertInRecovery,
     waitFor,
+    waitForUpTo,
+    partitionFrom,
+    partitionFromEverythingFor,
+    healPartition,
+    controllerAddr,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -37,7 +42,12 @@ import Data.List (isInfixOf)
 import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
-import System.Process (readProcessWithExitCode)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import System.Process (CmdSpec (..), cmdspec, readProcessWithExitCode)
+
+import qualified Salmon.Builtin.Nodes.Binary as Binary
+import qualified Salmon.Builtin.Nodes.Netfilter as Netfilter
 import Test.Harness
 import Test.Tasty.HUnit (assertBool)
 
@@ -275,7 +285,11 @@ something in its own time -- a standby connecting, a promotion finishing, a
 row arriving -- and none of them is instant.
 -}
 waitFor :: String -> IO (Bool, String) -> IO ()
-waitFor what probe = go (30 :: Int)
+waitFor = waitForUpTo 30
+
+-- | 'waitFor' with a different number of two-second tries.
+waitForUpTo :: Int -> String -> IO (Bool, String) -> IO ()
+waitForUpTo tries what probe = go tries
   where
     go :: Int -> IO ()
     go 0 = do
@@ -284,3 +298,85 @@ waitFor what probe = go (30 :: Int)
     go n = do
         (ok, _) <- probe
         unless ok (threadDelay 2000000 >> go (n - 1))
+
+{- | The host's address on the test bridge, which is where the controller
+runs: a partition that is meant to cut a machine off from the /operator/ has
+to drop this one too, and one that is only between the members must not.
+-}
+controllerAddr :: Text
+controllerAddr = "10.99.0.1"
+
+{- | Cuts this machine off from those addresses, which is what a partition
+looks like from inside one of them.
+
+The rules are built out of "Salmon.Builtin.Nodes.Netfilter"'s own vocabulary
+and rendered by its own @nft@ command, so this says what a salmon-declared
+firewall would say. It is only the /running/ of it that differs: these guests
+have no salmon on them, so the argv goes over ssh instead of into an 'Op'.
+
+Dropping by source address in @input@ breaks the connection in both
+directions, since neither end gets an answer -- including, if
+'controllerAddr' is among them, the ssh session that adds the rule. Hence
+'healPartition' and, for that case, a caller that detaches.
+-}
+partitionFrom :: VmAccess -> [Text] -> IO ()
+partitionFrom vm addrs = mapM_ (sshOrDie vm . map quoteForRemoteShell) (partitionCommands addrs)
+
+-- | Removes the whole table, whatever it held: a heal is not a negotiation.
+{- | Cuts this machine off from everything named, the controller included,
+and heals it again after @seconds@ with nobody asking.
+
+A partition that hides a machine from its operator cannot be lifted by that
+operator: the command that would lift it has to travel the path it cut. So
+the machine is handed the whole sequence -- cut, wait, heal -- and left to
+run it detached, which is also what anyone sensible does before touching the
+firewall of a box they can only reach over the network.
+-}
+partitionFromEverythingFor :: VmAccess -> [Text] -> Int -> IO ()
+partitionFromEverythingFor vm addrs seconds = do
+    sshOrDie vm ["bash", "-c", quoteForRemoteShell heredoc]
+    sshOrDie vm ["bash", "-c", quoteForRemoteShell "setsid bash /root/partition.sh >/dev/null 2>&1 </dev/null &"]
+  where
+    heredoc = "cat > /root/partition.sh <<'SALMON_EOF'\n" <> script <> "SALMON_EOF\n"
+    script =
+        unlines $
+            [unwords (map quoteForRemoteShell argv) | argv <- partitionCommands addrs]
+                <> [ "sleep " <> show seconds
+                   , unwords ["nft", "delete", "table", "inet", Text.unpack partitionTable.tableName]
+                   ]
+
+healPartition :: VmAccess -> IO ()
+healPartition vm = do
+    _ <- sshToVm vm ["nft", "delete", "table", "inet", Text.unpack partitionTable.tableName]
+    pure ()
+
+partitionCommands :: [Text] -> [[String]]
+partitionCommands addrs =
+    map
+        nftArgv
+        ( [ Netfilter.AddTable partitionTable
+          , Netfilter.AddChain partitionChain
+          ]
+            <> [Netfilter.AddRule partitionChain (Netfilter.RawRule ["ip", "saddr", addr, "drop"]) | addr <- addrs]
+        )
+
+partitionTable :: Netfilter.Table
+partitionTable = Netfilter.Table "salmon_test_partition" Netfilter.Inet
+
+partitionChain :: Netfilter.Chain
+partitionChain =
+    Netfilter.baseChain
+        "input"
+        partitionTable
+        (Netfilter.BaseChainSpec Netfilter.FilterChain Netfilter.Input 0 Netfilter.Accept)
+
+{- | What the builtin would run, as words to send somewhere else.
+
+Each word is quoted where it is used rather than here: ssh joins its
+arguments with spaces and the remote shell splits them again, so a chain
+spec's @{@, @;@ and @}@ arrive as shell syntax unless something stops them.
+-}
+nftArgv :: Netfilter.NftCommand -> [String]
+nftArgv cmd = case cmdspec (Binary.prepare Netfilter.nftcommand cmd) of
+    RawCommand bin args -> bin : args
+    ShellCommand sh -> ["sh", "-c", sh]

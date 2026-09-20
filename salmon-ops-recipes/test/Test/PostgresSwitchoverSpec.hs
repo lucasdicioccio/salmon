@@ -29,6 +29,7 @@ import Test.Harness
 import Test.Tasty (DependencyType (..), TestTree, sequentialTestGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
+import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Reporter (silent)
 import qualified SreBox.PostgresPair as Pair
 import Test.PostgresVms
@@ -43,7 +44,151 @@ tests =
         [ testCase "switches the primary over, and back, without losing a row" switchesOverAndBack
         , testCase "a switchover stopped part-way is finished by the next pass" resumesAfterInterruption
         , testCase "a crashed primary is failed over only when its writes are declared expendable" failsOverFromACrash
+        , testCase "a partition is waited out, not acted on" holdsThroughAPartition
+        , testCase "a failover across a partition leaves two primaries, and rewinds one" splitBrainIsRewound
         ]
+
+{- | S5: fail over while the old primary is still up and still taking
+writes, then let the partition heal and watch salmon find two primaries.
+
+This is the scenario the whole design is careful about, and the only one
+where salmon knowingly destroys writes that were acknowledged to a client.
+It needs a partition that hides A from /the controller/ as well as from B --
+otherwise there is nothing to fail over from: a primary that can be reached
+is simply stopped, and that is a switchover.
+
+Three refusals are asserted along the way, because each is the difference
+between this scenario and losing data nobody offered. While A cannot be
+reached and nothing has been declared, the pass refuses. Once the partition
+heals and both machines call themselves primaries, a pass without the flag
+refuses again. Only 'SreBox.PostgresPair.pair_may_discard', which names the
+side whose writes may go, turns either one into an action.
+-}
+splitBrainIsRewound :: IO ()
+splitBrainIsRewound = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            resetRows a
+            insertRow a "replicated-before-the-partition"
+            waitForRows b ["replicated-before-the-partition"]
+
+            psqlOrDie b "ALTER SYSTEM SET wal_receiver_timeout = '5s';"
+            psqlOrDie b "SELECT pg_reload_conf();"
+            partitionFrom b [testVmAddr]
+            waitForNoStreaming b
+
+            -- written on A with the standby already cut off: these are the
+            -- writes the flag is about, and a client had them acknowledged.
+            insertRow a "written-on-a-behind-the-partition"
+
+            -- and now A disappears from the controller too, until the
+            -- machine itself lifts the rule again.
+            partitionFromEverythingFor a [controllerAddr, testVmAddr2] 120
+            let declared = pairWith a b Pair.B
+            waitFor "A stayed reachable through the partition" $ do
+                obs <- Pair.observe declared Pair.A
+                pure (unreachable obs, show obs)
+
+            -- nothing declared: a machine that cannot be reached is not a
+            -- machine that has stopped, and salmon will not guess.
+            refused <- runUp (Pair.pairRole silent declared)
+            assertBool "promoted without being told whose writes may go" (not refused)
+            assertInRecovery b
+
+            -- the operator accepts losing whatever A has that B does not
+            let failover = declared{Pair.pair_may_discard = Just Pair.A}
+            passOrExplain "the failover" failover
+            assertPrimaryIs b
+            insertRow b "written-on-b-after-the-failover"
+
+            -- the partition lifts itself, and now both machines are primaries
+            waitForUpTo 120 "A never came back" $ do
+                obs <- Pair.observe failover Pair.A
+                pure (not (unreachable obs), show obs)
+            healPartition b
+            twoPrimaries <- Pair.decide declared
+            assertBool
+                ("two primaries, nothing declared, and the step was " <> show twoPrimaries)
+                (refuses twoPrimaries)
+
+            -- with the flag, A is stopped and rewound onto B's history
+            passOrExplain "the split-brain resolution" failover
+            assertStandbyOf a testVmAddr2
+            assertPrimaryIs b
+
+            waitForRows a ["replicated-before-the-partition", "written-on-b-after-the-failover"]
+            -- and the writes A took behind the partition are gone, which is
+            -- exactly what the flag said would happen to them
+            assertNoRow a "written-on-a-behind-the-partition"
+            assertNoRow b "written-on-a-behind-the-partition"
+
+unreachable :: Pair.Observed -> Bool
+unreachable (Pair.Unreachable _) = True
+unreachable _ = False
+
+refuses :: Pair.Step -> Bool
+refuses (Pair.Refuse _) = True
+refuses _ = False
+
+{- | S4: cut the two machines off from each other, change nothing, and let it
+heal.
+
+The declaration still says what it said, and both machines are still doing
+what they were told, so there is nothing here for salmon to do -- which is
+the whole assertion. A partition is the state where acting is most tempting
+and least safe: the standby has stopped streaming and looks, to a check that
+asks the wrong question, exactly like a standby that was never pointed here
+at all.
+
+What makes the difference is asking a standby /where it is told to stream
+from/ rather than only where it /is/ streaming from. The first is a
+declaration it keeps through a partition; the second is empty the moment the
+connection drops.
+-}
+holdsThroughAPartition :: IO ()
+holdsThroughAPartition = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            resetRows a
+            insertRow a "before-the-partition"
+            waitForRows b ["before-the-partition"]
+
+            -- how long a standby takes to notice that its primary has gone
+            -- quiet is a setting, and the default minute is longer than this
+            -- test's patience.
+            -- two calls, not one: psql sends a multi-statement line as one
+            -- implicit transaction, and ALTER SYSTEM refuses to run in one.
+            psqlOrDie b "ALTER SYSTEM SET wal_receiver_timeout = '5s';"
+            psqlOrDie b "SELECT pg_reload_conf();"
+            partitionFrom b [testVmAddr]
+            waitForNoStreaming b
+
+            -- the declaration has not changed: A is still the primary
+            let p = pairWith a b Pair.A
+            -- what the pair's own check says while the partition is up:
+            -- Unknown, the one verdict that starts nothing and keeps looking.
+            step <- Pair.decide p
+            assertEqual
+                ("a partition is not a reason to touch anything, but the step was " <> show step)
+                Unknown
+                (Pair.verdict step)
+            ok <- runUp (Pair.pairRole silent p)
+            assertBool "a pass over a partitioned pair failed" ok
+            -- in particular, the standby was not stopped, rewound or re-seeded
+            assertPrimaryIs a
+            assertInRecovery b
+
+            insertRow a "written-during-the-partition"
+            healPartition b
+            waitForRows b ["before-the-partition", "written-during-the-partition"]
+            settled <- Pair.decide p
+            assertEqual "the pair did not settle once the partition healed" Pair.Done settled
+
+
 
 {- | S3: crash the primary, fail over to the standby, and let the machine
 that crashed rejoin.
@@ -355,6 +500,12 @@ assertNoRow :: VmAccess -> String -> IO ()
 assertNoRow vm v = do
     (_, out, _) <- psql vm "SELECT v FROM salmon_switchover ORDER BY v;"
     assertBool ("expected " <> v <> " to be gone, got: " <> out) (not (v `isInfixOf` out))
+
+waitForNoStreaming :: VmAccess -> IO ()
+waitForNoStreaming vm =
+    waitFor "the standby never noticed the partition" $ do
+        (_, out, _) <- psql vm "SELECT count(*) FROM pg_stat_wal_receiver;"
+        pure ("0" `isInfixOf` out, out)
 
 waitForStandby :: VmAccess -> IO ()
 waitForStandby vm =

@@ -55,6 +55,7 @@ module SreBox.PostgresPair (
     -- * Doing it
     Report (..),
     pairRole,
+    verdict,
     observe,
     decide,
     converge,
@@ -222,6 +223,14 @@ data Observed
         { o_sysid :: Text
         , o_timeline :: Int
         , o_upstream :: Maybe Postgres.Host
+        -- ^ where it /is/ streaming from, which is empty the moment the
+        -- connection drops.
+        , o_configured :: Maybe Postgres.Host
+        -- ^ where it is /told/ to stream from, from @primary_conninfo@. A
+        -- standby keeps this through a partition, which is what makes "it
+        -- cannot reach its primary right now" distinguishable from "it was
+        -- never pointed here at all" -- states that look identical in
+        -- 'o_upstream' and call for opposite actions.
         , o_received :: Lsn
         -- ^ the furthest position it holds: what it received, or what it
         -- replayed from its own WAL if it has received nothing since it
@@ -234,7 +243,7 @@ data Observed
 sysidOf :: Observed -> Maybe Text
 sysidOf (Stopped s _ _ _) = Just s
 sysidOf (Primary s _ _) = Just s
-sysidOf (Standby s _ _ _ _) = Just s
+sysidOf (Standby s _ _ _ _ _) = Just s
 sysidOf _ = Nothing
 
 {- | What to run on a member to produce what 'parseObserved' reads: one
@@ -281,6 +290,11 @@ probeScript m =
                 <> " ELSE pg_current_wal_lsn() END;"
             , "SELECT 'replayed=' || coalesce(pg_last_wal_replay_lsn()::text, '');"
             , "SELECT 'upstream=' || coalesce((SELECT sender_host FROM pg_stat_wal_receiver LIMIT 1), '');"
+            , -- where it is *told* to stream from, which survives the
+              -- connection dropping. Read from pg_settings rather than SHOW
+              -- so that a primary, which has no such setting, reports an
+              -- empty value rather than failing the whole probe.
+              "SELECT 'configured=' || coalesce((SELECT substring(setting from 'host=([^ ]+)') FROM pg_settings WHERE name = 'primary_conninfo'), '');"
             ]
     controldataFilter =
         unwords
@@ -336,11 +350,14 @@ parseObserved out =
             Just l -> Primary s tl l
             Nothing -> Unreachable "a primary reported no write position"
         (Just s, Just tl, Just "t") -> case lsn "lsn" of
-            Just recv -> Standby s tl upstream recv (fromMaybe recv (lsn "replayed"))
+            Just recv -> Standby s tl upstream configured recv (fromMaybe recv (lsn "replayed"))
             Nothing -> Unreachable "a standby reported no receive position"
         _ -> Unreachable "a running cluster reported no identity"
 
-    upstream = case field "upstream" of
+    upstream = host "upstream"
+    configured = host "configured"
+
+    host k = case field k of
         Just u | not (Text.null u) -> Just u
         _ -> Nothing
 
@@ -368,6 +385,8 @@ data Step
       StopMember Side
     | -- | this side must have received past that position before it is promoted
       AwaitCatchUp Side Lsn
+    | -- | this side is pointed at the primary but is not streaming from it yet
+      AwaitStreaming Side
     | Promote Side
     | -- | @pg_rewind@ onto the primary's history, then start, as a standby
       Rejoin Side
@@ -391,11 +410,18 @@ nextStep pair obsA obsB bouncers
         -- The declared primary is the primary. Everything from here is about
         -- the peer, and about where clients are being sent.
         (Primary{}, _) | not bouncersReady -> RepointBouncers primarySide
-        (Primary{}, Standby _ _ up _ _)
+        (Primary{}, Standby _ _ up conf _ _)
             -- the peer must be streaming from the primary, which is the
             -- *other* machine's address: a standby pointed anywhere else is
             -- not part of this pair, however healthy it looks.
             | up == Just primary.member_host -> Done
+            -- pointed here, but not connected: a partition, a primary that
+            -- has just been promoted and not yet been found, a standby still
+            -- starting up. Rewinding a standby that is already this pair's
+            -- would stop it and then fail, since whatever keeps it from
+            -- streaming keeps pg_rewind from reading too -- a partition would
+            -- take the standby down rather than ride it out.
+            | conf == Just primary.member_host -> AwaitStreaming peerSide
             | otherwise -> Rejoin peerSide
         (Primary{}, Stopped{}) -> Rejoin peerSide
         (Primary{}, Absent) -> Degraded "the peer has no cluster: seed it before it can stream"
@@ -408,7 +434,7 @@ nextStep pair obsA obsB bouncers
         (Standby{}, Primary{})
             | any (not . bouncer_paused) bouncers -> PauseBouncers
             | otherwise -> StopMember peerSide
-        (Standby _ _ _ recv _, Stopped _ _ checkpoint clean)
+        (Standby _ _ _ _ recv _, Stopped _ _ checkpoint clean)
             -- the operator has already said what may be lost, so nothing
             -- below can tell them anything they have not accepted.
             | discardable peerSide -> Promote primarySide
@@ -423,7 +449,7 @@ nextStep pair obsA obsB bouncers
             | recv >= checkpoint -> Promote primarySide
             | otherwise -> AwaitCatchUp primarySide checkpoint
         (Standby{}, Absent) -> Promote primarySide
-        (Standby _ _ _ recv _, Standby _ _ _ peerRecv _)
+        (Standby _ _ _ _ recv _, Standby _ _ _ _ peerRecv _)
             | recv >= peerRecv -> Promote primarySide
             | otherwise -> Refuse "the peer standby is ahead of the declared primary"
         (Standby{}, Unreachable why)
@@ -465,18 +491,14 @@ nextStep pair obsA obsB bouncers
 
 Pure, so that what a switchover actually does to a machine is readable and
 testable without one. 'Left' is a step that runs nowhere: 'Done' and
-'Degraded' are arrivals, 'Refuse' is a stop, 'AwaitCatchUp' is a wait, and
+'Degraded' are arrivals, 'Refuse' is a stop, the two @Await@s are waits, and
 the two bouncer steps are not implemented yet (see @specs\/pg-switchover.md@
 phase 4) -- they cannot arise while no bouncer is declared.
 -}
 stepCommand :: Pair -> Step -> Either Text (Member, String)
 stepCommand pair = go
   where
-    go (StopMember side) =
-        -- fast, not immediate: a clean shutdown sends the standby everything
-        -- it has not got, including the shutdown checkpoint, which is the
-        -- record the promotion below waits for.
-        Right (on side, pgctl side "stop -m fast")
+    go (StopMember side) = Right (on side, stopScript side)
     go (StartMember side) =
         Right (on side, pgctl side "status >/dev/null 2>&1 || " <> unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"])
     go (Promote side) =
@@ -489,12 +511,36 @@ stepCommand pair = go
     go (Degraded why) = Left why
     go (Refuse why) = Left why
     go (AwaitCatchUp _ _) = Left "waiting for the standby to catch up"
+    go (AwaitStreaming _) = Left "waiting for the standby to start streaming"
     go PauseBouncers = Left "bouncers are not wired up yet"
     go (RepointBouncers _) = Left "bouncers are not wired up yet"
 
     on = memberOn pair
     cluster side = Text.unpack (on side).member_cluster
     port side = show (on side).member_port
+
+    {- Fast, not immediate: a clean shutdown sends the standby everything it
+    has not got, including the shutdown checkpoint, which is the record the
+    promotion waits for.
+
+    What that clean shutdown also does is checkpoint, and a checkpoint
+    recycles the WAL before it -- which is the WAL a rewind of this member
+    would need, read back to the last checkpoint the two machines share. In
+    an ordinary switchover that is the shutdown checkpoint itself and nothing
+    older is wanted; after a split brain the histories parted much earlier,
+    and stopping the loser is what destroys the record of how. Pinning what
+    pg_wal already holds costs nothing, since it is on the disk either way,
+    and the rejoin takes the pin off again. -}
+    stopScript side =
+        unlines
+            [ "set -e"
+            , versionOf side
+            , "datadir=/var/lib/postgresql/$version/" <> cluster side
+            , "keep=$(du -sm \"$datadir/pg_wal\" | awk '{print $1 + 1}')"
+            , "sudo -u postgres psql -p " <> port side <> " -tAX -d postgres -c \"ALTER SYSTEM SET wal_keep_size = '${keep}MB'\""
+            , "sudo -u postgres psql -p " <> port side <> " -tAX -d postgres -c 'SELECT pg_reload_conf()'"
+            , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "stop -m fast"]
+            ]
 
     pgctl side action =
         unlines
@@ -575,6 +621,10 @@ stepCommand pair = go
                   -- @specs\/pg-switchover.md@ phase 6 is for; streaming with
                   -- a slot that is not there costs everything.
                   "sudo -u postgres sed -i '/^primary_slot_name/d' " <> conf
+                , -- and the WAL the stop pinned so that this rewind could
+                  -- happen: it has happened, and a standby holding every
+                  -- segment it ever saw fills a disk.
+                  "sudo -u postgres sed -i '/^wal_keep_size/d' " <> conf
                 , "sudo -u postgres touch \"$datadir/standby.signal\""
                 , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
                 ]
@@ -647,6 +697,11 @@ exactly a state to keep looking at and not to act on.
 verdict :: Step -> CheckResult
 verdict Done = Success
 verdict (Degraded _) = Unknown
+-- the peer is where it should be and pointed where it should be, and is not
+-- streaming: a partition reads as this, and so does a standby that came back
+-- a second ago. Neither is a reason to act, and only one of them is a reason
+-- to worry, which is a distinction no observation can make.
+verdict (AwaitStreaming _) = Unknown
 verdict (Refuse why) = Failure why
 verdict step = Failure (Text.pack (show step) <> " is still to do")
 
@@ -698,12 +753,18 @@ convergeUpTo r budget0 pair = go budget0
             Done -> pure ()
             Degraded _ -> pure ()
             Refuse why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))
+            -- a standby that is pointed here and still not streaming when the
+            -- waiting runs out is a pair that is one machine short, which is
+            -- a state to report and keep looking at -- not a pass that
+            -- failed. Every other step that outlasts its budget is.
+            AwaitStreaming _ | budget <= 0 -> pure ()
             _
                 -- asked after the arrivals, never before: a pass that has
                 -- spent its budget and is /there/ has not failed at anything.
                 | budget <= 0 ->
                     throwIO (userError ("pair " <> Text.unpack pair.pair_name <> ": still " <> show step <> " after " <> show budget0 <> " steps, giving up"))
             AwaitCatchUp _ _ -> waitABit >> go (budget - 1)
+            AwaitStreaming _ -> waitABit >> go (budget - 1)
             _ -> case stepCommand pair step of
                 Left why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))
                 Right (_, script) -> do
@@ -735,6 +796,13 @@ sshTo pair side script = do
             [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) m.member_ssh_identity
             , maybe [] (\hosts -> ["-o", "UserKnownHostsFile=" <> hosts, "-o", "StrictHostKeyChecking=accept-new"]) pair.pair_ssh_known_hosts
             , ["-o", "BatchMode=yes"]
+            , -- a member that cannot be reached is the case this recipe
+              -- exists for, so deciding that must take seconds. Left to
+              -- itself ssh retries a dropped connection for minutes, which
+              -- would make every pass during a partition hang rather than
+              -- report. The second pair covers a connection that dies while
+              -- the probe is already running.
+              ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
             , [Text.unpack m.member_ssh_user <> "@" <> Text.unpack m.member_host]
             , ["bash", "-c", shQuote script]
             ]

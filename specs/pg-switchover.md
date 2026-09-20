@@ -4,18 +4,20 @@ Status: partly implemented, and the rest is still a sketch to react to.
 
 Done: the prerequisites P1-P5; the state table and the probe
 (`SreBox.PostgresPair`, phase 2), covered at Layer 0 including every
-refusal; the role node over ssh (phase 3), covered by Layer 3 tests that
-move a real primary between two VMs and back (S1, minus the client
-assertions), that stop a controller after each step in turn and let an
-ordinary pass finish it (S2), and that kill a primary outright and fail over
-onto its standby (S3, the first half of phase 5).
+refusal; the role node over ssh (phase 3) and `pair_may_discard`'s failover
+and split-brain paths (phase 5), covered by Layer 3 tests that move a real
+primary between two VMs and back (S1, minus the client assertions), stop a
+controller after each step in turn and let an ordinary pass finish it (S2),
+kill a primary outright and fail over onto its standby (S3), cut the two
+machines off from each other and change nothing (S4), and fail over across a
+partition that hides the old primary from the controller too, then heal it
+and rewind the loser (S5).
 
 Not done: symmetric member nodes and the seeding clone, so a pair is still
 built by hand, as `Test.PostgresSwitchoverSpec` does; bouncer routing (phase
 4), so `PauseBouncers`/`RepointBouncers` are in the table with nothing behind
-them; split brain, the other half of `pair_may_discard`, still tested only at
-Layer 0 (phase 5); the slot budget and re-seeding (phase 6). Scenarios S4-S8
-are unwritten.
+them; the slot budget and re-seeding (phase 6). Scenarios S6-S8 are
+unwritten.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
 failover and three voters. `pg-ha-control-plane.md` is the wider
@@ -195,8 +197,8 @@ running it.
 One ssh round trip per member returns a small `key=value` report:
 - cluster status from `pg_lsclusters`;
 - if it is running: `pg_is_in_recovery()`, the timeline, the current or
-  replay/receive LSN, the upstream host from `pg_stat_wal_receiver`, and
-  `system_identifier`;
+  replay/receive LSN, the upstream host from `pg_stat_wal_receiver`, the
+  *configured* upstream from `primary_conninfo`, and `system_identifier`;
 - if it is stopped: `pg_controldata`'s cluster state, latest checkpoint
   location, minimum recovery point, timeline and system identifier;
 - from the bouncers, whether each one is paused (`SHOW DATABASES` has a
@@ -207,7 +209,7 @@ data Observed
     = Unreachable Text
     | Stopped { o_sysid :: Word64, o_timeline :: Int, o_checkpoint :: Lsn, o_clean :: Bool }
     | Primary { o_sysid :: Word64, o_timeline :: Int, o_lsn :: Lsn }
-    | Standby { o_sysid :: Word64, o_timeline :: Int, o_upstream :: Maybe Text, o_received, o_replayed :: Lsn }
+    | Standby { o_sysid :: Word64, o_timeline :: Int, o_upstream, o_configured :: Maybe Text, o_received, o_replayed :: Lsn }
 
 data Step
     = Done
@@ -215,6 +217,7 @@ data Step
     | PauseBouncers
     | StopMember Side          -- a clean, fast shutdown
     | AwaitCatchUp Side Lsn    -- the standby must have received past this
+    | AwaitStreaming Side      -- pointed here, not connected: wait, do not rewind
     | Promote Side
     | Rejoin Side              -- pg_rewind -R against the primary, then start
     | StartMember Side
@@ -227,6 +230,19 @@ nextStep :: Pair -> Observed -> Observed -> [BouncerState] -> Step
 `parseObserved` and `nextStep` are pure, in the `Systemd.interpretShow` /
 `Postgres.interpretTemplateRow` pattern. Layer 0 can then cover the whole
 table below, including every refusal, without a database.
+
+A standby is asked two questions about its upstream, and the difference
+between them is what keeps a partition from becoming an outage. `o_upstream`
+is where it *is* streaming from, which is empty the instant the connection
+drops; `o_configured` is where `primary_conninfo` *tells* it to stream from,
+which it keeps through a partition. Reading only the first, a standby that
+cannot reach its primary is indistinguishable from a standby that belongs to
+somebody else -- and the answer to the second of those is `Rejoin`, which
+stops the standby and then fails, because whatever keeps it from streaming
+keeps `pg_rewind` from reading too. A partition would take the standby down.
+Reading both, the answer is `AwaitStreaming`: wait, and if the waiting runs
+out say so as `Unknown` rather than as a failure, because "it came back a
+second ago" and "it has been cut off for an hour" are the same observation.
 
 Two of those positions are not the field whose name they carry, and writing
 S3 is what found it. A **stopped** cluster's position is
@@ -261,7 +277,8 @@ Checked in order, first match wins:
 |---|---|---|
 | any sysid ≠ B's sysid | | `Refuse "not the same cluster"` |
 | Standby streaming from B | Primary | bouncers point at B and are unpaused? `Done` : `RepointBouncers B` |
-| Standby, upstream not B | Primary | `Rejoin A` (the rewind is a no-op if nothing diverged; `-R` repoints it) |
+| Standby, pointed at B, not streaming | Primary | `AwaitStreaming A`, and `Unknown` once the waiting runs out |
+| Standby, pointed anywhere else | Primary | `Rejoin A` (the rewind is a no-op if nothing diverged) |
 | Stopped | Primary | `Rejoin A` |
 | Unreachable | Primary | `RepointBouncers B` if needed, else `Degraded` |
 | Primary, not `may_discard` | Primary | `Refuse "two primaries"` |
@@ -309,14 +326,17 @@ single-user recovery itself with `-c config_file=`. Single-user, never a
 start: a server that listens is a second primary, and this one still believes
 it is the primary.
 
-**That recovery must not throw away what it is being run for.** A clean
-shutdown ends in a checkpoint, and a checkpoint recycles the WAL before it —
-which is the WAL `pg_rewind` then reads, walking back to the last checkpoint
-the two machines share. Without a `wal_keep_size` pinned for the length of
-the recovery, the rewind fails with `could not open file .../pg_wal/...`
-immediately after the recovery that was supposed to enable it. Keeping as
-much as `pg_wal` already holds costs nothing, since it is on the disk either
-way.
+**Neither that recovery nor the stop before it may throw away what the
+rewind is for.** A clean shutdown ends in a checkpoint, and a checkpoint
+recycles the WAL before it — which is the WAL `pg_rewind` then reads, walking
+back to the last checkpoint the two machines share. So both `StopMember` and
+the recovery pin `wal_keep_size` to what `pg_wal` already holds, and the
+rejoin takes the pin off again once it has been used. Without it the rewind
+fails with `could not open file .../pg_wal/...` immediately after the step
+that was supposed to enable it. In an ordinary switchover nothing older than
+the shutdown checkpoint is ever wanted, so this never shows; after a split
+brain the histories parted long before, and stopping the loser is precisely
+what destroys the record of how.
 
 Still open: the slot A should stream with. `-R` does not create one, slots
 are not replicated, and A's old slot for B is left behind on A, where on a
@@ -402,8 +422,14 @@ are written, in `Test.PostgresVms` and `SreBox.PostgresPair`:
 - **a controller killed part-way:** `convergeUpTo`, a step budget, which from
   the machines' side is indistinguishable from the controller dying after
   step *k*;
-- **a partition:** `Netfilter.rule` dropping traffic between the two members,
-  which dogfoods the builtin. Not written yet; it is what S4 and S5 need.
+- **a partition:** `partitionFrom` / `partitionFromEverythingFor`, `nft`
+  rules built out of `Netfilter`'s own `Table`/`Chain`/`Rule` vocabulary and
+  rendered by its own command, so the rule text is the tree's; only the
+  *running* of it differs, since the guests have no salmon on them and the
+  argv goes over ssh. A partition that hides a machine from the controller
+  cannot be lifted by the controller — the command would have to travel the
+  path it cut — so that one is handed to the machine as cut, wait, heal, and
+  left to run detached.
 
 Alongside them, what a scenario asserts *with*: `dataDirectoryIdentity` (the
 inodes a rewind keeps and a re-clone cannot), `assertPrimaryIs` /
@@ -415,8 +441,8 @@ machine doing something in its own time.
 | S1 | Switch A→B, then B→A, with a client inserting through the bouncer the whole time | every acknowledged insert is present; the client saw zero errors; a rerun of `run up` changes nothing |
 | S2 | S1, with the controller killed after each step *k* in turn | a plain rerun finishes; no bouncer is left paused; the result is the same as S1 |
 | S3 | Crash A while it holds writes the standby never got; declare B, first without `may_discard` and then with it | the first pass refuses, and promotes nothing; the second promotes B, which serves writes; A rejoins as B's standby through `pg_rewind`, not a re-clone (its data directory is never unlinked); the replicated rows survive and the un-replicated ones are gone, which is what the flag said |
-| S4 | Partition A from B, with no change to the declaration | the check is `Unknown`/`Degraded`; nothing is promoted; after the partition heals, B catches up |
-| S5 | Partition, fail over to B with `may_discard = A` while A still accepts direct writes, then heal | the first pass after healing sees two primaries and rewinds A; A's gap writes are gone, as declared; without the flag, it refuses |
+| S4 | Partition A from B, with no change to the declaration | the check is `Unknown`; nothing is promoted, and in particular the standby is not stopped or rewound; after the partition heals, B catches up on its own and the pair is `Done` |
+| S5 | Partition A from B *and from the controller*, fail over to B with `may_discard = A` while A still holds writes B never got, then let it heal | without the flag the pass refuses, twice: once while A cannot be reached, and again once both machines call themselves primaries; with it, B is promoted, then A is stopped and rewound onto B's history; A's writes behind the partition are gone, as declared |
 | S6 | Stop B; write past `max_slot_wal_keep_size` on A | A's disk is bounded; the slot reports `wal_status = 'lost'`; the pair is `Degraded`, and re-seeding B (the only fix) is an explicit re-clone, not a silent one |
 | S7 | Stop both; declare B | B starts first; A rejoins |
 | S8 | A standby from a *different* cluster (fresh `initdb`) where A should be | `Refuse "not the same cluster"`, and nothing is deleted |
@@ -424,7 +450,7 @@ machine doing something in its own time.
 S2 and S8 matter most. S2 proves resumability, which is the design's main
 claim. S8 proves the refusal that P1 is about.
 
-S1, S2 and S3 are written, in `Test.PostgresSwitchoverSpec`. Writing S3 alone
+S1 through S5 are written, in `Test.PostgresSwitchoverSpec`. Writing S3 alone
 turned up six defects: the two positions that were not what their names said
 (see "Observation, then a pure verdict"), the crashed peer treated as a clean
 one, and the three things the rejoin now does around `pg_rewind`. None of them
@@ -432,6 +458,14 @@ is reachable from the happy path, because every one needs a machine that
 stopped without being asked to -- which is the argument for the rest of this
 catalogue, and the reason the scenarios are written as a list of *causes*
 rather than of features.
+
+S4 and S5 turned up three more, in the same spirit. A partitioned standby
+read as somebody else's standby and would have been stopped and rewound, so a
+broken link between the two machines would have taken the standby down with
+it. Deciding that a member is unreachable took minutes, because nothing
+bounded ssh's own retrying — on the one failure this recipe exists for. And
+the clean stop of a divergent primary recycled the WAL the rewind of it then
+needed.
 
 ## Phased plan
 

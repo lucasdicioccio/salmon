@@ -482,7 +482,12 @@ rewound onto the other. A *crashed* peer is in that same category and for a reas
 cleanly (the last record is then a shutdown checkpoint), so for a crashed one the comparison "the
 standby has reached its checkpoint" reads as "the standby has everything" precisely when it is
 least likely to be true — hence `o_clean`, read from `Database cluster state`, with any value
-other than `shut down`/`shut down in recovery` counting as a crash. **The state is re-derived
+other than `shut down`/`shut down in recovery` counting as a crash. A standby is asked where it
+*is* streaming from and where it is *told* to (`o_upstream` / `o_configured`), because a partition
+empties the first and leaves the second: reading only the first, a standby that cannot reach its
+primary looks exactly like somebody else's standby, and the answer to that one is `Rejoin`, which
+stops it and then fails — a broken link would take the standby down. Pointed here but not
+connected is `AwaitStreaming`, which waits and then reports `Unknown`. **The state is re-derived
 every turn** (`observe` → `nextStep` → act → observe), so an `up` killed mid-switchover is
 finished by the next one; there is no progress file that could disagree with the machines, and
 that property is what to protect when changing `nextStep`. **`Degraded` is `Unknown`**, the one
@@ -498,16 +503,23 @@ because slots are not replicated and a standby naming a slot the new primary nev
 retries forever while looking healthy to every query but `pg_stat_wal_receiver`; and it completes
 a crashed target's recovery itself, in single-user mode with `-c config_file=` (pg_rewind's own
 attempt assumes Debian keeps postgresql.conf in the data directory, which it does not) and with
-`wal_keep_size` pinned to what `pg_wal` already holds, or that recovery's shutdown checkpoint
-recycles the very WAL the rewind is about to read. Bouncers are declared but not yet wired
-(`specs/pg-switchover.md` phase 4), so the pause/repoint steps cannot arise while none is
-declared. `Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;
-`Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a controller
-after each step in turn to show a plain pass finishes what it left, and kills a primary outright
-to show the failover refused without the flag and rewinds with it. `Test.PostgresVms` holds what
-those specs share, and the reason it exists is that **a rootfs is a host directory that outlives
-its VM**: a spec that moved the primary leaves the next one starting from a standby, so each
-normalizes on the way in (`ensurePrimary`, `resetCluster`) rather than assuming.
+`wal_keep_size` pinned to what `pg_wal` already holds — as `StopMember` pins it too, since any
+clean shutdown ends in a checkpoint and a checkpoint recycles the very WAL a rewind reads back to
+where the histories parted; the rejoin takes the pin off once it has been used. Bouncers are
+declared but not yet wired (`specs/pg-switchover.md` phase 4), so the pause/repoint steps cannot
+arise while none is declared. `Test.PostgresPairSpec` is the whole table at Layer 0, refusals
+included; `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a
+controller after each step in turn to show a plain pass finishes what it left, kills a primary
+outright to show the failover refused without the flag and rewound with it, and partitions the two
+machines — once between themselves, where the right answer is to do nothing, and once hiding the
+old primary from the controller as well, which is the only way to reach two primaries and the one
+case where salmon knowingly discards acknowledged writes. Those partitions are `nft` rules built
+from `Netfilter`'s own vocabulary and shipped over ssh, since the guests have no salmon on them;
+the one that hides a machine from the controller is handed to the machine as cut-wait-heal,
+because the command that would lift it would have to travel the path it cut. `Test.PostgresVms`
+holds what those specs share, and the reason it exists is that **a rootfs is a host directory that
+outlives its VM**: a spec that moved the primary leaves the next one starting from a standby, so
+each normalizes on the way in (`ensurePrimary`, `resetCluster`) rather than assuming.
 
 ## Conventions for node authors
 
