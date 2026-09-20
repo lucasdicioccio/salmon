@@ -22,7 +22,7 @@ does by hand -- which is why the check can only name the problem.
 Not done: symmetric member nodes and the seeding clone, so a pair is still
 built by hand, as `Test.PostgresSwitchoverSpec` does; bouncer routing (phase
 4), so `PauseBouncers`/`RepointBouncers` are in the table with nothing behind
-them. Scenarios S7 and S8 are unwritten.
+them. Scenario S8 is unwritten.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
 failover and three voters. `pg-ha-control-plane.md` is the wider
@@ -301,10 +301,12 @@ Checked in order, first match wins:
 | Unreachable | Primary | `RepointBouncers B` if needed, else `Degraded` |
 | Primary, not `may_discard` | Primary | `Refuse "two primaries"` |
 | Primary, `may_discard = A` | Primary | `StopMember A`, then `Rejoin A`: A's divergent writes are lost, as declared |
-| Primary | Standby of A | `PauseBouncers`, then `StopMember A` |
+| Primary | Standby of A, streaming | `PauseBouncers`, then `StopMember A` |
+| Primary | Standby of A, not streaming | `AwaitStreaming B`: a clean stop hands the tail over through that connection, so stopping A without one strands whatever B has not got |
 | Stopped, `may_discard = A` | Standby | `Promote B`: the loss is already accepted, and waiting on a machine that will send nothing more is a slower way to the same place |
 | Stopped, crashed | Standby | `Refuse "A did not stop cleanly"` |
-| Stopped cleanly at c | Standby, received < c | `AwaitCatchUp B c` (on timeout: `StartMember A`, resume, `Refuse`) |
+| Stopped cleanly at c | Standby, received < c, still streaming | `AwaitCatchUp B c`: the tail is in flight |
+| Stopped cleanly at c | Standby, received < c, not streaming | `StartMember A`: nothing will arrive from a stopped machine, so start the one that holds the records and let B catch up from it |
 | Stopped cleanly at c | Standby, received ≥ c | `Promote B` |
 | Unreachable, not `may_discard` | Standby | `Refuse "cannot confirm A is stopped"` |
 | Unreachable, `may_discard = A` | Standby | `PauseBouncers`, then `Promote B` |
@@ -471,7 +473,7 @@ machine doing something in its own time.
 | S4 | Partition A from B, with no change to the declaration | the check is `Unknown`; nothing is promoted, and in particular the standby is not stopped or rewound; after the partition heals, B catches up on its own and the pair is `Done` |
 | S5 | Partition A from B *and from the controller*, fail over to B with `may_discard = A` while A still holds writes B never got, then let it heal | without the flag the pass refuses, twice: once while A cannot be reached, and again once both machines call themselves primaries; with it, B is promoted, then A is stopped and rewound onto B's history; A's writes behind the partition are gone, as declared |
 | S6 | Stop the standby; write past `max_slot_wal_keep_size` on the primary | the primary's `pg_wal` is bounded rather than following the standby down; the slot reports `wal_status = 'lost'`; the check is `Unknown` with the slot named in it; a pass does nothing at all, and in particular the standby's data directory is not unlinked — re-seeding is an operator's decision about throwing data away, not a step |
-| S7 | Stop both; declare B | B starts first; A rejoins |
+| S7 | Stop both, in either order, and declare the side that stopped *first* | the pair converges on the declaration without losing what the other machine wrote after it: B starts, and if it is behind, A is started again so B can catch up from it before the ordinary switchover runs |
 | S8 | A standby from a *different* cluster (fresh `initdb`) where A should be | `Refuse "not the same cluster"`, and nothing is deleted |
 
 S2 and S8 matter most. S2 proves resumability, which is the design's main

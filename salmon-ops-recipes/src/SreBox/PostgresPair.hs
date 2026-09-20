@@ -475,10 +475,17 @@ nextStep pair obsA obsB bouncers
             | otherwise -> Refuse "both machines are primaries; say which side's writes may be discarded"
         -- The declared primary is a standby: this is the switchover, and what
         -- it costs depends on what the peer is doing.
-        (Standby{}, Primary{})
+        (Standby _ _ up _ _ _, Primary{})
+            -- stopping the peer is safe only once the declared primary is
+            -- streaming from it, because a clean stop hands the tail over
+            -- through that connection and there is otherwise nothing to hand
+            -- it over. Declared during a partition, the old rule stopped the
+            -- primary and stranded every record the standby had not got --
+            -- an outage produced out of a healthy pair by a declaration.
+            | up /= Just peer.member_host -> AwaitStreaming primarySide
             | any (not . bouncer_paused) bouncers -> PauseBouncers
             | otherwise -> StopMember peerSide
-        (Standby _ _ _ _ recv _, Stopped _ _ checkpoint clean)
+        (Standby _ _ up _ recv _, Stopped _ _ checkpoint clean)
             -- the operator has already said what may be lost, so nothing
             -- below can tell them anything they have not accepted.
             | discardable peerSide -> Promote primarySide
@@ -491,6 +498,13 @@ nextStep pair obsA obsB bouncers
                 Refuse
                     "the peer did not stop cleanly, so what it wrote after its last checkpoint is unknown; say whether its writes may be discarded"
             | recv >= checkpoint -> Promote primarySide
+            -- the tail is only ever in flight while the connection is up.
+            -- Once it is gone and the peer is stopped, nothing will arrive
+            -- however long anybody waits, and the way to converge without
+            -- losing those records is to start the machine that has them:
+            -- the standby catches up from it, and the ordinary switchover
+            -- takes it from there.
+            | up /= Just peer.member_host -> StartMember peerSide
             | otherwise -> AwaitCatchUp primarySide checkpoint
         (Standby{}, Absent) -> Promote primarySide
         (Standby _ _ _ _ recv _, Standby _ _ _ _ peerRecv _)

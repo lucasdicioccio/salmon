@@ -372,6 +372,10 @@ stepTests =
     , -- the ordinary switchover, step by step
       testCase "switchover: hold the clients before stopping anything" $
         assertEqual "" Pair.PauseBouncers (step (primaryAt "0/5") (streamingFrom "10.0.0.1" "0/5") atOldPrimary)
+    , -- the old rule stopped the primary whatever the standby was doing,
+      -- which during a partition strands every record it had not got.
+      testCase "switchover: the standby is not streaming, so do not stop the primary" $
+        assertEqual "" (Pair.AwaitStreaming Pair.B) (step (primaryAt "0/5") (pointedAt "10.0.0.1" "0/5") atOldPrimary)
     , testCase "switchover: clients held, so stop the old primary cleanly" $
         assertEqual "" (Pair.StopMember Pair.A) (step (primaryAt "0/5") (streamingFrom "10.0.0.1" "0/5") paused)
     , testCase "switchover: the old primary stopped and the new one has its last checkpoint" $
@@ -392,6 +396,14 @@ stepTests =
             ""
             (Pair.Promote Pair.B)
             (Pair.nextStep pair{Pair.pair_may_discard = Just Pair.A} (stoppedAt "0/5000060") (streamingFrom "10.0.0.1" "0/4000000") paused)
+    , -- both stopped, the declared one behind, and nothing left to stream
+      -- from: waiting is a slower way of failing, so start the machine that
+      -- holds the records and let the standby catch up from it.
+      testCase "the declared primary is behind a stopped peer: start the peer, do not wait" $
+        assertEqual
+            ""
+            (Pair.StartMember Pair.A)
+            (step (stoppedAt "0/5000060") (Pair.Standby "7000" 1 Nothing (Just "10.0.0.1") (lsn "0/4000000") (lsn "0/4000000")) paused)
     , testCase "switchover: not caught up yet, so wait rather than lose the tail" $
         assertEqual
             ""

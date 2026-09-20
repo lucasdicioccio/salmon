@@ -505,7 +505,12 @@ a crashed target's recovery itself, in single-user mode with `-c config_file=` (
 attempt assumes Debian keeps postgresql.conf in the data directory, which it does not) and with
 `wal_keep_size` pinned to what `pg_wal` already holds — as `StopMember` pins it too, since any
 clean shutdown ends in a checkpoint and a checkpoint recycles the very WAL a rewind reads back to
-where the histories parted; the rejoin takes the pin off once it has been used. Each member
+where the histories parted; the rejoin takes the pin off once it has been used. Two rules exist
+because a declaration can arrive at a bad moment: the peer is stopped only once the declared
+primary is *streaming* from it (a clean stop hands the tail over through that connection, so
+stopping it without one strands whatever the standby lacks — an outage made out of a healthy pair
+by a declaration), and a declared primary that is behind a *stopped* peer starts that peer rather
+than waiting, since nothing arrives from a stopped machine however long anyone waits. Each member
 streams with a slot the pair names (`slotNameFor`, derived rather than declared so that a
 rejoining member computes the same name the member it rejoins would), which the rejoin creates on
 the peer over the replication connection and then verifies, and whose stale twin — the slot this
