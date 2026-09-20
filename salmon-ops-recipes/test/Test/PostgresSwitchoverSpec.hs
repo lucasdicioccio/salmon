@@ -48,7 +48,66 @@ tests =
         , testCase "a failover across a partition leaves two primaries, and rewinds one" splitBrainIsRewound
         , testCase "a standby that falls off the slot budget is said so, not silently re-seeded" theSlotBudgetBoundsTheDisk
         , testCase "a pair stopped in either order comes back with the declared primary, losing nothing" recoversFromBothStopped
+        , testCase "a stranger's cluster where a member should be is refused, and nothing is deleted" refusesAStrangersCluster
         ]
+
+{- | S8: a stranger's cluster where a member of the pair should be.
+
+A machine is rebuilt, or a name is reused, or a directive is pointed at the
+wrong address: the address answers, the cluster name matches, the port is
+right, and what is there has never met the other machine. Every step in the
+table would then be applied to somebody else's data, which is why the system
+identifiers are compared before anything else is decided.
+
+The direction that matters is the one with 'SreBox.PostgresPair.pair_may_discard'
+set. That flag says which side's writes may go, and it presumes the two sides
+are the same cluster; read as a general licence to destroy, it would let a
+pass rewind a real cluster onto a stranger's. So the test declares it both
+ways round and asserts the refusal survives both -- and then that neither
+data directory was touched, which is the assertion a refusal is actually
+about.
+-}
+refusesAStrangersCluster :: IO ()
+refusesAStrangersCluster = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            resetRows a
+            insertRow a "on-the-real-cluster"
+            waitForRows b ["on-the-real-cluster"]
+
+            -- the standby's machine is rebuilt: same address, same cluster
+            -- name, same port, and a cluster that has never met A.
+            resetCluster b
+            psqlOrDie b "CREATE DATABASE precious;"
+            strangers <- dataDirectoryIdentity b
+            ours <- dataDirectoryIdentity a
+
+            -- nothing about the declaration has changed
+            let declared = pairWith a b Pair.A
+            step <- Pair.decide declared
+            assertBool ("expected a refusal, got " <> show step) (refuses step)
+            assertBool ("the reason does not say what is wrong: " <> show step) ("cluster" `isInfixOf` show step)
+            ok <- runUp (Pair.pairRole silent declared)
+            assertBool "a pass across two different clusters was reported a success" (not ok)
+
+            -- and saying whose writes may go does not change it, in either
+            -- direction: declared at the real cluster or at the stranger.
+            forM_ [Pair.A, Pair.B] $ \side -> do
+                let p = (pairWith a b (Pair.other side)){Pair.pair_may_discard = Just side}
+                flagged <- Pair.decide p
+                assertBool ("expected a refusal with may_discard = " <> show side <> ", got " <> show flagged) (refuses flagged)
+                acted <- runUp (Pair.pairRole silent p)
+                assertBool ("a pass with may_discard = " <> show side <> " was reported a success") (not acted)
+
+            -- neither machine was touched by any of that
+            assertEqual "the stranger's data directory was replaced" strangers =<< dataDirectoryIdentity b
+            assertEqual "our own data directory was replaced" ours =<< dataDirectoryIdentity a
+            (_, dbs, _) <- psql b "SELECT datname FROM pg_database WHERE datname = 'precious';"
+            assertBool ("the stranger's database is gone: " <> dbs) ("precious" `isInfixOf` dbs)
+            assertPrimaryIs a
+            waitForRows a ["on-the-real-cluster"]
 
 {- | S7: both machines are stopped, and the one declared primary is the one
 that stopped first.
