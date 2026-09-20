@@ -20,7 +20,6 @@ first switchover each of them has to accept the other streaming from it.
 -}
 module Test.PostgresSwitchoverSpec (tests) where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, unless)
 import Data.List (isInfixOf)
@@ -43,7 +42,65 @@ tests =
         AllFinish
         [ testCase "switches the primary over, and back, without losing a row" switchesOverAndBack
         , testCase "a switchover stopped part-way is finished by the next pass" resumesAfterInterruption
+        , testCase "a crashed primary is failed over only when its writes are declared expendable" failsOverFromACrash
         ]
+
+{- | S3: crash the primary, fail over to the standby, and let the machine
+that crashed rejoin.
+
+Two things separate this from the switchover above, and both are the point.
+The old primary is not stopped, it /dies/ -- so its last checkpoint is no
+longer the end of its WAL, and nothing on either machine can say what it
+wrote after it. That is a state salmon is not entitled to decide about, so
+the first pass here refuses and the second one is given
+'SreBox.PostgresPair.pair_may_discard': the operator saying which side's
+writes they accept losing, which is the only thing that makes a failover
+different from a guess.
+
+And the machine that comes back is rewound rather than re-seeded. The two
+are hard to tell apart afterwards -- same rows, same system identifier, same
+timeline -- so the test holds on to something only a re-clone destroys.
+-}
+failsOverFromACrash :: IO ()
+failsOverFromACrash = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            resetRows a
+            insertRow a "replicated-before-the-crash"
+            waitForRows b ["replicated-before-the-crash"]
+
+            -- with the standby down, what A writes now reaches nobody: these
+            -- are the writes the flag below is about.
+            stopCluster b
+            insertRow a "written-while-b-was-down"
+            identity <- dataDirectoryIdentity a
+            crashCluster a
+
+            -- nothing declared: a pass may start what is stopped, and may
+            -- not promote over a machine whose WAL it cannot account for.
+            let declared = pairWith a b Pair.B
+            refused <- runUp (Pair.pairRole silent declared)
+            assertBool "promoted over a crashed primary with nothing declared" (not refused)
+            assertInRecovery b
+
+            -- the operator accepts losing A's un-replicated writes
+            let failover = declared{Pair.pair_may_discard = Just Pair.A}
+            passOrExplain "the failover" failover
+            assertPrimaryIs b
+            insertRow b "written-on-b-after-the-failover"
+            assertStandbyOf a testVmAddr2
+
+            identity' <- dataDirectoryIdentity a
+            assertEqual "the old primary was re-cloned rather than rewound" identity identity'
+
+            -- what was replicated survived, on both machines
+            waitForRows a ["replicated-before-the-crash", "written-on-b-after-the-failover"]
+            waitForRows b ["replicated-before-the-crash", "written-on-b-after-the-failover"]
+            -- and what was not is gone, which is what the flag said
+            assertNoRow b "written-while-b-was-down"
+            assertNoRow a "written-while-b-was-down"
 
 {- | S2: kill the controller after each step of a switchover in turn, and
 let an ordinary pass pick it up.
@@ -97,6 +154,29 @@ resumesAfterInterruption = requirePgVmPrereqs $ do
             let rows = "before-any-interruption" : ["after-interruption-at-" <> show k | k <- [1 :: Int, 2, 3]]
             waitForRows a rows
             waitForRows b rows
+
+{- | Runs the node, and on failure says what the machines looked like.
+
+The node reports through a 'Salmon.Reporter.Reporter', which these tests
+leave 'silent' -- so a pass that failed is otherwise just @False@, and the
+one thing worth knowing, which of the steps refused or threw, is exactly
+what was thrown away. Deciding again costs two ssh round trips and turns
+that into a sentence.
+-}
+passOrExplain :: String -> Pair.Pair -> IO ()
+passOrExplain what p = do
+    ok <- runUp (Pair.pairRole silent p)
+    unless ok $ do
+        obsA <- Pair.observe p Pair.A
+        obsB <- Pair.observe p Pair.B
+        retried <- try (Pair.converge silent p) :: IO (Either SomeException ())
+        fail . unlines $
+            [ what <> " failed"
+            , "  A: " <> show obsA
+            , "  B: " <> show obsB
+            , "  next step: " <> show (Pair.nextStep p obsA obsB [])
+            , "  running it again said: " <> show retried
+            ]
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
@@ -247,40 +327,37 @@ prepareForSwitchover a b = do
 
 -------------------------------------------------------------------------------
 
-assertPrimaryIs :: VmAccess -> IO ()
-assertPrimaryIs vm = do
-    (_, out, _) <- psql vm "SELECT pg_is_in_recovery();"
-    assertBool ("expected a primary, got: " <> out) ("f" `isInfixOf` out)
-
 -- | Polls: a rejoined standby takes a moment to connect to its new primary.
 assertStandbyOf :: VmAccess -> Text.Text -> IO ()
-assertStandbyOf vm host = go (30 :: Int)
-  where
-    go 0 = do
-        (_, out, _) <- psql vm "SELECT pg_is_in_recovery(), coalesce((SELECT sender_host FROM pg_stat_wal_receiver LIMIT 1), 'none');"
-        fail ("never became a standby of " <> Text.unpack host <> ": " <> out)
-    go n = do
+assertStandbyOf vm host =
+    waitFor ("never became a standby of " <> Text.unpack host) $ do
         (_, out, _) <- psql vm "SELECT coalesce((SELECT sender_host FROM pg_stat_wal_receiver LIMIT 1), 'none');"
-        if Text.unpack host `isInfixOf` out then pure () else threadDelay 2000000 >> go (n - 1)
+        pure (Text.unpack host `isInfixOf` out, out)
 
 insertRow :: VmAccess -> String -> IO ()
 insertRow vm v =
     psqlOrDie vm ("CREATE TABLE IF NOT EXISTS salmon_switchover (v text); INSERT INTO salmon_switchover VALUES ('" <> v <> "');")
 
+{- | Starts the canaries over. The rootfses outlive the VMs, so a row from a
+previous run is otherwise still there -- which matters to the one assertion
+here that a row is /absent/.
+-}
+resetRows :: VmAccess -> IO ()
+resetRows vm = psqlOrDie vm "DROP TABLE IF EXISTS salmon_switchover;"
+
 waitForRows :: VmAccess -> [String] -> IO ()
-waitForRows vm vs = go (30 :: Int)
-  where
-    go 0 = do
+waitForRows vm vs =
+    waitFor ("expected " <> show vs) $ do
         (_, out, _) <- psql vm "SELECT v FROM salmon_switchover ORDER BY v;"
-        fail ("expected " <> show vs <> ", got: " <> out)
-    go n = do
-        (_, out, _) <- psql vm "SELECT v FROM salmon_switchover ORDER BY v;"
-        if all (`isInfixOf` out) vs then pure () else threadDelay 2000000 >> go (n - 1)
+        pure (all (`isInfixOf` out) vs, out)
+
+assertNoRow :: VmAccess -> String -> IO ()
+assertNoRow vm v = do
+    (_, out, _) <- psql vm "SELECT v FROM salmon_switchover ORDER BY v;"
+    assertBool ("expected " <> v <> " to be gone, got: " <> out) (not (v `isInfixOf` out))
 
 waitForStandby :: VmAccess -> IO ()
-waitForStandby vm = go (30 :: Int)
-  where
-    go 0 = fail "the standby never started streaming"
-    go n = do
+waitForStandby vm =
+    waitFor "the standby never started streaming" $ do
         (code, out, _) <- psql vm "SELECT status FROM pg_stat_wal_receiver;"
-        if code == ExitSuccess && "streaming" `isInfixOf` out then pure () else threadDelay 2000000 >> go (n - 1)
+        pure (code == ExitSuccess && "streaming" `isInfixOf` out, out)
