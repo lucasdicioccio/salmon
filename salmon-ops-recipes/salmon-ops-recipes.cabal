@@ -33,6 +33,7 @@ library
                    , SreBox.PostgresTls
                    , SreBox.PostgresBackup
                    , SreBox.PostgresTemplate
+                   , SreBox.PostgresPair
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
                    , SreBox.Gcp.VmProvision
@@ -104,6 +105,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresInitSpec
                     , Test.PostgresReplicationSpec
                     , Test.PostgresClusterSpec
+                    , Test.PostgresPairSpec
                     , Test.PostgresTemplateSpec
                     , Test.PostgresTlsSpec
                     , Test.PostgrestCloudRunSpec

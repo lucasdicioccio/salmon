@@ -19,6 +19,7 @@ import qualified Test.PostgresBackupSpec as PostgresBackupSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
+import qualified Test.PostgresPairSpec as PostgresPairSpec
 import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
@@ -84,6 +85,7 @@ main =
             , PodmanSpec.tests
             , PostgresBackupSpec.tests
             , PostgresClusterSpec.tests
+            , PostgresPairSpec.tests
             , PostgresTemplateSpec.tests
             , PostgresTlsSpec.tests
             , PostgrestCloudRunSpec.tests
