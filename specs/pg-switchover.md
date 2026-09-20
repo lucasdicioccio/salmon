@@ -19,10 +19,13 @@ is reported rather than rewound at (S6). The *re-seeding* half of phase 6 is
 not: there is no seeding node, so "re-seed it" is still something an operator
 does by hand -- which is why the check can only name the problem.
 
+The disaster catalogue S1-S8 is written, and running it is what most of the
+design above was decided by.
+
 Not done: symmetric member nodes and the seeding clone, so a pair is still
 built by hand, as `Test.PostgresSwitchoverSpec` does; bouncer routing (phase
 4), so `PauseBouncers`/`RepointBouncers` are in the table with nothing behind
-them. Scenario S8 is unwritten.
+them.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
 failover and three voters. `pg-ha-control-plane.md` is the wider
@@ -474,12 +477,22 @@ machine doing something in its own time.
 | S5 | Partition A from B *and from the controller*, fail over to B with `may_discard = A` while A still holds writes B never got, then let it heal | without the flag the pass refuses, twice: once while A cannot be reached, and again once both machines call themselves primaries; with it, B is promoted, then A is stopped and rewound onto B's history; A's writes behind the partition are gone, as declared |
 | S6 | Stop the standby; write past `max_slot_wal_keep_size` on the primary | the primary's `pg_wal` is bounded rather than following the standby down; the slot reports `wal_status = 'lost'`; the check is `Unknown` with the slot named in it; a pass does nothing at all, and in particular the standby's data directory is not unlinked — re-seeding is an operator's decision about throwing data away, not a step |
 | S7 | Stop both, in either order, and declare the side that stopped *first* | the pair converges on the declaration without losing what the other machine wrote after it: B starts, and if it is behind, A is started again so B can catch up from it before the ordinary switchover runs |
-| S8 | A standby from a *different* cluster (fresh `initdb`) where A should be | `Refuse "not the same cluster"`, and nothing is deleted |
+| S8 | A stranger's cluster (fresh `initdb`) where a member should be: same address, same cluster name, same port | `Refuse`, in both directions and with `may_discard` naming either side — the flag says whose *writes* may go, which presumes one cluster, and is not a licence to wipe a machine that was never in the pair. Neither data directory is touched, and the stranger's own databases are still there |
 
 S2 and S8 matter most. S2 proves resumability, which is the design's main
-claim. S8 proves the refusal that P1 is about.
+claim. S8 proves the refusal that P1 is about, one level up: P1 guards the
+clone against cloning over a stranger, and S8 guards every *step* against
+being applied to one.
 
-S1 through S5 are written, in `Test.PostgresSwitchoverSpec`. Writing S3 alone
+All eight are written, in `Test.PostgresSwitchoverSpec`, and between them
+they cost the recipe twelve defects. Where those came from is the argument
+for writing a catalogue of *causes* rather than of features: not one of the
+twelve is on the happy path. S1, the scenario in which nothing goes wrong,
+found nothing, and so did S8, whose guard was written first and stayed right.
+Every other defect needed a machine that stopped, or was cut off, without
+being asked to.
+
+Writing S3 alone
 turned up six defects: the two positions that were not what their names said
 (see "Observation, then a pure verdict"), the crashed peer treated as a clean
 one, and the three things the rejoin now does around `pg_rewind`. None of them
@@ -495,6 +508,15 @@ it. Deciding that a member is unreachable took minutes, because nothing
 bounded ssh's own retrying — on the one failure this recipe exists for. And
 the clean stop of a divergent primary recycled the WAL the rewind of it then
 needed.
+
+S6 turned up the state the pair had no answer for at all: once slots are in
+use, a standby that falls off the budget can never catch up, and every
+earlier version of the table would have gone on rewinding at it. S7 turned up
+the two worst, both of them one declaration away -- stopping a primary while
+the standby was not connected to receive its tail, and then waiting out a
+budget for records a stopped machine was never going to send. Between them
+they could take a healthy pair to one machine stopped and the other
+unpromotable.
 
 ## Phased plan
 

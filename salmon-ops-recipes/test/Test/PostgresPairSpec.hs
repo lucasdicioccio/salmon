@@ -439,6 +439,20 @@ stepTests =
         assertBool
             ""
             (refuses (step (Pair.Standby "7000" 1 (Just "10.0.0.2") (Just "10.0.0.2") (lsn "0/5") (lsn "0/5")) (Pair.Primary "9999" 1 (lsn "0/5") []) settled))
+    , -- the flag says which side's writes may go, which presumes the two
+      -- sides are the same cluster. It is not a licence to wipe a machine
+      -- that was never part of this pair.
+      testCase "different clusters: saying whose writes may go does not license it" $
+        assertBool
+            ""
+            ( refuses
+                ( Pair.nextStep
+                    pair{Pair.pair_may_discard = Just Pair.A}
+                    (Pair.Primary "7000" 1 (lsn "0/6") [])
+                    (Pair.Primary "9999" 1 (lsn "0/5") [])
+                    settled
+                )
+            )
     , testCase "no bouncers declared: their state cannot hold a pass back" $
         assertEqual "" Pair.Done (step (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") [])
     ]
