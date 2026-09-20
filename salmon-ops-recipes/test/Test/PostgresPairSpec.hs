@@ -44,6 +44,15 @@ commandTests :: [TestTree]
 commandTests =
     [ testCase "stopping the old primary is clean, so the standby gets the last checkpoint" $
         assertBool (script (Pair.StopMember Pair.A)) ("stop -m fast" `isInfixOf` script (Pair.StopMember Pair.A))
+    , -- that same clean shutdown checkpoints, and a checkpoint recycles the
+      -- WAL a later rewind reads back to where the histories parted.
+      testCase "stopping a member keeps the WAL a rewind of it would need" $ do
+        let s' = script (Pair.StopMember Pair.A)
+        assertBool s' ("wal_keep_size" `isInfixOf` s')
+        assertBool s' ("pg_reload_conf" `isInfixOf` s')
+        assertBool s' (at "wal_keep_size" s' < at "stop -m fast" s')
+    , testCase "and the rejoin takes that pin off again" $
+        assertBool (script (Pair.Rejoin Pair.A)) ("/^wal_keep_size/d" `isInfixOf` script (Pair.Rejoin Pair.A))
     , testCase "each step runs on the machine it names" $ do
         assertEqual "" (Just "10.0.0.1") (host (Pair.StopMember Pair.A))
         assertEqual "" (Just "10.0.0.2") (host (Pair.Promote Pair.B))
@@ -89,7 +98,7 @@ commandTests =
     , testCase "the steps that are arrivals, waits or refusals run nothing" $
         mapM_
             (\st -> assertBool (show st) (isLeft (Pair.stepCommand pair st)))
-            [Pair.Done, Pair.Degraded "x", Pair.Refuse "x", Pair.AwaitCatchUp Pair.B (lsn "0/1"), Pair.PauseBouncers, Pair.RepointBouncers Pair.B]
+            [Pair.Done, Pair.Degraded "x", Pair.Refuse "x", Pair.AwaitCatchUp Pair.B (lsn "0/1"), Pair.AwaitStreaming Pair.A, Pair.PauseBouncers, Pair.RepointBouncers Pair.B]
     ]
   where
     script st = case Pair.stepCommand pair st of
@@ -100,6 +109,10 @@ commandTests =
         Left _ -> Nothing
     isLeft (Left _) = True
     isLeft _ = False
+    -- where a word first appears, so that two of them can be ordered
+    at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
+    tails' [] = [[]]
+    tails' xs@(_ : rest) = xs : tails' rest
     -- what the script does before the given word
     takeWhile' needle hay = case breakOn needle hay of (before, _) -> before
     breakOn needle hay = go "" hay
@@ -134,7 +147,15 @@ lsn t = maybe (error ("bad lsn in test: " <> Text.unpack t)) id (Pair.parseLsn t
 
 -- | A standby streaming from the machine it should be streaming from.
 streamingFrom :: Text -> Text -> Pair.Observed
-streamingFrom host at = Pair.Standby "7000" 1 (Just host) (lsn at) (lsn at)
+streamingFrom host at = Pair.Standby "7000" 1 (Just host) (Just host) (lsn at) (lsn at)
+
+{- | A standby pointed at a machine it is not connected to: a partition, a
+standby still starting, a primary that was promoted a second ago. The
+configuration is the same as 'streamingFrom''s -- only the connection is
+missing, and only one of the two fields says so.
+-}
+pointedAt :: Text -> Text -> Pair.Observed
+pointedAt host at = Pair.Standby "7000" 1 Nothing (Just host) (lsn at) (lsn at)
 
 primaryAt :: Text -> Pair.Observed
 primaryAt at = Pair.Primary "7000" 1 (lsn at)
@@ -189,13 +210,19 @@ observedTests =
     , testCase "a standby, with where it streams from" $
         assertEqual
             ""
-            (Pair.Standby "7412" 3 (Just "10.0.0.1") (lsn "0/4000000") (lsn "0/3FFFFFF"))
-            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=t\nlsn=0/4000000\nreplayed=0/3FFFFFF\nupstream=10.0.0.1\n")
+            (Pair.Standby "7412" 3 (Just "10.0.0.1") (Just "10.0.0.1") (lsn "0/4000000") (lsn "0/3FFFFFF"))
+            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=t\nlsn=0/4000000\nreplayed=0/3FFFFFF\nupstream=10.0.0.1\nconfigured=10.0.0.1\n")
+    , -- the partition's shape: told where to stream from, connected to nobody
+      testCase "a standby that is pointed somewhere and connected to nobody" $
+        assertEqual
+            ""
+            (Pair.Standby "7412" 3 Nothing (Just "10.0.0.1") (lsn "0/4000000") (lsn "0/4000000"))
+            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=t\nlsn=0/4000000\nreplayed=\nupstream=\nconfigured=10.0.0.1\n")
     , testCase "a standby streaming from nowhere" $
         assertEqual
             ""
-            (Pair.Standby "7412" 3 Nothing (lsn "0/4000000") (lsn "0/4000000"))
-            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=t\nlsn=0/4000000\nreplayed=\nupstream=\n")
+            (Pair.Standby "7412" 3 Nothing Nothing (lsn "0/4000000") (lsn "0/4000000"))
+            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=t\nlsn=0/4000000\nreplayed=\nupstream=\nconfigured=\n")
     , testCase "a stopped cluster, read off pg_controldata" $
         assertEqual
             ""
@@ -238,7 +265,7 @@ probeTests =
         assertBool script ("pg_is_in_recovery()" `isInfixOf` script)
         assertBool script ("pg_controldata" `isInfixOf` script)
     , testCase "a running cluster reports every field the parser needs" $
-        mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["sysid", "timeline", "in_recovery", "lsn", "replayed", "upstream"]
+        mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["sysid", "timeline", "in_recovery", "lsn", "replayed", "upstream", "configured"]
     , testCase "a stopped cluster reports what the promotion turns on" $
         mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["checkpoint", "state", "min_recovery"]
     , -- the standby whose primary is gone has received nothing this
@@ -262,10 +289,14 @@ stepTests =
         assertEqual "" (Pair.RepointBouncers Pair.B) (step (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") paused)
     , testCase "arrived, but the clients are still sent to the old primary" $
         assertEqual "" (Pair.RepointBouncers Pair.B) (step (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") atOldPrimary)
+    , -- a partition, and the single most tempting moment to do damage: the
+      -- peer looks exactly like a standby that belongs to somebody else.
+      testCase "the peer is pointed at us but not streaming: wait, do not rewind it" $
+        assertEqual "" (Pair.AwaitStreaming Pair.A) (step (pointedAt "10.0.0.2" "0/5") (primaryAt "0/5") settled)
     , testCase "the peer streams from the wrong machine: rejoin it" $
         assertEqual "" (Pair.Rejoin Pair.A) (step (streamingFrom "10.0.0.9" "0/5") (primaryAt "0/5") settled)
     , testCase "the peer streams from nobody: rejoin it" $
-        assertEqual "" (Pair.Rejoin Pair.A) (step (Pair.Standby "7000" 1 Nothing (lsn "0/5") (lsn "0/5")) (primaryAt "0/5") settled)
+        assertEqual "" (Pair.Rejoin Pair.A) (step (Pair.Standby "7000" 1 Nothing Nothing (lsn "0/5") (lsn "0/5")) (primaryAt "0/5") settled)
     , testCase "the peer is stopped: rejoin it" $
         assertEqual "" (Pair.Rejoin Pair.A) (step (stoppedAt "0/4") (primaryAt "0/5") settled)
     , testCase "the peer is unreachable: serve, and say the pair is one machine short" $
@@ -336,7 +367,7 @@ stepTests =
       testCase "different clusters: refuse before anything else" $
         assertBool
             ""
-            (refuses (step (Pair.Standby "7000" 1 (Just "10.0.0.2") (lsn "0/5") (lsn "0/5")) (Pair.Primary "9999" 1 (lsn "0/5")) settled))
+            (refuses (step (Pair.Standby "7000" 1 (Just "10.0.0.2") (Just "10.0.0.2") (lsn "0/5") (lsn "0/5")) (Pair.Primary "9999" 1 (lsn "0/5")) settled))
     , testCase "no bouncers declared: their state cannot hold a pass back" $
         assertEqual "" Pair.Done (step (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") [])
     ]
