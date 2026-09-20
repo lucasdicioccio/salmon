@@ -34,7 +34,47 @@ tests =
         , testGroup "the probe script" probeTests
         , testGroup "nextStep, with the primary declared on B" stepTests
         , testGroup "nextStep, with the primary declared on A" mirrorTests
+        , testGroup "stepCommand" commandTests
         ]
+
+{- | What a step actually does to a machine. Pure, so the destructive half of
+this recipe is readable without a machine to destroy.
+-}
+commandTests :: [TestTree]
+commandTests =
+    [ testCase "stopping the old primary is clean, so the standby gets the last checkpoint" $
+        assertBool (script (Pair.StopMember Pair.A)) ("stop -m fast" `isInfixOf` script (Pair.StopMember Pair.A))
+    , testCase "each step runs on the machine it names" $ do
+        assertEqual "" (Just "10.0.0.1") (host (Pair.StopMember Pair.A))
+        assertEqual "" (Just "10.0.0.2") (host (Pair.Promote Pair.B))
+    , testCase "promotion waits for the server to say it promoted" $
+        assertBool (script (Pair.Promote Pair.B)) ("pg_promote(true, 60)" `isInfixOf` script (Pair.Promote Pair.B))
+    , testCase "starting is a no-op on a cluster already running" $
+        assertBool (script (Pair.StartMember Pair.A)) ("status" `isInfixOf` script (Pair.StartMember Pair.A))
+    , testCase "rejoining rewinds onto the peer, and never re-clones" $ do
+        let s = script (Pair.Rejoin Pair.A)
+        assertBool s ("pg_rewind" `isInfixOf` s)
+        assertBool s ("-R" `isInfixOf` s)
+        assertBool s ("host=10.0.0.2" `isInfixOf` s)
+        assertBool s ("user=rewinder" `isInfixOf` s)
+        assertBool s (not ("pg_basebackup" `isInfixOf` s))
+        assertBool s (not ("rm -rf" `isInfixOf` s))
+    , testCase "the rewind password is read from its file, never carried" $
+        assertBool (script (Pair.Rejoin Pair.A)) ("PGPASSFILE='/etc/postgresql/rewind.pass'" `isInfixOf` script (Pair.Rejoin Pair.A))
+    , testCase "the steps that are arrivals, waits or refusals run nothing" $
+        mapM_
+            (\st -> assertBool (show st) (isLeft (Pair.stepCommand pair st)))
+            [Pair.Done, Pair.Degraded "x", Pair.Refuse "x", Pair.AwaitCatchUp Pair.B (lsn "0/1"), Pair.PauseBouncers, Pair.RepointBouncers Pair.B]
+    ]
+  where
+    script st = case Pair.stepCommand pair st of
+        Right (_, s) -> s
+        Left why -> error ("expected a command for " <> show st <> ": " <> Text.unpack why)
+    host st = case Pair.stepCommand pair st of
+        Right (m, _) -> Just (Pair.member_host m)
+        Left _ -> Nothing
+    isLeft (Left _) = True
+    isLeft _ = False
 
 -------------------------------------------------------------------------------
 
@@ -46,6 +86,11 @@ pair =
         , Pair.pair_b = member "10.0.0.2"
         , Pair.pair_primary = Pair.B
         , Pair.pair_may_discard = Nothing
+        , Pair.pair_rewind_role = "rewinder"
+        , Pair.pair_rewind_passfile = "/etc/postgresql/rewind.pass"
+        , Pair.pair_ssh_identity = Nothing
+        , Pair.pair_ssh_known_hosts = Nothing
+        , Pair.pair_catch_up_seconds = 60
         }
   where
     member host = Pair.Member "root" host "main" 5432

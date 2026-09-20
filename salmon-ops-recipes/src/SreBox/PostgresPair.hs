@@ -50,16 +50,33 @@ module SreBox.PostgresPair (
     -- * What to do about it
     Step (..),
     nextStep,
+    stepCommand,
+
+    -- * Doing it
+    Report (..),
+    pairRole,
+    observe,
 ) where
 
+import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextError
 import GHC.Generics (Generic)
 import Numeric (readHex)
+import System.Exit (ExitCode (..))
+import System.Process.ByteString (readCreateProcessWithExitCode)
+import System.Process.ListLike (proc)
 
+import Salmon.Actions.UpDown (CheckResult (..))
+import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
+import Salmon.Op.Ref (mkRef)
+import Salmon.Reporter
 
 -------------------------------------------------------------------------------
 -- Declaring a pair
@@ -99,6 +116,20 @@ data Pair
     , pair_b :: Member
     , pair_primary :: Side
     -- ^ where the primary should be. An operator's declaration, not an observation.
+    , pair_rewind_role :: Postgres.RoleName
+    -- ^ the role @pg_rewind@ connects as when an old primary rejoins. Not
+    -- the replication role: rewind reads files through ordinary function
+    -- calls, so it needs a plain login with @EXECUTE@ on @pg_ls_dir@,
+    -- @pg_stat_file@ and the two @pg_read_binary_file@s.
+    , pair_rewind_passfile :: FilePath
+    -- ^ where that role's password sits /on each member/. A path, never the
+    -- password: these commands are shell scripts, and a script is visible in
+    -- @ps@ and printed by every report.
+    , pair_ssh_identity :: Maybe FilePath
+    , pair_ssh_known_hosts :: Maybe FilePath
+    , pair_catch_up_seconds :: Int
+    -- ^ how long a standby may take to replay the old primary's last
+    -- checkpoint before the switchover gives up and says so.
     , pair_may_discard :: Maybe Side
     -- ^ "I accept losing writes on this side that the other does not have".
     --
@@ -367,3 +398,215 @@ nextStep pair obsA obsB bouncers
         all
             (\b -> not b.bouncer_paused && b.bouncer_upstream == Just primary.member_host)
             bouncers
+
+-------------------------------------------------------------------------------
+-- Doing it
+
+{- | The command a step runs, and where.
+
+Pure, so that what a switchover actually does to a machine is readable and
+testable without one. 'Left' is a step that runs nowhere: 'Done' and
+'Degraded' are arrivals, 'Refuse' is a stop, 'AwaitCatchUp' is a wait, and
+the two bouncer steps are not implemented yet (see @specs\/pg-switchover.md@
+phase 4) -- they cannot arise while no bouncer is declared.
+-}
+stepCommand :: Pair -> Step -> Either Text (Member, String)
+stepCommand pair = go
+  where
+    go (StopMember side) =
+        -- fast, not immediate: a clean shutdown sends the standby everything
+        -- it has not got, including the shutdown checkpoint, which is the
+        -- record the promotion below waits for.
+        Right (on side, pgctl side "stop -m fast")
+    go (StartMember side) =
+        Right (on side, pgctl side "status >/dev/null 2>&1 || " <> unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"])
+    go (Promote side) =
+        Right
+            ( on side
+            , psql side "SELECT CASE WHEN pg_promote(true, 60) THEN 'promoted' ELSE 'promotion timed out' END"
+            )
+    go (Rejoin side) = Right (on side, rejoinScript side)
+    go Done = Left "nothing to do"
+    go (Degraded why) = Left why
+    go (Refuse why) = Left why
+    go (AwaitCatchUp _ _) = Left "waiting for the standby to catch up"
+    go PauseBouncers = Left "bouncers are not wired up yet"
+    go (RepointBouncers _) = Left "bouncers are not wired up yet"
+
+    on = memberOn pair
+    cluster side = Text.unpack (on side).member_cluster
+    port side = show (on side).member_port
+
+    pgctl side action =
+        unlines
+            [ "set -e"
+            , versionOf side
+            , unwords ["pg_ctlcluster", "\"$version\"", cluster side, action]
+            ]
+
+    versionOf side =
+        "version=$(pg_lsclusters --no-header | awk -v c=" <> shQuote (cluster side) <> " '$2==c {print $1}' | head -n1)"
+
+    psql side sql =
+        unlines
+            [ "set -e"
+            , unwords ["sudo", "-u", "postgres", "psql", "-p", port side, "-tAX", "-d", "postgres", "-c", shQuote sql]
+            ]
+
+    {- An old primary rejoins by being rewound onto the new one's history,
+    not by being copied over the network: same machine, same data, only the
+    records that diverged are replaced. @-R@ writes standby.signal and
+    primary_conninfo, so starting it afterwards is starting a standby.
+
+    pg_rewind wants the target shut down, and refuses outright if
+    wal_log_hints was off when the cluster was made -- which is why
+    Postgres.defaultReplicationTuning turns it on before there is data. -}
+    rejoinScript side =
+        let peerSide' = other side
+         in unlines
+                [ "set -e"
+                , versionOf side
+                , "datadir=/var/lib/postgresql/$version/" <> cluster side
+                , "bindir=/usr/lib/postgresql/$version/bin"
+                , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "stop || true"]
+                , "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " \"$bindir/pg_rewind\""
+                    <> " --target-pgdata=\"$datadir\" -R --source-server="
+                    <> shQuote (sourceServer peerSide')
+                , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
+                ]
+
+    sourceServer side =
+        unwords
+            [ "host=" <> Text.unpack (on side).member_host
+            , "port=" <> port side
+            , "user=" <> Text.unpack pair.pair_rewind_role
+            , "dbname=postgres"
+            ]
+
+shQuote :: String -> String
+shQuote s = "'" <> concatMap (\c -> if c == '\'' then "'\\''" else [c]) s <> "'"
+
+-------------------------------------------------------------------------------
+
+data Report
+    = Probed !Side !Observed
+    | Deciding !Step
+    | Acted !Side !ExitCode !Text
+    deriving (Show)
+
+{- | Where this pair's primary is.
+
+A node stating a fact about two machines, not an action: its @check@ asks
+them both and is satisfied only when the declaration holds, and its @up@
+takes 'nextStep's steps until it does. Both run from a /controlling/
+machine, over ssh -- never from a member, since the member that dies might
+be the one running this.
+
+@ref@ is keyed on the pair, never on which side is primary, so moving the
+primary changes this node rather than declaring a second one. The declared
+side is in @notes@ instead, which is what makes a re-declaration visible to
+@run serve@ as a change (see "Salmon.Actions.Serve"'s @Stale@).
+
+There is no @down@: tearing a pair down is not "stop being a primary", it is
+whatever the machines' own nodes do, and a switchover node that could stop
+serving on the way out is a footgun with no use.
+-}
+pairRole :: Reporter Report -> Pair -> Op
+pairRole r pair =
+    op "pg-pair-role" nodeps $ \actions ->
+        actions
+            { ref = mkRef "pg-pair-role" pair.pair_name
+            , help = Text.unwords ["primary of", pair.pair_name, "is on", Text.pack (show pair.pair_primary)]
+            , notes =
+                [ "primary declared on " <> Text.pack (show pair.pair_primary)
+                , maybe "no side's writes may be discarded" (\s -> "writes may be discarded on " <> Text.pack (show s)) pair.pair_may_discard
+                ]
+            , check = verdict <$> decide pair
+            , up = converge r pair
+            }
+
+{- | What the pair is, as a verdict.
+
+'Degraded' is 'Unknown' on purpose. Under @run serve@ that is the one
+verdict which restarts nothing (see "Salmon.Actions.Upkeep"), and "the
+primary is where it should be, and the other machine is unreachable" is
+exactly a state to keep looking at and not to act on.
+-}
+verdict :: Step -> CheckResult
+verdict Done = Success
+verdict (Degraded _) = Unknown
+verdict (Refuse why) = Failure why
+verdict step = Failure (Text.pack (show step) <> " is still to do")
+
+-- | Asks both machines, then draws the conclusion.
+decide :: Pair -> IO Step
+decide pair = do
+    obsA <- observe pair A
+    obsB <- observe pair B
+    -- no bouncers yet: an empty list is "nobody is holding any clients",
+    -- which is true, rather than a special case.
+    pure (nextStep pair obsA obsB [])
+
+-- | Runs 'probeScript' on a member and reads what comes back.
+observe :: Pair -> Side -> IO Observed
+observe pair side = do
+    (code, out, err) <- sshTo pair side (probeScript (memberOn pair side))
+    pure $ case code of
+        ExitSuccess -> parseObserved out
+        ExitFailure _ -> Unreachable (Text.strip (Text.take 200 err))
+
+{- | Steps until the declaration holds.
+
+The loop is the design: every turn starts by asking the machines again, so
+an @up@ that died half-way is resumed by the next one rather than continued
+from a note it left itself. The budget is a guard against a state this table
+cannot leave, not a timeout -- a pair that needs more than a handful of
+steps is a pair something else is fighting over.
+-}
+converge :: Reporter Report -> Pair -> IO ()
+converge r pair = go (12 :: Int)
+  where
+    go 0 = throwIO (userError ("pair " <> Text.unpack pair.pair_name <> ": too many steps, giving up"))
+    go budget = do
+        step <- decide pair
+        runReporter r (Deciding step)
+        case step of
+            Done -> pure ()
+            Degraded _ -> pure ()
+            Refuse why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))
+            AwaitCatchUp _ _ -> waitABit >> go (budget - 1)
+            _ -> case stepCommand pair step of
+                Left why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))
+                Right (_, script) -> do
+                    let side = sideOf step
+                    (code, out, err) <- sshTo pair side script
+                    runReporter r (Acted side code (Text.strip (out <> err)))
+                    case code of
+                        ExitSuccess -> go (budget - 1)
+                        ExitFailure _ ->
+                            throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> Text.pack (show step) <> " failed: " <> Text.strip err)))
+
+    waitABit = threadDelay (min 5 pair.pair_catch_up_seconds * 1000000)
+
+    sideOf (StopMember s) = s
+    sideOf (StartMember s) = s
+    sideOf (Promote s) = s
+    sideOf (Rejoin s) = s
+    sideOf _ = pair.pair_primary
+
+-- | Runs a script on a member over ssh, as the login that member declares.
+sshTo :: Pair -> Side -> String -> IO (ExitCode, Text, Text)
+sshTo pair side script = do
+    (code, out, err) <- readCreateProcessWithExitCode (proc "ssh" args) ""
+    pure (code, decode out, decode err)
+  where
+    m = memberOn pair side
+    args =
+        concat
+            [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) pair.pair_ssh_identity
+            , maybe [] (\hosts -> ["-o", "UserKnownHostsFile=" <> hosts, "-o", "StrictHostKeyChecking=accept-new"]) pair.pair_ssh_known_hosts
+            , ["-o", "BatchMode=yes"]
+            , [Text.unpack m.member_ssh_user <> "@" <> Text.unpack m.member_host]
+            , ["bash", "-c", shQuote script]
+            ]
+    decode = Text.decodeUtf8With TextError.lenientDecode
