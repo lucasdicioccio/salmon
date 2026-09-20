@@ -103,6 +103,10 @@ data Member
     , member_host :: Postgres.Host
     , member_cluster :: Postgres.ClusterName
     , member_port :: Postgres.Port
+    , member_ssh_identity :: Maybe FilePath
+    -- ^ a key to authenticate with, for a machine that does not answer to
+    -- whatever the controller offers by default. Per member rather than per
+    -- pair: two machines need not have been given the same key.
     }
     deriving (Eq, Show, Generic)
 
@@ -116,16 +120,23 @@ data Pair
     , pair_b :: Member
     , pair_primary :: Side
     -- ^ where the primary should be. An operator's declaration, not an observation.
+    , pair_repl_role :: Postgres.RoleName
+    -- ^ the @REPLICATION@ role a rejoined member streams as.
+    , pair_repl_passfile :: FilePath
+    -- ^ that role's password, in @.pgpass@ format, on each member: it goes
+    -- into @primary_conninfo@ as @passfile=@, which is how a standby
+    -- authenticates without the password being written into a config file.
     , pair_rewind_role :: Postgres.RoleName
     -- ^ the role @pg_rewind@ connects as when an old primary rejoins. Not
     -- the replication role: rewind reads files through ordinary function
     -- calls, so it needs a plain login with @EXECUTE@ on @pg_ls_dir@,
     -- @pg_stat_file@ and the two @pg_read_binary_file@s.
     , pair_rewind_passfile :: FilePath
-    -- ^ where that role's password sits /on each member/. A path, never the
-    -- password: these commands are shell scripts, and a script is visible in
-    -- @ps@ and printed by every report.
-    , pair_ssh_identity :: Maybe FilePath
+    -- ^ that role's password, in @.pgpass@ format, on each member. A path,
+    -- never the password: these commands are shell scripts, and a script is
+    -- visible in @ps@ and printed by every report. (@.pgpass@ here, unlike
+    -- 'Postgres.standby_repl_passfile''s bare password, because
+    -- @primary_conninfo@ can only take this form.)
     , pair_ssh_known_hosts :: Maybe FilePath
     , pair_catch_up_seconds :: Int
     -- ^ how long a standby may take to replay the old primary's last
@@ -463,6 +474,7 @@ stepCommand pair = go
     Postgres.defaultReplicationTuning turns it on before there is data. -}
     rejoinScript side =
         let peerSide' = other side
+            conf = "\"$datadir/postgresql.auto.conf\""
          in unlines
                 [ "set -e"
                 , versionOf side
@@ -472,8 +484,25 @@ stepCommand pair = go
                 , "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " \"$bindir/pg_rewind\""
                     <> " --target-pgdata=\"$datadir\" -R --source-server="
                     <> shQuote (sourceServer peerSide')
+                , -- pg_rewind's own -R writes these, but it is also entitled
+                  -- to decide no rewind was needed at all -- which is the
+                  -- ordinary case after a clean switchover. Writing them
+                  -- here makes "this member comes back as a standby" true of
+                  -- both outcomes, instead of leaving a second primary
+                  -- behind on the quiet one.
+                  "sudo -u postgres sed -i '/^primary_conninfo/d' " <> conf
+                , "echo " <> shQuote ("primary_conninfo = '" <> primaryConninfo peerSide' <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
+                , "sudo -u postgres touch \"$datadir/standby.signal\""
                 , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
                 ]
+
+    primaryConninfo side =
+        unwords
+            [ "host=" <> Text.unpack (on side).member_host
+            , "port=" <> port side
+            , "user=" <> Text.unpack pair.pair_repl_role
+            , "passfile=" <> pair.pair_repl_passfile
+            ]
 
     sourceServer side =
         unwords
@@ -603,7 +632,7 @@ sshTo pair side script = do
     m = memberOn pair side
     args =
         concat
-            [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) pair.pair_ssh_identity
+            [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) m.member_ssh_identity
             , maybe [] (\hosts -> ["-o", "UserKnownHostsFile=" <> hosts, "-o", "StrictHostKeyChecking=accept-new"]) pair.pair_ssh_known_hosts
             , ["-o", "BatchMode=yes"]
             , [Text.unpack m.member_ssh_user <> "@" <> Text.unpack m.member_host]
