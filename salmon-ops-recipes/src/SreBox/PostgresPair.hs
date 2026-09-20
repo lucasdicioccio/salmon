@@ -37,6 +37,7 @@ module SreBox.PostgresPair (
     Member (..),
     Pair (..),
     memberOn,
+    slotNameFor,
 
     -- * What the machines are
     Lsn (..),
@@ -165,6 +166,28 @@ memberOn :: Pair -> Side -> Member
 memberOn pair A = pair.pair_a
 memberOn pair B = pair.pair_b
 
+{- | The physical replication slot a member streams with, which lives on the
+/other/ member.
+
+One per side rather than one per pair, because both of them are somebody's
+standby eventually and a slot is named on the machine that holds it. The name
+is derived rather than declared so that nothing has to remember it across a
+switchover: a member that rejoins computes the same name the member it
+rejoins would, and a slot nobody can name is a slot nobody can drop.
+
+Postgres allows a slot name of at most 63 lower-case letters, digits and
+underscores, so anything else in the pair's name becomes an underscore.
+-}
+slotNameFor :: Pair -> Side -> Text
+slotNameFor pair side =
+    Text.take 63 ("salmon_pair_" <> Text.map keep (Text.toLower pair.pair_name) <> side')
+  where
+    side' = case side of A -> "_a"; B -> "_b"
+    keep c
+        | c >= 'a' && c <= 'z' = c
+        | c >= '0' && c <= '9' = c
+        | otherwise = '_' 
+
 -------------------------------------------------------------------------------
 -- What the machines are
 
@@ -218,6 +241,12 @@ data Observed
         { o_sysid :: Text
         , o_timeline :: Int
         , o_lsn :: Lsn
+        , o_slots :: [(Text, Text)]
+        -- ^ the replication slots this machine holds, and what each one's
+        -- WAL is worth (@pg_replication_slots.wal_status@). Only a primary
+        -- is asked, because only a primary holds the slot its standby
+        -- streams with -- and @lost@ on that slot is the one observation
+        -- that says a standby can never catch up again.
         }
     | Standby
         { o_sysid :: Text
@@ -242,7 +271,7 @@ data Observed
 -- | The system identifier, for the machines that have one.
 sysidOf :: Observed -> Maybe Text
 sysidOf (Stopped s _ _ _) = Just s
-sysidOf (Primary s _ _) = Just s
+sysidOf (Primary s _ _ _) = Just s
 sysidOf (Standby s _ _ _ _ _) = Just s
 sysidOf _ = Nothing
 
@@ -295,6 +324,7 @@ probeScript m =
               -- so that a primary, which has no such setting, reports an
               -- empty value rather than failing the whole probe.
               "SELECT 'configured=' || coalesce((SELECT substring(setting from 'host=([^ ]+)') FROM pg_settings WHERE name = 'primary_conninfo'), '');"
+            , "SELECT 'slot=' || slot_name || ':' || coalesce(wal_status, '') FROM pg_replication_slots;"
             ]
     controldataFilter =
         unwords
@@ -347,7 +377,7 @@ parseObserved out =
 
     running = case (field "sysid", timeline, field "in_recovery") of
         (Just s, Just tl, Just "f") -> case lsn "lsn" of
-            Just l -> Primary s tl l
+            Just l -> Primary s tl l slots
             Nothing -> Unreachable "a primary reported no write position"
         (Just s, Just tl, Just "t") -> case lsn "lsn" of
             Just recv -> Standby s tl upstream configured recv (fromMaybe recv (lsn "replayed"))
@@ -356,6 +386,9 @@ parseObserved out =
 
     upstream = host "upstream"
     configured = host "configured"
+
+    -- one line per slot, so this is the one field that is a list
+    slots = [(Text.takeWhile (/= ':') v, Text.drop 1 (Text.dropWhile (/= ':') v)) | (k, v) <- fields, k == "slot"]
 
     host k = case field k of
         Just u | not (Text.null u) -> Just u
@@ -421,9 +454,20 @@ nextStep pair obsA obsB bouncers
             -- would stop it and then fail, since whatever keeps it from
             -- streaming keeps pg_rewind from reading too -- a partition would
             -- take the standby down rather than ride it out.
+            -- ... unless the primary's own slot for it says the waiting is
+            -- over: a lost slot is WAL that has been recycled, so there is
+            -- nothing left for this standby to stream and no amount of
+            -- patience produces it.
+            | peerSlotLost -> Degraded lostSlotWhy
             | conf == Just primary.member_host -> AwaitStreaming peerSide
             | otherwise -> Rejoin peerSide
-        (Primary{}, Stopped{}) -> Rejoin peerSide
+        (Primary{}, Stopped{})
+            -- the same, one state earlier: rewinding a member whose slot is
+            -- lost succeeds and changes nothing, since what it then needs to
+            -- replay is gone. Re-seeding is the only way back, and it is an
+            -- operator's decision, not a step.
+            | peerSlotLost -> Degraded lostSlotWhy
+            | otherwise -> Rejoin peerSide
         (Primary{}, Absent) -> Degraded "the peer has no cluster: seed it before it can stream"
         (Primary{}, Unreachable why) -> Degraded ("the peer is unreachable: " <> why)
         (Primary{}, Primary{})
@@ -475,6 +519,17 @@ nextStep pair obsA obsB bouncers
         _ -> False
 
     discardable side = pair.pair_may_discard == Just side
+
+    -- the slot the peer streams with lives on the declared primary, which is
+    -- the only machine that can say what has become of it.
+    peerSlotLost = case p of
+        Primary _ _ _ slots -> lookup (slotNameFor pair peerSide) slots == Just "lost"
+        _ -> False
+
+    lostSlotWhy =
+        "the peer's replication slot ("
+            <> slotNameFor pair peerSide
+            <> ") is lost: it fell further behind than the slot budget allows, so the WAL it needs is gone and only a re-seed brings it back"
 
     -- every bouncer sending clients to the declared primary, and none of
     -- them holding those clients: a bouncer left paused is an outage, so it
@@ -569,6 +624,8 @@ stepCommand pair = go
     rejoinScript side =
         let peerSide' = other side
             conf = "\"$datadir/postgresql.auto.conf\""
+            slotHere = slotNameFor pair side
+            slotHeld = slotNameFor pair peerSide' 
          in unlines
                 [ "set -e"
                 , versionOf side
@@ -610,23 +667,38 @@ stepCommand pair = go
                   -- behind on the quiet one.
                   "sudo -u postgres sed -i '/^primary_conninfo/d' " <> conf
                 , "echo " <> shQuote ("primary_conninfo = '" <> primaryConninfo peerSide' <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
-                , -- and the slot it used to stream with, for a sharper
-                  -- reason. Slots are not replicated, so a member that names
-                  -- one names it on a machine that has never heard of it, and
-                  -- a standby whose slot does not exist does not fall back to
-                  -- streaming without one -- it retries forever ("replication
-                  -- slot ... does not exist") while looking, to every other
-                  -- query, like a healthy standby. Streaming with no slot
-                  -- costs WAL retention, which is what the slot budget of
-                  -- @specs\/pg-switchover.md@ phase 6 is for; streaming with
-                  -- a slot that is not there costs everything.
-                  "sudo -u postgres sed -i '/^primary_slot_name/d' " <> conf
+                , {- The slot this member streams with, on the machine it
+                  streams from. Slots are not replicated and nothing else
+                  creates this one, so a rejoining member makes its own --
+                  and then checks, because a standby that names a slot the
+                  primary does not have retries forever ("replication slot
+                  ... does not exist") while looking, to every other query,
+                  like a healthy standby. Creating it goes over the
+                  replication connection, which is the one path the pair is
+                  already required to have; the check goes over the rewind
+                  role's ordinary one. -}
+                  "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_repl_passfile <> " psql -tAX -d " <> shQuote (replicationConn peerSide')
+                    <> " -c " <> shQuote ("CREATE_REPLICATION_SLOT " <> Text.unpack slotHere <> " PHYSICAL") <> " >/dev/null 2>&1 || true"
+                , "have=$(sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " psql -tAX -d " <> shQuote (sourceServer peerSide')
+                    <> " -c " <> shQuote ("SELECT count(*) FROM pg_replication_slots WHERE slot_name = '" <> Text.unpack slotHere <> "'") <> ")"
+                , "[ \"$have\" = 1 ] || { echo " <> shQuote ("no replication slot " <> Text.unpack slotHere <> " on " <> Text.unpack (on peerSide').member_host) <> " >&2; exit 1; }"
+                , "sudo -u postgres sed -i '/^primary_slot_name/d' " <> conf
+                , "echo " <> shQuote ("primary_slot_name = '" <> Text.unpack slotHere <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
                 , -- and the WAL the stop pinned so that this rewind could
                   -- happen: it has happened, and a standby holding every
                   -- segment it ever saw fills a disk.
                   "sudo -u postgres sed -i '/^wal_keep_size/d' " <> conf
                 , "sudo -u postgres touch \"$datadir/standby.signal\""
                 , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
+                , -- and the slot this member held for the peer back when it
+                  -- was the primary. Nothing consumes it here, and a slot
+                  -- nobody consumes still pins every segment behind it: a
+                  -- standby that keeps one fills its own disk waiting for a
+                  -- machine that is not coming. Not fatal if it fails --
+                  -- this member is already back in the pair by now.
+                  "sudo -u postgres psql -p " <> port side <> " -tAX -d postgres -c "
+                    <> shQuote ("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '" <> Text.unpack slotHeld <> "'")
+                    <> " >/dev/null || echo " <> shQuote ("could not drop the stale slot " <> Text.unpack slotHeld) <> " >&2"
                 ]
 
     primaryConninfo side =
@@ -635,6 +707,17 @@ stepCommand pair = go
             , "port=" <> port side
             , "user=" <> Text.unpack pair.pair_repl_role
             , "passfile=" <> pair.pair_repl_passfile
+            ]
+
+    replicationConn side =
+        unwords
+            [ "host=" <> Text.unpack (on side).member_host
+            , "port=" <> port side
+            , "user=" <> Text.unpack pair.pair_repl_role
+            , "dbname=postgres"
+            , -- the physical kind. `replication=database` is the logical one,
+              -- and pg_hba matches that against the database name.
+              "replication=true"
             ]
 
     sourceServer side =

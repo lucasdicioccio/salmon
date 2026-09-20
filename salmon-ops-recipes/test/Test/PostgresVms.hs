@@ -26,6 +26,7 @@ module Test.PostgresVms (
     stopCluster,
     crashCluster,
     dataDirectoryIdentity,
+    walMegabytes,
     assertPrimaryIs,
     assertInRecovery,
     waitFor,
@@ -155,6 +156,10 @@ and is left alone.
 -}
 ensurePrimary :: VmAccess -> IO ()
 ensurePrimary vm = do
+    -- a spec is allowed to end with a cluster stopped -- S6 does, having
+    -- stopped the standby to see what the primary's disk does about it --
+    -- and the next one still starts from a machine, not from an error.
+    pgCtl vm "status >/dev/null 2>&1 || pg_ctlcluster \"$version\" main start"
     (_, out, _) <- psql vm "SELECT pg_is_in_recovery();"
     unless ("f" `isInfixOf` out) $ do
         psqlOrDie vm "SELECT pg_promote(true, 60);"
@@ -268,6 +273,25 @@ dataDirectoryIdentity vm = do
             ]
     unless (code == ExitSuccess) (fail ("could not read the data directory: " <> out <> err))
     pure (unwords (words out))
+
+-- | How much disk the write-ahead log is taking, in megabytes.
+walMegabytes :: VmAccess -> IO Int
+walMegabytes vm = do
+    (code, out, err) <-
+        sshToVm
+            vm
+            [ "bash"
+            , "-c"
+            , quoteForRemoteShell . unwords $
+                [ "set -e;"
+                , "version=$(pg_lsclusters --no-header | awk '{print $1}' | head -n1);"
+                , "du -sm \"/var/lib/postgresql/$version/main/pg_wal\" | awk '{print $1}'"
+                ]
+            ]
+    unless (code == ExitSuccess) (fail ("could not measure pg_wal: " <> out <> err))
+    case reads (takeWhile (/= '\n') out) of
+        [(n, _)] -> pure n
+        _ -> fail ("could not read a size from: " <> out)
 
 assertPrimaryIs :: VmAccess -> IO ()
 assertPrimaryIs vm = do
