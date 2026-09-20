@@ -56,6 +56,10 @@ module SreBox.PostgresPair (
     Report (..),
     pairRole,
     observe,
+    decide,
+    converge,
+    convergeUpTo,
+    stepBudget,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -593,9 +597,21 @@ cannot leave, not a timeout -- a pair that needs more than a handful of
 steps is a pair something else is fighting over.
 -}
 converge :: Reporter Report -> Pair -> IO ()
-converge r pair = go (12 :: Int)
+converge r = convergeUpTo r stepBudget
+
+{- | How many steps a pass may take before it decides the pair is being
+fought over by something else. A switchover between two machines that are
+both there is three: stop the old primary, promote the new one, rejoin the
+old one.
+-}
+stepBudget :: Int
+stepBudget = 12
+
+-- | 'converge', with the budget spelled out. A test stopping a controller
+-- part-way is what this is for.
+convergeUpTo :: Reporter Report -> Int -> Pair -> IO ()
+convergeUpTo r budget0 pair = go budget0
   where
-    go 0 = throwIO (userError ("pair " <> Text.unpack pair.pair_name <> ": too many steps, giving up"))
     go budget = do
         step <- decide pair
         runReporter r (Deciding step)
@@ -603,6 +619,11 @@ converge r pair = go (12 :: Int)
             Done -> pure ()
             Degraded _ -> pure ()
             Refuse why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))
+            _
+                -- asked after the arrivals, never before: a pass that has
+                -- spent its budget and is /there/ has not failed at anything.
+                | budget <= 0 ->
+                    throwIO (userError ("pair " <> Text.unpack pair.pair_name <> ": still " <> show step <> " after " <> show budget0 <> " steps, giving up"))
             AwaitCatchUp _ _ -> waitABit >> go (budget - 1)
             _ -> case stepCommand pair step of
                 Left why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))

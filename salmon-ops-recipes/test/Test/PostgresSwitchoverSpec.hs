@@ -21,29 +21,90 @@ first switchover each of them has to accept the other streaming from it.
 module Test.PostgresSwitchoverSpec (tests) where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless)
+import Control.Exception (SomeException, try)
+import Control.Monad (forM_, unless)
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
-import System.IO (hPutStrLn, stderr)
-import System.Process (readProcessWithExitCode)
 import Test.Harness
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (DependencyType (..), TestTree, sequentialTestGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
 import Salmon.Reporter (silent)
 import qualified SreBox.PostgresPair as Pair
+import Test.PostgresVms
 
 tests :: TestTree
 tests =
-    testGroup
+    -- one pair of VMs, one bridge, two addresses: these cases cannot run at
+    -- the same time as each other any more than the specs around them can.
+    sequentialTestGroup
         "Postgres switchover (Layer 3, a primary moved between two VMs)"
-        [testCase "switches the primary over, and back, without losing a row" switchesOverAndBack]
+        AllFinish
+        [ testCase "switches the primary over, and back, without losing a row" switchesOverAndBack
+        , testCase "a switchover stopped part-way is finished by the next pass" resumesAfterInterruption
+        ]
 
-primaryRootfs, standbyRootfs :: FilePath
-primaryRootfs = "/var/lib/salmon-test-vms/pg-primary/root"
-standbyRootfs = "/var/lib/salmon-test-vms/pg-standby/root"
+{- | S2: kill the controller after each step of a switchover in turn, and
+let an ordinary pass pick it up.
+
+This is the scenario the design is /for/. 'SreBox.PostgresPair.nextStep'
+reads the machines rather than a note about where a previous pass got to,
+and the claim that buys -- an interrupted switchover needs no repair, only
+another pass -- is a claim about states nobody writes down and so nobody
+tests by accident.
+
+The interruption is a budget: a controller allowed @k@ steps does @k@ and
+throws, which is what a controller being killed looks like from the
+machines' side. The direction alternates, so each @k@ lands part-way through
+a switchover going the other way than the last one did.
+-}
+resumesAfterInterruption :: IO ()
+resumesAfterInterruption = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            insertRow a "before-any-interruption"
+
+            forM_ (zip [1 :: Int, 2, 3] (cycle [Pair.B, Pair.A])) $ \(k, side) -> do
+                let p = pairWith a b side
+                -- a controller that dies part-way
+                outcome <- try (Pair.convergeUpTo silent k p) :: IO (Either SomeException ())
+                -- ... which, for a budget short of the three steps a
+                -- switchover takes, must really have stopped part-way:
+                -- otherwise the pass below is being credited with finishing
+                -- something that was never started.
+                unless (k >= 3) $ do
+                    assertBool ("a budget of " <> show k <> " steps finished a whole switchover") (isLeft outcome)
+                    midA <- Pair.observe p Pair.A
+                    midB <- Pair.observe p Pair.B
+                    assertBool
+                        ("interrupted at step " <> show k <> ", yet already settled: " <> show midA <> " / " <> show midB)
+                        (Pair.nextStep p midA midB [] /= Pair.Done)
+                -- and an ordinary pass afterwards, with nothing else done
+                ok <- runUp (Pair.pairRole silent p)
+                assertBool ("a pass after an interruption at step " <> show k <> " failed") ok
+                obsA <- Pair.observe p Pair.A
+                obsB <- Pair.observe p Pair.B
+                assertEqual
+                    ("interrupted at step " <> show k <> ", not finished: " <> show obsA <> " / " <> show obsB)
+                    Pair.Done
+                    (Pair.nextStep p obsA obsB [])
+                insertRow (vmFor a b side) ("after-interruption-at-" <> show k)
+
+            -- nothing written along the way was lost by any of it
+            let rows = "before-any-interruption" : ["after-interruption-at-" <> show k | k <- [1 :: Int, 2, 3]]
+            waitForRows a rows
+            waitForRows b rows
+
+isLeft :: Either a b -> Bool
+isLeft (Left _) = True
+isLeft _ = False
+
+vmFor :: VmAccess -> VmAccess -> Pair.Side -> VmAccess
+vmFor a _ Pair.A = a
+vmFor _ b Pair.B = b
 
 replPassword, rewindPassword :: String
 replPassword = "fixture-replication-password"
@@ -54,19 +115,11 @@ replPgpass = "/etc/postgresql/salmon-replication.pgpass"
 rewindPgpass = "/etc/postgresql/salmon-rewind.pgpass"
 
 switchesOverAndBack :: IO ()
-switchesOverAndBack = requirePrereqs $ do
+switchesOverAndBack = requirePgVmPrereqs $ do
     fixtureBin <- resolveFixtureBinary
     withVmAt testVmAddr primaryRootfs $ \a ->
         withVmAt testVmAddr2 standbyRootfs $ \b -> do
-            -- a pair, as it stands before any switchover: A primary, B its standby
-            resetCluster b
-            mapM_ (\(vm, path) -> scpToVm vm fixtureBin path) [(a, "/root/fixture"), (b, "/root/fixture")]
-            mapM_ (\vm -> sshOrDie vm ["chmod", "+x", "/root/fixture"]) [a, b]
-            runFixture a ["primary", Text.unpack testVmAddr2 <> "/32"]
-            runFixture b ["standby", Text.unpack testVmAddr]
-            waitForStandby b
-
-            prepareForSwitchover a b
+            buildPair a b fixtureBin
             insertRow a "before-any-switchover"
 
             -- A -> B
@@ -127,6 +180,22 @@ pairWith a b side =
     member host identity = Pair.Member "root" host "main" 5432 (Just identity)
 
 -------------------------------------------------------------------------------
+
+{- | A pair as it stands before any switchover: A primary, B its standby,
+and both machines ready to swap those roles.
+-}
+buildPair :: VmAccess -> VmAccess -> FilePath -> IO ()
+buildPair a b fixtureBin = do
+    -- whatever the last spec left: A may well be a standby of B, and the
+    -- fixture's primary half cannot run on a read-only server.
+    ensurePrimary a
+    resetCluster b
+    mapM_ (\(vm, path) -> scpToVm vm fixtureBin path) [(a, "/root/fixture"), (b, "/root/fixture")]
+    mapM_ (\vm -> sshOrDie vm ["chmod", "+x", "/root/fixture"]) [a, b]
+    runFixture a ["primary", Text.unpack testVmAddr2 <> "/32"]
+    runFixture b ["standby", Text.unpack testVmAddr]
+    waitForStandby b
+    prepareForSwitchover a b
 
 {- | What a switchover needs and plain streaming replication does not: a
 rewind role, its password file and the replication one on both machines, and
@@ -215,67 +284,3 @@ waitForStandby vm = go (30 :: Int)
     go n = do
         (code, out, _) <- psql vm "SELECT status FROM pg_stat_wal_receiver;"
         if code == ExitSuccess && "streaming" `isInfixOf` out then pure () else threadDelay 2000000 >> go (n - 1)
-
-{- | The standby's rootfs outlives its VM, and the last run left a cluster
-of some other lineage in it; start from one just created. Same reasoning as
-"Test.PostgresReplicationSpec".
--}
-resetCluster :: VmAccess -> IO ()
-resetCluster vm =
-    sshOrDie vm
-        [ "bash"
-        , "-c"
-        , quoteForRemoteShell . unwords $
-            [ "export LANG=C LC_ALL=C;"
-            , "set -e;"
-            , "version=$(ls /usr/lib/postgresql | sort -n | tail -n1);"
-            , "if pg_lsclusters --no-header | awk '{print $2}' | grep -qx main;"
-            , "then pg_dropcluster \"$version\" main --stop; fi;"
-            , "pg_createcluster \"$version\" main -p 5432 -- --auth-local=peer --auth-host=md5;"
-            , "pg_ctlcluster \"$version\" main start"
-            ]
-        ]
-
-psql :: VmAccess -> String -> IO (ExitCode, String, String)
-psql vm sql = sshToVm vm ["sudo", "-u", "postgres", "psql", "-tAXc", quoteForRemoteShell sql]
-
-psqlOrDie :: VmAccess -> String -> IO ()
-psqlOrDie vm sql = do
-    (code, out, err) <- psql vm sql
-    unless (code == ExitSuccess) (fail ("psql failed: " <> sql <> "\n" <> out <> err))
-
-sshOrDie :: VmAccess -> [String] -> IO ()
-sshOrDie vm args = do
-    (code, out, err) <- sshToVm vm args
-    unless (code == ExitSuccess) (fail ("remote command failed: " <> unwords args <> "\n" <> out <> err))
-
-runFixture :: VmAccess -> [String] -> IO ()
-runFixture vm args = do
-    (code, out, err) <- sshToVm vm (["/root/fixture"] <> args)
-    unless (code == ExitSuccess) (fail ("fixture " <> unwords args <> " failed:\n" <> out <> err))
-
-requirePrereqs :: IO () -> IO ()
-requirePrereqs act = do
-    privileged <- hasVmPrivileges
-    hasQemu <- (/= Nothing) <$> findExecutable "qemu-system-x86_64"
-    hasA <- doesFileExist (primaryRootfs <> "/etc/issue")
-    hasB <- doesFileExist (standbyRootfs <> "/etc/issue")
-    case () of
-        _
-            | not privileged -> skip "needs root, or ip/qemu-system-x86_64 setcap'd (see Test.Harness.hasVmPrivileges)"
-            | not hasQemu -> skip "qemu-system-x86_64 not found on PATH"
-            | not hasA -> skip ("no VM rootfs at " <> primaryRootfs <> " (see Test.PostgresReplicationSpec)")
-            | not hasB -> skip ("no VM rootfs at " <> standbyRootfs <> " (see Test.PostgresReplicationSpec)")
-            | otherwise -> act
-  where
-    skip msg = hPutStrLn stderr ("SKIPPED: " <> msg)
-
-resolveFixtureBinary :: IO FilePath
-resolveFixtureBinary = do
-    (code, out, err) <- readProcessWithExitCode "cabal" ["list-bin", "salmon-postgres-replication-fixture"] ""
-    case code of
-        ExitSuccess -> case filter (not . null) (lines out) of
-            [] -> error "resolveFixtureBinary: `cabal list-bin` produced no output"
-            ls -> pure (last ls)
-        ExitFailure n ->
-            error ("resolveFixtureBinary: cabal list-bin failed with exit " <> show n <> "\n" <> err)
