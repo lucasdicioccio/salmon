@@ -202,7 +202,16 @@ data Observed
         { o_sysid :: Text
         , o_timeline :: Int
         , o_checkpoint :: Lsn
-        -- ^ from @pg_controldata@: the last checkpoint written before it stopped.
+        -- ^ the furthest position @pg_controldata@ can prove this cluster
+        -- reached: its latest checkpoint, or its minimum recovery point if
+        -- that is further (which it is for a standby that was stopped).
+        , o_clean :: Bool
+        -- ^ whether it stopped cleanly, from @pg_controldata@'s cluster
+        -- state. This is what says whether 'o_checkpoint' is the whole
+        -- story: a cluster shut down cleanly ends with a checkpoint, so
+        -- there is no WAL after it, while a crashed one may have written
+        -- any amount past its last checkpoint and pg_control says nothing
+        -- about it.
         }
     | Primary
         { o_sysid :: Text
@@ -214,13 +223,16 @@ data Observed
         , o_timeline :: Int
         , o_upstream :: Maybe Postgres.Host
         , o_received :: Lsn
+        -- ^ the furthest position it holds: what it received, or what it
+        -- replayed from its own WAL if it has received nothing since it
+        -- started.
         , o_replayed :: Lsn
         }
     deriving (Eq, Show)
 
 -- | The system identifier, for the machines that have one.
 sysidOf :: Observed -> Maybe Text
-sysidOf (Stopped s _ _) = Just s
+sysidOf (Stopped s _ _ _) = Just s
 sysidOf (Primary s _ _) = Just s
 sysidOf (Standby s _ _ _ _) = Just s
 sysidOf _ = Nothing
@@ -257,7 +269,16 @@ probeScript m =
             [ "SELECT 'sysid=' || system_identifier FROM pg_control_system();"
             , "SELECT 'timeline=' || timeline_id FROM pg_control_checkpoint();"
             , "SELECT 'in_recovery=' || CASE WHEN pg_is_in_recovery() THEN 't' ELSE 'f' END;"
-            , "SELECT 'lsn=' || CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn() ELSE pg_current_wal_lsn() END;"
+            , -- a standby that has just restarted and cannot reach its
+              -- primary -- which is the failover case, and so exactly when
+              -- this has to work -- has received nothing in this session, and
+              -- pg_last_wal_receive_lsn() is then NULL rather than the
+              -- position it crash-recovered to. Asking for the furthest of
+              -- the two is the same answer whenever both exist, since a
+              -- standby cannot replay what it has not received.
+              "SELECT 'lsn=' || CASE WHEN pg_is_in_recovery()"
+                <> " THEN GREATEST(coalesce(pg_last_wal_receive_lsn(), '0/0'::pg_lsn), coalesce(pg_last_wal_replay_lsn(), '0/0'::pg_lsn))"
+                <> " ELSE pg_current_wal_lsn() END;"
             , "SELECT 'replayed=' || coalesce(pg_last_wal_replay_lsn()::text, '');"
             , "SELECT 'upstream=' || coalesce((SELECT sender_host FROM pg_stat_wal_receiver LIMIT 1), '');"
             ]
@@ -265,8 +286,12 @@ probeScript m =
         unwords
             [ "| sed -n"
             , "-e 's/^Database system identifier: *\\(.*\\)$/sysid=\\1/p'"
+            , "-e 's/^Database cluster state: *\\(.*\\)$/state=\\1/p'"
             , "-e 's/^Latest checkpoint location: *\\(.*\\)$/checkpoint=\\1/p'"
             , "-e \"s/^Latest checkpoint's TimeLineID: *\\(.*\\)$/timeline=\\1/p\""
+            , -- 0/0 on a primary; on a standby that was stopped, this is how
+              -- far it actually replayed, which is past its last checkpoint.
+              "-e 's/^Minimum recovery ending location: *\\(.*\\)$/min_recovery=\\1/p'"
             ]
     shellQuote :: String -> String
     shellQuote s = "'" <> concatMap (\c -> if c == '\'' then "'\\''" else [c]) s <> "'"
@@ -295,8 +320,16 @@ parseObserved out =
         _ -> Nothing
 
     stopped = case (field "sysid", timeline, lsn "checkpoint") of
-        (Just s, Just tl, Just cp) -> Stopped s tl cp
+        (Just s, Just tl, Just cp) -> Stopped s tl (max cp (fromMaybe cp (lsn "min_recovery"))) cleanly
         _ -> Unreachable "a stopped cluster reported no control data"
+
+    -- pg_controldata's cluster state, of which exactly two values mean the
+    -- cluster was stopped rather than lost: a primary shut down, and a
+    -- standby shut down while in recovery. "in production" on a cluster that
+    -- is not running is what a crash reads as, and an unrecognised value is
+    -- treated the same way -- the direction that refuses rather than the one
+    -- that promotes.
+    cleanly = field "state" `elem` [Just "shut down", Just "shut down in recovery"]
 
     running = case (field "sysid", timeline, field "in_recovery") of
         (Just s, Just tl, Just "f") -> case lsn "lsn" of
@@ -375,7 +408,18 @@ nextStep pair obsA obsB bouncers
         (Standby{}, Primary{})
             | any (not . bouncer_paused) bouncers -> PauseBouncers
             | otherwise -> StopMember peerSide
-        (Standby _ _ _ recv _, Stopped _ _ checkpoint)
+        (Standby _ _ _ recv _, Stopped _ _ checkpoint clean)
+            -- the operator has already said what may be lost, so nothing
+            -- below can tell them anything they have not accepted.
+            | discardable peerSide -> Promote primarySide
+            -- a crashed peer proves nothing past its last checkpoint: it may
+            -- have written and acknowledged any amount of WAL after it, and
+            -- pg_control does not say. Comparing against the checkpoint would
+            -- read as "the standby has everything" precisely when it is least
+            -- likely to be true.
+            | not clean ->
+                Refuse
+                    "the peer did not stop cleanly, so what it wrote after its last checkpoint is unknown; say whether its writes may be discarded"
             | recv >= checkpoint -> Promote primarySide
             | otherwise -> AwaitCatchUp primarySide checkpoint
         (Standby{}, Absent) -> Promote primarySide
@@ -483,8 +527,32 @@ stepCommand pair = go
                 [ "set -e"
                 , versionOf side
                 , "datadir=/var/lib/postgresql/$version/" <> cluster side
+                , "confdir=/etc/postgresql/$version/" <> cluster side
                 , "bindir=/usr/lib/postgresql/$version/bin"
                 , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "stop || true"]
+                , -- pg_rewind finishes a crashed target's recovery itself, by
+                  -- running `postgres --single -D <datadir>` -- which takes
+                  -- the configuration to be in the data directory. On Debian
+                  -- it is in /etc/postgresql, so that step fails and the
+                  -- rewind with it, in exactly the case a failover is about:
+                  -- the machine that died. Do the recovery here, where the
+                  -- config file's location is known. Single-user, never a
+                  -- start: a server that listens is a second primary, and
+                  -- this one still believes it is the primary.
+                  "state=$(\"$bindir/pg_controldata\" -D \"$datadir\" | sed -n 's/^Database cluster state: *//p')"
+                , -- and it must not throw away what it is being run for: a
+                  -- clean shutdown ends in a checkpoint, and a checkpoint
+                  -- recycles the WAL before it -- which is the WAL pg_rewind
+                  -- then reads, from the last checkpoint the two machines
+                  -- share. Keeping as much as pg_wal already holds costs
+                  -- nothing, since it is on the disk either way.
+                  "keep=$(du -sm \"$datadir/pg_wal\" | awk '{print $1 + 1}')"
+                , "case \"$state\" in"
+                , "  'shut down'|'shut down in recovery') ;;"
+                , "  *) sudo -u postgres \"$bindir/postgres\" --single -D \"$datadir\""
+                    <> " -c config_file=\"$confdir/postgresql.conf\" -c wal_keep_size=\"${keep}MB\""
+                    <> " template1 </dev/null >/dev/null ;;"
+                , "esac"
                 , "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " \"$bindir/pg_rewind\""
                     <> " --target-pgdata=\"$datadir\" -R --source-server="
                     <> shQuote (sourceServer peerSide')
@@ -496,6 +564,17 @@ stepCommand pair = go
                   -- behind on the quiet one.
                   "sudo -u postgres sed -i '/^primary_conninfo/d' " <> conf
                 , "echo " <> shQuote ("primary_conninfo = '" <> primaryConninfo peerSide' <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
+                , -- and the slot it used to stream with, for a sharper
+                  -- reason. Slots are not replicated, so a member that names
+                  -- one names it on a machine that has never heard of it, and
+                  -- a standby whose slot does not exist does not fall back to
+                  -- streaming without one -- it retries forever ("replication
+                  -- slot ... does not exist") while looking, to every other
+                  -- query, like a healthy standby. Streaming with no slot
+                  -- costs WAL retention, which is what the slot budget of
+                  -- @specs\/pg-switchover.md@ phase 6 is for; streaming with
+                  -- a slot that is not there costs everything.
+                  "sudo -u postgres sed -i '/^primary_slot_name/d' " <> conf
                 , "sudo -u postgres touch \"$datadir/standby.signal\""
                 , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
                 ]

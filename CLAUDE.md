@@ -470,27 +470,44 @@ systemd's `NeedDaemonReload`. `restartCluster` and `promoteCluster` stay uncondi
 restart is not a state, and "not in recovery" is a fact about a *pair* of machines that one of
 them cannot answer alone.
 
-`SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary,
-and `pairRole` — a node that *states where the primary is* rather than an action that moves it.
-Its `check` asks both machines and its `up` takes steps until the declaration holds, both over
-ssh from a **controlling** machine (never a member: the member that dies may be the one running
-it). Four things are load-bearing. **Nothing decides a machine is dead** — salmon has no
-consensus, so a failover needs the operator to name, in `pair_may_discard`, the side whose
-un-replicated writes may go; without it the node refuses, and the same field is what allows one
-of two primaries to be rewound onto the other. **The state is re-derived every turn**
-(`observe` → `nextStep` → act → observe), so an `up` killed mid-switchover is finished by the
-next one; there is no progress file that could disagree with the machines, and that property is
-what to protect when changing `nextStep`. **`Degraded` is `Unknown`**, the one verdict `Upkeep`
-acts on by continuing to look — "the primary is where it should be and the peer is unreachable"
-must not start anything. And **the `ref` is keyed on the pair, never on the side**, so moving
-the primary changes that node rather than declaring a second one; the declared side rides in
-`notes`, where `serve` sees it as a change. An old primary rejoins through `pg_rewind` onto the
-new one's history, never a re-clone — which is what `wal_log_hints` above is for — and the node
-writes `primary_conninfo`/`standby.signal` itself afterwards, because `pg_rewind` may decide no
-rewind was needed and what it then does about `-R` is not worth betting a second primary on.
-Bouncers are declared but not yet wired (`specs/pg-switchover.md` phase 4), so the pause/repoint
-steps cannot arise while none is declared. `Test.PostgresPairSpec` is the whole table at Layer 0,
-refusals included; `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back.
+`SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary, and
+`pairRole` — a node that *states where the primary is* rather than an action that moves it. Its
+`check` asks both machines and its `up` takes steps until the declaration holds, both over ssh
+from a **controlling** machine (never a member: the member that dies may be the one running it).
+Four things are load-bearing. **Nothing decides a machine is dead** — salmon has no consensus, so
+a failover needs the operator to name, in `pair_may_discard`, the side whose un-replicated writes
+may go; without it the node refuses, and the same field is what allows one of two primaries to be
+rewound onto the other. A *crashed* peer is in that same category and for a reason worth knowing:
+`pg_controldata`'s checkpoint location is the end of the WAL only for a cluster that shut down
+cleanly (the last record is then a shutdown checkpoint), so for a crashed one the comparison "the
+standby has reached its checkpoint" reads as "the standby has everything" precisely when it is
+least likely to be true — hence `o_clean`, read from `Database cluster state`, with any value
+other than `shut down`/`shut down in recovery` counting as a crash. **The state is re-derived
+every turn** (`observe` → `nextStep` → act → observe), so an `up` killed mid-switchover is
+finished by the next one; there is no progress file that could disagree with the machines, and
+that property is what to protect when changing `nextStep`. **`Degraded` is `Unknown`**, the one
+verdict `Upkeep` acts on by continuing to look — "the primary is where it should be and the peer
+is unreachable" must not start anything. And **the `ref` is keyed on the pair, never on the
+side**, so moving the primary changes that node rather than declaring a second one; the declared
+side rides in `notes`, where `serve` sees it as a change. An old primary rejoins through
+`pg_rewind` onto the new one's history, never a re-clone — which is what `wal_log_hints` above is
+for — and three things sit around that command, each of which was a failure first. The node writes
+`primary_conninfo` itself, because `pg_rewind` may decide no rewind was needed and what it then
+does about `-R` is not worth betting a second primary on; it *deletes* `primary_slot_name`,
+because slots are not replicated and a standby naming a slot the new primary never heard of
+retries forever while looking healthy to every query but `pg_stat_wal_receiver`; and it completes
+a crashed target's recovery itself, in single-user mode with `-c config_file=` (pg_rewind's own
+attempt assumes Debian keeps postgresql.conf in the data directory, which it does not) and with
+`wal_keep_size` pinned to what `pg_wal` already holds, or that recovery's shutdown checkpoint
+recycles the very WAL the rewind is about to read. Bouncers are declared but not yet wired
+(`specs/pg-switchover.md` phase 4), so the pause/repoint steps cannot arise while none is
+declared. `Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;
+`Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a controller
+after each step in turn to show a plain pass finishes what it left, and kills a primary outright
+to show the failover refused without the flag and rewinds with it. `Test.PostgresVms` holds what
+those specs share, and the reason it exists is that **a rootfs is a host directory that outlives
+its VM**: a spec that moved the primary leaves the next one starting from a standby, so each
+normalizes on the way in (`ensurePrimary`, `resetCluster`) rather than assuming.
 
 ## Conventions for node authors
 

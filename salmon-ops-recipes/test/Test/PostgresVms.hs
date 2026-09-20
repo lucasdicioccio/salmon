@@ -23,6 +23,12 @@ module Test.PostgresVms (
     sshOrDie,
     ensurePrimary,
     resetCluster,
+    stopCluster,
+    crashCluster,
+    dataDirectoryIdentity,
+    assertPrimaryIs,
+    assertInRecovery,
+    waitFor,
 ) where
 
 import Control.Concurrent (threadDelay)
@@ -154,6 +160,15 @@ ensurePrimary vm = do
 For the standby, whose data directory is about to be replaced by a clone
 anyway: starting from a cluster that was just created is also the state the
 clone's own "pristine" branch is written for.
+
+It removes both directories by hand rather than trusting @pg_dropcluster@
+with the job, because the state this has to survive is a /half/ a cluster. A
+run interrupted between "remove the data directory" and "clone into it", or
+between the drop's two halves, leaves one of the two directories without the
+other -- and then @pg_lsclusters@ lists nothing, so there is nothing to drop,
+while @pg_createcluster@ finds a data directory to adopt and fails on the
+config files a clone does not have. That is a wreck no amount of asking
+politely gets rid of.
 -}
 resetCluster :: VmAccess -> IO ()
 resetCluster vm =
@@ -169,8 +184,103 @@ resetCluster vm =
             , -- not pg_lsclusters: there may be no cluster to list.
               "version=$(ls /usr/lib/postgresql | sort -n | tail -n1);"
             , "if pg_lsclusters --no-header | awk '{print $2}' | grep -qx main;"
-            , "then pg_dropcluster \"$version\" main --stop; fi;"
+            , "then pg_dropcluster \"$version\" main --stop || true; fi;"
+            , "rm -rf \"/etc/postgresql/$version/main\" \"/var/lib/postgresql/$version/main\";"
             , "pg_createcluster \"$version\" main -p 5432 -- --auth-local=peer --auth-host=md5;"
             , "pg_ctlcluster \"$version\" main start"
             ]
         ]
+
+{- | Stops this machine's cluster the way an operator would, leaving a
+shutdown checkpoint behind: what it stopped at is then on disk, and a
+promotion elsewhere can prove it lost nothing.
+-}
+stopCluster :: VmAccess -> IO ()
+stopCluster vm = pgCtl vm "stop"
+
+{- | Kills this machine's cluster the way a crash would, leaving nothing
+behind: whatever it wrote after its last checkpoint is in the WAL and in no
+control file, which is the state a failover cannot reason about.
+-}
+crashCluster :: VmAccess -> IO ()
+crashCluster vm = do
+    sshOrDie
+        vm
+        [ "bash"
+        , "-c"
+        , quoteForRemoteShell . unwords $
+            [ "version=$(pg_lsclusters --no-header | awk '{print $1}' | head -n1);"
+            , -- the unit's whole cgroup, so no backend outlives the postmaster
+              "systemctl kill -s KILL postgresql@\"$version\"-main 2>/dev/null;"
+            , "pkill -9 -u postgres 2>/dev/null;"
+            , "true"
+            ]
+        ]
+    waitFor "the cluster never died" $ do
+        (code, out, _) <- sshToVm vm ["pg_lsclusters", "--no-header"]
+        pure (code /= ExitSuccess || not ("online" `isInfixOf` out), out)
+
+pgCtl :: VmAccess -> String -> IO ()
+pgCtl vm action =
+    sshOrDie
+        vm
+        [ "bash"
+        , "-c"
+        , quoteForRemoteShell . unwords $
+            [ "set -e;"
+            , "version=$(pg_lsclusters --no-header | awk '{print $1}' | head -n1);"
+            , "pg_ctlcluster \"$version\" main " <> action
+            ]
+        ]
+
+{- | Something about this cluster's data directory that survives a rewind and
+cannot survive a re-clone: the inodes of the directory and of the one file in
+it that never changes.
+
+This is how a test tells "the old primary was rewound onto the new one" from
+"the old primary was thrown away and copied back", which from the outside
+look alike -- same rows, same system identifier, same timeline. Only one of
+them unlinks anything.
+-}
+dataDirectoryIdentity :: VmAccess -> IO String
+dataDirectoryIdentity vm = do
+    (code, out, err) <-
+        sshToVm
+            vm
+            [ "bash"
+            , "-c"
+            , quoteForRemoteShell . unwords $
+                [ "set -e;"
+                , "version=$(pg_lsclusters --no-header | awk '{print $1}' | head -n1);"
+                , "datadir=/var/lib/postgresql/$version/main;"
+                , "stat -c %i \"$datadir\" \"$datadir/PG_VERSION\""
+                ]
+            ]
+    unless (code == ExitSuccess) (fail ("could not read the data directory: " <> out <> err))
+    pure (unwords (words out))
+
+assertPrimaryIs :: VmAccess -> IO ()
+assertPrimaryIs vm = do
+    (_, out, _) <- psql vm "SELECT pg_is_in_recovery();"
+    assertBool ("expected a primary, got: " <> out) ("f" `isInfixOf` out)
+
+assertInRecovery :: VmAccess -> IO ()
+assertInRecovery vm = do
+    (_, out, _) <- psql vm "SELECT pg_is_in_recovery();"
+    assertBool ("expected a standby, got: " <> out) ("t" `isInfixOf` out)
+
+{- | Polls every two seconds for a minute, and says what it last saw rather
+than only that it gave up. Every one of these waits is on a machine doing
+something in its own time -- a standby connecting, a promotion finishing, a
+row arriving -- and none of them is instant.
+-}
+waitFor :: String -> IO (Bool, String) -> IO ()
+waitFor what probe = go (30 :: Int)
+  where
+    go :: Int -> IO ()
+    go 0 = do
+        (_, seen) <- probe
+        fail (what <> "; last seen: " <> seen)
+    go n = do
+        (ok, _) <- probe
+        unless ok (threadDelay 2000000 >> go (n - 1))

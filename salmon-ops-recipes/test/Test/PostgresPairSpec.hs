@@ -17,7 +17,7 @@ becomes /allowed/ only when the operator has said so through
 -}
 module Test.PostgresPairSpec (tests) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Tasty (TestTree, testGroup)
@@ -59,10 +59,29 @@ commandTests =
         assertBool s ("user=rewinder" `isInfixOf` s)
         assertBool s (not ("pg_basebackup" `isInfixOf` s))
         assertBool s (not ("rm -rf" `isInfixOf` s))
+    , -- pg_rewind finishes a crashed target's recovery by running
+      -- `postgres --single -D <datadir>`, which looks for the configuration
+      -- in the data directory. Debian keeps it in /etc/postgresql, so that
+      -- step fails on exactly the machine a failover is about.
+      testCase "a crashed member is recovered before the rewind, with a config file it can find" $ do
+        let s' = script (Pair.Rejoin Pair.A)
+        assertBool s' ("pg_controldata" `isInfixOf` s')
+        assertBool s' ("--single" `isInfixOf` s')
+        assertBool s' ("config_file=" `isInfixOf` s')
+        -- and that recovery must not recycle the WAL the rewind then reads
+        assertBool s' ("wal_keep_size=" `isInfixOf` s')
+        -- and never a start: a server that listens is a second primary
+        assertBool s' (not ("main start" `isInfixOf` takeWhile' "pg_rewind" s'))
+    , testCase "a member that shut down cleanly is not recovered twice" $
+        assertBool (script (Pair.Rejoin Pair.A)) ("'shut down'" `isInfixOf` script (Pair.Rejoin Pair.A))
     , testCase "a rejoined member comes back as a standby, whatever pg_rewind decided" $ do
         let s = script (Pair.Rejoin Pair.A)
         assertBool s ("standby.signal" `isInfixOf` s)
         assertBool s ("primary_conninfo" `isInfixOf` s)
+        -- a slot the new primary never heard of is not a smaller problem
+        -- than a conninfo pointing at the wrong machine: it is a bigger one,
+        -- since the standby then retries forever instead of failing.
+        assertBool s ("/^primary_slot_name/d" `isInfixOf` s)
         assertBool s ("host=10.0.0.2 port=5432 user=replicator" `isInfixOf` s)
         assertBool s ("passfile=/etc/postgresql/repl.pgpass" `isInfixOf` s)
     , testCase "the rewind password is read from its file, never carried" $
@@ -81,6 +100,14 @@ commandTests =
         Left _ -> Nothing
     isLeft (Left _) = True
     isLeft _ = False
+    -- what the script does before the given word
+    takeWhile' needle hay = case breakOn needle hay of (before, _) -> before
+    breakOn needle hay = go "" hay
+      where
+        go acc [] = (reverse acc, [])
+        go acc rest@(c : cs)
+            | needle `isPrefixOf` rest = (reverse acc, rest)
+            | otherwise = go (c : acc) cs
 
 -------------------------------------------------------------------------------
 
@@ -112,8 +139,16 @@ streamingFrom host at = Pair.Standby "7000" 1 (Just host) (lsn at) (lsn at)
 primaryAt :: Text -> Pair.Observed
 primaryAt at = Pair.Primary "7000" 1 (lsn at)
 
+-- | A cluster that was shut down: its last checkpoint is the end of its WAL.
 stoppedAt :: Text -> Pair.Observed
-stoppedAt at = Pair.Stopped "7000" 1 (lsn at)
+stoppedAt at = Pair.Stopped "7000" 1 (lsn at) True
+
+{- | A cluster that stopped without shutting down. The position is the same
+field, and it no longer means the same thing: there may be any amount of WAL
+after it that nothing on disk records.
+-}
+crashedAt :: Text -> Pair.Observed
+crashedAt at = Pair.Stopped "7000" 1 (lsn at) False
 
 -- | Bouncers doing what they should: pointed at B, nobody held.
 settled :: [Pair.BouncerState]
@@ -164,7 +199,25 @@ observedTests =
     , testCase "a stopped cluster, read off pg_controldata" $
         assertEqual
             ""
-            (Pair.Stopped "7412" 3 (lsn "0/2000060"))
+            (Pair.Stopped "7412" 3 (lsn "0/2000060") True)
+            (Pair.parseObserved "status=stopped\nsysid=7412\nstate=shut down\ncheckpoint=0/2000060\ntimeline=3\nmin_recovery=0/0\n")
+    , testCase "a stopped standby replayed past its last checkpoint" $
+        assertEqual
+            ""
+            (Pair.Stopped "7412" 3 (lsn "0/4000000") True)
+            (Pair.parseObserved "status=stopped\nsysid=7412\nstate=shut down in recovery\ncheckpoint=0/2000060\ntimeline=3\nmin_recovery=0/4000000\n")
+    , -- "in production" on a cluster that is not running is a crash.
+      testCase "a cluster that stopped without shutting down" $
+        assertEqual
+            ""
+            (Pair.Stopped "7412" 3 (lsn "0/2000060") False)
+            (Pair.parseObserved "status=stopped\nsysid=7412\nstate=in production\ncheckpoint=0/2000060\ntimeline=3\nmin_recovery=0/0\n")
+    , -- an old pg_controldata, a translated one, a field that moved: none of
+      -- them is a reason to believe a cluster shut down cleanly.
+      testCase "a cluster state nobody recognises is not a clean stop" $
+        assertEqual
+            ""
+            (Pair.Stopped "7412" 3 (lsn "0/2000060") False)
             (Pair.parseObserved "status=stopped\nsysid=7412\ncheckpoint=0/2000060\ntimeline=3\n")
     , testCase "no cluster there at all" $
         assertEqual "" Pair.Absent (Pair.parseObserved "status=absent\n")
@@ -186,8 +239,13 @@ probeTests =
         assertBool script ("pg_controldata" `isInfixOf` script)
     , testCase "a running cluster reports every field the parser needs" $
         mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["sysid", "timeline", "in_recovery", "lsn", "replayed", "upstream"]
-    , testCase "a stopped cluster reports the checkpoint the promotion turns on" $
-        assertBool script ("checkpoint=" `isInfixOf` script)
+    , testCase "a stopped cluster reports what the promotion turns on" $
+        mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["checkpoint", "state", "min_recovery"]
+    , -- the standby whose primary is gone has received nothing this
+      -- session, and that is the one whose position decides a failover.
+      testCase "a standby's position falls back on what it replayed" $ do
+        assertBool script ("GREATEST" `isInfixOf` script)
+        assertBool script ("pg_last_wal_replay_lsn" `isInfixOf` script)
     , testCase "it reads, and never writes" $
         mapM_ (\verb -> assertBool (verb <> " has no business in a probe") (not (verb `isInfixOf` script))) ["rm ", "promote", "pg_rewind", "DROP", "pg_ctlcluster \"$version\" main stop"]
     ]
@@ -228,6 +286,22 @@ stepTests =
         assertEqual "" (Pair.StopMember Pair.A) (step (primaryAt "0/5") (streamingFrom "10.0.0.1" "0/5") paused)
     , testCase "switchover: the old primary stopped and the new one has its last checkpoint" $
         assertEqual "" (Pair.Promote Pair.B) (step (stoppedAt "0/5000060") (streamingFrom "10.0.0.1" "0/5000060") paused)
+    , -- a crash is the case the checkpoint comparison cannot see: the peer
+      -- may have written and acknowledged anything at all after it.
+      testCase "failover: the peer crashed, so its checkpoint proves nothing" $
+        assertBool "" (refuses (step (crashedAt "0/5000060") (streamingFrom "10.0.0.1" "0/5000060") paused))
+    , testCase "failover: the peer crashed, and its writes are declared expendable" $
+        assertEqual
+            ""
+            (Pair.Promote Pair.B)
+            (Pair.nextStep pair{Pair.pair_may_discard = Just Pair.A} (crashedAt "0/5000060") (streamingFrom "10.0.0.1" "0/5000060") paused)
+    , -- with the flag, waiting for a machine that will send nothing more is
+      -- only a slower way to reach the same place.
+      testCase "failover: expendable writes are not waited for" $
+        assertEqual
+            ""
+            (Pair.Promote Pair.B)
+            (Pair.nextStep pair{Pair.pair_may_discard = Just Pair.A} (stoppedAt "0/5000060") (streamingFrom "10.0.0.1" "0/4000000") paused)
     , testCase "switchover: not caught up yet, so wait rather than lose the tail" $
         assertEqual
             ""
