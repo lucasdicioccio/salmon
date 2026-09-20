@@ -29,7 +29,8 @@ tests :: TestTree
 tests =
     testGroup
         "SreBox.PostgresPair"
-        [ testGroup "parseLsn" lsnTests
+        [ testGroup "slot names" slotNameTests
+        , testGroup "parseLsn" lsnTests
         , testGroup "parseObserved" observedTests
         , testGroup "the probe script" probeTests
         , testGroup "nextStep, with the primary declared on B" stepTests
@@ -83,6 +84,23 @@ commandTests =
         assertBool s' (not ("main start" `isInfixOf` takeWhile' "pg_rewind" s'))
     , testCase "a member that shut down cleanly is not recovered twice" $
         assertBool (script (Pair.Rejoin Pair.A)) ("'shut down'" `isInfixOf` script (Pair.Rejoin Pair.A))
+    , -- nothing else creates it, and a standby naming a slot that is not
+      -- there retries forever while looking healthy. The quoting these
+      -- assertions avoid is the shell's: a slot name arrives inside SQL
+      -- inside a single-quoted script, so it is spelled three ways at once.
+      testCase "a rejoining member creates the slot it will stream with, and checks" $ do
+        let s' = script (Pair.Rejoin Pair.A)
+        assertBool s' ("CREATE_REPLICATION_SLOT salmon_pair_app_a PHYSICAL" `isInfixOf` s')
+        assertBool s' ("replication=true" `isInfixOf` s')
+        assertBool s' ("pg_replication_slots WHERE slot_name = " `isInfixOf` s')
+        assertBool s' ("primary_slot_name = " `isInfixOf` s')
+        assertBool s' (at "CREATE_REPLICATION_SLOT" s' < at "primary_slot_name = " s')
+    , testCase "and drops the one it held for the peer, which nothing consumes here" $ do
+        let s' = script (Pair.Rejoin Pair.A)
+        assertBool s' ("pg_drop_replication_slot(slot_name)" `isInfixOf` s')
+        assertBool s' ("salmon_pair_app_b" `isInfixOf` s')
+        -- after the start: dropping a slot needs a server to ask
+        assertBool s' (at "main start" s' < at "pg_drop_replication_slot" s')
     , testCase "a rejoined member comes back as a standby, whatever pg_rewind decided" $ do
         let s = script (Pair.Rejoin Pair.A)
         assertBool s ("standby.signal" `isInfixOf` s)
@@ -158,7 +176,11 @@ pointedAt :: Text -> Text -> Pair.Observed
 pointedAt host at = Pair.Standby "7000" 1 Nothing (Just host) (lsn at) (lsn at)
 
 primaryAt :: Text -> Pair.Observed
-primaryAt at = Pair.Primary "7000" 1 (lsn at)
+primaryAt at = Pair.Primary "7000" 1 (lsn at) [(Pair.slotNameFor pair Pair.A, "reserved")]
+
+-- | A primary whose slot for the peer has fallen off the end of the budget.
+primaryWithLostSlot :: Text -> Pair.Observed
+primaryWithLostSlot at = Pair.Primary "7000" 1 (lsn at) [(Pair.slotNameFor pair Pair.A, "lost")]
 
 -- | A cluster that was shut down: its last checkpoint is the end of its WAL.
 stoppedAt :: Text -> Pair.Observed
@@ -186,6 +208,25 @@ step = Pair.nextStep pair
 
 -------------------------------------------------------------------------------
 
+{- | A slot name is derived, never declared, so that a member that rejoins
+computes the same one the member it rejoins would.
+-}
+slotNameTests :: [TestTree]
+slotNameTests =
+    [ testCase "one per side, since both of them are somebody's standby eventually" $ do
+        assertEqual "" "salmon_pair_app_a" (Pair.slotNameFor pair Pair.A)
+        assertEqual "" "salmon_pair_app_b" (Pair.slotNameFor pair Pair.B)
+    , -- a pair is named by whoever declares it; a slot name is Postgres's to
+      -- accept, and it accepts rather less.
+      testCase "anything Postgres will not take becomes an underscore" $
+        assertEqual
+            ""
+            "salmon_pair_orders_eu_west_a"
+            (Pair.slotNameFor pair{Pair.pair_name = "Orders-EU.west"} Pair.A)
+    , testCase "and the whole thing fits in the 63 characters Postgres allows" $
+        assertBool "" (Text.length (Pair.slotNameFor pair{Pair.pair_name = Text.replicate 200 "x"} Pair.B) <= 63)
+    ]
+
 lsnTests :: [TestTree]
 lsnTests =
     [ testCase "positions are compared as numbers, not as text" $
@@ -205,8 +246,15 @@ observedTests =
     [ testCase "a primary" $
         assertEqual
             ""
-            (Pair.Primary "7412" 3 (lsn "0/3000028"))
-            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=f\nlsn=0/3000028\nreplayed=\nupstream=\n")
+            (Pair.Primary "7412" 3 (lsn "0/3000028") [])
+            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=f\nlsn=0/3000028\nreplayed=\nupstream=\nconfigured=\n")
+    , -- the one field that is a list: a machine may hold several slots, and
+      -- what matters is what each one's WAL is still worth.
+      testCase "a primary, with the slots it holds" $
+        assertEqual
+            ""
+            (Pair.Primary "7412" 3 (lsn "0/3000028") [("salmon_pair_app_a", "lost"), ("other", "reserved")])
+            (Pair.parseObserved "status=running\nsysid=7412\ntimeline=3\nin_recovery=f\nlsn=0/3000028\nreplayed=\nupstream=\nconfigured=\nslot=salmon_pair_app_a:lost\nslot=other:reserved\n")
     , testCase "a standby, with where it streams from" $
         assertEqual
             ""
@@ -265,7 +313,7 @@ probeTests =
         assertBool script ("pg_is_in_recovery()" `isInfixOf` script)
         assertBool script ("pg_controldata" `isInfixOf` script)
     , testCase "a running cluster reports every field the parser needs" $
-        mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["sysid", "timeline", "in_recovery", "lsn", "replayed", "upstream", "configured"]
+        mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["sysid", "timeline", "in_recovery", "lsn", "replayed", "upstream", "configured", "slot"]
     , testCase "a stopped cluster reports what the promotion turns on" $
         mapM_ (\k -> assertBool (k <> " missing from the probe") ((k <> "=") `isInfixOf` script)) ["checkpoint", "state", "min_recovery"]
     , -- the standby whose primary is gone has received nothing this
@@ -293,6 +341,17 @@ stepTests =
       -- peer looks exactly like a standby that belongs to somebody else.
       testCase "the peer is pointed at us but not streaming: wait, do not rewind it" $
         assertEqual "" (Pair.AwaitStreaming Pair.A) (step (pointedAt "10.0.0.2" "0/5") (primaryAt "0/5") settled)
+    , -- a lost slot is WAL that has been recycled: there is nothing left to
+      -- stream, so waiting is not a plan and rewinding is not a fix.
+      testCase "the peer's slot is lost: say so, and wait for nobody" $
+        assertBool "" (degraded (step (pointedAt "10.0.0.2" "0/5") (primaryWithLostSlot "0/5") settled))
+    , testCase "the peer is stopped and its slot is lost: do not rewind it either" $
+        assertBool "" (degraded (step (stoppedAt "0/4") (primaryWithLostSlot "0/5") settled))
+    , testCase "somebody else's lost slot is not this pair's business" $
+        assertEqual
+            ""
+            (Pair.Rejoin Pair.A)
+            (step (stoppedAt "0/4") (Pair.Primary "7000" 1 (lsn "0/5") [("somebody_elses", "lost")]) settled)
     , testCase "the peer streams from the wrong machine: rejoin it" $
         assertEqual "" (Pair.Rejoin Pair.A) (step (streamingFrom "10.0.0.9" "0/5") (primaryAt "0/5") settled)
     , testCase "the peer streams from nobody: rejoin it" $
@@ -367,7 +426,7 @@ stepTests =
       testCase "different clusters: refuse before anything else" $
         assertBool
             ""
-            (refuses (step (Pair.Standby "7000" 1 (Just "10.0.0.2") (Just "10.0.0.2") (lsn "0/5") (lsn "0/5")) (Pair.Primary "9999" 1 (lsn "0/5")) settled))
+            (refuses (step (Pair.Standby "7000" 1 (Just "10.0.0.2") (Just "10.0.0.2") (lsn "0/5") (lsn "0/5")) (Pair.Primary "9999" 1 (lsn "0/5") []) settled))
     , testCase "no bouncers declared: their state cannot hold a pass back" $
         assertEqual "" Pair.Done (step (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") [])
     ]

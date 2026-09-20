@@ -13,11 +13,16 @@ machines off from each other and change nothing (S4), and fail over across a
 partition that hides the old primary from the controller too, then heal it
 and rewind the loser (S5).
 
+Also done: the slot budget (phase 6), in that each member streams with a slot
+the pair names and the rejoin creates, and a slot that falls off the budget
+is reported rather than rewound at (S6). The *re-seeding* half of phase 6 is
+not: there is no seeding node, so "re-seed it" is still something an operator
+does by hand -- which is why the check can only name the problem.
+
 Not done: symmetric member nodes and the seeding clone, so a pair is still
 built by hand, as `Test.PostgresSwitchoverSpec` does; bouncer routing (phase
 4), so `PauseBouncers`/`RepointBouncers` are in the table with nothing behind
-them; the slot budget and re-seeding (phase 6). Scenarios S6-S8 are
-unwritten.
+them. Scenarios S7 and S8 are unwritten.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
 failover and three voters. `pg-ha-control-plane.md` is the wider
@@ -158,6 +163,15 @@ life, and again only if a standby is lost beyond repair (S6). It is
 deliberately **not** how an old primary rejoins after a switchover; that is
 `pg_rewind`, inside the role node.
 
+Not built yet, and S6 is what says how it should behave when it is: a lost
+slot leaves the pair in a state only a re-seed fixes, and the role node
+deliberately does not fix it. Wiping a machine's data directory is a decision
+about losing whatever is on it, which is the same class of decision as
+`pair_may_discard` and belongs to the same place — an operator saying so —
+rather than to a pass that runs unattended. So the seeding node should be
+*separately declared*, and the role node's job is to name the problem
+precisely enough that the operator knows which machine to declare it for.
+
 ### 3. The role node: "this pair's primary is on B"
 
 ```haskell
@@ -201,6 +215,9 @@ One ssh round trip per member returns a small `key=value` report:
   *configured* upstream from `primary_conninfo`, and `system_identifier`;
 - if it is stopped: `pg_controldata`'s cluster state, latest checkpoint
   location, minimum recovery point, timeline and system identifier;
+- if it is running: the replication slots it holds and each one's
+  `wal_status`, which is the only place the fate of the *other* member's
+  catching-up is written down;
 - from the bouncers, whether each one is paused (`SHOW DATABASES` has a
   `paused` column).
 
@@ -208,7 +225,7 @@ One ssh round trip per member returns a small `key=value` report:
 data Observed
     = Unreachable Text
     | Stopped { o_sysid :: Word64, o_timeline :: Int, o_checkpoint :: Lsn, o_clean :: Bool }
-    | Primary { o_sysid :: Word64, o_timeline :: Int, o_lsn :: Lsn }
+    | Primary { o_sysid :: Word64, o_timeline :: Int, o_lsn :: Lsn, o_slots :: [(Text, Text)] }
     | Standby { o_sysid :: Word64, o_timeline :: Int, o_upstream, o_configured :: Maybe Text, o_received, o_replayed :: Lsn }
 
 data Step
@@ -277,6 +294,7 @@ Checked in order, first match wins:
 |---|---|---|
 | any sysid ≠ B's sysid | | `Refuse "not the same cluster"` |
 | Standby streaming from B | Primary | bouncers point at B and are unpaused? `Done` : `RepointBouncers B` |
+| Standby or Stopped, and B's slot for A is `lost` | Primary | `Degraded "the slot is lost"`: the WAL it needs has been recycled, so waiting produces nothing and a rewind changes nothing. Only a re-seed helps, and that is an operator's call |
 | Standby, pointed at B, not streaming | Primary | `AwaitStreaming A`, and `Unknown` once the waiting runs out |
 | Standby, pointed anywhere else | Primary | `Rejoin A` (the rewind is a no-op if nothing diverged) |
 | Stopped | Primary | `Rejoin A` |
@@ -338,9 +356,18 @@ the shutdown checkpoint is ever wanted, so this never shows; after a split
 brain the histories parted long before, and stopping the loser is precisely
 what destroys the record of how.
 
-Still open: the slot A should stream with. `-R` does not create one, slots
-are not replicated, and A's old slot for B is left behind on A, where on a
-standby it keeps WAL forever. Both belong with phase 6.
+**And the slot it will stream with is made here too.** `-R` does not create
+one, and slots are not replicated, so a rejoining member creates its own on
+the machine it is about to stream from — over the replication connection,
+which is the one path the pair already requires — and then *checks that it is
+there*, because a standby naming a slot the primary does not have retries
+forever while looking healthy to every query but `pg_stat_wal_receiver`. The
+name is derived from the pair and the side (`salmon_pair_<name>_<side>`,
+lower-cased, anything else an underscore, 63 characters) rather than declared,
+so that a member computes the same name the member it rejoins would and a slot
+nobody can name is not a slot nobody can drop. The same step drops the slot
+this member held for its *peer* back when it was the primary: nothing consumes
+it here, and a slot nobody consumes goes on pinning every segment behind it.
 
 ## Failover and split brain: `pair_may_discard`
 
@@ -443,7 +470,7 @@ machine doing something in its own time.
 | S3 | Crash A while it holds writes the standby never got; declare B, first without `may_discard` and then with it | the first pass refuses, and promotes nothing; the second promotes B, which serves writes; A rejoins as B's standby through `pg_rewind`, not a re-clone (its data directory is never unlinked); the replicated rows survive and the un-replicated ones are gone, which is what the flag said |
 | S4 | Partition A from B, with no change to the declaration | the check is `Unknown`; nothing is promoted, and in particular the standby is not stopped or rewound; after the partition heals, B catches up on its own and the pair is `Done` |
 | S5 | Partition A from B *and from the controller*, fail over to B with `may_discard = A` while A still holds writes B never got, then let it heal | without the flag the pass refuses, twice: once while A cannot be reached, and again once both machines call themselves primaries; with it, B is promoted, then A is stopped and rewound onto B's history; A's writes behind the partition are gone, as declared |
-| S6 | Stop B; write past `max_slot_wal_keep_size` on A | A's disk is bounded; the slot reports `wal_status = 'lost'`; the pair is `Degraded`, and re-seeding B (the only fix) is an explicit re-clone, not a silent one |
+| S6 | Stop the standby; write past `max_slot_wal_keep_size` on the primary | the primary's `pg_wal` is bounded rather than following the standby down; the slot reports `wal_status = 'lost'`; the check is `Unknown` with the slot named in it; a pass does nothing at all, and in particular the standby's data directory is not unlinked — re-seeding is an operator's decision about throwing data away, not a step |
 | S7 | Stop both; declare B | B starts first; A rejoins |
 | S8 | A standby from a *different* cluster (fresh `initdb`) where A should be | `Refuse "not the same cluster"`, and nothing is deleted |
 

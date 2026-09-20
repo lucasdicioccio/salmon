@@ -46,7 +46,94 @@ tests =
         , testCase "a crashed primary is failed over only when its writes are declared expendable" failsOverFromACrash
         , testCase "a partition is waited out, not acted on" holdsThroughAPartition
         , testCase "a failover across a partition leaves two primaries, and rewinds one" splitBrainIsRewound
+        , testCase "a standby that falls off the slot budget is said so, not silently re-seeded" theSlotBudgetBoundsTheDisk
         ]
+
+{- | S6: the standby goes away and stays away, and the primary's disk does
+not follow it down.
+
+A replication slot is a promise to keep WAL until the standby has it, and an
+unbounded promise is how a machine that is merely /down/ takes the machine
+that is /up/ with it. @max_slot_wal_keep_size@ is the price cap on that
+promise: past it the slot is invalidated, the WAL is recycled, and the
+standby -- which can now never catch up -- is the only thing that was lost.
+
+That is a good trade and a terrible surprise, so the pair has to say it out
+loud. A lost slot is not a state to rewind out of: @pg_rewind@ would succeed,
+change nothing, and hand back a standby that still cannot replay what is no
+longer there. The only way back is a re-seed, which is a decision about
+throwing a machine's data away and therefore an operator's, so the check says
+'Salmon.Actions.UpDown.Unknown' with the slot named in it, and the pass does
+nothing at all.
+-}
+theSlotBudgetBoundsTheDisk :: IO ()
+theSlotBudgetBoundsTheDisk = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            resetRows a
+            insertRow a "before-the-slot-budget"
+
+            -- one switchover first, so that the slot in play is the pair's
+            -- own: what the fixture set up streams with a slot of the
+            -- fixture's making, and this is a test about the pair's.
+            let p = pairWith a b Pair.B
+            passOrExplain "the switchover" p
+            assertStandbyOf a testVmAddr2
+            let slot = Text.unpack (Pair.slotNameFor p Pair.A)
+
+            -- a budget small enough to go past on purpose
+            psqlOrDie b "ALTER SYSTEM SET max_slot_wal_keep_size = '32MB';"
+            psqlOrDie b "ALTER SYSTEM SET max_wal_size = '64MB';"
+            psqlOrDie b "SELECT pg_reload_conf();"
+
+            stopCluster a
+            churnWal b 24
+
+            waitFor ("the slot " <> slot <> " never fell off the budget") $ do
+                (_, out, _) <- psql b ("SELECT wal_status FROM pg_replication_slots WHERE slot_name = '" <> slot <> "';")
+                pure ("lost" `isInfixOf` out, out)
+            wal <- walMegabytes b
+            assertBool
+                ("the primary's WAL followed the standby down: " <> show wal <> "MB of pg_wal")
+                (wal < 250)
+
+            -- the pair says what happened, names the slot, and touches nothing
+            identity <- dataDirectoryIdentity a
+            step <- Pair.decide p
+            assertEqual ("a lost slot is not a failure and not a success: " <> show step) Unknown (Pair.verdict step)
+            assertBool ("the reason does not name the slot: " <> show step) (slot `isInfixOf` show step)
+            ok <- runUp (Pair.pairRole silent p)
+            assertBool "a pass over a pair with a lost slot failed" ok
+            identity' <- dataDirectoryIdentity a
+            assertEqual "the standby was re-seeded without anybody asking" identity identity'
+
+            -- and the machine that is still up is still serving
+            assertPrimaryIs b
+            insertRow b "written-after-the-slot-was-lost"
+            waitForRows b ["before-the-slot-budget", "written-after-the-slot-was-lost"]
+
+            -- put the budget back: this rootfs outlives the VM, and a 32MB
+            -- cap is a trap to leave lying around for the next spec.
+            psqlOrDie b "ALTER SYSTEM RESET max_slot_wal_keep_size;"
+            psqlOrDie b "ALTER SYSTEM RESET max_wal_size;"
+            psqlOrDie b "SELECT pg_reload_conf();"
+            psqlOrDie b "DROP TABLE IF EXISTS salmon_churn;"
+
+{- | Writes enough WAL to go past a small budget, in the cheapest way there
+is: a row so that the segment is not empty (@pg_switch_wal@ does nothing to
+one that is), then a switch to the next, then a checkpoint to make the
+primary act on what it now may throw away.
+-}
+churnWal :: VmAccess -> Int -> IO ()
+churnWal vm n = do
+    psqlOrDie vm "CREATE TABLE IF NOT EXISTS salmon_churn (v int);"
+    forM_ [1 .. n] $ \i -> do
+        psqlOrDie vm ("INSERT INTO salmon_churn VALUES (" <> show (i :: Int) <> ");")
+        psqlOrDie vm "SELECT pg_switch_wal();"
+    psqlOrDie vm "CHECKPOINT;"
+    psqlOrDie vm "CHECKPOINT;"
 
 {- | S5: fail over while the old primary is still up and still taking
 writes, then let the partition heal and watch salmon find two primaries.

@@ -505,21 +505,30 @@ a crashed target's recovery itself, in single-user mode with `-c config_file=` (
 attempt assumes Debian keeps postgresql.conf in the data directory, which it does not) and with
 `wal_keep_size` pinned to what `pg_wal` already holds — as `StopMember` pins it too, since any
 clean shutdown ends in a checkpoint and a checkpoint recycles the very WAL a rewind reads back to
-where the histories parted; the rejoin takes the pin off once it has been used. Bouncers are
-declared but not yet wired (`specs/pg-switchover.md` phase 4), so the pause/repoint steps cannot
-arise while none is declared. `Test.PostgresPairSpec` is the whole table at Layer 0, refusals
-included; `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a
-controller after each step in turn to show a plain pass finishes what it left, kills a primary
-outright to show the failover refused without the flag and rewound with it, and partitions the two
-machines — once between themselves, where the right answer is to do nothing, and once hiding the
-old primary from the controller as well, which is the only way to reach two primaries and the one
-case where salmon knowingly discards acknowledged writes. Those partitions are `nft` rules built
-from `Netfilter`'s own vocabulary and shipped over ssh, since the guests have no salmon on them;
-the one that hides a machine from the controller is handed to the machine as cut-wait-heal,
-because the command that would lift it would have to travel the path it cut. `Test.PostgresVms`
-holds what those specs share, and the reason it exists is that **a rootfs is a host directory that
-outlives its VM**: a spec that moved the primary leaves the next one starting from a standby, so
-each normalizes on the way in (`ensurePrimary`, `resetCluster`) rather than assuming.
+where the histories parted; the rejoin takes the pin off once it has been used. Each member
+streams with a slot the pair names (`slotNameFor`, derived rather than declared so that a
+rejoining member computes the same name the member it rejoins would), which the rejoin creates on
+the peer over the replication connection and then verifies, and whose stale twin — the slot this
+member held while it was the primary — it drops, since a slot nobody consumes pins every segment
+behind it. The primary reports its slots' `wal_status`, because a slot that fell off
+`max_slot_wal_keep_size` is the one observation saying a standby can never catch up: that is
+`Degraded` naming the slot, not a `Rejoin`, since `pg_rewind` would succeed and change nothing,
+and re-seeding means wiping a machine — an operator's decision, like `pair_may_discard`. Bouncers
+are declared but not yet wired (`specs/pg-switchover.md` phase 4), so the pause/repoint steps
+cannot arise while none is declared. `Test.PostgresPairSpec` is the whole table at Layer 0,
+refusals included; `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back,
+stops a controller after each step in turn to show a plain pass finishes what it left, kills a
+primary outright to show the failover refused without the flag and rewound with it, and partitions
+the two machines — once between themselves, where the right answer is to do nothing, and once
+hiding the old primary from the controller as well, which is the only way to reach two primaries
+and the one case where salmon knowingly discards acknowledged writes. Those partitions are `nft`
+rules built from `Netfilter`'s own vocabulary and shipped over ssh, since the guests have no
+salmon on them; the one that hides a machine from the controller is handed to the machine as
+cut-wait-heal, because the command that would lift it would have to travel the path it cut.
+`Test.PostgresVms` holds what those specs share, and the reason it exists is that **a rootfs is a
+host directory that outlives its VM**: a spec that moved the primary leaves the next one starting
+from a standby, so each normalizes on the way in (`ensurePrimary`, `resetCluster`) rather than
+assuming.
 
 ## Conventions for node authors
 
