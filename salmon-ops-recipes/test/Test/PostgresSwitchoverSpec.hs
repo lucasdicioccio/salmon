@@ -47,7 +47,58 @@ tests =
         , testCase "a partition is waited out, not acted on" holdsThroughAPartition
         , testCase "a failover across a partition leaves two primaries, and rewinds one" splitBrainIsRewound
         , testCase "a standby that falls off the slot budget is said so, not silently re-seeded" theSlotBudgetBoundsTheDisk
+        , testCase "a pair stopped in either order comes back with the declared primary, losing nothing" recoversFromBothStopped
         ]
+
+{- | S7: both machines are stopped, and the one declared primary is the one
+that stopped first.
+
+The easy half is a maintenance window: the primary goes down first, so its
+last record reaches the standby on the way out, and bringing the pair back up
+with the roles swapped costs nothing. The interesting half is the other
+order. Stop the /standby/ first, let the primary write one more thing, then
+stop that too, and declare the machine that was already gone: what the pair
+must not do is promote it, because the other machine holds a write it has
+never seen.
+
+There is no waiting its way out of that, either. A standby catches up by
+streaming, and the machine it would stream from is stopped -- so the only way
+to converge on the declaration without losing the write is to start the old
+primary again, let the standby catch up from it, and then do the ordinary
+switchover. The test asserts the write survives, which is the only assertion
+that can tell that apart from a promotion that happened to be quick.
+-}
+recoversFromBothStopped :: IO ()
+recoversFromBothStopped = requirePgVmPrereqs $ do
+    fixtureBin <- resolveFixtureBinary
+    withVmAt testVmAddr primaryRootfs $ \a ->
+        withVmAt testVmAddr2 standbyRootfs $ \b -> do
+            buildPair a b fixtureBin
+            resetRows a
+            insertRow a "before-the-maintenance-window"
+            waitForRows b ["before-the-maintenance-window"]
+
+            -- the primary goes down first, so the standby has its last record
+            stopCluster a
+            stopCluster b
+            let toB = pairWith a b Pair.B
+            passOrExplain "bringing the pair up with B declared" toB
+            assertPrimaryIs b
+            assertStandbyOf a testVmAddr2
+
+            -- and now the other order, with the declared primary the one
+            -- that stopped first and so missed what came after
+            stopCluster a
+            insertRow b "written-after-the-standby-stopped"
+            stopCluster b
+            let toA = pairWith a b Pair.A
+            passOrExplain "bringing the pair up with A declared" toA
+            assertPrimaryIs a
+            assertStandbyOf b testVmAddr
+
+            -- declaring the machine that was behind lost nothing
+            waitForRows a ["before-the-maintenance-window", "written-after-the-standby-stopped"]
+            waitForRows b ["before-the-maintenance-window", "written-after-the-standby-stopped"]
 
 {- | S6: the standby goes away and stays away, and the primary's disk does
 not follow it down.
