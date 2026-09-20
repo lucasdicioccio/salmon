@@ -62,6 +62,7 @@ import Control.Monad (unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
 import Data.List (isInfixOf)
+import qualified Data.List as List
 import qualified Data.Text as Text
 import Numeric (showHex)
 import qualified Salmon.Actions.UpDown as UpDown
@@ -434,14 +435,27 @@ freshTapName = do
     t <- getCPUTime
     pure (Text.pack ("vmtap" <> take 6 (reverse (show t))))
 
--- | A locally-administered MAC in qemu's own default OUI (@52:54:00@), with
--- a CPU-time-derived low byte for uniqueness across concurrent\/successive VMs.
+{- | A locally-administered MAC in qemu's own default OUI (@52:54:00@), with
+three CPU-time-derived bytes.
+
+One byte is not enough, and the way it fails is worth remembering: two
+guests that draw the same address are on one bridge claiming one IP, so the
+host's ARP entry for the first is overwritten by the second and the first
+goes unreachable /after/ it has already answered SSH. That reads as a VM
+that died for no reason, in whichever spec boots two at once.
+
+The odds were far worse than one in 256, too: 'getCPUTime' counts
+picoseconds but the clock underneath it ticks in nanoseconds, so the low
+digits are always zero and a single byte of it ranges over a fraction of its
+values. The three bytes here are taken /above/ that dead range.
+-}
 freshMac :: IO Text.Text
 freshMac = do
     t <- getCPUTime
-    let byte = fromInteger (t `mod` 256) :: Int
-        hex = showHex byte ""
-    pure (Text.pack ("52:54:00:12:34:" <> (if length hex < 2 then '0' : hex else hex)))
+    let ticks = t `div` 1000
+        byteAt k = fromInteger ((ticks `div` (256 ^ (k :: Int))) `mod` 256) :: Int
+        hex2 n = let h = showHex n "" in if length h < 2 then '0' : h else h
+    pure (Text.pack (List.intercalate ":" (["52", "54", "00"] <> map (hex2 . byteAt) [2, 1, 0])))
 
 -- | What 'withVm' hands its action: the guest's login plus the private key
 -- to authenticate with (see 'sshToVm' — always pass this explicitly rather

@@ -37,7 +37,7 @@ and two pre-built rootfses, one per role, each with
 same reasoning as 'Test.Harness.withVm''s own SSH-CA design: the test
 bridge has no NAT\/internet route out of the guest, so nothing here can
 depend on the guest reaching the network past boot). Both preconditions
-skip loudly, not fail, if unmet — see 'requirePrereqs'.
+skip loudly, not fail, if unmet — see 'Test.PostgresVms.requirePgVmPrereqs'.
 
 > sudo debootstrap --include=linux-image-amd64,openssh-server,postgresql,sudo stable /var/lib/salmon-test-vms/pg-primary/root
 > sudo debootstrap --include=linux-image-amd64,openssh-server,postgresql,sudo stable /var/lib/salmon-test-vms/pg-standby/root
@@ -49,11 +49,9 @@ import Control.Exception (SomeException, catch)
 import Control.Monad (unless)
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
-import System.IO (hPutStrLn, stderr)
-import System.Process (readProcessWithExitCode)
 import Test.Harness
+import Test.PostgresVms
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase)
 
@@ -63,22 +61,17 @@ tests =
         "Postgres replication (Layer 3, real primary/standby VMs)"
         [testCase "replicates a row, keeps a promoted standby, refuses a stranger's cluster" replicatesARow]
 
-primaryRootfs, standbyRootfs :: FilePath
-primaryRootfs = "/var/lib/salmon-test-vms/pg-primary/root"
-standbyRootfs = "/var/lib/salmon-test-vms/pg-standby/root"
-
 replicatesARow :: IO ()
-replicatesARow = requirePrereqs $ do
+replicatesARow = requirePgVmPrereqs $ do
     fixtureBin <- resolveFixtureBinary
     withVmAt testVmAddr primaryRootfs $ \primary ->
         withVmAt testVmAddr2 standbyRootfs $ \standby -> do
-            scpToVm primary fixtureBin "/root/fixture"
-            scpToVm standby fixtureBin "/root/fixture"
-            -- scp doesn't reliably carry the exec bit over without -p; set it explicitly.
-            _ <- sshToVm primary ["chmod", "+x", "/root/fixture"]
-            _ <- sshToVm standby ["chmod", "+x", "/root/fixture"]
-
-            resetStandbyCluster standby
+            mapM_ (`installFixture` fixtureBin) [primary, standby]
+            -- whatever the last spec left behind: the switchover spec ends
+            -- with the primary on the other machine, and this one's fixture
+            -- cannot make a read-only server into a primary.
+            ensurePrimary primary
+            resetCluster standby
 
             runFixture primary ["primary", Text.unpack testVmAddr2 <> "/32"]
             runFixture standby ["standby", Text.unpack testVmAddr]
@@ -94,31 +87,6 @@ replicatesARow = requirePrereqs $ do
             promotedStandbyIsLeftAlone standby
             strangersClusterIsRefused standby
   where
-    -- A VM's rootfs is a directory on the host, kept between runs, so
-    -- whatever the last run left behind is this run's starting state -- and
-    -- the last thing this test does is put a stranger's cluster on the
-    -- standby. Start from a cluster that was just created and never used,
-    -- which is also the state the clone's "pristine" branch is written for.
-    resetStandbyCluster :: VmAccess -> IO ()
-    resetStandbyCluster standby = do
-        (code, out, err) <-
-            sshToVm
-                standby
-                [ "bash"
-                , "-c"
-                , quoteForRemoteShell . unwords $
-                    [ "export LANG=C LC_ALL=C;"
-                    , "set -e;"
-                    , -- not pg_lsclusters: there may be no cluster to list.
-                      "version=$(ls /usr/lib/postgresql | sort -n | tail -n1);"
-                    , "if pg_lsclusters --no-header | awk '{print $2}' | grep -qx main;"
-                    , "then pg_dropcluster \"$version\" main --stop; fi;"
-                    , "pg_createcluster \"$version\" main -p 5432 -- --auth-local=peer --auth-host=md5;"
-                    , "pg_ctlcluster \"$version\" main start"
-                    ]
-                ]
-        unless (code == ExitSuccess) (fail ("could not reset the standby's cluster: " <> out <> err))
-
     -- Promotion deletes `standby.signal`, which used to be the whole guard:
     -- the next run read the new primary as "never cloned" and deleted it.
     promotedStandbyIsLeftAlone :: VmAccess -> IO ()
@@ -163,14 +131,6 @@ replicatesARow = requirePrereqs $ do
         (_, dbs, _) <- psql standby "SELECT datname FROM pg_database WHERE datname = 'precious';"
         assertBool ("the refused cluster was deleted anyway: " <> dbs) ("precious" `isInfixOf` dbs)
 
-    psql :: VmAccess -> String -> IO (ExitCode, String, String)
-    psql access sql = sshToVm access ["sudo", "-u", "postgres", "psql", "-tAc", quoteForRemoteShell sql]
-
-    psqlOrDie :: VmAccess -> String -> IO ()
-    psqlOrDie access sql = do
-        (code, out, err) <- psql access sql
-        unless (code == ExitSuccess) (fail ("psql failed: " <> sql <> "\n" <> out <> err))
-
     dumpDiagAnd :: VmAccess -> VmAccess -> SomeException -> IO ()
     dumpDiagAnd primary standby e = do
         (_, primRepl, _) <- sshToVm primary ["sudo", "-u", "postgres", "psql", "-tAc", quoteForRemoteShell "SELECT * FROM pg_stat_replication;"]
@@ -197,72 +157,6 @@ replicatesARow = requirePrereqs $ do
                 <> standSignal
                 <> "\n--- standby ping primary ---\n"
                 <> pingOut
-
-    runFixture :: VmAccess -> [String] -> IO ()
-    runFixture access args = do
-        (code, out, err) <- sshToVm access (["/root/fixture"] <> args)
-        if code == ExitSuccess
-            then pure ()
-            else do
-                (_, lsOut, _) <- sshToVm access ["pg_lsclusters"]
-                (_, logOut, _) <-
-                    sshToVm
-                        access
-                        [ "bash"
-                        , "-c"
-                        , quoteForRemoteShell "cat /var/log/postgresql/*.log 2>&1; echo ---journal---; journalctl --no-pager -n 100 2>&1 | grep -i postgres; echo ---run---; ls -la /var/run/postgresql 2>&1"
-                        ]
-                assertBool
-                    ( "fixture "
-                        <> unwords args
-                        <> " failed: "
-                        <> show code
-                        <> "\n"
-                        <> out
-                        <> err
-                        <> "\n--- pg_lsclusters ---\n"
-                        <> lsOut
-                        <> "\n--- logs ---\n"
-                        <> logOut
-                    )
-                    False
-
-requirePrereqs :: IO () -> IO ()
-requirePrereqs act = do
-    privileged <- hasVmPrivileges
-    hasQemu <- (/= Nothing) <$> findExecutable "qemu-system-x86_64"
-    hasPrimary <- doesFileExist (primaryRootfs <> "/etc/issue")
-    hasStandby <- doesFileExist (standbyRootfs <> "/etc/issue")
-    case () of
-        _
-            | not privileged -> skip "needs root, or ip/qemu-system-x86_64 setcap'd (see Test.Harness.hasVmPrivileges)"
-            | not hasQemu -> skip "qemu-system-x86_64 not found on PATH"
-            | not hasPrimary -> skip ("no primary VM rootfs at " <> primaryRootfs <> " (see this module's haddock)")
-            | not hasStandby -> skip ("no standby VM rootfs at " <> standbyRootfs <> " (see this module's haddock)")
-            | otherwise -> act
-  where
-    skip msg = hPutStrLn stderr ("SKIPPED: " <> msg)
-
--- | The fixture binary isn't on PATH; resolve its build location via cabal
--- itself rather than hardcoding a dist-newstyle path that'd break on a
--- different GHC/cabal version.
-resolveFixtureBinary :: IO FilePath
-resolveFixtureBinary = do
-    (code, out, err) <- readProcessWithExitCode "cabal" ["list-bin", "salmon-postgres-replication-fixture"] ""
-    case code of
-        -- `cabal` can print extra notices before the path on stdout (e.g. as
-        -- root under sudo, with no prior cabal config: "Config file path
-        -- source is default config file."); the bin path is always the last
-        -- non-blank line.
-        ExitSuccess -> case filter (not . null) (lines out) of
-            [] -> error "resolveFixtureBinary: `cabal list-bin` produced no output"
-            ls -> pure (last ls)
-        ExitFailure n ->
-            error $
-                "resolveFixtureBinary: `cabal list-bin salmon-postgres-replication-fixture` failed with exit "
-                    <> show n
-                    <> " -- build it first: cabal build salmon-postgres-replication-fixture\n"
-                    <> err
 
 -- | Polls @pg_stat_replication@ on the primary until the standby shows up
 -- streaming, or fails after a timeout -- same "skip/fail loudly, don't
