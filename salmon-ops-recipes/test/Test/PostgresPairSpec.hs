@@ -125,7 +125,11 @@ commandTests =
         assertEqual "" (Just "10.0.0.3") (bouncerHost Pair.PauseBouncers)
         assertBool s' ("PAUSE app" `isInfixOf` s')
         assertBool s' ("-d pgbouncer" `isInfixOf` s')
-        assertBool s' ("paused" `isInfixOf` s')
+        -- as awk variables, not as words spliced into its program: the
+        -- shell eats the quotes on the way and awk reads a bare word, which
+        -- is an empty variable that matches nothing.
+        assertBool s' ("-v col='paused'" `isInfixOf` s')
+        assertBool s' ("-v want='app'" `isInfixOf` s')
     , testCase "repointing rewrites the routing file, reloads, and lets the clients go" $ do
         let s' = script (Pair.RepointBouncers Pair.B)
         assertBool s' ("/etc/pgbouncer/routing.ini" `isInfixOf` s')

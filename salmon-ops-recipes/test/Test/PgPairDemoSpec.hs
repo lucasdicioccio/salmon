@@ -92,8 +92,18 @@ clientKeepsWriting = requirePgVmPrereqs $ requireBouncerRootfs $ do
                 assertPrimaryIs a
                 waitForClientProgress bouncer 10
 
-                (acknowledged, failures) <- stopClient bouncer
-                assertBool ("the client saw " <> show (length failures) <> " errors: " <> unlines (take 5 failures)) (null failures)
+                (acknowledged, failures, stderrs) <- stopClient bouncer
+                assertBool
+                    ( "the client saw "
+                        <> show (length failures)
+                        <> " failed inserts (of "
+                        <> show (length acknowledged + length failures)
+                        <> "), the first few being "
+                        <> show (take 5 failures)
+                        <> "; its stderr ended with:\n"
+                        <> unlines (take 8 (reverse (lines stderrs)))
+                    )
+                    (null failures)
                 assertBool "the client never got anywhere" (length acknowledged > 20)
 
                 -- every insert the client was told had happened, did
@@ -102,6 +112,12 @@ clientKeepsWriting = requirePgVmPrereqs $ requireBouncerRootfs $ do
                     ("acknowledged but absent after the switchovers: " <> show (take 20 missing))
                     []
                     missing
+
+                -- the demo's whole point, in three numbers
+                putStrLn ""
+                putStrLn ("  inserts acknowledged through the bouncer: " <> show (length acknowledged))
+                putStrLn ("  client errors across two switchovers:     " <> show (length failures))
+                putStrLn ("  acknowledged rows missing afterwards:     " <> show (length missing))
 
 -------------------------------------------------------------------------------
 
@@ -149,10 +165,19 @@ requireBouncerRootfs :: IO () -> IO ()
 requireBouncerRootfs act = do
     there <- fileExists (bouncerRootfs <> "/etc/issue")
     bootable <- grepQuiet "9pnet_virtio" (bouncerRootfs <> "/etc/initramfs-tools/modules")
+    -- the harness signs a CA into the guest's sshd config before boot, and
+    -- that write happens on the host as whoever runs the tests
+    writableSsh <- writable (bouncerRootfs <> "/etc/ssh")
     case () of
         _
             | not there ->
                 skip ("no VM rootfs at " <> bouncerRootfs <> " (see this module's haddock for the debootstrap)")
+            | not writableSsh ->
+                skip
+                    ( bouncerRootfs
+                        <> "/etc/ssh is not writable: the harness puts its SSH CA there before the guest boots."
+                        <> " chown it to whoever runs the tests, as the other rootfses have it"
+                    )
             | not bootable ->
                 skip
                     ( bouncerRootfs
@@ -164,6 +189,9 @@ requireBouncerRootfs act = do
     skip msg = putStrLn ("SKIPPED: " <> msg)
     fileExists path = do
         (code, _, _) <- readProcessWithExitCode "test" ["-e", path] ""
+        pure (code == ExitSuccess)
+    writable path = do
+        (code, _, _) <- readProcessWithExitCode "test" ["-w", path] ""
         pure (code == ExitSuccess)
     grepQuiet needle path = do
         (code, _, _) <- readProcessWithExitCode "grep" ["-q", needle, path] ""
@@ -248,6 +276,11 @@ startClient vm = do
             , "#!/bin/bash"
             , "n=0"
             , "export PGPASSFILE=/root/app.pgpass"
+            , -- Debian's psql is a perl wrapper, and perl complains to
+              -- stderr about every locale it cannot find. Left alone it
+              -- writes two lines of noise per insert into the file this test
+              -- reads for evidence.
+              "export LANG=C LC_ALL=C"
             , "while [ ! -e /root/client.stop ]; do"
             , "  n=$((n+1))"
             , "  if psql -h 127.0.0.1 -p 6432 -U app -d app -v ON_ERROR_STOP=1 -tAXc \"INSERT INTO canary VALUES ($n)\" >/dev/null 2>>/root/client.err; then"
@@ -279,13 +312,20 @@ countOk vm = do
     listToMaybe [] = Nothing
     listToMaybe (x : _) = Just x
 
--- | Stops it, and says what it was told, and what went wrong.
-stopClient :: VmAccess -> IO ([String], [String])
+{- | Stops it, and says what it was told: the inserts acknowledged, the ones
+that failed, and whatever the client wrote to stderr.
+
+A failure is an insert that came back non-zero, not a line on stderr --
+Debian's psql is a perl wrapper that warns there about locales, which says
+nothing about whether the write happened.
+-}
+stopClient :: VmAccess -> IO ([String], [String], String)
 stopClient vm = do
     sshOrDie vm ["bash", "-c", quoteForRemoteShell "touch /root/client.stop; sleep 2"]
     (_, ok, _) <- sshToVm vm ["bash", "-c", quoteForRemoteShell "cat /root/client.ok 2>/dev/null"]
-    (_, errs, _) <- sshToVm vm ["bash", "-c", quoteForRemoteShell "cat /root/client.err /root/client.fail 2>/dev/null"]
-    pure (lines ok, filter (not . null) (lines errs))
+    (_, failed, _) <- sshToVm vm ["bash", "-c", quoteForRemoteShell "cat /root/client.fail 2>/dev/null"]
+    (_, errs, _) <- sshToVm vm ["bash", "-c", quoteForRemoteShell "cat /root/client.err 2>/dev/null"]
+    pure (lines ok, filter (not . null) (lines failed), errs)
 
 -- | Of the inserts the client was told had happened, which are not there.
 rowsMissing :: VmAccess -> [String] -> IO [String]

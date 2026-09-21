@@ -824,9 +824,12 @@ stepCommand pair = go
     pauseScript b =
         unlines
             [ "set -e"
-            , consoleCommand b "-tAX" ("PAUSE " <> Text.unpack b.bouncer_alias) <> " >/dev/null 2>&1 || true"
+            , -- kept, rather than discarded: "it did not pause" is a
+              -- symptom, and what the console said about it is the cause.
+              "said=$(" <> consoleCommand b "-tAX" ("PAUSE " <> Text.unpack b.bouncer_alias) <> " 2>&1)" <> " || true"
             , "paused=$(" <> showDatabasesColumn b "paused" <> ")"
-            , "[ \"$paused\" = 1 ] || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " did not pause " <> Text.unpack b.bouncer_alias) <> " >&2; exit 1; }"
+            , "[ \"$paused\" = 1 ] || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " did not pause " <> Text.unpack b.bouncer_alias <> ", and said:") <> " \"$said\" >&2; "
+                <> consoleCommand b "-AX" "SHOW DATABASES" <> " >&2 2>&1 || true; exit 1; }"
             ]
 
     {- The whole of moving traffic: rewrite the routing file, RELOAD so the
@@ -848,20 +851,28 @@ stepCommand pair = go
                 <> Text.unpack b.bouncer_dbname
             , "SALMON_ROUTING"
             , consoleCommand b "-tAX" "RELOAD" <> " >/dev/null"
-            , consoleCommand b "-tAX" ("RESUME " <> Text.unpack b.bouncer_alias) <> " >/dev/null 2>&1 || true"
+            , "said=$(" <> consoleCommand b "-tAX" ("RESUME " <> Text.unpack b.bouncer_alias) <> " 2>&1)" <> " || true"
             , "host=$(" <> showDatabasesColumn b "host" <> ")"
             , "paused=$(" <> showDatabasesColumn b "paused" <> ")"
             , "[ \"$host\" = " <> shQuote (Text.unpack (on side).member_host) <> " ] && [ \"$paused\" = 0 ]"
-                <> " || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " is still sending clients to $host (paused=$paused)") <> " >&2; exit 1; }"
+                <> " || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " is still sending clients to $host (paused=$paused), and said:") <> " \"$said\" >&2; exit 1; }"
             ]
 
-    -- one column of this pair's row of SHOW DATABASES, by name: the columns
-    -- have changed between pgbouncer versions, and counting them reads the
-    -- wrong one.
+    {- One column of this pair's row of SHOW DATABASES, found by column
+    /name/: the columns have changed between pgbouncer versions, and
+    counting them reads the wrong one.
+
+    The two values are handed to awk with @-v@ rather than written into its
+    program, because a shell-quoted string spliced into a single-quoted awk
+    program stops being a string: the shell eats the quotes, awk reads a bare
+    word, and a bare word in awk is an empty variable that equals nothing. -}
     showDatabasesColumn b col =
         consoleCommand b "-AX" "SHOW DATABASES"
-            <> " | awk -F'|' 'NR==1 { for (i=1;i<=NF;i++) if ($i==\"name\") n=i; else if ($i==" <> shQuote ("\"" <> col <> "\"") <> ") c=i }"
-            <> " NR>1 && $n==" <> shQuote ("\"" <> Text.unpack b.bouncer_alias <> "\"") <> " { print $c }'"
+            <> " | awk -F'|' -v col="
+            <> shQuote col
+            <> " -v want="
+            <> shQuote (Text.unpack b.bouncer_alias)
+            <> " 'NR==1 { for (i=1;i<=NF;i++) { if ($i==\"name\") n=i; if ($i==col) c=i } } NR>1 && $n==want { print $c }'"
 
 {- Everything that makes a member /this pair's/ standby, whatever brought
 it here -- a rewind, or a clone from nothing. It writes the recovery
