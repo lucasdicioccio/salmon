@@ -29,7 +29,9 @@ tests :: TestTree
 tests =
     testGroup
         "SreBox.PostgresPair"
-        [ testGroup "slot names" slotNameTests
+        [ testGroup "what a member needs" memberTests
+        , testGroup "slot names" slotNameTests
+        , testGroup "what a bouncer is doing" bouncerTests
         , testGroup "parseLsn" lsnTests
         , testGroup "parseObserved" observedTests
         , testGroup "the probe script" probeTests
@@ -116,17 +118,50 @@ commandTests =
     , testCase "the steps that are arrivals, waits or refusals run nothing" $
         mapM_
             (\st -> assertBool (show st) (isLeft (Pair.stepCommand pair st)))
-            [Pair.Done, Pair.Degraded "x", Pair.Refuse "x", Pair.AwaitCatchUp Pair.B (lsn "0/1"), Pair.AwaitStreaming Pair.A, Pair.PauseBouncers, Pair.RepointBouncers Pair.B]
+            [Pair.Done, Pair.Degraded "x", Pair.Refuse "x", Pair.AwaitCatchUp Pair.B (lsn "0/1"), Pair.AwaitStreaming Pair.A]
+    , -- holding the clients, rather than dropping them
+      testCase "pausing asks every bouncer, and checks that it really paused" $ do
+        let s' = script Pair.PauseBouncers
+        assertEqual "" (Just "10.0.0.3") (bouncerHost Pair.PauseBouncers)
+        assertBool s' ("PAUSE app" `isInfixOf` s')
+        assertBool s' ("-d pgbouncer" `isInfixOf` s')
+        assertBool s' ("paused" `isInfixOf` s')
+    , testCase "repointing rewrites the routing file, reloads, and lets the clients go" $ do
+        let s' = script (Pair.RepointBouncers Pair.B)
+        assertBool s' ("/etc/pgbouncer/routing.ini" `isInfixOf` s')
+        assertBool s' ("app = host=10.0.0.2 port=5432 dbname=app" `isInfixOf` s')
+        assertBool s' ("RELOAD" `isInfixOf` s')
+        assertBool s' ("RESUME app" `isInfixOf` s')
+        -- and in that order: a reload before the file is written moves
+        -- nobody, and a resume before the reload moves them to the old one
+        assertBool s' (at "routing.ini" s' < at "RELOAD" s')
+        assertBool s' (at "RELOAD" s' < at "RESUME" s')
+    , -- a restart would drop every client, which is the one thing a bouncer
+      -- is in the way to prevent
+      testCase "and never restarts the bouncer to do it" $
+        mapM_
+            (\st -> mapM_ (\verb -> assertBool (verb <> " has no business moving traffic") (not (verb `isInfixOf` script st))) ["systemctl", "restart", "pkill"])
+            [Pair.PauseBouncers, Pair.RepointBouncers Pair.B]
+    , testCase "a pair nothing routes through has no bouncer steps to run" $
+        mapM_
+            (\st -> assertEqual (show st) (Right []) (Pair.stepCommand pair{Pair.pair_bouncers = []} st))
+            [Pair.PauseBouncers, Pair.RepointBouncers Pair.B]
     ]
   where
-    script st = case Pair.stepCommand pair st of
-        Right (_, s) -> s
+    scripts st = case Pair.stepCommand pair st of
+        Right cs -> map snd cs
         Left why -> error ("expected a command for " <> show st <> ": " <> Text.unpack why)
+    script st = case scripts st of
+        (s : _) -> s
+        [] -> error ("expected a command for " <> show st)
     host st = case Pair.stepCommand pair st of
-        Right (m, _) -> Just (Pair.member_host m)
-        Left _ -> Nothing
+        Right ((Pair.OnMember m, _) : _) -> Just (Pair.member_host m)
+        _ -> Nothing
     isLeft (Left _) = True
     isLeft _ = False
+    bouncerHost st = case Pair.stepCommand pair st of
+        Right ((Pair.OnBouncer b, _) : _) -> Just (Pair.bouncer_ssh_host b)
+        _ -> Nothing
     -- where a word first appears, so that two of them can be ordered
     at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
     tails' [] = [[]]
@@ -149,6 +184,7 @@ pair =
         , Pair.pair_a = member "10.0.0.1"
         , Pair.pair_b = member "10.0.0.2"
         , Pair.pair_primary = Pair.B
+        , Pair.pair_bouncers = [bouncer]
         , Pair.pair_may_discard = Nothing
         , Pair.pair_repl_role = "replicator"
         , Pair.pair_repl_passfile = "/etc/postgresql/repl.pgpass"
@@ -159,6 +195,21 @@ pair =
         }
   where
     member host = Pair.Member "root" host "main" 5432 Nothing
+
+bouncer :: Pair.Bouncer
+bouncer =
+    Pair.Bouncer
+        { Pair.bouncer_name = "bouncer-1"
+        , Pair.bouncer_ssh_user = "root"
+        , Pair.bouncer_ssh_host = "10.0.0.3"
+        , Pair.bouncer_ssh_identity = Nothing
+        , Pair.bouncer_console_user = "router"
+        , Pair.bouncer_console_port = 6432
+        , Pair.bouncer_console_passfile = "/etc/pgbouncer/console.pgpass"
+        , Pair.bouncer_alias = "app"
+        , Pair.bouncer_dbname = "app"
+        , Pair.bouncer_routing_path = "/etc/pgbouncer/routing.ini"
+        }
 
 lsn :: Text -> Pair.Lsn
 lsn t = maybe (error ("bad lsn in test: " <> Text.unpack t)) id (Pair.parseLsn t)
@@ -195,18 +246,65 @@ crashedAt at = Pair.Stopped "7000" 1 (lsn at) False
 
 -- | Bouncers doing what they should: pointed at B, nobody held.
 settled :: [Pair.BouncerState]
-settled = [Pair.BouncerState "bouncer-1" (Just "10.0.0.2") False]
+settled = [Pair.BouncerState (Just "10.0.0.2") False]
 
 paused :: [Pair.BouncerState]
-paused = [Pair.BouncerState "bouncer-1" (Just "10.0.0.1") True]
+paused = [Pair.BouncerState (Just "10.0.0.1") True]
 
 atOldPrimary :: [Pair.BouncerState]
-atOldPrimary = [Pair.BouncerState "bouncer-1" (Just "10.0.0.1") False]
+atOldPrimary = [Pair.BouncerState (Just "10.0.0.1") False]
 
 step :: Pair.Observed -> Pair.Observed -> [Pair.BouncerState] -> Pair.Step
 step = Pair.nextStep pair
 
 -------------------------------------------------------------------------------
+
+{- | The member node is the one that says nothing about roles: both machines
+get the same declaration, and which of them is the primary is somebody
+else's sentence.
+-}
+memberTests :: [TestTree]
+memberTests =
+    [ testCase "it configures a machine to be either half of the pair" $ do
+        let s' = Pair.memberScript pair Pair.A
+        mapM_
+            (\k -> assertBool (k <> " missing") (k `isInfixOf` s'))
+            ["wal_level", "wal_log_hints", "max_slot_wal_keep_size", "max_wal_senders"]
+    , -- without these the peer cannot stream from it, whichever way round
+      -- the pair ends up
+      testCase "and to accept the peer, in both of the ways the peer arrives" $ do
+        let s' = Pair.memberScript pair Pair.A
+        assertBool s' ("host replication replicator 10.0.0.2/32 md5" `isInfixOf` s')
+        assertBool s' ("host all rewinder 10.0.0.2/32 md5" `isInfixOf` s')
+        assertBool s' ("grep -qxF" `isInfixOf` s')
+    , testCase "the roles are made where roles can be made, and reach the other machine as rows" $ do
+        let s' = Pair.memberScript pair Pair.A
+        assertBool s' ("pg_is_in_recovery()" `isInfixOf` s')
+        assertBool s' ("CREATE ROLE replicator REPLICATION LOGIN" `isInfixOf` s')
+        assertBool s' ("CREATE ROLE rewinder LOGIN" `isInfixOf` s')
+        assertBool s' ("pg_read_binary_file(text, bigint, bigint, boolean) TO rewinder" `isInfixOf` s')
+    , -- a password on a command line is a password in ps
+      testCase "a password is read on the machine and fed in on stdin, never written here" $ do
+        let s' = Pair.memberScript pair Pair.A
+        assertBool s' ("<<PAIR_SQL" `isInfixOf` s')
+        assertBool s' ("$replpw" `isInfixOf` s')
+        assertBool s' (not ("PASSWORD 'hunter" `isInfixOf` s'))
+        assertBool s' (at "replpw=$(" s' < at "PASSWORD" s')
+    , testCase "a setting that needs a restart gets one, and nothing else does" $ do
+        let s' = Pair.memberScript pair Pair.A
+        assertBool s' ("pg_settings WHERE pending_restart" `isInfixOf` s')
+        assertBool s' ("pg_reload_conf()" `isInfixOf` s')
+    , -- the whole reason this node exists as one node rather than two
+      testCase "and it says nothing at all about which side is the primary" $ do
+        let s' = Pair.memberScript pair Pair.A <> Pair.memberScript pair Pair.B
+        mapM_
+            (\w -> assertBool (w <> " has no business in a member's script") (not (w `isInfixOf` s')))
+            ["pg_promote", "standby.signal", "primary_conninfo", "pg_rewind", "primary", "standby"]
+    ]
+  where
+    at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
+    tails' [] = [[]]
+    tails' xs@(_ : rest) = xs : tails' rest
 
 {- | A slot name is derived, never declared, so that a member that rejoins
 computes the same one the member it rejoins would.
@@ -225,6 +323,36 @@ slotNameTests =
             (Pair.slotNameFor pair{Pair.pair_name = "Orders-EU.west"} Pair.A)
     , testCase "and the whole thing fits in the 63 characters Postgres allows" $
         assertBool "" (Text.length (Pair.slotNameFor pair{Pair.pair_name = Text.replicate 200 "x"} Pair.B) <= 63)
+    ]
+
+{- | @SHOW DATABASES@ has grown columns between pgbouncer versions, so the
+answer is read by column name rather than by counting.
+-}
+bouncerTests :: [TestTree]
+bouncerTests =
+    [ testCase "where it is sending clients, and that it is not holding them" $
+        assertEqual
+            ""
+            (Pair.BouncerState (Just "10.0.0.2") False)
+            (Pair.parseBouncerState bouncer "name|host|port|database|paused|disabled\napp|10.0.0.2|5432|app|0|0\npgbouncer|||pgbouncer|0|0\n")
+    , testCase "holding them" $
+        assertEqual
+            ""
+            (Pair.BouncerState (Just "10.0.0.1") True)
+            (Pair.parseBouncerState bouncer "name|host|port|database|paused|disabled\napp|10.0.0.1|5432|app|1|0\n")
+    , -- the columns moved, and nothing read the wrong one
+      testCase "in whatever order the columns come in" $
+        assertEqual
+            ""
+            (Pair.BouncerState (Just "10.0.0.2") True)
+            (Pair.parseBouncerState bouncer "paused|pool_mode|host|name|port\n1|transaction|10.0.0.2|app|5432\n")
+    , testCase "another database's row is not this pair's answer" $
+        assertEqual
+            ""
+            (Pair.BouncerState Nothing False)
+            (Pair.parseBouncerState bouncer "name|host|paused\nsomething_else|10.0.0.9|1\n")
+    , testCase "and nothing readable at all is not an arrival" $
+        assertEqual "" (Pair.BouncerState Nothing False) (Pair.parseBouncerState bouncer "psql: could not connect\n")
     ]
 
 lsnTests :: [TestTree]
@@ -464,7 +592,7 @@ a rule that reached for @pair_a@ by accident would show up here.
 mirrorTests :: [TestTree]
 mirrorTests =
     [ testCase "A primary, B streaming from it, clients on A: nothing to do" $
-        assertEqual "" Pair.Done (mirror (primaryAt "0/5") (streamingFrom "10.0.0.1" "0/5") [Pair.BouncerState "b" (Just "10.0.0.1") False])
+        assertEqual "" Pair.Done (mirror (primaryAt "0/5") (streamingFrom "10.0.0.1" "0/5") [Pair.BouncerState (Just "10.0.0.1") False])
     , testCase "switchover the other way: stop B once the clients are held" $
         assertEqual "" (Pair.StopMember Pair.B) (mirror (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") paused)
     , testCase "promote A once B has stopped and A has its checkpoint" $

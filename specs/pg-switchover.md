@@ -22,10 +22,16 @@ does by hand -- which is why the check can only name the problem.
 The disaster catalogue S1-S8 is written, and running it is what most of the
 design above was decided by.
 
-Not done: symmetric member nodes and the seeding clone, so a pair is still
-built by hand, as `Test.PostgresSwitchoverSpec` does; bouncer routing (phase
-4), so `PauseBouncers`/`RepointBouncers` are in the table with nothing behind
-them.
+Phases 3 and 4 are now whole: `member` configures a machine to be either half
+of the pair without naming a side, `bouncerSetup` stands a pgbouncer up in
+front, `pairOp` is the three of them as one declaration, and
+`salmon-pgpair` is a binary an operator can type at. `PauseBouncers` and
+`RepointBouncers` have commands behind them, and `decide` asks the bouncers
+rather than assuming there are none.
+
+Not done: the seeding clone, so a pair's first standby is still made by hand;
+S1's client assertions, which need the bouncer machine the harness does not
+have yet.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
 failover and three voters. `pg-ha-control-plane.md` is the wider
@@ -137,6 +143,17 @@ secret-transport rule.
 A new `SreBox.PostgresPair`, three kinds of node.
 
 ### 1. Members are symmetric
+
+Built, as `member` / `memberScript`. It runs over ssh from the controller
+like everything else here, which is why it renders SQL rather than reusing
+the nodes in `Nodes/Postgres.hs`: those are ops that run *on* the machine
+they configure, and nothing in this recipe does. What it does reuse is that
+module's opinion about which settings replication needs
+(`replicationSettings`), so one place decides. Role passwords are read on the
+member out of the `.pgpass` files the pair already names, and fed to `psql`
+on standard input — never in the script, never on a command line, never in a
+report.
+
 
 Both machines get the same configuration, whichever is primary today:
 - `wal_level`, `max_wal_senders`, `max_replication_slots`, `hot_standby`,
@@ -420,16 +437,36 @@ declared. The recipe should say this plainly in its haddock and in the check's
 
 ## Routing
 
+Implemented; what follows is what was built and why.
+
 The bouncers' upstream is always the *declared* primary. Admin nodes that
 must run on the primary (`database`, `user`, templates, clones, migrations)
 also target the declared primary, so the `Track' Postgres.Server` they take
 is simply B's. This is where the design is simpler than Patroni's, where the
 primary has to be discovered at run time.
 
-A switchover is `PAUSE` on every bouncer, the Postgres steps, a rewritten ini,
-`RELOAD`, then `RESUME`. With `pool_mode = transaction`, `PAUSE` waits for
-transactions in flight, so clients see latency rather than errors. That makes
-scenario S1's "no client errors" a real assertion.
+A switchover is `PAUSE` on every bouncer, the Postgres steps, a rewritten
+routing file, `RELOAD`, then `RESUME`. With `pool_mode = transaction`,
+`PAUSE` waits for transactions in flight, so clients see latency rather than
+errors. That makes scenario S1's "no client errors" a real assertion.
+
+**The routing lives in its own file, not in the ini**, pulled in with
+`%include`. That is the seam between two nodes that would otherwise fight
+over one file. `PgBouncer.setup` owns the ini and *watches* it, so a change
+there is noticed and applied — by a restart, which drops every client the
+bouncer exists to hold. The role node owns the routing file, which is not
+watched, and applies a change the gentle way. Each file has one writer, and
+the one that moves traffic never restarts anything.
+
+`bouncerSetup` writes the routing file only when it is **missing**, for the
+same reason: after that it is the role node's, and a pass that rewrote it
+would move clients without pausing them first.
+
+Reading a bouncer is `SHOW DATABASES` on the admin console, by column
+*name* — the columns have changed between pgbouncer versions, and counting
+them is a way to read the wrong one. A bouncer that cannot be reached reads
+as sending clients nowhere, which is not `Done`: a pair whose clients are
+going somewhere unknown has not arrived.
 
 ## Disaster scenarios
 

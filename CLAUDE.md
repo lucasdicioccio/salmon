@@ -26,7 +26,8 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   Split out of `salmon-ops-recipes` so that package's build stays fast; **not** part of the
   default `cabal.project` package set — it's only built via `cabal.perso.project` (see below).
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
-  see `Migrator.hs` / `MigratorApp.hs`).
+  see `Migrator.hs` / `MigratorApp.hs`; and `salmon-pgpair`, see `PgPair.hs`, whose directive is
+  simply a `SreBox.PostgresPair.Pair` — moving a primary is then an edit to one word of the seed).
 
 Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-recipes` ←
 `salmon-apps`, with `salmon-ops-recipes-experimental` branching off `salmon-ops-recipes` as an
@@ -522,9 +523,16 @@ drops, since a slot nobody consumes pins every segment behind it. The primary re
 `wal_status`, because a slot that fell off `max_slot_wal_keep_size` is the one observation saying
 a standby can never catch up: that is `Degraded` naming the slot, not a `Rejoin`, since
 `pg_rewind` would succeed and change nothing, and re-seeding means wiping a machine — an
-operator's decision, like `pair_may_discard`. Bouncers are declared but not yet wired
-(`specs/pg-switchover.md` phase 4), so the pause/repoint steps cannot arise while none is
-declared. `Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;
+operator's decision, like `pair_may_discard`. A pair is declared as three kinds of node
+(`pairOp`): `member`, which makes a machine able to be *either* half and says nothing about which
+— so a switchover edits one declaration, the role node's — `bouncerSetup`, and the role node on
+top. `salmon-pgpair` is the binary. Traffic moves through pgbouncer's admin console: `PAUSE`,
+rewrite, `RELOAD`, `RESUME`, never a restart, since a restart drops the clients the bouncer is
+there to hold. That is why the routing lives in its own file pulled in by `%include` and
+deliberately *not* among `systemdServiceWatching`'s watched files: the ini has one writer
+(`PgBouncer.setup`, which restarts on change) and the routing file has another (the role node,
+which does not), and one file with two writers is how a switchover becomes an outage.
+`Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;
 `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a controller
 after each step in turn to show a plain pass finishes what it left, kills a primary outright to
 show the failover refused without the flag and rewound with it, and partitions the two machines —
