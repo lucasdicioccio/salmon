@@ -537,13 +537,24 @@ psqlAdminRun_Sudo port = Command go
                 <> portArgs
                 <> [ "-c"
                    , mconcat
+                        -- created if missing, and its password set either
+                        -- way: the password is part of what this node
+                        -- declares, so a role that exists with some other
+                        -- one has drifted from the declaration rather than
+                        -- been left alone deliberately. Guarding the ALTER
+                        -- behind the IF NOT EXISTS, as this used to, means a
+                        -- rotated password never reaches the cluster and the
+                        -- failure arrives later as "password authentication
+                        -- failed" somewhere that looks unrelated.
                         [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
                         , Text.unpack name
                         , "') THEN CREATE ROLE "
                         , Text.unpack name
+                        , " WITH REPLICATION LOGIN; END IF; END $$; ALTER ROLE "
+                        , Text.unpack name
                         , " WITH REPLICATION LOGIN PASSWORD "
                         , quotePass pass
-                        , "; END IF; END $$;"
+                        , ";"
                         ]
                    ]
             )

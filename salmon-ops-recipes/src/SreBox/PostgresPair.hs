@@ -1282,7 +1282,14 @@ pairOp :: Reporter Report -> Pair -> Op
 pairOp r pair =
     foldl inject (pairRole r pair) $
         [member r pair A, member r pair B]
-            <> foldMap (\side -> [seedMember r pair side `inject` member r pair side]) pair.pair_seed
+            <> foldMap
+                ( \side ->
+                    -- after *both* members, not just its own: a clone reads
+                    -- from the peer, and the peer is only ready to be read
+                    -- from once its own member node has let this side in.
+                    [foldl inject (seedMember r pair side) [member r pair A, member r pair B]]
+                )
+                pair.pair_seed
             <> [bouncerSetup r pair b | b <- pair.pair_bouncers]
 
 {- | What the pair is, as a verdict.
@@ -1417,6 +1424,11 @@ sshToTarget pair target script = do
     (login, identity) = case target of
         OnMember m -> (m.member_ssh_user <> "@" <> m.member_host, m.member_ssh_identity)
         OnBouncer b -> (b.bouncer_ssh_user <> "@" <> b.bouncer_ssh_host, b.bouncer_ssh_identity)
+    {- A neutral locale, because ssh forwards the caller's and Debian's psql
+    is a perl wrapper that complains about every locale the guest does not
+    have -- fifteen lines of it, per invocation, into the report of a node
+    that did nothing wrong. -}
+    quieted = "export LANG=C LC_ALL=C\n" <> script
     args =
         concat
             [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) identity
@@ -1430,6 +1442,6 @@ sshToTarget pair target script = do
               -- the probe is already running.
               ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
             , [Text.unpack login]
-            , ["bash", "-c", shQuote script]
+            , ["bash", "-c", shQuote quieted]
             ]
     decode = Text.decodeUtf8With TextError.lenientDecode

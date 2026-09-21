@@ -70,7 +70,12 @@ clientKeepsWriting = requirePgVmPrereqs $ requireBouncerRootfs $ do
                 resetCluster b
                 psqlOrDie a "DROP DATABASE IF EXISTS app;"
                 psqlOrDie a "CREATE DATABASE app;"
-                psqlOrDie a "DO $$ BEGIN CREATE ROLE app LOGIN PASSWORD 'demo-app-password'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+                -- created if missing, and its password set either way: a
+                -- role left over from something else with a password of its
+                -- own is drift, and the failure it causes is an
+                -- authentication error a long way from here.
+                psqlOrDie a "DO $$ BEGIN CREATE ROLE app LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+                psqlOrDie a ("ALTER ROLE app LOGIN PASSWORD '" <> appPassword <> "';")
                 sshOrDie a ["bash", "-c", quoteForRemoteShell ("sudo -u postgres psql -d app -c " <> quoteForRemoteShell "CREATE TABLE IF NOT EXISTS canary (n int primary key); GRANT ALL ON canary TO app;")]
                 appendHba a "host all app 10.99.0.4/32 md5"
                 appendHba b "host all app 10.99.0.4/32 md5"
@@ -100,8 +105,8 @@ clientKeepsWriting = requirePgVmPrereqs $ requireBouncerRootfs $ do
                         <> show (length acknowledged + length failures)
                         <> "), the first few being "
                         <> show (take 5 failures)
-                        <> "; its stderr ended with:\n"
-                        <> unlines (take 8 (reverse (lines stderrs)))
+                        <> "; what they said:\n"
+                        <> unlines (take 6 (lines stderrs))
                     )
                     (null failures)
                 assertBool "the client never got anywhere" (length acknowledged > 20)
@@ -235,12 +240,20 @@ provisionBouncerSecrets vm =
             , "{"
             , "  printf '\"router\" \"%s\"\\n' \"$(md5 router " <> consolePassword <> ")\""
             , "  printf '\"app\" \"%s\"\\n' \"$(md5 app " <> appPassword <> ")\""
-            , "} > /etc/pgbouncer/userlist.txt"
+            , "} > /tmp/userlist.txt"
             , "printf '*:*:*:router:" <> consolePassword <> "\\n' > /etc/pgbouncer/console.pgpass"
             , "printf '*:*:*:app:" <> appPassword <> "\\n' > /root/app.pgpass"
             , "chmod 0600 /etc/pgbouncer/console.pgpass /root/app.pgpass"
-            , "chown -R postgres:postgres /etc/pgbouncer"
-            , "chmod 0644 /etc/pgbouncer/userlist.txt"
+            , "chown postgres:postgres /etc/pgbouncer/console.pgpass"
+            , -- pgbouncer reads its auth file when it starts and not again,
+              -- so a userlist written under a running process is a password
+              -- that does not work yet. Only when it changed: a restart
+              -- otherwise drops the very clients this test is watching.
+              "if ! cmp -s /tmp/userlist.txt /etc/pgbouncer/userlist.txt; then"
+            , "  install -m 0644 -o postgres -g postgres /tmp/userlist.txt /etc/pgbouncer/userlist.txt"
+            , "  systemctl restart pgbouncer"
+            , "fi"
+            , "rm -f /tmp/userlist.txt"
             ]
         ]
 
@@ -271,7 +284,13 @@ startClient vm = do
         , "-c"
         , quoteForRemoteShell . unlines $
             [ "set -e"
-            , "rm -f /root/client.ok /root/client.err /root/client.stop"
+            , -- every one of them, including the failures: a rootfs outlives
+              -- its VM, so a file left behind here is read by the next run as
+              -- evidence about itself. Leaving client.fail out of this list
+              -- cost an afternoon -- eleven failures that no error text ever
+              -- explained, because the errors were cleared and the failures
+              -- were not.
+              "rm -f /root/client.ok /root/client.fail /root/client.err /root/client.stop"
             , "cat > /root/client.sh <<'CLIENT'"
             , "#!/bin/bash"
             , "n=0"
@@ -283,10 +302,11 @@ startClient vm = do
               "export LANG=C LC_ALL=C"
             , "while [ ! -e /root/client.stop ]; do"
             , "  n=$((n+1))"
-            , "  if psql -h 127.0.0.1 -p 6432 -U app -d app -v ON_ERROR_STOP=1 -tAXc \"INSERT INTO canary VALUES ($n)\" >/dev/null 2>>/root/client.err; then"
+            , "  if out=$(psql -h 127.0.0.1 -p 6432 -U app -d app -v ON_ERROR_STOP=1 -tAXc \"INSERT INTO canary VALUES ($n)\" 2>&1); then"
             , "    echo \"$n\" >> /root/client.ok"
             , "  else"
             , "    echo \"$n\" >> /root/client.fail"
+            , "    echo \"$n: $out\" >> /root/client.err"
             , "  fi"
             , "  sleep 0.2"
             , "done"

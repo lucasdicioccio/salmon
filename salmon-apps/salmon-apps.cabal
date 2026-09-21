@@ -25,6 +25,7 @@ library
     exposed-modules:
                     Migrator
                     PgPair
+                    QemuPgHaToy
                     Initializer
                     GcpToy
                     PgBackup
@@ -41,11 +42,13 @@ library
                     , filepath
                     , optparse-applicative
                     , optparse-generic
+                    , process
                     , salmon-core
                     , salmon-ops
                     , salmon-ops-recipes
                     , text
                     , time
+                    , unix
     ghc-options:   -Wall
     hs-source-dirs:   src
     default-language: Haskell2010
@@ -56,6 +59,14 @@ library
                       , OverloadedRecordDot
                       , TypeApplications
                       , ScopedTypeVariables
+
+executable salmon-toy-qemu-pg-ha
+    main-is:          QemuPgHaToyApp.hs
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
+    hs-source-dirs:   app
+    ghc-options:      -threaded
+    default-language: Haskell2010
 
 executable salmon-pgpair
     main-is:          PgPairApp.hs
