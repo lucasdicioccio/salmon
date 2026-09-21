@@ -596,6 +596,9 @@ pairWith a b side =
           -- keys across runs would only ever be wrong
           Pair.pair_ssh_known_hosts = Just "/dev/null"
         , Pair.pair_catch_up_seconds = 60
+        , -- the scenarios below route no clients; S1's client assertions are
+          -- the one case that declares a bouncer.
+          Pair.pair_bouncers = []
         , Pair.pair_may_discard = Nothing
         }
   where

@@ -36,6 +36,7 @@ module SreBox.PostgresPair (
     other,
     Member (..),
     Pair (..),
+    Bouncer (..),
     memberOn,
     slotNameFor,
 
@@ -47,15 +48,23 @@ module SreBox.PostgresPair (
     probeScript,
     parseObserved,
     BouncerState (..),
+    bouncerProbeScript,
+    parseBouncerState,
 
     -- * What to do about it
     Step (..),
+    Target (..),
     nextStep,
     stepCommand,
 
     -- * Doing it
     Report (..),
+    memberScript,
+    member,
+    bouncerSetup,
+    bouncerSetupScript,
     pairRole,
+    pairOp,
     verdict,
     observe,
     decide,
@@ -80,7 +89,9 @@ import System.Process.ListLike (proc)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
+import qualified Salmon.Builtin.Nodes.PgBouncer as PgBouncer
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
+import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (mkRef)
 import Salmon.Reporter
 
@@ -119,6 +130,48 @@ data Member
 instance FromJSON Member
 instance ToJSON Member
 
+{- | One pgbouncer in front of the pair, and everything needed to move
+traffic through it without dropping any.
+
+Traffic moves through the /admin console/ -- @PAUSE@, rewrite, @RELOAD@,
+@RESUME@ -- because the alternative is restarting pgbouncer, which drops
+every client it is holding, which is the thing it was put there to avoid.
+The rewrite goes to 'bouncer_routing_path', a file included by the ini and
+deliberately not watched by @PgBouncer.setup@ (see that module), so that
+moving traffic and owning the service stay separable.
+-}
+data Bouncer
+    = Bouncer
+    { bouncer_name :: Text
+    -- ^ what to call it in reports; it identifies nothing else.
+    , bouncer_ssh_user :: Text
+    , bouncer_ssh_host :: Text
+    -- ^ how the /controller/ reaches it, which need not be how clients do.
+    , bouncer_ssh_identity :: Maybe FilePath
+    , bouncer_console_user :: Text
+    -- ^ a user in the bouncer's @admin_users@.
+    , bouncer_console_port :: Postgres.Port
+    , bouncer_console_passfile :: FilePath
+    -- ^ that user's password, in @.pgpass@ format, on the bouncer's machine.
+    -- A path, never the password: these are shell scripts.
+    , bouncer_alias :: Text
+    -- ^ the database clients connect to, whose upstream this pair owns.
+    , bouncer_dbname :: Text
+    -- ^ the database it resolves to on whichever member is the primary.
+    , bouncer_routing_path :: FilePath
+    , bouncer_config_dir :: FilePath
+    -- ^ where its @pgbouncer.ini@ lives, and, by @PgBouncer@'s convention,
+    -- its @userlist.txt@ -- which is /pre-provisioned/, like every other
+    -- secret this recipe touches. Standing up the bouncer writes the ini and
+    -- leaves authentication to whoever put that file there.
+    , bouncer_listen_port :: Postgres.Port
+    -- ^ what clients connect to, as opposed to 'bouncer_console_port'.
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON Bouncer
+instance ToJSON Bouncer
+
 data Pair
     = Pair
     { pair_name :: Text
@@ -147,6 +200,10 @@ data Pair
     , pair_catch_up_seconds :: Int
     -- ^ how long a standby may take to replay the old primary's last
     -- checkpoint before the switchover gives up and says so.
+    , pair_bouncers :: [Bouncer]
+    -- ^ the bouncers whose clients follow the declared primary. Empty is a
+    -- pair nothing routes through: the two bouncer steps then cannot arise,
+    -- since there is nobody holding a client to hold up a pass.
     , pair_may_discard :: Maybe Side
     -- ^ "I accept losing writes on this side that the other does not have".
     --
@@ -394,16 +451,75 @@ parseObserved out =
         Just u | not (Text.null u) -> Just u
         _ -> Nothing
 
-{- | One pgbouncer in front of the pair, as it was found: which member it
-sends clients to, and whether it is holding them.
+{- | A bouncer as it was found: which member it sends clients to, and
+whether it is holding them rather than passing them on.
+
+It carries no name because nothing needs one -- 'nextStep' reads these as a
+set, and the declaration says which bouncer each came from.
 -}
 data BouncerState
     = BouncerState
-    { bouncer_name :: Text
-    , bouncer_upstream :: Maybe Postgres.Host
+    { bouncer_upstream :: Maybe Postgres.Host
     , bouncer_paused :: Bool
     }
     deriving (Eq, Show)
+
+{- | What to run on a bouncer to find that out. Asked with the header, so
+that the columns are read by name: @SHOW DATABASES@ has grown columns
+between pgbouncer versions, and counting them is a way to read the wrong one.
+-}
+bouncerProbeScript :: Bouncer -> String
+bouncerProbeScript b = consoleCommand b "-AX" "SHOW DATABASES"
+
+-- | Reads 'bouncerProbeScript''s output, for the one database this pair owns.
+parseBouncerState :: Bouncer -> Text -> BouncerState
+parseBouncerState b out =
+    case (header, row) of
+        (Just hs, Just r) ->
+            BouncerState
+                (column hs r "host" >>= nonEmpty)
+                (column hs r "paused" == Just "1")
+        _ -> BouncerState Nothing False
+  where
+    rows = map (Text.splitOn "|") (Text.lines out)
+    header = case filter (elem "name") rows of
+        (h : _) -> Just h
+        _ -> Nothing
+    row = do
+        hs <- header
+        i <- lookupIndex hs "name"
+        case [r | r <- rows, atIndex r i == Just b.bouncer_alias] of
+            (r : _) -> Just r
+            _ -> Nothing
+
+    column hs r name = lookupIndex hs name >>= atIndex r
+    lookupIndex xs x = lookup x (zip xs [0 ..])
+    atIndex xs i = case drop i xs of
+        (v : _) -> Just (Text.strip v)
+        _ -> Nothing
+    nonEmpty t = if Text.null t then Nothing else Just t
+
+{- | @psql@ against a bouncer's admin console, which is an ordinary
+connection to the database named @pgbouncer@ as a user the bouncer lists in
+@admin_users@.
+-}
+consoleCommand :: Bouncer -> String -> String -> String
+consoleCommand b flags sql =
+    unwords
+        [ "PGPASSFILE=" <> shQuote b.bouncer_console_passfile
+        , "psql"
+        , "-h"
+        , "127.0.0.1"
+        , "-p"
+        , show b.bouncer_console_port
+        , "-U"
+        , Text.unpack b.bouncer_console_user
+        , "-d"
+        , "pgbouncer"
+        , flags
+        , "-c"
+        , shQuote sql
+        ]
 
 -------------------------------------------------------------------------------
 -- What to do about it
@@ -556,33 +672,43 @@ nextStep pair obsA obsB bouncers
 -------------------------------------------------------------------------------
 -- Doing it
 
-{- | The command a step runs, and where.
+-- | Where a step's command runs.
+data Target
+    = OnMember Member
+    | OnBouncer Bouncer
+    deriving (Eq, Show)
+
+{- | The commands a step runs, and where.
 
 Pure, so that what a switchover actually does to a machine is readable and
 testable without one. 'Left' is a step that runs nowhere: 'Done' and
-'Degraded' are arrivals, 'Refuse' is a stop, the two @Await@s are waits, and
-the two bouncer steps are not implemented yet (see @specs\/pg-switchover.md@
-phase 4) -- they cannot arise while no bouncer is declared.
+'Degraded' are arrivals, 'Refuse' is a stop, and the two @Await@s are waits.
+
+A list rather than one command, because the bouncer steps address every
+bouncer there is; the member steps address exactly one machine and return a
+single-element list. An empty list is a step with nothing to do, which is
+what the bouncer steps become when no bouncer is declared -- though
+'nextStep' does not reach them then either.
 -}
-stepCommand :: Pair -> Step -> Either Text (Member, String)
+stepCommand :: Pair -> Step -> Either Text [(Target, String)]
 stepCommand pair = go
   where
-    go (StopMember side) = Right (on side, stopScript side)
+    onMember side script = Right [(OnMember (on side), script)]
+    onBouncers script = Right [(OnBouncer b, script b) | b <- pair.pair_bouncers]
+
+    go (StopMember side) = onMember side (stopScript side)
     go (StartMember side) =
-        Right (on side, pgctl side "status >/dev/null 2>&1 || " <> unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"])
+        onMember side (pgctl side "status >/dev/null 2>&1 || " <> unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"])
     go (Promote side) =
-        Right
-            ( on side
-            , psql side "SELECT CASE WHEN pg_promote(true, 60) THEN 'promoted' ELSE 'promotion timed out' END"
-            )
-    go (Rejoin side) = Right (on side, rejoinScript side)
+        onMember side (psql side "SELECT CASE WHEN pg_promote(true, 60) THEN 'promoted' ELSE 'promotion timed out' END")
+    go (Rejoin side) = onMember side (rejoinScript side)
     go Done = Left "nothing to do"
     go (Degraded why) = Left why
     go (Refuse why) = Left why
     go (AwaitCatchUp _ _) = Left "waiting for the standby to catch up"
     go (AwaitStreaming _) = Left "waiting for the standby to start streaming"
-    go PauseBouncers = Left "bouncers are not wired up yet"
-    go (RepointBouncers _) = Left "bouncers are not wired up yet"
+    go PauseBouncers = onBouncers pauseScript
+    go (RepointBouncers side) = onBouncers (repointScript side)
 
     on = memberOn pair
     cluster side = Text.unpack (on side).member_cluster
@@ -723,6 +849,56 @@ stepCommand pair = go
             , "passfile=" <> pair.pair_repl_passfile
             ]
 
+    {- Holding the clients, rather than dropping them: with transaction
+    pooling, PAUSE waits for the transactions in flight and queues what comes
+    after, so a client sees latency where it would otherwise see an error.
+
+    Asked for and then checked, because PAUSE on an already-paused database
+    is an error and a pass that is resumed after being interrupted will find
+    one -- and because "did the clients actually stop" is the question this
+    step exists to answer, not "did a command exit zero". -}
+    pauseScript b =
+        unlines
+            [ "set -e"
+            , consoleCommand b "-tAX" ("PAUSE " <> Text.unpack b.bouncer_alias) <> " >/dev/null 2>&1 || true"
+            , "paused=$(" <> showDatabasesColumn b "paused" <> ")"
+            , "[ \"$paused\" = 1 ] || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " did not pause " <> Text.unpack b.bouncer_alias) <> " >&2; exit 1; }"
+            ]
+
+    {- The whole of moving traffic: rewrite the routing file, RELOAD so the
+    bouncer reads it, RESUME so the clients it has been holding go to the new
+    primary. The file is written here rather than reloaded from a
+    declaration, because between those two things there is a moment when the
+    bouncer would send clients to a machine that is not the primary yet. -}
+    repointScript side b =
+        unlines
+            [ "set -e"
+            , "cat > " <> shQuote b.bouncer_routing_path <> " <<'SALMON_ROUTING'"
+            , "[databases]"
+            , Text.unpack b.bouncer_alias
+                <> " = host="
+                <> Text.unpack (on side).member_host
+                <> " port="
+                <> port side
+                <> " dbname="
+                <> Text.unpack b.bouncer_dbname
+            , "SALMON_ROUTING"
+            , consoleCommand b "-tAX" "RELOAD" <> " >/dev/null"
+            , consoleCommand b "-tAX" ("RESUME " <> Text.unpack b.bouncer_alias) <> " >/dev/null 2>&1 || true"
+            , "host=$(" <> showDatabasesColumn b "host" <> ")"
+            , "paused=$(" <> showDatabasesColumn b "paused" <> ")"
+            , "[ \"$host\" = " <> shQuote (Text.unpack (on side).member_host) <> " ] && [ \"$paused\" = 0 ]"
+                <> " || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " is still sending clients to $host (paused=$paused)") <> " >&2; exit 1; }"
+            ]
+
+    -- one column of this pair's row of SHOW DATABASES, by name: the columns
+    -- have changed between pgbouncer versions, and counting them reads the
+    -- wrong one.
+    showDatabasesColumn b col =
+        consoleCommand b "-AX" "SHOW DATABASES"
+            <> " | awk -F'|' 'NR==1 { for (i=1;i<=NF;i++) if ($i==\"name\") n=i; else if ($i==" <> shQuote ("\"" <> col <> "\"") <> ") c=i }"
+            <> " NR>1 && $n==" <> shQuote ("\"" <> Text.unpack b.bouncer_alias <> "\"") <> " { print $c }'"
+
     replicationConn side =
         unwords
             [ "host=" <> Text.unpack (on side).member_host
@@ -750,7 +926,9 @@ shQuote s = "'" <> concatMap (\c -> if c == '\'' then "'\\''" else [c]) s <> "'"
 data Report
     = Probed !Side !Observed
     | Deciding !Step
-    | Acted !Side !ExitCode !Text
+    | Acted !Text !ExitCode !Text
+    -- ^ what was acted on -- a member's side, or a bouncer's name -- and how
+    -- it went.
     deriving (Show)
 
 {- | Where this pair's primary is.
@@ -770,6 +948,212 @@ There is no @down@: tearing a pair down is not "stop being a primary", it is
 whatever the machines' own nodes do, and a switchover node that could stop
 serving on the way out is a footgun with no use.
 -}
+{- | What a machine needs in order to be either half of the pair, whichever
+half it happens to be today.
+
+Both members get the same node, and **it says nothing about which of them is
+the primary** -- not in its 'ref', not in its 'help', not in its 'notes'. A
+switchover then changes exactly one declaration, the role node's, and under
+@run serve@ the members are not marked 'Salmon.Actions.Serve.Stale' by a
+change that is none of their business.
+
+It runs over ssh from the controller, like every other part of this recipe,
+which is why it renders SQL rather than reusing the nodes in
+"Salmon.Builtin.Nodes.Postgres": those are ops that run /on/ the machine
+they configure, and nothing here does. What it does reuse is that module's
+opinion about which settings replication needs
+('Postgres.replicationSettings'), so there is one place that decides.
+
+The passwords are read on the member, out of the @.pgpass@ files the pair
+already names, and fed to @psql@ on standard input rather than an argument:
+they are never in this script, never on a command line, and never in a
+report. Provisioning those files is somebody else's job, which is the rule
+for recipes -- a recipe that ships secrets has chosen a transport for
+everyone who uses it.
+
+The node has no 'check': everything it does is a set rather than an insert,
+and asking a machine whether all of it is already true costs the same round
+trips as doing it again.
+-}
+member :: Reporter Report -> Pair -> Side -> Op
+member r pair side =
+    op "pg-pair-member" nodeps $ \actions ->
+        actions
+            { ref = mkRef "pg-pair-member" (pair.pair_name <> "@" <> m.member_host)
+            , help = Text.unwords ["member of", pair.pair_name, "on", m.member_host]
+            , notes =
+                [ "accepts replication and rewind connections from " <> peer.member_host
+                , "cluster " <> m.member_cluster <> " on port " <> Text.pack (show m.member_port)
+                ]
+            , up = do
+                (code, out, err) <- sshToTarget pair (OnMember m) (memberScript pair side)
+                runReporter r (Acted m.member_host code (Text.strip (out <> err)))
+                case code of
+                    ExitSuccess -> pure ()
+                    ExitFailure _ ->
+                        throwIO (userError (Text.unpack ("member " <> m.member_host <> ": " <> Text.strip (err <> out))))
+            }
+  where
+    m = memberOn pair side
+    peer = memberOn pair (other side)
+
+{- | The script 'member' runs. Pure, like the steps, so that what it does to
+a machine can be read without one.
+-}
+{- | Stands a bouncer up in front of the pair: its @pgbouncer.ini@, and the
+routing file the ini includes.
+
+The two are written differently on purpose. The ini is this node's, so it is
+rewritten whenever the declaration changes it, and a change means a restart
+-- which is affordable exactly because the ini says nothing about where the
+primary is. The routing file, which does, is written here only if it is
+/missing/, because from then on it belongs to the role node, which moves it
+the gentle way. Two writers and one file is how a switchover turns into an
+outage.
+-}
+bouncerSetup :: Reporter Report -> Pair -> Bouncer -> Op
+bouncerSetup r pair b =
+    op "pg-pair-bouncer" nodeps $ \actions ->
+        actions
+            { ref = mkRef "pg-pair-bouncer" (pair.pair_name <> "@" <> b.bouncer_ssh_host)
+            , help = Text.unwords ["pgbouncer", b.bouncer_name, "in front of", pair.pair_name]
+            , notes =
+                [ "clients reach " <> b.bouncer_alias <> " on port " <> Text.pack (show b.bouncer_listen_port)
+                , "routing is " <> Text.pack b.bouncer_routing_path <> ", which the role node owns"
+                ]
+            , up = do
+                (code, out, err) <- sshToTarget pair (OnBouncer b) (bouncerSetupScript pair b)
+                runReporter r (Acted b.bouncer_name code (Text.strip (out <> err)))
+                case code of
+                    ExitSuccess -> pure ()
+                    ExitFailure _ ->
+                        throwIO (userError (Text.unpack ("bouncer " <> b.bouncer_name <> ": " <> Text.strip (err <> out))))
+            }
+
+-- | The script 'bouncerSetup' runs.
+bouncerSetupScript :: Pair -> Bouncer -> String
+bouncerSetupScript pair b =
+    unlines
+        [ "set -e"
+        , "cat > /tmp/salmon-pgbouncer.ini <<'SALMON_INI'"
+        , Text.unpack (Text.strip (PgBouncer.renderIni iniConfig))
+        , "SALMON_INI"
+        , -- written only if absent: after that it is the role node's, and a
+          -- pass that rewrote it here would move clients without pausing them
+          "[ -e " <> shQuote b.bouncer_routing_path <> " ] || cat > " <> shQuote b.bouncer_routing_path <> " <<'SALMON_ROUTING'"
+        , "[databases]"
+        , Text.unpack b.bouncer_alias
+            <> " = host="
+            <> Text.unpack primary.member_host
+            <> " port="
+            <> show primary.member_port
+            <> " dbname="
+            <> Text.unpack b.bouncer_dbname
+        , "SALMON_ROUTING"
+        , "if ! cmp -s /tmp/salmon-pgbouncer.ini " <> shQuote ini <> "; then"
+        , "  install -m 0644 /tmp/salmon-pgbouncer.ini " <> shQuote ini <> ""
+        , "  systemctl restart pgbouncer"
+        , "fi"
+        , "rm -f /tmp/salmon-pgbouncer.ini"
+        , "systemctl is-active --quiet pgbouncer || systemctl start pgbouncer"
+        ]
+  where
+    primary = memberOn pair pair.pair_primary
+    ini = b.bouncer_config_dir <> "/pgbouncer.ini"
+    iniConfig =
+        PgBouncer.BouncerConfig
+            { PgBouncer.bouncer_config_dir = b.bouncer_config_dir
+            , PgBouncer.bouncer_listen_addr = "*"
+            , PgBouncer.bouncer_listen_port = b.bouncer_listen_port
+            , -- this pair's database is in the routing file, not here
+              PgBouncer.bouncer_databases = []
+            , -- and its users are in the pre-provisioned auth file
+              PgBouncer.bouncer_users = []
+            , -- the pooling a switchover needs: PAUSE then waits for
+              -- transactions rather than for whole sessions, so a client
+              -- sees a pause of its own length and not of somebody else's.
+              PgBouncer.bouncer_pool_mode = PgBouncer.TransactionPooling
+            , PgBouncer.bouncer_max_client_conn = 200
+            , PgBouncer.bouncer_default_pool_size = 20
+            , PgBouncer.bouncer_admin_users = [b.bouncer_console_user]
+            , PgBouncer.bouncer_routing_file = Just b.bouncer_routing_path
+            }
+
+memberScript :: Pair -> Side -> String
+memberScript pair side =
+    unlines $
+        [ "set -e"
+        , "version=$(pg_lsclusters --no-header | awk -v c=" <> shQuote cluster <> " '$2==c {print $1}' | head -n1)"
+        , "hba=/etc/postgresql/$version/" <> cluster <> "/pg_hba.conf"
+        ]
+            <> map setting (Postgres.replicationSettings Postgres.defaultReplicationTuning)
+            <> map hbaLine
+                [ "host replication " <> Text.unpack pair.pair_repl_role <> " " <> Text.unpack peer.member_host <> "/32 md5"
+                , "host all " <> Text.unpack pair.pair_rewind_role <> " " <> Text.unpack peer.member_host <> "/32 md5"
+                ]
+            <> -- roles are catalog rows: they reach the other machine through
+               -- the WAL like any other write, so only a primary makes them,
+               -- and a standby that is one tomorrow already has them.
+               [ "if [ \"$(" <> query "SELECT pg_is_in_recovery()" <> ")\" = f ]; then"
+               , "  replpw=$(awk -F: 'NR==1 {print $5}' " <> shQuote pair.pair_repl_passfile <> ")"
+               , "  rewindpw=$(awk -F: 'NR==1 {print $5}' " <> shQuote pair.pair_rewind_passfile <> ")"
+               , "  " <> heredoc (roleSql "REPLICATION LOGIN" pair.pair_repl_role "$replpw")
+               , "  " <> heredoc (roleSql "LOGIN" pair.pair_rewind_role "$rewindpw" <> " " <> grants)
+               , "fi"
+               ]
+            <> [ psql' "SELECT pg_reload_conf()"
+               , -- the same shape as systemd's NeedDaemonReload: the file has
+                 -- changed, and only the running server knows whether what
+                 -- changed needs it to come back.
+                 "pending=$(" <> query "SELECT count(*) FROM pg_settings WHERE pending_restart" <> ")"
+               , "[ \"$pending\" = 0 ] || pg_ctlcluster \"$version\" " <> cluster <> " restart"
+               ]
+  where
+    m = memberOn pair side
+    peer = memberOn pair (other side)
+    cluster = Text.unpack m.member_cluster
+    port = show m.member_port
+
+    setting (k, v) = psql' ("ALTER SYSTEM SET " <> Text.unpack k <> " = " <> Text.unpack (quoteSql v))
+    quoteSql v = "'" <> Text.replace "'" "''" v <> "'"
+
+    hbaLine l = "grep -qxF " <> shQuote l <> " \"$hba\" || echo " <> shQuote l <> " >> \"$hba\""
+
+    psql' sql = "sudo -u postgres psql -p " <> port <> " -tAX -d postgres -c " <> shQuote sql
+    query = psql'
+
+    {- Fed on standard input, so that a password is never an argument: this
+    runs on a machine with other people on it, and an argument is in `ps`.
+    The delimiter is deliberately unquoted, so that the shell substitutes the
+    password it just read -- which is why the dollar-quoted DO block is
+    written @\\$do\\$@, or the shell would take it for a variable. -}
+    heredoc sql =
+        "sudo -u postgres psql -p " <> port <> " -tAX -d postgres >/dev/null <<PAIR_SQL\n" <> sql <> "\nPAIR_SQL"
+
+    {- Created if missing, and its password set either way, so that rotating
+    the passfile is enough to rotate the role. -}
+    roleSql attrs role pw =
+        "DO \\$do\\$ BEGIN CREATE ROLE "
+            <> Text.unpack role
+            <> " "
+            <> attrs
+            <> "; EXCEPTION WHEN duplicate_object THEN NULL; END \\$do\\$;"
+            <> " ALTER ROLE "
+            <> Text.unpack role
+            <> " "
+            <> attrs
+            <> " PASSWORD '"
+            <> pw
+            <> "';"
+
+    grants =
+        unwords
+            [ "GRANT EXECUTE ON FUNCTION pg_ls_dir(text, boolean, boolean) TO " <> Text.unpack pair.pair_rewind_role <> ";"
+            , "GRANT EXECUTE ON FUNCTION pg_stat_file(text, boolean) TO " <> Text.unpack pair.pair_rewind_role <> ";"
+            , "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text) TO " <> Text.unpack pair.pair_rewind_role <> ";"
+            , "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint, boolean) TO " <> Text.unpack pair.pair_rewind_role <> ";"
+            ]
+
 pairRole :: Reporter Report -> Pair -> Op
 pairRole r pair =
     op "pg-pair-role" nodeps $ \actions ->
@@ -783,6 +1167,19 @@ pairRole r pair =
             , check = verdict <$> decide pair
             , up = converge r pair
             }
+
+{- | The whole pair as one declaration: both machines configured to be
+either half of it, every bouncer stood up in front, and on top of those the
+one sentence that says where the primary is.
+
+The ordering is the point. The role node is the only one that mentions a
+side, so it is the only one an operator edits to move the primary, and it
+runs after the machines underneath it are ready to take either role.
+-}
+pairOp :: Reporter Report -> Pair -> Op
+pairOp r pair =
+    foldl inject (pairRole r pair) $
+        [member r pair A, member r pair B] <> [bouncerSetup r pair b | b <- pair.pair_bouncers]
 
 {- | What the pair is, as a verdict.
 
@@ -802,14 +1199,28 @@ verdict (AwaitStreaming _) = Unknown
 verdict (Refuse why) = Failure why
 verdict step = Failure (Text.pack (show step) <> " is still to do")
 
--- | Asks both machines, then draws the conclusion.
+-- | Asks both machines and every bouncer, then draws the conclusion.
 decide :: Pair -> IO Step
 decide pair = do
     obsA <- observe pair A
     obsB <- observe pair B
-    -- no bouncers yet: an empty list is "nobody is holding any clients",
-    -- which is true, rather than a special case.
-    pure (nextStep pair obsA obsB [])
+    bouncers <- traverse (observeBouncer pair) pair.pair_bouncers
+    pure (nextStep pair obsA obsB bouncers)
+
+{- | Asks a bouncer where it is sending clients, and whether it is holding
+them.
+
+A bouncer that cannot be reached reads as sending clients nowhere, which is
+not 'Done' -- so a pass will try to repoint it, and say so loudly when it
+cannot. That is the right way round: a pair whose clients are going somewhere
+unknown has not arrived.
+-}
+observeBouncer :: Pair -> Bouncer -> IO BouncerState
+observeBouncer pair b = do
+    (code, out, _) <- sshToTarget pair (OnBouncer b) (bouncerProbeScript b)
+    pure $ case code of
+        ExitSuccess -> parseBouncerState b out
+        ExitFailure _ -> BouncerState Nothing False
 
 -- | Runs 'probeScript' on a member and reads what comes back.
 observe :: Pair -> Side -> IO Observed
@@ -864,33 +1275,47 @@ convergeUpTo r budget0 pair = go budget0
             AwaitStreaming _ -> waitABit >> go (budget - 1)
             _ -> case stepCommand pair step of
                 Left why -> throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> why)))
-                Right (_, script) -> do
-                    let side = sideOf step
-                    (code, out, err) <- sshTo pair side script
-                    runReporter r (Acted side code (Text.strip (out <> err)))
-                    case code of
-                        ExitSuccess -> go (budget - 1)
-                        ExitFailure _ ->
-                            throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> Text.pack (show step) <> " failed: " <> Text.strip err)))
+                Right commands -> do
+                    -- in order, and stopping at the first failure: these are
+                    -- steps like "hold every client", where doing half of it
+                    -- and carrying on is worse than not starting.
+                    failures <- runEach commands
+                    case failures of
+                        [] -> go (budget - 1)
+                        (why : _) ->
+                            throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": " <> Text.pack (show step) <> " failed: " <> why)))
+
+    runEach [] = pure []
+    runEach ((target, script) : rest) = do
+        (code, out, err) <- sshToTarget pair target script
+        runReporter r (Acted (targetName target) code (Text.strip (out <> err)))
+        case code of
+            ExitSuccess -> runEach rest
+            ExitFailure _ -> pure [targetName target <> ": " <> Text.strip (err <> out)]
 
     waitABit = threadDelay (min 5 pair.pair_catch_up_seconds * 1000000)
 
-    sideOf (StopMember s) = s
-    sideOf (StartMember s) = s
-    sideOf (Promote s) = s
-    sideOf (Rejoin s) = s
-    sideOf _ = pair.pair_primary
+-- | What a report calls the machine a command ran on.
+targetName :: Target -> Text
+targetName (OnMember m) = m.member_host
+targetName (OnBouncer b) = b.bouncer_name
 
 -- | Runs a script on a member over ssh, as the login that member declares.
 sshTo :: Pair -> Side -> String -> IO (ExitCode, Text, Text)
-sshTo pair side script = do
+sshTo pair side = sshToTarget pair (OnMember (memberOn pair side))
+
+-- | The same, for whichever kind of machine a step addresses.
+sshToTarget :: Pair -> Target -> String -> IO (ExitCode, Text, Text)
+sshToTarget pair target script = do
     (code, out, err) <- readCreateProcessWithExitCode (proc "ssh" args) ""
     pure (code, decode out, decode err)
   where
-    m = memberOn pair side
+    (login, identity) = case target of
+        OnMember m -> (m.member_ssh_user <> "@" <> m.member_host, m.member_ssh_identity)
+        OnBouncer b -> (b.bouncer_ssh_user <> "@" <> b.bouncer_ssh_host, b.bouncer_ssh_identity)
     args =
         concat
-            [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) m.member_ssh_identity
+            [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) identity
             , maybe [] (\hosts -> ["-o", "UserKnownHostsFile=" <> hosts, "-o", "StrictHostKeyChecking=accept-new"]) pair.pair_ssh_known_hosts
             , ["-o", "BatchMode=yes"]
             , -- a member that cannot be reached is the case this recipe
@@ -900,7 +1325,7 @@ sshTo pair side script = do
               -- report. The second pair covers a connection that dies while
               -- the probe is already running.
               ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
-            , [Text.unpack m.member_ssh_user <> "@" <> Text.unpack m.member_host]
+            , [Text.unpack login]
             , ["bash", "-c", shQuote script]
             ]
     decode = Text.decodeUtf8With TextError.lenientDecode

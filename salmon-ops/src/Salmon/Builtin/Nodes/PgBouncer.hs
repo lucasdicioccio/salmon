@@ -72,6 +72,25 @@ data BouncerConfig
     , bouncer_pool_mode :: PoolMode
     , bouncer_max_client_conn :: Int
     , bouncer_default_pool_size :: Int
+    , bouncer_admin_users :: [Text]
+    -- ^ users allowed on the admin console (database @pgbouncer@), which is
+    -- how anything moves traffic without restarting: @PAUSE@, @RELOAD@,
+    -- @RESUME@, and the @SHOW@s that say where clients are being sent. They
+    -- authenticate like any other user, so each one also belongs in
+    -- 'bouncer_users'.
+    , bouncer_routing_file :: Maybe FilePath
+    -- ^ a second config file, pulled in with @%include@, for databases whose
+    -- upstream is somebody else's to decide -- a pair's routing, say
+    -- (@SreBox.PostgresPair@).
+    --
+    -- It exists so that ownership is divisible. This node owns the service
+    -- and the static configuration, and watches those files, so that a
+    -- change to them is noticed and applied -- by a restart. Traffic must
+    -- not move that way: a restart drops every client this process exists to
+    -- hold. So the routing file is deliberately /not/ watched, and whoever
+    -- owns it applies a change the gentle way, through the admin console.
+    -- It must exist before the service starts, since pgbouncer refuses a
+    -- missing include.
     }
 
 configPath :: BouncerConfig -> FilePath
@@ -109,6 +128,8 @@ renderIni cfg =
                 , "max_client_conn = " <> Text.pack (show cfg.bouncer_max_client_conn)
                 , "default_pool_size = " <> Text.pack (show cfg.bouncer_default_pool_size)
                 ]
+            , ["admin_users = " <> Text.intercalate "," cfg.bouncer_admin_users | not (null cfg.bouncer_admin_users)]
+            , maybe [] (\path -> ["", "%include " <> Text.pack path]) cfg.bouncer_routing_file
             ]
   where
     renderDb :: BouncerDatabase -> Text
@@ -149,6 +170,11 @@ service node is skipped. Note that acting on such a change is a restart,
 which drops the clients this process exists to hold on to -- a node that
 means to move traffic should @PAUSE@ the bouncers, change the config, and
 @RESUME@ them, rather than let this node notice on its own.
+
+'bouncer_routing_file' is the seam for exactly that: it is included by the
+ini and is /not/ watched here, so the node that owns it can move traffic
+through the admin console without this one restarting the service underneath
+it. See @SreBox.PostgresPair@, which owns one.
 -}
 setup :: Reporter Systemd.Report -> Track' (Binary "systemctl") -> Track' (Binary "pgbouncer") -> BouncerConfig -> Op
 setup r systemctl pgbouncerBin cfg =
