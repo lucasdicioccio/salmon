@@ -23,12 +23,14 @@ module Test.PostgresVms (
     sshOrDie,
     ensurePrimary,
     resetCluster,
+    startCluster,
     stopCluster,
     crashCluster,
     dataDirectoryIdentity,
     walMegabytes,
     assertPrimaryIs,
     assertInRecovery,
+    assertStandbyOf,
     waitFor,
     waitForUpTo,
     partitionFrom,
@@ -159,7 +161,18 @@ ensurePrimary vm = do
     -- a spec is allowed to end with a cluster stopped -- S6 does, having
     -- stopped the standby to see what the primary's disk does about it --
     -- and the next one still starts from a machine, not from an error.
-    pgCtl vm "status >/dev/null 2>&1 || pg_ctlcluster \"$version\" main start"
+    started <- startCluster vm
+    unless started $ do
+        -- and a guest killed mid-write leaves a data directory that no
+        -- longer has a valid checkpoint to start from, which this tier does
+        -- routinely: every run that is interrupted stops a VM with postgres
+        -- writing. A scratch fixture that cannot start is not data anybody
+        -- is keeping, and the alternative is every spec after this one
+        -- failing on the same corpse -- including in ways that do not look
+        -- like a broken cluster at all, since a cluster crash-looping on a
+        -- 512MB guest starves the sshd the next spec needs.
+        hPutStrLn stderr "NOTE: the cluster would not start; recreating it (see Test.PostgresVms.ensurePrimary)"
+        resetCluster vm
     (_, out, _) <- psql vm "SELECT pg_is_in_recovery();"
     unless ("f" `isInfixOf` out) $ do
         psqlOrDie vm "SELECT pg_promote(true, 60);"
@@ -205,6 +218,25 @@ resetCluster vm =
             , "pg_ctlcluster \"$version\" main start"
             ]
         ]
+
+{- | Starts the cluster if it is not running, and says whether it is running
+now. Unlike the rest of these helpers, it does not die on failure: its
+callers have somewhere better to go than an exception.
+-}
+startCluster :: VmAccess -> IO Bool
+startCluster vm = do
+    (code, _, _) <-
+        sshToVm
+            vm
+            [ "bash"
+            , "-c"
+            , quoteForRemoteShell . unwords $
+                [ "version=$(pg_lsclusters --no-header | awk '{print $1}' | head -n1);"
+                , "pg_ctlcluster \"$version\" main status >/dev/null 2>&1 ||"
+                , "pg_ctlcluster \"$version\" main start"
+                ]
+            ]
+    pure (code == ExitSuccess)
 
 {- | Stops this machine's cluster the way an operator would, leaving a
 shutdown checkpoint behind: what it stopped at is then on disk, and a
@@ -297,6 +329,15 @@ assertPrimaryIs :: VmAccess -> IO ()
 assertPrimaryIs vm = do
     (_, out, _) <- psql vm "SELECT pg_is_in_recovery();"
     assertBool ("expected a primary, got: " <> out) ("f" `isInfixOf` out)
+
+{- | Polls: a standby takes a moment to connect to its primary, and every
+spec that moves one waits for the same thing.
+-}
+assertStandbyOf :: VmAccess -> Text -> IO ()
+assertStandbyOf vm host =
+    waitFor ("never became a standby of " <> Text.unpack host) $ do
+        (_, out, _) <- psql vm "SELECT coalesce((SELECT sender_host FROM pg_stat_wal_receiver LIMIT 1), 'none');"
+        pure (Text.unpack host `isInfixOf` out, out)
 
 assertInRecovery :: VmAccess -> IO ()
 assertInRecovery vm = do

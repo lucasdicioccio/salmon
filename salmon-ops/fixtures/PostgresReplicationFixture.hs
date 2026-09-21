@@ -69,9 +69,14 @@ replPassword = Postgres.Password "fixture-replication-password"
 replSlot :: Postgres.ReplicationSlotName
 replSlot = "standby_slot"
 
--- | Where the standby keeps the replication password; see 'standbyOp'.
+{- | Where the standby keeps the replication password; see 'standbyOp'.
+
+@.pgpass@ format, which is what @primary_conninfo@'s @passfile=@ reads and
+what 'Postgres.standby_repl_passfile' therefore expects: one file for the
+clone and for the streaming that follows it.
+-}
 replPassfile :: FilePath
-replPassfile = "/etc/postgresql/salmon-replication.pass"
+replPassfile = "/etc/postgresql/salmon-replication.pgpass"
 
 primaryPort :: Postgres.Port
 primaryPort = 5432
@@ -122,7 +127,7 @@ standbyOp primaryHost =
     passfileOp :: Op
     passfileOp =
         FS.ownedFile (FS.FileOwnership replPassfile (Just "postgres") (Just "postgres") 0o600)
-            `inject` FS.filecontents (FS.FileContents replPassfile replPassword.revealPassword)
+            `inject` FS.filecontents (FS.FileContents replPassfile ("*:*:*:" <> replRole <> ":" <> replPassword.revealPassword <> "\n"))
 
     standbySetup =
         Postgres.StandbySetup

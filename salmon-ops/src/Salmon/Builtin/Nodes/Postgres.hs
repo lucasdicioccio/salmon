@@ -245,7 +245,9 @@ cloneFromPrimaryScript setup =
   where
     cluster = Text.unpack setup.standby_cluster
     pgctl action = "pg_ctlcluster \"$version\" " <> cluster <> " " <> action
-    pgpassword = "PGPASSWORD=$(cat " <> shellQuote (Text.pack setup.standby_repl_passfile) <> ")"
+    -- PGPASSFILE, not PGPASSWORD: a path rather than the secret itself, and
+    -- the same file `primary_conninfo` names once this is streaming.
+    pgpassword = "PGPASSFILE=" <> shellQuote (Text.pack setup.standby_repl_passfile)
     replConninfo =
         Text.unwords
             [ "host=" <> setup.standby_primary_host
@@ -923,11 +925,16 @@ data StandbySetup
     , standby_primary_port :: Port
     , standby_repl_user :: User
     , standby_repl_passfile :: FilePath
-    -- ^ a file on the standby holding the replication role's password, and
-    -- nothing else. A path, not the password: this setup is rendered into a
+    -- ^ a @.pgpass@ file on the standby holding the replication role's
+    -- password. A path, not the password: this setup is rendered into a
     -- shell script, and a script is visible in @ps@ and printed verbatim by
     -- every 'Binary.Report' along the way. Pre-provisioned by the caller,
     -- readable only by whoever runs this node.
+    --
+    -- @.pgpass@ format rather than a bare password, because
+    -- @primary_conninfo@'s @passfile=@ can read nothing else -- so one file
+    -- serves both the clone and the streaming that follows it, and a pair
+    -- has one secret per role rather than two spellings of it.
     , standby_slot :: Maybe ReplicationSlotName
     }
     deriving (Show)
