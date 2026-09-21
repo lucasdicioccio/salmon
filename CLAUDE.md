@@ -479,67 +479,76 @@ systemd's `NeedDaemonReload`. `restartCluster` and `promoteCluster` stay uncondi
 restart is not a state, and "not in recovery" is a fact about a *pair* of machines that one of
 them cannot answer alone.
 
-`SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary, and
-`pairRole` — a node that *states where the primary is* rather than an action that moves it. Its
-`check` asks both machines and its `up` takes steps until the declaration holds, both over ssh
-from a **controlling** machine (never a member: the member that dies may be the one running it).
-Four things are load-bearing. **Nothing decides a machine is dead** — salmon has no consensus, so
-a failover needs the operator to name, in `pair_may_discard`, the side whose un-replicated writes
-may go; without it the node refuses, and the same field is what allows one of two primaries to be
-rewound onto the other. A *crashed* peer is in that same category and for a reason worth knowing:
-`pg_controldata`'s checkpoint location is the end of the WAL only for a cluster that shut down
-cleanly (the last record is then a shutdown checkpoint), so for a crashed one the comparison "the
-standby has reached its checkpoint" reads as "the standby has everything" precisely when it is
-least likely to be true — hence `o_clean`, read from `Database cluster state`, with any value
-other than `shut down`/`shut down in recovery` counting as a crash. A standby is asked where it
-*is* streaming from and where it is *told* to (`o_upstream` / `o_configured`), because a partition
-empties the first and leaves the second: reading only the first, a standby that cannot reach its
-primary looks exactly like somebody else's standby, and the answer to that one is `Rejoin`, which
-stops it and then fails — a broken link would take the standby down. Pointed here but not
-connected is `AwaitStreaming`, which waits and then reports `Unknown`. **The state is re-derived
-every turn** (`observe` → `nextStep` → act → observe), so an `up` killed mid-switchover is
-finished by the next one; there is no progress file that could disagree with the machines, and
-that property is what to protect when changing `nextStep`. **`Degraded` is `Unknown`**, the one
-verdict `Upkeep` acts on by continuing to look — "the primary is where it should be and the peer
-is unreachable" must not start anything. And **the `ref` is keyed on the pair, never on the
-side**, so moving the primary changes that node rather than declaring a second one; the declared
-side rides in `notes`, where `serve` sees it as a change. An old primary rejoins through
-`pg_rewind` onto the new one's history, never a re-clone — which is what `wal_log_hints` above is
-for — and three things sit around that command, each of which was a failure first. The node writes
-`primary_conninfo` itself, because `pg_rewind` may decide no rewind was needed and what it then
-does about `-R` is not worth betting a second primary on; it *deletes* `primary_slot_name`,
-because slots are not replicated and a standby naming a slot the new primary never heard of
-retries forever while looking healthy to every query but `pg_stat_wal_receiver`; and it completes
-a crashed target's recovery itself, in single-user mode with `-c config_file=` (pg_rewind's own
-attempt assumes Debian keeps postgresql.conf in the data directory, which it does not) and with
-`wal_keep_size` pinned to what `pg_wal` already holds — as `StopMember` pins it too, since any
-clean shutdown ends in a checkpoint and a checkpoint recycles the very WAL a rewind reads back to
-where the histories parted; the rejoin takes the pin off once it has been used. The two system
-identifiers are compared before anything else is decided, and a mismatch refuses whatever else is
-declared — `pair_may_discard` included, since it says whose *writes* may go and presumes one
-cluster, rather than licensing a pass to rewind a real cluster onto a stranger that happens to
-answer at the right address. Two more rules exist because a declaration can arrive at a bad
-moment: the peer is stopped only once the declared primary is *streaming* from it (a clean stop
-hands the tail over through that connection, so stopping it without one strands whatever the
-standby lacks — an outage made out of a healthy pair by a declaration), and a declared primary
-that is behind a *stopped* peer starts that peer rather than waiting, since nothing arrives from a
-stopped machine however long anyone waits. Each member streams with a slot the pair names
-(`slotNameFor`, derived rather than declared so that a rejoining member computes the same name the
-member it rejoins would), which the rejoin creates on the peer over the replication connection and
-then verifies, and whose stale twin — the slot this member held while it was the primary — it
-drops, since a slot nobody consumes pins every segment behind it. The primary reports its slots'
-`wal_status`, because a slot that fell off `max_slot_wal_keep_size` is the one observation saying
-a standby can never catch up: that is `Degraded` naming the slot, not a `Rejoin`, since
-`pg_rewind` would succeed and change nothing, and re-seeding means wiping a machine — an
-operator's decision, like `pair_may_discard`. A pair is declared as three kinds of node
-(`pairOp`): `member`, which makes a machine able to be *either* half and says nothing about which
-— so a switchover edits one declaration, the role node's — `bouncerSetup`, and the role node on
-top. `salmon-pgpair` is the binary. Traffic moves through pgbouncer's admin console: `PAUSE`,
-rewrite, `RELOAD`, `RESUME`, never a restart, since a restart drops the clients the bouncer is
-there to hold. That is why the routing lives in its own file pulled in by `%include` and
-deliberately *not* among `systemdServiceWatching`'s watched files: the ini has one writer
-(`PgBouncer.setup`, which restarts on change) and the routing file has another (the role node,
-which does not), and one file with two writers is how a switchover becomes an outage.
+`SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary,
+and `pairRole` — a node that *states where the primary is* rather than an action that moves it.
+Its `check` asks both machines and every bouncer; its `up` takes steps until the declaration
+holds, both over ssh from a **controlling** machine (never a member: the member that dies may be
+the one running it). A pair is three kinds of node (`pairOp`): `member`, which makes a machine
+able to be *either* half and says nothing about which — so a switchover edits one declaration,
+the role node's — `bouncerSetup`, and the role node on top. `salmon-pgpair` is the binary,
+`salmon-toy-qemu-pg-ha` the demo, `docs/postgres-pair.md` the guide, `specs/pg-switchover.md` the
+argument. What follows is the list of things that are load-bearing; each was a defect first.
+
+- **Nothing decides a machine is dead.** Salmon has no consensus, so a failover needs the
+  operator to name, in `pair_may_discard`, the side whose un-replicated writes may go; without it
+  the node refuses, and the same field is what allows one of two primaries to be rewound onto the
+  other. A *crashed* peer is in that category for a reason worth knowing: `pg_controldata`'s
+  checkpoint location is the end of the WAL only for a cluster that shut down cleanly (the last
+  record is then a shutdown checkpoint), so for a crashed one "the standby has reached its
+  checkpoint" reads as "the standby has everything" precisely when it is least likely to be true
+  — hence `o_clean`, read from `Database cluster state`, with any value other than `shut
+  down`/`shut down in recovery` counting as a crash.
+- **A standby is asked two questions about its upstream**, where it *is* streaming from and where
+  it is *told* to (`o_upstream` / `o_configured`), because a partition empties the first and
+  leaves the second. Reading only the first, a standby that cannot reach its primary looks exactly
+  like somebody else's standby — and the answer to that one is `Rejoin`, which stops it and then
+  fails, so a broken link would take the standby down. Pointed here but not connected is
+  `AwaitStreaming`: wait, then report `Unknown`.
+- **The state is re-derived every turn** (`observe` → `nextStep` → act → observe), so an `up`
+  killed mid-switchover is finished by the next one. There is no progress file that could disagree
+  with the machines, and that property is what to protect when changing `nextStep`.
+- **`Degraded` is `Unknown`**, the one verdict `Upkeep` acts on by continuing to look — "the
+  primary is where it should be and the peer is unreachable" must not start anything.
+- **The `ref` is keyed on the pair, never on the side**, so moving the primary changes that node
+  rather than declaring a second one; the declared side rides in `notes`, where `serve` sees it as
+  a change.
+- **An old primary rejoins through `pg_rewind`** onto the new one's history, never a re-clone —
+  which is what `wal_log_hints` above is for — and three things sit around that command. The node
+  writes `primary_conninfo` itself, because `pg_rewind` may decide no rewind was needed and what
+  it then does about `-R` is not worth betting a second primary on. It *deletes*
+  `primary_slot_name`, because slots are not replicated and a standby naming a slot the new
+  primary never heard of retries forever while looking healthy to every query but
+  `pg_stat_wal_receiver`. And it completes a crashed target's recovery itself, in single-user mode
+  with `-c config_file=` (pg_rewind's own attempt assumes Debian keeps postgresql.conf in the data
+  directory, which it does not) and with `wal_keep_size` pinned to what `pg_wal` already holds —
+  as `StopMember` pins it too, since any clean shutdown ends in a checkpoint and a checkpoint
+  recycles the very WAL a rewind reads back to where the histories parted. The rejoin takes the
+  pin off once it has been used.
+- **The two system identifiers are compared before anything else is decided**, and a mismatch
+  refuses whatever else is declared — `pair_may_discard` included, since it says whose *writes*
+  may go and presumes one cluster, rather than licensing a pass to rewind a real cluster onto a
+  stranger that happens to answer at the right address.
+- **Two rules exist because a declaration can arrive at a bad moment.** The peer is stopped only
+  once the declared primary is *streaming* from it (a clean stop hands the tail over through that
+  connection, so stopping it without one strands whatever the standby lacks — an outage made out
+  of a healthy pair by a declaration). And a declared primary that is behind a *stopped* peer
+  starts that peer rather than waiting, since nothing arrives from a stopped machine however long
+  anyone waits.
+- **Each member streams with a slot the pair names** (`slotNameFor`, derived rather than declared
+  so that a rejoining member computes the same name the member it rejoins would), which the rejoin
+  creates on the peer over the replication connection and then verifies, and whose stale twin —
+  the slot this member held while it was the primary — it drops, since a slot nobody consumes pins
+  every segment behind it. The primary reports its slots' `wal_status`, because a slot that fell
+  off `max_slot_wal_keep_size` is the one observation saying a standby can never catch up: that is
+  `Degraded` naming the slot, not a `Rejoin`, since `pg_rewind` would succeed and change nothing,
+  and re-seeding means wiping a machine — an operator's decision, like `pair_may_discard`.
+- **Traffic moves through pgbouncer's admin console**: `PAUSE`, rewrite, `RELOAD`, `RESUME`, never
+  a restart, since a restart drops the clients the bouncer is there to hold. That is why the
+  routing lives in its own file pulled in by `%include` and deliberately *not* among
+  `systemdServiceWatching`'s watched files: the ini has one writer (`PgBouncer.setup`, which
+  restarts on change) and the routing file has another (the role node, which does not), and one
+  file with two writers is how a switchover becomes an outage.
+
 `Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;
 `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a controller
 after each step in turn to show a plain pass finishes what it left, kills a primary outright to
