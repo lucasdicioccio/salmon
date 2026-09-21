@@ -29,9 +29,18 @@ front, `pairOp` is the three of them as one declaration, and
 `RepointBouncers` have commands behind them, and `decide` asks the bouncers
 rather than assuming there are none.
 
-Not done: the seeding clone, so a pair's first standby is still made by hand;
-S1's client assertions, which need the bouncer machine the harness does not
-have yet.
+Also done: the seeding clone (`seedMember`, declared through `pair_seed`),
+and S1's client assertions -- 460 inserts through pgbouncer across a
+switchover, no errors, nothing lost.
+
+There are two ways to watch it. `Test.PgPairDemoSpec` asserts it on three
+VMs the harness boots. `salmon-toy-qemu-pg-ha` is the same thing as a
+binary that makes its own guests, where moving the primary is a command you
+type -- and where the three steps that used to be a README (debootstrap,
+`ensureVm9pBoot`, handing `/etc/ssh` to the unprivileged user) are a `prereqs`
+seed that declares them.
+
+Not done: nothing in this spec, though `pg-patroni.md` is still a sketch.
 
 Companion: `pg-patroni.md` covers the other end of the range, with automatic
 failover and three voters. `pg-ha-control-plane.md` is the wider

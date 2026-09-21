@@ -28,6 +28,14 @@ semantics regardless of whether a node is as small as "create a file" or as larg
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
   see `Migrator.hs` / `MigratorApp.hs`; and `salmon-pgpair`, see `PgPair.hs`, whose directive is
   simply a `SreBox.PostgresPair.Pair` — moving a primary is then an edit to one word of the seed).
+  `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
+  itself, with a client that keeps writing while the primary moves: a demo of
+  `specs/pg-switchover.md`, and the throwaway-validation counterpart to `salmon-gcp-toy`. Its two
+  seeds split along the only line that matters — `prereqs` is the part that needs root
+  (debootstrap, an initrd that can mount a 9p root, handing `/etc/ssh` to whoever runs the rest),
+  and everything after it is an unprivileged user with two capabilities granted once. Splitting
+  them is also what makes the demo a demo: `prereqs` is slow and rarely changes, `up` is the one
+  you re-run, and re-running it with one word changed is the whole show.
 
 Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-recipes` ←
 `salmon-apps`, with `salmon-ops-recipes-experimental` branching off `salmon-ops-recipes` as an
