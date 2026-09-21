@@ -599,6 +599,7 @@ pairWith a b side =
         , -- the scenarios below route no clients; S1's client assertions are
           -- the one case that declares a bouncer.
           Pair.pair_bouncers = []
+        , Pair.pair_seed = Nothing
         , Pair.pair_may_discard = Nothing
         }
   where
@@ -671,13 +672,6 @@ prepareForSwitchover a b = do
             ]
 
 -------------------------------------------------------------------------------
-
--- | Polls: a rejoined standby takes a moment to connect to its new primary.
-assertStandbyOf :: VmAccess -> Text.Text -> IO ()
-assertStandbyOf vm host =
-    waitFor ("never became a standby of " <> Text.unpack host) $ do
-        (_, out, _) <- psql vm "SELECT coalesce((SELECT sender_host FROM pg_stat_wal_receiver LIMIT 1), 'none');"
-        pure (Text.unpack host `isInfixOf` out, out)
 
 insertRow :: VmAccess -> String -> IO ()
 insertRow vm v =

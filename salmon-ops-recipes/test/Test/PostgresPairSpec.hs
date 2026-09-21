@@ -184,6 +184,7 @@ pair =
         , Pair.pair_a = member "10.0.0.1"
         , Pair.pair_b = member "10.0.0.2"
         , Pair.pair_primary = Pair.B
+        , Pair.pair_seed = Nothing
         , Pair.pair_bouncers = [bouncer]
         , Pair.pair_may_discard = Nothing
         , Pair.pair_repl_role = "replicator"

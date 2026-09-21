@@ -66,12 +66,16 @@ replicatesARow = requirePgVmPrereqs $ do
     fixtureBin <- resolveFixtureBinary
     withVmAt testVmAddr primaryRootfs $ \primary ->
         withVmAt testVmAddr2 standbyRootfs $ \standby -> do
-            mapM_ (`installFixture` fixtureBin) [primary, standby]
             -- whatever the last spec left behind: the switchover spec ends
             -- with the primary on the other machine, and this one's fixture
-            -- cannot make a read-only server into a primary.
+            -- cannot make a read-only server into a primary. Before copying
+            -- anything onto these guests, not after: a cluster that cannot
+            -- start crash-loops, and a crash loop on a 512MB guest starves
+            -- the sshd the copy needs -- so the failure arrives as a dead
+            -- scp, a long way from its cause.
             ensurePrimary primary
             resetCluster standby
+            mapM_ (`installFixture` fixtureBin) [primary, standby]
 
             runFixture primary ["primary", Text.unpack testVmAddr2 <> "/32"]
             runFixture standby ["standby", Text.unpack testVmAddr]

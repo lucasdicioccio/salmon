@@ -75,8 +75,13 @@ cloneGuardTests =
     , testCase "stops at the first failing command" $
         assertBool script ("set -e" `isInfixOf` script)
     , -- a script is visible in `ps` and printed by every report on the way.
+      -- PGPASSFILE rather than PGPASSWORD: a path, not the secret, and the
+      -- same .pgpass that `primary_conninfo`'s passfile= reads once this is
+      -- streaming -- so one file serves the clone and the streaming, and a
+      -- pair has one secret per role rather than two spellings of it.
       testCase "reads the password from its file, and never carries it" $ do
-        assertBool script ("PGPASSWORD=$(cat '/etc/postgresql/repl.pass')" `isInfixOf` script)
+        assertBool script ("PGPASSFILE='/etc/postgresql/repl.pass'" `isInfixOf` script)
+        assertBool script (not ("PGPASSWORD" `isInfixOf` script))
         assertBool script (not ("hunter2" `isInfixOf` script))
     , testCase "streams from the declared slot" $
         assertBool script ("-S replica_slot" `isInfixOf` script)

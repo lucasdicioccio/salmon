@@ -61,6 +61,8 @@ module SreBox.PostgresPair (
     Report (..),
     memberScript,
     member,
+    seedMember,
+    seedScript,
     bouncerSetup,
     bouncerSetupScript,
     pairRole,
@@ -200,6 +202,16 @@ data Pair
     , pair_catch_up_seconds :: Int
     -- ^ how long a standby may take to replay the old primary's last
     -- checkpoint before the switchover gives up and says so.
+    , pair_seed :: Maybe Side
+    -- ^ "this side is to be built from the other one" -- the first clone of
+    -- a pair's life, and the only way back from a standby that has fallen
+    -- too far behind to catch up (@specs\/pg-switchover.md@ S6).
+    --
+    -- Declared rather than inferred, because it is a decision about losing
+    -- whatever is on that machine, which is the same class of decision as
+    -- 'pair_may_discard'. Safe to leave declared: the clone refuses a data
+    -- directory holding a cluster it does not recognise, and does nothing at
+    -- all once the two sides share a system identifier.
     , pair_bouncers :: [Bouncer]
     -- ^ the bouncers whose clients follow the declared primary. Empty is a
     -- pair nothing routes through: the two bouncer steps then cannot arise,
@@ -755,99 +767,51 @@ stepCommand pair = go
 
     {- An old primary rejoins by being rewound onto the new one's history,
     not by being copied over the network: same machine, same data, only the
-    records that diverged are replaced. @-R@ writes standby.signal and
-    primary_conninfo, so starting it afterwards is starting a standby.
+    records that diverged are replaced. Everything that makes it /this
+    pair's/ standby afterwards is 'standbyTail', which a member that was
+    seeded from nothing runs too.
 
     pg_rewind wants the target shut down, and refuses outright if
     wal_log_hints was off when the cluster was made -- which is why
     Postgres.defaultReplicationTuning turns it on before there is data. -}
     rejoinScript side =
-        let peerSide' = other side
-            conf = "\"$datadir/postgresql.auto.conf\""
-            slotHere = slotNameFor pair side
-            slotHeld = slotNameFor pair peerSide' 
-         in unlines
-                [ "set -e"
-                , versionOf side
-                , "datadir=/var/lib/postgresql/$version/" <> cluster side
-                , "confdir=/etc/postgresql/$version/" <> cluster side
-                , "bindir=/usr/lib/postgresql/$version/bin"
-                , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "stop || true"]
-                , -- pg_rewind finishes a crashed target's recovery itself, by
-                  -- running `postgres --single -D <datadir>` -- which takes
-                  -- the configuration to be in the data directory. On Debian
-                  -- it is in /etc/postgresql, so that step fails and the
-                  -- rewind with it, in exactly the case a failover is about:
-                  -- the machine that died. Do the recovery here, where the
-                  -- config file's location is known. Single-user, never a
-                  -- start: a server that listens is a second primary, and
-                  -- this one still believes it is the primary.
-                  "state=$(\"$bindir/pg_controldata\" -D \"$datadir\" | sed -n 's/^Database cluster state: *//p')"
-                , -- and it must not throw away what it is being run for: a
-                  -- clean shutdown ends in a checkpoint, and a checkpoint
-                  -- recycles the WAL before it -- which is the WAL pg_rewind
-                  -- then reads, from the last checkpoint the two machines
-                  -- share. Keeping as much as pg_wal already holds costs
-                  -- nothing, since it is on the disk either way.
-                  "keep=$(du -sm \"$datadir/pg_wal\" | awk '{print $1 + 1}')"
-                , "case \"$state\" in"
-                , "  'shut down'|'shut down in recovery') ;;"
-                , "  *) sudo -u postgres \"$bindir/postgres\" --single -D \"$datadir\""
-                    <> " -c config_file=\"$confdir/postgresql.conf\" -c wal_keep_size=\"${keep}MB\""
-                    <> " template1 </dev/null >/dev/null ;;"
-                , "esac"
-                , "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " \"$bindir/pg_rewind\""
-                    <> " --target-pgdata=\"$datadir\" -R --source-server="
-                    <> shQuote (sourceServer peerSide')
-                , -- pg_rewind's own -R writes these, but it is also entitled
-                  -- to decide no rewind was needed at all -- which is the
-                  -- ordinary case after a clean switchover. Writing them
-                  -- here makes "this member comes back as a standby" true of
-                  -- both outcomes, instead of leaving a second primary
-                  -- behind on the quiet one.
-                  "sudo -u postgres sed -i '/^primary_conninfo/d' " <> conf
-                , "echo " <> shQuote ("primary_conninfo = '" <> primaryConninfo peerSide' <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
-                , {- The slot this member streams with, on the machine it
-                  streams from. Slots are not replicated and nothing else
-                  creates this one, so a rejoining member makes its own --
-                  and then checks, because a standby that names a slot the
-                  primary does not have retries forever ("replication slot
-                  ... does not exist") while looking, to every other query,
-                  like a healthy standby. Creating it goes over the
-                  replication connection, which is the one path the pair is
-                  already required to have; the check goes over the rewind
-                  role's ordinary one. -}
-                  "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_repl_passfile <> " psql -tAX -d " <> shQuote (replicationConn peerSide')
-                    <> " -c " <> shQuote ("CREATE_REPLICATION_SLOT " <> Text.unpack slotHere <> " PHYSICAL") <> " >/dev/null 2>&1 || true"
-                , "have=$(sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " psql -tAX -d " <> shQuote (sourceServer peerSide')
-                    <> " -c " <> shQuote ("SELECT count(*) FROM pg_replication_slots WHERE slot_name = '" <> Text.unpack slotHere <> "'") <> ")"
-                , "[ \"$have\" = 1 ] || { echo " <> shQuote ("no replication slot " <> Text.unpack slotHere <> " on " <> Text.unpack (on peerSide').member_host) <> " >&2; exit 1; }"
-                , "sudo -u postgres sed -i '/^primary_slot_name/d' " <> conf
-                , "echo " <> shQuote ("primary_slot_name = '" <> Text.unpack slotHere <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
-                , -- and the WAL the stop pinned so that this rewind could
-                  -- happen: it has happened, and a standby holding every
-                  -- segment it ever saw fills a disk.
-                  "sudo -u postgres sed -i '/^wal_keep_size/d' " <> conf
-                , "sudo -u postgres touch \"$datadir/standby.signal\""
-                , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
-                , -- and the slot this member held for the peer back when it
-                  -- was the primary. Nothing consumes it here, and a slot
-                  -- nobody consumes still pins every segment behind it: a
-                  -- standby that keeps one fills its own disk waiting for a
-                  -- machine that is not coming. Not fatal if it fails --
-                  -- this member is already back in the pair by now.
-                  "sudo -u postgres psql -p " <> port side <> " -tAX -d postgres -c "
-                    <> shQuote ("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '" <> Text.unpack slotHeld <> "'")
-                    <> " >/dev/null || echo " <> shQuote ("could not drop the stale slot " <> Text.unpack slotHeld) <> " >&2"
-                ]
-
-    primaryConninfo side =
-        unwords
-            [ "host=" <> Text.unpack (on side).member_host
-            , "port=" <> port side
-            , "user=" <> Text.unpack pair.pair_repl_role
-            , "passfile=" <> pair.pair_repl_passfile
+        unlines $
+            [ "set -e"
+            , versionOf side
+            , "datadir=/var/lib/postgresql/$version/" <> cluster side
+            , "confdir=/etc/postgresql/$version/" <> cluster side
+            , "bindir=/usr/lib/postgresql/$version/bin"
+            , unwords ["pg_ctlcluster", "\"$version\"", cluster side, "stop || true"]
+            , -- pg_rewind finishes a crashed target's recovery itself, by
+              -- running `postgres --single -D <datadir>` -- which takes the
+              -- configuration to be in the data directory. On Debian it is in
+              -- /etc/postgresql, so that step fails and the rewind with it, in
+              -- exactly the case a failover is about: the machine that died.
+              -- Do the recovery here, where the config file's location is
+              -- known. Single-user, never a start: a server that listens is a
+              -- second primary, and this one still believes it is one.
+              "state=$(\"$bindir/pg_controldata\" -D \"$datadir\" | sed -n 's/^Database cluster state: *//p')"
+            , -- and it must not throw away what it is being run for: a clean
+              -- shutdown ends in a checkpoint, and a checkpoint recycles the
+              -- WAL before it -- which is the WAL pg_rewind then reads, from
+              -- the last checkpoint the two machines share. Keeping as much
+              -- as pg_wal already holds costs nothing, since it is on the
+              -- disk either way.
+              "keep=$(du -sm \"$datadir/pg_wal\" | awk '{print $1 + 1}')"
+            , "case \"$state\" in"
+            , "  'shut down'|'shut down in recovery') ;;"
+            , "  *) sudo -u postgres \"$bindir/postgres\" --single -D \"$datadir\""
+                <> " -c config_file=\"$confdir/postgresql.conf\" -c wal_keep_size=\"${keep}MB\""
+                <> " template1 </dev/null >/dev/null ;;"
+            , "esac"
+            , "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " \"$bindir/pg_rewind\""
+                <> " --target-pgdata=\"$datadir\" -R --source-server="
+                <> shQuote (sourceServer pair (other side))
             ]
+                <> standbyTail pair side
+                <> [ unwords ["pg_ctlcluster", "\"$version\"", cluster side, "start"]
+                   , dropStaleSlot pair side
+                   ]
 
     {- Holding the clients, rather than dropping them: with transaction
     pooling, PAUSE waits for the transactions in flight and queues what comes
@@ -899,24 +863,86 @@ stepCommand pair = go
             <> " | awk -F'|' 'NR==1 { for (i=1;i<=NF;i++) if ($i==\"name\") n=i; else if ($i==" <> shQuote ("\"" <> col <> "\"") <> ") c=i }"
             <> " NR>1 && $n==" <> shQuote ("\"" <> Text.unpack b.bouncer_alias <> "\"") <> " { print $c }'"
 
-    replicationConn side =
-        unwords
-            [ "host=" <> Text.unpack (on side).member_host
-            , "port=" <> port side
-            , "user=" <> Text.unpack pair.pair_repl_role
-            , "dbname=postgres"
-            , -- the physical kind. `replication=database` is the logical one,
-              -- and pg_hba matches that against the database name.
-              "replication=true"
-            ]
+{- Everything that makes a member /this pair's/ standby, whatever brought
+it here -- a rewind, or a clone from nothing. It writes the recovery
+configuration rather than trusting @pg_rewind -R@ or @pg_basebackup -R@
+to have done it: both are entitled to write something reasonable and
+neither is entitled to write this pair's slot, and a member that comes
+back as somebody else's standby is a second primary waiting to happen.
 
-    sourceServer side =
-        unwords
-            [ "host=" <> Text.unpack (on side).member_host
-            , "port=" <> port side
-            , "user=" <> Text.unpack pair.pair_rewind_role
-            , "dbname=postgres"
-            ]
+It leaves the cluster stopped or running exactly as it found it; the
+caller starts it. -}
+standbyTail :: Pair -> Side -> [String]
+standbyTail pair side =
+    let peerSide' = other side
+        conf = "\"$datadir/postgresql.auto.conf\""
+        slotHere = slotNameFor pair side
+     in [ {- The slot this member streams with, on the machine it streams
+          from. Slots are not replicated and nothing else creates this
+          one, so the member makes its own -- and then checks, because a
+          standby that names a slot the primary does not have retries
+          forever ("replication slot ... does not exist") while looking,
+          to every other query, like a healthy standby. Creating it goes
+          over the replication connection, which is the one path the pair
+          is already required to have; the check goes over the rewind
+          role's ordinary one. -}
+          "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_repl_passfile <> " psql -tAX -d " <> shQuote (replicationConn pair peerSide')
+            <> " -c " <> shQuote ("CREATE_REPLICATION_SLOT " <> Text.unpack slotHere <> " PHYSICAL") <> " >/dev/null 2>&1 || true"
+        , "have=$(sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " psql -tAX -d " <> shQuote (sourceServer pair peerSide')
+            <> " -c " <> shQuote ("SELECT count(*) FROM pg_replication_slots WHERE slot_name = '" <> Text.unpack slotHere <> "'") <> ")"
+        , "[ \"$have\" = 1 ] || { echo " <> shQuote ("no replication slot " <> Text.unpack slotHere <> " on " <> Text.unpack (memberOn pair peerSide').member_host) <> " >&2; exit 1; }"
+        , "sudo -u postgres sed -i '/^primary_conninfo/d' " <> conf
+        , "echo " <> shQuote ("primary_conninfo = '" <> primaryConninfo pair peerSide' <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
+        , "sudo -u postgres sed -i '/^primary_slot_name/d' " <> conf
+        , "echo " <> shQuote ("primary_slot_name = '" <> Text.unpack slotHere <> "'") <> " | sudo -u postgres tee -a " <> conf <> " >/dev/null"
+        , -- and the WAL a stop pinned so that a rewind could happen: it
+          -- has happened, and a standby holding every segment it ever saw
+          -- fills a disk.
+          "sudo -u postgres sed -i '/^wal_keep_size/d' " <> conf
+        , "sudo -u postgres touch \"$datadir/standby.signal\""
+        ]
+
+{- The slot this member held for the peer back when it was the primary.
+Nothing consumes it here, and a slot nobody consumes still pins every
+segment behind it: a standby that keeps one fills its own disk waiting
+for a machine that is not coming. Not fatal -- this member is already
+back in the pair by the time it runs. -}
+dropStaleSlot :: Pair -> Side -> String
+dropStaleSlot pair side =
+    "sudo -u postgres psql -p " <> show (memberOn pair side).member_port <> " -tAX -d postgres -c "
+        <> shQuote ("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '" <> Text.unpack (slotNameFor pair (other side)) <> "'")
+        <> " >/dev/null || echo " <> shQuote ("could not drop the stale slot " <> Text.unpack (slotNameFor pair (other side))) <> " >&2"
+
+primaryConninfo :: Pair -> Side -> String
+primaryConninfo pair side =
+    unwords
+        [ "host=" <> Text.unpack (memberOn pair side).member_host
+        , "port=" <> show (memberOn pair side).member_port
+        , "user=" <> Text.unpack pair.pair_repl_role
+        , "passfile=" <> pair.pair_repl_passfile
+        ]
+
+replicationConn :: Pair -> Side -> String
+replicationConn pair side =
+    unwords
+        [ "host=" <> Text.unpack (memberOn pair side).member_host
+        , "port=" <> show (memberOn pair side).member_port
+        , "user=" <> Text.unpack pair.pair_repl_role
+        , "dbname=postgres"
+        , -- the physical kind. `replication=database` is the logical one,
+          -- and pg_hba matches that against the database name.
+          "replication=true"
+        ]
+
+sourceServer :: Pair -> Side -> String
+sourceServer pair side =
+    unwords
+        [ "host=" <> Text.unpack (memberOn pair side).member_host
+        , "port=" <> show (memberOn pair side).member_port
+        , "user=" <> Text.unpack pair.pair_rewind_role
+        , "dbname=postgres"
+        ]
+
 
 shQuote :: String -> String
 shQuote s = "'" <> concatMap (\c -> if c == '\'' then "'\\''" else [c]) s <> "'"
@@ -1000,6 +1026,71 @@ member r pair side =
 {- | The script 'member' runs. Pure, like the steps, so that what it does to
 a machine can be read without one.
 -}
+{- | Builds one member out of the other: @pg_basebackup@, then everything
+that makes it this pair's standby.
+
+This is the one node here that can destroy a machine's data, so what guards
+it is 'Postgres.cloneFromPrimaryScript''s own guard, reused rather than
+rewritten: same system identifier means this data directory already belongs
+to that cluster and is left alone, a different one is cloned over only if
+what is there is pristine, and anything else is refused by name. See P1 in
+@specs\/pg-switchover.md@, which is the defect that guard was written for.
+
+It is not part of a switchover. A member that already belongs to the pair
+rejoins by being rewound (see 'Step''s @Rejoin@); copying a whole cluster
+across the network is what you do when there is nothing to rewind /from/.
+-}
+seedMember :: Reporter Report -> Pair -> Side -> Op
+seedMember r pair side =
+    op "pg-pair-seed" nodeps $ \actions ->
+        actions
+            { ref = mkRef "pg-pair-seed" (pair.pair_name <> "@" <> m.member_host)
+            , help = Text.unwords ["seeds", m.member_host, "from", peer.member_host]
+            , notes =
+                [ "clones only over a pristine or matching data directory, and refuses anything else"
+                ]
+            , up = do
+                (code, out, err) <- sshToTarget pair (OnMember m) (seedScript pair side)
+                runReporter r (Acted m.member_host code (Text.strip (out <> err)))
+                case code of
+                    ExitSuccess -> pure ()
+                    ExitFailure _ ->
+                        throwIO (userError (Text.unpack ("seeding " <> m.member_host <> ": " <> Text.strip (err <> out))))
+            }
+  where
+    m = memberOn pair side
+    peer = memberOn pair (other side)
+
+-- | The script 'seedMember' runs.
+seedScript :: Pair -> Side -> String
+seedScript pair side =
+    unlines $
+        [ Postgres.cloneFromPrimaryScript setup
+        , -- the clone leaves it running and streaming with whatever
+          -- pg_basebackup's -R wrote; from here it is this pair's standby,
+          -- with this pair's slot, which nothing else would give it.
+          "version=$(pg_lsclusters --no-header | awk -v c=" <> shQuote (Text.unpack m.member_cluster) <> " '$2==c {print $1}' | head -n1)"
+        , "datadir=/var/lib/postgresql/$version/" <> Text.unpack m.member_cluster
+        ]
+            <> standbyTail pair side
+            <> [ unwords ["pg_ctlcluster", "\"$version\"", Text.unpack m.member_cluster, "restart"]
+               ]
+  where
+    m = memberOn pair side
+    peer = memberOn pair (other side)
+    setup =
+        Postgres.StandbySetup
+            { Postgres.standby_cluster = m.member_cluster
+            , Postgres.standby_primary_host = peer.member_host
+            , Postgres.standby_primary_port = peer.member_port
+            , Postgres.standby_repl_user = Postgres.User pair.pair_repl_role
+            , Postgres.standby_repl_passfile = pair.pair_repl_passfile
+            , -- no slot for the copy itself: the slot this member streams
+              -- with is made just below, once there is a member to make it
+              -- for.
+              Postgres.standby_slot = Nothing
+            }
+
 {- | Stands a bouncer up in front of the pair: its @pgbouncer.ini@, and the
 routing file the ini includes.
 
@@ -1179,7 +1270,9 @@ runs after the machines underneath it are ready to take either role.
 pairOp :: Reporter Report -> Pair -> Op
 pairOp r pair =
     foldl inject (pairRole r pair) $
-        [member r pair A, member r pair B] <> [bouncerSetup r pair b | b <- pair.pair_bouncers]
+        [member r pair A, member r pair B]
+            <> foldMap (\side -> [seedMember r pair side `inject` member r pair side]) pair.pair_seed
+            <> [bouncerSetup r pair b | b <- pair.pair_bouncers]
 
 {- | What the pair is, as a verdict.
 
