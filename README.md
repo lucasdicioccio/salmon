@@ -50,7 +50,7 @@ salmon-core  <-  salmon-ops  <-  salmon-ops-recipes  <-  salmon-apps
   `salmon-ops-recipes` so that package stays fast to build. Not part of the
   default `cabal.project` package set.
 - **`salmon-apps`** — blessed, project-useful binaries built from the above
-  (e.g. `salmon-migrator`).
+  (e.g. `salmon-migrator`, `salmon-pgpair`, `salmon-gcp-toy`).
 
 ## Build
 
@@ -146,6 +146,7 @@ above, where this project's own conventions get enforced:
 | `MicroDNS` | a minimal DNS server setup |
 | `PostgresInit` | database/user/group/grant setup for a Postgres cluster (locally or driven onto a remote machine via `Self`) |
 | `PostgresMigrations` | shipping and running migrations, local or remote-connstring |
+| `PostgresPair` | two machines, one Postgres cluster, and a *declared* primary: switchover, operator-decided failover, `pg_rewind` rejoins, and pgbouncer routing that follows — see [`docs/postgres-pair.md`](docs/postgres-pair.md) |
 | `Postgrest` | PostgREST service configuration |
 | `WireGuardVpn` | a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange |
 
@@ -165,6 +166,11 @@ package set — see [Build](#build)): `KitchenSinkBlog`,
   gives you for free (convergence, `status`/`force`/`pause`, self-healing on
   re-declaration), how to try it, and what to decorate a node with (`check`,
   `Supervision`, `managed`) to get more out of it.
+- [`docs/postgres-pair.md`](docs/postgres-pair.md) — a Postgres primary and
+  standby whose primary is a declaration rather than a discovery: what a
+  switchover does step by step, when the recipe refuses and why, and how to
+  watch a client keep writing across one with the `salmon-toy-qemu-pg-ha`
+  demo.
 - [`docs/gcp-toy-validation.md`](docs/gcp-toy-validation.md) — how to exercise
   the GCP builtins against a real, throwaway project with the `salmon-gcp-toy`
   binary: what it declares, how to read an `up`/`up`/`down` run, and what the
