@@ -10,6 +10,7 @@ import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension (Op, Track', deps, notes, op, ref)
 import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
+import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
@@ -55,6 +56,7 @@ program =
     -- meta
     specOp _ (Migrate setup1 setup2) = [migrate setup2 `inject` migrateSuperUser setup1]
     specOp _ (BuildTemplate setup1 setup2 fp) = [buildTemplate fp setup1 setup2]
+    specOp _ (Clone retention c) = [cloneOp retention c]
 
 configure :: Configure IO Seed Spec
 configure = Configure go
@@ -66,3 +68,8 @@ configure = Configure go
         case mode of
             InPlace -> pure $ Migrate setup1 setup2
             AsTemplate -> BuildTemplate setup1 setup2 <$> fingerprintInputs setup1 setup2
+    go (CloneSeed dbname template owner retain) =
+        pure $
+            Clone
+                (if retain then Postgres.Retain else Postgres.Discard)
+                (Postgres.Clone dbname template owner)

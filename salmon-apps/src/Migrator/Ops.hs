@@ -7,7 +7,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
-import Salmon.Builtin.Extension (Op, Track')
+import Salmon.Builtin.Extension (Op, Track', ignoreTrack)
 import qualified Salmon.Builtin.Migrations as Migrations
 import qualified Salmon.Builtin.Nodes.Debian.OS as Debian
 import Salmon.Builtin.Nodes.Filesystem as FS
@@ -123,6 +123,25 @@ each set tagged so moving a file from one to the other counts as a change,
 plus the database and roles, which end up baked into the template's
 ownership and grants.
 -}
+{- | Copies a preview environment's database from a template already built
+by 'buildTemplate' / @salmon-migrator template@ on this same cluster.
+
+The template is named, not tracked: this binary has no graph position for
+"the template got built", only a name it trusts is already there (an
+already-run @template@ invocation, out of band -- see 'Salmon.Builtin.Extension.ignoreTrack').
+'Postgres.cloneDatabase' refuses to run against a database it did not
+itself create as a clone, so this is safe to re-run.
+-}
+cloneOp :: Postgres.Retention -> Postgres.Clone -> Op
+cloneOp retention c =
+    Postgres.cloneDatabase
+        reportPrint
+        Debian.psql
+        Postgres.localServer.serverPort
+        ignoreTrack
+        retention
+        c
+
 fingerprintInputs :: PGMigrate.MigrationSetup -> PGMigrate.MigrationSetup -> IO Text
 fingerprintInputs superuser owner = do
     superuserFiles <- PGTemplate.fileFingerprintParts (paths superuser)

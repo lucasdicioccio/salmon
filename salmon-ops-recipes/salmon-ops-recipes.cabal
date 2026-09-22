@@ -39,6 +39,7 @@ library
                    , SreBox.Gcp.VmProvision
                    , SreBox.Gcp.CloudRunDeploy
                    , SreBox.Gcp.PostgrestCloudRun
+                   , SreBox.Gcp.PreviewEnvironment
     build-depends:    base >=4.16.3.0
                     , aeson
                     , base16-bytestring
