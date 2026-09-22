@@ -1,7 +1,8 @@
 module Migrator.Seed where
 
 import Data.Text (Text)
-import Options.Applicative (command, commandGroup, fullDesc, header, help, helper, info, long, many, progDesc, strOption, subparser, value, (<**>))
+import qualified Data.Text as Text
+import Options.Applicative (command, commandGroup, flag, fullDesc, header, help, helper, info, long, many, optional, progDesc, strOption, subparser, value, (<**>))
 
 import Options.Generic (ParseRecord (..))
 
@@ -24,6 +25,20 @@ data Seed
     , migratePassFile :: FilePath
     , migrateExtraUsers :: [Text]
     }
+    | -- | Copies a preview environment's database from an already-built
+      -- template. See @salmon-migrator clone --help@.
+      CloneSeed
+    { cloneSeedDatabase :: Text
+    -- ^ the new database's name -- typically derived from a branch, e.g.
+    -- @preview_\<branch\>@
+    , cloneSeedTemplate :: Text
+    -- ^ the template database's name, as built by @salmon-migrator template --db=...@
+    , cloneSeedOwner :: Maybe Text
+    -- ^ role to own the new database; must already exist on this cluster
+    , cloneSeedRetain :: Bool
+    -- ^ @True@: @down@/teardown leaves the database in place (a still-open
+    -- PR). @False@: @down@ drops it (a merged/closed PR).
+    }
 
 instance ParseRecord Seed where
     parseRecord =
@@ -39,6 +54,9 @@ instance ParseRecord Seed where
                     , command
                         "template"
                         (info (build AsTemplate) (header "Template" <> fullDesc <> progDesc templateDescription))
+                    , command
+                        "clone"
+                        (info buildClone (header "Clone" <> fullDesc <> progDesc cloneDescription))
                     ]
         templateDescription :: String
         templateDescription =
@@ -63,6 +81,20 @@ instance ParseRecord Seed where
                 , "Admin migrations run first as the `postgres` system user."
                 , "User migrations run with a user-name and a password (in a password file)."
                 ]
+        cloneDescription :: String
+        cloneDescription =
+            unlines
+                [ "Copies a database from a template already built by `template`."
+                , ""
+                , "Does not migrate anything: the template must already be locked on this"
+                , "cluster (run `template` first, or point at a template some other run of"
+                , "this cluster already built). Meant for preview environments: one clone per"
+                , "branch, named from the branch."
+                , ""
+                , "--retain keeps the clone on `down` (an open PR's environment); without it,"
+                , "`down` drops the database (a merged/closed PR). Refuses to touch a database"
+                , "salmon did not itself clone."
+                ]
         build mode =
             Seed mode
                 <$> strOption
@@ -83,3 +115,9 @@ instance ParseRecord Seed where
                         strOption
                             (long "db-extra-user" <> Options.Applicative.help "username [database user]")
                     )
+        buildClone =
+            CloneSeed
+                <$> (Text.pack <$> strOption (long "db" <> Options.Applicative.help "name of the database to create (the clone)"))
+                <*> (Text.pack <$> strOption (long "template" <> Options.Applicative.help "name of the template database to copy from"))
+                <*> optional (Text.pack <$> strOption (long "db-owner" <> Options.Applicative.help "role to own the clone [default: postgres]"))
+                <*> flag False True (long "retain" <> Options.Applicative.help "keep the clone on teardown (`down`) instead of dropping it")
