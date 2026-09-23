@@ -291,12 +291,15 @@ fields 'Dag.sameRepresentative' compares (shorthand, help, notes, the
 rendering of dynamics) and the loop's state for the node, as @status@
 lists it — plus its dependencies and dependants as refs. Structurally what
 'Salmon.Actions.Help.printDagTree' prints for the same 'Dag', with the
-state added.
+state added. The envelope carries the loop's 'Serve.Mode' at the moment of
+the read, the same value @\/status@ opens with, so a client knows which
+guarantees the nodes it is looking at are under.
 -}
-dagValue :: WorldView -> Value
-dagValue v =
+dagValue :: Serve.Mode -> WorldView -> Value
+dagValue mode v =
     object
-        [ "nodes"
+        [ "mode" .= mode
+        , "nodes"
             .= [ nodeObject r act
                | r <- Dag.dagOrder dag
                , Just act <- [Dag.representativeOf dag r]
@@ -339,7 +342,9 @@ instance FromJSON CommandBody where
 application :: Server -> Application
 application server req respond =
     case (Wai.requestMethod req, Wai.pathInfo req) of
-        ("GET", ["dag"]) -> withView (respond . json HTTP.status200 . dagValue)
+        ("GET", ["dag"]) -> withView $ \v -> do
+            mode <- serverMode server
+            respond (json HTTP.status200 (dagValue mode v))
         ("GET", ["status"]) -> withView $ \v -> do
             mode <- serverMode server
             respond (json HTTP.status200 (toJSON (FromServe (Serve.StatusReport mode (Map.toList (viewNodes v)) (viewPaths v)))))

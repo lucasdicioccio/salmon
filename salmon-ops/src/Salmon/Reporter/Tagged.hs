@@ -219,6 +219,13 @@ supervisionValue sup =
     strategy OneForOne = "one-for-one"
     strategy RestForOne = "rest-for-one"
 
+{- | The loop's mode, as @status@ renders it: @interactive@, @following@
+or @replay@. On the wire in two places (@status@\'s object and @\/dag@\'s
+envelope), so it is encoded once, here, beside the other orphans.
+-}
+instance ToJSON Serve.Mode where
+    toJSON = String . Serve.renderMode
+
 -------------------------------------------------------------------------------
 
 instance ToJSON (UpDown.Report Extension) where
@@ -305,7 +312,7 @@ instance ToJSON Serve.Report where
             Serve.ConvergeStart ndown nup -> [kind "converge-start", "down" .= ndown, "up" .= nup]
             Serve.ConvergeStop ok remaining -> [kind "converge-stop", "ok" .= ok, "remaining" .= remaining]
             Serve.StatusReport mode xs paths ->
-                [kind "status", "mode" .= Serve.renderMode mode, "nodes" .= fmap (nodeStateValue paths Nothing) xs]
+                [kind "status", "mode" .= mode, "nodes" .= fmap (nodeStateValue paths Nothing) xs]
             Serve.HistoryReport xs -> [kind "history", "seeds" .= fmap epochValue xs]
             Serve.HistoryElided n -> [kind "history-elided", "elided" .= n]
             Serve.QueryReport xs sel exc paths ->

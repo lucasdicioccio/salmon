@@ -596,7 +596,8 @@ successful round the world already is the registry's last word, a round
 failing later changes nothing about it (the last good document stays in
 force), and `follow: N failed round(s) in a row` is what says the registry
 is gone. Under `--json` the status object carries `"mode"`; the HTTP
-surface's `/status` is the same object.
+surface's `/status` is the same object, and `/dag`'s envelope carries the
+same field.
 
 ### Refusing to move backwards: `--follow-refuse-older`
 
@@ -705,7 +706,10 @@ What to know:
   declared — under `autoconverge off` every node reads `pending` with its
   edges already in place — and a retired seed's nodes stay in it with
   `direction: "down"` until their teardown is done. A batch a `Rewrite`
-  would introduce is not shown; the nodes it would stand in for are.
+  would introduce is not shown; the nodes it would stand in for are. The
+  envelope's top-level `mode` is §12's (`interactive`, `following`,
+  `replay`), read at the moment of the request — the same value `/status`
+  opens with, so a client showing nodes as tended knows whether they are.
 - **`POST /command` is one line of §3's language**, `text/plain` or
   `{"line": "..."}`, and it is handled like any other line: it stands the
   machines down first and takes its turn in the inbox. Synchronous by

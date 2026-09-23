@@ -71,6 +71,7 @@ tests =
         , testCase "sync, async and stdin leave the same world; sync answers with the line's reports" syncAndAsyncAgree
         , testCase "reads answer while the loop is inside a long up" readsDuringLongUp
         , testCase "/help/seed, /history and the error responses" theOtherReads
+        , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
         ]
 
 -------------------------------------------------------------------------------
@@ -137,7 +138,11 @@ seedHelp = "usage: config NAME...\n"
 it to the test, and make sure it has ended before the temp dir goes.
 -}
 withRunning :: (Running -> IO a) -> IO a
-withRunning act =
+withRunning = withRunningMode (pure Serve.Interactive)
+
+-- | 'withRunning' with the server's mode accessor chosen by the test.
+withRunningMode :: IO Serve.Mode -> (Running -> IO a) -> IO a
+withRunningMode mode act =
     withTempDir $ \dir -> do
         let path = dir </> "serve.http"
         (stdinR, stdinW) <- createPipe
@@ -146,7 +151,7 @@ withRunning act =
         upsRef <- newIORef Map.empty
         downsRef <- newIORef Map.empty
         slow <- Slow <$> newEmptyMVar <*> newEmptyMVar
-        Http.withHttpServer path seedHelp (pure Serve.Interactive) $ \server -> do
+        Http.withHttpServer path seedHelp mode $ \server -> do
             let base = (contramap attributed (Tagged.serveStream own), contramap attributed (Tagged.updownStream own))
                 (serveR, updownR) = Http.serverReporters server base
             _ <- forkIO $ do
@@ -489,3 +494,28 @@ worldShape w =
     , length w.worldEpochs
     , length w.worldLog
     )
+
+
+{- | The @mode@ on @\/dag@ is read from the server's accessor at the moment
+of the read, not fixed when the server starts: the same accessor is what
+@\/status@ opens with, and the loop's mode moves (@replay@ turns to
+@following@ at the first full round, "Salmon.Actions.Follow").
+-}
+dagCarriesMode :: IO ()
+dagCarriesMode = do
+    modeRef <- newIORef Serve.Replay
+    withRunningMode (readIORef modeRef) $ \running -> do
+        _ <- sync running "supervise off"
+        _ <- sync running "up n1"
+        (code, v) <- get running "/dag"
+        assertEqual "status" 200 code
+        assertEqual "the mode the accessor answered" (Just "replay") (textAt ["mode"] v)
+        (_, st) <- get running "/status"
+        assertEqual "/status agrees" (Just "replay") (textAt ["mode"] st)
+        atomicModifyIORef' modeRef (const (Serve.Following, ()))
+        (_, v') <- get running "/dag"
+        assertEqual "the mode after the accessor moved" (Just "following") (textAt ["mode"] v')
+        (_, st') <- get running "/status"
+        assertEqual "/status moved with it" (Just "following") (textAt ["mode"] st')
+        _ <- finish running
+        pure ()

@@ -50,6 +50,7 @@ tests =
         [ testGroup "golden JSON, one per constructor" [testCase name (golden rep expected) | (name, rep, expected) <- goldens]
         , testCase "Tagged adds a stream to the inner object and nothing else" taggedOrigin
         , testCase "a Ref encodes as its short tag and its full text" refShape
+        , testCase "a Mode encodes as the word status prints" modeShape
         , testCase "the text reporters print the same lines beside a JSON one as they do alone" textUnchangedBesideJson
         , testCase "reportJSONLines writes one object per line" oneObjectPerLine
         ]
@@ -323,6 +324,17 @@ refShape = do
             assertEqual "two keys and no more" 2 (KeyMap.size o)
         v -> assertFailure ("not an object: " <> show v)
     assertBool "the short tag is a prefix-searchable 8 characters" (Text.length (shortRef fixtureRef) == 8)
+
+{- | 'Serve.Mode' is on the wire twice (@status@'s object, @\/dag@'s
+envelope) through one instance; this is its golden, and what it must keep
+saying for either.
+-}
+modeShape :: Assertion
+modeShape = do
+    assertEqual "interactive" (String "interactive") (toJSON Serve.Interactive)
+    assertEqual "following" (String "following") (toJSON Serve.Following)
+    assertEqual "replay" (String "replay") (toJSON Serve.Replay)
+    assertEqual "encoded as its rendering" (LText.encodeUtf8 (LText.fromStrict ("\"" <> Serve.renderMode Serve.Replay <> "\""))) (encode Serve.Replay)
 
 {- | The composition "Salmon.Builtin.CommandLine" would make if it ever ran
 both: the three text reporters behind one 'Tagged' reporter, 'reportBoth'

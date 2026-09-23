@@ -290,7 +290,11 @@ cheap one and lands first.
    in as an `elided` field rather than answering with two objects.
 4. **`/events` (SSE) with sequence numbers and `?since=`.** Test: a client
    that reconnects mid-pass misses nothing.
-5. **`mode` in `status`/`/dag`.**
+5. **`mode` in `status`/`/dag`.** **Shipped**: `status` and `/status`
+   with `specs/pull-mode.md` milestone 4 (`Serve.Mode` on `StatusReport`),
+   `/dag` as a top-level `mode` on the envelope, read from the server's
+   accessor at the moment of the request; one `ToJSON Serve.Mode` in
+   `Salmon.Reporter.Tagged` serves both. `/help/seed` does not carry it.
 6. **Terminal client** against the socket.
 7. **Web UI**: static graph from `/dag`, then live from `/events`, then
    actions, then the seed form.
