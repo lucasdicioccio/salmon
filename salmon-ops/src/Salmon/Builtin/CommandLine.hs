@@ -3,6 +3,7 @@
 
 module Salmon.Builtin.CommandLine where
 
+import Control.Concurrent.MVar (newEmptyMVar, putMVar)
 import Control.Monad (void, when)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
@@ -15,7 +16,7 @@ import Options.Applicative
 import qualified Options.Applicative
 import Options.Generic
 import System.Exit (exitFailure)
-import System.IO (stdin, stdout)
+import System.IO (hPutStrLn, stderr, stdin, stdout)
 
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Concurrency as Concurrency
@@ -29,6 +30,7 @@ import Salmon.Op.OpGraph
 import Salmon.Op.Track
 
 import Salmon.Actions.Dot as Dot
+import qualified Salmon.Actions.Follow as Follow
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
@@ -80,8 +82,12 @@ data RunCommand
       -- 'Nothing' is unbounded, matching every version of @serve@ before
       -- this flag existed), and optionally starting with @autoconverge@ off
       -- (@--no-autoconverge@; 'False' is the default, matching every
-      -- version of @serve@ before the setting existed).
-      RunServe !(Maybe Int) !Bool !ReportFormat
+      -- version of @serve@ before the setting existed). The rest is pull
+      -- mode ("Salmon.Actions.Follow"): a directory registry to follow
+      -- (@--follow DIR@), the labels to fetch from it (@--label L@,
+      -- repeatable; both or neither), and the seconds between rounds
+      -- (@--follow-interval S@).
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !Int
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
@@ -172,6 +178,28 @@ runCommandParser =
                         "Start with `autoconverge off`: declarations are recorded but not converged until an explicit `converge`."
                 )
             <*> reportFormatP
+            <*> optional
+                ( strOption
+                    ( long "follow"
+                        <> Options.Applicative.metavar "DIR"
+                        <> Options.Applicative.help "Pull mode: fetch declarations from the documents in this directory (one <label>.json per --label)."
+                    )
+                )
+            <*> many
+                ( strOption
+                    ( long "label"
+                        <> Options.Applicative.metavar "LABEL"
+                        <> Options.Applicative.help "A label to follow in the --follow registry; repeatable, the desired set is the union."
+                    )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-interval"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value 5
+                    <> showDefault
+                    <> Options.Applicative.help "Seconds between two rounds of fetching the followed labels."
+                )
     upP =
         RunUp
             <$> optional
@@ -343,10 +371,38 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels interval)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let (serveR', r') = reportersFor fmt
-            void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase stdin
+            case (followDir, traverse Follow.mkLabel labels) of
+                (Nothing, Right []) ->
+                    void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase stdin
+                (Nothing, _) -> do
+                    hPutStrLn stderr "--label needs a --follow DIR to fetch from"
+                    exitFailure
+                (Just _, Right []) -> do
+                    hPutStrLn stderr "--follow needs at least one --label to fetch"
+                    exitFailure
+                (Just _, Left err) -> do
+                    hPutStrLn stderr (Text.unpack err)
+                    exitFailure
+                (Just dir, Right lbls) -> do
+                    -- the fetcher's first round is in the inbox before
+                    -- standard input is even read, so the first convergence
+                    -- is what the registry says, deterministically; after
+                    -- that both interleave at line granularity.
+                    gate <- newEmptyMVar
+                    let follow =
+                            Follow.Follow
+                                { Follow.followRegistry = Follow.directoryRegistry dir
+                                , Follow.followLabels = lbls
+                                , Follow.followInterval = max 1 interval * 1000000
+                                }
+                    let producers =
+                            [ Follow.follower Follow.reportText follow (putMVar gate ())
+                            , Follow.gated gate (Serve.stdinProducer stdin)
+                            ]
+                    void $ Serve.serveProducers rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase producers
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
