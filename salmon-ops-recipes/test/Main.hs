@@ -8,6 +8,7 @@ import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
+import qualified Test.FollowCacheSpec as FollowCacheSpec
 import qualified Test.FollowSchedulerSpec as FollowSchedulerSpec
 import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpSpec as GcpSpec
@@ -88,6 +89,7 @@ main =
             , DebianPackageSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
+            , FollowCacheSpec.tests
             , FollowSchedulerSpec.tests
             , FollowSpec.tests
             , GcpSpec.tests
