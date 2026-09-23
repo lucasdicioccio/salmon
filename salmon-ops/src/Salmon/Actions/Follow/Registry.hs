@@ -8,6 +8,7 @@ label into an address; the fetcher and the scheduler see none of this.
 > --follow /srv/reg                          a directory: /srv/reg/<label>.json
 > --follow git+https://host/repo#main:hosts  a git branch: hosts/<label>.json at origin/main
 > --follow https://host/seed/latest/{label}  HTTP: GET that URL, or <base>/<label>.json without {label}
+> --follow dns:fleet.example                 a TXT index at <label>.fleet.example, fetched over HTTP
 -}
 module Salmon.Actions.Follow.Registry (
     Address (..),
@@ -25,6 +26,7 @@ import System.Directory (getTemporaryDirectory)
 import System.FilePath ((</>))
 
 import Salmon.Actions.Follow (Registry (..), digestOf, directoryRegistry, unDigest)
+import qualified Salmon.Actions.Follow.Registry.Dns as Dns
 import qualified Salmon.Actions.Follow.Registry.Git as Git
 import qualified Salmon.Actions.Follow.Registry.Http as Http
 
@@ -33,6 +35,7 @@ data Address
     = Directory FilePath
     | Git Git.Source
     | Http Text
+    | Dns Text
     deriving (Show, Eq)
 
 -- | By shape; anything with no recognised scheme is a directory path.
@@ -40,6 +43,8 @@ parseAddress :: Text -> Either Text Address
 parseAddress t
     | Just rest <- Text.stripPrefix "git+" t = Git <$> Git.parseSource rest
     | Text.isPrefixOf "http://" t || Text.isPrefixOf "https://" t = Right (Http t)
+    | Just zone <- Text.stripPrefix "dns:" t =
+        if Text.null zone then Left "dns: needs a zone" else Right (Dns zone)
     | Text.null t = Left "--follow needs a registry"
     | otherwise = Right (Directory (Text.unpack t))
 
@@ -50,10 +55,11 @@ data Options = Options
     -- ^ the git checkout; 'defaultWorkdir' when 'Nothing'
     , optCacheDir :: Maybe FilePath
     -- ^ @--follow-cache@, which the default checkout lives under
+    , optResolver :: Dns.Resolver
     }
 
 defaultOptions :: Options
-defaultOptions = Options Http.defaultOptions Nothing Nothing
+defaultOptions = Options Http.defaultOptions Nothing Nothing Dns.digResolver
 
 {- | Where a git registry is checked out when nobody said: @checkout@ under
 the cache directory (the one place a follower already keeps state across
@@ -76,3 +82,6 @@ open o addr = case addr of
     Http template -> do
         mgr <- Http.newManager o.optHttp
         pure (Http.httpRegistry mgr template)
+    Dns zone -> do
+        mgr <- Http.newManager o.optHttp
+        pure (Dns.dnsRegistry o.optResolver mgr zone)

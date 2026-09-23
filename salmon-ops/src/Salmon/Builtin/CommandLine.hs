@@ -95,8 +95,8 @@ data RunCommand
       -- (@--no-autoconverge@; 'False' is the default, matching every
       -- version of @serve@ before the setting existed). Then pull mode
       -- ("Salmon.Actions.Follow"): a registry to follow (@--follow
-      -- REGISTRY@, a directory, @git+URL@ or an HTTP URL — see
-      -- "Salmon.Actions.Follow.Registry"), the labels to fetch from it
+      -- REGISTRY@, a directory, @git+URL@, an HTTP URL or @dns:ZONE@ —
+      -- see "Salmon.Actions.Follow.Registry"), the labels to fetch from it
       -- (@--label L@,
       -- repeatable; both or neither), and the fetcher's schedule
       -- ('FollowOptions'). Last, optionally listening for the same
@@ -262,7 +262,7 @@ runCommandParser =
                 ( strOption
                     ( long "follow"
                         <> Options.Applicative.metavar "REGISTRY"
-                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json), git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout), or an http(s):// URL (<base>/<label>.json, or {label} placed in it)."
+                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json), git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout), an http(s):// URL (<base>/<label>.json, or {label} placed in it), or dns:ZONE (a TXT index at <label>.ZONE naming an https URL and a sha256)."
                     )
                 )
             <*> many
@@ -390,7 +390,7 @@ runCommandParser =
                     <> Options.Applicative.metavar "SECONDS"
                     <> Options.Applicative.value (Registry.Http.defaultOptions.optTimeout `div` 1000000)
                     <> showDefault
-                    <> Options.Applicative.help "The longest one HTTP fetch may take, for the http(s):// registry; longer is a failed round."
+                    <> Options.Applicative.help "The longest one HTTP fetch may take, for the http(s):// and dns: registries; longer is a failed round."
                 )
             <*> optional
                 ( strOption

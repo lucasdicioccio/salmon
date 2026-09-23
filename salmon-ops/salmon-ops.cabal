@@ -25,6 +25,7 @@ library
     exposed-modules: Salmon.Actions.Concurrent
                    , Salmon.Actions.Follow
                    , Salmon.Actions.Follow.Registry
+                   , Salmon.Actions.Follow.Registry.Dns
                    , Salmon.Actions.Follow.Registry.Git
                    , Salmon.Actions.Follow.Registry.Http
                    , Salmon.Actions.Follow.Scheduler
