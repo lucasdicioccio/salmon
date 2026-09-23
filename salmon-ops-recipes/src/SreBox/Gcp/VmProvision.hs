@@ -17,7 +17,7 @@ short-lived client certificate for the connecting user with 'Keys.signKey'.
 certificate the eventual @ssh@ call to run the self binary will use.
 
 Dependency shape: the self-upload-and-call step depends on 'sshAvailable'
-succeeding (plan section 4's own recommendation, not followed by its section
+succeeding (and on every 'vmp_beforeCall' node, which in turn depends on it) (plan section 4's own recommendation, not followed by its section
 6 pseudocode) rather than only on the instance's GCE-level @RUNNING@ status,
 because @RUNNING@ says nothing about sshd being reachable yet.
 -}
@@ -87,6 +87,14 @@ data VmProvisionConfig directive = VmProvisionConfig
     -- its sshd needs, the address it claims. They inject into the instance
     -- rather than into this recipe's root, because a root only orders itself
     -- after both, which would let the instance boot first.
+    , vmp_beforeCall :: Ssh.ClientOpts -> [Op]
+    -- ^ nodes that must be up /after ssh answers and before the self binary
+    -- runs/ -- files the remote directive will read once it is there
+    -- (migrations, generated secrets), uploaded with the same signed key
+    -- and known-hosts file this recipe connects with, which is why they are
+    -- handed the 'Ssh.ClientOpts' rather than left to find them. Each one
+    -- depends on the ssh probe and the remote call depends on each of them.
+    -- @const []@ when nothing needs to precede the call.
     , vmp_remoteDir :: FilePath
     -- ^ where the self binary is uploaded on the VM.
     , vmp_selfPath :: Self.SelfPath
@@ -127,7 +135,7 @@ provisionedVm ::
     VmProvisionConfig directive ->
     Op
 provisionedVm r gcloudTrack keygenTrack cfg =
-    op "gcp-vm-provision" (deps [trackedGraph call `inject` sshReady]) $ \actions ->
+    op "gcp-vm-provision" (deps [foldl inject (trackedGraph call) (sshReady : beforeCall)]) $ \actions ->
         actions
             { help = Text.unwords ["provisions GCE VM", cfg.vmp_instance.instanceName, "over SSH and runs the self binary on it"]
             , ref = mkRef "gcp-vm-provision" cfg.vmp_name
@@ -177,6 +185,9 @@ provisionedVm r gcloudTrack keygenTrack cfg =
             (SshAccess.SshEndpoint (Just cfg.vmp_sshUser) cfg.vmp_sshHost cfg.vmp_sshPort (clientOpts cfg))
             `inject` vm
             `inject` signedClient
+
+    beforeCall :: [Op]
+    beforeCall = [step `inject` sshReady | step <- cfg.vmp_beforeCall (clientOpts cfg)]
 
     call :: Tracked' (Self.RemoteCall directive)
     call =

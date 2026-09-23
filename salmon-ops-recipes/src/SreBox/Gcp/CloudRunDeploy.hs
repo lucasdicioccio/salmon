@@ -99,9 +99,13 @@ buildPushDeploy r gcloudTrack podmanTrack cfg =
     rPodman = contramap RunPodman r
     rCloudRun = contramap RunCloudRun r
 
-    -- Artifact Registry's docker/podman-facing hostname for this repo's region.
+    -- Artifact Registry's docker/podman-facing hostname for the repo's own
+    -- location -- not the Cloud Run region: a repository in one location
+    -- serving services deployed in another is ordinary (one registry, many
+    -- regions), and logging in to the region's host would leave the push to
+    -- the repo's host unauthenticated.
     registry :: Podman.Registry
-    registry = Podman.Registry (cfg.crd_region.regionName <> "-docker.pkg.dev")
+    registry = Podman.Registry (cfg.crd_repo.repoLocation.regionName <> "-docker.pkg.dev")
 
     repo :: Op
     repo = ArtifactRegistry.artifactRepository rAr gcloudTrack cfg.crd_repo
