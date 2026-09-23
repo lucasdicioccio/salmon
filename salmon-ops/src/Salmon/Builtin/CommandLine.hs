@@ -34,6 +34,7 @@ import qualified Salmon.Actions.Follow as Follow
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
+import qualified Salmon.Actions.Serve.Socket as Socket
 -- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
 -- optparse-applicative's 'ParserResult' ones, which this module pattern
 -- matches on. Nothing here needs a 'CheckResult'.
@@ -82,12 +83,15 @@ data RunCommand
       -- 'Nothing' is unbounded, matching every version of @serve@ before
       -- this flag existed), and optionally starting with @autoconverge@ off
       -- (@--no-autoconverge@; 'False' is the default, matching every
-      -- version of @serve@ before the setting existed). The rest is pull
-      -- mode ("Salmon.Actions.Follow"): a directory registry to follow
+      -- version of @serve@ before the setting existed). Then pull mode
+      -- ("Salmon.Actions.Follow"): a directory registry to follow
       -- (@--follow DIR@), the labels to fetch from it (@--label L@,
       -- repeatable; both or neither), and the seconds between rounds
-      -- (@--follow-interval S@).
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !Int
+      -- (@--follow-interval S@). Last, optionally listening for the same
+      -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
+      -- @specs/generic-server.md@; see "Salmon.Actions.Serve.Socket"),
+      -- stdin still read beside it.
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !Int !(Maybe FilePath)
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
@@ -199,6 +203,14 @@ runCommandParser =
                     <> Options.Applicative.value 5
                     <> showDefault
                     <> Options.Applicative.help "Seconds between two rounds of fetching the followed labels."
+                )
+            <*> optional
+                ( strOption
+                    ( long "listen"
+                        <> Options.Applicative.metavar "PATH"
+                        <> Options.Applicative.help
+                            "Also accept the line protocol on a unix socket at PATH (created owner-only); each client is answered on its own connection, as JSON lines. Stdin keeps working alongside."
+                    )
                 )
     upP =
         RunUp
@@ -371,12 +383,11 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels interval)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels interval listen)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
-            let (serveR', r') = reportersFor fmt
-            case (followDir, traverse Follow.mkLabel labels) of
-                (Nothing, Right []) ->
-                    void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase stdin
+            let tagged = taggedFor fmt
+            follow <- case (followDir, traverse Follow.mkLabel labels) of
+                (Nothing, Right []) -> pure Nothing
                 (Nothing, _) -> do
                     hPutStrLn stderr "--label needs a --follow DIR to fetch from"
                     exitFailure
@@ -386,23 +397,53 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 (Just _, Left err) -> do
                     hPutStrLn stderr (Text.unpack err)
                     exitFailure
-                (Just dir, Right lbls) -> do
-                    -- the fetcher's first round is in the inbox before
-                    -- standard input is even read, so the first convergence
-                    -- is what the registry says, deterministically; after
-                    -- that both interleave at line granularity.
-                    gate <- newEmptyMVar
-                    let follow =
+                (Just dir, Right lbls) ->
+                    pure $
+                        Just
                             Follow.Follow
                                 { Follow.followRegistry = Follow.directoryRegistry dir
                                 , Follow.followLabels = lbls
                                 , Follow.followInterval = max 1 interval * 1000000
                                 }
-                    let producers =
-                            [ Follow.follower Follow.reportText follow (putMVar gate ())
-                            , Follow.gated gate (Serve.stdinProducer stdin)
-                            ]
-                    void $ Serve.serveProducers rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase producers
+            -- the fetcher's first round is in the inbox before standard
+            -- input is even read, so the first convergence is what the
+            -- registry says, deterministically; after that both interleave
+            -- at line granularity.
+            gate <- newEmptyMVar
+            let -- with a socket to talk to, the process must outlive
+                -- whatever started it (`< /dev/null &` is the ordinary way
+                -- to run it), so standard input is read as a named source
+                -- rather than as the loop's 'Serve.Stdin': its end of input
+                -- is a hang-up like any client's and only `quit` — from
+                -- stdin or from a client — ends the loop.
+                stdinP = case listen of
+                    Nothing -> Serve.stdinProducer stdin
+                    Just _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
+                producersWith more =
+                    case follow of
+                        Nothing -> stdinP : more
+                        Just f -> Follow.follower Follow.reportText f (putMVar gate ()) : Follow.gated gate stdinP : more
+            case listen of
+                Nothing -> do
+                    let (serveR', r') = reportersOver tagged
+                    void $ Serve.serveProducers rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase (producersWith [])
+                Just path ->
+                    -- the listener's reporters answer each socket client on
+                    -- its own connection and hand everything on to the
+                    -- loop's own, which stays exactly as `fmt` says.
+                    Socket.withUnixListener path $ \listener -> do
+                        let (serveR', r') = Socket.listenerReporters listener tagged
+                        void $
+                            Serve.serveAttributed
+                                rewrites
+                                limit
+                                (not noAutoConverge)
+                                serveR'
+                                r'
+                                parseSeedArgs
+                                genBase
+                                traceBase
+                                (producersWith [Socket.listenerProducer listener])
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
@@ -436,23 +477,24 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
   where
     nat = pure . runIdentity
 
-    {- | The reporters a @run up@\/@run down@\/@run serve@ speaks through,
-    by 'ReportFormat'. One 'Tagged.Tagged' reporter, split contravariantly
-    into the two the drivers take: for 'ReportText' it dispatches back to
-    the reporters the binary passed in (so nothing about the text output
-    changes), for 'ReportJson' it is "Salmon.Reporter.Tagged"'s line writer
-    on stdout in their place. The tending loop's own stream never reaches
-    here on its own — @serve@ forwards what it keeps of it as
+    {- | The one 'Tagged.Tagged' reporter a @run up@\/@run down@\/@run
+    serve@ speaks through, by 'ReportFormat': for 'ReportText' it dispatches
+    back to the reporters the binary passed in (so nothing about the text
+    output changes), for 'ReportJson' it is "Salmon.Reporter.Tagged"'s line
+    writer on stdout in their place. The tending loop's own stream never
+    reaches here on its own — @serve@ forwards what it keeps of it as
     'Serve.Tended', which the encoding nests — so its slot is 'silent'. -}
-    reportersFor :: ReportFormat -> (Reporter Serve.Report, Reporter (UpDown.Report Extension))
-    reportersFor fmt = (Tagged.serveStream tagged, Tagged.updownStream tagged)
-      where
-        tagged = case fmt of
-            ReportText -> Tagged.reportTexts serveR r silent
-            ReportJson -> Tagged.reportJSONLines stdout
+    taggedFor :: ReportFormat -> Reporter Tagged.Tagged
+    taggedFor fmt = case fmt of
+        ReportText -> Tagged.reportTexts serveR r silent
+        ReportJson -> Tagged.reportJSONLines stdout
+
+    -- | The tagged reporter split contravariantly into the two the drivers take.
+    reportersOver :: Reporter Tagged.Tagged -> (Reporter Serve.Report, Reporter (UpDown.Report Extension))
+    reportersOver tagged = (Tagged.serveStream tagged, Tagged.updownStream tagged)
 
     updownFor :: ReportFormat -> Reporter (UpDown.Report Extension)
-    updownFor = snd . reportersFor
+    updownFor = snd . reportersOver . taggedFor
 
     {- | @run up@: everything in this one directive's graph is wanted up, so
     that is the rewrites' 'phaseDesired'. @excluded@ (a plan's skipped

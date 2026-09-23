@@ -26,6 +26,7 @@ library
                    , Salmon.Actions.Follow
                    , Salmon.Actions.Help
                    , Salmon.Actions.Serve
+                   , Salmon.Actions.Serve.Socket
                    , Salmon.Actions.UpDown
                    , Salmon.Actions.Upkeep
                    , Salmon.Actions.Dot
@@ -109,6 +110,7 @@ library
                     , http-client-tls
                     , jose
                     , mtl
+                    , network
                     , optparse-applicative
                     , optparse-generic
                     , process

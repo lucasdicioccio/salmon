@@ -134,6 +134,7 @@ module Salmon.Actions.Serve (
     Origin (..),
     Provenance (..),
     renderOrigin,
+    originName,
     handleProducer,
     stdinProducer,
 
@@ -670,7 +671,7 @@ renderReport rep =
             , "serve: type `help` for the command reference"
             ]
         Stopped -> ["serve: input closed"]
-        HungUp origin -> ["serve: " <> renderOrigin origin <> " hung up"]
+        HungUp origin -> ["serve: " <> originName origin <> " hung up"]
         BadCommand err -> ["serve: " <> err]
         BadSeed err -> ("serve: cannot configure seed:") : Text.lines err
         BadDirective err -> ("serve: cannot decode directive:") : Text.lines err
@@ -1367,12 +1368,14 @@ data Provenance = Provenance
     }
     deriving (Show, Eq, Ord)
 
--- | An 'Origin' as a report names it.
-renderOrigin :: Origin -> Text
-renderOrigin Stdin = "stdin"
-renderOrigin (Origin t) = t
-renderOrigin (Loaded path) = "loaded " <> Text.pack path
-renderOrigin (Fetched prov) = "fetched " <> prov.provRegistry <> " label=" <> prov.provLabel
+{- | An 'Origin' as a report names it in a sentence ("stdin hung up"), as
+opposed to 'renderOrigin', the bracketed annotation @history@ appends.
+-}
+originName :: Origin -> Text
+originName Stdin = "stdin"
+originName (Origin t) = t
+originName (Loaded path) = "loaded " <> Text.pack path
+originName (Fetched prov) = "fetched " <> prov.provRegistry <> " label=" <> prov.provLabel
 
 {- | A report, and the 'Origin' of the command it was emitted for: 'Nothing'
 for one emitted between commands (the tending loop's), or before the first
