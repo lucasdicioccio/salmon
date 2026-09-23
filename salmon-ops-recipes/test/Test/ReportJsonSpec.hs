@@ -196,6 +196,7 @@ serveGoldens :: [(String, Tagged.Tagged, Text)]
 serveGoldens =
     [ ("Serve.Started", Tagged.FromServe Serve.Started, "{\"kind\":\"started\"}")
     , ("Serve.Stopped", Tagged.FromServe Serve.Stopped, "{\"kind\":\"stopped\"}")
+    , ("Serve.HungUp", Tagged.FromServe (Serve.HungUp (Serve.Origin "/tmp/x.sock#0")), "{\"kind\":\"hung-up\",\"from\":\"/tmp/x.sock#0\"}")
     , ("Serve.BadCommand", Tagged.FromServe (Serve.BadCommand "unknown command"), "{\"kind\":\"bad-command\",\"error\":\"unknown command\"}")
     , ("Serve.BadSeed", Tagged.FromServe (Serve.BadSeed "missing --dir"), "{\"kind\":\"bad-seed\",\"error\":\"missing --dir\"}")
     , ("Serve.BadDirective", Tagged.FromServe (Serve.BadDirective "not json"), "{\"kind\":\"bad-directive\",\"error\":\"not json\"}")
@@ -417,6 +418,7 @@ _serveCovered :: Serve.Report -> ()
 _serveCovered rep = case rep of
     Serve.Started -> ()
     Serve.Stopped -> ()
+    Serve.HungUp{} -> ()
     Serve.BadCommand{} -> ()
     Serve.BadSeed{} -> ()
     Serve.BadDirective{} -> ()

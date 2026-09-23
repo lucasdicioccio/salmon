@@ -99,8 +99,21 @@ the loop./ Any other producer's 'Eof' is not a command — nothing is about to
 act, so the machines are not stood down for it — and the loop reads on; a
 socket client hanging up or a fetcher going quiet must not take the server
 with it. A loop with no 'Stdin' producer at all therefore ends only on
-@quit@. A producer other than standard input hanging up is reported nowhere
-today; that is a gap the first such producer fills.
+@quit@. Such a producer hanging up is reported, as 'HungUp', at the moment
+the loop reads its 'Eof' — which, the inbox being one queue, is after every
+line it typed has been handled. Whoever holds a connection for that origin
+can close it on that report and know nothing typed on it is still pending.
+
+== Whose report is it
+
+A report emitted while a command is handled belongs to whoever typed the
+command; one emitted between commands (the tending machines' own) belongs
+to nobody in particular. 'serveAttributed' says which, by stamping every
+report with the 'Origin' of the line being handled — 'Nothing' outside a
+command — through 'Attributed'. That is what lets a second client be
+answered on its own connection rather than on the loop's standard output
+("Salmon.Actions.Serve.Socket"); 'serveProducers' is the same loop with the
+stamp thrown away.
 
 This is what replaced @serveWakingWith@, an "these nodes want attention" hook
 nothing in the repo ever drove. It was there because a node had no state of
@@ -113,6 +126,7 @@ module Salmon.Actions.Serve (
     serve,
     serveWith,
     serveProducers,
+    serveAttributed,
 
     -- * Input producers
     Producer (..),
@@ -122,6 +136,9 @@ module Salmon.Actions.Serve (
     renderOrigin,
     handleProducer,
     stdinProducer,
+
+    -- * Attributing reports
+    Attributed (..),
 
     -- * Input language
     ServeCommand (..),
@@ -589,6 +606,10 @@ data Report
     = Started
     | -- | input closed
       Stopped
+    | -- | a producer other than standard input has no more lines, and every
+      -- line it did have has been handled. Never for 'Stdin', whose end of
+      -- input is 'Stopped'.
+      HungUp !Origin
     | BadCommand !Text
     | BadSeed !Text
     | BadDirective !Text
@@ -649,6 +670,7 @@ renderReport rep =
             , "serve: type `help` for the command reference"
             ]
         Stopped -> ["serve: input closed"]
+        HungUp origin -> ["serve: " <> renderOrigin origin <> " hung up"]
         BadCommand err -> ["serve: " <> err]
         BadSeed err -> ("serve: cannot configure seed:") : Text.lines err
         BadDirective err -> ("serve: cannot decode directive:") : Text.lines err
@@ -1345,6 +1367,23 @@ data Provenance = Provenance
     }
     deriving (Show, Eq, Ord)
 
+-- | An 'Origin' as a report names it.
+renderOrigin :: Origin -> Text
+renderOrigin Stdin = "stdin"
+renderOrigin (Origin t) = t
+renderOrigin (Loaded path) = "loaded " <> Text.pack path
+renderOrigin (Fetched prov) = "fetched " <> prov.provRegistry <> " label=" <> prov.provLabel
+
+{- | A report, and the 'Origin' of the command it was emitted for: 'Nothing'
+for one emitted between commands (the tending loop's), or before the first
+and after the last. See 'serveAttributed'.
+-}
+data Attributed a = Attributed
+    { attributedTo :: !(Maybe Origin)
+    , attributed :: !a
+    }
+    deriving (Show, Functor)
+
 {- | What a 'Producer' pushes into the loop's inbox.
 
 A 'Batch' is the unit a fetched document is injected as: its commands run
@@ -1414,7 +1453,63 @@ serveProducers ::
     Track' directive ->
     [Producer] ->
     IO (World seed directive)
-serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program producers = do
+serveProducers rewrites limit autoConverge0 r nodeReporter =
+    serveAttributed rewrites limit autoConverge0 (contramap attributed r) (contramap attributed nodeReporter)
+
+{- | 'serveProducers', reporting through reporters that are told whose
+report each one is.
+
+The loop keeps one private "line being handled" cell, written when a line
+is taken off the inbox and cleared when its command is done, and every
+report — the loop's own and the per-node ones a pass emits — is stamped
+with it on the way out ('Salmon.Reporter.pulls'). Nothing else about the
+loop changes: a command is handled whole before the next is read, so the
+cell is stable for as long as a command's reports are being emitted, and
+the concurrent walks a pass runs all report inside that window. What
+arrives outside it — a machine tending a node between commands — is stamped
+'Nothing'.
+
+The cell is written /after/ 'stopTending', not before: the machines standing
+down are not something the operator who typed the command asked for, so
+whatever they say on their way out is nobody's.
+-}
+serveAttributed ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    [Producer] ->
+    IO (World seed directive)
+serveAttributed rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program producers = do
+    handling <- newIORef Nothing
+    serveLoop rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program producers
+  where
+    stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
+    stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
+
+-- | The loop itself: 'serveAttributed' with the stamping already applied
+-- and the cell it reads from in hand.
+serveLoop ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    IORef (Maybe Origin) ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    [Producer] ->
+    IO (World seed directive)
+serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program producers = do
     world <- newIORef emptyWorld
     tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
     inbox <- newTChanIO
@@ -1454,8 +1549,12 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
         case line of
             -- another producer hanging up is not a command: nothing is about
             -- to act, so the machines are not stood down, and the loop goes
-            -- back to waiting (they are left running if they were).
-            Eof origin | origin /= Stdin -> loop tending world inbox
+            -- back to waiting (they are left running if they were). It is
+            -- said, though: every line that origin typed has been handled
+            -- by now, which is what whoever holds its connection waits for.
+            Eof origin | origin /= Stdin -> do
+                runReporter r (HungUp origin)
+                loop tending world inbox
             _ -> do
                 -- a command is about to act on these nodes, so the machines
                 -- stand down. Waits for anything in flight rather than
@@ -1464,7 +1563,9 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
                 case line of
                     Eof _ -> runReporter r Stopped
                     Line origin l -> do
+                        writeIORef handling (Just origin)
                         keepGoing <- step tending 0 world origin l
+                        writeIORef handling Nothing
                         when keepGoing (loop tending world inbox)
                     Batch origin cmds -> do
                         keepGoing <- batch tending world origin cmds
