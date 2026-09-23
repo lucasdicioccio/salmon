@@ -96,6 +96,7 @@ test-suite salmon-ops-recipes-test
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
                     , Test.FollowCacheSpec
+                    , Test.FollowRegistrySpec
                     , Test.FollowSchedulerSpec
                     , Test.FollowSpec
                     , Test.GcpSpec
@@ -158,6 +159,8 @@ test-suite salmon-ops-recipes-test
                     , text
                     , time
                     , unix
+                    , wai
+                    , warp
     -- Salmon.Actions.Serve reads its input handle on a forked thread, so a
     -- test driving the loop wants a runtime where a blocking read does not
     -- stall every other Haskell thread.
