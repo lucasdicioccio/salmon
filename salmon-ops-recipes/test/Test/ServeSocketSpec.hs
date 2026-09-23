@@ -133,6 +133,7 @@ withRunning act =
                         parseSpec
                         (Configure pure)
                         (spyProgram upsRef downsRef)
+                        Nothing
                         [Serve.stdinProducer stdinR, Socket.listenerProducer listener]
                 putMVar worldVar w
             let running = Running path stdinW worldVar seen upsRef downsRef
