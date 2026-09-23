@@ -76,7 +76,37 @@ have to be rewritten over raw sockets, and warp would need a
 Two paths cost one flag. The socket is bound through
 'Socket.withUnixListener' all the same, so it is owner-only and refuses a
 path something else is listening on — permissions are the whole access
-story, and there is no TCP here (see the spec's security section).
+story on that path (see the spec's security section).
+
+= Over the network: TLS and a token, or nothing
+
+Milestone 8. @run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key
+FILE --token-file FILE@ runs the same 'application' on a TCP listener
+('withHttpServerOn', a 'BindTls' beside the unix 'BindUnix'), and the three
+files are not optional: 'Bind' has no plaintext TCP constructor, and the
+command line refuses @--http-tcp@ without all three, naming the missing
+ones. A salmon server is root on the box one @up@ away, so it never listens
+on a network without both. warp-tls answers a plain-HTTP client on that
+port with @426 Upgrade Required@ and never reaches the application.
+
+The token is 'requireToken', a middleware on the TCP listener only:
+@Authorization: Bearer \<token\>@ on every route — the reads, the command,
+the event stream, anything a later milestone adds to the application —
+compared in constant time ('sameSecret') against the file's trimmed
+content, @401@ with a JSON error otherwise. It is a middleware rather than
+a check inside 'application' because the unix socket must stay token-free
+(its permissions are its access story, and every client of it today is a
+local one), and so that a route added to 'application' is covered without
+its author knowing the token exists. Checking a token queues nothing: a
+read is still a read. The file itself is 'readTokenFile': refused when
+readable by others, or empty.
+
+One 'Server' value serves both listeners — one event ring, one request
+counter, one inbox — so sequence numbers are one sequence across them, and
+an origin is 'originFor': @PATH#n@ on the unix socket, @ADDR:PORT#n@ (the
+client's) over TCP, so @history@ says who typed a line from the network.
+Not here: a client certificate instead of a token, a read-only token, a
+plaintext option behind any flag.
 
 = Sequence numbers
 
@@ -107,10 +137,21 @@ warp's shutdown does not wait behind a subscriber.
 module Salmon.Actions.Serve.Http (
     -- * Serving
     Server,
-    serverPath,
+    serverName,
     serverEvents,
+    serverBoundTcp,
     withHttpServer,
     withHttpServerWith,
+
+    -- * Over the network
+    Bind (..),
+    TlsBind (..),
+    withHttpServerOn,
+    BadCredentials (..),
+    requireToken,
+    sameSecret,
+    TokenError (..),
+    readTokenFile,
 
     -- * Plugging into the loop
     serverObserver,
@@ -127,16 +168,19 @@ module Salmon.Actions.Serve.Http (
 import Control.Concurrent.Async (withAsync)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTChan, writeTVar)
-import Control.Exception (finally)
+import Control.Exception (Exception, bracket, finally, fromException, throwIO)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.=))
 import Data.FileEmbed (embedDir, makeRelativeToProject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Bits (xor, (.&.), (.|.))
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as LByteString
+import Data.Char (isSpace, toLower)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -144,12 +188,16 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Read as Text
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
 import System.FilePath (takeExtension)
 import qualified Network.HTTP.Types as HTTP
+import qualified Network.Socket as Socket
+import qualified Network.TLS as TLS
 import Network.Wai (Application, Request, Response)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
+import qualified Network.Wai.Handler.WarpTLS as WarpTLS
+import System.Posix.Files (fileMode, getFileStatus)
 
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Declaration, EpochId, Line (..), NodeState (..), Origin (..), Producer (..), World (..))
@@ -168,9 +216,13 @@ import Salmon.Reporter.Tagged (Tagged (..), nodeStatePairs, refValue)
 
 -------------------------------------------------------------------------------
 
--- | A bound unix socket with warp accepting on it, and the requests in flight.
+-- | One or more listeners with warp accepting on them, and the requests in flight.
 data Server = Server
-    { serverListener :: Socket.Listener
+    { serverName :: String
+    -- ^ what a request's origin is named after: the unix socket's path when
+    -- there is one, else @HOST:PORT@ (see 'originFor')
+    , serverBoundTcp :: TVar [Socket.SockAddr]
+    -- ^ the TCP addresses actually bound, port @0@ resolved, in 'Bind' order
     , serverSeedHelp :: Text
     -- ^ the binary's own @config --help@, for @\/help\/seed@
     , serverInbox :: TVar (Maybe (TChan Line))
@@ -198,8 +250,30 @@ data Collector = Collector
     , collectorDone :: TVar Bool
     }
 
-serverPath :: Server -> FilePath
-serverPath = Socket.listenerPath . serverListener
+{- | Where a server listens. A unix socket needs nothing but its path; TCP
+needs everything in 'TlsBind', and there is deliberately no constructor for
+TCP without it.
+-}
+data Bind
+    = BindUnix FilePath
+    | BindTls TlsBind
+    deriving (Show)
+
+{- | A TCP listener: the address to bind, the certificate and key warp-tls
+serves, and the token every request on it must present. The token is the
+file's content already read and trimmed ('readTokenFile'), so that a
+server is refused before it binds rather than after.
+-}
+data TlsBind = TlsBind
+    { tlsHost :: String
+    -- ^ an address to bind, never a wildcard by omission: the caller spells it
+    , tlsPort :: Int
+    -- ^ @0@ for any free port; 'serverBoundTcp' says which
+    , tlsCertFile :: FilePath
+    , tlsKeyFile :: FilePath
+    , tlsToken :: ByteString.ByteString
+    }
+    deriving (Show)
 
 {- | Bind the socket at the path (owner-only, see 'Socket.withUnixListener'),
 serve HTTP on it for as long as the action runs, and take it down after.
@@ -214,20 +288,158 @@ withHttpServer = withHttpServerWith Events.defaultConfig
 
 -- | 'withHttpServer' with the event stream's ring size and keep-alive chosen.
 withHttpServerWith :: Events.Config -> FilePath -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
-withHttpServerWith cfg path seedHelp mode act =
-    Socket.withUnixListener path $ \listener -> do
-        server <-
-            Server listener seedHelp
-                <$> newTVarIO Nothing
-                <*> newTVarIO Nothing
-                <*> newTVarIO Map.empty
-                <*> newIORef 0
-                <*> Events.newEvents cfg
-                <*> pure mode
-                <*> newTVarIO False
-        let settings = Warp.setServerName "salmon" Warp.defaultSettings
-        withAsync (Warp.runSettingsSocket settings (Socket.listenerSocket listener) (application server)) $ \_ ->
-            act server `finally` atomically (writeTVar (serverStopped server) True)
+withHttpServerWith cfg path = withHttpServerOn cfg [BindUnix path]
+
+{- | One server on every listener in the list: one 'Server' value — one
+event ring, one request counter, one inbox — and the same 'application'
+accepting on each, so a command typed over TCP and a read over the unix
+socket see one world and one sequence of numbers. A unix bind is
+'withHttpServerWith' exactly; a TCP bind is warp-tls over a socket bound
+here (so port @0@ works and 'serverBoundTcp' reports what it became), with
+'requireToken' in front of the application — the unix socket never asks for
+a token, since its permissions are its access story, and the TCP listener
+never answers without one. The certificate and key are loaded before
+anything is bound, so a file that does not parse is an exception out of
+this call rather than a listener thread dying quietly behind a running loop.
+
+Binds are taken in order and released in reverse; the action runs once
+every one of them is listening.
+-}
+withHttpServerOn :: forall a. Events.Config -> [Bind] -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
+withHttpServerOn cfg binds seedHelp mode act = do
+    server <-
+        Server name
+            <$> newTVarIO []
+            <*> pure seedHelp
+            <*> newTVarIO Nothing
+            <*> newTVarIO Nothing
+            <*> newTVarIO Map.empty
+            <*> newIORef 0
+            <*> Events.newEvents cfg
+            <*> pure mode
+            <*> newTVarIO False
+    listenOn server binds
+  where
+    name :: String
+    name =
+        case [p | BindUnix p <- binds] ++ [t.tlsHost <> ":" <> show t.tlsPort | BindTls t <- binds] of
+            (n : _) -> n
+            [] -> "http"
+
+    settings = Warp.setServerName "salmon" Warp.defaultSettings
+
+    listenOn :: Server -> [Bind] -> IO a
+    listenOn server [] =
+        act server `finally` atomically (writeTVar (serverStopped server) True)
+    listenOn server (BindUnix path : more) =
+        Socket.withUnixListener path $ \listener ->
+            withAsync (Warp.runSettingsSocket settings (Socket.listenerSocket listener) (application server)) $ \_ ->
+                listenOn server more
+    listenOn server (BindTls tls : more) = do
+        -- warp-tls loads these on its own thread, where a bad file is an
+        -- error nobody waits on; load them here first so it is ours.
+        _ <- either (throwIO . BadCredentials tls.tlsCertFile tls.tlsKeyFile) pure =<< TLS.credentialLoadX509 tls.tlsCertFile tls.tlsKeyFile
+        withTcpListener tls.tlsHost tls.tlsPort $ \sock addr -> do
+            atomically (modifyTVar' (serverBoundTcp server) (++ [addr]))
+            let tlsSettings = WarpTLS.tlsSettings tls.tlsCertFile tls.tlsKeyFile
+                -- a plain-HTTP client is answered 426 and refused by
+                -- warp-tls, which then throws this; it is the listener
+                -- working as intended, not something to print a trace for
+                quietly = Warp.setOnException $ \mreq e ->
+                    case fromException e of
+                        Just WarpTLS.InsecureConnectionDenied -> pure ()
+                        _ -> Warp.defaultOnException mreq e
+            withAsync (WarpTLS.runTLSSocket tlsSettings (quietly settings) sock (requireToken tls.tlsToken (application server))) $ \_ ->
+                listenOn server more
+
+-- | The certificate or key given for a TCP listener did not load.
+data BadCredentials = BadCredentials FilePath FilePath String
+    deriving (Show)
+
+instance Exception BadCredentials
+
+{- | A bound, listening TCP socket at the address, and the address it got
+(the port resolved when @0@ was asked for); closed on the way out.
+-}
+withTcpListener :: String -> Int -> (Socket.Socket -> Socket.SockAddr -> IO a) -> IO a
+withTcpListener host port act = do
+    let hints = Socket.defaultHints{Socket.addrFlags = [Socket.AI_PASSIVE, Socket.AI_NUMERICSERV], Socket.addrSocketType = Socket.Stream}
+    addrs <- Socket.getAddrInfo (Just hints) (Just host) (Just (show port))
+    addr <- case addrs of
+        (a : _) -> pure a
+        [] -> throwIO (userError ("no address to bind for " <> host <> ":" <> show port))
+    bracket (Socket.openSocket addr) Socket.close $ \sock -> do
+        Socket.setSocketOption sock Socket.ReuseAddr 1
+        Socket.bind sock (Socket.addrAddress addr)
+        Socket.listen sock 16
+        bound <- Socket.getSocketName sock
+        act sock bound
+
+-------------------------------------------------------------------------------
+-- the token
+
+{- | Refuse every request on this listener that does not carry
+@Authorization: Bearer <token>@ for exactly this token, with @401@ and a
+JSON error. Every route, the event stream included: a read of the output
+ring is as sensitive as a command (the spec's decision), so there is no
+route a network client gets for free. The comparison is constant-time
+('sameSecret'); the scheme name is matched without regard to case, the
+token itself exactly.
+-}
+requireToken :: ByteString.ByteString -> Wai.Middleware
+requireToken token app req respond =
+    case bearerOf =<< lookup HTTP.hAuthorization (Wai.requestHeaders req) of
+        Just presented | sameSecret presented token -> app req respond
+        _ ->
+            respond $
+                Wai.responseLBS
+                    HTTP.status401
+                    [(HTTP.hContentType, "application/json"), ("WWW-Authenticate", "Bearer")]
+                    (encode (object ["error" .= ("a bearer token is required" :: Text)]))
+  where
+    bearerOf :: ByteString.ByteString -> Maybe ByteString.ByteString
+    bearerOf h =
+        let (scheme, rest) = Char8.break (== ' ') h
+         in if Char8.map toLower scheme == "bearer"
+                then Just (Char8.dropWhileEnd isSpace (Char8.dropWhile (== ' ') rest))
+                else Nothing
+
+{- | Equal, in time that depends on the lengths and not on where the first
+differing byte is: every byte is folded whether or not an earlier one
+already differed, and the length comparison is folded in the same way
+rather than short-circuiting.
+-}
+sameSecret :: ByteString.ByteString -> ByteString.ByteString -> Bool
+sameSecret a b = (lengthBit .|. foldl' (.|.) 0 (ByteString.zipWith xor a b)) == 0
+  where
+    lengthBit :: Word8
+    lengthBit = if ByteString.length a == ByteString.length b then 0 else 1
+
+-- | Why a token file was not accepted.
+data TokenError
+    = -- | others can read it, so it is not a secret: the file's mode
+      TokenFileReadable FilePath
+    | -- | nothing but whitespace in it
+      TokenFileEmpty FilePath
+    deriving (Show, Eq)
+
+instance Exception TokenError
+
+{- | The token in a file: its content with surrounding whitespace removed
+(so a trailing newline from @echo@ is not part of it). Refused when the
+file is readable by others — a token anyone on the box can read is not one —
+and when it is empty, which would make every request with an empty
+@Bearer@ valid. A file that cannot be read at all throws as any read does.
+-}
+readTokenFile :: FilePath -> IO (Either TokenError ByteString.ByteString)
+readTokenFile path = do
+    st <- getFileStatus path
+    if fileMode st .&. 0o004 /= 0
+        then pure (Left (TokenFileReadable path))
+        else do
+            raw <- ByteString.readFile path
+            let token = Char8.dropWhileEnd isSpace (Char8.dropWhile isSpace raw)
+            pure (if ByteString.null token then Left (TokenFileEmpty path) else Right token)
 
 {- | What to hand 'Serve.serveObserved': installs the read accessor. Reads
 answer @503@ until it has been.
@@ -434,7 +646,7 @@ application server req respond =
                     Nothing -> pure (failure HTTP.status503 "the loop is not taking commands")
                     Just inbox -> do
                         n <- atomicModifyIORef' (serverCounter server) (\k -> (k + 1, k))
-                        let origin = Origin (Text.pack (serverPath server <> "#" <> show n))
+                        let origin = originFor server req n
                         -- numbered before it is queued, so every report
                         -- the line produces is numbered after it
                         seqNo <- Events.enqueued (serverEvents server) origin line
@@ -498,6 +710,18 @@ application server req respond =
         , (HTTP.hCacheControl, "no-cache")
         , ("X-Accel-Buffering", "no")
         ]
+
+{- | The origin a request's command is typed under: @NAME#n@, where @NAME@
+is the server's ('serverName', the unix socket's path) for a request on the
+unix socket and the client's own address for one over TCP — @history@ then
+says which network client typed a line, which "the socket" does not.
+-}
+originFor :: Server -> Request -> Int -> Origin
+originFor server req n = Origin (Text.pack (name <> "#" <> show n))
+  where
+    name = case Wai.remoteHost req of
+        Socket.SockAddrUnix _ -> serverName server
+        addr -> show addr
 
 -- | @?since=N@, @?stream=a,b@ (repeatable), @?origin=NAME@ (repeatable).
 eventsQuery :: Request -> Either Text (Maybe Word64, Events.Filter)

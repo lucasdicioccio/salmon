@@ -5,12 +5,12 @@ module Salmon.Builtin.CommandLine where
 
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
 import Control.Applicative ((<|>))
-import Control.Monad (void, when)
+import Control.Monad (forM, forM_, void, when)
 import Data.Foldable (traverse_)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -108,8 +108,102 @@ data RunCommand
       -- @specs/pull-mode.md@; see "Salmon.Actions.Serve.StatusSink").
       -- The HTTP server's event stream keeps @--events-ring N@ events for a
       -- client to resume from (milestone 4; see "Salmon.Actions.Serve.Events").
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions
+      -- Last of all, the same HTTP over the network ('TcpOptions', milestone
+      -- 8): @--http-tcp HOST:PORT@ with @--tls-cert@, @--tls-key@ and
+      -- @--token-file@, all three or nothing.
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions
     deriving (Eq, Ord, Generic, Show)
+
+{- | The four flags that put the HTTP surface on a network, as typed. What
+they mean together is 'validateTcpOptions': there is no way to spell a
+plaintext listener, and the only accepted shapes are none of them or all of
+them.
+-}
+data TcpOptions = TcpOptions
+    { tcpBind :: !(Maybe String)
+    -- ^ @--http-tcp HOST:PORT@
+    , tcpCert :: !(Maybe FilePath)
+    -- ^ @--tls-cert FILE@
+    , tcpKey :: !(Maybe FilePath)
+    -- ^ @--tls-key FILE@
+    , tcpTokenFile :: !(Maybe FilePath)
+    -- ^ @--token-file FILE@
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON TcpOptions
+instance ToJSON TcpOptions
+
+-- | No network listener at all: the default.
+noTcp :: TcpOptions
+noTcp = TcpOptions Nothing Nothing Nothing Nothing
+
+-- | A validated 'TcpOptions': where to listen and the three files, all present.
+data TcpListen = TcpListen
+    { tcpHost :: !String
+    , tcpPort :: !Int
+    , tcpCertFile :: !FilePath
+    , tcpKeyFile :: !FilePath
+    , tcpTokenPath :: !FilePath
+    }
+    deriving (Eq, Ord, Show)
+
+{- | The loud default, as a pure function so it can be tested without a
+process: 'Nothing' when none of the four is given; a 'TcpListen' when all
+four are and the address parses; otherwise the message the binary exits
+with, naming every flag that is missing — so an operator who typed
+@--http-tcp@ alone is told about all three at once rather than one per
+attempt — or, for @--tls-cert@\/@--tls-key@\/@--token-file@ without
+@--http-tcp@, that they do nothing on their own. @HOST@ is never implied:
+@:8443@ is refused, since listening on every address is exactly the thing
+that should have to be spelled out (@0.0.0.0:8443@ does it). An IPv6 address
+is written in brackets, @[::1]:8443@.
+-}
+validateTcpOptions :: TcpOptions -> Either Text (Maybe TcpListen)
+validateTcpOptions opts =
+    case opts.tcpBind of
+        Nothing
+            | null given -> Right Nothing
+            | otherwise -> Left (Text.intercalate ", " given <> " need --http-tcp HOST:PORT to apply to; there is no network listener without it")
+        Just hostPort ->
+            case missing of
+                [] -> do
+                    (host, port) <- parseHostPort hostPort
+                    Right (Just (TcpListen host port (fromJust opts.tcpCert) (fromJust opts.tcpKey) (fromJust opts.tcpTokenFile)))
+                _ ->
+                    Left
+                        ( "--http-tcp needs "
+                            <> Text.intercalate ", " missing
+                            <> ": a salmon server never listens on a network without TLS and a token"
+                        )
+  where
+    named =
+        [ ("--tls-cert", opts.tcpCert)
+        , ("--tls-key", opts.tcpKey)
+        , ("--token-file", opts.tcpTokenFile)
+        ]
+    given = [flag | (flag, Just _) <- named]
+    missing = [flag | (flag, Nothing) <- named]
+
+-- | @HOST:PORT@, with @[v6]:PORT@ for an IPv6 address; the port is 0..65535.
+parseHostPort :: String -> Either Text (String, Int)
+parseHostPort s =
+    case break (== ':') (reverse s) of
+        (portRev, ':' : hostRev) -> do
+            let host = unbracket (reverse hostRev)
+                portText = reverse portRev
+            port <- case reads portText of
+                [(n, "")] | n >= 0 && n <= 65535 -> Right n
+                _ -> Left ("--http-tcp: not a port: " <> Text.pack (show portText))
+            when (null host) (Left ("--http-tcp: no host in " <> Text.pack (show s) <> "; spell the address, 0.0.0.0 included"))
+            Right (host, port)
+        _ -> Left ("--http-tcp: expected HOST:PORT, got " <> Text.pack (show s))
+  where
+    unbracket h
+        | Just inner <- stripBrackets h = inner
+        | otherwise = h
+    stripBrackets ('[' : rest) | not (null rest) && last rest == ']' = Just (init rest)
+    stripBrackets _ = Nothing
 
 {- | @--status-sink PATH@ and @--status-sink-interval SECONDS@ (default
 'StatusSink.defaultInterval'): where this host's status document is written,
@@ -299,6 +393,38 @@ runCommandParser =
                     <> Options.Applicative.help "How many events --http's /events keeps for a client to resume from with ?since=; a client further behind is sent a gap event."
                 )
             <*> sinkOptionsP
+            <*> tcpOptionsP
+    tcpOptionsP =
+        TcpOptions
+            <$> optional
+                ( strOption
+                    ( long "http-tcp"
+                        <> Options.Applicative.metavar "HOST:PORT"
+                        <> Options.Applicative.help
+                            "Also serve the same HTTP over TCP at HOST:PORT, with TLS and a bearer token on every request. Requires --tls-cert, --tls-key and --token-file; there is no plaintext option. Spell the host ([::1]:8443 for IPv6)."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "tls-cert"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "The PEM certificate (with its chain, if any) --http-tcp serves."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "tls-key"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "The PEM private key for --tls-cert."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "token-file"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "A file holding the bearer token every --http-tcp request must present (surrounding whitespace ignored). Refused if readable by others."
+                    )
+                )
     sinkOptionsP =
         SinkOptions
             <$> optional
@@ -580,9 +706,27 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let own = taggedFor fmt
+            -- the network listener is refused before anything is bound or
+            -- read: the flags as a whole, then the token file itself
+            tcp <- case validateTcpOptions tcpOptions of
+                Left err -> do
+                    hPutStrLn stderr (Text.unpack err)
+                    exitFailure
+                Right t -> pure t
+            tlsBinds <- forM (maybe [] pure tcp) $ \t -> do
+                token <- Http.readTokenFile t.tcpTokenPath
+                case token of
+                    Left (Http.TokenFileReadable path) -> do
+                        hPutStrLn stderr ("--token-file " <> path <> " is readable by others; a token anyone on the box can read is not one (chmod 600 it)")
+                        exitFailure
+                    Left (Http.TokenFileEmpty path) -> do
+                        hPutStrLn stderr ("--token-file " <> path <> " is empty")
+                        exitFailure
+                    Right tok -> pure (Http.BindTls (Http.TlsBind t.tcpHost t.tcpPort t.tcpCertFile t.tcpKeyFile tok))
+            let binds = [Http.BindUnix path | Just path <- [http]] ++ tlsBinds
             follow <- case (followDir, traverse Follow.mkLabel labels) of
                 (Nothing, Right []) -> pure Nothing
                 (Nothing, _) -> do
@@ -649,8 +793,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                   -- rather than as the loop's 'Serve.Stdin': its end of input
                   -- is a hang-up like any client's and only `quit` — from
                   -- stdin or from a client — ends the loop.
-                  stdinP = case (listen, http) of
-                      (Nothing, Nothing) -> Serve.stdinProducer stdin
+                  stdinP = case (listen, binds) of
+                      (Nothing, []) -> Serve.stdinProducer stdin
                       _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
                   producersWith more =
                       case follow of
@@ -661,7 +805,11 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
               -- own reports, and both hand everything on to the loop's own,
               -- which stays exactly as `fmt` says.
               withMaybe listen Socket.withUnixListener $ \mlistener ->
-                withMaybe http (\path -> Http.withHttpServerWith Events.defaultConfig{Events.configRing = eventsRing} path (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
+                withMaybe (nonEmptyList binds) (\bs -> Http.withHttpServerOn Events.defaultConfig{Events.configRing = eventsRing} bs (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
+                    -- exactly one line, once the listener is up, saying what
+                    -- is now reachable from the network and on what terms
+                    forM_ tcp $ \t ->
+                        hPutStrLn stderr ("serve: exposing HTTP on " <> t.tcpHost <> ":" <> show t.tcpPort <> " with TLS, token from " <> t.tcpTokenPath)
                     let (serveR0, r0) = reportersOver tagged
                         base = case mlistener of
                             Nothing -> (contramap Serve.attributed serveR0, contramap Serve.attributed r0)
@@ -810,6 +958,11 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
 withMaybe :: Maybe x -> (x -> (y -> IO r) -> IO r) -> (Maybe y -> IO r) -> IO r
 withMaybe Nothing _ k = k Nothing
 withMaybe (Just x) with k = with x (k . Just)
+
+-- | 'Nothing' for an empty list, for 'withMaybe' over a list of resources.
+nonEmptyList :: [x] -> Maybe [x]
+nonEmptyList [] = Nothing
+nonEmptyList xs = Just xs
 
 {- | A seed parser's own @--help@ text, as @config --help@ prints it: what
 @GET \/help\/seed@ answers, the one non-generic surface the server has.

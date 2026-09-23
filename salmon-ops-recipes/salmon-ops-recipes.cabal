@@ -129,6 +129,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ServeModelSpec
                     , Test.ServeSocketSpec
                     , Test.ServeSpec
+                    , Test.ServeTlsSpec
                     , Test.StatusSinkSpec
                     , Test.SystemdSpec
                     , Test.UpTreeSpec
@@ -140,10 +141,13 @@ test-suite salmon-ops-recipes-test
                     , comonad
                     , containers
                     , contravariant
+                    , crypton-connection
+                    , crypton-x509-store
                     , directory
                     , filepath
                     , free
                     , http-client
+                    , http-client-tls
                     , http-types
                     , mtl
                     , network
@@ -159,6 +163,7 @@ test-suite salmon-ops-recipes-test
                     , temporary
                     , text
                     , time
+                    , tls
                     , unix
                     , wai
                     , warp

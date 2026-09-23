@@ -41,6 +41,7 @@ import qualified Test.ServeHttpSpec as ServeHttpSpec
 import qualified Test.ServeModelSpec as ServeModelSpec
 import qualified Test.ServeSocketSpec as ServeSocketSpec
 import qualified Test.ServeSpec as ServeSpec
+import qualified Test.ServeTlsSpec as ServeTlsSpec
 import qualified Test.StatusSinkSpec as StatusSinkSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
@@ -119,6 +120,7 @@ main =
             , ServeModelSpec.tests
             , ServeSocketSpec.tests
             , ServeSpec.tests
+            , ServeTlsSpec.tests
             , StatusSinkSpec.tests
             , SystemdSpec.tests
             , UpTreeSpec.tests
