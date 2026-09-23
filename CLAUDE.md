@@ -465,7 +465,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   producer types lands between the two. Sync (default) collects every report the loop stamps
   with that origin and answers, as a JSON array, on the loop's `HungUp` for it — Socket's
   closing rule, for the same reason; `?async` answers `202 {"seq": n}` at once. Report text is
-  public, no redaction (spec decision). No TLS, no token, no TCP. `Test/ServeHttpSpec.hs`
+  public, no redaction (spec decision). No token on the unix socket. `Test/ServeHttpSpec.hs`
   drives it with `http-client` over the socket and rebuilds `Help.dagLines` from `/dag`.
   **`GET /` and `/ui/*` are the web UI** (milestone 7, first two steps): `salmon-ops/ui/`'s
   `index.html`/`ui.js`/`ui.css`, embedded at build time with `file-embed` (`embedDir` under
@@ -490,6 +490,28 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   page, and no bearer token sent until milestone 8 asks for one. A browser cannot open a unix
   socket, so it is reached through a TCP forward (`socat`/`ssh -L`) until milestone 8's TCP
   listener; see `docs/serve-supervision.md` §14.
+  **Milestone 8, the same HTTP over a network**: `run serve --http-tcp HOST:PORT --tls-cert
+  FILE --tls-key FILE --token-file FILE` adds a warp-tls listener (`Http.withHttpServerOn`
+  over a list of `Bind`s — `BindUnix PATH | BindTls TlsBind`, no plaintext constructor) running
+  the *same* `application` on the *same* `Server` (one ring, one counter, one inbox), behind
+  `requireToken`, a middleware on the TCP listener only that wants `Authorization: Bearer
+  <token>` on every route, `/events` included, compared in constant time (`sameSecret`) and
+  answering `401 {"error": ...}` otherwise. It is a middleware so a route added to
+  `application` later is covered without knowing the token exists. `CommandLine.
+  validateTcpOptions` is the pure refusal: `--http-tcp` without all three files exits 1 naming
+  the missing ones, the files without `--http-tcp` are refused, `:PORT` with no host is
+  refused (spell `0.0.0.0`), `[::1]:PORT` for IPv6; `Http.readTokenFile` refuses a
+  world-readable or empty file. Exactly one line goes to stderr on startup (`serve: exposing
+  HTTP on HOST:PORT with TLS, token from FILE`), and the listener's `onException` drops
+  warp-tls's `InsecureConnectionDenied` (a plain-HTTP client, answered 426 first) and TLS-level
+  connection errors (curl closes without close-notify on every request) so it stays the only
+  line. Origins over TCP are the client's `ADDR:PORT#n` (`originFor`), the socket's `PATH#n`
+  as before. The certificate and key are loaded before binding, so a bad file throws
+  `BadCredentials` here rather than dying on warp's thread. `Test/ServeTlsSpec.hs` mints a
+  certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
+  which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
+  pinning exactly that certificate. Not done: client certificates, a read-only token, TCP/token
+  support in `salmon-tui` and the web UI.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a
@@ -1013,6 +1035,9 @@ my-salmon run serve --http PATH          # the same, also serving HTTP on a unix
                                          # GET /dag /status /history /help/seed, POST /command[?async],
                                          # GET /events[?since=N&stream=..&origin=..] (SSE; --events-ring N),
                                          # GET / (the web UI; forward the socket to a TCP port to open it)
+my-salmon run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key FILE --token-file FILE
+                                         # the same HTTP over TCP with TLS, every request needing
+                                         # `Authorization: Bearer <token>`; all three files or it refuses
 my-salmon run serve --status-sink PATH [--status-sink-interval S]
                                          # the same, also writing this host's status document to PATH
                                          # (atomically) after every pass and injection, and every S seconds
@@ -1074,6 +1099,9 @@ on a unix socket from any number of clients, each answered on its own connection
 see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §13. `--http PATH` serves
 the same world over HTTP on a second socket — `curl --unix-socket PATH http://x/dag`, and
 `POST /command` with a line as the body — see `Actions/Serve/Http.hs` above and §14.
+`--http-tcp HOST:PORT` puts the same HTTP on a network, and only with `--tls-cert`,
+`--tls-key` and `--token-file` all given — there is no plaintext option — see §14's "Reaching
+it over the network".
 `--status-sink PATH` writes the host's status document there after every pass and injection and
 on a timer — see `Actions/Serve/StatusSink.hs` above and §12's "Status flows back" — and
 `salmon-fleet status DIR` folds a directory of them. `salmon-tui PATH` is a terminal client of

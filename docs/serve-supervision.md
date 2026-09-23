@@ -909,9 +909,103 @@ What to know:
   #17 upkeep parked bjU3MjUz serve-fixture-bundle
   j/k move  enter expand  : command (async; stands the machines down)  r re-read /dag  q quit
   ```
-- **Permissions are the whole access story.** No TLS, no token, no TCP;
-  `notes`, `help` and report text are as public as the logs they already
-  go to. Do not put this socket where an untrusted user can open it.
+- **Permissions are the whole access story on the socket.** No token is
+  asked for on it; `notes`, `help` and report text are as public as the
+  logs they already go to. Do not put this socket where an untrusted user
+  can open it. Reaching the same server over a network is the next
+  paragraph, and it is TLS with a token or nothing.
+
+### Reaching it over the network: `--http-tcp`
+
+Milestone 8 of `specs/generic-server.md`. The same HTTP — every route
+above, `/events` included — can also listen on a TCP address, and the only
+way to spell that is with all three of a certificate, its key and a token
+file:
+
+```sh
+my-salmon run serve --http /run/my-salmon.http \
+    --http-tcp 0.0.0.0:8443 --tls-cert /etc/my-salmon/server.pem \
+    --tls-key /etc/my-salmon/server.key --token-file /etc/my-salmon/token < /dev/null &
+# stderr, once: serve: exposing HTTP on 0.0.0.0:8443 with TLS, token from /etc/my-salmon/token
+
+T="Authorization: Bearer $(cat /etc/my-salmon/token)"
+curl -s --cacert ca.pem -H "$T" https://host:8443/status | jq .
+curl -s --cacert ca.pem -H "$T" -X POST -d 'up --name web --file index.html' https://host:8443/command
+curl -sN --cacert ca.pem -H "$T" 'https://host:8443/events?since=0'
+```
+
+What the fixture binary does with each way of getting it wrong (the
+refusals are `exit 1` before anything is bound or read; the option check
+itself is a pure function, `CommandLine.validateTcpOptions`):
+
+```
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443
+--http-tcp needs --tls-cert, --tls-key, --token-file: a salmon server never listens on a network without TLS and a token
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443 --tls-cert tls/server.pem
+--http-tcp needs --tls-key, --token-file: a salmon server never listens on a network without TLS and a token
+$ salmon-ops-serve-fixture run serve --token-file token
+--token-file need --http-tcp HOST:PORT to apply to; there is no network listener without it
+$ ls -l token
+-rw-r--r-- token
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443 --tls-cert tls/server.pem --tls-key tls/server.key --token-file token
+--token-file token is readable by others; a token anyone on the box can read is not one (chmod 600 it)
+$ salmon-ops-serve-fixture run serve --http-tcp :8443 --tls-cert tls/server.pem --tls-key tls/server.key --token-file token
+--http-tcp: no host in ":8443"; spell the address, 0.0.0.0 included
+```
+
+and, once it is up (`chmod 600 token` first), what a client sees:
+
+```
+$ curl -s --cacert tls/server.pem https://localhost:8443/status
+{"error":"a bearer token is required"}                       # 401, WWW-Authenticate: Bearer
+$ curl -s --cacert tls/server.pem -H "Authorization: Bearer $(cat token)" https://localhost:8443/status
+{"kind":"status","mode":"interactive","nodes":[],"seq":2,"stream":"serve"}
+$ curl -s --cacert tls/server.pem -H "Authorization: Bearer wrong" https://localhost:8443/dag
+{"error":"a bearer token is required"}
+$ curl -si http://localhost:8443/status                      # plain HTTP on the TLS port
+HTTP/1.1 426 Upgrade Required
+$ curl -s --unix-socket /run/my-salmon.http http://x/history | jq -c '.seeds[] | .origin'
+{"kind":"other","name":"127.0.0.1:51510#0"}                  # the unix socket: no token, and who typed the line
+```
+
+Five things to know:
+
+- **There is no plaintext option, behind any flag.** `Http.Bind` has a
+  unix constructor and a TLS constructor and nothing else; `--http-tcp`
+  without all three files is refused with every missing one named, and the
+  three files without `--http-tcp` are refused too, since silently unused
+  is how a listener ends up open by accident. `HOST` is spelled, always:
+  `:8443` is refused, `0.0.0.0:8443` is how listening on every address is
+  written, `[::1]:8443` for IPv6. A salmon server is root on the box, one
+  `up` away — the spec's security section is binding on this.
+- **The token is on every route of the TCP listener**, `Authorization:
+  Bearer <token>`, compared in constant time against the file's content
+  with surrounding whitespace removed (so `echo secret > token` is fine).
+  Reads and `/events` are not exempt: a node's output ring is as sensitive
+  as a command. `401` with `{"error": ...}` otherwise, and a refused
+  command is never queued. The token file must not be readable by others
+  (`chmod 600`), and must not be empty. Checking it queues nothing — a read
+  is still a read.
+- **The unix socket is unchanged**, token-free, and the *same server*: one
+  event ring, one `seq` counter, one inbox, whichever listener a request
+  came in on. What differs is the origin a command is typed under:
+  `PATH#n` on the socket, the client's own `ADDR:PORT#n` over TCP, so
+  `history` says who typed a line from the network.
+- **Plain HTTP on the TLS port is refused by warp-tls** with `426 Upgrade
+  Required` before any route is reached; a client with a wrong CA sees a
+  failed handshake. Both are the listener working, and neither is traced on
+  stderr — the startup line is deliberately the only thing written there.
+- **Mint the certificate however you like; the tree can do it.**
+  `Certificates.certificateAuthority` writes a v3 self-signed certificate
+  a client can pin with `--cacert`; a CA-issued one works the same. Note
+  that `Certificates.selfSign` and `caSign` write X.509 *v1* certificates
+  (`openssl x509 -req` without extensions), which OpenSSL-based clients
+  accept and crypton-based Haskell clients reject (`LeafNotV3`).
+
+Not yet: `salmon-tui` and the web UI (§6/§7 of the spec) speak to the unix
+socket only; they will need a `--token` and a TCP address to reach a
+server started this way. Mutual TLS and a read-only token are the spec's
+own v2.
 
 ### The web UI: `GET /`
 

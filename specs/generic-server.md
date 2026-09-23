@@ -371,3 +371,31 @@ cheap one and lands first.
    deviations), and `history` as a timeline — it is a table under the
    seed form.
 8. **TCP + TLS + token**, opt-in, with the loud default described above.
+   **Shipped** (`run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key
+   FILE --token-file FILE`; `Http.withHttpServerOn`/`Http.Bind`/
+   `Http.requireToken`, `CommandLine.validateTcpOptions`,
+   `Test/ServeTlsSpec.hs`, `docs/serve-supervision.md` §14). The same
+   `application` on a warp-tls listener beside the unix socket, one
+   `Server` for both; a bearer token on every route of the TCP listener,
+   compared in constant time; the unix socket unchanged and token-free.
+   The loud default is stricter than the text above: not "never on
+   `0.0.0.0` without TLS and auth" but never on *any* address without
+   both — there is no plaintext TCP constructor or flag, `--http-tcp`
+   without all three files exits 1 naming the missing ones, and the host
+   is always spelled (`:8443` is refused, `0.0.0.0:8443` is how listening
+   everywhere is written), so "default to localhost" is not a default but
+   a choice the operator types. Four deviations. A bearer token from a
+   file, not a JWT: `SreBox.JWTSigning` signs for *other* services and a
+   verifier here would need a key store, an audience and a clock for what
+   a `chmod 600` file already gives; and no client certificate, which is
+   the v2 the text names. The token file must not be readable by others
+   and must not be empty — two refusals the text did not ask for. Commands
+   typed over TCP are attributed to the client's `ADDR:PORT#n`, not to the
+   listener, so `history` says who. And the `Certificates` nodes *can*
+   mint the certificate, as the text says, with one caveat found on the
+   way: `selfSign`/`caSign` (`openssl x509 -req`) write X.509 v1
+   certificates, which crypton's validation rejects (`LeafNotV3`) while
+   OpenSSL-based clients accept; `certificateAuthority` (`req -x509`)
+   writes v3, and is what the test pins. Not done: the clients —
+   `salmon-tui` and the web UI need a `--token` and a TCP address to use
+   this.
