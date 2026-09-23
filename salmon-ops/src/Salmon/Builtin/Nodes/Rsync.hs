@@ -99,8 +99,16 @@ receiveFileWith opts r rsync mkdir remote remotepath localpath =
     cmd = ReceiveFile remote remotepath localpath opts
     r' = contramap (RunRsyncCommand cmd) r
 
+-- | Copies a directory to a remote, authenticating however ssh would by default.
 sendDir :: Reporter Report -> Track' (Binary "rsync") -> Track' Directory -> Directory -> Remote -> FilePath -> Op
-sendDir r rsync mkdir dir remote remotepath =
+sendDir = sendDirWith Ssh.noClientOpts
+
+{- | 'sendDir', with explicit ssh client options -- the same @--rsh@
+treatment as 'sendFileWith', for a key ssh would not offer on its own (one
+a recipe generated and had signed, typically).
+-}
+sendDirWith :: Ssh.ClientOpts -> Reporter Report -> Track' (Binary "rsync") -> Track' Directory -> Directory -> Remote -> FilePath -> Op
+sendDirWith opts r rsync mkdir dir remote remotepath =
     withBinary rsync rsyncRun cmd $ \up ->
         op "rsync:send-dir" (deps [run mkdir dir]) $ \actions ->
             actions
@@ -109,7 +117,7 @@ sendDir r rsync mkdir dir remote remotepath =
                 , up = up r'
                 }
   where
-    cmd = SendDir dirpath remote remotepath
+    cmd = SendDir dirpath remote remotepath opts
     r' = contramap (RunRsyncCommand cmd) r
     dirpath :: FilePath
     dirpath = dir.directoryPath
@@ -117,7 +125,7 @@ sendDir r rsync mkdir dir remote remotepath =
 data RsyncCommand
     = SendFile FilePath Remote FilePath Ssh.ClientOpts
     | ReceiveFile Remote FilePath FilePath Ssh.ClientOpts
-    | SendDir FilePath Remote FilePath
+    | SendDir FilePath Remote FilePath Ssh.ClientOpts
     deriving (Show)
 
 rsyncRun :: Command "rsync" RsyncCommand
@@ -133,7 +141,11 @@ rsyncRun = Command $ \run ->
                 ["--copy-links"]
                     <> (case Ssh.clientArgs opts of [] -> []; args -> ["--rsh", unwords ("ssh" : args)])
                     <> [Text.unpack (loginAtHost rem) <> ":" <> src, dst]
-        (SendDir src rem dst) -> proc "rsync" ["--copy-links", "--recursive", src, Text.unpack (loginAtHost rem) <> ":" <> dst]
+        (SendDir src rem dst opts) ->
+            proc "rsync" $
+                ["--copy-links", "--recursive"]
+                    <> (case Ssh.clientArgs opts of [] -> []; args -> ["--rsh", unwords ("ssh" : args)])
+                    <> [src, Text.unpack (loginAtHost rem) <> ":" <> dst]
 
 loginAtHost :: Remote -> Text
 loginAtHost rem = mconcat [rem.remoteUser, "@", rem.remoteHost]

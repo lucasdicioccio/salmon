@@ -574,6 +574,22 @@ clientOptsTests =
             , "salmon@1.2.3.4:/home/salmon/bin"
             ]
             (processArgs (prepare Rsync.rsyncRun (Rsync.SendFile "/local/bin" (Rsync.Remote "salmon" "1.2.3.4") "/home/salmon/bin" opts)))
+    , testCase "a directory upload carries them too" $
+        assertEqual
+            "sendDirWith is sendFileWith's --rsh treatment, recursively"
+            [ "--copy-links"
+            , "--recursive"
+            , "--rsh"
+            , "ssh -i /w/ssh/toy-client -o IdentitiesOnly=yes -o UserKnownHostsFile=/w/ssh/known_hosts -o StrictHostKeyChecking=accept-new"
+            , "/local/files"
+            , "salmon@1.2.3.4:/home/salmon/files"
+            ]
+            (processArgs (prepare Rsync.rsyncRun (Rsync.SendDir "/local/files" (Rsync.Remote "salmon" "1.2.3.4") "/home/salmon/files" opts)))
+    , testCase "a directory upload without options is the same command as before" $
+        assertEqual
+            ""
+            ["--copy-links", "--recursive", "/local/files", "salmon@1.2.3.4:/home/salmon/files"]
+            (processArgs (prepare Rsync.rsyncRun (Rsync.SendDir "/local/files" (Rsync.Remote "salmon" "1.2.3.4") "/home/salmon/files" Ssh.noClientOpts)))
     , testCase "a changed host key is recognised as such" $
         assertBool
             "the one ssh failure that never resolves by waiting"
