@@ -590,7 +590,62 @@ The commands are still one inbox: a line from a client stands the tending
 machines down before it runs, same as a line from stdin, and two clients'
 lines interleave at line granularity in arrival order.
 
-## 14. Gotchas
+## 14. HTTP on a socket: `--http`
+
+`run serve --http PATH` binds a *second* unix socket and serves HTTP on it
+— reads of the live world as JSON, and the same command language as
+`POST`. Milestone 3 of `specs/generic-server.md`;
+`Salmon.Actions.Serve.Http` is the implementation. It is its own path
+rather than HTTP detected on `--listen`'s socket, so use both flags if you
+want both; the socket file has the same owner-only mode and the same
+live/stale checks as §13's.
+
+```sh
+my-salmon run serve --http /run/my-salmon.http < /dev/null &
+C='curl -s --unix-socket /run/my-salmon.http'
+
+$C http://x/dag | jq '.nodes[] | {shorthand, ref: .ref.short, direction, convergence,
+                                  deps: [.dependencies[].short]}'
+$C http://x/status | jq .        # the object `status` prints under --json
+$C http://x/history | jq .       # likewise `history`, plus an `elided` count
+$C http://x/help/seed | jq -r .seed   # this binary's own `config --help`
+
+$C -X POST -d 'up --name web --file index.html' http://x/command      # sync
+$C -X POST -d 'up --name api' 'http://x/command?async'                # {"seq": n}
+$C -X POST -H 'content-type: application/json' -d '{"line": "status"}' http://x/command
+```
+
+What to know:
+
+- **Reads never touch the inbox.** `/dag`, `/status`, `/history` and
+  `/help/seed` read the loop's own `World` directly — they do not stand the
+  tending machines down, do not wait behind a command, and answer while a
+  node's `up` is still running. The price is that a read is at most one
+  command old: each node's `status` is the snapshot the last command took
+  (§11's `status` field, `null` for a node never tended). Motion between
+  commands belongs to the event stream, a later milestone.
+- **`/dag` is the graph a pass walks**, not the declared tree: one object
+  per `Ref`, with `dependencies` and `dependants` as ref lists both ways,
+  the node's `shorthand`/`help`/`notes`/`dynamics` (the fields §8's
+  `Stale` detection compares), and its `direction`/`convergence`/`status`/
+  `paths` as `status` lists them. It is populated the moment something is
+  declared — under `autoconverge off` every node reads `pending` with its
+  edges already in place — and a retired seed's nodes stay in it with
+  `direction: "down"` until their teardown is done. A batch a `Rewrite`
+  would introduce is not shown; the nodes it would stand in for are.
+- **`POST /command` is one line of §3's language**, `text/plain` or
+  `{"line": "..."}`, and it is handled like any other line: it stands the
+  machines down first and takes its turn in the inbox. Synchronous by
+  default, the response is a JSON array of exactly the reports that line
+  produced (§11's objects), returned when the loop has finished with it —
+  what a script or a CI step wants. `?async` returns `202 {"seq": n}` the
+  moment the line is queued; `n` is the loop-wide sequence number the event
+  stream will resume from. `quit` works from here too and answers `[]`.
+- **Permissions are the whole access story.** No TLS, no token, no TCP;
+  `notes`, `help` and report text are as public as the logs they already
+  go to. Do not put this socket where an untrusted user can open it.
+
+## 15. Gotchas
 
 - **A piped script is never supervised.** If you're testing self-healing and
   piping a script in, you won't see it — there's no idle moment for the
@@ -616,7 +671,7 @@ lines interleave at line granularity in arrival order.
   node with no `check` never notices its own file changing, and nothing
   standing on it is ever bounced, however that node is decorated otherwise.
 
-## 15. Where to read more
+## 16. Where to read more
 
 - `docs/howto-ops.md` — writing and testing the `Op`s this doc assumes.
 - `CLAUDE.md`'s "`salmon-ops` layer" section — the implementation-level

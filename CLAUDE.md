@@ -432,6 +432,36 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   than `Stdin`: with a socket to talk to the process must outlive whatever started it
   (`< /dev/null &`), so stdin's EOF is a hang-up like any client's and only `quit` — from
   anywhere — ends the loop. `Test/ServeSocketSpec.hs` drives it with real connections.
+  **`Actions/Serve/Http.hs`** is milestone 3: `run serve --http PATH` serves HTTP (warp) on a
+  *second* unix socket, bound through the same `withUnixListener` (owner-only, live path
+  refused) — its own path rather than protocol detection on `--listen`'s, because the line
+  protocol reads through a `Handle` that cannot hand peeked bytes back, and sharing would have
+  meant rewriting both over raw sockets plus a warp `Internal` shim for the price of one flag.
+  **Reads bypass the inbox**: `GET /dag`, `/status`, `/history`, `/help/seed` read the loop's
+  `World` cell through the accessor `serveObserved` hands its observer (`serveAttributed` is
+  that with a no-op observer; the accessor is `readIORef`, nothing more), plus the (R3) tending
+  snapshot already on each `NodeState` — so a read never runs `stopTending`, never wakes a
+  machine, and answers while a node's `up` is still running in the loop; it is at most one
+  command old. `/dag` is `worldDag` (magma plus the ledger's precedence, the structure a pass
+  walks, *unrewritten*), one object per `Ref` in `dagOrder` with `dependencies`/`dependants`
+  both ways and the `Act` projection — exactly the fields `Dag.sameRepresentative` compares
+  (`shorthand`/`help`/`notes`/rendered `dynamics`, via `Dag.representative`) plus the loop's
+  `direction`/`convergence`/`status` through `Tagged.nodeStatePairs`, one encoding not two. It
+  exists from the first declaration on (every node `pending` under `autoconverge off`), and a
+  retiring node is in it with `direction: down` until `prune` drops it. `/status` and
+  `/history` are the objects `--json` prints for the commands (`history` folds the elided count
+  in as a field); `/help/seed` is the seed parser's own `--help` (`CommandLine.seedHelpText`)
+  and the command reference. **`POST /command`** is one line of the input language as one more
+  `Producer`: the `Line` and its `Eof` are written in one STM transaction under an origin minted
+  per request (`PATH#n`), so every arrival still runs `stopTending` first and nothing another
+  producer types lands between the two. Sync (default) collects every report the loop stamps
+  with that origin and answers, as a JSON array, on the loop's `HungUp` for it — Socket's
+  closing rule, for the same reason; `?async` answers `202 {"seq": n}` at once. `n` comes from
+  `Http.Sequence` (`IORef Word64` on the `Server`, `serverSequence`), drawn at enqueue; B4's
+  event stream is meant to number every report from the *same* counter under the concurrent
+  driver's reporter `MVar`, so one cursor orders enqueues and reports together. Report text is
+  public, no redaction (spec decision). No TLS, no token, no TCP. `Test/ServeHttpSpec.hs`
+  drives it with `http-client` over the socket and rebuilds `Help.dagLines` from `/dag`.
 
   `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
   in-memory producers and checks the world matches the one-script run.
@@ -803,6 +833,8 @@ my-salmon run serve                      # reads a stream of seed declarations o
 my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--follow-debounce S] ...
                                          # the same loop, also fetching documents from DIR (pull mode)
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
+my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
+                                         # GET /dag /status /history /help/seed, POST /command[?async]
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
@@ -852,7 +884,9 @@ Seed args are parsed with the binary's own `ParseRecord seed` — the same words
 `config` — so a seed is identified by the directive it configures to, not by its spelling.
 `--listen PATH` (beside `--max-concurrency`/`--no-autoconverge`/`--json`) accepts the same lines
 on a unix socket from any number of clients, each answered on its own connection as JSON lines;
-see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §12.
+see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §13. `--http PATH` serves
+the same world over HTTP on a second socket — `curl --unix-socket PATH http://x/dag`, and
+`POST /command` with a line as the body — see `Actions/Serve/Http.hs` above and §14.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

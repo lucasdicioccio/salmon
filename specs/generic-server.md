@@ -276,7 +276,18 @@ cheap one and lands first.
    knows and the socket needs it to close the connection at the right moment.
 3. **`/dag`, `/status`, `/history`, `/help/seed` as JSON** over HTTP on the
    socket. The `Act` projection lands here. Test: `/dag` equals what
-   `Help.printDagTree` would print, structurally.
+   `Help.printDagTree` would print, structurally. **Shipped**
+   (`Salmon.Actions.Serve.Http`, `run serve --http PATH`,
+   `Test/ServeHttpSpec.hs`), with `POST /command` in both modes. Two
+   deviations: it is a *second* unix socket beside `--listen`'s rather than
+   HTTP detected on the same one (the line protocol reads through a
+   `Handle` that cannot give peeked bytes back, so sharing meant rewriting
+   both over raw sockets plus a warp `Internal` shim, for the price of one
+   flag); and `/dag` is `worldDag` unrewritten — no `members`, no `remote`,
+   no `output`/`paths` beyond what `status` already carries — since the
+   loop's registered `Rewrite`s run per pass and a rewrite-introduced node
+   has no `NodeState` to project. `/history` folds `history-elided`'s count
+   in as an `elided` field rather than answering with two objects.
 4. **`/events` (SSE) with sequence numbers and `?since=`.** Test: a client
    that reconnects mid-pass misses nothing.
 5. **`mode` in `status`/`/dag`.**
