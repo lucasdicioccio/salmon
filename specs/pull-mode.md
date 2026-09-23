@@ -1,6 +1,7 @@
 # Pull mode: a `serve` that fetches its own declarations
 
-Status: draft / not implemented. This is a design sketch to react to, not a
+Status: milestones 1 and 2 below are implemented (`Salmon.Actions.Follow`,
+`run serve --follow`); the rest is a design sketch to react to, not a
 committed plan. It grew out of a fleet-management assessment; the companion
 idea (a generic salmon server with web/terminal clients that render the live
 `Dag`) is a separate sketch and is only referenced here where the two meet.
@@ -387,6 +388,14 @@ zero".
    contribution, fetcher origin in `history`. Layer 1 test: write the file,
    assert the world; rewrite identical content, assert *no* command was
    injected (the starvation rule, as a test).
+   *Shipped* (`Salmon.Actions.Follow`, `Test.FollowSpec`), with two
+   deviations: the batch is one structured `Serve.Batch` inbox entry rather
+   than text lines (so the loop, which alone knows the `autoconverge`
+   setting, restores it, and no other producer's line can land mid-batch),
+   and the "fetcher-owned contribution" is computed in the fetcher as the
+   union across its labels — the ledger keys a declaration by its directive,
+   so it cannot retire "only its own" copy of a seed an operator also typed.
+   Rounds run on a fixed `--follow-interval` pending milestone 3.
 3. **Scheduler.** Backoff with jitter toward the registry, debounce with
    `max_wait` toward the loop, the `fetch` command. Test: three writes
    inside the window yield one pass; a failing registry is polled on the

@@ -48,7 +48,8 @@ Take any existing salmon binary — built the ordinary way, via
   currently-active seed's graph reaches it at — the exact text a
   `--select`/`--exclude` pattern matches, pasteable straight back in.
   Without this a pattern could only be *guessed*; `status` is where it comes
-  from. `history` lists what was declared, when. `query` annotates nodes
+  from. `history` lists what was declared, when, and by whom — a typed line,
+  a `load`ed file, or (§12) a fetched document. `query` annotates nodes
   `[selected]`/`[excluded]` against a `--select`/`--exclude` pattern without
   acting on anything — useful for checking a pattern before you `force`/
   `pause` with it for real.
@@ -180,6 +181,7 @@ quit
 | addressing a batch/rewrite-introduced node that has no declared path | ❌ | a `#ref` selector (§9) |
 | bounding how many nodes converge at once | ❌ (unbounded by default) | `--max-concurrency N` (§10) |
 | reports a script can parse | ❌ (text by default) | `--json` (§11) |
+| fetching declarations from a registry instead of typing them | ❌ (stdin only) | `--follow DIR --label L` (§12) |
 
 ## 5. Decorating nodes: `check`
 
@@ -446,7 +448,64 @@ with the JSON ones; a consumer should skip lines that are not JSON. And
 `run tree`/`run dag`/`query` are renderings of their own, not reports, and
 are untouched.
 
-## 12. Gotchas
+## 12. Pull mode: `--follow`
+
+`run serve --follow DIR --label L [--label L]... [--follow-interval S]` makes
+the loop fetch its own declarations instead of only waiting to be typed at.
+`DIR` is a *registry*: one JSON document per label at `DIR/<label>.json`,
+each the **desired set** of seeds for that label — not a log of commands:
+
+```json
+{
+  "salmon": 1,
+  "id": "web-api@2026-09-23T10:41:07Z",
+  "seeds": [
+    { "seed": ["--dir", "/tmp/play", "--name", "web", "--file", "index.html"] },
+    { "directive": { "...": "a directive JSON, as `up-directive` takes" } }
+  ]
+}
+```
+
+`salmon` is the format version (only `1`), `id` is whatever the publisher
+calls this revision, and anything else at the top level is ignored. A host
+following several labels wants the union of their documents.
+
+What happens on a change: the fetcher diffs the document against the one it
+last applied *for that label* and injects one batch — `up` for each seed
+newly present, `down` for each seed no longer present and not carried by any
+other followed label either — which the loop runs with `autoconverge` held
+off, restores, and converges once. Seeds you typed interactively are never in
+that diff (unless you typed the exact seed a document then drops: the ledger
+identifies a seed by its directive, not by who declared it).
+
+What happens when nothing changed: **nothing**. The registry's mtime and size
+say whether to read the file at all, the sha256 of the bytes says whether
+anything changed, and an unchanged round is invisible to the loop. That rule
+is load-bearing: every line reaching the loop stands the tending machines
+down (§3), so a fetcher that injected on every poll would keep the supervisor
+from ever reaching a steady state. Poll as often as you like.
+
+`history` tells the fetcher's declarations from yours:
+
+```
+serve: seeds:
+  #0 up       [active] --dir /tmp/play --name web --file index.html [fetched /srv/reg label=web-api id=web-api@2026-09-23T10:41:07Z sha256=32ea59311d97]
+  #1 up       [active] --dir /tmp/play --name api --file openapi.json [fetched /srv/reg label=web-api id=web-api@2026-09-23T10:41:07Z sha256=32ea59311d97]
+  #2 up       [active] --dir /tmp/play --name scratch --file notes
+```
+
+(`#2` was typed; a line run from `load <file>` says `[loaded <file>]`.)
+
+The first fetch runs before standard input is read, so the first convergence
+is deterministic — what the registry said at startup — and later changes
+arrive live, handled like any typed command. A document that fails to parse,
+a seed the binary cannot parse, or a seed whose `config` step throws, is
+reported and skipped; the loop keeps serving and the last good document stays
+in force. Not there yet (`specs/pull-mode.md`, milestones 3 onwards): backoff
+and debounce, a `fetch` command, a cached document that survives a restart,
+other registries (git, HTTP, DNS, bucket), and signatures.
+
+## 13. Gotchas
 
 - **A piped script is never supervised.** If you're testing self-healing and
   piping a script in, you won't see it — there's no idle moment for the
@@ -472,7 +531,7 @@ are untouched.
   node with no `check` never notices its own file changing, and nothing
   standing on it is ever bounced, however that node is decorated otherwise.
 
-## 13. Where to read more
+## 14. Where to read more
 
 - `docs/howto-ops.md` — writing and testing the `Op`s this doc assumes.
 - `CLAUDE.md`'s "`salmon-ops` layer" section — the implementation-level

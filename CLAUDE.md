@@ -405,10 +405,36 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   runs `stopTending` first. The one decision the list adds: **only the `Stdin` origin's `Eof`
   ends the loop**; another producer's `Eof` is not a command (nothing acts, so nothing stands
   down) and is read past — a socket client hanging up or a fetcher going quiet must not take
-  the server with it, so a loop with no `Stdin` producer ends only on `quit`. No producer but
-  stdin exists yet (`specs/pull-mode.md` milestone 1; the socket and the fetcher are the next
-  two); `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
+  the server with it, so a loop with no `Stdin` producer ends only on `quit`.
+  `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
   in-memory producers and checks the world matches the one-script run.
+  **`Actions/Follow.hs` is the second producer**, pull mode (`specs/pull-mode.md`, milestone
+  2): `run serve --follow DIR --label L [--label L]... [--follow-interval S]` fetches a JSON
+  `Document` per label from a `Registry` (`directoryRegistry`: one `<dir>/<label>.json` per
+  label) and injects the *diff* against that label's previously applied document — `up` for
+  seeds newly present, `down` for seeds gone from it and from every other followed label's
+  document, since the ledger keys a declaration by its directive and cannot tell one label's
+  copy from another's. Three things there are load-bearing. **Change is detected before
+  injection** (the registry's stamp — mtime and size — decides whether to read, the sha256
+  digest whether anything changed, and the seed-set diff whether anything is declared): an
+  unchanged round is invisible to the loop, because every inbox entry stands the machines down
+  and a poller that injected on every tick would starve supervision (`Test/FollowSpec.hs`'s
+  "rewriting the same bytes injects nothing" is that rule as a test). **A diff is one `Batch`
+  inbox entry**, a `Line` constructor the loop runs with `autoconverge` held off, restores to
+  whatever the operator had set, and follows with one `converge` — one entry so nothing
+  another producer types lands in the middle of it, and restored by the loop because only the
+  loop knows the setting. **The fetcher is a named actor in `history`**: `Origin` grew
+  `Loaded path` and `Fetched Provenance` (registry, label, document id, digest), every
+  `Epoch`/`LogEntry` carries the origin of the line that made it, and `history` renders it as
+  a trailing `[fetched ... label=... id=... sha256=...]` — a typed line renders as before. The
+  first round runs synchronously and stdin is held behind it (`Follow.gated`), so the first
+  convergence is what the registry says; rounds then repeat on a fixed interval. No scheduler,
+  no backoff or debounce, no `fetch` command, no cached last document yet (milestones 3–4).
+  `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
+  never spelled by a line of the input language. And a `Configure` that throws is now a
+  `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
+  a document's author is not at the keyboard, and their typo must not cost a host its
+  supervisor.
   (R2): `force`/`recheck`/`pause`/`resume [--select P]... [--exclude P]...` finally make
   `Op/Mailbox.hs`'s `Instruction`s reachable from the input language, reusing
   `parseSelection`/`resolveWorldSelectors` the same way `status`/`query`/`converge --select`
@@ -725,6 +751,8 @@ subcommands via `Salmon.Builtin.CommandLine.execCommandOrSeed`:
 my-salmon config <seed-args...>          # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
 my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
+my-salmon run serve --follow DIR --label L [--label L]... [--follow-interval S]
+                                         # the same loop, also fetching documents from DIR (pull mode)
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
@@ -763,7 +791,8 @@ down <seed args...>    # retire this seed (its nodes go down unless another seed
 clear                  # retire every seed
 converge               # re-attempt whatever hasn't converged (e.g. after fixing what made it fail)
 supervise on|off       # whether to tend nodes while the loop is idle (default on)
-status | history       # dump the per-node state / the seed+graph history
+status | history       # dump the per-node state / the seed+graph history (each entry annotated
+                       # [loaded <file>] or [fetched <registry> label=.. id=.. sha256=..] unless typed)
 quit                   # leave the loop, changing nothing on the way out
 ```
 
