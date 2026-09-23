@@ -8,6 +8,7 @@ import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
+import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
@@ -84,6 +85,7 @@ main =
             , DebianPackageSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
+            , FollowSpec.tests
             , GcpSpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests
