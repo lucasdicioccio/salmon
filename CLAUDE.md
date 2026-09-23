@@ -28,6 +28,10 @@ semantics regardless of whether a node is as small as "create a file" or as larg
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
   see `Migrator.hs` / `MigratorApp.hs`; and `salmon-pgpair`, see `PgPair.hs`, whose directive is
   simply a `SreBox.PostgresPair.Pair` — moving a primary is then an edit to one word of the seed).
+  `salmon-fleet` (`Fleet.hs`) is the odd one out: not a salmon binary in the seed → directive
+  sense but the reader's side of `run serve --status-sink` — `salmon-fleet status DIR` folds a
+  directory of status documents into one line per host (`Salmon.Actions.Fleet` is the fold; the
+  binary only parses flags and prints). It never writes.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
   itself, with a client that keeps writing while the primary moves: a demo of
   `specs/pg-switchover.md`, and the throwaway-validation counterpart to `salmon-gcp-toy`. Its two
@@ -497,6 +501,32 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   but not `SOCK_CLOEXEC` (its `accept` does), and `process`'s `createPipe` is plain — which
   showed up as a loop whose stdin never hit EOF and a hung-up client whose socket stayed open;
   the spec marks its own fds.
+  **`Actions/Serve/StatusSink.hs`** is milestone 5 of `specs/pull-mode.md`: `run serve
+  --status-sink PATH [--status-sink-interval S]` writes a JSON document about this host —
+  `salmon-status: 1`, `host` (`uname -n`), `written`, `mode`, `labels` (the document applied per
+  followed label: id, sha256, when), `status` (the very object `status --json` prints) and `last`
+  (the last `converge-stop` and the last follow-stream object, tagged, as `--json` prints them) —
+  to a temp file renamed over `PATH`, so a reader never sees half of one. It is **a reporter and
+  a timer, not a producer**: `sinkReporter` is composed beside the loop's `Reporter Tagged` with
+  `reportBoth` and wakes the writer on `ConvergeStop` and `Follow.Injected`; `sinkObserver` is
+  handed to `serveObserved` (sequenced after the HTTP server's) and reads the world through the
+  same accessor `/status` does; a tick every interval rewrites it regardless. Nothing about it
+  touches the inbox, so no write ever stands a machine down, and a host gone quiet is one whose
+  `written` is old, not one whose file says all is well. A write that fails is `Serve.SinkFailed`
+  — once per run of failures, re-armed by the next success, emitted from the sink's thread and
+  attributed to nobody — and the loop keeps serving. The fetcher's `Applied` gained `appliedAt`
+  and its cell is made by the caller (`Follow.newApplied`, beside `newMode`) so `Followed` can
+  carry `followedApplied :: IO [AppliedDocument]`; the spec's "the sink is an op in the host's
+  graph" was not done, because a node runs *in* a pass and the sink must write *after* it. The
+  fetcher's reports are the fourth `Tagged` stream (`FromFollow`, `stream: "follow"`) as of the
+  same change — before it they printed as text whatever `--json` said, and no sink could see
+  them. **`Actions/Fleet.hs`** is the reader: `readStatusDir` (every `*.json` that parses as a
+  sink document, the rest listed with why) and a pure `fold` — one `Row` per document in host
+  order, `converged`/`errored`/total read off `status.nodes[].convergence`, the label filter,
+  `rowStale` past `optStale` (a visible fact, not a decision: nothing decides a host is dead) —
+  which `salmon-fleet status DIR [--label L] [--stale S] [--json]` in `salmon-apps` is a thin
+  command line over. Two documents naming one host are two rows; the fold reports, it does not
+  pick. See `Test/StatusSinkSpec.hs`.
 
   `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
   in-memory producers and checks the world matches the one-script run.
@@ -899,6 +929,11 @@ my-salmon run serve --listen PATH        # the same, also accepting the line pro
 my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
                                          # GET /dag /status /history /help/seed, POST /command[?async],
                                          # GET /events[?since=N&stream=..&origin=..] (SSE; --events-ring N)
+my-salmon run serve --status-sink PATH [--status-sink-interval S]
+                                         # the same, also writing this host's status document to PATH
+                                         # (atomically) after every pass and injection, and every S seconds
+salmon-fleet status DIR [--label L] [--stale S] [--json]
+                                         # one line per host from a directory of such documents; reads only
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
@@ -911,10 +946,11 @@ human-readable dependency tree (`Actions.Help`); `run dag` prints Graphviz dot o
 `run up`/`run down`/`run serve` take `--json` (milestone 1 of `specs/generic-server.md`): the
 binary's text reporters are replaced by one JSON object per line on stdout, flushed per report,
 so `run up --json | jq` streams. `Salmon.Reporter.Tagged` is the whole of it — a `Tagged` sum of
-the three report streams (`Serve.Report`, `UpDown.Report Extension`, `Upkeep.Report Extension`)
-tagged by `stream` (not `origin`, which names who typed a command), the three `ToJSON` instances (orphans, kept together there because the two
+the four report streams (`Serve.Report`, `UpDown.Report Extension`, `Upkeep.Report Extension`,
+and, since the status sink needed to see it, `Follow.Report`)
+tagged by `stream` (not `origin`, which names who typed a command), the four `ToJSON` instances (orphans, kept together there because the two
 parametric streams are only encodable at `Extension`, which `UpDown` cannot import), and two
-reporters over the sum: `reportTexts`, which dispatches back to the three text reporters
+reporters over the sum: `reportTexts`, which dispatches back to the four text reporters
 unchanged, and `reportJSONLines`. `CommandLine` builds exactly one `Reporter Tagged` per run and
 `contramap`s it into the two the drivers take, so `--json` is a choice of reporter and not a
 second reporting mechanism; the `Reporter` stays contravariant and text output is byte-identical
@@ -922,7 +958,8 @@ without the flag. Every object has a `kind` (constructor, kebab-cased), a `ref` 
 `{short, full}` (`Op/Ref.hs`'s `shortRef`, moved there from `Query` for this) where the report is
 about one node, and named fields; a nested report (`Upkeep.Acted`, `Serve.Tended`) reuses the
 inner instance under `report`. Report text is public and encoded verbatim, per the spec's
-decision. `Test/ReportJsonSpec.hs` holds a golden object per constructor of all three streams.
+decision. `Test/ReportJsonSpec.hs` holds a golden object per constructor of all four streams, and one for
+the status sink document.
 Not covered: a node's own `Binary.Report`s (handed a `reportPrint` by the recipe, printed as
 text regardless), and sequence numbers (a later milestone).
 
@@ -952,6 +989,9 @@ on a unix socket from any number of clients, each answered on its own connection
 see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §13. `--http PATH` serves
 the same world over HTTP on a second socket — `curl --unix-socket PATH http://x/dag`, and
 `POST /command` with a line as the body — see `Actions/Serve/Http.hs` above and §14.
+`--status-sink PATH` writes the host's status document there after every pass and injection and
+on a timer — see `Actions/Serve/StatusSink.hs` above and §12's "Status flows back" — and
+`salmon-fleet status DIR` folds a directory of them.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

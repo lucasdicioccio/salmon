@@ -616,8 +616,64 @@ a host. Off by default; a document without `published`, on either side, is
 never refused. A `published` that does not parse is a malformed document,
 not an ignored annotation.
 
-Not there yet (`specs/pull-mode.md`, milestones 5 onwards): a status sink,
-other registries (git, HTTP, DNS, bucket), and signatures.
+### Status flows back: `--status-sink`
+
+A host in pull mode converges with nobody watching. `--status-sink PATH`
+makes it write down what came of it — a JSON document, to a temp file
+renamed over `PATH` so a reader never sees half of one — after every
+convergence pass, after every follow injection, and every
+`--status-sink-interval` seconds (default 10) otherwise:
+
+```json
+{
+  "salmon-status": 1,
+  "host": "web-3",
+  "written": "2026-09-24T10:41:07.12Z",
+  "mode": "following",
+  "labels": [{"label": "web", "id": "web@42", "sha256": "…", "applied": "2026-09-24T10:40:58.51Z"}],
+  "status": { "kind": "status", "mode": "following", "nodes": [ ... ] },
+  "last": {
+    "converge": { "stream": "serve", "kind": "converge-stop", "ok": true, "remaining": 0 },
+    "follow":   { "stream": "follow", "kind": "injected", "label": "web", "document": "web@42", ... }
+  }
+}
+```
+
+`status` is the very object `status --json` prints (and `/status` answers);
+`labels` is the document each followed label last applied; `last` holds
+the most recent converge-stop and the most recent follow report, as
+`--json` prints them. The fetcher's own reports (`injected`, `backoff`,
+`replayed`, ...) are a `--json` stream in their own right now — `"stream":
+"follow"` — which is what lets the sink carry them.
+
+The sink never touches the loop: it is a reporter watching the loop's
+stream for its triggers and a reader of the world through the same accessor
+`/status` uses, so a write stands no tending machine down. A path that
+cannot be written is reported once (`serve: status sink PATH could not be
+written:`), and again only after a write has succeeded in between; the loop
+keeps serving. A host gone quiet therefore shows as a document whose
+`written` is old — not as one that says all is well.
+
+Fleet status is a fold over a directory of these, computed by whoever reads
+it. `salmon-fleet status DIR` is that reader, one line per host:
+
+```
+$ salmon-fleet status /srv/status
+host      mode       labels                      converged  errored  age   flags
+web-1     following  web=web@42@32ea59311d97     4/4        0        3s
+web-2     following  web=web@42@32ea59311d97     3/4        1        5s
+db-1      replay     db=db@7@d00ef24caea4        3/3        0        94s   stale
+```
+
+`--label L` keeps only hosts whose applied documents include `L`,
+`--stale SECONDS` (default 60) sets when a host is flagged, `--json` emits
+the rows as one array. It only reads; a stale host is a visible fact, not a
+decision, and nothing here decides a host is dead. Two documents naming one
+host (two loops on one machine, as in the tests) are two rows.
+
+Not there yet (`specs/pull-mode.md`, milestone 6): other registries (git,
+HTTP, DNS, bucket), other sinks (a bucket object, an HTTP `POST`), and
+signatures.
 
 ## 13. A second way in: `--listen`
 

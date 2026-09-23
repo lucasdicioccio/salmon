@@ -1,8 +1,8 @@
 # Pull mode: a `serve` that fetches its own declarations
 
-Status: milestones 1 to 4 below are implemented (`Salmon.Actions.Follow`,
+Status: milestones 1 to 5 below are implemented (`Salmon.Actions.Follow`,
 `Salmon.Actions.Follow.Scheduler`, `run serve --follow`, `--follow-cache`,
-`mode` in `status`); the rest is a
+`mode` in `status`, `--status-sink`, `salmon-fleet status`); the rest is a
 design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion
 idea (a generic salmon server with web/terminal clients that render the live
 `Dag`) is a separate sketch and is only referenced here where the two meet.
@@ -461,5 +461,31 @@ zero".
    HTTP `/status` gets it from the same encoder.
 5. **Status sink** (file first), and a `salmon-fleet status` that folds a
    directory of them.
+   *Shipped* (`Salmon.Actions.Serve.StatusSink`, `Salmon.Actions.Fleet`,
+   `salmon-fleet` in `salmon-apps`, `Test.StatusSinkSpec`), with four
+   deviations from the sketch above. **The sink is not an op in the host's
+   graph.** "Status flows back" wanted a `filecontents`/`Storage` node so a
+   sink that is down shows as a `Failed` node; but a node is applied *by* a
+   pass, and the document must be written *after* the pass it describes,
+   which a node inside that pass cannot do. It is a reporter beside the
+   loop's (watching for `ConvergeStop` and `Follow.Injected`) plus a
+   read-only accessor to the world and a timer, and a failed write is a
+   `Serve.SinkFailed` report — the same information, on the same stream,
+   once per run of failures. **It writes more often than "after every
+   pass":** also after every follow injection and every
+   `--status-sink-interval` seconds (10) with nothing happening, so that a
+   host that has gone quiet is visibly one whose `written` is old. **The
+   fetcher's reports had to become a `--json` stream first** (`stream:
+   "follow"`, the fourth constructor of `Salmon.Reporter.Tagged`); until
+   then `Injected`/`Backoff`/`Replayed` printed as text under `--json` and
+   no sink could carry them — which the sketch did not anticipate because
+   it predates `--json`. And **the host is `uname -n`**, so two loops on one
+   machine write two documents naming one host, and the fold shows two rows
+   rather than picking; a `--status-sink-host` override is the obvious next
+   flag and was not added speculatively. `salmon-fleet status DIR [--label
+   L] [--stale S] [--json]` is the fold: one line per document, host order,
+   converged/errored/total off `status.nodes`, stale past `--stale` (60s) as
+   a flag and never a decision. Only the file sink exists; a bucket object
+   or an HTTP `POST` is the same document handed to a different writer.
 6. **Git registry**, then HTTP, then the DNS index over HTTP, then bucket.
    Verify-before-inject hook with a no-op verifier.
