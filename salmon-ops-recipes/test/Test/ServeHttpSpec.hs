@@ -161,6 +161,7 @@ withRunning act =
                         parseSpec
                         (Configure pure)
                         (spyProgram slow upsRef downsRef)
+                        Nothing
                         [Serve.stdinProducer stdinR, Http.serverProducer server]
                 putMVar worldVar w
             manager <- unixManager path
