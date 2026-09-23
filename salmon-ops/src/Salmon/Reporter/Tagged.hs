@@ -360,6 +360,7 @@ instance ToJSON Follow.Report where
             Follow.Replayed lbl did dg -> kind "replayed" : labelled lbl ++ ["document" .= did, "sha256" .= dg.unDigest]
             Follow.Stale lbl did -> kind "stale" : labelled lbl ++ ["document" .= did]
             Follow.BadCache lbl err -> kind "bad-cache" : labelled lbl ++ ["error" .= err]
+            Follow.Rejected lbl dg err -> kind "rejected" : labelled lbl ++ ["sha256" .= dg.unDigest, "reason" .= err]
             Follow.CacheFailed lbl err -> kind "cache-failed" : labelled lbl ++ ["error" .= err]
       where
         labelled :: Follow.Label -> [(Key, Value)]

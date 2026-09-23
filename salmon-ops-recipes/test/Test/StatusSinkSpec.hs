@@ -132,6 +132,7 @@ withHost root host sinkPath labels body = do
                 , Follow.followSchedule = schedule
                 , Follow.followCache = Nothing
                 , Follow.followRefuseOlder = False
+                , Follow.followVerify = Follow.noVerifier
                 }
         followed = Follow.followed pk modeVar appliedVar
         own = Tagged.reportTexts serveReporter nodeReporter silent followReporter

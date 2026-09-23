@@ -147,6 +147,7 @@ withFollowing root registry knobs labels body = do
     gate <- newEmptyMVar
     pk <- Scheduler.newPoke
     modeVar <- Follow.newMode
+    appliedVar <- Follow.newApplied
     let follow =
             Follow.Follow
                 { Follow.followRegistry = registry
@@ -157,7 +158,7 @@ withFollowing root registry knobs labels body = do
                 , Follow.followVerify = knobs.knobVerify
                 }
         producers =
-            [ Follow.follower followReporter pk modeVar follow (putMVar gate ())
+            [ Follow.follower followReporter pk modeVar appliedVar follow (putMVar gate ())
             , Follow.gated gate (chanProducer stdinChan)
             ]
         driver =
@@ -171,7 +172,7 @@ withFollowing root registry knobs labels body = do
         outcome <- try (body driver)
         atomically (writeTChan stdinChan Nothing)
         atomically (writeTChan resultVar outcome)
-    w <- Serve.serveFollowing [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) program (Just (Follow.followed pk modeVar)) producers
+    w <- Serve.serveFollowing [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) program (Just (Follow.followed pk modeVar appliedVar)) producers
     outcome <- atomically (readTChan resultVar)
     case outcome of
         Left (ex :: SomeException) -> throwIO ex

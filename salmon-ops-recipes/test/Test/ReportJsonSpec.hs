@@ -325,6 +325,7 @@ followGoldens =
     , ("Follow.Stale", Tagged.FromFollow (Follow.Stale web "web@0"), "{\"kind\":\"stale\",\"label\":\"web\",\"document\":\"web@0\"}")
     , ("Follow.BadCache", Tagged.FromFollow (Follow.BadCache web "digest mismatch"), "{\"kind\":\"bad-cache\",\"label\":\"web\",\"error\":\"digest mismatch\"}")
     , ("Follow.CacheFailed", Tagged.FromFollow (Follow.CacheFailed web "read-only file system"), "{\"kind\":\"cache-failed\",\"label\":\"web\",\"error\":\"read-only file system\"}")
+    , ("Follow.Rejected", Tagged.FromFollow (Follow.Rejected web digest "signature does not verify"), "{\"kind\":\"rejected\",\"label\":\"web\",\"sha256\":\"" <> hex <> "\",\"reason\":\"signature does not verify\"}")
     ]
   where
     web = labelOf "web"
@@ -544,3 +545,4 @@ _followCovered rep = case rep of
     Follow.Stale{} -> ()
     Follow.BadCache{} -> ()
     Follow.CacheFailed{} -> ()
+    Follow.Rejected{} -> ()
