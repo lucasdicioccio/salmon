@@ -342,12 +342,19 @@ withHttpServerOn cfg binds seedHelp mode act = do
         withTcpListener tls.tlsHost tls.tlsPort $ \sock addr -> do
             atomically (modifyTVar' (serverBoundTcp server) (++ [addr]))
             let tlsSettings = WarpTLS.tlsSettings tls.tlsCertFile tls.tlsKeyFile
-                -- a plain-HTTP client is answered 426 and refused by
-                -- warp-tls, which then throws this; it is the listener
-                -- working as intended, not something to print a trace for
+                -- warp prints what its hook is handed, and two families of
+                -- exception on a TLS listener are the listener working as
+                -- intended rather than anything to trace: a plain-HTTP
+                -- client answered 426 and refused (warp-tls throws after),
+                -- and a TLS-level error on one connection — a client that
+                -- closed without a close-notify (`PostHandshake Error_EOF`,
+                -- which curl does on every request) or whose handshake
+                -- failed, neither of which reached the application. The
+                -- startup line is meant to be the only thing on stderr.
                 quietly = Warp.setOnException $ \mreq e ->
-                    case fromException e of
-                        Just WarpTLS.InsecureConnectionDenied -> pure ()
+                    case (fromException e, fromException e) of
+                        (Just WarpTLS.InsecureConnectionDenied, _) -> pure ()
+                        (_, Just (_ :: TLS.TLSException)) -> pure ()
                         _ -> Warp.defaultOnException mreq e
             withAsync (WarpTLS.runTLSSocket tlsSettings (quietly settings) sock (requireToken tls.tlsToken (application server))) $ \_ ->
                 listenOn server more
