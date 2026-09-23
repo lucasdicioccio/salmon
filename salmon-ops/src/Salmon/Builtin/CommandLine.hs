@@ -15,7 +15,7 @@ import Options.Applicative
 import qualified Options.Applicative
 import Options.Generic
 import System.Exit (exitFailure)
-import System.IO (stdin)
+import System.IO (stdin, stdout)
 
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Concurrency as Concurrency
@@ -38,6 +38,7 @@ import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.UpDown as UpDown hiding (Failure, Success)
 import Salmon.Builtin.Extension
 import Salmon.Reporter
+import qualified Salmon.Reporter.Tagged as Tagged
 
 data Command seed
     = Config seed
@@ -70,8 +71,8 @@ argForBaseCommand = \case
 -- @--plan@/@--force-stale-plan@ pair.
 data RunCommand
     = -- | @run up@, optionally honoring a @query plan@-emitted 'Query.Plan' file.
-      RunUp !(Maybe FilePath) !Bool
-    | RunDown
+      RunUp !(Maybe FilePath) !Bool !ReportFormat
+    | RunDown !ReportFormat
     | RunTree
     | RunDAG
     | -- | @run serve@, optionally capping how many nodes converge at once
@@ -80,11 +81,27 @@ data RunCommand
       -- this flag existed), and optionally starting with @autoconverge@ off
       -- (@--no-autoconverge@; 'False' is the default, matching every
       -- version of @serve@ before the setting existed).
-      RunServe !(Maybe Int) !Bool
+      RunServe !(Maybe Int) !Bool !ReportFormat
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
 instance ToJSON RunCommand
+
+{- | How the commands that execute something (@run up@, @run down@, @run
+serve@) report. @--json@ selects 'ReportJson': one JSON object per line on
+stdout, in the encoding "Salmon.Reporter.Tagged" defines, in place of the
+binary's own text reporters — so @run up --json | jq@ works, and a client
+of the server @specs\/generic-server.md@ sketches reads the same objects.
+Absent, 'ReportText' hands every report to the reporters the binary
+passed in, untouched.
+-}
+data ReportFormat
+    = ReportText
+    | ReportJson
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON ReportFormat
+instance ToJSON ReportFormat
 
 data QueryCommand
     = -- | @query show@: annotate the directive's tree with [selected]/[excluded].
@@ -133,7 +150,7 @@ runCommandParser =
     hsubparser $
         mconcat
             [ command "up" (info upP (progDesc "Runs (up) the directive on stdin."))
-            , command "down" (info (pure RunDown) (progDesc "Tears down (down) the directive on stdin."))
+            , command "down" (info (RunDown <$> reportFormatP) (progDesc "Tears down (down) the directive on stdin."))
             , command "tree" (info (pure RunTree) (progDesc "Prints a human-readable dependency tree."))
             , command "dag" (info (pure RunDAG) (progDesc "Prints Graphviz dot output."))
             , command "serve" (info serveP (progDesc "Reads a stream of seed declarations on stdin and converges."))
@@ -154,6 +171,7 @@ runCommandParser =
                     <> Options.Applicative.help
                         "Start with `autoconverge off`: declarations are recorded but not converged until an explicit `converge`."
                 )
+            <*> reportFormatP
     upP =
         RunUp
             <$> optional
@@ -167,6 +185,14 @@ runCommandParser =
                 ( long "force-stale-plan"
                     <> Options.Applicative.help "Proceed even if the plan's directive digest doesn't match stdin."
                 )
+            <*> reportFormatP
+    reportFormatP =
+        Options.Applicative.flag
+            ReportText
+            ReportJson
+            ( long "json"
+                <> Options.Applicative.help "Report as one JSON object per line on stdout (see Salmon.Reporter.Tagged) instead of text."
+            )
 
 queryCommandParser :: Parser QueryCommand
 queryCommandParser =
@@ -273,10 +299,10 @@ execCommandOrSeedWithRewrites ::
     IO ()
 execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     case cmd of
-        (Run (RunUp Nothing _)) -> do
-            result <- withGraph (runUp Set.empty)
+        (Run (RunUp Nothing _ fmt)) -> do
+            result <- withGraph (runUp (updownFor fmt) Set.empty)
             when (result == Just False) exitFailure
-        (Run (RunUp (Just planPath) forceStale)) -> do
+        (Run (RunUp (Just planPath) forceStale fmt)) -> do
             result <- withGraphAndBytes $ \dirBytes op -> do
                 planBytes <- LBysteString.readFile planPath
                 case eitherDecode planBytes of
@@ -287,7 +313,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         let actual = Query.digestBytes dirBytes
                         let expected = Query.planDirectiveDigest plan
                         if actual == expected
-                            then runUp (Set.fromList (Query.planExcludedRefs plan)) op
+                            then runUp (updownFor fmt) (Set.fromList (Query.planExcludedRefs plan)) op
                             else
                                 if forceStale
                                     then do
@@ -297,7 +323,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                                 <> ", this directive hashes to "
                                                 <> Text.unpack actual
                                                 <> "); proceeding due to --force-stale-plan"
-                                        runUp (Set.fromList (Query.planExcludedRefs plan)) op
+                                        runUp (updownFor fmt) (Set.fromList (Query.planExcludedRefs plan)) op
                                     else do
                                         putStrLn $
                                             "refusing to run stale plan: plan expects digest "
@@ -306,8 +332,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                                 <> Text.unpack actual
                                         exitFailure
             when (result == Just False) exitFailure
-        (Run RunDown) -> do
-            result <- withGraph runDown
+        (Run (RunDown fmt)) -> do
+            result <- withGraph (runDown (updownFor fmt))
             when (result == Just False) exitFailure
         (Run RunTree) -> do
             -- (R4): the computed 'Dag' is what @run up@ would actually walk
@@ -317,9 +343,10 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
-            void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR r parseSeedArgs genBase traceBase stdin
+            let (serveR', r') = reportersFor fmt
+            void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase stdin
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
@@ -353,6 +380,24 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
   where
     nat = pure . runIdentity
 
+    {- | The reporters a @run up@\/@run down@\/@run serve@ speaks through,
+    by 'ReportFormat'. One 'Tagged.Tagged' reporter, split contravariantly
+    into the two the drivers take: for 'ReportText' it dispatches back to
+    the reporters the binary passed in (so nothing about the text output
+    changes), for 'ReportJson' it is "Salmon.Reporter.Tagged"'s line writer
+    on stdout in their place. The tending loop's own stream never reaches
+    here on its own — @serve@ forwards what it keeps of it as
+    'Serve.Tended', which the encoding nests — so its slot is 'silent'. -}
+    reportersFor :: ReportFormat -> (Reporter Serve.Report, Reporter (UpDown.Report Extension))
+    reportersFor fmt = (Tagged.serveStream tagged, Tagged.updownStream tagged)
+      where
+        tagged = case fmt of
+            ReportText -> Tagged.reportTexts serveR r silent
+            ReportJson -> Tagged.reportJSONLines stdout
+
+    updownFor :: ReportFormat -> Reporter (UpDown.Report Extension)
+    updownFor = snd . reportersFor
+
     {- | @run up@: everything in this one directive's graph is wanted up, so
     that is the rewrites' 'phaseDesired'. @excluded@ (a plan's skipped
     refs) is what they must not collect: batching a node the operator asked
@@ -362,20 +407,20 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     composes with collections — a batch is worth running iff some member of
     it is, which is the same 'Rewrite.membersOf' translation @serve@'s gate
     does. The report stream is identical either way: both produce a 'Skip'. -}
-    runUp :: Set Ref -> Op -> IO Bool
-    runUp excluded op = do
-        dag <- UpDown.expandDag r nat op
+    runUp :: Reporter (UpDown.Report Extension) -> Set Ref -> Op -> IO Bool
+    runUp r' excluded op = do
+        dag <- UpDown.expandDag r' nat op
         let computed = Rewrite.rewrite rewrites (Phase (Set.fromList (Dag.dagOrder dag)) excluded) dag
-        UpDown.upDag (excluding computed excluded) r (Rewrite.computedDag computed)
+        UpDown.upDag (excluding computed excluded) r' (Rewrite.computedDag computed)
 
     {- | @run down@: nothing is wanted up, which is what makes a
     direction-aware rewrite emit a teardown batch here and an install batch
     under @run up@, from the same registered phase. -}
-    runDown :: Op -> IO Bool
-    runDown op = do
-        dag <- UpDown.expandDag r nat op
+    runDown :: Reporter (UpDown.Report Extension) -> Op -> IO Bool
+    runDown r' op = do
+        dag <- UpDown.expandDag r' nat op
         let computed = Rewrite.rewrite rewrites (Phase Set.empty Set.empty) dag
-        UpDown.downDag UpDown.alwaysRequired r (Rewrite.computedDag computed)
+        UpDown.downDag UpDown.alwaysRequired r' (Rewrite.computedDag computed)
 
     {- | (R4): the whole-graph 'Rewritten' `run tree`\/`run dag`\/`query`
     all read from — everything in the declared graph is "desired" and
