@@ -451,7 +451,7 @@ are untouched.
 
 ## 12. Pull mode: `--follow`
 
-`run serve --follow DIR --label L [--label L]... [--follow-interval S]` makes
+`run serve --follow DIR --label L [--label L]... [--follow-base S] ...` makes
 the loop fetch its own declarations instead of only waiting to be typed at.
 `DIR` is a *registry*: one JSON document per label at `DIR/<label>.json`,
 each the **desired set** of seeds for that label — not a log of commands:
@@ -502,9 +502,47 @@ is deterministic — what the registry said at startup — and later changes
 arrive live, handled like any typed command. A document that fails to parse,
 a seed the binary cannot parse, or a seed whose `config` step throws, is
 reported and skipped; the loop keeps serving and the last good document stays
-in force. Not there yet (`specs/pull-mode.md`, milestones 3 onwards): backoff
-and debounce, a `fetch` command, a cached document that survives a restart,
-other registries (git, HTTP, DNS, bucket), and signatures.
+in force.
+
+### When rounds run, and when a change is applied
+
+Two schedules, pointing in opposite directions, both on the `--follow-*`
+flags (seconds unless said otherwise):
+
+| flag | default | what it is |
+|---|---|---|
+| `--follow-base` | 30 | seconds between rounds while they succeed (`--follow-interval` is the older name for the same thing) |
+| `--follow-factor` | 2 | how much slower each consecutive *failed* round makes the next one |
+| `--follow-cap` | 600 | the longest a failing registry is left alone |
+| `--follow-jitter` | 0.2 | every delay is scaled by a draw from `[1-j, 1+j]`, so a fleet does not poll in step |
+| `--follow-debounce` | 5 | how long the registry must be quiet after a change before the change is applied; `0` applies at the round that saw it |
+| `--follow-max-wait` | 60 | the longest a change waits while the registry keeps changing |
+
+**Toward the registry**: a round that succeeds — changed or not — schedules
+the next one one base away; a round that fails (the registry threw, or the
+bytes do not parse; a label with no document is *not* a failure, the
+registry answered) climbs a ladder, `min(cap, base · factor^(n-1))` after
+`n` failures in a row, and the first success steps off it. `follow: 3 failed
+round(s) in a row; next in 120s` is what that looks like.
+
+**Toward the loop**: a changed document is not applied at once. It is set
+aside (`follow: web id=web@2 ...: changed, waiting for the registry to go
+quiet`) and applied once no round has seen a further change for `debounce`,
+or `max_wait` after the first pending one, whichever comes first — and what
+is applied is the diff from the document the loop *last heard about* to the
+*latest* one, so a publisher writing three times in a row is one batch and
+one pass, and a half-published state is never applied. Several labels
+changing inside one window are one batch too. The startup round is the
+exception and applies at once: nothing to coalesce yet.
+
+**`fetch`** cuts both short: a round now, the ladder forgotten, and whatever
+is pending afterwards applied without waiting out the window — for the
+operator who just published and does not want to wait. Without `--follow`
+it only says nothing is being followed.
+
+Not there yet (`specs/pull-mode.md`, milestones 4 onwards): a cached
+document that survives a restart, other registries (git, HTTP, DNS, bucket),
+and signatures.
 
 ## 13. A second way in: `--listen`
 

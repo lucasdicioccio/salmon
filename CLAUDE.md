@@ -435,8 +435,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
 
   `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
   in-memory producers and checks the world matches the one-script run.
-  **`Actions/Follow.hs` is the second producer**, pull mode (`specs/pull-mode.md`, milestone
-  2): `run serve --follow DIR --label L [--label L]... [--follow-interval S]` fetches a JSON
+  **`Actions/Follow.hs` is the second producer**, pull mode (`specs/pull-mode.md`, milestones
+  2–3): `run serve --follow DIR --label L [--label L]... [--follow-base S ...]` fetches a JSON
   `Document` per label from a `Registry` (`directoryRegistry`: one `<dir>/<label>.json` per
   label) and injects the *diff* against that label's previously applied document — `up` for
   seeds newly present, `down` for seeds gone from it and from every other followed label's
@@ -455,8 +455,30 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `Epoch`/`LogEntry` carries the origin of the line that made it, and `history` renders it as
   a trailing `[fetched ... label=... id=... sha256=...]` — a typed line renders as before. The
   first round runs synchronously and stdin is held behind it (`Follow.gated`), so the first
-  convergence is what the registry says; rounds then repeat on a fixed interval. No scheduler,
-  no backoff or debounce, no `fetch` command, no cached last document yet (milestones 3–4).
+  convergence is what the registry says, and what it found is injected at once.
+  **When every later round runs, and when what it found reaches the loop, is
+  `Actions/Follow/Scheduler.hs`** (milestone 3): a pure step over a small state (consecutive
+  failures, the next round's deadline, a pending change and when it was first and last seen)
+  and one `IO` loop around it that takes a `Clock` from the caller — the system's, or a test's
+  that moves time (`Test/FollowSchedulerSpec.hs`). Toward the registry, a ladder: a successful
+  round (changed or not) polls at `base`, a failed one — the registry threw, or its bytes do not
+  parse; a label with no document is *not* a failure — at `min(cap, base·factor^(n-1))`, every
+  delay jittered so a fleet does not poll in step. Toward the loop, a quiet window: a changed
+  document is set aside as that label's latest `Seen`, and injected once the registry has been
+  quiet for `debounce` or `max_wait` after the first pending change, diffed against the document
+  last *applied* — so three writes inside one window are one diff and one pass, and a
+  half-published state is never applied. A window can close over several labels at once, which
+  is why `Batch` carries `[(Origin, ServeCommand)]`: one inbox entry, each declaration still
+  naming its own document in `history`. `fetch` is the one place inbound events touch the
+  scheduler — a round now, the ladder forgotten, whatever is pending injected the moment the
+  round is over — and since the loop cannot call into a producer, `serveFollowing` takes the
+  hook it pulls (`serveProducers` is that with none; without `--follow`, `fetch` says nothing is
+  being followed) and `Scheduler.Poke` is the flag the fetcher's clock wakes on. A round and an
+  injection due at the same instant go round first, deliberately: a poke makes both due now, and
+  its point is to inject what that round finds. The flags are `--follow-base` (30s;
+  `--follow-interval` is its older name), `--follow-factor` (2), `--follow-cap` (10m),
+  `--follow-jitter` (0.2), `--follow-debounce` (5s; 0 injects at the round that saw the change)
+  and `--follow-max-wait` (60s). No cached last document yet (milestone 4).
   `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
   never spelled by a line of the input language. And a `Configure` that throws is now a
   `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
@@ -778,7 +800,7 @@ subcommands via `Salmon.Builtin.CommandLine.execCommandOrSeed`:
 my-salmon config <seed-args...>          # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
 my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
-my-salmon run serve --follow DIR --label L [--label L]... [--follow-interval S]
+my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--follow-debounce S] ...
                                          # the same loop, also fetching documents from DIR (pull mode)
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 ```
@@ -821,6 +843,8 @@ converge               # re-attempt whatever hasn't converged (e.g. after fixing
 supervise on|off       # whether to tend nodes while the loop is idle (default on)
 status | history       # dump the per-node state / the seed+graph history (each entry annotated
                        # [loaded <file>] or [fetched <registry> label=.. id=.. sha256=..] unless typed)
+fetch                  # (--follow) fetch the followed documents now, ladder forgotten, and apply
+                       # whatever is pending without waiting out the quiet window
 quit                   # leave the loop, changing nothing on the way out
 ```
 

@@ -1,8 +1,8 @@
 # Pull mode: a `serve` that fetches its own declarations
 
-Status: milestones 1 and 2 below are implemented (`Salmon.Actions.Follow`,
-`run serve --follow`); the rest is a design sketch to react to, not a
-committed plan. It grew out of a fleet-management assessment; the companion
+Status: milestones 1 to 3 below are implemented (`Salmon.Actions.Follow`,
+`Salmon.Actions.Follow.Scheduler`, `run serve --follow`); the rest is a
+design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion
 idea (a generic salmon server with web/terminal clients that render the live
 `Dag`) is a separate sketch and is only referenced here where the two meet.
 
@@ -376,6 +376,12 @@ zero".
 - Whether `debounce` should also apply to the *first* fetch at startup
   (probably not: startup wants the deterministic synchronous fetch, and
   there is nothing to coalesce yet).
+  *Settled as the leaning says*: the startup round is synchronous and what
+  it finds is injected at once, before standard input is released; the
+  window applies from the first scheduled round on. A restart therefore
+  applies the registry's current document immediately, even if the
+  publisher is mid-write — which is the same exposure milestone 2 had, and
+  the price of a deterministic first convergence.
 
 ## Suggested milestones
 
@@ -395,11 +401,23 @@ zero".
    and the "fetcher-owned contribution" is computed in the fetcher as the
    union across its labels — the ledger keys a declaration by its directive,
    so it cannot retire "only its own" copy of a seed an operator also typed.
-   Rounds run on a fixed `--follow-interval` pending milestone 3.
+   Rounds ran on a fixed `--follow-interval` until milestone 3.
 3. **Scheduler.** Backoff with jitter toward the registry, debounce with
    `max_wait` toward the loop, the `fetch` command. Test: three writes
    inside the window yield one pass; a failing registry is polled on the
    ladder, not the base.
+   *Shipped* (`Salmon.Actions.Follow.Scheduler`, `Test.FollowSchedulerSpec`),
+   with three deviations: the knobs are six flat flags
+   (`--follow-base/-factor/-cap/-jitter/-debounce/-max-wait`, with
+   `--follow-interval` kept as the base's older name) rather than the
+   `--poll 30s --backoff 5s..10m` spelling above; a label with no document
+   is not a failed round (the registry answered), so only a throwing
+   registry or unparseable bytes climb the ladder; and the ladder's first
+   rung is the base itself (`min(cap, base · factor^(n-1))`), so a single
+   failure is retried no later than a success would have been. One
+   consequence for the loop: `Batch` carries an origin per command, since
+   a window can close over several labels at once and `history` must still
+   say which document each declaration came from.
 4. **Cached last document + `mode` in `status`.**
 5. **Status sink** (file first), and a `salmon-fleet status` that folds a
    directory of them.
