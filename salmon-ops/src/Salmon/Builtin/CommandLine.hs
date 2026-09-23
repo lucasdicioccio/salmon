@@ -38,6 +38,7 @@ import qualified Salmon.Actions.Follow as Follow
 import qualified Salmon.Actions.Follow.Registry as Registry
 import qualified Salmon.Actions.Follow.Registry.Http as Registry.Http
 import qualified Salmon.Actions.Follow.Scheduler as Scheduler
+import qualified Salmon.Actions.Follow.Signature as Signature
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
@@ -228,9 +229,12 @@ then the cache directory (@--follow-cache DIR@; none by default, in which
 case nothing survives a restart) and @--follow-refuse-older@ (see
 'Follow.followRefuseOlder'). @--follow-interval@ is milestone 2's name for
 the base delay, kept as a synonym of @--follow-base@; either may be given,
-the base's own flag wins. Last, the backends' own knobs (milestone 6):
+the base's own flag wins. Then the backends' own knobs (milestone 6):
 @--follow-timeout@ for the HTTP-backed ones, @--follow-workdir@ for the git
-checkout, @--follow-bucket-endpoint@ for an S3-compatible store.
+checkout, @--follow-bucket-endpoint@ for an S3-compatible store. Last,
+@--follow-key FILE@ (repeatable): the public keys a document must be signed
+by ("Salmon.Actions.Follow.Signature"); with none given, documents are
+taken as they come — __unsigned mode is the default__.
 -}
 data FollowOptions = FollowOptions
     { followBase :: !(Maybe Int)
@@ -245,6 +249,7 @@ data FollowOptions = FollowOptions
     , followTimeout :: !Int
     , followWorkdir :: !(Maybe FilePath)
     , followBucketEndpoint :: !(Maybe Text)
+    , followKeys :: ![FilePath]
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -533,6 +538,13 @@ runCommandParser =
                         <> Options.Applicative.help "For an s3:// registry, an S3-compatible endpoint (MinIO, Ceph RGW...) to address the bucket under, path-style: URL/BUCKET/PREFIX/<label>.json. Without it, https://BUCKET.s3.amazonaws.com."
                     )
                 )
+            <*> many
+                ( strOption
+                    ( long "follow-key"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "A public key (JWK, as `salmon-fleet keygen` writes FILE.pub) every fetched or replayed document must carry a signature by; repeatable, any one suffices. Without it documents are not required to be signed (the default). With it, an unsigned document is refused and never applied."
+                    )
+                )
     defaultSecs :: (Scheduler.Config -> Int) -> Int
     defaultSecs f = f Scheduler.defaultConfig `div` 1000000
     upP =
@@ -728,6 +740,9 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                     Right tok -> pure (Http.BindTls (Http.TlsBind t.tcpHost t.tcpPort t.tcpCertFile t.tcpKeyFile tok))
             let binds = [Http.BindUnix path | Just path <- [http]] ++ tlsBinds
             follow <- case (followDir, traverse Follow.mkLabel labels) of
+                (Nothing, _) | not (null followOptions.followKeys) -> do
+                    hPutStrLn stderr "--follow-key needs a --follow REGISTRY whose documents it verifies"
+                    exitFailure
                 (Nothing, Right []) -> pure Nothing
                 (Nothing, _) -> do
                     hPutStrLn stderr "--label needs a --follow REGISTRY to fetch from"
@@ -744,6 +759,14 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                     address <- case Registry.parseAddress (Text.pack addr) of
                         Left err -> hPutStrLn stderr (Text.unpack err) >> exitFailure
                         Right a -> pure a
+                    -- a key that cannot be loaded must not start a loop that
+                    -- would then refuse everything, or accept everything
+                    keys <- forM followOptions.followKeys $ \path -> do
+                        loaded <- Signature.readPublicKeyFile path
+                        case loaded of
+                            Left err -> hPutStrLn stderr ("--follow-key " <> path <> ": " <> Text.unpack err) >> exitFailure
+                            Right k -> pure k
+                    let verifier = if null keys then Follow.noVerifier else Signature.signedVerifier keys
                     registry <-
                         Registry.open
                             Registry.defaultOptions
@@ -761,7 +784,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                 , Follow.followSchedule = followSchedule followOptions
                                 , Follow.followCache = followOptions.followCacheDir
                                 , Follow.followRefuseOlder = followOptions.followRefuseOlder
-                                , Follow.followVerify = Follow.noVerifier
+                                , Follow.followVerify = verifier
                                 }
             -- the fetcher's first round is in the inbox before standard
             -- input is even read, so the first convergence is what the
