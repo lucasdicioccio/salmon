@@ -587,6 +587,7 @@ provisioned spec vm ip =
             , VmProvision.vmp_sshHost = ip
             , VmProvision.vmp_sshPort = 22
             , VmProvision.vmp_prerequisites = vmPrerequisites spec vm
+            , VmProvision.vmp_beforeCall = const []
             , VmProvision.vmp_remoteDir = "/home/" <> Text.unpack vm.vmUser
             , VmProvision.vmp_selfPath = vm.vmSelfPath
             , VmProvision.vmp_directiveTrack = program
