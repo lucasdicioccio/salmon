@@ -29,6 +29,7 @@ import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
+import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeModelSpec as ServeModelSpec
 import qualified Test.ServeSpec as ServeSpec
@@ -97,6 +98,7 @@ main =
             , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests
             , QuerySpec.tests
+            , ReportJsonSpec.tests
             , RewriteSpec.tests
             , ServeModelSpec.tests
             , ServeSpec.tests

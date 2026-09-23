@@ -117,6 +117,7 @@ test-suite salmon-ops-recipes-test
                     , Test.QemuResolveKernelSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
+                    , Test.ReportJsonSpec
                     , Test.RewriteSpec
                     , Test.ServeModelSpec
                     , Test.ServeSpec
