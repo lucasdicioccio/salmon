@@ -122,6 +122,7 @@ test-suite salmon-ops-recipes-test
                     , Test.QuerySpec
                     , Test.ReportJsonSpec
                     , Test.RewriteSpec
+                    , Test.ServeEventsSpec
                     , Test.ServeHttpSpec
                     , Test.ServeModelSpec
                     , Test.ServeSocketSpec
