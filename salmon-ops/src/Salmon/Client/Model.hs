@@ -45,14 +45,29 @@ What moves a node's view:
 A node wanted @down@ whose @done@ arrives is dropped: the loop prunes it
 after the pass, and @\/dag@ would not show it either.
 
-= Replays are safe
+= Replays are dropped, per stamp
 
-Every step is a state update keyed on the node, never an increment, so
-an event applied twice leaves the model where one application did. That
-is what the snapshot's @seq@ ordering relies on ("Salmon.Actions.Serve.Http"
-reads the number before the world so a racing event is replayed rather
-than skipped), and it is what lets a client keep folding the live stream
-while a re-read snapshot is on its way.
+One counter numbers everything on the stream, and a snapshot carries the
+last number handed out before it was read. Every part of the model
+remembers the number it is current to — each node its 'nodeSeq' (the
+snapshot's, then each event's about it), the loop-level fields
+('modelPass', 'modelSupervised', 'modelResync') their 'modelLoopSeq' — and
+an event numbered at or below the stamp of the part it would change is
+one already accounted for, so 'step' leaves that part untouched. That is
+what the server's ordering relies on ("Salmon.Actions.Serve.Http" reads
+the number before the world so a racing event is replayed rather than
+skipped), and it is what lets a client keep folding the live stream while
+a re-read snapshot is on its way: the events that land in between are
+replayed onto the new snapshot and fall away.
+
+Two stamps rather than one because the two inputs cover different things.
+A snapshot says everything about the nodes and nothing about the loop —
+whether a pass is running is not in @\/dag@ — so a fresh snapshot must
+not swallow the @converge-stop@ of a pass whose @converge-start@ the
+client already showed. 'rebase' is how a re-read snapshot joins a model
+that has been folding: the nodes are the snapshot's, the loop-level
+fields and their stamp are carried over. The @gap@ event has no number
+and always applies.
 -}
 module Salmon.Client.Model (
     -- * Events
@@ -69,6 +84,7 @@ module Salmon.Client.Model (
     step,
     modelResync,
     resolve,
+    rebase,
 
     -- * Reading it
     nodesInOrder,
@@ -162,6 +178,8 @@ data Node = Node
     , nodeLastKind :: !(Maybe Text)
     -- ^ the kind of the last event about this node, and its stream
     , nodeLastSeq :: !(Maybe Word64)
+    , nodeSeq :: !Word64
+    -- ^ the number this view is current to: the snapshot's, then each event's
     , nodeDependencies :: ![RefId]
     , nodeDependants :: ![RefId]
     , nodePaths :: ![Text]
@@ -180,7 +198,10 @@ data Model = Model
     { modelMode :: !Text
     -- ^ @interactive@\/@replay@\/@following@, from the snapshot's envelope
     , modelSeq :: !Word64
-    -- ^ the highest sequence number seen: the snapshot's, then each event's
+    -- ^ the highest sequence number seen: the snapshot's, then each
+    -- event's; the cursor to resume @\/events@ from
+    , modelLoopSeq :: !Word64
+    -- ^ the number the loop-level fields are current to
     , modelOrder :: ![RefId]
     -- ^ the snapshot's dependency order ('Salmon.Op.Dag.dagOrder')
     , modelNodes :: !(Map RefId Node)
@@ -203,6 +224,23 @@ modelResync = modelResyncReason
 resolve :: Model -> Model
 resolve m = m{modelResyncReason = Nothing}
 
+{- | A re-read snapshot joining a model that has been folding: the nodes,
+order and mode are the fresh snapshot's; the loop-level fields, their
+stamp and the last event are the old model's; the cursor is the higher of
+the two; and the resync request is answered. See the module header for
+why the loop's part is not simply the snapshot's.
+-}
+rebase :: Model -> Model -> Model
+rebase old fresh =
+    fresh
+        { modelSeq = max old.modelSeq fresh.modelSeq
+        , modelLoopSeq = old.modelLoopSeq
+        , modelPass = old.modelPass
+        , modelSupervised = old.modelSupervised
+        , modelLast = old.modelLast
+        , modelResyncReason = Nothing
+        }
+
 {- | A model from a @\/dag@ answer. 'Left' names what is missing; a @\/dag@
 answer always has @nodes@ and @seq@, so a 'Left' is a wrong URL, not a
 version skew.
@@ -211,11 +249,12 @@ fromDag :: Value -> Either String Model
 fromDag v = do
     nodes <- maybe (Left "/dag answer has no nodes array") Right (arrayAt ["nodes"] v)
     seqNo <- maybe (Left "/dag answer carries no seq") Right (numberAt ["seq"] v)
-    parsed <- traverse nodeOf nodes
+    parsed <- traverse (nodeOf seqNo) nodes
     pure
         Model
             { modelMode = fromMaybe "?" (textAt ["mode"] v)
             , modelSeq = seqNo
+            , modelLoopSeq = 0
             , modelOrder = fmap nodeRef parsed
             , modelNodes = Map.fromList [(nodeRef n, n) | n <- parsed]
             , modelPass = Nothing
@@ -224,8 +263,8 @@ fromDag v = do
             , modelResyncReason = Nothing
             }
   where
-    nodeOf :: Value -> Either String Node
-    nodeOf n = do
+    nodeOf :: Word64 -> Value -> Either String Node
+    nodeOf seqNo n = do
         r <- maybe (Left ("a node without a ref: " <> show n)) Right (refAt ["ref"] n)
         pure
             Node
@@ -240,29 +279,35 @@ fromDag v = do
                 , nodeError = Nothing
                 , nodeLastKind = Nothing
                 , nodeLastSeq = Nothing
+                , nodeSeq = seqNo
                 , nodeDependencies = maybe [] (mapMaybe (refAt [])) (arrayAt ["dependencies"] n)
                 , nodeDependants = maybe [] (mapMaybe (refAt [])) (arrayAt ["dependants"] n)
                 , nodePaths = maybe [] (mapMaybe asText) (arrayAt ["paths"] n)
                 }
 
-{- | Fold one event in. Total, and idempotent per event (see the module
-header): the seq moves to the event's if higher, the node the event is
-about is updated, and the loop-level fields follow the @serve@ stream.
+{- | Fold one event in. Total; an event already accounted for (numbered at
+or below the stamp of the part it would change, see the module header)
+leaves that part as it was. Otherwise the cursor moves to the event's
+number, the node the event is about is updated, and the loop-level fields
+follow the @serve@ stream. An event that changes nothing still becomes
+'modelLast' if it is new to the cursor.
 -}
 step :: Model -> Event -> Model
-step m0 e = byStream (m0{modelSeq = maybe m0.modelSeq (max m0.modelSeq) e.eventSeq, modelLast = Just e})
+step m0 e
+    | Just s <- e.eventSeq, s <= m0.modelSeq = byStream m0
+    | otherwise = byStream (m0{modelSeq = fromMaybe m0.modelSeq e.eventSeq, modelLast = Just e})
   where
     byStream m = case (e.eventStream, e.eventKind) of
         ("server", "gap") -> m{modelResyncReason = Just ("events " <> fromText (numberAt ["from"] e.eventValue) <> " fell off the ring")}
         ("server", _) -> m
         ("serve", "declared") ->
-            m{modelResyncReason = Just ("epoch " <> fromText (numberAt ["epoch"] e.eventValue) <> " declared " <> fromMaybe "?" (textAt ["direction"] e.eventValue))}
-        ("serve", "cleared") -> m{modelResyncReason = Just "every seed retired"}
+            onLoop m $ \l -> l{modelResyncReason = Just ("epoch " <> fromText (numberAt ["epoch"] e.eventValue) <> " declared " <> fromMaybe "?" (textAt ["direction"] e.eventValue))}
+        ("serve", "cleared") -> onLoop m $ \l -> l{modelResyncReason = Just "every seed retired"}
         ("serve", "converge-start") ->
-            m{modelPass = Just (Converging (intAt ["down"] e.eventValue) (intAt ["up"] e.eventValue))}
+            onLoop m $ \l -> l{modelPass = Just (Converging (intAt ["down"] e.eventValue) (intAt ["up"] e.eventValue))}
         ("serve", "converge-stop") ->
-            m{modelPass = Just (Stopped (fromMaybe False (boolAt ["ok"] e.eventValue)) (intAt ["remaining"] e.eventValue))}
-        ("serve", "supervised") -> m{modelSupervised = boolAt ["on"] e.eventValue}
+            onLoop m $ \l -> l{modelPass = Just (Stopped (fromMaybe False (boolAt ["ok"] e.eventValue)) (intAt ["remaining"] e.eventValue))}
+        ("serve", "supervised") -> onLoop m $ \l -> l{modelSupervised = boolAt ["on"] e.eventValue}
         ("serve", _) -> m
         ("updown", k) -> maybe m (\r -> onNode r (settle k e.eventValue) m) e.eventRef
         -- an @acted@ wraps what the tending machine did in the pass's
@@ -278,17 +323,25 @@ step m0 e = byStream (m0{modelSeq = maybe m0.modelSeq (max m0.modelSeq) e.eventS
         ("upkeep", k) -> maybe m (\r -> onNode r (touch k) m) e.eventRef
         _ -> m
 
-    -- update the node, or drop it: a node wanted down that a pass has
-    -- brought down is pruned by the loop after the pass, and /dag would
-    -- no longer show it
+    -- the loop-level fields, unless the event is at or below their stamp
+    onLoop :: Model -> (Model -> Model) -> Model
+    onLoop m f = case e.eventSeq of
+        Just s | s <= m.modelLoopSeq -> m
+        _ -> (f m){modelLoopSeq = fromMaybe m.modelLoopSeq e.eventSeq}
+
+    -- update the node (unless the event is at or below its stamp), or
+    -- drop it: a node wanted down that a pass has brought down is pruned
+    -- by the loop after the pass, and /dag would no longer show it
     onNode :: RefId -> (Node -> Node) -> Model -> Model
     onNode r f m = case Map.lookup r m.modelNodes of
         Nothing -> m
-        Just n ->
-            let n' = f n
-             in if n'.nodeDirection == "down" && n'.nodeConvergence == "converged" && n'.nodeLastKind `elem` [Just "done", Just "acted done"]
-                    then m{modelNodes = Map.delete r m.modelNodes, modelOrder = filter (/= r) m.modelOrder}
-                    else m{modelNodes = Map.insert r n' m.modelNodes}
+        Just n
+            | Just s <- e.eventSeq, s <= n.nodeSeq -> m
+            | otherwise ->
+                let n' = (f n){nodeSeq = fromMaybe n.nodeSeq e.eventSeq}
+                 in if n'.nodeDirection == "down" && n'.nodeConvergence == "converged" && n'.nodeLastKind `elem` [Just "done", Just "acted done"]
+                        then m{modelNodes = Map.delete r m.modelNodes, modelOrder = filter (/= r) m.modelOrder}
+                        else m{modelNodes = Map.insert r n' m.modelNodes}
 
     touch :: Text -> Node -> Node
     touch k n = n{nodeLastKind = Just k, nodeLastSeq = e.eventSeq}

@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Test.CheckSpec as CheckSpec
+import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
@@ -86,6 +87,7 @@ main =
                 , PgPairDemoSpec.tests
                 ]
             , CheckSpec.tests
+            , ClientModelSpec.tests
             , ConcurrentSpec.tests
             , DaemonSpec.tests
             , DagSpec.tests

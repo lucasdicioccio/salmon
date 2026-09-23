@@ -88,6 +88,7 @@ test-suite salmon-ops-recipes-test
     hs-source-dirs:   test
     other-modules:    Test.Harness
                     , Test.CheckSpec
+                    , Test.ClientModelSpec
                     , Test.DebianPackageSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
