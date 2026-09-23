@@ -508,7 +508,33 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   its point is to inject what that round finds. The flags are `--follow-base` (30s;
   `--follow-interval` is its older name), `--follow-factor` (2), `--follow-cap` (10m),
   `--follow-jitter` (0.2), `--follow-debounce` (5s; 0 injects at the round that saw the change)
-  and `--follow-max-wait` (60s). No cached last document yet (milestone 4).
+  and `--follow-max-wait` (60s).
+  **The last applied document survives a restart** (milestone 4): with `--follow-cache DIR`,
+  `injectPending` writes each label's just-applied document — bytes, digest, id — to
+  `DIR/<label>.applied.json` (a temp file and a rename, so a crash mid-write leaves the previous
+  entry), and the startup round replays it for any label whose fetch *failed* (the registry
+  threw, or its bytes did not parse — a label the registry answers `Absent` for is not replayed,
+  the registry answered). A replayed document is that label's `Seen` with no stamp, so it goes
+  through the same diff and batch as a fetched one, and its digest is compared exactly as an
+  applied one's is: a registry coming back with the same bytes injects nothing, which is the
+  starvation rule across restarts. `Serve.Mode` is what `status` says about it — `interactive`
+  (no `--follow`), `following` (the world is what the registry last said), `replay` (at least one
+  label came from the cache) — and it is only ever *entered* at startup, because the cache stands
+  in for a world, not for a round: before the first round there is nothing else, and after a
+  successful one the world already is the registry's last word, a later failure changes nothing
+  about it, and the scheduler's `Backoff` is what says the registry is gone. `Replay` turns to
+  `Following` at the first later round in which every label answers. The loop reads the mode
+  through `Serve.Followed` — the fetch hook and an `IO Mode`, one record in the slot the hook
+  had, `Nothing` meaning interactive — and `StatusReport` carries it as its first field, so the
+  text render's first line is `serve: mode: ...` and the JSON object has `mode`. `Document` also
+  gained an optional `published` (RFC 3339; a *malformed* one is a parse error, not ignored), and
+  `--follow-refuse-older` refuses a fetched document published before the one already applied
+  *or pending* for its label (`Stale`, not injected) — off by default, and without `published`
+  on both sides the latest is whatever the registry says. A cache entry that cannot be read
+  (`BadCache`) or written (`CacheFailed`) is reported and otherwise ignored; the cache never
+  takes the loop down. `directoryRegistry` now *throws* when its directory is missing rather than
+  answering `Absent`, since that is the difference between "the registry is unreachable" and "no
+  document for this label", and the cache hinges on it. See `Test/FollowCacheSpec.hs`.
   `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
   never spelled by a line of the input language. And a `Configure` that throws is now a
   `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
@@ -832,6 +858,8 @@ my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expa
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
 my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--follow-debounce S] ...
                                          # the same loop, also fetching documents from DIR (pull mode)
+my-salmon run serve --follow DIR --label L --follow-cache CACHE [--follow-refuse-older]
+                                         # ... replaying CACHE's last applied document when DIR is unreachable at startup
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
                                          # GET /dag /status /history /help/seed, POST /command[?async]
@@ -873,8 +901,9 @@ down <seed args...>    # retire this seed (its nodes go down unless another seed
 clear                  # retire every seed
 converge               # re-attempt whatever hasn't converged (e.g. after fixing what made it fail)
 supervise on|off       # whether to tend nodes while the loop is idle (default on)
-status | history       # dump the per-node state / the seed+graph history (each entry annotated
-                       # [loaded <file>] or [fetched <registry> label=.. id=.. sha256=..] unless typed)
+status | history       # dump the per-node state (first line: `mode: interactive|following|replay`) /
+                       # the seed+graph history (each entry annotated [loaded <file>] or
+                       # [fetched <registry> label=.. id=.. sha256=..] unless typed)
 fetch                  # (--follow) fetch the followed documents now, ladder forgotten, and apply
                        # whatever is pending without waiting out the quiet window
 quit                   # leave the loop, changing nothing on the way out

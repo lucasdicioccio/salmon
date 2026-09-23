@@ -1,7 +1,8 @@
 # Pull mode: a `serve` that fetches its own declarations
 
-Status: milestones 1 to 3 below are implemented (`Salmon.Actions.Follow`,
-`Salmon.Actions.Follow.Scheduler`, `run serve --follow`); the rest is a
+Status: milestones 1 to 4 below are implemented (`Salmon.Actions.Follow`,
+`Salmon.Actions.Follow.Scheduler`, `run serve --follow`, `--follow-cache`,
+`mode` in `status`); the rest is a
 design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion
 idea (a generic salmon server with web/terminal clients that render the live
 `Dag`) is a separate sketch and is only referenced here where the two meet.
@@ -91,7 +92,8 @@ words, so a document can carry either a seed or a fully-configured directive:
 
 `salmon` is a format version; `id` is opaque, chosen by the publisher, and is
 what `history` records (below). Anything else at the top level is ignored by
-v1 so publishers can annotate.
+v1 so publishers can annotate — except `published`, an optional RFC 3339
+timestamp that milestone 4 gave a meaning (see the open questions).
 
 Reason for a document rather than a log: a log needs a cursor, exactly-once
 delivery, and a story for a host that missed the middle of it. A document is
@@ -310,6 +312,8 @@ zero".
   and looks converged). The fetcher should at minimum cache the last verified
   document on disk and replay it on start; the journal for `World` proper is
   its own item and should land first or alongside.
+  *The cache shipped in milestone 4* (`--follow-cache`); the `World` journal
+  has not, and is still its own item.
 - **`supervise off`/`autoconverge off` typed interactively** should be
   respected by the fetcher — it must not silently re-enable either. The diff
   batch reads the current setting and restores it.
@@ -334,7 +338,12 @@ zero".
   idle is handled by the tending loop like any interactive command, not
   replayed deterministically. Correct, but `status` should report `mode:
   following` vs `mode: replay` so a test or an operator knows which
-  guarantees apply.
+  guarantees apply. *It does, as of milestone 4*, with one shift in what
+  `replay` means: not "the startup round was applied synchronously" (that is
+  always true, and `following` covers it) but "the registry could not be
+  reached at startup and the world is the cached document" — the case an
+  operator actually needs to be told about. `interactive` is the third
+  value, for a loop with no `--follow` at all.
 - **Secrets in documents.** The document names seeds; seeds that need secret
   material should keep using pre-provisioned files (see the recipe
   key-exchange-agnostic convention), not inline them.
@@ -373,6 +382,17 @@ zero".
   *backwards* if a registry serves a stale copy from a lagging replica), or
   is "latest is whatever the registry says" enough? Leaning: an optional
   `published` timestamp, refuse-older as a flag, off by default.
+  *Settled as the leaning says* (milestone 4): `id` stays opaque; a document
+  may carry `published` (RFC 3339) at its top level, and under
+  `--follow-refuse-older` a fetched document published before the one
+  already applied *or pending* for its label is reported `Stale` and not
+  injected. Off by default; without `published` on both sides the latest is
+  whatever the registry says. Two details worth knowing: the comparison is
+  against the pending document when there is one, not only the applied one,
+  since "do not move backwards" has to hold inside a quiet window too; and a
+  `published` that does not parse is a malformed document rather than an
+  ignored annotation, because a flag that silently skipped a mistyped
+  timestamp would not be doing its one job.
 - Whether `debounce` should also apply to the *first* fetch at startup
   (probably not: startup wants the deterministic synchronous fetch, and
   there is nothing to coalesce yet).
@@ -419,6 +439,26 @@ zero".
    a window can close over several labels at once and `history` must still
    say which document each declaration came from.
 4. **Cached last document + `mode` in `status`.**
+   *Shipped* (`--follow-cache DIR`, `--follow-refuse-older`, `Serve.Mode`,
+   `Test.FollowCacheSpec`), with four deviations. The cache is written
+   after every *injection* (bytes, sha256 and id per label, a temp file
+   renamed into place), not after a verified convergence — the fetcher
+   does not learn whether the loop's pass succeeded, and "the last document
+   the loop was told about" is the right thing to come back to anyway. A
+   label is replayed when its startup fetch *fails*, which covers the
+   registry throwing and its bytes not parsing (a half-written file at the
+   moment of a restart is the realistic case), but not the registry
+   answering "no document" — the registry answered, and the cache is not
+   deleted either, so it will be replayed the next time the registry is
+   unreachable. `replay` is entered only at startup and turns to
+   `following` at the first later round in which every label answers; a
+   failure after that is `Backoff`, not a mode, since the world is still
+   the registry's last word. And the directory registry now throws when
+   its directory is missing instead of answering "no document", because
+   the cache hinges on telling those apart. The `Followed` record
+   (`Serve.hs`) is the loop's only view of the fetcher — the fetch hook
+   and an `IO Mode` — and `mode` lives on `StatusReport` itself, so the
+   HTTP `/status` gets it from the same encoder.
 5. **Status sink** (file first), and a `salmon-fleet status` that folds a
    directory of them.
 6. **Git registry**, then HTTP, then the DNS index over HTTP, then bucket.

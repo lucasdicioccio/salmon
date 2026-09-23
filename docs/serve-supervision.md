@@ -517,6 +517,8 @@ flags (seconds unless said otherwise):
 | `--follow-jitter` | 0.2 | every delay is scaled by a draw from `[1-j, 1+j]`, so a fleet does not poll in step |
 | `--follow-debounce` | 5 | how long the registry must be quiet after a change before the change is applied; `0` applies at the round that saw it |
 | `--follow-max-wait` | 60 | the longest a change waits while the registry keeps changing |
+| `--follow-cache` | none | a directory to keep each label's last applied document in, replayed at startup if the registry cannot be reached (below) |
+| `--follow-refuse-older` | off | refuse a document whose `published` is older than the one already applied for its label (below) |
 
 **Toward the registry**: a round that succeeds — changed or not — schedules
 the next one one base away; a round that fails (the registry threw, or the
@@ -540,9 +542,80 @@ is pending afterwards applied without waiting out the window — for the
 operator who just published and does not want to wait. Without `--follow`
 it only says nothing is being followed.
 
-Not there yet (`specs/pull-mode.md`, milestones 4 onwards): a cached
-document that survives a restart, other registries (git, HTTP, DNS, bucket),
-and signatures.
+### Across a restart: `--follow-cache`
+
+The world is in memory. Without more, a host restarted while its registry is
+unreachable comes up empty, tears nothing down, and looks converged — worse
+than no puller at all. `--follow-cache DIR` closes that: after every batch
+the fetcher writes each label's just-applied document to
+`DIR/<label>.applied.json` (bytes, sha256 and id; written to a temp file and
+renamed, so a crash mid-write leaves the previous entry), and at startup a
+label whose fetch *fails* — the registry directory is missing, or the file
+does not parse — is replayed from there:
+
+```
+follow: fetching web failed: user error (registry directory does not exist: /srv/reg)
+follow: web: registry unreachable; replaying the cached document id=web@1 sha256=8a8e1c180390
+follow: web id=web@1 sha256=8a8e1c180390: 1 seed(s) up, 0 down
+serve: epoch #0 up (4 nodes, 1 active seed(s))
+```
+
+A replayed document is treated exactly as a fetched one from then on — same
+diff, same batch, same `[fetched ...]` in `history` — and its digest is what
+the registry's answer is later compared against, so a registry that comes
+back with the same bytes injects **nothing** (the starvation rule holds
+across restarts) and one that comes back with a different document is
+diffed against the replayed one, not applied from scratch. A label the
+registry answers "no document" for is *not* replayed: the registry answered.
+A cache entry that cannot be read is reported once and ignored, one that
+cannot be written is reported and the batch goes in regardless; the cache
+never takes the loop down. Without the flag nothing is cached, and a restart
+against an unreachable registry declares nothing, as before.
+
+### Which mode is this?
+
+`status` now starts with which guarantees apply to the world:
+
+```
+serve: mode: replay
+serve: nodes:
+  ...
+```
+
+- `interactive` — nothing is followed; every declaration was typed, loaded
+  or sent by a client.
+- `following` — a fetcher is running and the world is what the registry
+  last said.
+- `replay` — the registry could not be reached at startup and at least one
+  label's world is its cached document: the last thing this host knew, not
+  necessarily what the registry says now.
+
+`replay` turns into `following` at the first round in which every label
+answers, changed or not. It is only ever *entered* at startup: after a
+successful round the world already is the registry's last word, a round
+failing later changes nothing about it (the last good document stays in
+force), and `follow: N failed round(s) in a row` is what says the registry
+is gone. Under `--json` the status object carries `"mode"`; the HTTP
+surface's `/status` is the same object.
+
+### Refusing to move backwards: `--follow-refuse-older`
+
+A document may carry a `published` timestamp (RFC 3339) at its top level.
+Nothing reads it unless `--follow-refuse-older` is given, under which a
+fetched document published *before* the one already applied (or pending)
+for its label is reported and left alone:
+
+```
+follow: web id=web@0: published before the document already applied; refused (--follow-refuse-older)
+```
+
+That is what a registry serving from a lagging replica would otherwise do to
+a host. Off by default; a document without `published`, on either side, is
+never refused. A `published` that does not parse is a malformed document,
+not an ignored annotation.
+
+Not there yet (`specs/pull-mode.md`, milestones 5 onwards): a status sink,
+other registries (git, HTTP, DNS, bucket), and signatures.
 
 ## 13. A second way in: `--listen`
 
