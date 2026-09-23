@@ -225,8 +225,17 @@ serveGoldens =
         )
     ,
         ( "Serve.HistoryReport"
-        , Tagged.FromServe (Serve.HistoryReport [(Serve.EpochId 1, Serve.Add, True, ["--dir", "/tmp/play"]), (Serve.EpochId 2, Serve.Remove, False, [])])
-        , "{\"kind\":\"history\",\"seeds\":[{\"epoch\":1,\"declaration\":\"up\",\"active\":true,\"args\":[\"--dir\",\"/tmp/play\"]},{\"epoch\":2,\"declaration\":\"down\",\"active\":false,\"args\":[]}]}"
+        , Tagged.FromServe
+            ( Serve.HistoryReport
+                [ (Serve.EpochId 1, Serve.Add, True, Serve.Stdin, ["--dir", "/tmp/play"])
+                , (Serve.EpochId 2, Serve.Remove, False, Serve.Loaded "/tmp/script", [])
+                , (Serve.EpochId 3, Serve.Add, True, Serve.Fetched (Serve.Provenance "/srv/reg" "web-api" "web-api@2026-09-23T10:41:07Z" "32ea59311d97"), ["--name", "web"])
+                ]
+            )
+        , "{\"kind\":\"history\",\"seeds\":["
+            <> "{\"epoch\":1,\"declaration\":\"up\",\"active\":true,\"origin\":{\"kind\":\"stdin\"},\"args\":[\"--dir\",\"/tmp/play\"]},"
+            <> "{\"epoch\":2,\"declaration\":\"down\",\"active\":false,\"origin\":{\"kind\":\"loaded\",\"path\":\"/tmp/script\"},\"args\":[]},"
+            <> "{\"epoch\":3,\"declaration\":\"up\",\"active\":true,\"origin\":{\"kind\":\"fetched\",\"registry\":\"/srv/reg\",\"label\":\"web-api\",\"document\":\"web-api@2026-09-23T10:41:07Z\",\"sha256\":\"32ea59311d97\"},\"args\":[\"--name\",\"web\"]}]}"
         )
     , ("Serve.HistoryElided", Tagged.FromServe (Serve.HistoryElided 40), "{\"kind\":\"history-elided\",\"elided\":40}")
     ,

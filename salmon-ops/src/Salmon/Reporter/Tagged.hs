@@ -345,14 +345,31 @@ instance ToJSON Serve.Report where
                 , "output" .= Status.ringLines ms.statusOutput
                 ]
 
-        epochValue :: (Serve.EpochId, Serve.Declaration, Bool, [String]) -> Value
-        epochValue (eid, decl, active, args) =
+        epochValue :: (Serve.EpochId, Serve.Declaration, Bool, Serve.Origin, [String]) -> Value
+        epochValue (eid, decl, active, origin, args) =
             object
                 [ "epoch" .= eid.unEpochId
                 , "declaration" .= declaration decl
                 , "active" .= active
+                , "origin" .= originValue origin
                 , "args" .= args
                 ]
+
+        -- who made the declaration: the same distinction the text `history`
+        -- draws with its trailing `[fetched ...]`/`[loaded ...]` annotation.
+        originValue :: Serve.Origin -> Value
+        originValue origin = case origin of
+            Serve.Stdin -> object ["kind" .= ("stdin" :: Text)]
+            Serve.Origin name -> object ["kind" .= ("other" :: Text), "name" .= name]
+            Serve.Loaded path -> object ["kind" .= ("loaded" :: Text), "path" .= path]
+            Serve.Fetched prov ->
+                object
+                    [ "kind" .= ("fetched" :: Text)
+                    , "registry" .= prov.provRegistry
+                    , "label" .= prov.provLabel
+                    , "document" .= prov.provDocument
+                    , "sha256" .= prov.provDigest
+                    ]
 
         -- the input-language word, the same one 'Serve.renderReport' prints
         declaration :: Serve.Declaration -> Text
