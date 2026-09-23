@@ -1,7 +1,38 @@
 # Salmon as PID 1: an init system whose unit graph is a real DAG
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan.
+Status: draft / not implemented — **revised** after the supervision work it
+asked for shipped (`Nodes/Daemon.hs`, `Op/Supervision.hs`,
+`Actions/Upkeep.hs`, `Actions/Serve.hs`'s tending loop) and after two
+companion sketches were written (`specs/pull-mode.md`,
+`specs/generic-server.md`). This is a design sketch to react to, not a
+committed plan. Sections below that describe something as missing have been
+re-checked against the tree as of 2026-09-23; where the original text has
+been overtaken it is rewritten rather than annotated, so the spec reads as
+one argument.
+
+## What has shipped since this was first written
+
+The original draft's "three things that genuinely are not here" is now one
+thing. The other two moved into `run serve`, exactly as the draft asked, and
+this spec now *consumes* them:
+
+| Draft asked for | What the tree has now |
+|---|---|
+| a vocabulary for "keep this running" | `Extension.managed :: Maybe (Output -> IO ExitCode)` and `Nodes/Daemon.hs` — a node whose effect *is* a running process, torn down by cancelling its `withAsync` (group signal, `stop_grace`, `SIGKILL`), output drained into a ring |
+| restart policy, backoff, give-up latch | `Op/Supervision.hs` (`Restart` `Always`/`OnFailure`/`Never`, `supStableAfter`, `supGiveUpAfter`, `RestForOne`, a watchdog) read by `Actions/Upkeep.hs`'s per-node machine, with its `Tally` of consecutive failures and adaptive delay |
+| exit-event-driven convergence | `Upkeep`'s `Up` state races the managed action; the `ExitCode` it yields is what the policy reads, after the node's own `check` (so a daemonising service that exits 0 is still up) |
+| a "supervisor table keyed by `Ref`" | per-machine state in `Upkeep`, not in `World`; `Serve.NodeState.nodeStatus` snapshots it |
+| `prelim`-alive / `Skippable` | `check :: IO CheckResult`; `Unknown` means "keep looking", `Immaterial` parks |
+| a supervisor that survives its own commands | `Upkeep.Kept`: machines holding a `managed` effect outlive the supervisor that started them and are adopted by the next (`Upkeep.Under`) |
+| `worldHistory` retention | done (`885d9f0`) |
+| a magma keyed by `Ref` | `Op/Dag.hs`, `Op/Ledger.hs`, `Op/Rewrite.hs` |
+| a control socket speaking the `serve` language | not shipped; now specified in `specs/generic-server.md` |
+| reconfiguration by re-reading a file | not shipped; `specs/pull-mode.md` gives a stronger answer (below) |
+
+What is still genuinely missing is **PID 1 itself** — reaping, signals,
+stage-0 mounts, `reboot(2)` — and the process-topology decision that follows
+from it (next section). Everything else in this document is now a question
+of *wiring*, not of building.
 
 ## Problem / goal
 
@@ -14,8 +45,10 @@ tractable, and the repo is already set up for it: `Salmon.Builtin.Nodes.Qemu`
 direct-boots a kernel with `-kernel`/`-initrd`, `root=vroot rootfstype=9p`,
 `net.ifnames=0` (`Qemu.kernelCmdline`), against a
 `Debian.Debootstrap.rootTree` chroot. Hardware is then *known*: virtio
-devices, one serial console, no firmware quirks, no disk enumeration race, no
-initramfs, no udev rule engine, no network-interface naming ambiguity. And
+devices, one serial console, no firmware quirks, no disk enumeration race, a
+stock Debian initrd whose only job is to mount the 9p root (the toy and the
+qemu tier already boot this way), no udev rule engine, no network-interface
+naming ambiguity. And
 `VmConfig.vm_extra_kernel_args` already exists as the place `init=/sbin/salmon-init`
 would go, which means the qemu test tier from `specs/qemu-test-vms.md` is
 also the test bed for this. Physical hardware is explicitly out of scope.
@@ -45,9 +78,11 @@ from the design:
   This is the payoff of `Configure` being a separate hermetic step, and it is
   what lets the "boot order is what I reviewed" test in the Testing section
   exist at all.
-- **Reconfiguration-without-reboot stops being load-bearing.** It stays
-  achievable (see SIGHUP below) but it is a convenience, not the mechanism by
-  which machines change. A machine changes by getting a new binary.
+- **Reconfiguration-without-reboot is a parameter change, not a shape
+  change.** A machine's *graph* changes by getting a new binary; its
+  *parameters* change by a new document arriving — and `specs/pull-mode.md`
+  is now the mechanism for that (below), rather than a SIGHUP re-read of a
+  local file.
 
 Being "generally static afterwards" also means the supervisor can be built
 with as few runtime moving parts as possible — ideally statically linked, so
@@ -74,64 +109,88 @@ graph, as a first-class value, and salmon already has:
 - **`Serve`'s `World`** — a per-node `Direction` + `Convergence` state machine
   across a set of active seeds, with retry of `Errored`/`Blocked` nodes on the
   next pass. That is a supervisor's bookkeeping, already written.
+- **`Upkeep`** — the tending loop: per-node machines that keep asking whether
+  an effect is still there, restart a `managed` process by its declared
+  policy, back off, give up, bounce dependants on `RestForOne`, and are
+  `Kept` across the supervisor's own restarts. That is *the supervisor*,
+  already written and tested (`Test/UpkeepSpec.hs`, `Test/DaemonSpec.hs`).
 
 So a surprising amount of this spec is not "build an init system" but "notice
 that the init system is mostly already here, and identify the handful of
 things that genuinely are not."
 
-## The three things that genuinely are not here
+## What genuinely is not here
 
-### 1. Salmon has no vocabulary for "keep this running"
+### 1. (Shipped.) "Keep this running" is `managed`, and the init node is a second `Daemon`
 
-`Extension.up :: IO ()` is a one-shot idempotent action that *returns*. An init
-system's central job is owning processes that never return. The closest thing
-in the repo, `Systemd.systemdService`, does not actually solve this — its `up`
-is `systemctl restart`, which returns immediately, and the entire supervision
-problem is delegated to systemd. When salmon *is* PID 1 there is nothing left
-to delegate to.
+The draft's table of supervision concerns is now a table of shipped code:
 
-**The proposed answer: don't add a new execution model — add an event source.**
-Supervision decomposes into exactly the pieces the convergence loop already
-has, if the loop is woken by signals instead of by stdin lines:
-
-| Supervision concern | Existing salmon mechanism |
+| Supervision concern | Where it lives now |
 |---|---|
-| "is this service running?" | `prelim :: IO Requirement` — `Skippable` if the pid is alive, `Required` if not |
-| "start it" | `up` — spawn, record the pid |
-| "stop it" | `down` — signal the process group, wait, escalate |
-| "it died, restart it" | SIGCHLD marks that node non-`Converged`; the next `converge` pass re-runs `up` |
-| "don't restart in a tight loop" | `prelim` returns `Skippable` while inside the backoff window |
-| "start things in the right order" | `upTree`'s existing topological walk |
-| "a dependency failed" | `Blocked`, existing |
+| "is this service running?" | the node's `check :: IO CheckResult` |
+| "start it" | its `managed` action, run under `withAsync` by `Upkeep`'s `Up` state |
+| "stop it" | cancelling that async; `Daemon.runDaemon`'s bracket escalates group-`SIGTERM` → `stop_grace` → `SIGKILL` |
+| "it died, restart it" | the action yields an `ExitCode`; `supRestart` decides |
+| "don't restart in a tight loop" | `Upkeep`'s delay ladder + `Tally`, `supStableAfter`, `supGiveUpAfter` |
+| "start things in the right order" | `waitStability` over dependencies |
+| "a dependency failed" | waited out rather than `Blocked`: the dependency's own machine keeps retrying |
+| "a dependency went away, take me with it" | `supStrategy = RestForOne` on the dependency |
 
-That last-but-one row is the neat one: **restart backoff needs no new control
-flow at all**, because `Skippable` already means "not now" and `Serve` already
-retries non-converged nodes on the next pass. What it does need is somewhere to
-put the counters (see "State that `World` doesn't have" below).
+So the init-system node is not a new mechanism; it is **a sibling of
+`Nodes/Daemon.hs`** whose `managed` action talks to PID 1 instead of calling
+`createProcess` itself:
 
-So the delta is: a `Salmon.Builtin.Nodes.SalmonInit.service` node, shaped
-*exactly* like `Systemd.systemdService` (same `Config`-ish record: user, group,
-umask, exec, restart policy, kill mode, working dir — `Systemd.Service` is
-already the right vocabulary and should be reused or generalized rather than
-re-invented), whose `up`/`down`/`prelim` talk to the local supervisor instead
-of to `systemctl`. **The recipe layer then does not change conceptually at
-all** — a recipe ports from systemd to salmon-init by swapping one node.
+```
+SalmonInit.service :: Reporter -> Service -> Op
+  check   = Query slot            -> Success | Failure | Unknown (deferred until T)
+  managed = Spawn slot; block on the Exited event for it; return its ExitCode
+            (cancellation => Signal slot, then wait for Exited)
+  up      = throwIO NeedsSupervisor      -- exactly as Daemon.daemon does
+  down    = pure ()                       -- exactly as Daemon.daemon does
+```
 
-This is not only an init-system concern, and it should not wait for one:
-supervision is a gap in `run serve` today, for the same reason and with the
-same fix, and building it there — where it can be exercised interactively
-from a shell — is the right order. This spec then consumes it rather than
-introducing it.
+`managed :: Output -> IO ExitCode` is precisely the shape of "ask PID 1 to
+run this and tell me when it stopped", which is a strong sign the field was
+cut in the right place. `Systemd.Service` stays the vocabulary
+(`service_user`/`service_group`/`service_umask`/`KillMode`), rendered into a
+spawn request rather than a unit file. **A recipe ports from systemd to
+salmon-init by swapping one node**, and the policy it carries in
+`Supervision` needs no translation at all.
 
-That work has since moved: a first cut landed as
-`Salmon.Builtin.Nodes.Supervised` and was removed again in favour of
-`specs/per-node-state-machines.md`, which supplies supervision as a property
-every node has rather than as one special node type. Read the paragraphs
-below about `prelim`-alive and `Skippable` as describing the shape of the
-answer; that spec is where it now lives, and it changes one thing that
-matters here — a supervised process's handle lives on its own node's thread,
-so the Haskell side never needs a pid table and never needs `waitpid(-1)`,
-which is the constraint the two-process split exists to satisfy.
+Two things the draft got right that are worth keeping explicit. First, PID 1
+answering `Deferred { until }` maps onto `check` returning **`Unknown`**, not
+`Skipped` or `Failure`: `Unknown` is the one verdict `Upkeep` acts on by
+*continuing to look*, which is what a deferral wants. Second, the process
+handle lives on the node's own machine, so the Haskell side has no pid table
+— but see the next section, because *whose child the process is* is now a
+real decision rather than a free one.
+
+### 1b. The one new tension: `Daemon`'s bracket versus "services are children of PID 1"
+
+`Daemon.runDaemon` owns its process through a bracket: the process is a
+child of the supervisor, and cancelling the machine kills it. That is the
+whole teardown story under `run serve` and it needs no pid table. The
+draft's architecture wants the opposite — services as **children of
+PID 1**, so the supervisor can crash, restart or be replaced without any
+service noticing. Both cannot be true of one node.
+
+The reconciliation is the split above: `SalmonInit.service`'s `managed`
+action holds no process, it holds a *subscription* to PID 1's exit event for
+a slot. Cancellation signals through PID 1; a supervisor restart re-attaches
+(its `check` asks PID 1 and answers `Success`, so the node starts
+`Settled`/`Standing`, and its `managed` action subscribes to a slot that is
+already running rather than spawning it). The protocol therefore needs an
+**attach** verb beside spawn — "give me the exit event for the pid you are
+already holding in this slot" — which the draft's `Query` did not cover.
+
+What this costs: `Upkeep.Kept` — machines that survive the supervisor
+stopping — does nothing useful across a *process* restart of the
+supervisor; it was built for the in-process case (`status` typed at a
+`serve` prompt must not restart every service). Under salmon-init the
+equivalent guarantee is provided by PID 1 holding the children, and the
+re-attach path above is what replaces adoption. Under plain `run serve` on
+a systemd box, `Daemon.daemon` stays what it is. **Neither node should try
+to be both.**
 
 ### 2. PID 1 has duties that are not convergence at all
 
@@ -248,7 +307,7 @@ purpose and therefore the one place it can go wrong.
 **The cost is a protocol** between the two: `Spawn`/`Signal`/`Query` requests
 and `Exited pid status` events. It is small, it must be stable (a supervisor
 restart must not require a PID 1 restart), and it is worth noting it is *the
-same shape* as the `SalmonInit.service` node's `up`/`down`/`prelim` — so the
+same shape* as the `SalmonInit.service` node's `check`/`managed` — so the
 node can talk to the control socket directly and the protocol only has to be
 designed once. Length-prefixed JSON over a `SOCK_SEQPACKET` socketpair is
 almost certainly enough; the temptation to make it clever should be resisted,
@@ -278,12 +337,12 @@ The rule is that **PID 1 defers, it never refuses**, and the supervisor
 When a spawn request arrives sooner than the slot's minimum interval allows,
 PID 1 schedules it rather than rejecting it, and answers the request with
 `Deferred { until }`. A `Query` on that slot then answers "not running, spawn
-deferred until T" — which maps exactly onto `Skippable` in the existing
-`prelim` vocabulary. So the `SalmonInit.service` node's `prelim` returns
-`Skippable` while PID 1 says deferred, the convergence pass leaves the node
-alone, and the next pass picks it up once the deferral expires. The two
-backoffs compose into `max(pid1_floor, supervisor_policy)` rather than summing,
-and the supervisor needs no timer of its own for this case.
+deferred until T" — which maps onto **`Unknown`** in the `check` vocabulary
+(1 above): `Upkeep` keeps looking on its ladder rather than restarting or
+giving up, and picks the node up once the deferral expires. The two
+backoffs compose into `max(pid1_floor, supervisor_policy)` rather than
+summing; `Upkeep`'s own ladder (double on a failing `up`, halve on a
+vanished effect) is the policy half and already exists.
 
 Deferring rather than refusing matters: a refusal that a buggy supervisor drops
 on the floor means the service never comes back, whereas a deferral is
@@ -398,16 +457,21 @@ developer machine — that is how the boot graph gets reviewed before it is ever
 booted. So the binary has three personalities (init supervisor, control client,
 ordinary salmon CLI) but only the first is entered without argv.
 
-### The control socket speaks the `serve` language
+### The control socket is `specs/generic-server.md`'s socket
 
 `Serve.parseServeCommand` already defines a line-oriented language —
 `up`/`only`/`down`/`up-directive`/`clear`/`converge`/`status`/`history`/
-`query`/`load`/`help`/`quit` — with `--select`/`--exclude` on the query-ish
-ones. That is a remarkably good fit for an init control interface, and reusing
-it verbatim means the interactive story is done. Additions needed:
-`reboot`, `poweroff`, `reload` (re-read `/etc/salmon-init.json`), and a
-`logs`-ish affordance. `quit` obviously has to mean something different (or
-be rejected) when quitting is a kernel panic.
+`query`/`load`/`force`/`recheck`/`pause`/`resume`/`supervise`/`autoconverge`/
+`help`/`quit` — with `--select`/`--exclude` on the node-addressing ones. That
+is a remarkably good fit for an init control interface. The draft proposed
+reusing it over a socket of this spec's own; that socket is now
+`specs/generic-server.md`'s first milestone (a unix socket carrying the line
+protocol, as a second producer into the loop's inbox), and this spec should
+**consume it unchanged** — the `<role>ctl` client is that spec's terminal
+client, and a `/dag` view of a booting VM is that spec's web UI pointed at
+the guest. Additions this spec still needs on top: `reboot`, `poweroff`
+(which go to PID 1's socket, not this one — see "Two sockets"), and `quit`
+rejected, since quitting is a supervisor restart at best.
 
 ## Boot sequence
 
@@ -445,15 +509,21 @@ Two properties worth calling out:
   this reason and is worth copying. "Rescue" here is not a mode — it is just
   "the console got spawned in stage 0 and convergence didn't work", which
   requires no extra machinery.
-- **Re-reading the seed on SIGHUP is reconfiguration without reboot**, and it
-  is nearly free: it is `Serve`'s `only <new seed>` path, which retires the old
-  seed and converges the difference — teardown of what is no longer wanted,
-  bring-up of what is newly wanted, using `downTree`/`upTree`'s existing
-  ordering. Getting that property essentially for free is a good sign the
-  `Serve` model is the right foundation. Given the build model, this only ever
-  re-reads *parameters*, never a new graph shape; a new graph shape arrives as
-  a new supervisor binary, and PID 1 restarting the supervisor is the same
-  code path as PID 1 restarting a crashed one.
+- **Reconfiguration without reboot is pull mode, not SIGHUP.** The draft
+  had the supervisor re-read `/etc/salmon-init.json` on SIGHUP and run
+  `Serve`'s `only` path. `specs/pull-mode.md` is the same idea with the
+  problems solved: the supervisor is started with `--follow <registry>
+  --label <role>` and its parameters arrive as a JSON document (the format
+  that spec fixes), diffed against the ledger and converged as one pass,
+  with change detection so an unchanged poll never stands the machines
+  down, a scheduler with backoff so a hundred booting VMs do not hammer the
+  registry, and the fetch recorded in `history` as its own actor. The local
+  file becomes the *cached last document* that spec asks for anyway — the
+  thing a VM boots from when the registry is unreachable — and SIGHUP, if
+  kept at all, is `fetch` (force a round now). Given the build model this
+  only ever changes *parameters*; a new graph shape is a new supervisor
+  binary, and PID 1 restarting the supervisor is the same code path as PID 1
+  restarting a crashed one — which, with 1b's re-attach, no service notices.
 
 ## Why the VM assumption buys so much
 
@@ -473,43 +543,36 @@ written:
 The last row is the one that makes this *testable* rather than merely
 buildable, and it is why the qemu tier is the natural home for the tests.
 
-## State that `World` doesn't have
+## State that `World` doesn't have — now mostly `Upkeep`'s
 
-`Serve.NodeState` carries `nodeDirection`/`nodeConvergence`/`nodeEpoch`.
-Supervision needs more, and it should go in a **separate supervisor table keyed
-by `Ref`** rather than by widening `NodeState` (which is shared with the
-one-shot `serve` path that has no notion of a running process):
+The draft asked for a supervisor table keyed by `Ref` with the live pid,
+restart counts, next-eligible time and a give-up latch, kept apart from
+`NodeState`. That is what shipped, and it shipped apart from `World` for the
+draft's own reason: `Upkeep`'s per-machine `Tally` (consecutive failures,
+when the node last reached `Up`) and delay ladder are the counters;
+`supGiveUpAfter` is the latch (a node that gave up is *parked*, and `Force`/
+`Recheck` starts it over — the draft's "reported instead of consuming the
+machine"); and `Serve.NodeState.nodeStatus` is the snapshot `status` reads.
+The live pid is the one item that is deliberately *not* stored anywhere on
+the Haskell side: under `run serve` it lives inside the machine's async;
+under salmon-init it lives in PID 1's slot table and the machine holds a
+subscription (1b).
 
-- the live `ProcessID` and its process-group id,
-- restart count and the window it is counted over,
-- next-eligible-restart time (the backoff that `prelim` consults),
-- a "gave up" latch, so a service that crash-loops stops being retried and is
-  reported instead of consuming the machine.
+One thing survives as a genuine gap. **`World` is an `IORef`**: none of this
+persists across a supervisor *process* restart. The draft's cure was "PID 1
+holds the services, so a supervisor restart re-adopts"; that still holds
+for the *processes*, but the ledger, the convergence states and the tallies
+start from zero. Under pull mode the cached last document replays the
+declarations; the rest is `Standing` guesses from each node's `check`. That
+is acceptable for v1 of an init (a rebooted machine starts from zero too)
+and is the same journal item both companion specs already rank ahead of
+their own work.
 
-Under the init system the third of these is partly answered by PID 1 rather
-than stored: a `Query` can come back "deferred until T", which `prelim` turns
-straight into `Skippable`. The supervisor still keeps its own next-eligible
-time, because its policy is usually the longer of the two and because plain
-`run serve` (no PID 1 underneath) has nobody to ask. See "Restart backoff"
-above for how the two compose.
-
-**Also a real problem, now fixed: `World.worldHistory` was append-only
-forever.** Correct and cheap for a `serve` session measured in minutes; for a
-supervisor on a box that stays up for months it was an unbounded leak, since
-it retained a whole `Cofree Graph Op` per epoch. It was replaced (`885d9f0`)
-by a retention policy: `worldEpochs` keeps only the graphs a future pass could
-still walk — the active ones, plus retired ones that still describe a node to
-turn down — and `worldLog` keeps the small per-declaration lines `history`
-prints, so the record outlives the graphs. `specs/per-node-state-machines.md`
-would replace even that, since a magma keyed by `Ref` needs no per-declaration
-graph at all.
-
-Both of these were `Serve` problems before they were init problems. The
-retention fix in particular landed on its own merits; a long-running `serve`
-had the same leak, it was just less likely to be noticed. Note that the split architecture softens the consequence — heap
-exhaustion in the supervisor is a supervisor restart, not a kernel panic — but
-a supervisor that restarts every few weeks and loses its convergence state is
-not a system anyone should ship.
+`worldHistory`'s unbounded growth, the draft's other worry, was fixed on its
+own merits (`885d9f0`): `worldEpochs` keeps only graphs a pass could still
+walk and `worldLog` keeps capped per-declaration lines; and with the magma
+keyed by `Ref` (`Op/Dag.hs`) there is no per-declaration graph to retain at
+all.
 
 ## Process lifecycle details worth deciding early
 
@@ -536,10 +599,12 @@ not a system anyone should ship.
   is not v1.
 - **Readiness.** `Type=simple` only (as `Systemd.ServiceType` already is):
   "spawned" means "started". Notify/readiness protocols are a v2 concern, and
-  the honest v1 story for ordering against readiness is "the dependent node's
-  `prelim`/`up` retries until the dependency answers" — which the convergence
-  loop already does, and which is arguably more robust than a readiness
-  protocol anyway.
+  the honest v1 story for ordering against readiness is "the dependent node
+  waits on `waitStability` and its own `check` until the dependency
+  answers" — which `Upkeep` already does (failure is waited out, not
+  contained), and which is arguably more robust than a readiness protocol
+  anyway. A `RestForOne` on the dependency is the opt-in for "and bounce me
+  if it goes away".
 - **Shutdown ordering.** `downTree` gives correct reverse-dependency teardown,
   but a real shutdown also needs a global deadline: converge-down with a
   timeout, then SIGTERM everything remaining, then SIGKILL, then `sync` and
@@ -590,12 +655,18 @@ machine that also has to run somebody else's units.
 - **How small can stage 0 actually get?** Every line in it is a line that
   `run tree` cannot show you. Is there a defensible way to express the mounts
   as ops that run under a degraded engine, or is hardcoding them honest?
-- **Seed vs directive on disk.** `/etc/salmon-init.json` holding the *seed*
-  means `Configure` runs in IO at boot — flexible, but it can fail at boot in a
-  way a pre-computed directive could not. Supporting both (seed, plus an
-  optional cached directive alongside) hedges this and mirrors `serve`'s
-  existing `up` vs `up-directive` distinction. Note the seed is JSON here, so
-  it needs `FromJSON seed`, not the `ParseRecord seed` that `serve` uses.
+- **Seed vs directive on disk** is answered by pull mode's document format:
+  a document entry is either `{"seed": [words]}` or `{"directive": {...}}`,
+  mirroring `up` vs `up-directive`. A role can publish directives (hermetic,
+  cannot fail `Configure` at boot) or seeds (flexible); the cached last
+  document is what the VM boots from. What remains open is only whether a
+  role should *refuse* seeds and insist on directives for the boot path.
+- **Does the fleet story change the build model?** With labels addressing
+  documents in a registry, "one cabal-built binary per role" is still right
+  for the *graph*, but a role's parameters now come from the registry rather
+  than an image-baked file, which means the image is the same for every
+  machine of a role and the label is the only per-machine input. That is a
+  simplification; it should be stated as the target.
 - **How static is "static"?** A statically-linked GHC binary is achievable but
   not free, and it interacts with what the recipes actually shell out to: a
   supervisor with no dynamic loader still needs `psql`, `ip`, `nft` and friends
@@ -614,15 +685,19 @@ machine that also has to run somebody else's units.
 Each is independently useful and independently testable, which matters a lot
 for something whose failure mode is "the VM does not boot".
 
-**In `Serve`, ahead of any of this** (both worth doing on their own merits):
+**In `Serve`, ahead of any of this:**
 
-0a. **Supervision in `run serve`** — exercised interactively from a shell,
-    where a wedged loop costs nothing, before anything depends on it to boot.
-    This is milestone 4 below, built somewhere debuggable first. Superseded in
-    approach by `specs/per-node-state-machines.md`: a first cut shipped as
-    `Nodes/Supervised` and was removed (`579f435`) in favour of it.
+0a. **Supervision in `run serve`** — done: `managed`/`Daemon`, `Supervision`,
+    `Upkeep`, tending between commands (`80fb410`, `e9fd9d9` and the
+    per-node-state-machines series). Milestone 4 below is now wiring.
 
-0b. **`worldHistory` retention** — done (`885d9f0`); see above.
+0b. **`worldHistory` retention** — done (`885d9f0`).
+
+0c. **The serve-language socket** — `specs/generic-server.md` milestone 2.
+    This spec consumes it.
+
+0d. **Pull mode with a cached last document** — `specs/pull-mode.md`
+    milestones 2–4. This spec consumes it for reconfiguration.
 
 **Then the init system itself:**
 
@@ -639,11 +714,18 @@ for something whose failure mode is "the VM does not boot".
    `salmon_init.backoff=off` on the kernel cmdline overrides the file. That
    last set is cheap to test and is exactly the behaviour nobody exercises
    until the day it matters.
-3. **`SalmonInit.service` node + seed reading + one converge pass.** First real
-   boot of a cabal-built role supervisor from `/etc/salmon-init.json`.
-4. **Supervision proper in the supervisor**: exit-event-driven convergence,
-   restart policy, backoff, give-up latch — i.e. 0a wired to the real event
-   source.
-5. **Reconfiguration**: SIGHUP re-read of parameters, and supervisor binary
-   replacement without dropping services.
+3. **`SalmonInit.service` node** as a sibling of `Daemon.daemon` (1 above):
+   `check` = `Query`, `managed` = `Spawn`/`Attach` + block on `Exited`,
+   cancellation = `Signal`. Plus seed/directive reading from the cached
+   document and one converge pass. First real boot of a cabal-built role
+   supervisor. Test at Layer 1 against a fake PID 1 speaking the protocol
+   over a socketpair, before any VM.
+4. **Supervision proper**: nothing to build — `Upkeep` tends the node from
+   milestone 3 with its declared `Supervision`. The test is that killing a
+   service under the VM brings it back by policy, and that a crash-looping
+   one parks after `supGiveUpAfter` rather than spinning.
+5. **Reconfiguration**: `--follow` a registry (0d) from inside the VM, and
+   supervisor binary replacement without dropping services — which is 1b's
+   re-attach, tested by killing the supervisor and checking `status` from
+   the new one shows every slot `Standing`.
 6. **Ordered shutdown**: `downTree` with a global deadline, then `reboot(2)`.
