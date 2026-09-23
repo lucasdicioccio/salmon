@@ -48,6 +48,9 @@ module Salmon.Reporter.Tagged (
     refValue,
     actPairs,
     checkResultValue,
+    nodeStatePairs,
+    nodeStateValue,
+    epochValue,
 ) where
 
 import Control.Exception (SomeException)
@@ -311,73 +314,85 @@ instance ToJSON Serve.Report where
             -- would print: the reference is prose, and there is nothing
             -- more structured to say about it.
             Serve.HelpText mtopic -> [kind "help", "topic" .= mtopic, "lines" .= Serve.renderReport rep]
-      where
-        nodeStateValue :: Map Ref [Text] -> Maybe (Set Ref, Set Ref) -> (Ref, Serve.NodeState) -> Value
-        nodeStateValue paths selection (r, st) =
-            object $
-                [ "ref" .= refValue r
-                , "shorthand" .= st.nodeShorthand
-                , "help" .= st.nodeHelp
-                , "direction" .= directionValue st.nodeDirection
-                , "convergence" .= convergence st.nodeConvergence
-                , "status" .= fmap statusValue st.nodeStatus
-                , "paths" .= Map.findWithDefault [] r paths
-                ]
-                    ++ case selection of
-                        Nothing -> []
-                        Just (sel, exc) ->
-                            [ "selected" .= (r `Set.member` sel)
-                            , "excluded" .= (r `Set.member` exc)
-                            ]
 
-        convergence :: Serve.Convergence -> Text
-        convergence Serve.Pending = "pending"
-        convergence Serve.Stale = "stale"
-        convergence Serve.Converged = "converged"
-        convergence Serve.Errored = "errored"
-        convergence Serve.Blocked = "blocked"
+-------------------------------------------------------------------------------
 
-        -- the snapshot 'Serve.NodeState' keeps of a node's machine: the
-        -- clock reading is left out, since it is only meaningful against
-        -- a later reading of the same monotonic clock in the same process.
-        statusValue :: Status.Status -> Value
-        statusValue ms =
-            object
-                [ "check" .= checkResultValue ms.statusCheck
-                , "direction" .= directionValue ms.statusDirection
-                , "stability" .= stabilityValue ms.statusStability
-                , "epoch" .= ms.statusEpoch
-                , "output" .= Status.ringLines ms.statusOutput
+{- | A node as @status@\/@query@ list it: its 'Ref', what it is, which way it
+is wanted, how far it has got, its machine's last snapshot, and the paths a
+selector can name it by. The pairs rather than the object, so that a
+consumer with more to say about the node — the @\/dag@ read in
+"Salmon.Actions.Serve.Http", which adds its edges — extends the same
+encoding rather than keeping a second one.
+-}
+nodeStatePairs :: Map Ref [Text] -> Maybe (Set Ref, Set Ref) -> (Ref, Serve.NodeState) -> [(Key, Value)]
+nodeStatePairs paths selection (r, st) =
+    [ "ref" .= refValue r
+    , "shorthand" .= st.nodeShorthand
+    , "help" .= st.nodeHelp
+    , "direction" .= directionValue st.nodeDirection
+    , "convergence" .= convergence st.nodeConvergence
+    , "status" .= fmap statusValue st.nodeStatus
+    , "paths" .= Map.findWithDefault [] r paths
+    ]
+        ++ case selection of
+            Nothing -> []
+            Just (sel, exc) ->
+                [ "selected" .= (r `Set.member` sel)
+                , "excluded" .= (r `Set.member` exc)
                 ]
 
-        epochValue :: (Serve.EpochId, Serve.Declaration, Bool, Serve.Origin, [String]) -> Value
-        epochValue (eid, decl, active, origin, args) =
-            object
-                [ "epoch" .= eid.unEpochId
-                , "declaration" .= declaration decl
-                , "active" .= active
-                , "origin" .= originValue origin
-                , "args" .= args
-                ]
+nodeStateValue :: Map Ref [Text] -> Maybe (Set Ref, Set Ref) -> (Ref, Serve.NodeState) -> Value
+nodeStateValue paths selection = object . nodeStatePairs paths selection
 
-        -- who made the declaration: the same distinction the text `history`
-        -- draws with its trailing `[fetched ...]`/`[loaded ...]` annotation.
-        originValue :: Serve.Origin -> Value
-        originValue origin = case origin of
-            Serve.Stdin -> object ["kind" .= ("stdin" :: Text)]
-            Serve.Origin name -> object ["kind" .= ("other" :: Text), "name" .= name]
-            Serve.Loaded path -> object ["kind" .= ("loaded" :: Text), "path" .= path]
-            Serve.Fetched prov ->
-                object
-                    [ "kind" .= ("fetched" :: Text)
-                    , "registry" .= prov.provRegistry
-                    , "label" .= prov.provLabel
-                    , "document" .= prov.provDocument
-                    , "sha256" .= prov.provDigest
-                    ]
+convergence :: Serve.Convergence -> Text
+convergence Serve.Pending = "pending"
+convergence Serve.Stale = "stale"
+convergence Serve.Converged = "converged"
+convergence Serve.Errored = "errored"
+convergence Serve.Blocked = "blocked"
 
-        -- the input-language word, the same one 'Serve.renderReport' prints
-        declaration :: Serve.Declaration -> Text
-        declaration Serve.Add = "up"
-        declaration Serve.Replace = "only"
-        declaration Serve.Remove = "down"
+-- the snapshot 'Serve.NodeState' keeps of a node's machine: the
+-- clock reading is left out, since it is only meaningful against
+-- a later reading of the same monotonic clock in the same process.
+statusValue :: Status.Status -> Value
+statusValue ms =
+    object
+        [ "check" .= checkResultValue ms.statusCheck
+        , "direction" .= directionValue ms.statusDirection
+        , "stability" .= stabilityValue ms.statusStability
+        , "epoch" .= ms.statusEpoch
+        , "output" .= Status.ringLines ms.statusOutput
+        ]
+
+-- | One line of @history@.
+epochValue :: (Serve.EpochId, Serve.Declaration, Bool, Serve.Origin, [String]) -> Value
+epochValue (eid, decl, active, origin, args) =
+    object
+        [ "epoch" .= eid.unEpochId
+        , "declaration" .= declaration decl
+        , "active" .= active
+        , "origin" .= originValue origin
+        , "args" .= args
+        ]
+
+-- the input-language word, the same one 'Serve.renderReport' prints
+declaration :: Serve.Declaration -> Text
+declaration Serve.Add = "up"
+declaration Serve.Replace = "only"
+declaration Serve.Remove = "down"
+
+-- who made the declaration: the same distinction the text `history`
+-- draws with its trailing `[fetched ...]`/`[loaded ...]` annotation.
+originValue :: Serve.Origin -> Value
+originValue origin = case origin of
+    Serve.Stdin -> object ["kind" .= ("stdin" :: Text)]
+    Serve.Origin name -> object ["kind" .= ("other" :: Text), "name" .= name]
+    Serve.Loaded path -> object ["kind" .= ("loaded" :: Text), "path" .= path]
+    Serve.Fetched prov ->
+        object
+            [ "kind" .= ("fetched" :: Text)
+            , "registry" .= prov.provRegistry
+            , "label" .= prov.provLabel
+            , "document" .= prov.provDocument
+            , "sha256" .= prov.provDigest
+            ]

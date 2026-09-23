@@ -38,6 +38,7 @@ module Salmon.Actions.Serve.Socket (
     -- * Listening
     Listener,
     listenerPath,
+    listenerSocket,
     withUnixListener,
     ListenError (..),
 

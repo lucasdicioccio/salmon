@@ -128,6 +128,7 @@ module Salmon.Actions.Serve (
     serveProducers,
     serveAttributed,
     serveFollowing,
+    serveObserved,
 
     -- * Input producers
     Producer (..),
@@ -162,6 +163,11 @@ module Salmon.Actions.Serve (
     NodeState (..),
     Direction (..),
     Convergence (..),
+
+    -- * Reading a world
+    worldDag,
+    worldPaths,
+    historyLinesMatching,
 
     -- * Reporting
     Report (..),
@@ -1546,9 +1552,46 @@ serveAttributed ::
     Maybe (IO ()) ->
     [Producer] ->
     IO (World seed directive)
-serveAttributed rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
+serveAttributed = serveObserved (const (pure ()))
+
+{- | 'serveAttributed', handing an observer a way to read the 'World' before
+the first line is read.
+
+The accessor is a plain read of the loop's own cell — never a copy, never a
+lock — so what it returns is whatever the loop has committed so far: a
+declaration's nodes the moment it is recorded (a pass has not necessarily
+run), and the tending snapshot 'stopTending' last filed on each node. It is
+what a server answering reads ("Salmon.Actions.Serve.Http") holds instead of
+a seat in the inbox, which is the whole of how a read stays a read: it never
+stands the machines down and never waits behind a command, including one
+whose @up@ is taking a while.
+
+The observer is called once, synchronously, before any producer starts; a
+server that wants to run for the loop's lifetime forks from it. The loop
+does not kill anything the observer started — a server's own bracket owns
+that — but it does return, so an observer holding the accessor after that
+reads the final 'World', the same value this returns. It is the first
+argument, ahead of everything 'serveAttributed' takes, so that the two
+signatures read as one prefixed by the other.
+-}
+serveObserved ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe (IO ()) ->
+    [Producer] ->
+    IO (World seed directive)
+serveObserved observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
-    serveLoop rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+    serveLoop observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
@@ -1558,6 +1601,7 @@ serveAttributed rewrites limit autoConverge0 rAttributed nodeReporterAttributed 
 serveLoop ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
+    (IO (World seed directive) -> IO ()) ->
     [Rewrite Extension] ->
     Maybe ConcurrencyLimit ->
     Bool ->
@@ -1570,8 +1614,9 @@ serveLoop ::
     Maybe (IO ()) ->
     [Producer] ->
     IO (World seed directive)
-serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
+serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
     world <- newIORef emptyWorld
+    observe (readIORef world)
     tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
     inbox <- newTChanIO
     readers <- traverse (\p -> forkIO (produceInto p inbox)) producers
