@@ -38,6 +38,7 @@ import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
+import qualified Salmon.Actions.Serve.Events as Events
 import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.Serve.Socket as Socket
 -- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
@@ -96,8 +97,10 @@ data RunCommand
       -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
       -- @specs/generic-server.md@; see "Salmon.Actions.Serve.Socket"),
       -- stdin still read beside it, and for HTTP on a second unix socket
-      -- (@--http PATH@, milestone 3; see "Salmon.Actions.Serve.Http").
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath)
+      -- (@--http PATH@, milestone 3; see "Salmon.Actions.Serve.Http"),
+      -- whose event stream keeps @--events-ring N@ events for a client to
+      -- resume from (milestone 4; see "Salmon.Actions.Serve.Events").
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
@@ -254,8 +257,16 @@ runCommandParser =
                     ( long "http"
                         <> Options.Applicative.metavar "PATH"
                         <> Options.Applicative.help
-                            "Also serve HTTP on a unix socket at PATH (created owner-only): GET /dag, /status, /history, /help/seed and POST /command[?async]. Stdin keeps working alongside."
+                            "Also serve HTTP on a unix socket at PATH (created owner-only): GET /dag, /status, /history, /help/seed, /events and POST /command[?async]. Stdin keeps working alongside."
                     )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "events-ring"
+                    <> Options.Applicative.metavar "N"
+                    <> Options.Applicative.value (Events.configRing Events.defaultConfig)
+                    <> Options.Applicative.showDefault
+                    <> Options.Applicative.help "How many events --http's /events keeps for a client to resume from with ?since=; a client further behind is sent a gap event."
                 )
     followOptionsP =
         FollowOptions
@@ -499,7 +510,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let tagged = taggedFor fmt
             follow <- case (followDir, traverse Follow.mkLabel labels) of
@@ -551,7 +562,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             -- own reports, and both hand everything on to the loop's own,
             -- which stays exactly as `fmt` says.
             withMaybe listen Socket.withUnixListener $ \mlistener ->
-                withMaybe http (\path -> Http.withHttpServer path (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
+                withMaybe http (\path -> Http.withHttpServerWith Events.defaultConfig{Events.configRing = eventsRing} path (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
                     let (serveR0, r0) = reportersOver tagged
                         base = case mlistener of
                             Nothing -> (contramap Serve.attributed serveR0, contramap Serve.attributed r0)

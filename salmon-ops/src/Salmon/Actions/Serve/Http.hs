@@ -24,7 +24,12 @@ Milestone 3 of @specs\/generic-server.md@. Four reads and one write:
     response is the JSON array of every report that line produced, which
     is what @curl@ and a CI step want. With @?async@ the line is queued and
     the response is the sequence number it was queued at, for a client
-    that reads the event stream (milestone 4) from there instead.
+    that reads the event stream from there instead.
+  * @GET \/events@ — the event stream, milestone 4, as server-sent events:
+    every report the loop's reporters see, numbered, with @?since=N@ to
+    replay what the ring still holds after @N@ and go on live, and
+    @?stream=@\/@?origin=@ to narrow it. "Salmon.Actions.Serve.Events" is
+    the record behind it; this module only writes it to a connection.
 
 = Reads never touch the inbox
 
@@ -67,30 +72,42 @@ story, and there is no TCP here (see the spec's security section).
 
 = Sequence numbers
 
-'Sequence' is the counter an @async@ command's number is drawn from,
-kept on the 'Server' ('serverSequence') so that the event stream, when it
-lands, draws every report's number from the same counter under the
-reporter lock the concurrent driver already serialises through. One
-counter for enqueues and reports gives a client one cursor: everything
-that happened after its command was queued is everything numbered after
-the number it was handed.
+One counter, on 'Events'. A command @POST \/command@ queues is an
+@enqueued@ event numbered from it (an @?async@ answer is that number), and
+every report is numbered from it as it is published, in one transaction
+with the ring and the broadcast — see "Salmon.Actions.Serve.Events" for
+why that transaction, rather than the concurrent driver's reporter lock,
+is the critical section. A client has one cursor: everything that happened
+after its command was queued is everything numbered after the number it
+was handed, and @\/dag@ and @\/status@ carry @seq@, the last number handed
+out when the snapshot was read, so that @\/events?since=@ that number
+resumes without a gap. The number is read __before__ the world, so an
+event landing between the two reads is replayed rather than skipped.
+
+= The stream on the wire
+
+@\/events@ is a @text\/event-stream@ response that does not end until the
+client goes or the loop does: one @id: N@ \/ @data: {...}@ per event (the
+'Events.eventValue' object), a @gap@ event first when the ring no longer
+reaches @?since@, and a comment line after every 'Events.configKeepAlive'
+of silence, so a proxy between here and the client, or a client with a
+read timeout, keeps the connection. A client hanging up is an exception
+out of the write, which ends the stream and drops its subscription; the
+loop ending sets 'serverStopped', on which every open stream returns, so
+warp's shutdown does not wait behind a subscriber.
 -}
 module Salmon.Actions.Serve.Http (
     -- * Serving
     Server,
     serverPath,
+    serverEvents,
     withHttpServer,
+    withHttpServerWith,
 
     -- * Plugging into the loop
     serverObserver,
     serverProducer,
     serverReporters,
-
-    -- * Sequence numbers
-    Sequence,
-    newSequence,
-    nextSequence,
-    serverSequence,
 
     -- * The read model
     WorldView (..),
@@ -100,9 +117,10 @@ module Salmon.Actions.Serve.Http (
 ) where
 
 import Control.Concurrent.Async (withAsync)
-import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, retry, writeTChan, writeTVar)
+import qualified Control.Concurrent.STM as STM
+import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTChan, writeTVar)
 import Control.Exception (finally)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -112,9 +130,11 @@ import qualified Data.ByteString.Lazy as LByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Read as Text
 import Data.Word (Word64)
 import qualified Network.HTTP.Types as HTTP
 import Network.Wai (Application, Request, Response)
@@ -123,6 +143,8 @@ import qualified Network.Wai.Handler.Warp as Warp
 
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Declaration, EpochId, Line (..), NodeState (..), Origin (..), Producer (..), World (..))
+import qualified Salmon.Actions.Serve.Events as Events
+import Salmon.Actions.Serve.Events (Events)
 import qualified Salmon.Actions.Serve.Socket as Socket
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension (Extension (..))
@@ -133,21 +155,6 @@ import Salmon.Op.Ref (Ref)
 import Salmon.Op.Status (Direction (..))
 import Salmon.Reporter
 import Salmon.Reporter.Tagged (Tagged (..), nodeStatePairs, refValue)
-
--------------------------------------------------------------------------------
-
-{- | A per-loop counter. An @async@ command is numbered from it at enqueue;
-the event stream (milestone 4) numbers every report from it too, under the
-reporter lock, so the two share one order.
--}
-newtype Sequence = Sequence (IORef Word64)
-
-newSequence :: IO Sequence
-newSequence = Sequence <$> newIORef 0
-
--- | Take the next number.
-nextSequence :: Sequence -> IO Word64
-nextSequence (Sequence counter) = atomicModifyIORef' counter (\n -> (n + 1, n))
 
 -------------------------------------------------------------------------------
 
@@ -164,7 +171,8 @@ data Server = Server
     -- ^ synchronous commands still waiting for their reports
     , serverCounter :: IORef Int
     -- ^ next request number; an origin is never reused within a run
-    , serverSequence :: Sequence
+    , serverEvents :: Events
+    -- ^ the counter, the ring and the broadcast behind @\/events@
     , serverMode :: IO Serve.Mode
     -- ^ what @status@ says first: interactive, following, or replaying a
     -- cached document ("Salmon.Actions.Follow"); the loop's own accessor
@@ -192,7 +200,11 @@ it takes the action to return, and a request still waiting at that point
 is answered with the reports it collected.
 -}
 withHttpServer :: FilePath -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
-withHttpServer path seedHelp mode act =
+withHttpServer = withHttpServerWith Events.defaultConfig
+
+-- | 'withHttpServer' with the event stream's ring size and keep-alive chosen.
+withHttpServerWith :: Events.Config -> FilePath -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
+withHttpServerWith cfg path seedHelp mode act =
     Socket.withUnixListener path $ \listener -> do
         server <-
             Server listener seedHelp
@@ -200,7 +212,7 @@ withHttpServer path seedHelp mode act =
                 <*> newTVarIO Nothing
                 <*> newTVarIO Map.empty
                 <*> newIORef 0
-                <*> newSequence
+                <*> Events.newEvents cfg
                 <*> pure mode
                 <*> newTVarIO False
         let settings = Warp.setServerName "salmon" Warp.defaultSettings
@@ -224,11 +236,12 @@ serverProducer server = Producer $ \inbox -> do
     atomically (writeTVar (serverInbox server) (Just inbox))
     atomically retry `finally` atomically (writeTVar (serverInbox server) Nothing)
 
-{- | Wrap the loop's reporters: every report goes on unchanged, and one
-stamped with a waiting request's origin is collected for that request's
-response. The loop's 'Serve.HungUp' for such an origin releases the
-request — it is the loop saying every line typed under that origin has
-been handled, so the response is complete.
+{- | Wrap the loop's reporters: every report goes on unchanged, then onto
+the event stream ('Events.eventsReporter', numbered there), and one stamped
+with a waiting request's origin is collected for that request's response.
+The loop's 'Serve.HungUp' for such an origin releases the request — it is
+the loop saying every line typed under that origin has been handled, so the
+response is complete.
 -}
 serverReporters ::
     Server ->
@@ -239,6 +252,7 @@ serverReporters server (serveR, updownR) = (serveR', updownR')
     serveR' :: Reporter (Attributed Serve.Report)
     serveR' = ReporterM $ \a@(Attributed origin rep) -> do
         runReporter serveR a
+        runReporter events (FromServe <$> a)
         forM_ origin (collect (FromServe rep))
         case rep of
             Serve.HungUp gone -> release gone
@@ -247,7 +261,11 @@ serverReporters server (serveR, updownR) = (serveR', updownR')
     updownR' :: Reporter (Attributed (UpDown.Report Extension))
     updownR' = ReporterM $ \a@(Attributed origin rep) -> do
         runReporter updownR a
+        runReporter events (FromUpDown <$> a)
         forM_ origin (collect (FromUpDown rep))
+
+    events :: Reporter (Attributed Tagged)
+    events = Events.eventsReporter (serverEvents server)
 
     collect :: Tagged -> Origin -> IO ()
     collect tagged origin = atomically $ do
@@ -342,13 +360,13 @@ instance FromJSON CommandBody where
 application :: Server -> Application
 application server req respond =
     case (Wai.requestMethod req, Wai.pathInfo req) of
-        ("GET", ["dag"]) -> withView $ \v -> do
+        ("GET", ["dag"]) -> withView $ \seqNo v -> do
             mode <- serverMode server
-            respond (json HTTP.status200 (dagValue mode v))
-        ("GET", ["status"]) -> withView $ \v -> do
+            respond (json HTTP.status200 (withSeq seqNo (dagValue mode v)))
+        ("GET", ["status"]) -> withView $ \seqNo v -> do
             mode <- serverMode server
-            respond (json HTTP.status200 (toJSON (FromServe (Serve.StatusReport mode (Map.toList (viewNodes v)) (viewPaths v)))))
-        ("GET", ["history"]) -> withView $ \v ->
+            respond (json HTTP.status200 (withSeq seqNo (toJSON (FromServe (Serve.StatusReport mode (Map.toList (viewNodes v)) (viewPaths v))))))
+        ("GET", ["history"]) -> withView $ \_ v ->
             respond (json HTTP.status200 (withElided (viewElided v) (toJSON (FromServe (Serve.HistoryReport (viewHistory v))))))
         ("GET", ["help", "seed"]) ->
             respond $
@@ -360,6 +378,8 @@ application server req respond =
                         ]
                     )
         ("POST", ["command"]) -> command >>= respond
+        ("GET", ["events"]) -> events
+        (_, ["events"]) -> respond (methodNotAllowed ["GET"])
         (_, ["dag"]) -> respond (methodNotAllowed ["GET"])
         (_, ["status"]) -> respond (methodNotAllowed ["GET"])
         (_, ["history"]) -> respond (methodNotAllowed ["GET"])
@@ -367,12 +387,21 @@ application server req respond =
         (_, ["command"]) -> respond (methodNotAllowed ["POST"])
         _ -> respond (failure HTTP.status404 "no such resource")
   where
-    withView :: (WorldView -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
+    -- the snapshot and the last sequence number at the time it was taken:
+    -- the number first, so what lands in between is replayed, never
+    -- skipped (see "Sequence numbers" above).
+    withView :: (Word64 -> WorldView -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
     withView k = do
         mread <- readTVarIO (serverView server)
         case mread of
             Nothing -> respond (failure HTTP.status503 "the loop has not started")
-            Just readView -> readView >>= k
+            Just readView -> do
+                seqNo <- Events.lastSequence (serverEvents server)
+                readView >>= k seqNo
+
+    withSeq :: Word64 -> Value -> Value
+    withSeq n (Object o) = Object (KeyMap.insert "seq" (toJSON n) o)
+    withSeq n v = object ["report" .= v, "seq" .= n]
 
     -- the history object as `--json` prints it, with the count `history`
     -- would print as a second object folded in as a field.
@@ -392,7 +421,9 @@ application server req respond =
                     Just inbox -> do
                         n <- atomicModifyIORef' (serverCounter server) (\k -> (k + 1, k))
                         let origin = Origin (Text.pack (serverPath server <> "#" <> show n))
-                        seqNo <- nextSequence (serverSequence server)
+                        -- numbered before it is queued, so every report
+                        -- the line produces is numbered after it
+                        seqNo <- Events.enqueued (serverEvents server) origin line
                         if asynchronous
                             then do
                                 atomically (enqueue inbox origin line)
@@ -418,6 +449,58 @@ application server req respond =
 
     asynchronous :: Bool
     asynchronous = any ((== "async") . fst) (Wai.queryString req)
+
+    -- @\/events@: replay from @?since@ (a gap first if the ring no longer
+    -- reaches it), then live until the client or the loop goes.
+    events :: IO Wai.ResponseReceived
+    events =
+        case eventsQuery req of
+            Left err -> respond (failure HTTP.status400 err)
+            Right (since, filt) ->
+                respond $ Wai.responseStream HTTP.status200 sseHeaders $ \write flush ->
+                    Events.withSubscription (serverEvents server) since $ \sub -> do
+                        forM_ (Events.subscriptionGap sub) (write . Events.renderGap)
+                        forM_ (filter (Events.matches filt) (Events.subscriptionReplay sub)) (write . Events.renderEvent)
+                        flush
+                        let keepAlive = Events.configKeepAlive (Events.eventsConfig (serverEvents server))
+                            live = do
+                                expired <- registerDelay keepAlive
+                                next <-
+                                    atomically $
+                                        (Just . Just <$> Events.subscriptionLive sub)
+                                            `orElse` (Nothing <$ (readTVar (serverStopped server) >>= STM.check))
+                                            `orElse` (Just Nothing <$ (readTVar expired >>= STM.check))
+                                case next of
+                                    Nothing -> pure ()
+                                    Just Nothing -> write Events.keepAlive >> flush >> live
+                                    Just (Just e) -> do
+                                        when (Events.matches filt e) (write (Events.renderEvent e) >> flush)
+                                        live
+                        live
+
+    sseHeaders :: [HTTP.Header]
+    sseHeaders =
+        [ (HTTP.hContentType, "text/event-stream")
+        , (HTTP.hCacheControl, "no-cache")
+        , ("X-Accel-Buffering", "no")
+        ]
+
+-- | @?since=N@, @?stream=a,b@ (repeatable), @?origin=NAME@ (repeatable).
+eventsQuery :: Request -> Either Text (Maybe Word64, Events.Filter)
+eventsQuery req = do
+    since <- case lookup "since" query of
+        Nothing -> Right Nothing
+        Just Nothing -> Left "since needs a number"
+        Just (Just raw) -> case Text.decimal (Text.decodeUtf8 raw) of
+            Right (n, rest) | Text.null rest -> Right (Just n)
+            _ -> Left "since is not a number"
+    let listed key = [Text.strip v | (k, Just raw) <- query, k == key, v <- Text.splitOn "," (Text.decodeUtf8 raw), not (Text.null (Text.strip v))]
+        setOf key = case listed key of
+            [] -> Nothing
+            vs -> Just (Set.fromList vs)
+    pure (since, Events.Filter{Events.filterStreams = setOf "stream", Events.filterOrigins = setOf "origin"})
+  where
+    query = Wai.queryString req
 
 -- | One line, from a JSON @{"line": ...}@ body or a text one.
 commandLine :: Request -> LByteString.ByteString -> Either Text String

@@ -30,7 +30,7 @@ import Data.List (sort)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -265,6 +265,10 @@ field :: Text -> Value -> Maybe Value
 field k (Object o) = KeyMap.lookup (Key.fromText k) o
 field _ _ = Nothing
 
+withoutSeq :: Value -> Value
+withoutSeq (Object o) = Object (KeyMap.delete "seq" o)
+withoutSeq v = v
+
 arrayOf :: Value -> [Value]
 arrayOf (Array xs) = toList xs
 arrayOf _ = []
@@ -382,7 +386,7 @@ syncAndAsyncAgree = do
     -- asynchronously: queued, then a sync `status` that is handled after them all
     (asyncUps, asyncDowns, asyncWorld) <- withRunning $ \running -> do
         seqs <- forM script (async running)
-        assertEqual "sequence numbers are assigned at enqueue, in order" [0 .. fromIntegral (length script) - 1] seqs
+        assertBool ("sequence numbers are assigned at enqueue, in order: " <> show seqs) (and (zipWith (<) seqs (drop 1 seqs)))
         _ <- sync running "status"
         own <- runningOwn running
         let handled = length (filter isConvergeStop own)
@@ -450,11 +454,13 @@ theOtherReads =
         (scode, st) <- get running "/status"
         assertEqual "status status" 200 scode
         assertEqual "kind" (Just "status") (textAt ["kind"] st)
-        -- and the same object the loop's own `status` produces
+        -- and the same object the loop's own `status` produces, plus the
+        -- event stream's cursor (milestone 4)
+        assertBool "the read carries seq" (isJust (field "seq" st))
         _ <- sync running "status"
         own <- runningOwn running
         let fromLoop = [toJSON t | t@(Tagged.FromServe Serve.StatusReport{}) <- own]
-        assertEqual "the same object --json prints" [st] fromLoop
+        assertEqual "the same object --json prints" [withoutSeq st] fromLoop
         (nf, _) <- get running "/nope"
         assertEqual "unknown route" 404 nf
         (mna, _) <- post running "/dag" "status"
