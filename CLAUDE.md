@@ -794,7 +794,7 @@ human-readable dependency tree (`Actions.Help`); `run dag` prints Graphviz dot o
 binary's text reporters are replaced by one JSON object per line on stdout, flushed per report,
 so `run up --json | jq` streams. `Salmon.Reporter.Tagged` is the whole of it — a `Tagged` sum of
 the three report streams (`Serve.Report`, `UpDown.Report Extension`, `Upkeep.Report Extension`)
-tagged by `origin`, the three `ToJSON` instances (orphans, kept together there because the two
+tagged by `stream` (not `origin`, which names who typed a command), the three `ToJSON` instances (orphans, kept together there because the two
 parametric streams are only encodable at `Extension`, which `UpDown` cannot import), and two
 reporters over the sum: `reportTexts`, which dispatches back to the three text reporters
 unchanged, and `reportJSONLines`. `CommandLine` builds exactly one `Reporter Tagged` per run and

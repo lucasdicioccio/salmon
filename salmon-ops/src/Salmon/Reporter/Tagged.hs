@@ -9,7 +9,7 @@ node did, from the one-shot drivers and, wrapped in 'Upkeep.Acted', from the
 tending loop), 'Upkeep.Report' (what a node's own machine is doing between
 commands) and 'Serve.Report' (what the @run serve@ loop is doing). Each has
 its own text rendering, and each is emitted through its own
-'Reporter'. 'Tagged' is the sum of the three, tagged by origin, so that one
+'Reporter'. 'Tagged' is the sum of the three, tagged by stream, so that one
 'Reporter' 'Tagged' can be split contravariantly into the three the drivers
 expect ('serveStream'/'updownStream'/'upkeepStream' are the 'contramap's) and
 so that a second consumer — a JSON line writer today, a server later (see
@@ -26,7 +26,10 @@ The format: every report is an object with a @kind@, a @ref@ (an object with
 the 'shortRef' and the full text) wherever there is one node the report is
 about, and named fields. A report that nests another stream's report
 ('Upkeep.Acted', 'Serve.Tended') nests the inner object as-is under
-@report@. 'Tagged' adds @origin@ to the object. Report text — @help@,
+@report@. 'Tagged' adds @stream@ to the object — @serve@, @updown@ or
+@upkeep@; the key is not @origin@ because that word names who typed a
+command (see 'Serve.Origin'), which the event stream will carry too. Report
+text — @help@,
 @notes@, failure text — is public and encoded verbatim; see the spec's
 decisions. No sequence numbers yet.
 -}
@@ -126,11 +129,11 @@ instance ToJSON Tagged where
             FromUpkeep rep -> withOrigin "upkeep" (toJSON rep)
       where
         withOrigin :: Text -> Value -> Value
-        withOrigin origin (Object o) = Object (KeyMap.insert "origin" (String origin) o)
+        withOrigin origin (Object o) = Object (KeyMap.insert "stream" (String origin) o)
         -- every instance below produces an object; kept total rather than
         -- partial so a future non-object encoding degrades to a wrapper
         -- instead of a crash in a reporter.
-        withOrigin origin v = object ["origin" .= origin, "report" .= v]
+        withOrigin origin v = object ["stream" .= origin, "report" .= v]
 
 -------------------------------------------------------------------------------
 
@@ -276,8 +279,6 @@ instance ToJSON Serve.Report where
         object $ case rep of
             Serve.Started -> [kind "started"]
             Serve.Stopped -> [kind "stopped"]
-            -- @from@ rather than @origin@: 'Tagged' already puts the stream's
-            -- name under that key.
             Serve.HungUp origin -> [kind "hung-up", "from" .= Serve.originName origin]
             Serve.BadCommand err -> [kind "bad-command", "error" .= err]
             Serve.BadSeed err -> [kind "bad-seed", "error" .= err]

@@ -48,7 +48,7 @@ tests =
     testGroup
         "Salmon.Reporter.Tagged"
         [ testGroup "golden JSON, one per constructor" [testCase name (golden rep expected) | (name, rep, expected) <- goldens]
-        , testCase "Tagged adds an origin to the inner object and nothing else" taggedOrigin
+        , testCase "Tagged adds a stream to the inner object and nothing else" taggedOrigin
         , testCase "a Ref encodes as its short tag and its full text" refShape
         , testCase "the text reporters print the same lines beside a JSON one as they do alone" textUnchangedBesideJson
         , testCase "reportJSONLines writes one object per line" oneObjectPerLine
@@ -124,7 +124,7 @@ golden tagged expectedText = do
   where
     -- the goldens are about each stream's own object; 'taggedOrigin' covers
     -- what 'Tagged' adds on top.
-    stripOrigin (Object o) = Object (KeyMap.delete "origin" o)
+    stripOrigin (Object o) = Object (KeyMap.delete "stream" o)
     stripOrigin v = v
 
 -------------------------------------------------------------------------------
@@ -301,14 +301,14 @@ taggedOrigin = do
     assertEqual "serve" (Just (String "serve")) (originOf (Tagged.FromServe Serve.Started))
     assertEqual "updown" (Just (String "updown")) (originOf (Tagged.FromUpDown (UpDown.Done fixtureAct)))
     assertEqual "upkeep" (Just (String "upkeep")) (originOf (Tagged.FromUpkeep (Upkeep.Holding 1)))
-    -- the inner object is carried whole: removing the origin gives it back
+    -- the inner object is carried whole: removing the stream gives it back
     let inner = toJSON (UpDown.Done fixtureAct)
     case toJSON (Tagged.FromUpDown (UpDown.Done fixtureAct)) of
-        Object o -> assertEqual "inner object, untouched" inner (Object (KeyMap.delete "origin" o))
+        Object o -> assertEqual "inner object, untouched" inner (Object (KeyMap.delete "stream" o))
         v -> assertFailure ("not an object: " <> show v)
   where
     originOf tagged = case toJSON tagged of
-        Object o -> KeyMap.lookup "origin" o
+        Object o -> KeyMap.lookup "stream" o
         _ -> Nothing
 
 refShape :: Assertion
@@ -370,7 +370,7 @@ oneObjectPerLine =
   where
     decodesToTaggedObject line =
         case eitherDecode line of
-            Right (Object o) -> assertBool "has an origin" (KeyMap.member "origin" o)
+            Right (Object o) -> assertBool "has a stream" (KeyMap.member "stream" o)
             Right v -> assertFailure ("not an object: " <> show v)
             Left err -> assertFailure ("not a JSON line: " <> err <> ": " <> LChar8.unpack line)
 

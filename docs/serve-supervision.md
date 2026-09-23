@@ -429,7 +429,7 @@ Everything above prints text: `serve:`-prefixed lines for the loop itself,
 flag is absent.
 
 Every object has a `kind` (the report's constructor, kebab-cased:
-`declared`, `converge-start`, `done`, `failed`, `wedged`, ...), an `origin`
+`declared`, `converge-start`, `done`, `failed`, `wedged`, ...), a `stream`
 (`serve` for the loop's own reports, `updown` for what a node did; the
 tending loop's reports arrive nested inside `serve`'s `tended`), a `ref`
 whenever the report is about one node (`{"short": ..., "full": ...}`, the
