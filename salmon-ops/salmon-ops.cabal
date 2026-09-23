@@ -91,6 +91,7 @@ library
                    , Salmon.Op.Configure
                    , Salmon.Op.Ref
                    , Salmon.Reporter
+                   , Salmon.Reporter.Tagged
     build-depends:    base >=4.16.3.0
                     , async
                     , aeson
