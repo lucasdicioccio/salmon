@@ -1,8 +1,10 @@
 # Pull mode: a `serve` that fetches its own declarations
 
-Status: milestones 1 to 5 below are implemented (`Salmon.Actions.Follow`,
-`Salmon.Actions.Follow.Scheduler`, `run serve --follow`, `--follow-cache`,
-`mode` in `status`, `--status-sink`, `salmon-fleet status`); the rest is a
+Status: milestones 1 to 6 below are implemented (`Salmon.Actions.Follow`,
+`Salmon.Actions.Follow.Scheduler`, `Salmon.Actions.Follow.Registry` and its
+git/HTTP/DNS backends, `run serve --follow`, `--follow-cache`, `mode` in
+`status`, `--status-sink`, `salmon-fleet status`, the verify-before-inject
+hook); the rest is a
 design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion
 idea (a generic salmon server with web/terminal clients that render the live
 `Dag`) is a separate sketch and is only referenced here where the two meet.
@@ -378,6 +380,21 @@ zero".
 - DNS-index record format: one `TXT` with `url=` and `sha256=` as sketched,
   or a `URI` record plus a `TXT` digest? And whether the inline-document
   variant is worth having at all.
+  *Settled as sketched* (milestone 6): one `TXT` at `<label>.<zone>` reading
+  `v=salmon1 url=<https url> sha256=<hex>`, fields in any order after the
+  version, a record longer than one string joined the way `TXT` readers do.
+  Two things decided it. A single record is one lookup and one atomic
+  write for the publisher — a `URI` plus a `TXT` can be observed with one
+  updated and the other not, which is exactly the "index announces what the
+  store does not serve" state the digest check refuses, only now
+  manufactured by the index itself. And the `sha256=` field *is* the change
+  detection: the record's digest is the stamp, so a round that finds it
+  unchanged makes no HTTP request at all, which a `URI` record would not
+  carry. The `URI` variant was not done; nothing stops a later reader from
+  also accepting it. The inline-document variant was not done either and
+  is not planned: base64 chunked over 255-byte strings for a document that
+  is JSON anyway buys nothing a small HTTP store does not, and the record
+  size would bound the document.
 - Does the document `id` need to be ordered (so a host can refuse to move
   *backwards* if a registry serves a stale copy from a lagging replica), or
   is "latest is whatever the registry says" enough? Leaning: an optional
@@ -489,3 +506,29 @@ zero".
    or an HTTP `POST` is the same document handed to a different writer.
 6. **Git registry**, then HTTP, then the DNS index over HTTP, then bucket.
    Verify-before-inject hook with a no-op verifier.
+   *Shipped* (`Salmon.Actions.Follow.Registry` and `Registry.Git`/`.Http`/
+   `.Dns`, `Follow.followVerify`, `Test.FollowRegistrySpec`), with five
+   deviations from the table under "Labels are addresses into a registry".
+   The git template is `<subdir>/<label>.json` at a branch
+   (`git+URL[#BRANCH[:SUBDIR]]`), not `<repo>/<label>/latest.json` — one
+   file per label beside the others is what a publisher edits, and a
+   subdirectory per label would have made history git's *twice*. The
+   registries are **not nodes in the agent's own graph**: the "inbox as a
+   node" idea above would have put a fetch under `stopTending` (a pass is
+   what runs a node's `up`) and so under the very starvation rule the
+   fetcher exists to respect; a fetch failure reaches the same `Report`
+   stream as `FetchFailed`/`Backoff` instead. The bucket backends are the
+   HTTP one under a URL template (virtual-hosted S3, GCS, or path-style
+   under `--follow-bucket-endpoint`) — public or presigned objects only,
+   no SDK, no object generation as the stamp (the `ETag` serves), and
+   **no authenticated access**, which is its own item if wanted. The DNS
+   resolver is `dig +short` through `Binary` behind a `Resolver` record
+   (nothing in the tree resolved DNS, and one TXT lookup did not justify a
+   resolver library's footprint); the record format is settled under the
+   open questions. And the hook is `followVerify :: Digest -> ByteString ->
+   IO (Either Text ())` on the *raw bytes*, after the digest comparison and
+   before the parser, run on a cache replay as well as on a fetch — a
+   refusal is `Rejected`, a failed round, neither injected nor cached, the
+   last good document staying in force as the "Signed documents" section
+   asks. Three flags joined the `--follow-*` family for the backends'
+   sake: `--follow-timeout`, `--follow-workdir`, `--follow-bucket-endpoint`.

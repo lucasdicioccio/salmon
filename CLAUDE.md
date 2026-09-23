@@ -600,6 +600,34 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   takes the loop down. `directoryRegistry` now *throws* when its directory is missing rather than
   answering `Absent`, since that is the difference between "the registry is unreachable" and "no
   document for this label", and the cache hinges on it. See `Test/FollowCacheSpec.hs`.
+  **The other registries are `Actions/Follow/Registry.hs`** (milestone 6), one `Registry` value
+  per backend, each owning the template that turns a label into an address, chosen by the shape
+  of `--follow` (`parseAddress`) and opened by `open`; `follower` and the scheduler see none of
+  it. `Registry/Git.hs` (`git+URL[#BRANCH[:SUBDIR]]`): cloned once into `--follow-workdir` (default
+  `checkout` under the cache directory, else a temp directory named by the repository), then
+  `git fetch` and `git reset --hard` onto the branch every round, all through `Binary` with
+  `GIT_TERMINAL_PROMPT=0`; the document is `SUBDIR/<label>.json` in the checkout and the *stamp is
+  the commit*, so a round that finds the same commit reads nothing. The subdirectory comes after
+  the branch, not after the URL, because URLs have colons of their own. `Registry/Http.hs`
+  (`http(s)://...`, `{label}` placed or `/<label>.json` appended): the stamp is the `ETag`, else
+  `Last-Modified`, sent back as `If-None-Match`/`If-Modified-Since` so an unchanged document is a
+  `304` and no body crosses; `404` is `Absent`, anything else throws (a failed round). One manager
+  per registry, `--follow-timeout` on the whole response. `Registry/Dns.hs` (`dns:ZONE`): one
+  `TXT` at `<label>.ZONE` reading `v=salmon1 url=<https url> sha256=<hex>`; **the record's digest
+  is the stamp**, so a round is one lookup and the URL is fetched only when the announced digest
+  moved, and a body that does not hash to what the record announces throws `IndexMismatch` —
+  a failed round with that reason, never applied. The resolver is a `Resolver` record so tests
+  stub it; the shipped one shells out to `dig +short` (nothing in the tree resolved DNS before,
+  and one TXT lookup did not buy a resolver library). The bucket backends (`s3://`, `gs://`) are
+  the HTTP one under a URL template (virtual-hosted S3, GCS's `storage.googleapis.com`, or
+  path-style under `--follow-bucket-endpoint`): public or presigned objects only, no SDK, no
+  credentials. **`followVerify`** is the verify-before-inject hook: `Digest -> ByteString -> IO
+  (Either Text ())`, run on the raw bytes after the digest comparison and before the parser, on
+  every backend *and on a cache replay* (a cache file is as writable as a registry file); a
+  `Left` is `Rejected label digest reason`, a failed round, never injected and never cached.
+  `noVerifier` is the default until signatures (E2) fill it in. `Binary.untrackedExecOutput` is
+  `untrackedExec` handing stdout back, for `git rev-parse` and `dig`. See
+  `Test/FollowRegistrySpec.hs`: a bare repo, a `warp` server with `ETag`s, a stubbed resolver.
   `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
   never spelled by a line of the input language. And a `Configure` that throws is now a
   `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
@@ -925,6 +953,9 @@ my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--f
                                          # the same loop, also fetching documents from DIR (pull mode)
 my-salmon run serve --follow DIR --label L --follow-cache CACHE [--follow-refuse-older]
                                          # ... replaying CACHE's last applied document when DIR is unreachable at startup
+my-salmon run serve --follow git+URL#BRANCH:SUBDIR | https://host/path | dns:ZONE | s3://B/P | gs://B/P --label L
+                                         # the other registries (Salmon.Actions.Follow.Registry), chosen by the address's shape;
+                                         # --follow-timeout S, --follow-workdir DIR, --follow-bucket-endpoint URL are theirs
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
                                          # GET /dag /status /history /help/seed, POST /command[?async],

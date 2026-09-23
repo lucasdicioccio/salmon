@@ -452,10 +452,12 @@ are untouched.
 
 ## 12. Pull mode: `--follow`
 
-`run serve --follow DIR --label L [--label L]... [--follow-base S] ...` makes
-the loop fetch its own declarations instead of only waiting to be typed at.
-`DIR` is a *registry*: one JSON document per label at `DIR/<label>.json`,
-each the **desired set** of seeds for that label — not a log of commands:
+`run serve --follow REGISTRY --label L [--label L]... [--follow-base S] ...`
+makes the loop fetch its own declarations instead of only waiting to be
+typed at. A *registry* is anything that answers "the latest document for
+this label"; the simplest is a directory with one JSON document per label at
+`DIR/<label>.json` (the others are below), each the **desired set** of seeds
+for that label — not a log of commands:
 
 ```json
 {
@@ -520,6 +522,9 @@ flags (seconds unless said otherwise):
 | `--follow-max-wait` | 60 | the longest a change waits while the registry keeps changing |
 | `--follow-cache` | none | a directory to keep each label's last applied document in, replayed at startup if the registry cannot be reached (below) |
 | `--follow-refuse-older` | off | refuse a document whose `published` is older than the one already applied for its label (below) |
+| `--follow-timeout` | 30 | the longest one HTTP fetch may take (the `http(s)://`, `dns:` and bucket registries) |
+| `--follow-workdir` | see below | where a `git+` registry is checked out |
+| `--follow-bucket-endpoint` | none | an S3-compatible endpoint for an `s3://` registry, path-style |
 
 **Toward the registry**: a round that succeeds — changed or not — schedules
 the next one one base away; a round that fails (the registry threw, or the
@@ -616,6 +621,54 @@ a host. Off by default; a document without `published`, on either side, is
 never refused. A `published` that does not parse is a malformed document,
 not an ignored annotation.
 
+### The registries: what `--follow` can name
+
+The backend is chosen by the shape of the address, and each one owns the
+rule that turns a label into an address and the cheap "has it moved?" test
+that keeps an unchanged round from reading anything:
+
+| `--follow` | the document for `<label>` | unchanged when | notes |
+|---|---|---|---|
+| `/srv/reg` | `/srv/reg/<label>.json` | mtime and size match | the directory missing is a failed round, not "no document" |
+| `git+URL[#BRANCH[:SUBDIR]]` | `SUBDIR/<label>.json` at `origin/BRANCH` (the remote's default branch without `BRANCH`) | the branch points at the same commit | cloned once into `--follow-workdir` (default `checkout` under `--follow-cache`, else a temp directory named by the repository), then `git fetch` + `git reset --hard` every round; the subdirectory comes *after* the branch because URLs have colons of their own (`git+ssh://h:22/r#main:hosts`, `git+https://h/r#:hosts`); credential prompts are off, so a private repository fails rather than hangs |
+| `http://…` / `https://…` | `<base>/<label>.json`, or the URL with `{label}` replaced (`https://h/seed/latest/{label}`) | `304` to `If-None-Match` (`ETag`) or `If-Modified-Since` (`Last-Modified`) | `404` is "no document"; `5xx`, `403`, a refused connection or `--follow-timeout` running out is a failed round |
+| `dns:ZONE` | a `TXT` record at `<label>.ZONE` reading `v=salmon1 url=<https url> sha256=<hex>`, then that URL | the record's `sha256` is the one last seen — one lookup, no HTTP at all | a body that does not hash to what the record announces is refused with that reason (a failed round, never applied); no record is "no document"; the lookup is `dig +short`, so `dig` must be installed |
+| `s3://BUCKET/PREFIX` / `gs://BUCKET/PREFIX` | `https://BUCKET.s3.amazonaws.com/PREFIX/<label>.json`, `https://storage.googleapis.com/BUCKET/PREFIX/<label>.json`, or `ENDPOINT/BUCKET/PREFIX/<label>.json` under `--follow-bucket-endpoint` | as HTTP | the HTTP backend under a template: **public or presigned objects only** — no SDK, no credentials, and a private bucket's `403` is a failed round that says so |
+
+Three things hold for every backend. The stamp above decides whether to
+*read*, the sha256 of the bytes decides whether anything *changed*, and only
+a changed document reaches the loop — so a `git commit --allow-empty`, a
+re-uploaded identical object or a rewritten identical file injects nothing.
+`history` names the registry as you gave it (`[fetched
+git+https://h/r#main:hosts label=web ...]`). And a fetch that throws leaves
+the last good document in force and climbs the ladder, whatever threw.
+
+The DNS shape is the cheap one for a fleet: a host's round is one UDP
+lookup answered from the resolver's cache until the record's TTL runs out,
+and the controller *publishes* by writing a record — which salmon can
+already do as a node (`SreBox.MicroDNS`, `SreBox.DNSRegistration`). Publish
+the document first and the record second, since a record announcing a
+digest the store does not yet serve is refused until it does.
+
+### Before anything is applied: the verifier
+
+Every document — from any registry, and a cached one on replay, since a
+cache file is as writable as a registry file — goes through
+`Follow.followVerify` on its raw bytes *before* it is parsed. A refusal is
+reported and is a failed round:
+
+```
+follow: refusing the document for web (sha256=1f0d2c9a7b3e):
+signature does not verify against fleet-signing-key
+```
+
+The bytes are neither injected nor cached; the last good document stays in
+force. The verifier shipped today accepts everything (`Follow.noVerifier`):
+the hook is the place a signature check drops into, not the check itself.
+
+Not there yet (`specs/pull-mode.md`): signatures, other sinks (a bucket
+object, an HTTP `POST`), and authenticated bucket access.
+
 ### Status flows back: `--status-sink`
 
 A host in pull mode converges with nobody watching. `--status-sink PATH`
@@ -671,9 +724,6 @@ the rows as one array. It only reads; a stale host is a visible fact, not a
 decision, and nothing here decides a host is dead. Two documents naming one
 host (two loops on one machine, as in the tests) are two rows.
 
-Not there yet (`specs/pull-mode.md`, milestone 6): other registries (git,
-HTTP, DNS, bucket), other sinks (a bucket object, an HTTP `POST`), and
-signatures.
 
 ## 13. A second way in: `--listen`
 
