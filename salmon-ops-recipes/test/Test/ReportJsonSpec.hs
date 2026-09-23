@@ -35,6 +35,7 @@ import Test.Tasty.HUnit (Assertion, assertBool, assertEqual, assertFailure, test
 import qualified Salmon.Actions.Follow as Follow
 import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import qualified Salmon.Actions.Serve as Serve
+import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Extension (..), Op, nodeps, op)
@@ -57,6 +58,7 @@ tests =
         , testCase "a Mode encodes as the word status prints" modeShape
         , testCase "the text reporters print the same lines beside a JSON one as they do alone" textUnchangedBesideJson
         , testCase "reportJSONLines writes one object per line" oneObjectPerLine
+        , testCase "the status sink document" sinkDocumentGolden
         ]
 
 -------------------------------------------------------------------------------
@@ -247,6 +249,7 @@ serveGoldens =
             <> "{\"epoch\":3,\"declaration\":\"up\",\"active\":true,\"origin\":{\"kind\":\"fetched\",\"registry\":\"/srv/reg\",\"label\":\"web-api\",\"document\":\"web-api@2026-09-23T10:41:07Z\",\"sha256\":\"32ea59311d97\"},\"args\":[\"--name\",\"web\"]}]}"
         )
     , ("Serve.HistoryElided", Tagged.FromServe (Serve.HistoryElided 40), "{\"kind\":\"history-elided\",\"elided\":40}")
+    , ("Serve.SinkFailed", Tagged.FromServe (Serve.SinkFailed "/var/lib/salmon/status.json" "permission denied"), "{\"kind\":\"sink-failed\",\"path\":\"/var/lib/salmon/status.json\",\"error\":\"permission denied\"}")
     ,
         ( "Serve.QueryReport"
         , Tagged.FromServe (Serve.QueryReport [(fixtureRef, tendedState), (otherRef, untendedState)] (Set.singleton fixtureRef) (Set.singleton otherRef) paths)
@@ -423,6 +426,43 @@ oneObjectPerLine =
             Right v -> assertFailure ("not an object: " <> show v)
             Left err -> assertFailure ("not a JSON line: " <> err <> ": " <> LChar8.unpack line)
 
+{- | The status sink's document: the @status@ object is the one
+'Serve.StatusReport' encodes to, the two @last@ objects are tagged reports
+as @--json@ prints them (@stream@ included), the labels are what the
+fetcher applied. Round-trips through its own 'FromJSON', which is what the
+fleet fold reads it with. -}
+sinkDocumentGolden :: Assertion
+sinkDocumentGolden = do
+    let written = read "2026-09-24 10:41:07 UTC"
+        applied = read "2026-09-24 10:40:00 UTC"
+        doc =
+            StatusSink.Document
+                { StatusSink.docHost = "web-3"
+                , StatusSink.docWritten = written
+                , StatusSink.docMode = "following"
+                , StatusSink.docLabels = [Serve.AppliedDocument "web" "web@42" "32ea59311d97a7c0" applied]
+                , StatusSink.docStatus = toJSON (Serve.StatusReport Serve.Following [] Map.empty)
+                , StatusSink.docLastConverge = Just (toJSON (Tagged.FromServe (Serve.ConvergeStop True 0)))
+                , StatusSink.docLastFollow = Just (toJSON (Tagged.FromFollow (Follow.Backoff 2 60000000)))
+                }
+        expectedText =
+            "{\"salmon-status\":1,\"host\":\"web-3\",\"written\":\"2026-09-24T10:41:07Z\",\"mode\":\"following\""
+                <> ",\"labels\":[{\"label\":\"web\",\"id\":\"web@42\",\"sha256\":\"32ea59311d97a7c0\",\"applied\":\"2026-09-24T10:40:00Z\"}]"
+                <> ",\"status\":{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}"
+                <> ",\"last\":{\"converge\":{\"stream\":\"serve\",\"kind\":\"converge-stop\",\"ok\":true,\"remaining\":0}"
+                <> ",\"follow\":{\"stream\":\"follow\",\"kind\":\"backoff\",\"failures\":2,\"next_us\":60000000}}}"
+    expected <- case eitherDecode (LText.encodeUtf8 (LText.fromStrict expectedText)) of
+        Left err -> assertFailure ("golden is not valid JSON: " <> err)
+        Right v -> pure (v :: Value)
+    assertEqual "the document" expected (toJSON doc)
+    assertEqual "round-trips" (Right doc) (eitherDecode (encode doc))
+    -- the two `last` objects are optional on the way in: an older writer's
+    -- document without them still folds
+    assertEqual
+        "without `last`"
+        (Right doc{StatusSink.docLastConverge = Nothing, StatusSink.docLastFollow = Nothing})
+        (eitherDecode "{\"salmon-status\":1,\"host\":\"web-3\",\"written\":\"2026-09-24T10:41:07Z\",\"mode\":\"following\",\"labels\":[{\"label\":\"web\",\"id\":\"web@42\",\"sha256\":\"32ea59311d97a7c0\",\"applied\":\"2026-09-24T10:40:00Z\"}],\"status\":{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}}")
+
 -------------------------------------------------------------------------------
 
 {- | Exhaustiveness sentinels: a constructor added to a stream shows up here
@@ -487,6 +527,7 @@ _serveCovered rep = case rep of
     Serve.HistoryElided{} -> ()
     Serve.QueryReport{} -> ()
     Serve.HelpText{} -> ()
+    Serve.SinkFailed{} -> ()
 
 _followCovered :: Follow.Report -> ()
 _followCovered rep = case rep of

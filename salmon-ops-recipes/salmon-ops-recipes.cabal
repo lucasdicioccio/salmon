@@ -127,6 +127,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ServeModelSpec
                     , Test.ServeSocketSpec
                     , Test.ServeSpec
+                    , Test.StatusSinkSpec
                     , Test.SystemdSpec
                     , Test.UpTreeSpec
                     , Test.UpkeepSpec
