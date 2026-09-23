@@ -27,6 +27,7 @@ library
                    , Salmon.Actions.Follow.Scheduler
                    , Salmon.Actions.Help
                    , Salmon.Actions.Serve
+                   , Salmon.Actions.Serve.Events
                    , Salmon.Actions.Serve.Http
                    , Salmon.Actions.Serve.Socket
                    , Salmon.Actions.UpDown

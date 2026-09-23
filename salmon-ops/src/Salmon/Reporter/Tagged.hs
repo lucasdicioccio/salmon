@@ -31,7 +31,8 @@ about, and named fields. A report that nests another stream's report
 command (see 'Serve.Origin'), which the event stream will carry too. Report
 text — @help@,
 @notes@, failure text — is public and encoded verbatim; see the spec's
-decisions. No sequence numbers yet.
+decisions. Sequence numbers are added on the event stream alone, by
+"Salmon.Actions.Serve.Events".
 -}
 module Salmon.Reporter.Tagged (
     -- * The sum
@@ -51,6 +52,7 @@ module Salmon.Reporter.Tagged (
     nodeStatePairs,
     nodeStateValue,
     epochValue,
+    originValue,
 ) where
 
 import Control.Exception (SomeException)
@@ -388,8 +390,9 @@ declaration Serve.Add = "up"
 declaration Serve.Replace = "only"
 declaration Serve.Remove = "down"
 
--- who made the declaration: the same distinction the text `history`
--- draws with its trailing `[fetched ...]`/`[loaded ...]` annotation.
+-- | Who made a declaration (or, on the event stream, typed a command):
+-- the same distinction the text @history@ draws with its trailing
+-- @[fetched ...]@\/@[loaded ...]@ annotation.
 originValue :: Serve.Origin -> Value
 originValue origin = case origin of
     Serve.Stdin -> object ["kind" .= ("stdin" :: Text)]
