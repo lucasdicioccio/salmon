@@ -36,6 +36,7 @@ import Salmon.Op.Track
 import Salmon.Actions.Dot as Dot
 import qualified Salmon.Actions.Follow as Follow
 import qualified Salmon.Actions.Follow.Registry as Registry
+import qualified Salmon.Actions.Follow.Registry.Http as Registry.Http
 import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
@@ -94,7 +95,7 @@ data RunCommand
       -- (@--no-autoconverge@; 'False' is the default, matching every
       -- version of @serve@ before the setting existed). Then pull mode
       -- ("Salmon.Actions.Follow"): a registry to follow (@--follow
-      -- REGISTRY@, a directory or @git+URL@ — see
+      -- REGISTRY@, a directory, @git+URL@ or an HTTP URL — see
       -- "Salmon.Actions.Follow.Registry"), the labels to fetch from it
       -- (@--label L@,
       -- repeatable; both or neither), and the fetcher's schedule
@@ -134,7 +135,8 @@ case nothing survives a restart) and @--follow-refuse-older@ (see
 'Follow.followRefuseOlder'). @--follow-interval@ is milestone 2's name for
 the base delay, kept as a synonym of @--follow-base@; either may be given,
 the base's own flag wins. Last, the backends' own knobs (milestone 6):
-@--follow-workdir@ for the git checkout.
+@--follow-timeout@ for the HTTP-backed ones, @--follow-workdir@ for the git
+checkout.
 -}
 data FollowOptions = FollowOptions
     { followBase :: !(Maybe Int)
@@ -146,6 +148,7 @@ data FollowOptions = FollowOptions
     , followMaxWait :: !Int
     , followCacheDir :: !(Maybe FilePath)
     , followRefuseOlder :: !Bool
+    , followTimeout :: !Int
     , followWorkdir :: !(Maybe FilePath)
     }
     deriving (Eq, Ord, Generic, Show)
@@ -164,8 +167,11 @@ followSchedule o =
         , Scheduler.schedMaxWait = seconds o.followMaxWait
         }
   where
-    seconds n = max 0 n * 1000000
     defaultBase = Scheduler.defaultConfig.schedBase `div` 1000000
+
+-- | A flag in seconds, as the microseconds the schedule and the backends take.
+seconds :: Int -> Int
+seconds n = max 0 n * 1000000
 
 {- | How the commands that execute something (@run up@, @run down@, @run
 serve@) report. @--json@ selects 'ReportJson': one JSON object per line on
@@ -256,7 +262,7 @@ runCommandParser =
                 ( strOption
                     ( long "follow"
                         <> Options.Applicative.metavar "REGISTRY"
-                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json) or git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout)."
+                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json), git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout), or an http(s):// URL (<base>/<label>.json, or {label} placed in it)."
                     )
                 )
             <*> many
@@ -377,6 +383,14 @@ runCommandParser =
             <*> switch
                 ( long "follow-refuse-older"
                     <> Options.Applicative.help "Refuse a fetched document whose `published` timestamp is older than the one already applied for its label (reported as stale, not injected). Documents without `published` are never refused."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-timeout"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (Registry.Http.defaultOptions.optTimeout `div` 1000000)
+                    <> showDefault
+                    <> Options.Applicative.help "The longest one HTTP fetch may take, for the http(s):// registry; longer is a failed round."
                 )
             <*> optional
                 ( strOption
@@ -581,7 +595,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                     registry <-
                         Registry.open
                             Registry.defaultOptions
-                                { Registry.optWorkdir = followOptions.followWorkdir
+                                { Registry.optHttp = Registry.Http.Options{Registry.Http.optTimeout = seconds followOptions.followTimeout}
+                                , Registry.optWorkdir = followOptions.followWorkdir
                                 , Registry.optCacheDir = followOptions.followCacheDir
                                 }
                             address

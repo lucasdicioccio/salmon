@@ -26,6 +26,7 @@ library
                    , Salmon.Actions.Follow
                    , Salmon.Actions.Follow.Registry
                    , Salmon.Actions.Follow.Registry.Git
+                   , Salmon.Actions.Follow.Registry.Http
                    , Salmon.Actions.Follow.Scheduler
                    , Salmon.Actions.Help
                    , Salmon.Actions.Serve

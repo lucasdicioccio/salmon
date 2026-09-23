@@ -7,6 +7,7 @@ label into an address; the fetcher and the scheduler see none of this.
 
 > --follow /srv/reg                          a directory: /srv/reg/<label>.json
 > --follow git+https://host/repo#main:hosts  a git branch: hosts/<label>.json at origin/main
+> --follow https://host/seed/latest/{label}  HTTP: GET that URL, or <base>/<label>.json without {label}
 -}
 module Salmon.Actions.Follow.Registry (
     Address (..),
@@ -25,30 +26,34 @@ import System.FilePath ((</>))
 
 import Salmon.Actions.Follow (Registry (..), digestOf, directoryRegistry, unDigest)
 import qualified Salmon.Actions.Follow.Registry.Git as Git
+import qualified Salmon.Actions.Follow.Registry.Http as Http
 
 -- | What @--follow@ can name.
 data Address
     = Directory FilePath
     | Git Git.Source
+    | Http Text
     deriving (Show, Eq)
 
 -- | By shape; anything with no recognised scheme is a directory path.
 parseAddress :: Text -> Either Text Address
 parseAddress t
     | Just rest <- Text.stripPrefix "git+" t = Git <$> Git.parseSource rest
+    | Text.isPrefixOf "http://" t || Text.isPrefixOf "https://" t = Right (Http t)
     | Text.null t = Left "--follow needs a registry"
     | otherwise = Right (Directory (Text.unpack t))
 
 -- | What the backends need beyond their address.
 data Options = Options
-    { optWorkdir :: Maybe FilePath
+    { optHttp :: Http.Options
+    , optWorkdir :: Maybe FilePath
     -- ^ the git checkout; 'defaultWorkdir' when 'Nothing'
     , optCacheDir :: Maybe FilePath
     -- ^ @--follow-cache@, which the default checkout lives under
     }
 
 defaultOptions :: Options
-defaultOptions = Options Nothing Nothing
+defaultOptions = Options Http.defaultOptions Nothing Nothing
 
 {- | Where a git registry is checked out when nobody said: @checkout@ under
 the cache directory (the one place a follower already keeps state across
@@ -68,3 +73,6 @@ open o addr = case addr of
     Git source -> do
         workdir <- maybe (defaultWorkdir o.optCacheDir source) pure o.optWorkdir
         Git.gitRegistry workdir source
+    Http template -> do
+        mgr <- Http.newManager o.optHttp
+        pure (Http.httpRegistry mgr template)
