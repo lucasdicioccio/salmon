@@ -95,9 +95,9 @@ data RunCommand
       -- (@--no-autoconverge@; 'False' is the default, matching every
       -- version of @serve@ before the setting existed). Then pull mode
       -- ("Salmon.Actions.Follow"): a registry to follow (@--follow
-      -- REGISTRY@, a directory, @git+URL@, an HTTP URL or @dns:ZONE@ —
-      -- see "Salmon.Actions.Follow.Registry"), the labels to fetch from it
-      -- (@--label L@,
+      -- REGISTRY@, a directory, @git+URL@, an HTTP URL, @dns:ZONE@ or a
+      -- bucket — see "Salmon.Actions.Follow.Registry"), the labels to
+      -- fetch from it (@--label L@,
       -- repeatable; both or neither), and the fetcher's schedule
       -- ('FollowOptions'). Last, optionally listening for the same
       -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
@@ -136,7 +136,7 @@ case nothing survives a restart) and @--follow-refuse-older@ (see
 the base delay, kept as a synonym of @--follow-base@; either may be given,
 the base's own flag wins. Last, the backends' own knobs (milestone 6):
 @--follow-timeout@ for the HTTP-backed ones, @--follow-workdir@ for the git
-checkout.
+checkout, @--follow-bucket-endpoint@ for an S3-compatible store.
 -}
 data FollowOptions = FollowOptions
     { followBase :: !(Maybe Int)
@@ -150,6 +150,7 @@ data FollowOptions = FollowOptions
     , followRefuseOlder :: !Bool
     , followTimeout :: !Int
     , followWorkdir :: !(Maybe FilePath)
+    , followBucketEndpoint :: !(Maybe Text)
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -262,7 +263,7 @@ runCommandParser =
                 ( strOption
                     ( long "follow"
                         <> Options.Applicative.metavar "REGISTRY"
-                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json), git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout), an http(s):// URL (<base>/<label>.json, or {label} placed in it), or dns:ZONE (a TXT index at <label>.ZONE naming an https URL and a sha256)."
+                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json), git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout), an http(s):// URL (<base>/<label>.json, or {label} placed in it), dns:ZONE (a TXT index at <label>.ZONE naming an https URL and a sha256), or s3://BUCKET/PREFIX / gs://BUCKET/PREFIX (public or presigned object URLs; no SDK, no credentials)."
                     )
                 )
             <*> many
@@ -390,13 +391,20 @@ runCommandParser =
                     <> Options.Applicative.metavar "SECONDS"
                     <> Options.Applicative.value (Registry.Http.defaultOptions.optTimeout `div` 1000000)
                     <> showDefault
-                    <> Options.Applicative.help "The longest one HTTP fetch may take, for the http(s):// and dns: registries; longer is a failed round."
+                    <> Options.Applicative.help "The longest one HTTP fetch may take, for the http(s)://, dns: and bucket registries; longer is a failed round."
                 )
             <*> optional
                 ( strOption
                     ( long "follow-workdir"
                         <> Options.Applicative.metavar "DIR"
                         <> Options.Applicative.help "Where a git+ registry is checked out (cloned once, then fetched and reset every round). Default: `checkout` under --follow-cache, else a directory under the system temporary directory named by the repository."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "follow-bucket-endpoint"
+                        <> Options.Applicative.metavar "URL"
+                        <> Options.Applicative.help "For an s3:// registry, an S3-compatible endpoint (MinIO, Ceph RGW...) to address the bucket under, path-style: URL/BUCKET/PREFIX/<label>.json. Without it, https://BUCKET.s3.amazonaws.com."
                     )
                 )
     defaultSecs :: (Scheduler.Config -> Int) -> Int
@@ -598,6 +606,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                 { Registry.optHttp = Registry.Http.Options{Registry.Http.optTimeout = seconds followOptions.followTimeout}
                                 , Registry.optWorkdir = followOptions.followWorkdir
                                 , Registry.optCacheDir = followOptions.followCacheDir
+                                , Registry.optBucketEndpoint = followOptions.followBucketEndpoint
                                 }
                             address
                     pure $
