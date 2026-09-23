@@ -273,14 +273,17 @@ withFollowing root schedule fl labels body = do
     stdinChan <- newTChanIO
     gate <- newEmptyMVar
     fc <- newFakeClock
+    modeVar <- Follow.newMode
     let follow =
             Follow.Follow
                 { Follow.followRegistry = flakyRegistry fl fc (Follow.directoryRegistry (registryDir root))
                 , Follow.followLabels = labels
                 , Follow.followSchedule = schedule
+                , Follow.followCache = Nothing
+                , Follow.followRefuseOlder = False
                 }
         producers =
-            [ Follow.followerWith followReporter (clockOf fc) (Scheduler.mkRng 1) follow (putMVar gate ())
+            [ Follow.followerWith followReporter (clockOf fc) (Scheduler.mkRng 1) modeVar follow (putMVar gate ())
             , Follow.gated gate (chanProducer stdinChan)
             ]
         driver =
@@ -295,7 +298,7 @@ withFollowing root schedule fl labels body = do
         outcome <- try (body driver)
         atomically (writeTChan stdinChan Nothing)
         atomically (writeTChan resultVar outcome)
-    w <- Serve.serveFollowing [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) program (Just (atomically (writeTVar fc.fakePoke True))) producers
+    w <- Serve.serveFollowing [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) program (Just (Serve.Followed (atomically (writeTVar fc.fakePoke True)) (readIORef modeVar))) producers
     outcome <- atomically (readTChan resultVar)
     case outcome of
         Left (ex :: SomeException) -> throwIO ex
@@ -319,7 +322,7 @@ label t = either (error . Text.unpack) id (Follow.mkLabel t)
 publish :: FilePath -> Label -> Text -> [[String]] -> IO ()
 publish root lbl did seeds = do
     createDirectoryIfMissing True (registryDir root)
-    LByteString.writeFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds)))
+    LByteString.writeFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds) Nothing))
 
 waitFor :: String -> IO Bool -> IO ()
 waitFor what cond = do

@@ -222,9 +222,11 @@ serveGoldens =
     , ("Serve.ConvergeStop", Tagged.FromServe (Serve.ConvergeStop False 2), "{\"kind\":\"converge-stop\",\"ok\":false,\"remaining\":2}")
     ,
         ( "Serve.StatusReport"
-        , Tagged.FromServe (Serve.StatusReport [(fixtureRef, tendedState), (otherRef, untendedState)] paths)
-        , "{\"kind\":\"status\",\"nodes\":[" <> tendedJson <> "," <> untendedJson <> "]}"
+        , Tagged.FromServe (Serve.StatusReport Serve.Interactive [(fixtureRef, tendedState), (otherRef, untendedState)] paths)
+        , "{\"kind\":\"status\",\"mode\":\"interactive\",\"nodes\":[" <> tendedJson <> "," <> untendedJson <> "]}"
         )
+    , ("Serve.StatusReport (following)", Tagged.FromServe (Serve.StatusReport Serve.Following [] Map.empty), "{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}")
+    , ("Serve.StatusReport (replay)", Tagged.FromServe (Serve.StatusReport Serve.Replay [] Map.empty), "{\"kind\":\"status\",\"mode\":\"replay\",\"nodes\":[]}")
     ,
         ( "Serve.HistoryReport"
         , Tagged.FromServe

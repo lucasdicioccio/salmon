@@ -22,6 +22,7 @@ import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode, toJSON)
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -136,14 +137,17 @@ withFollowing root labels body = do
     stdinChan <- newTChanIO
     gate <- newEmptyMVar
     pk <- Scheduler.newPoke
+    modeVar <- Follow.newMode
     let follow =
             Follow.Follow
                 { Follow.followRegistry = Follow.directoryRegistry (registryDir root)
                 , Follow.followLabels = labels
                 , Follow.followSchedule = schedule
+                , Follow.followCache = Nothing
+                , Follow.followRefuseOlder = False
                 }
         producers =
-            [ Follow.follower followReporter pk follow (putMVar gate ())
+            [ Follow.follower followReporter pk modeVar follow (putMVar gate ())
             , Follow.gated gate (chanProducer stdinChan)
             ]
         driver =
@@ -187,7 +191,7 @@ label t = either (error . Text.unpack) id (Follow.mkLabel t)
 publish :: FilePath -> Label -> Text -> [[String]] -> IO ()
 publish root lbl did seeds = do
     createDirectoryIfMissing True (registryDir root)
-    LByteString.writeFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds)))
+    LByteString.writeFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds) Nothing))
 
 -- | Poll until the condition holds, or fail after a generous bound.
 waitFor :: String -> IO Bool -> IO ()
@@ -356,11 +360,13 @@ badSeedIsContained =
 
 documentFormat :: IO ()
 documentFormat = do
-    let doc = Document "web@1" [SeedWords ["app", "--version", "42"], SeedDirective (toJSON (Spec "/x" ["a"]))]
+    let doc = Document "web@1" [SeedWords ["app", "--version", "42"], SeedDirective (toJSON (Spec "/x" ["a"]))] Nothing
     assertEqual "round-trips" (Right doc) (eitherDecode (encode doc))
     assertBool "a future format version is refused" (isLeft (decodeDoc "{\"salmon\": 2, \"id\": \"x\", \"seeds\": []}"))
     assertBool "an entry needs exactly one of seed/directive" (isLeft (decodeDoc "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [{\"seed\": [\"a\"], \"directive\": {}}]}"))
-    assertEqual "unknown top-level keys are ignored" (Right (Document "x" [])) (decodeDoc "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [], \"published\": \"yesterday\"}")
+    assertEqual "unknown top-level keys are ignored" (Right (Document "x" [] Nothing)) (decodeDoc "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [], \"note\": \"yesterday\"}")
+    assertBool "`published` is a known key, and one that does not parse is refused rather than ignored" (isLeft (decodeDoc "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [], \"published\": \"yesterday\"}"))
+    assertEqual "`published` round-trips" (Right (Document "x" [] (Just (read "2026-09-23 10:41:07 UTC")))) (decodeDoc "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [], \"published\": \"2026-09-23T10:41:07Z\"}")
     assertBool "a label cannot escape the directory" (isLeft (Follow.mkLabel "../etc"))
     assertBool "a label cannot start with a dot" (isLeft (Follow.mkLabel ".hidden"))
     assertEqual "the file name convention" "/reg/web-api.json" (Follow.documentPath "/reg" (label "web-api"))

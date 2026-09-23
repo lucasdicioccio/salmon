@@ -409,7 +409,7 @@ statusExcludeAllHidesEverything =
         (_, reports, _) <- runServe program root ["up a", "status --exclude **"]
         -- `up a`'s own auto-converge never emits a StatusReport, so the only
         -- one here is the explicit `status` call's.
-        assertEqual "every node excluded" [0] [length xs | Serve.StatusReport xs _ <- reports]
+        assertEqual "every node excluded" [0] [length xs | Serve.StatusReport _ xs _ <- reports]
 
 historyExcludeAllHidesEverything :: IO ()
 historyExcludeAllHidesEverything =
@@ -818,7 +818,7 @@ autoConvergeOffAlsoStopsIdleTending =
             -- tending and applied the node, if it were going to.
             threadDelay 300000
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ _ <- rs]))
             assertEqual "the idle loop must not apply a deferred declaration" 0 =<< readIORef attempts
         assertEqual "the node is still pending, not silently converged" [Pending] (fmap nodeConvergence (Map.elems w.worldNodes))
 
@@ -842,7 +842,7 @@ autoConvergeOffKeepsAChecklessNodeFromRunning =
             -- tending and applied the node, if it were going to.
             threadDelay 300000
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ _ <- rs]))
             assertEqual "up must never have run" 0 =<< readIORef attempts
             -- the deferred work is still there, waiting for an explicit
             -- `converge` — this isn't "up never runs at all", only "not
@@ -909,8 +909,8 @@ statusPathsRoundTripAsSelectors :: IO ()
 statusPathsRoundTripAsSelectors =
     withTempDir $ \root -> do
         (_, reports, _) <- runServe program root ["up a b", "status"]
-        let paths = last [ps | Serve.StatusReport _ ps <- reports]
-            nodes = last [xs | Serve.StatusReport xs _ <- reports]
+        let paths = last [ps | Serve.StatusReport _ _ ps <- reports]
+            nodes = last [xs | Serve.StatusReport _ xs _ <- reports]
         rootRef <- case [r | (r, st) <- nodes, st.nodeShorthand == "serve-spec-root"] of
             [r] -> pure r
             rs -> assertFailure ("expected exactly one serve-spec-root node, got " <> show (length rs))
@@ -932,8 +932,8 @@ ambiguousPathsAreDisambiguatedByRef :: IO ()
 ambiguousPathsAreDisambiguatedByRef =
     withTempDir $ \root -> do
         (_, reports, _) <- runServe program root ["up a b", "status"]
-        let paths = last [ps | Serve.StatusReport _ ps <- reports]
-            nodes = last [xs | Serve.StatusReport xs _ <- reports]
+        let paths = last [ps | Serve.StatusReport _ _ ps <- reports]
+            nodes = last [xs | Serve.StatusReport _ xs _ <- reports]
             fileRefs = [r | (r, st) <- nodes, st.nodeShorthand == "file-contents"]
         assertEqual "both files are nodes here" 2 (length fileRefs)
         let filePaths = Data.List.nub [p | r <- fileRefs, Just ps <- [Map.lookup r paths], p <- ps]
@@ -973,9 +973,9 @@ autoConvergeOffForceStillReachesANamedNode =
             (a0, b0) <- (,) <$> readIORef attemptsA <*> readIORef attemptsB
             assertEqual "both nodes are still deferred" (0, 0) (a0, b0)
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ _ <- rs]))
             reports <- readTVarIO session.sessionServe
-            let nodes = last [xs | Serve.StatusReport xs _ <- reports]
+            let nodes = last [xs | Serve.StatusReport _ xs _ <- reports]
             targetRef <- case [r | (r, st) <- nodes, st.nodeShorthand == "never-runs-a"] of
                 [r] -> pure r
                 rs -> assertFailure ("expected exactly one never-runs-a node, got " <> show (length rs))
@@ -1004,7 +1004,7 @@ superviseOffLeavesItAlone =
             -- loop to do something else and check nothing happened in the
             -- meantime.
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ _ <- rs]))
             assertEqual "nothing put it back" 1 =<< readIORef attempts
             assertBool "and supervision never started" . not . tending
                 =<< atomically (reverse <$> readTVar session.sessionServe)
@@ -1033,7 +1033,7 @@ ownedProcessSurvivesCommands =
             n0 <- awaitTicks ticks 2
             -- a read-only command: the machines stand down, but not this one
             hPutStrLn session.sessionIn "status"
-            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ <- rs]))
+            awaitOn session.sessionServe (\rs -> not (null [() | Serve.StatusReport _ _ _ <- rs]))
             n1 <- awaitTicks ticks (n0 + 2)
             assertBool "it kept running across the command" (n1 > n0)
             -- ...and now nothing wants it
@@ -1190,7 +1190,7 @@ statusShowsAFailingNodesOutput =
   where
     flakyStates :: [Serve.Report] -> [NodeState]
     flakyStates rs =
-        [st | Serve.StatusReport xs _ <- rs, (_, st) <- xs, st.nodeShorthand == "flaky-forever"]
+        [st | Serve.StatusReport _ xs _ <- rs, (_, st) <- xs, st.nodeShorthand == "flaky-forever"]
 
     isFailingSnapshot :: NodeState -> Bool
     isFailingSnapshot st = maybe False (isFailure . MachineStatus.statusCheck) st.nodeStatus

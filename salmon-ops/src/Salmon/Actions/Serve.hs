@@ -129,6 +129,9 @@ module Salmon.Actions.Serve (
     serveAttributed,
     serveFollowing,
     serveObserved,
+    Followed (..),
+    Mode (..),
+    renderMode,
 
     -- * Input producers
     Producer (..),
@@ -655,9 +658,10 @@ data Report
       ConvergeStart !Int !Int
     | -- | everything applied cleanly, nodes still not converged
       ConvergeStop !Bool !Int
-    | -- | nodes, plus every live declaration's path(s) to each one (see 'worldPaths') —
-      -- the thing a @--select@\/@--exclude@ pattern is actually built from.
-      StatusReport ![(Ref, NodeState)] !(Map Ref [Text])
+    | -- | the loop's 'Mode', then nodes, plus every live declaration's
+      -- path(s) to each one (see 'worldPaths') — the thing a
+      -- @--select@\/@--exclude@ pattern is actually built from.
+      StatusReport !Mode ![(Ref, NodeState)] !(Map Ref [Text])
     | -- | epoch, declaration, still active, who declared it, argv
       HistoryReport ![(EpochId, Declaration, Bool, Origin, [String])]
     | -- | declarations too old to still be in 'worldLog'; emitted after a
@@ -735,8 +739,8 @@ renderReport rep =
                 , if ok then ")" else ", including a failure)"
                 ]
             ]
-        StatusReport [] _ -> ["serve: no nodes"]
-        StatusReport xs paths -> "serve: nodes:" : concatMap (renderNode paths) (sortOn statusOrder xs)
+        StatusReport mode [] _ -> ["serve: mode: " <> renderMode mode, "serve: no nodes"]
+        StatusReport mode xs paths -> ("serve: mode: " <> renderMode mode) : "serve: nodes:" : concatMap (renderNode paths) (sortOn statusOrder xs)
         HistoryReport [] -> ["serve: no seed declared yet"]
         HistoryReport xs -> "serve: seeds:" : fmap renderEpochLine xs
         HistoryElided n -> ["serve: " <> tshow n <> " earlier declaration(s) elided"]
@@ -1114,7 +1118,11 @@ statusHelp :: [Text]
 statusHelp =
     [ "serve: status [--select PATTERN]... [--exclude PATTERN]..."
     , ""
-    , "  Lists every node this world is still concerned with, unified by Ref across every seed"
+    , "  First says which mode the loop is in — `interactive` (nothing followed: every declaration"
+    , "  was typed or loaded), `following` (the world is what the registry last said), or `replay`"
+    , "  (the registry could not be reached at startup and the world is a cached document: the"
+    , "  last one applied before the restart, until a round in which every label answers)."
+    , "  Then lists every node this world is still concerned with, unified by Ref across every seed"
     , "  that shares it, with its wanted direction (up/down) and convergence (Pending/Stale/"
     , "  Converged/Errored/Blocked). A node that has finished going down is dropped, so a world whose seeds"
     , "  have all been retired and converged lists nothing at all — `history` still shows they"
@@ -1498,12 +1506,38 @@ serveProducers ::
 serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program =
     serveFollowing rewrites limit autoConverge0 r nodeReporter parseSeed configure program Nothing
 
-{- | 'serveProducers', with what @fetch@ pulls: the hook a fetcher producer
-("Salmon.Actions.Follow") is poked through. 'Nothing' when nothing is being
-followed, and @fetch@ then only says so. It is a hook rather than a
-producer's method because the loop reads lines and does not know which
-producer it has; the one thing it needs of the fetcher is to be able to
-wake it. -}
+{- | What the loop knows of a fetcher producer ("Salmon.Actions.Follow"):
+how to wake it (what @fetch@ pulls) and which 'Mode' it is in (what @status@
+prints). It is a pair of hooks rather than a producer's methods because the
+loop reads lines and does not know which producer it has; these two are the
+only things it needs of the fetcher, and both are read-only from its side.
+-}
+data Followed = Followed
+    { followedFetch :: IO ()
+    -- ^ a round now; see 'Salmon.Actions.Follow.Scheduler.poke'
+    , followedMode :: IO Mode
+    -- ^ never 'Interactive'
+    }
+
+{- | Which guarantees apply to the world right now, for @status@ (see
+@specs/pull-mode.md@, "what this does not solve"). 'Interactive' when nothing
+is followed: every declaration was typed, loaded or batched by a client.
+'Following' when a fetcher is running and the world is what the registry
+last said. 'Replay' when the registry could not be reached at startup and
+the fetcher applied its cached document instead — the world is the last
+thing this host knew, not necessarily what the registry says now — until a
+later round in which every followed label answers. -}
+data Mode = Interactive | Replay | Following
+    deriving (Show, Eq, Ord)
+
+renderMode :: Mode -> Text
+renderMode Interactive = "interactive"
+renderMode Replay = "replay"
+renderMode Following = "following"
+
+{- | 'serveProducers', with a 'Followed' for what @fetch@ and @status@ ask
+of a fetcher producer. 'Nothing' when nothing is being followed: @fetch@
+then only says so, and @status@ reports 'Interactive'. -}
 serveFollowing ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
@@ -1515,7 +1549,7 @@ serveFollowing ::
     ([String] -> Either Text seed) ->
     Configure IO seed directive ->
     Track' directive ->
-    Maybe (IO ()) ->
+    Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
 serveFollowing rewrites limit autoConverge0 r nodeReporter =
@@ -1549,7 +1583,7 @@ serveAttributed ::
     ([String] -> Either Text seed) ->
     Configure IO seed directive ->
     Track' directive ->
-    Maybe (IO ()) ->
+    Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
 serveAttributed = serveObserved (const (pure ()))
@@ -1586,7 +1620,7 @@ serveObserved ::
     ([String] -> Either Text seed) ->
     Configure IO seed directive ->
     Track' directive ->
-    Maybe (IO ()) ->
+    Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
 serveObserved observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
@@ -1611,7 +1645,7 @@ serveLoop ::
     ([String] -> Either Text seed) ->
     Configure IO seed directive ->
     Track' directive ->
-    Maybe (IO ()) ->
+    Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
 serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
@@ -1986,7 +2020,8 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
                         pure True
                     Status sel -> do
                         w <- readIORef world
-                        runReporter r (StatusReport (filterNodes w sel) (worldPaths w))
+                        mode <- maybe (pure Interactive) followedMode onFetch
+                        runReporter r (StatusReport mode (filterNodes w sel) (worldPaths w))
                         pure True
                     History sel -> do
                         w <- readIORef world
@@ -2049,7 +2084,7 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
                         runReporter r (Instructed instr (Set.size allowed))
                         pure True
                     Fetch -> do
-                        sequence_ onFetch
+                        traverse_ followedFetch onFetch
                         runReporter r (FetchRequested (isJust onFetch))
                         pure True
 

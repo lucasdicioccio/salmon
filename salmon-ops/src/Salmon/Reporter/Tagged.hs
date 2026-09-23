@@ -304,8 +304,8 @@ instance ToJSON Serve.Report where
             Serve.Tended inner -> [kind "tended", "report" .= inner]
             Serve.ConvergeStart ndown nup -> [kind "converge-start", "down" .= ndown, "up" .= nup]
             Serve.ConvergeStop ok remaining -> [kind "converge-stop", "ok" .= ok, "remaining" .= remaining]
-            Serve.StatusReport xs paths ->
-                [kind "status", "nodes" .= fmap (nodeStateValue paths Nothing) xs]
+            Serve.StatusReport mode xs paths ->
+                [kind "status", "mode" .= Serve.renderMode mode, "nodes" .= fmap (nodeStateValue paths Nothing) xs]
             Serve.HistoryReport xs -> [kind "history", "seeds" .= fmap epochValue xs]
             Serve.HistoryElided n -> [kind "history-elided", "elided" .= n]
             Serve.QueryReport xs sel exc paths ->

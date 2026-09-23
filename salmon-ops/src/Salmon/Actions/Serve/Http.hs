@@ -165,6 +165,9 @@ data Server = Server
     , serverCounter :: IORef Int
     -- ^ next request number; an origin is never reused within a run
     , serverSequence :: Sequence
+    , serverMode :: IO Serve.Mode
+    -- ^ what @status@ says first: interactive, following, or replaying a
+    -- cached document ("Salmon.Actions.Follow"); the loop's own accessor
     , serverStopped :: TVar Bool
     -- ^ set on the way out, so a request waiting on a loop that has ended
     -- answers with what it has rather than never
@@ -188,8 +191,8 @@ and reporters plugged in; the server outlives the loop only for as long as
 it takes the action to return, and a request still waiting at that point
 is answered with the reports it collected.
 -}
-withHttpServer :: FilePath -> Text -> (Server -> IO a) -> IO a
-withHttpServer path seedHelp act =
+withHttpServer :: FilePath -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
+withHttpServer path seedHelp mode act =
     Socket.withUnixListener path $ \listener -> do
         server <-
             Server listener seedHelp
@@ -198,6 +201,7 @@ withHttpServer path seedHelp act =
                 <*> newTVarIO Map.empty
                 <*> newIORef 0
                 <*> newSequence
+                <*> pure mode
                 <*> newTVarIO False
         let settings = Warp.setServerName "salmon" Warp.defaultSettings
         withAsync (Warp.runSettingsSocket settings (Socket.listenerSocket listener) (application server)) $ \_ ->
@@ -336,8 +340,9 @@ application :: Server -> Application
 application server req respond =
     case (Wai.requestMethod req, Wai.pathInfo req) of
         ("GET", ["dag"]) -> withView (respond . json HTTP.status200 . dagValue)
-        ("GET", ["status"]) -> withView $ \v ->
-            respond (json HTTP.status200 (toJSON (FromServe (Serve.StatusReport (Map.toList (viewNodes v)) (viewPaths v)))))
+        ("GET", ["status"]) -> withView $ \v -> do
+            mode <- serverMode server
+            respond (json HTTP.status200 (toJSON (FromServe (Serve.StatusReport mode (Map.toList (viewNodes v)) (viewPaths v)))))
         ("GET", ["history"]) -> withView $ \v ->
             respond (json HTTP.status200 (withElided (viewElided v) (toJSON (FromServe (Serve.HistoryReport (viewHistory v))))))
         ("GET", ["help", "seed"]) ->

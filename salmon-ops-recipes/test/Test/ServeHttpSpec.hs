@@ -146,7 +146,7 @@ withRunning act =
         upsRef <- newIORef Map.empty
         downsRef <- newIORef Map.empty
         slow <- Slow <$> newEmptyMVar <*> newEmptyMVar
-        Http.withHttpServer path seedHelp $ \server -> do
+        Http.withHttpServer path seedHelp (pure Serve.Interactive) $ \server -> do
             let base = (contramap attributed (Tagged.serveStream own), contramap attributed (Tagged.updownStream own))
                 (serveR, updownR) = Http.serverReporters server base
             _ <- forkIO $ do

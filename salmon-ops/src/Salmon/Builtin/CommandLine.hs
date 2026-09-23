@@ -104,9 +104,12 @@ instance FromJSON RunCommand
 instance ToJSON RunCommand
 
 {- | The @--follow-*@ flags: the scheduler's numbers
-("Salmon.Actions.Follow.Scheduler"), in seconds where they are durations.
-@--follow-interval@ is milestone 2's name for the base delay, kept as a
-synonym of @--follow-base@; either may be given, the base's own flag wins.
+("Salmon.Actions.Follow.Scheduler"), in seconds where they are durations,
+then the cache directory (@--follow-cache DIR@; none by default, in which
+case nothing survives a restart) and @--follow-refuse-older@ (see
+'Follow.followRefuseOlder'). @--follow-interval@ is milestone 2's name for
+the base delay, kept as a synonym of @--follow-base@; either may be given,
+the base's own flag wins.
 -}
 data FollowOptions = FollowOptions
     { followBase :: !(Maybe Int)
@@ -116,6 +119,8 @@ data FollowOptions = FollowOptions
     , followJitter :: !Double
     , followDebounce :: !Int
     , followMaxWait :: !Int
+    , followCacheDir :: !(Maybe FilePath)
+    , followRefuseOlder :: !Bool
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -309,6 +314,17 @@ runCommandParser =
                     <> Options.Applicative.value (defaultSecs (.schedMaxWait))
                     <> showDefault
                     <> Options.Applicative.help "The longest a change waits to be applied while the registry keeps changing."
+                )
+            <*> optional
+                ( strOption
+                    ( long "follow-cache"
+                        <> Options.Applicative.metavar "DIR"
+                        <> Options.Applicative.help "Keep each label's last applied document in DIR, and replay it at startup when the registry cannot be reached (status then says `mode: replay`). Without it a restart against an unreachable registry declares nothing."
+                    )
+                )
+            <*> switch
+                ( long "follow-refuse-older"
+                    <> Options.Applicative.help "Refuse a fetched document whose `published` timestamp is older than the one already applied for its label (reported as stale, not injected). Documents without `published` are never refused."
                 )
     defaultSecs :: (Scheduler.Config -> Int) -> Int
     defaultSecs f = f Scheduler.defaultConfig `div` 1000000
@@ -504,14 +520,18 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                 { Follow.followRegistry = Follow.directoryRegistry dir
                                 , Follow.followLabels = lbls
                                 , Follow.followSchedule = followSchedule followOptions
+                                , Follow.followCache = followOptions.followCacheDir
+                                , Follow.followRefuseOlder = followOptions.followRefuseOlder
                                 }
             -- the fetcher's first round is in the inbox before standard
             -- input is even read, so the first convergence is what the
             -- registry says, deterministically; after that both interleave
             -- at line granularity.
             gate <- newEmptyMVar
-            -- what `fetch` pokes: the fetcher's clock wakes on it
+            -- what `fetch` pokes: the fetcher's clock wakes on it; and
+            -- what `status` reads: the fetcher's mode
             pk <- Scheduler.newPoke
+            modeVar <- Follow.newMode
             let -- with a socket to talk to, the process must outlive
                 -- whatever started it (`< /dev/null &` is the ordinary way
                 -- to run it), so standard input is read as a named source
@@ -524,14 +544,14 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 producersWith more =
                     case follow of
                         Nothing -> stdinP : more
-                        Just f -> Follow.follower Follow.reportText pk f (putMVar gate ()) : Follow.gated gate stdinP : more
-                onFetch = Scheduler.poke pk <$ follow
+                        Just f -> Follow.follower Follow.reportText pk modeVar f (putMVar gate ()) : Follow.gated gate stdinP : more
+                onFetch = Follow.followed pk modeVar <$ follow
             -- the listener's reporters answer each socket client on its own
             -- connection, the HTTP server's answer each request with its
             -- own reports, and both hand everything on to the loop's own,
             -- which stays exactly as `fmt` says.
             withMaybe listen Socket.withUnixListener $ \mlistener ->
-                withMaybe http (\path -> Http.withHttpServer path (seedHelpText (parseRecord :: Parser seed))) $ \mserver -> do
+                withMaybe http (\path -> Http.withHttpServer path (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
                     let (serveR0, r0) = reportersOver tagged
                         base = case mlistener of
                             Nothing -> (contramap Serve.attributed serveR0, contramap Serve.attributed r0)
