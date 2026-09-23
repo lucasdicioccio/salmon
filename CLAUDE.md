@@ -405,7 +405,34 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   runs `stopTending` first. The one decision the list adds: **only the `Stdin` origin's `Eof`
   ends the loop**; another producer's `Eof` is not a command (nothing acts, so nothing stands
   down) and is read past — a socket client hanging up or a fetcher going quiet must not take
-  the server with it, so a loop with no `Stdin` producer ends only on `quit`.
+  the server with it, so a loop with no `Stdin` producer ends only on `quit`. Such a hang-up is
+  reported as `HungUp origin` at the moment the loop reads its `Eof` — which, the inbox being
+  one queue, is after every line that origin typed has been handled, and is what whoever holds
+  a connection for it waits for before closing.   **Whose report is it** is the loop's knowledge and nobody else's, so `serveAttributed` is the
+  entry point that says: it takes reporters over `Attributed a` (a `Maybe Origin` beside the
+  report) and stamps every report — the loop's own and the per-node ones a pass emits — with
+  the origin of the line being handled, `Nothing` outside a command (the tending machines'
+  reports). The mechanism is one private `IORef (Maybe Origin)` written in `loop` after
+  `stopTending` and cleared when `step` returns, applied through `Reporter.pulls`; it is
+  private on purpose, so the API is two contravariant reporters and no mutable state.
+  `serveProducers`/`serveWith` are the same loop with the stamp thrown away.
+  **`Actions/Serve/Socket.hs`** is the first producer beyond stdin (milestone 2 of
+  `specs/generic-server.md`): `withUnixListener` binds a unix socket (bind, then chmod 0600,
+  then listen — race-free without a process-global umask, because a bound-but-unlistened
+  socket refuses connections; a stale file is replaced only if a connect to it fails, a live one
+  is `AlreadyListening`, a non-socket is `NotASocket`), `listenerProducer` accepts connections
+  and reads each as lines under its own `Origin "PATH#n"`, and `listenerReporters` wraps the
+  loop's one `Reporter Tagged` so that a report stamped with a connection's origin is also
+  written to that connection as `reportJSONLines` — clients always get JSON, the loop's stdout
+  stays whatever `--json` said. Two ordering facts are load-bearing: a connection is closed on
+  the loop's `HungUp` for it and **not** when its reader hits EOF (a client that half-closes
+  after typing is still owed its reports, which the loop may not have reached yet), and the
+  producer's own teardown closes every connection so a client attached when `quit` ends the
+  loop reads EOF. Under `--listen`, `CommandLine` hands stdin over as `Origin "stdin"` rather
+  than `Stdin`: with a socket to talk to the process must outlive whatever started it
+  (`< /dev/null &`), so stdin's EOF is a hang-up like any client's and only `quit` — from
+  anywhere — ends the loop. `Test/ServeSocketSpec.hs` drives it with real connections.
+
   `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
   in-memory producers and checks the world matches the one-script run.
   **`Actions/Follow.hs` is the second producer**, pull mode (`specs/pull-mode.md`, milestone
@@ -753,6 +780,7 @@ my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expa
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
 my-salmon run serve --follow DIR --label L [--label L]... [--follow-interval S]
                                          # the same loop, also fetching documents from DIR (pull mode)
+my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
@@ -798,6 +826,9 @@ quit                   # leave the loop, changing nothing on the way out
 
 Seed args are parsed with the binary's own `ParseRecord seed` — the same words that would follow
 `config` — so a seed is identified by the directive it configures to, not by its spelling.
+`--listen PATH` (beside `--max-concurrency`/`--no-autoconverge`/`--json`) accepts the same lines
+on a unix socket from any number of clients, each answered on its own connection as JSON lines;
+see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §12.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

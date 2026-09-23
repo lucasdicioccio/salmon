@@ -267,7 +267,13 @@ cheap one and lands first.
 2. **Unix socket carrying the line protocol** (`run serve --listen
    <path>`), as a second producer into the inbox, stdin unchanged. Test:
    two clients, interleaved commands, reports go to the client that typed
-   them.
+   them. **Shipped** (`Salmon.Actions.Serve.Socket`, `Test/ServeSocketSpec.hs`).
+   Two deviations: "stdin unchanged" holds for what stdin *accepts*, not for
+   what its end of input does — under `--listen` stdin EOF is a hang-up and
+   only `quit` ends the loop, since a server started `< /dev/null &` must not
+   exit at once; and a `HungUp` report was added to `Serve.Report`, because
+   "every line this client typed has been handled" is a fact only the loop
+   knows and the socket needs it to close the connection at the right moment.
 3. **`/dag`, `/status`, `/history`, `/help/seed` as JSON** over HTTP on the
    socket. The `Act` projection lands here. Test: `/dag` equals what
    `Help.printDagTree` would print, structurally.

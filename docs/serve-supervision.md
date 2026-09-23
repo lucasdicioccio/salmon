@@ -182,6 +182,7 @@ quit
 | bounding how many nodes converge at once | ❌ (unbounded by default) | `--max-concurrency N` (§10) |
 | reports a script can parse | ❌ (text by default) | `--json` (§11) |
 | fetching declarations from a registry instead of typing them | ❌ (stdin only) | `--follow DIR --label L` (§12) |
+| a second operator or a tool attached to a running `serve` | ❌ (stdin only by default) | `--listen PATH` (§13) |
 
 ## 5. Decorating nodes: `check`
 
@@ -505,7 +506,53 @@ in force. Not there yet (`specs/pull-mode.md`, milestones 3 onwards): backoff
 and debounce, a `fetch` command, a cached document that survives a restart,
 other registries (git, HTTP, DNS, bucket), and signatures.
 
-## 13. Gotchas
+## 13. A second way in: `--listen`
+
+`run serve --listen PATH` binds a unix socket at `PATH` and accepts the
+*same line protocol* on it — `up`, `status`, `force --select ...`, `quit`,
+every command §3 typed on stdin — from any number of clients at once, while
+stdin keeps working alongside. Milestone 2 of `specs/generic-server.md`;
+`Salmon.Actions.Serve.Socket` is the implementation.
+
+```sh
+my-salmon run serve --listen /run/my-salmon.sock < /dev/null &
+printf 'status\n' | socat - UNIX-CONNECT:/run/my-salmon.sock
+ssh -L /tmp/remote.sock:/run/my-salmon.sock host   # then the same, locally
+```
+
+Four things to know:
+
+- **Each client reads exactly the reports for its own lines**, as JSON
+  lines in the §11 encoding, whatever the loop's own stdout is set to
+  (text by default, JSON under `--json`; it sees everything either way).
+  What another client typed, and what the tending loop says between
+  commands, never reaches a client — the loop stamps every report with who
+  typed the command it belongs to, and the socket only echoes the ones
+  stamped for it. There is no per-client text mode.
+- **A client hanging up is not `quit`.** It is reported on the loop's stdout
+  (`serve: PATH#N hung up`) once every line that client typed has been
+  handled, and the connection is closed then — so `printf 'status\n' |
+  socat ...` gets its answer even though it half-closes immediately. `quit`
+  from a client ends the loop exactly as it does from stdin.
+- **Under `--listen`, stdin's end of input does not end the loop either.**
+  With a socket to talk to, the process is expected to outlive whatever
+  started it (`< /dev/null &`, a unit file), so stdin is one more source
+  whose hang-up is reported and read past; only `quit` — typed anywhere —
+  or a signal ends it. Without `--listen`, stdin closing ends the loop as
+  it always has.
+- **The socket is owner-only (mode 0600) and the path is checked before it
+  is taken.** A stale socket file (its `serve` died without removing it) is
+  replaced; one something still answers on is refused (`AlreadyListening`),
+  as is a path holding something that is not a socket. Permissions are the
+  whole access story: there is no authentication, and no TCP — see the
+  spec's security section for why a salmon server must never listen on a
+  network without both.
+
+The commands are still one inbox: a line from a client stands the tending
+machines down before it runs, same as a line from stdin, and two clients'
+lines interleave at line granularity in arrival order.
+
+## 14. Gotchas
 
 - **A piped script is never supervised.** If you're testing self-healing and
   piping a script in, you won't see it — there's no idle moment for the
@@ -531,7 +578,7 @@ other registries (git, HTTP, DNS, bucket), and signatures.
   node with no `check` never notices its own file changing, and nothing
   standing on it is ever bounced, however that node is decorated otherwise.
 
-## 14. Where to read more
+## 15. Where to read more
 
 - `docs/howto-ops.md` — writing and testing the `Op`s this doc assumes.
 - `CLAUDE.md`'s "`salmon-ops` layer" section — the implementation-level
