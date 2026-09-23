@@ -6,6 +6,7 @@ module Salmon.Builtin.CommandLine where
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
 import Control.Applicative ((<|>))
 import Control.Monad (void, when)
+import Data.Foldable (traverse_)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
@@ -41,6 +42,7 @@ import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Actions.Serve.Events as Events
 import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.Serve.Socket as Socket
+import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 -- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
 -- optparse-applicative's 'ParserResult' ones, which this module pattern
 -- matches on. Nothing here needs a 'CheckResult'.
@@ -97,11 +99,27 @@ data RunCommand
       -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
       -- @specs/generic-server.md@; see "Salmon.Actions.Serve.Socket"),
       -- stdin still read beside it, and for HTTP on a second unix socket
-      -- (@--http PATH@, milestone 3; see "Salmon.Actions.Serve.Http"),
-      -- whose event stream keeps @--events-ring N@ events for a client to
-      -- resume from (milestone 4; see "Salmon.Actions.Serve.Events").
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int
+      -- (@--http PATH@, milestone 3; see "Salmon.Actions.Serve.Http").
+      -- Last, the status sink ('SinkOptions', milestone 5 of
+      -- @specs/pull-mode.md@; see "Salmon.Actions.Serve.StatusSink").
+      -- The HTTP server's event stream keeps @--events-ring N@ events for a
+      -- client to resume from (milestone 4; see "Salmon.Actions.Serve.Events").
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions
     deriving (Eq, Ord, Generic, Show)
+
+{- | @--status-sink PATH@ and @--status-sink-interval SECONDS@ (default
+'StatusSink.defaultInterval'): where this host's status document is written,
+and how often between the writes a convergence pass or a follow injection
+triggers on their own. 'Nothing' writes none.
+-}
+data SinkOptions = SinkOptions
+    { sinkPath :: !(Maybe FilePath)
+    , sinkInterval :: !Int
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON SinkOptions
+instance ToJSON SinkOptions
 
 instance FromJSON RunCommand
 instance ToJSON RunCommand
@@ -257,7 +275,7 @@ runCommandParser =
                     ( long "http"
                         <> Options.Applicative.metavar "PATH"
                         <> Options.Applicative.help
-                            "Also serve HTTP on a unix socket at PATH (created owner-only): GET /dag, /status, /history, /help/seed, /events and POST /command[?async]. Stdin keeps working alongside."
+                            "Also serve HTTP on a unix socket at PATH (created owner-only): GET /dag, /status, /history, /help/seed and POST /command[?async]. Stdin keeps working alongside."
                     )
                 )
             <*> Options.Applicative.option
@@ -267,6 +285,24 @@ runCommandParser =
                     <> Options.Applicative.value (Events.configRing Events.defaultConfig)
                     <> Options.Applicative.showDefault
                     <> Options.Applicative.help "How many events --http's /events keeps for a client to resume from with ?since=; a client further behind is sent a gap event."
+                )
+            <*> sinkOptionsP
+    sinkOptionsP =
+        SinkOptions
+            <$> optional
+                ( strOption
+                    ( long "status-sink"
+                        <> Options.Applicative.metavar "PATH"
+                        <> Options.Applicative.help "Write this host's status document (JSON: host, mode, applied documents per label, the `status` object, the last converge and follow reports) to PATH, atomically, after every convergence pass and follow injection and on a timer; `salmon-fleet status DIR` folds a directory of them."
+                    )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "status-sink-interval"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (StatusSink.defaultInterval `div` 1000000)
+                    <> showDefault
+                    <> Options.Applicative.help "Seconds between two status sink writes when nothing triggers one."
                 )
     followOptionsP =
         FollowOptions
@@ -510,9 +546,9 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
-            let tagged = taggedFor fmt
+            let own = taggedFor fmt
             follow <- case (followDir, traverse Follow.mkLabel labels) of
                 (Nothing, Right []) -> pure Nothing
                 (Nothing, _) -> do
@@ -543,32 +579,48 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             -- what `status` reads: the fetcher's mode
             pk <- Scheduler.newPoke
             modeVar <- Follow.newMode
-            let -- with a socket to talk to, the process must outlive
-                -- whatever started it (`< /dev/null &` is the ordinary way
-                -- to run it), so standard input is read as a named source
-                -- rather than as the loop's 'Serve.Stdin': its end of input
-                -- is a hang-up like any client's and only `quit` — from
-                -- stdin or from a client — ends the loop.
-                stdinP = case (listen, http) of
-                    (Nothing, Nothing) -> Serve.stdinProducer stdin
-                    _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
-                producersWith more =
-                    case follow of
-                        Nothing -> stdinP : more
-                        Just f -> Follow.follower Follow.reportText pk modeVar f (putMVar gate ()) : Follow.gated gate stdinP : more
-                onFetch = Follow.followed pk modeVar <$ follow
-            -- the listener's reporters answer each socket client on its own
-            -- connection, the HTTP server's answer each request with its
-            -- own reports, and both hand everything on to the loop's own,
-            -- which stays exactly as `fmt` says.
-            withMaybe listen Socket.withUnixListener $ \mlistener ->
+            appliedVar <- Follow.newApplied
+            host <- StatusSink.hostName
+            let onFetch = Follow.followed pk modeVar appliedVar <$ follow
+                sinkConfig path =
+                    StatusSink.Config
+                        { StatusSink.configPath = path
+                        , StatusSink.configInterval = max 1 sinkOptions.sinkInterval * 1000000
+                        , StatusSink.configHost = host
+                        }
+            -- the status sink watches the loop's stream for its triggers,
+            -- so what everything below reports through is the loop's own
+            -- reporter with the sink beside it; the sink's own complaints
+            -- go to the loop's own alone.
+            withMaybe sinkOptions.sinkPath (\path -> StatusSink.withSink (sinkConfig path) onFetch own) $ \msink -> do
+              let tagged = maybe own (reportBoth own . StatusSink.sinkReporter) msink
+                  -- with a socket to talk to, the process must outlive
+                  -- whatever started it (`< /dev/null &` is the ordinary way
+                  -- to run it), so standard input is read as a named source
+                  -- rather than as the loop's 'Serve.Stdin': its end of input
+                  -- is a hang-up like any client's and only `quit` — from
+                  -- stdin or from a client — ends the loop.
+                  stdinP = case (listen, http) of
+                      (Nothing, Nothing) -> Serve.stdinProducer stdin
+                      _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
+                  producersWith more =
+                      case follow of
+                          Nothing -> stdinP : more
+                          Just f -> Follow.follower (Tagged.followStream tagged) pk modeVar appliedVar f (putMVar gate ()) : Follow.gated gate stdinP : more
+              -- the listener's reporters answer each socket client on its own
+              -- connection, the HTTP server's answer each request with its
+              -- own reports, and both hand everything on to the loop's own,
+              -- which stays exactly as `fmt` says.
+              withMaybe listen Socket.withUnixListener $ \mlistener ->
                 withMaybe http (\path -> Http.withHttpServerWith Events.defaultConfig{Events.configRing = eventsRing} path (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
                     let (serveR0, r0) = reportersOver tagged
                         base = case mlistener of
                             Nothing -> (contramap Serve.attributed serveR0, contramap Serve.attributed r0)
                             Just listener -> Socket.listenerReporters listener tagged
                         (serveR', r') = maybe base (`Http.serverReporters` base) mserver
-                        observe = maybe (const (pure ())) Http.serverObserver mserver
+                        observe acc = do
+                            traverse_ (`Http.serverObserver` acc) mserver
+                            traverse_ (`StatusSink.sinkObserver` acc) msink
                         more = foldMap (pure . Socket.listenerProducer) mlistener <> foldMap (pure . Http.serverProducer) mserver
                     void $
                         Serve.serveObserved
@@ -622,10 +674,12 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     output changes), for 'ReportJson' it is "Salmon.Reporter.Tagged"'s line
     writer on stdout in their place. The tending loop's own stream never
     reaches here on its own — @serve@ forwards what it keeps of it as
-    'Serve.Tended', which the encoding nests — so its slot is 'silent'. -}
+    'Serve.Tended', which the encoding nests — so its slot is 'silent'. The
+    fetcher's stream ("Salmon.Actions.Follow") goes through here too, so
+    that @--json@ covers it and a status sink can watch it. -}
     taggedFor :: ReportFormat -> Reporter Tagged.Tagged
     taggedFor fmt = case fmt of
-        ReportText -> Tagged.reportTexts serveR r silent
+        ReportText -> Tagged.reportTexts serveR r silent Follow.reportText
         ReportJson -> Tagged.reportJSONLines stdout
 
     -- | The tagged reporter split contravariantly into the two the drivers take.

@@ -130,6 +130,7 @@ module Salmon.Actions.Serve (
     serveFollowing,
     serveObserved,
     Followed (..),
+    AppliedDocument (..),
     Mode (..),
     renderMode,
 
@@ -183,7 +184,7 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.STM (TChan, TVar, atomically, isEmptyTChan, newTChanIO, readTChan, writeTChan)
 import Control.Exception (IOException, SomeException, finally, try)
 import Control.Monad (forM_, unless, when)
-import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, encode, parseJSON)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
@@ -200,6 +201,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.Time.Clock (UTCTime)
 import System.IO (Handle, hFlush, hGetLine, hIsEOF, stdout)
 
 import qualified Salmon.Actions.Query as Query
@@ -673,6 +675,11 @@ data Report
       -- didn't recognise), or a lengthier explanation of just that one
       -- recognised 'Topic'.
       HelpText !(Maybe Topic)
+    | -- | the status sink ("Salmon.Actions.Serve.StatusSink") could not
+      -- write its document: path, why. Emitted from the sink's own thread,
+      -- once per run of failures rather than once per attempt, and never
+      -- attributed to a typist; the loop keeps serving.
+      SinkFailed !FilePath !Text
     deriving (Show)
 
 -- | Prints 'Report's in a human-readable, one-event-per-block form.
@@ -750,6 +757,7 @@ renderReport rep =
             case mtopic >>= lookupTopic of
                 Just detailed -> detailed
                 Nothing -> commandReference
+        SinkFailed path err -> ("serve: status sink " <> Text.pack path <> " could not be written:") : Text.lines err
   where
     statusOrder :: (Ref, NodeState) -> (Direction, Convergence, ShortHand, Text)
     statusOrder (r, st) = (st.nodeDirection, st.nodeConvergence, st.nodeShorthand, unRef r)
@@ -1517,7 +1525,31 @@ data Followed = Followed
     -- ^ a round now; see 'Salmon.Actions.Follow.Scheduler.poke'
     , followedMode :: IO Mode
     -- ^ never 'Interactive'
+    , followedApplied :: IO [AppliedDocument]
+    -- ^ the document last applied per label, for the status sink
+    -- ("Salmon.Actions.Serve.StatusSink"); read-only, a plain read of the
+    -- fetcher's own cell
     }
+
+{- | What the fetcher last applied for one label, as the status sink
+publishes it: the label, the document's @id@, its sha256 and when it was
+injected. Defined here rather than in "Salmon.Actions.Follow" because the
+loop's 'Followed' names it and the fetcher imports the loop, not the other
+way round. -}
+data AppliedDocument = AppliedDocument
+    { appliedDocLabel :: !Text
+    , appliedDocId :: !Text
+    , appliedDocDigest :: !Text
+    , appliedDocAt :: !UTCTime
+    }
+    deriving (Show, Eq)
+
+instance ToJSON AppliedDocument where
+    toJSON a = object ["label" .= a.appliedDocLabel, "id" .= a.appliedDocId, "sha256" .= a.appliedDocDigest, "applied" .= a.appliedDocAt]
+
+instance FromJSON AppliedDocument where
+    parseJSON = withObject "applied document" $ \o ->
+        AppliedDocument <$> o .: "label" <*> o .: "id" <*> o .: "sha256" <*> o .: "applied"
 
 {- | Which guarantees apply to the world right now, for @status@ (see
 @specs/pull-mode.md@, "what this does not solve"). 'Interactive' when nothing

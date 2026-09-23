@@ -86,8 +86,10 @@ label already applied (or has pending) is reported 'Stale' and not injected
 host. Off by default, and without a @published@ on both sides the latest
 document is whatever the registry says.
 
-What is /not/ here yet: signatures, a status sink, and every registry but
-the directory.
+The status sink ("Salmon.Actions.Serve.StatusSink") reads this module's
+reports and the per-label 'Applied' cell ('appliedDocuments') and writes
+nothing here. What is /not/ here yet: signatures, and every registry but the
+directory.
 -}
 module Salmon.Actions.Follow (
     -- * Documents
@@ -120,7 +122,9 @@ module Salmon.Actions.Follow (
     followerWith,
     gated,
     newMode,
+    newApplied,
     followed,
+    appliedDocuments,
     Applied (..),
     diffBatch,
 
@@ -148,7 +152,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
-import Data.Time.Clock (UTCTime)
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getFileSize, getModificationTime, renameFile)
 import System.FilePath ((<.>), (</>))
@@ -429,6 +433,8 @@ data Applied = Applied
     , appliedId :: !Text
     , appliedSeeds :: [Entry]
     , appliedPublished :: !(Maybe UTCTime)
+    , appliedAt :: !UTCTime
+    -- ^ when it was injected (the wall clock), for the status sink
     }
     deriving (Show, Eq)
 
@@ -540,16 +546,36 @@ runs. Starts 'Serve.Following'; only the startup round can turn it to
 newMode :: IO (IORef Serve.Mode)
 newMode = newIORef Serve.Following
 
--- | The loop's side: what @fetch@ pokes and what @status@ reads.
-followed :: Scheduler.Poke -> IORef Serve.Mode -> Serve.Followed
-followed pk mode = Serve.Followed{Serve.followedFetch = Scheduler.poke pk, Serve.followedMode = readIORef mode}
+{- | The cell the fetcher keeps the document last applied per label in,
+made by the caller for the same reason as 'newMode': the status sink reads
+it ('appliedDocuments') and the sink is composed before the producer runs.
+Starts empty. -}
+newApplied :: IO (IORef (Map Label Applied))
+newApplied = newIORef Map.empty
+
+-- | The loop's side: what @fetch@ pokes, what @status@ reads, and what
+-- the status sink lists per label.
+followed :: Scheduler.Poke -> IORef Serve.Mode -> IORef (Map Label Applied) -> Serve.Followed
+followed pk mode applied =
+    Serve.Followed
+        { Serve.followedFetch = Scheduler.poke pk
+        , Serve.followedMode = readIORef mode
+        , Serve.followedApplied = appliedDocuments applied
+        }
+
+-- | The document last applied per label, in label order, as the status
+-- sink publishes it.
+appliedDocuments :: IORef (Map Label Applied) -> IO [Serve.AppliedDocument]
+appliedDocuments applied = do
+    m <- readIORef applied
+    pure [Serve.AppliedDocument (labelText lbl) a.appliedId a.appliedDigest.unDigest a.appliedAt | (lbl, a) <- Map.toList m]
 
 -- | The producer, on the system clock and seeded from the wall clock (so
 -- that two hosts started together draw different jitter). See 'followerWith'.
-follower :: Reporter Report -> Scheduler.Poke -> IORef Serve.Mode -> Follow -> IO () -> Producer
-follower r pk mode follow primed = Producer $ \inbox -> do
+follower :: Reporter Report -> Scheduler.Poke -> IORef Serve.Mode -> IORef (Map Label Applied) -> Follow -> IO () -> Producer
+follower r pk mode applied follow primed = Producer $ \inbox -> do
     seed <- fromIntegral . (`div` 1000) . fromEnum <$> getPOSIXTime
-    produceInto (followerWith r (Scheduler.systemClock pk) (Scheduler.mkRng seed) mode follow primed) inbox
+    produceInto (followerWith r (Scheduler.systemClock pk) (Scheduler.mkRng seed) mode applied follow primed) inbox
 
 {- | The producer. One round runs synchronously before the given action
 (meant to release the standard-input producer, see 'gated'), and whatever it
@@ -561,10 +587,10 @@ then run on the schedule ("Salmon.Actions.Follow.Scheduler"), on the clock
 given: the system's, or a test's. The thread never sends an 'Eof': a
 registry that goes quiet is not the loop ending.
 -}
-followerWith :: Reporter Report -> Scheduler.Clock -> Scheduler.Rng -> IORef Serve.Mode -> Follow -> IO () -> Producer
-followerWith r clock rng mode follow primed = Producer $ \inbox -> do
+followerWith :: Reporter Report -> Scheduler.Clock -> Scheduler.Rng -> IORef Serve.Mode -> IORef (Map Label Applied) -> Follow -> IO () -> Producer
+followerWith r clock rng mode applied follow primed = Producer $ \inbox -> do
     runReporter r (Following (registryName follow.followRegistry) follow.followLabels follow.followSchedule)
-    st <- Fetcher <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> newIORef Map.empty
+    st <- Fetcher applied <$> newIORef Map.empty <*> newIORef Set.empty <*> newIORef Map.empty
     cached <- loadCache
     replayed <- forM follow.followLabels $ \lbl -> do
         outcome <- fetchOne r follow st lbl
@@ -728,8 +754,9 @@ injectPending r follow st inbox = do
     writeIORef st.fetcherFresh Set.empty
     unless (Map.null seen) $ do
         applied <- readIORef st.fetcherApplied
+        now <- getCurrentTime
         let adopt :: Seen -> Applied
-            adopt s = Applied s.seenStamp s.seenDigest s.seenId s.seenSeeds s.seenPublished
+            adopt s = Applied s.seenStamp s.seenDigest s.seenId s.seenSeeds s.seenPublished now
             -- what every label is about to say: the union the diff is against
             upcoming = Map.union (fmap adopt seen) applied
         let perLabel :: (Label, Seen) -> (Report, [(Origin, ServeCommand)])

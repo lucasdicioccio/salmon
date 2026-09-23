@@ -274,6 +274,7 @@ withFollowing root schedule fl labels body = do
     gate <- newEmptyMVar
     fc <- newFakeClock
     modeVar <- Follow.newMode
+    appliedVar <- Follow.newApplied
     let follow =
             Follow.Follow
                 { Follow.followRegistry = flakyRegistry fl fc (Follow.directoryRegistry (registryDir root))
@@ -283,7 +284,7 @@ withFollowing root schedule fl labels body = do
                 , Follow.followRefuseOlder = False
                 }
         producers =
-            [ Follow.followerWith followReporter (clockOf fc) (Scheduler.mkRng 1) modeVar follow (putMVar gate ())
+            [ Follow.followerWith followReporter (clockOf fc) (Scheduler.mkRng 1) modeVar appliedVar follow (putMVar gate ())
             , Follow.gated gate (chanProducer stdinChan)
             ]
         driver =
@@ -298,7 +299,7 @@ withFollowing root schedule fl labels body = do
         outcome <- try (body driver)
         atomically (writeTChan stdinChan Nothing)
         atomically (writeTChan resultVar outcome)
-    w <- Serve.serveFollowing [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) program (Just (Serve.Followed (atomically (writeTVar fc.fakePoke True)) (readIORef modeVar))) producers
+    w <- Serve.serveFollowing [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) program (Just (Serve.Followed (atomically (writeTVar fc.fakePoke True)) (readIORef modeVar) (Follow.appliedDocuments appliedVar))) producers
     outcome <- atomically (readTChan resultVar)
     case outcome of
         Left (ex :: SomeException) -> throwIO ex

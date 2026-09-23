@@ -2,32 +2,34 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-{- | The three report streams as one, and as JSON.
+{- | The four report streams as one, and as JSON.
 
-A salmon binary reports through three vocabularies: 'UpDown.Report' (what a
+A salmon binary reports through four vocabularies: 'UpDown.Report' (what a
 node did, from the one-shot drivers and, wrapped in 'Upkeep.Acted', from the
 tending loop), 'Upkeep.Report' (what a node's own machine is doing between
-commands) and 'Serve.Report' (what the @run serve@ loop is doing). Each has
-its own text rendering, and each is emitted through its own
-'Reporter'. 'Tagged' is the sum of the three, tagged by stream, so that one
-'Reporter' 'Tagged' can be split contravariantly into the three the drivers
-expect ('serveStream'/'updownStream'/'upkeepStream' are the 'contramap's) and
-so that a second consumer — a JSON line writer today, a server later (see
+commands), 'Serve.Report' (what the @run serve@ loop is doing) and
+'Follow.Report' (what the fetcher of @run serve --follow@ is doing on its own
+thread). Each has its own text rendering, and each is emitted through its own
+'Reporter'. 'Tagged' is the sum of the four, tagged by stream, so that one
+'Reporter' 'Tagged' can be split contravariantly into the four the drivers
+expect ('serveStream'/'updownStream'/'upkeepStream'/'followStream' are the
+'contramap's) and so that a second consumer — a JSON line writer, a status
+sink ("Salmon.Actions.Serve.StatusSink"), a server (see
 @specs\/generic-server.md@) — sees every event in one place, composed beside
 the text one with 'reportBoth' rather than as a second reporting mechanism.
 
 The 'ToJSON' instances live here rather than beside the types for one
 reason: the two parametric streams are only encodable at 'Extension', which
 "Salmon.Actions.UpDown" cannot import (it is what "Salmon.Builtin.Extension"
-imports). Keeping all three together, orphans included, also makes this the
+imports). Keeping all four together, orphans included, also makes this the
 one module a client reads to know the wire format.
 
 The format: every report is an object with a @kind@, a @ref@ (an object with
 the 'shortRef' and the full text) wherever there is one node the report is
 about, and named fields. A report that nests another stream's report
 ('Upkeep.Acted', 'Serve.Tended') nests the inner object as-is under
-@report@. 'Tagged' adds @stream@ to the object — @serve@, @updown@ or
-@upkeep@; the key is not @origin@ because that word names who typed a
+@report@. 'Tagged' adds @stream@ to the object — @serve@, @updown@,
+@upkeep@ or @follow@; the key is not @origin@ because that word names who typed a
 command (see 'Serve.Origin'), which the event stream will carry too. Report
 text — @help@,
 @notes@, failure text — is public and encoded verbatim; see the spec's
@@ -40,6 +42,7 @@ module Salmon.Reporter.Tagged (
     serveStream,
     updownStream,
     upkeepStream,
+    followStream,
 
     -- * Reporters
     reportJSONLines,
@@ -68,6 +71,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle, hFlush)
 
+import qualified Salmon.Actions.Follow as Follow
+import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Actions.Upkeep as Upkeep
@@ -81,11 +86,12 @@ import Salmon.Reporter
 
 -------------------------------------------------------------------------------
 
--- | One of the three streams, tagged by where it came from.
+-- | One of the four streams, tagged by where it came from.
 data Tagged
     = FromServe !Serve.Report
     | FromUpDown !(UpDown.Report Extension)
     | FromUpkeep !(Upkeep.Report Extension)
+    | FromFollow !Follow.Report
     deriving (Show)
 
 serveStream :: Reporter Tagged -> Reporter Serve.Report
@@ -97,20 +103,25 @@ updownStream = contramap FromUpDown
 upkeepStream :: Reporter Tagged -> Reporter (Upkeep.Report Extension)
 upkeepStream = contramap FromUpkeep
 
-{- | The three text reporters, behind one 'Tagged' one. Dispatches and does
-nothing else, so whatever each of the three prints, it prints unchanged —
+followStream :: Reporter Tagged -> Reporter Follow.Report
+followStream = contramap FromFollow
+
+{- | The four text reporters, behind one 'Tagged' one. Dispatches and does
+nothing else, so whatever each of the four prints, it prints unchanged —
 this is what a binary's own reporters go through when @--json@ is absent.
 -}
 reportTexts ::
     Reporter Serve.Report ->
     Reporter (UpDown.Report Extension) ->
     Reporter (Upkeep.Report Extension) ->
+    Reporter Follow.Report ->
     Reporter Tagged
-reportTexts serveR updownR upkeepR = ReporterM $ \tagged ->
+reportTexts serveR updownR upkeepR followR = ReporterM $ \tagged ->
     case tagged of
         FromServe rep -> runReporter serveR rep
         FromUpDown rep -> runReporter updownR rep
         FromUpkeep rep -> runReporter upkeepR rep
+        FromFollow rep -> runReporter followR rep
 
 {- | One JSON object per line, flushed as it is written so a consumer on the
 other end of a pipe (@| jq@) sees each report when it happens rather than
@@ -132,6 +143,7 @@ instance ToJSON Tagged where
             FromServe rep -> withOrigin "serve" (toJSON rep)
             FromUpDown rep -> withOrigin "updown" (toJSON rep)
             FromUpkeep rep -> withOrigin "upkeep" (toJSON rep)
+            FromFollow rep -> withOrigin "follow" (toJSON rep)
       where
         withOrigin :: Text -> Value -> Value
         withOrigin origin (Object o) = Object (KeyMap.insert "stream" (String origin) o)
@@ -323,6 +335,46 @@ instance ToJSON Serve.Report where
             -- would print: the reference is prose, and there is nothing
             -- more structured to say about it.
             Serve.HelpText mtopic -> [kind "help", "topic" .= mtopic, "lines" .= Serve.renderReport rep]
+            Serve.SinkFailed path err -> [kind "sink-failed", "path" .= path, "error" .= err]
+
+-------------------------------------------------------------------------------
+
+{- | The fetcher's stream. A label is its text, a digest its hex; the
+schedule ('Scheduler.Config') is spelled out in microseconds, the unit the
+scheduler itself keeps, under the same names the @--follow-*@ flags use.
+-}
+instance ToJSON Follow.Report where
+    toJSON rep =
+        object $ case rep of
+            Follow.Following reg lbls cfg ->
+                [kind "following", "registry" .= reg, "labels" .= fmap Follow.labelText lbls, "schedule" .= scheduleValue cfg]
+            Follow.Injected lbl did dg nup ndown ->
+                kind "injected" : labelled lbl ++ ["document" .= did, "sha256" .= dg.unDigest, "up" .= nup, "down" .= ndown]
+            Follow.NoDiff lbl did dg -> kind "no-diff" : labelled lbl ++ ["document" .= did, "sha256" .= dg.unDigest]
+            Follow.Deferred lbl did dg -> kind "deferred" : labelled lbl ++ ["document" .= did, "sha256" .= dg.unDigest]
+            Follow.Backoff n us -> [kind "backoff", "failures" .= n, "next_us" .= us]
+            Follow.Missing lbl -> kind "missing" : labelled lbl
+            Follow.Vanished lbl -> kind "vanished" : labelled lbl
+            Follow.Malformed lbl dg err -> kind "malformed" : labelled lbl ++ ["sha256" .= dg.unDigest, "error" .= err]
+            Follow.FetchFailed lbl err -> kind "fetch-failed" : labelled lbl ++ ["error" .= err]
+            Follow.Replayed lbl did dg -> kind "replayed" : labelled lbl ++ ["document" .= did, "sha256" .= dg.unDigest]
+            Follow.Stale lbl did -> kind "stale" : labelled lbl ++ ["document" .= did]
+            Follow.BadCache lbl err -> kind "bad-cache" : labelled lbl ++ ["error" .= err]
+            Follow.CacheFailed lbl err -> kind "cache-failed" : labelled lbl ++ ["error" .= err]
+      where
+        labelled :: Follow.Label -> [(Key, Value)]
+        labelled lbl = ["label" .= Follow.labelText lbl]
+
+scheduleValue :: Scheduler.Config -> Value
+scheduleValue cfg =
+    object
+        [ "base_us" .= cfg.schedBase
+        , "factor" .= cfg.schedFactor
+        , "cap_us" .= cfg.schedCap
+        , "jitter" .= cfg.schedJitter
+        , "debounce_us" .= cfg.schedDebounce
+        , "max_wait_us" .= cfg.schedMaxWait
+        ]
 
 -------------------------------------------------------------------------------
 

@@ -30,6 +30,8 @@ library
                    , Salmon.Actions.Serve.Events
                    , Salmon.Actions.Serve.Http
                    , Salmon.Actions.Serve.Socket
+                   , Salmon.Actions.Serve.StatusSink
+                   , Salmon.Actions.Fleet
                    , Salmon.Actions.UpDown
                    , Salmon.Actions.Upkeep
                    , Salmon.Actions.Dot

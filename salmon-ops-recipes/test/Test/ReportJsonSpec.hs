@@ -1,15 +1,17 @@
 {- | Layer 0 coverage for "Salmon.Reporter.Tagged" (milestone 1 of
-@specs\/generic-server.md@): the JSON encoding of the three report streams,
+@specs\/generic-server.md@): the JSON encoding of the four report streams,
 and the composition of the text reporters beside a JSON one.
 
-Every constructor of 'UpDown.Report', 'Upkeep.Report' and 'Serve.Report' has
-a golden object here, written out as JSON text and compared structurally
+Every constructor of 'UpDown.Report', 'Upkeep.Report', 'Serve.Report' and
+'Follow.Report' has a golden object here, written out as JSON text and compared structurally
 (key order is not part of the contract; the set of keys and their values
 are). The one thing a golden cannot spell out literally is a 'Ref' — one is
 only ever made by hashing — so each golden carries @<REF>@\/@<SHORT>@
 placeholders spliced from the one fixture ref before parsing. A constructor
 added to any of the three streams is an incomplete-pattern warning in the
 sentinels at the bottom of this module, which is the cue to add its golden.
+The status sink's document ("Salmon.Actions.Serve.StatusSink") has its
+golden here too, since it is built from these same objects.
 -}
 module Test.ReportJsonSpec (tests) where
 
@@ -30,6 +32,8 @@ import System.IO.Temp (withSystemTempFile)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (Assertion, assertBool, assertEqual, assertFailure, testCase)
 
+import qualified Salmon.Actions.Follow as Follow
+import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Actions.Upkeep as Upkeep
@@ -131,7 +135,7 @@ golden tagged expectedText = do
 -------------------------------------------------------------------------------
 
 goldens :: [(String, Tagged.Tagged, Text)]
-goldens = updownGoldens ++ upkeepGoldens ++ serveGoldens
+goldens = updownGoldens ++ upkeepGoldens ++ serveGoldens ++ followGoldens
 
 updownGoldens :: [(String, Tagged.Tagged, Text)]
 updownGoldens =
@@ -298,6 +302,35 @@ serveGoldens =
     jsonStrings :: [Text] -> Text
     jsonStrings = LText.toStrict . LText.decodeUtf8 . encode
 
+followGoldens :: [(String, Tagged.Tagged, Text)]
+followGoldens =
+    [
+        ( "Follow.Following"
+        , Tagged.FromFollow (Follow.Following "/srv/reg" [web, canary] schedule)
+        , "{\"kind\":\"following\",\"registry\":\"/srv/reg\",\"labels\":[\"web\",\"canary\"]"
+            <> ",\"schedule\":{\"base_us\":30000000,\"factor\":2,\"cap_us\":600000000,\"jitter\":0.2,\"debounce_us\":5000000,\"max_wait_us\":60000000}}"
+        )
+    , ("Follow.Injected", Tagged.FromFollow (Follow.Injected web "web@2" digest 2 1), "{\"kind\":\"injected\",\"label\":\"web\",\"document\":\"web@2\",\"sha256\":\"" <> hex <> "\",\"up\":2,\"down\":1}")
+    , ("Follow.NoDiff", Tagged.FromFollow (Follow.NoDiff web "web@2" digest), "{\"kind\":\"no-diff\",\"label\":\"web\",\"document\":\"web@2\",\"sha256\":\"" <> hex <> "\"}")
+    , ("Follow.Deferred", Tagged.FromFollow (Follow.Deferred web "web@2" digest), "{\"kind\":\"deferred\",\"label\":\"web\",\"document\":\"web@2\",\"sha256\":\"" <> hex <> "\"}")
+    , ("Follow.Backoff", Tagged.FromFollow (Follow.Backoff 3 120000000), "{\"kind\":\"backoff\",\"failures\":3,\"next_us\":120000000}")
+    , ("Follow.Missing", Tagged.FromFollow (Follow.Missing web), "{\"kind\":\"missing\",\"label\":\"web\"}")
+    , ("Follow.Vanished", Tagged.FromFollow (Follow.Vanished web), "{\"kind\":\"vanished\",\"label\":\"web\"}")
+    , ("Follow.Malformed", Tagged.FromFollow (Follow.Malformed web digest "not json"), "{\"kind\":\"malformed\",\"label\":\"web\",\"sha256\":\"" <> hex <> "\",\"error\":\"not json\"}")
+    , ("Follow.FetchFailed", Tagged.FromFollow (Follow.FetchFailed web "no such directory"), "{\"kind\":\"fetch-failed\",\"label\":\"web\",\"error\":\"no such directory\"}")
+    , ("Follow.Replayed", Tagged.FromFollow (Follow.Replayed web "web@1" digest), "{\"kind\":\"replayed\",\"label\":\"web\",\"document\":\"web@1\",\"sha256\":\"" <> hex <> "\"}")
+    , ("Follow.Stale", Tagged.FromFollow (Follow.Stale web "web@0"), "{\"kind\":\"stale\",\"label\":\"web\",\"document\":\"web@0\"}")
+    , ("Follow.BadCache", Tagged.FromFollow (Follow.BadCache web "digest mismatch"), "{\"kind\":\"bad-cache\",\"label\":\"web\",\"error\":\"digest mismatch\"}")
+    , ("Follow.CacheFailed", Tagged.FromFollow (Follow.CacheFailed web "read-only file system"), "{\"kind\":\"cache-failed\",\"label\":\"web\",\"error\":\"read-only file system\"}")
+    ]
+  where
+    web = labelOf "web"
+    canary = labelOf "canary"
+    labelOf t = either (error . Text.unpack) id (Follow.mkLabel t)
+    hex = "32ea59311d97a7c0"
+    digest = Follow.Digest hex
+    schedule = Scheduler.defaultConfig
+
 -------------------------------------------------------------------------------
 
 taggedOrigin :: Assertion
@@ -305,6 +338,7 @@ taggedOrigin = do
     assertEqual "serve" (Just (String "serve")) (originOf (Tagged.FromServe Serve.Started))
     assertEqual "updown" (Just (String "updown")) (originOf (Tagged.FromUpDown (UpDown.Done fixtureAct)))
     assertEqual "upkeep" (Just (String "upkeep")) (originOf (Tagged.FromUpkeep (Upkeep.Holding 1)))
+    assertEqual "follow" (Just (String "follow")) (originOf (Tagged.FromFollow (Follow.Backoff 1 1)))
     -- the inner object is carried whole: removing the stream gives it back
     let inner = toJSON (UpDown.Done fixtureAct)
     case toJSON (Tagged.FromUpDown (UpDown.Done fixtureAct)) of
@@ -352,7 +386,7 @@ textUnchangedBesideJson = do
     let serveText ref = ReporterM $ \rep -> modifyIORef' ref (++ Serve.renderReport rep)
         updownText ref = ReporterM $ \rep -> modifyIORef' ref (++ [Text.pack (show rep)])
         jsonR = ReporterM $ \tagged -> modifyIORef' jsonSeen (++ [encode tagged])
-        composed = reportBoth (Tagged.reportTexts (serveText besideServe) (updownText besideUpdown) silent) jsonR
+        composed = reportBoth (Tagged.reportTexts (serveText besideServe) (updownText besideUpdown) silent silent) jsonR
         serveReports = [Serve.Started, Serve.ConvergeStart 0 2, Serve.Tended (Upkeep.Wedged fixtureAct (Micros 5)), Serve.ConvergeStop True 0]
         updownReports = [UpDown.Eval fixtureAct, UpDown.Done fixtureAct, UpDown.Failed otherAct (toException boom)]
     mapM_ (runReporter (serveText aloneServe)) serveReports
@@ -453,3 +487,19 @@ _serveCovered rep = case rep of
     Serve.HistoryElided{} -> ()
     Serve.QueryReport{} -> ()
     Serve.HelpText{} -> ()
+
+_followCovered :: Follow.Report -> ()
+_followCovered rep = case rep of
+    Follow.Following{} -> ()
+    Follow.Injected{} -> ()
+    Follow.NoDiff{} -> ()
+    Follow.Deferred{} -> ()
+    Follow.Backoff{} -> ()
+    Follow.Missing{} -> ()
+    Follow.Vanished{} -> ()
+    Follow.Malformed{} -> ()
+    Follow.FetchFailed{} -> ()
+    Follow.Replayed{} -> ()
+    Follow.Stale{} -> ()
+    Follow.BadCache{} -> ()
+    Follow.CacheFailed{} -> ()

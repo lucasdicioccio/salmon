@@ -138,6 +138,7 @@ withFollowing root labels body = do
     gate <- newEmptyMVar
     pk <- Scheduler.newPoke
     modeVar <- Follow.newMode
+    appliedVar <- Follow.newApplied
     let follow =
             Follow.Follow
                 { Follow.followRegistry = Follow.directoryRegistry (registryDir root)
@@ -147,7 +148,7 @@ withFollowing root labels body = do
                 , Follow.followRefuseOlder = False
                 }
         producers =
-            [ Follow.follower followReporter pk modeVar follow (putMVar gate ())
+            [ Follow.follower followReporter pk modeVar appliedVar follow (putMVar gate ())
             , Follow.gated gate (chanProducer stdinChan)
             ]
         driver =
