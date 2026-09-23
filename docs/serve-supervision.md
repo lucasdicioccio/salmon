@@ -179,6 +179,7 @@ quit
 | a non-`managed` node re-applying itself on a timer instead of parking | ❌ | `supReapply` (§6), narrowly |
 | addressing a batch/rewrite-introduced node that has no declared path | ❌ | a `#ref` selector (§9) |
 | bounding how many nodes converge at once | ❌ (unbounded by default) | `--max-concurrency N` (§10) |
+| reports a script can parse | ❌ (text by default) | `--json` (§11) |
 
 ## 5. Decorating nodes: `check`
 
@@ -414,7 +415,38 @@ outbound connection limit) rather than two specific nodes fighting over one
 resource — that case is still an edge (a dependency) or a collection's job,
 not this flag's. Omit it for the old, unbounded behavior (the default).
 
-## 11. Gotchas
+## 11. Machine-readable reports: `--json`
+
+Everything above prints text: `serve:`-prefixed lines for the loop itself,
+`Show`n `UpDown.Report`s for what each node did. `run serve --json` (and
+`run up --json`/`run down --json`, the same flag) replaces all of that with
+**one JSON object per line on stdout**, flushed as each report happens, so
+`my-salmon run up --json | jq` streams and a script can watch a `serve` for
+`converge-stop` without parsing prose. The text output is unchanged when the
+flag is absent.
+
+Every object has a `kind` (the report's constructor, kebab-cased:
+`declared`, `converge-start`, `done`, `failed`, `wedged`, ...), an `origin`
+(`serve` for the loop's own reports, `updown` for what a node did; the
+tending loop's reports arrive nested inside `serve`'s `tended`), a `ref`
+whenever the report is about one node (`{"short": ..., "full": ...}`, the
+same short tag `status`/`query show` print after `#`, so it pastes back in as
+a selector), and the node's `shorthand`/`help`/`notes` under `node`. Report
+text is public: `notes`, failure messages and a `status`'s output ring go
+out verbatim, so keep secrets out of them (see the `filecontents` failure
+text for the convention). `Salmon.Reporter.Tagged` is the encoding, and
+`Test/ReportJsonSpec.hs` holds a golden object per constructor; there are no
+sequence numbers yet.
+
+Two things the flag does not cover. A node's *own* subprocess output — the
+`Binary.Report`s a node's builder was handed a `reportPrint` for — is not one
+of the three streams and still prints as text, so a binary whose nodes were
+built with `reportPrint` (all of `salmon-apps` today) interleaves those lines
+with the JSON ones; a consumer should skip lines that are not JSON. And
+`run tree`/`run dag`/`query` are renderings of their own, not reports, and
+are untouched.
+
+## 12. Gotchas
 
 - **A piped script is never supervised.** If you're testing self-healing and
   piping a script in, you won't see it — there's no idle moment for the
@@ -440,7 +472,7 @@ not this flag's. Omit it for the old, unbounded behavior (the default).
   node with no `check` never notices its own file changing, and nothing
   standing on it is ever bounced, however that node is decorated otherwise.
 
-## 12. Where to read more
+## 13. Where to read more
 
 - `docs/howto-ops.md` — writing and testing the `Op`s this doc assumes.
 - `CLAUDE.md`'s "`salmon-ops` layer" section — the implementation-level

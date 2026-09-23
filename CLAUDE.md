@@ -734,6 +734,24 @@ inspectable steps — the JSON directive is the contract between them. `run tree
 human-readable dependency tree (`Actions.Help`); `run dag` prints Graphviz dot output
 (`Actions.Dot`); `run down` tears the directive's graph down (`downTree`).
 
+`run up`/`run down`/`run serve` take `--json` (milestone 1 of `specs/generic-server.md`): the
+binary's text reporters are replaced by one JSON object per line on stdout, flushed per report,
+so `run up --json | jq` streams. `Salmon.Reporter.Tagged` is the whole of it — a `Tagged` sum of
+the three report streams (`Serve.Report`, `UpDown.Report Extension`, `Upkeep.Report Extension`)
+tagged by `origin`, the three `ToJSON` instances (orphans, kept together there because the two
+parametric streams are only encodable at `Extension`, which `UpDown` cannot import), and two
+reporters over the sum: `reportTexts`, which dispatches back to the three text reporters
+unchanged, and `reportJSONLines`. `CommandLine` builds exactly one `Reporter Tagged` per run and
+`contramap`s it into the two the drivers take, so `--json` is a choice of reporter and not a
+second reporting mechanism; the `Reporter` stays contravariant and text output is byte-identical
+without the flag. Every object has a `kind` (constructor, kebab-cased), a `ref` as
+`{short, full}` (`Op/Ref.hs`'s `shortRef`, moved there from `Query` for this) where the report is
+about one node, and named fields; a nested report (`Upkeep.Acted`, `Serve.Tended`) reuses the
+inner instance under `report`. Report text is public and encoded verbatim, per the spec's
+decision. `Test/ReportJsonSpec.hs` holds a golden object per constructor of all three streams.
+Not covered: a node's own `Binary.Report`s (handed a `reportPrint` by the recipe, printed as
+text regardless), and sequence numbers (a later milestone).
+
 `run serve` is the odd one out: it reads *seeds* (not a directive) as command lines, one
 declaration per line, and keeps converging a `Salmon.Actions.Serve.World` across all of them —
 see `Actions/Serve.hs` above for the state it maintains. Its input language is:
