@@ -33,6 +33,7 @@ import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
+import qualified Test.ServeHttpSpec as ServeHttpSpec
 import qualified Test.ServeModelSpec as ServeModelSpec
 import qualified Test.ServeSocketSpec as ServeSocketSpec
 import qualified Test.ServeSpec as ServeSpec
@@ -105,6 +106,7 @@ main =
             , QuerySpec.tests
             , ReportJsonSpec.tests
             , RewriteSpec.tests
+            , ServeHttpSpec.tests
             , ServeModelSpec.tests
             , ServeSocketSpec.tests
             , ServeSpec.tests
