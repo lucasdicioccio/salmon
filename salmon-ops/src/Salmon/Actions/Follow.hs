@@ -86,10 +86,20 @@ label already applied (or has pending) is reported 'Stale' and not injected
 host. Off by default, and without a @published@ on both sides the latest
 document is whatever the registry says.
 
+__A document is verified before it is parsed__, by 'followVerify': a
+function of the raw bytes and their digest, run on everything that would
+otherwise reach the loop — a fetched document from any registry, and a
+cached one on replay, since a cache file is as writable as a registry file.
+A 'Left' is reported 'Rejected' with its reason, is a failed round, and the
+bytes are neither injected nor cached; the last good document stays in
+force. The one verifier here, 'noVerifier', accepts everything: the hook is
+the shape a signature check drops into (the spec's "signed documents"),
+not the check itself.
+
 The status sink ("Salmon.Actions.Serve.StatusSink") reads this module's
 reports and the per-label 'Applied' cell ('appliedDocuments') and writes
-nothing here. What is /not/ here yet: signatures, and every registry but the
-directory.
+nothing here. What is /not/ here yet: signatures. The registries beyond the
+directory are in "Salmon.Actions.Follow.Registry".
 -}
 module Salmon.Actions.Follow (
     -- * Documents
@@ -118,6 +128,8 @@ module Salmon.Actions.Follow (
 
     -- * Following
     Follow (..),
+    Verifier,
+    noVerifier,
     follower,
     followerWith,
     gated,
@@ -421,7 +433,27 @@ data Follow = Follow
     , followRefuseOlder :: Bool
     -- ^ refuse a document whose @published@ is older than the one already
     -- applied or pending for its label
+    , followVerify :: Verifier
+    -- ^ run on the raw bytes of every document before it is parsed, cache
+    -- replay included; 'noVerifier' accepts everything
     }
+
+{- | The verify-before-inject hook: the digest and the bytes exactly as
+fetched, a reason to refuse them. It may throw, which is a refusal with the
+exception's text. -}
+type Verifier = Digest -> ByteString -> IO (Either Text ())
+
+-- | Accepts everything: the default, until a signature scheme fills this in.
+noVerifier :: Verifier
+noVerifier _ _ = pure (Right ())
+
+-- | 'followVerify' with a throw contained as a refusal.
+verify :: Follow -> Digest -> ByteString -> IO (Either Text ())
+verify follow digest bytes = do
+    outcome <- try (follow.followVerify digest bytes)
+    pure $ case outcome of
+        Left (ex :: SomeException) -> Left (Text.pack (show ex))
+        Right verdict -> verdict
 
 {- | The document last applied for a label: what the next diff is against.
 The stamp is 'Nothing' for a document replayed from the cache — a stamp
@@ -473,6 +505,10 @@ data Report
     | -- | writing a label's cache entry threw: label, why. The document
       -- was injected all the same; only the next restart is affected.
       CacheFailed !Label !Text
+    | -- | 'followVerify' refused the bytes: label, digest, why. Not
+      -- injected, not cached; a failed round. For a cached document at
+      -- startup, not replayed.
+      Rejected !Label !Digest !Text
     deriving (Show, Eq)
 
 -- | One write per report, for the same reason as 'Serve.reportText': the
@@ -522,6 +558,7 @@ renderReport rep =
             ["follow: " <> labelText lbl <> " id=" <> did <> ": published before the document already applied; refused (--follow-refuse-older)"]
         BadCache lbl err -> ("follow: ignoring the cached document for " <> labelText lbl <> ":") : Text.lines err
         CacheFailed lbl err -> ("follow: could not cache the document for " <> labelText lbl <> ":") : Text.lines err
+        Rejected lbl dg err -> ("follow: refusing the document for " <> labelText lbl <> " (sha256=" <> Text.take 12 dg.unDigest <> "):") : Text.lines err
 
 {- | The diff-batch for a label whose document changed: what to declare up
 (in the new document, not in the old one) and down (in the old one, not in
@@ -638,7 +675,14 @@ followerWith r clock rng mode applied follow primed = Producer $ \inbox -> do
                     entry <- readCache dir lbl
                     case entry of
                         Left err -> runReporter r (BadCache lbl err) >> pure Nothing
-                        Right found -> pure ((,) lbl <$> found)
+                        Right Nothing -> pure Nothing
+                        -- verified as a fetched one is: the cache is as
+                        -- writable as the registry
+                        Right (Just (c, doc)) -> do
+                            verdict <- verify follow c.cachedDigest c.cachedBytes
+                            case verdict of
+                                Left why -> runReporter r (Rejected lbl c.cachedDigest why) >> pure Nothing
+                                Right () -> pure (Just (lbl, (c, doc)))
 
 {- | A producer that does not start until the 'MVar' is filled — what puts
 standard input behind the fetcher's first round. -}
@@ -688,9 +732,11 @@ aside as this label's 'Seen', to be diffed and injected by 'injectPending'
 when the scheduler says so. Every other outcome is a report at most — and a
 repeated one (a label still missing, a file still malformed) is not even
 that, since a report per round about a condition that has not changed is
-noise. A registry that throws, or bytes that do not parse, is a 'Failed'
-round; a label with no document is not (the registry answered), and neither
-is a document refused for being 'Stale'. -}
+noise. A registry that throws, bytes the verifier refuses, or bytes that do
+not parse, is a 'Failed' round; a label with no document is not (the
+registry answered), and neither is a document refused for being 'Stale'.
+The verifier runs before the parser and after the digest comparison, so it
+sees every document that could reach the loop and nothing that could not. -}
 fetchOne :: Reporter Report -> Follow -> Fetcher -> Label -> IO Scheduler.Outcome
 fetchOne r follow st lbl = do
     applied <- Map.lookup lbl <$> readIORef st.fetcherApplied
@@ -714,20 +760,24 @@ fetchOne r follow st lbl = do
                     Just s -> modifyIORef' st.fetcherSeen (Map.insert lbl s{seenStamp = Just stamp})
                     Nothing -> modifyIORef' st.fetcherApplied (Map.adjust (\a -> a{appliedStamp = Just stamp}) lbl)
                 pure Scheduler.Unchanged
-            | otherwise ->
-                case eitherDecode bytes :: Either String Document of
-                    Left err -> complain (Malformed lbl digest (Text.pack err)) >> pure Scheduler.Failed
-                    Right doc
-                        | follow.followRefuseOlder
-                        , Just newer <- lastPublished
-                        , Just published <- doc.docPublished
-                        , published < newer ->
-                            complain (Stale lbl doc.docId) >> pure Scheduler.Unchanged
-                        | otherwise -> do
-                            quiet
-                            modifyIORef' st.fetcherSeen (Map.insert lbl (Seen (Just stamp) digest doc.docId doc.docSeeds doc.docPublished bytes))
-                            modifyIORef' st.fetcherFresh (Set.insert lbl)
-                            pure Scheduler.Changed
+            | otherwise -> do
+                -- verified before it is parsed, on the bytes as fetched
+                verdict <- verify follow digest bytes
+                case verdict of
+                    Left why -> complain (Rejected lbl digest why) >> pure Scheduler.Failed
+                    Right () -> case eitherDecode bytes :: Either String Document of
+                        Left err -> complain (Malformed lbl digest (Text.pack err)) >> pure Scheduler.Failed
+                        Right doc
+                            | follow.followRefuseOlder
+                            , Just newer <- lastPublished
+                            , Just published <- doc.docPublished
+                            , published < newer ->
+                                complain (Stale lbl doc.docId) >> pure Scheduler.Unchanged
+                            | otherwise -> do
+                                quiet
+                                modifyIORef' st.fetcherSeen (Map.insert lbl (Seen (Just stamp) digest doc.docId doc.docSeeds doc.docPublished bytes))
+                                modifyIORef' st.fetcherFresh (Set.insert lbl)
+                                pure Scheduler.Changed
   where
     registry = follow.followRegistry
     -- report a complaint once per change of complaint, not once per round

@@ -146,6 +146,7 @@ withFollowing root labels body = do
                 , Follow.followSchedule = schedule
                 , Follow.followCache = Nothing
                 , Follow.followRefuseOlder = False
+                , Follow.followVerify = Follow.noVerifier
                 }
         producers =
             [ Follow.follower followReporter pk modeVar appliedVar follow (putMVar gate ())

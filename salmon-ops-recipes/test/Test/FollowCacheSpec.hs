@@ -137,6 +137,7 @@ withFollowing root knobs labels body = do
                 , Follow.followSchedule = schedule
                 , Follow.followCache = knobs.knobCache
                 , Follow.followRefuseOlder = knobs.knobRefuseOlder
+                , Follow.followVerify = Follow.noVerifier
                 }
         producers =
             [ Follow.follower followReporter pk modeVar appliedVar follow (putMVar gate ())

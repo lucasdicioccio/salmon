@@ -282,6 +282,7 @@ withFollowing root schedule fl labels body = do
                 , Follow.followSchedule = schedule
                 , Follow.followCache = Nothing
                 , Follow.followRefuseOlder = False
+                , Follow.followVerify = Follow.noVerifier
                 }
         producers =
             [ Follow.followerWith followReporter (clockOf fc) (Scheduler.mkRng 1) modeVar appliedVar follow (putMVar gate ())

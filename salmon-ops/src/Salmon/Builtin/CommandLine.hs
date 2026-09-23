@@ -569,6 +569,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                 , Follow.followSchedule = followSchedule followOptions
                                 , Follow.followCache = followOptions.followCacheDir
                                 , Follow.followRefuseOlder = followOptions.followRefuseOlder
+                                , Follow.followVerify = Follow.noVerifier
                                 }
             -- the fetcher's first round is in the inbox before standard
             -- input is even read, so the first convergence is what the
