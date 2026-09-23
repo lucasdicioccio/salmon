@@ -13,7 +13,9 @@ pass; a retired seed's nodes stay in it wanted @down@ until they are gone;
 a script typed through @POST \/command@ synchronously, asynchronously, and
 on standard input leaves the same world, and the synchronous form answers
 with exactly the reports each line produced; and a read answers while the
-loop is inside a node's @up@.
+loop is inside a node's @up@. Milestone 7's static files: @GET \/@ is the
+page, @\/ui\/ui.js@ is the script with its content type, and a path outside
+the embedded set is the ordinary @404@.
 -}
 module Test.ServeHttpSpec (tests) where
 
@@ -26,7 +28,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy.Char8 as LChar8
 import Data.Foldable (toList)
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -72,6 +74,7 @@ tests =
         , testCase "reads answer while the loop is inside a long up" readsDuringLongUp
         , testCase "/help/seed, /history and the error responses" theOtherReads
         , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
+        , testCase "GET / is the web UI's page, /ui/* its files, and a missing one is 404" theWebUi
         ]
 
 -------------------------------------------------------------------------------
@@ -221,6 +224,20 @@ post running route line = do
                 , HTTP.requestBody = HTTP.RequestBodyLBS (LChar8.pack line)
                 }
     exchange running req
+
+-- | A GET left undecoded: the status, the content type, and the body.
+getRaw :: Running -> String -> IO (Int, Maybe LChar8.ByteString, LChar8.ByteString)
+getRaw running route = do
+    req <- HTTP.parseRequest ("http://salmon" <> route)
+    r <- timeout (10 * 1000000) (HTTP.httpLbs req (runningManager running))
+    case r of
+        Nothing -> assertFailure ("no answer within 10s to " <> route)
+        Just resp ->
+            pure
+                ( HTTP.statusCode (HTTP.responseStatus resp)
+                , LChar8.fromStrict <$> lookup HTTP.hContentType (HTTP.responseHeaders resp)
+                , HTTP.responseBody resp
+                )
 
 exchange :: Running -> HTTP.Request -> IO (Int, Value)
 exchange running req = do
@@ -467,6 +484,28 @@ theOtherReads =
         assertEqual "wrong method" 405 mna
         (bad, _) <- post running "/command" "status\nhistory"
         assertEqual "two lines in one body" 400 bad
+
+theWebUi :: IO ()
+theWebUi =
+    withRunning $ \running -> do
+        (code, ctype, body) <- getRaw running "/"
+        assertEqual "the page's status" 200 code
+        assertEqual "the page's content type" (Just "text/html; charset=utf-8") ctype
+        assertBool "the page is HTML" ("<!doctype html>" `LChar8.isPrefixOf` body)
+        assertBool "the page loads the script" ("ui/ui.js" `isInfixOf` LChar8.unpack body)
+        (jcode, jtype, js) <- getRaw running "/ui/ui.js"
+        assertEqual "the script's status" 200 jcode
+        assertEqual "the script's content type" (Just "text/javascript; charset=utf-8") jtype
+        assertBool "the script subscribes from the snapshot's seq" ("events?since=" `isInfixOf` LChar8.unpack js)
+        (ccode, ctype', _) <- getRaw running "/ui/ui.css"
+        assertEqual "the stylesheet's status" 200 ccode
+        assertEqual "the stylesheet's content type" (Just "text/css; charset=utf-8") ctype'
+        (missing, _) <- get running "/ui/missing"
+        assertEqual "a file outside the embedded set" 404 missing
+        (mna, _) <- post running "/" "status"
+        assertEqual "the page takes no POST" 405 mna
+        _ <- finish running
+        pure ()
 
 -------------------------------------------------------------------------------
 
