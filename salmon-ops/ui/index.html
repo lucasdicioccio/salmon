@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>salmon serve</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="ui/ui.css">
+</head>
+<body>
+<header id="header">
+  <h1>salmon</h1>
+  <dl id="summary">
+    <div><dt>mode</dt><dd id="h-mode">–</dd></div>
+    <div><dt>seq</dt><dd id="h-seq">–</dd></div>
+    <div><dt>nodes</dt><dd id="h-counts">–</dd></div>
+    <div><dt>last converge</dt><dd id="h-converge">–</dd></div>
+    <div><dt>stream</dt><dd id="h-stream">connecting</dd></div>
+  </dl>
+  <button id="reload" type="button" title="fetch /dag again and resubscribe">reload</button>
+</header>
+<main id="main">
+  <section id="graph-wrap">
+    <p id="empty" hidden>Nothing declared yet. Declare a seed (<code>POST /command</code> with <code>up …</code>) and it appears here.</p>
+    <svg id="graph" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="the world's dag">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z"></path>
+        </marker>
+      </defs>
+      <g id="edges"></g>
+      <g id="nodes"></g>
+    </svg>
+    <ol id="list"></ol>
+    <ul id="legend">
+      <li class="pending">pending</li>
+      <li class="stale">stale</li>
+      <li class="converged">converged</li>
+      <li class="errored">errored</li>
+      <li class="blocked">blocked</li>
+      <li class="retiring">retiring (wanted down)</li>
+    </ul>
+  </section>
+  <aside id="panel" hidden>
+    <button id="panel-close" type="button" aria-label="close">×</button>
+    <div id="panel-body"></div>
+  </aside>
+</main>
+<script type="module" src="ui/ui.js"></script>
+</body>
+</html>

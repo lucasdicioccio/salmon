@@ -20,6 +20,9 @@ maintainer:         lucas@dicioccio.fr
 -- copyright:
 -- category:
 extra-source-files: CHANGELOG.md
+                    ui/index.html
+                    ui/ui.js
+                    ui/ui.css
 
 library
     exposed-modules: Salmon.Actions.Concurrent
@@ -112,6 +115,7 @@ library
                     , contravariant
                     , cryptohash-sha256
                     , directory
+                    , file-embed
                     , filepath
                     , free
                     , hashable

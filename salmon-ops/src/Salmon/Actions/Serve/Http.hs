@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- | The read surfaces and the command surface as HTTP over a unix socket:
 @run serve --http PATH@.
@@ -30,6 +31,13 @@ Milestone 3 of @specs\/generic-server.md@. Four reads and one write:
     replay what the ring still holds after @N@ and go on live, and
     @?stream=@\/@?origin=@ to narrow it. "Salmon.Actions.Serve.Events" is
     the record behind it; this module only writes it to a connection.
+  * @GET \/@ and @GET \/ui\/*@ — the web UI (milestone 7), a handful of
+    static files under @salmon-ops\/ui\/@ compiled into the binary with
+    "Data.FileEmbed", so a binary is one file whatever it serves. The
+    page is a client of the surfaces above and nothing more: it draws
+    @\/dag@ and follows @\/events@ from that snapshot's @seq@. Nothing
+    here is dynamic — a path outside the embedded set is the same @404@
+    as any other unknown route, and there is no template.
 
 = Reads never touch the inbox
 
@@ -122,6 +130,7 @@ import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, 
 import Control.Exception (finally)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.=))
+import Data.FileEmbed (embedDir, makeRelativeToProject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
@@ -136,6 +145,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Read as Text
 import Data.Word (Word64)
+import System.FilePath (takeExtension)
 import qualified Network.HTTP.Types as HTTP
 import Network.Wai (Application, Request, Response)
 import qualified Network.Wai as Wai
@@ -379,12 +389,16 @@ application server req respond =
                     )
         ("POST", ["command"]) -> command >>= respond
         ("GET", ["events"]) -> events
+        ("GET", []) -> respond (static "index.html")
+        ("GET", ("ui" : rest)) -> respond (static (Text.unpack (Text.intercalate "/" rest)))
         (_, ["events"]) -> respond (methodNotAllowed ["GET"])
         (_, ["dag"]) -> respond (methodNotAllowed ["GET"])
         (_, ["status"]) -> respond (methodNotAllowed ["GET"])
         (_, ["history"]) -> respond (methodNotAllowed ["GET"])
         (_, ["help", "seed"]) -> respond (methodNotAllowed ["GET"])
         (_, ["command"]) -> respond (methodNotAllowed ["POST"])
+        (_, []) -> respond (methodNotAllowed ["GET"])
+        (_, "ui" : _) -> respond (methodNotAllowed ["GET"])
         _ -> respond (failure HTTP.status404 "no such resource")
   where
     -- the snapshot and the last sequence number at the time it was taken:
@@ -522,6 +536,35 @@ commandLine req body
 
 json :: HTTP.Status -> Value -> Response
 json status v = Wai.responseLBS status [(HTTP.hContentType, "application/json")] (encode v)
+
+-------------------------------------------------------------------------------
+-- the web UI
+
+{- | The files under @salmon-ops\/ui\/@, read at compile time. Relative
+paths as the page references them (@ui.js@, @ui.css@), with @index.html@
+the page itself.
+-}
+uiFiles :: [(FilePath, ByteString.ByteString)]
+uiFiles = $(makeRelativeToProject "ui" >>= embedDir)
+
+{- | One embedded file, or the same @404@ an unknown route gets — the set is
+closed at compile time, so there is nothing to look up on disk.
+-}
+static :: FilePath -> Response
+static path =
+    case lookup path uiFiles of
+        Nothing -> failure HTTP.status404 "no such resource"
+        Just body -> Wai.responseLBS HTTP.status200 [(HTTP.hContentType, contentType path)] (LByteString.fromStrict body)
+
+-- | By extension; the embedded set only holds these three kinds.
+contentType :: FilePath -> ByteString.ByteString
+contentType path =
+    case takeExtension path of
+        ".html" -> "text/html; charset=utf-8"
+        ".js" -> "text/javascript; charset=utf-8"
+        ".css" -> "text/css; charset=utf-8"
+        ".svg" -> "image/svg+xml"
+        _ -> "application/octet-stream"
 
 failure :: HTTP.Status -> Text -> Response
 failure status err = json status (object ["error" .= err])
