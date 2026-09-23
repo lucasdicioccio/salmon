@@ -95,6 +95,7 @@ test-suite salmon-ops-recipes-test
                     , Test.DagSpec
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
+                    , Test.FollowSchedulerSpec
                     , Test.FollowSpec
                     , Test.GcpSpec
                     , Test.PodmanCommandSpec
