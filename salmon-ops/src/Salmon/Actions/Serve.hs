@@ -81,6 +81,27 @@ command). Two things fall out, and the second is the reason:
 scopes the /pass/, not the standing watch — a node the pass skipped is still
 tended once the loop goes idle.
 
+== Where the lines come from
+
+The loop reads one inbox. What fills it is a list of 'Producer's, each on a
+thread of its own, each pushing 'Line's tagged with the 'Origin' that typed
+them; 'serveWith' is the one-producer case, standard input, and behaves
+exactly as it did when the loop read a 'Handle' directly. The inbox is still
+the loop's whole notion of idle — machines are tended while it is empty and
+stand down before any command, whoever typed it — and a piped script is
+still every line queued before the first pass ends. Two producers
+interleave at line granularity and nothing more: a command is handled whole
+before the next is read, and the order in which two producers' lines land
+in the inbox is the order they are handled.
+
+One decision is new with the list. /Only standard input's end of input ends
+the loop./ Any other producer's 'Eof' is not a command — nothing is about to
+act, so the machines are not stood down for it — and the loop reads on; a
+socket client hanging up or a fetcher going quiet must not take the server
+with it. A loop with no 'Stdin' producer at all therefore ends only on
+@quit@. A producer other than standard input hanging up is reported nowhere
+today; that is a gap the first such producer fills.
+
 This is what replaced @serveWakingWith@, an "these nodes want attention" hook
 nothing in the repo ever drove. It was there because a node had no state of
 its own to block on; now one does, so the hook is not a smaller version of
@@ -91,6 +112,14 @@ module Salmon.Actions.Serve (
     -- * Running
     serve,
     serveWith,
+    serveProducers,
+
+    -- * Input producers
+    Producer (..),
+    Line (..),
+    Origin (..),
+    handleProducer,
+    stdinProducer,
 
     -- * Input language
     ServeCommand (..),
@@ -1174,7 +1203,9 @@ selectHelp =
 {- | Read declarations from a handle until EOF (or @quit@), converging after
 each one, and hand back the 'World' as it stands when the loop ends. Never
 tears anything down on its way out: exiting the loop leaves the machine as
-the last convergence left it.
+the last convergence left it. The handle is the loop's standard input
+('stdinProducer'); see 'serveProducers' for feeding it from more than one
+place.
 -}
 serve ::
     forall seed directive.
@@ -1225,36 +1256,96 @@ serveWith ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure program h = do
+serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure program h =
+    serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program [stdinProducer h]
+
+-------------------------------------------------------------------------------
+-- input producers
+
+{- | Who typed a line. Standard input is singled out because its end of input
+is the one that ends the loop (see 'serveProducers'); every other source is
+named, so that a report or a history entry can one day say where a
+declaration came from.
+-}
+data Origin
+    = -- | the process's own standard input
+      Stdin
+    | -- | any other source: a socket connection, a fetcher, a test
+      Origin !Text
+    deriving (Show, Eq, Ord)
+
+-- | What a 'Producer' pushes into the loop's inbox.
+data Line
+    = -- | one line of the input language, as the producer read it
+      Line !Origin !String
+    | -- | this producer has nothing more to say and its thread is about to end
+      Eof !Origin
+    deriving (Show, Eq)
+
+{- | A source of 'Line's. 'serveProducers' runs 'produceInto' on a thread of
+its own, hands it the loop's one inbox, and kills the thread when the loop
+ends; a producer is expected to push an 'Eof' as its last word and return.
+-}
+newtype Producer = Producer {produceInto :: TChan Line -> IO ()}
+
+-- | Read a handle line by line until end of file, then 'Eof'.
+handleProducer :: Origin -> Handle -> Producer
+handleProducer origin h = Producer go
+  where
+    go inbox = do
+        eof <- hIsEOF h
+        if eof
+            then atomically (writeTChan inbox (Eof origin))
+            else do
+                line <- hGetLine h
+                atomically (writeTChan inbox (Line origin line))
+                go inbox
+
+{- | The producer 'serveWith' runs: 'handleProducer' with the 'Stdin' origin,
+which is what makes its end of input the loop's. The handle need not be the
+process's actual standard input — a test's pipe or script file is the same
+thing to the loop.
+-}
+stdinProducer :: Handle -> Producer
+stdinProducer = handleProducer Stdin
+
+{- | 'serveWith', fed by any number of 'Producer's rather than one handle.
+Each runs on its own thread so that the loop is never itself blocked in a
+read: the supervisor's machines run while it waits, and stopping them has to
+be able to interleave with a command arriving.
+
+The loop ends on @quit@, or on 'Eof' from the 'Stdin' origin; an 'Eof' from
+any other origin is read past. With no 'Stdin' producer in the list, only
+@quit@ ends it.
+-}
+serveProducers ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    [Producer] ->
+    IO (World seed directive)
+serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program producers = do
     world <- newIORef emptyWorld
     tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
     inbox <- newTChanIO
-    -- the input handle is read on its own thread so that the loop is never
-    -- itself blocked in a read: the supervisor's machines run while it
-    -- waits, and stopping them has to be able to interleave with a command
-    -- arriving.
-    reader <- forkIO (readInto inbox)
+    readers <- traverse (\p -> forkIO (produceInto p inbox)) producers
     runReporter r Started
-    loop tending world inbox `finally` (stopTending tending world >> killThread reader)
+    loop tending world inbox `finally` (stopTending tending world >> traverse_ killThread readers)
     readIORef world
   where
-    -- | 'Nothing' marks end of input, after which the reader stops.
-    readInto :: TChan (Maybe String) -> IO ()
-    readInto inbox = do
-        eof <- hIsEOF h
-        if eof
-            then atomically (writeTChan inbox Nothing)
-            else do
-                line <- hGetLine h
-                atomically (writeTChan inbox (Just line))
-                readInto inbox
-
     -- | Deepest chain of nested @load@s allowed, to bound a self-referential
     -- (or mutually-referential) load file rather than looping forever.
     maxLoadDepth :: Int
     maxLoadDepth = 8
 
-    loop :: Tending -> IORef (World seed directive) -> TChan (Maybe String) -> IO ()
+    loop :: Tending -> IORef (World seed directive) -> TChan Line -> IO ()
     loop tending world inbox = do
         {- Tend the nodes only while there is genuinely nothing to do.
 
@@ -1277,14 +1368,21 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
         idle <- atomically (isEmptyTChan inbox)
         when idle (startTending tending world)
         line <- atomically (readTChan inbox)
-        -- a command is about to act on these nodes, so the machines stand
-        -- down. Waits for anything in flight rather than cutting it.
-        stopTending tending world
         case line of
-            Nothing -> runReporter r Stopped
-            Just l -> do
-                keepGoing <- step tending 0 world l
-                when keepGoing (loop tending world inbox)
+            -- another producer hanging up is not a command: nothing is about
+            -- to act, so the machines are not stood down, and the loop goes
+            -- back to waiting (they are left running if they were).
+            Eof origin | origin /= Stdin -> loop tending world inbox
+            _ -> do
+                -- a command is about to act on these nodes, so the machines
+                -- stand down. Waits for anything in flight rather than
+                -- cutting it.
+                stopTending tending world
+                case line of
+                    Eof _ -> runReporter r Stopped
+                    Line _ l -> do
+                        keepGoing <- step tending 0 world l
+                        when keepGoing (loop tending world inbox)
 
     -------------------------------------------------------------------------
     -- supervision

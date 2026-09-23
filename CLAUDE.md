@@ -398,6 +398,17 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   pass must be the only thing touching anything. This is what replaced `serveWakingWith`, a
   "these nodes want attention" hook nothing ever drove: it existed because a node had no state
   of its own to block on.
+  **The input is one inbox filled by a list of `Producer`s** (`serveProducers`), each on a
+  thread of its own pushing `Line`s tagged with the `Origin` that typed them; `serveWith` is
+  the one-producer case, `stdinProducer` over a `Handle`, and is unchanged for every caller.
+  "Idle" is still `isEmptyTChan` on that one inbox, whoever fills it, and every command still
+  runs `stopTending` first. The one decision the list adds: **only the `Stdin` origin's `Eof`
+  ends the loop**; another producer's `Eof` is not a command (nothing acts, so nothing stands
+  down) and is read past — a socket client hanging up or a fetcher going quiet must not take
+  the server with it, so a loop with no `Stdin` producer ends only on `quit`. No producer but
+  stdin exists yet (`specs/pull-mode.md` milestone 1; the socket and the fetcher are the next
+  two); `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
+  in-memory producers and checks the world matches the one-script run.
   (R2): `force`/`recheck`/`pause`/`resume [--select P]... [--exclude P]...` finally make
   `Op/Mailbox.hs`'s `Instruction`s reachable from the input language, reusing
   `parseSelection`/`resolveWorldSelectors` the same way `status`/`query`/`converge --select`
