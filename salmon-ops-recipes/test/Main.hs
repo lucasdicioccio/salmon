@@ -33,6 +33,7 @@ import qualified Test.QuerySpec as QuerySpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeModelSpec as ServeModelSpec
+import qualified Test.ServeSocketSpec as ServeSocketSpec
 import qualified Test.ServeSpec as ServeSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
@@ -103,6 +104,7 @@ main =
             , ReportJsonSpec.tests
             , RewriteSpec.tests
             , ServeModelSpec.tests
+            , ServeSocketSpec.tests
             , ServeSpec.tests
             , SystemdSpec.tests
             , UpTreeSpec.tests

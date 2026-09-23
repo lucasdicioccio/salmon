@@ -121,6 +121,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ReportJsonSpec
                     , Test.RewriteSpec
                     , Test.ServeModelSpec
+                    , Test.ServeSocketSpec
                     , Test.ServeSpec
                     , Test.SystemdSpec
                     , Test.UpTreeSpec
@@ -136,6 +137,7 @@ test-suite salmon-ops-recipes-test
                     , filepath
                     , free
                     , mtl
+                    , network
                     , process
                     , process-extras
                     , stm
