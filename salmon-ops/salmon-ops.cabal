@@ -43,6 +43,8 @@ library
                    , Salmon.Actions.Upkeep
                    , Salmon.Actions.Dot
                    , Salmon.Actions.Query
+                   , Salmon.Client.Http
+                   , Salmon.Client.Model
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine
                    , Salmon.Builtin.Helpers
