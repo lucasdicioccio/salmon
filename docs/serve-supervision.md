@@ -438,8 +438,9 @@ a selector), and the node's `shorthand`/`help`/`notes` under `node`. Report
 text is public: `notes`, failure messages and a `status`'s output ring go
 out verbatim, so keep secrets out of them (see the `filecontents` failure
 text for the convention). `Salmon.Reporter.Tagged` is the encoding, and
-`Test/ReportJsonSpec.hs` holds a golden object per constructor; there are no
-sequence numbers yet.
+`Test/ReportJsonSpec.hs` holds a golden object per constructor. Sequence
+numbers exist only on `--http`'s `/events` (§14), where the same objects go
+out with a `seq` added.
 
 Two things the flag does not cover. A node's *own* subprocess output — the
 `Binary.Report`s a node's builder was handed a `reportPrint` for — is not one
@@ -687,7 +688,43 @@ $C http://x/help/seed | jq -r .seed   # this binary's own `config --help`
 $C -X POST -d 'up --name web --file index.html' http://x/command      # sync
 $C -X POST -d 'up --name api' 'http://x/command?async'                # {"seq": n}
 $C -X POST -H 'content-type: application/json' -d '{"line": "status"}' http://x/command
+
+curl -sN --unix-socket /run/my-salmon.http http://x/events            # live, forever
+curl -sN --unix-socket /run/my-salmon.http 'http://x/events?since=42' # replay after 42, then live
+curl -sN --unix-socket /run/my-salmon.http 'http://x/events?stream=upkeep,updown&origin=stdin'
 ```
+
+What the `-N` client sees while another posts an `up` (the fixture binary,
+`salmon-ops-serve-fixture run serve --json --http /tmp/x.http --events-ring 64`,
+abridged):
+
+```
+id: 3
+data: {"kind":"enqueued","line":"up --dir /tmp/play --name web --file index.html","origin":{"kind":"other","name":"/tmp/x.http#0"},"seq":3,"stream":"server"}
+
+id: 4
+data: {"active_seeds":1,"direction":"up","epoch":0,"kind":"declared","nodes":3,"origin":{...},"seq":4,"stream":"serve"}
+
+id: 6
+data: {"kind":"eval","node":{"shorthand":"directory",...},"origin":{...},"ref":{...},"seq":6,"stream":"updown"}
+...
+id: 12
+data: {"kind":"converge-stop","ok":true,"origin":{...},"remaining":0,"seq":12,"stream":"serve"}
+
+id: 13
+data: {"from":"/tmp/x.http#0","kind":"hung-up","seq":13,"stream":"serve"}
+
+id: 14
+data: {"down":0,"kind":"supervising","seq":14,"stream":"upkeep","up":3}
+
+id: 16
+data: {"delay_us":2000000,"kind":"reapplying","node":{"shorthand":"directory",...},"ref":{...},"seq":16,"stream":"upkeep"}
+```
+
+The `?async` answer was `{"seq":3}`: everything numbered above 3 with that
+origin is that command; from 14 on, with no origin, it is the machines
+tending between commands — which a sync `POST` never shows, since tending
+happens exactly when no command is being handled.
 
 What to know:
 
@@ -697,7 +734,9 @@ What to know:
   node's `up` is still running. The price is that a read is at most one
   command old: each node's `status` is the snapshot the last command took
   (§11's `status` field, `null` for a node never tended). Motion between
-  commands belongs to the event stream, a later milestone.
+  commands is on `/events`, below, and `/status` and `/dag` carry a `seq`
+  — the last event number at the moment of the read — so that
+  `/events?since=<that seq>` starts exactly where the snapshot left off.
 - **`/dag` is the graph a pass walks**, not the declared tree: one object
   per `Ref`, with `dependencies` and `dependants` as ref lists both ways,
   the node's `shorthand`/`help`/`notes`/`dynamics` (the fields §8's
@@ -716,8 +755,24 @@ What to know:
   default, the response is a JSON array of exactly the reports that line
   produced (§11's objects), returned when the loop has finished with it —
   what a script or a CI step wants. `?async` returns `202 {"seq": n}` the
-  moment the line is queued; `n` is the loop-wide sequence number the event
-  stream will resume from. `quit` works from here too and answers `[]`.
+  moment the line is queued; `n` is the number of the `enqueued` event on
+  `/events`, and that command's reports are the events above `n` carrying
+  its `origin`. `quit` works from here too and answers `[]`.
+- **`/events` is one stream, numbered, replayable.** `text/event-stream`:
+  each event is `id: <seq>` and one `data:` line holding the §11 object with
+  `seq` added, plus `origin` (the object `history` entries use) when the
+  report was produced for a command. Three streams and the server's own:
+  `serve`, `updown`, `upkeep` (the tending machines' reports, which reach a
+  client here and nowhere else) and `server` (`enqueued`, and `gap`). One
+  counter numbers everything — enqueues and reports, from the loop and from
+  machine threads — so one cursor is enough. `?since=N` replays what the
+  ring still holds after `N`, then continues live; the ring keeps the last
+  `--events-ring N` events (default 2048), and a client further behind than
+  that is sent `{"kind":"gap","from":<oldest>,"stream":"server"}` first
+  (no `id`), never a silent skip. `?stream=a,b` and `?origin=NAME` filter on
+  the server. An idle stream carries a comment line every 15 seconds so
+  proxies and read timeouts keep it open; hanging up is all a client has to
+  do to unsubscribe. `curl -N` or any `EventSource` reads it.
 - **Permissions are the whole access story.** No TLS, no token, no TCP;
   `notes`, `help` and report text are as public as the logs they already
   go to. Do not put this socket where an untrusted user can open it.

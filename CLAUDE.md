@@ -456,12 +456,47 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   per request (`PATH#n`), so every arrival still runs `stopTending` first and nothing another
   producer types lands between the two. Sync (default) collects every report the loop stamps
   with that origin and answers, as a JSON array, on the loop's `HungUp` for it — Socket's
-  closing rule, for the same reason; `?async` answers `202 {"seq": n}` at once. `n` comes from
-  `Http.Sequence` (`IORef Word64` on the `Server`, `serverSequence`), drawn at enqueue; B4's
-  event stream is meant to number every report from the *same* counter under the concurrent
-  driver's reporter `MVar`, so one cursor orders enqueues and reports together. Report text is
+  closing rule, for the same reason; `?async` answers `202 {"seq": n}` at once. Report text is
   public, no redaction (spec decision). No TLS, no token, no TCP. `Test/ServeHttpSpec.hs`
   drives it with `http-client` over the socket and rebuilds `Help.dagLines` from `/dag`.
+  **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
+  of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
+  added and `origin` — the object `history` entries use — when the report was stamped for a
+  command). The `Events` value is the counter, a bounded ring (`Data.Sequence`, `--events-ring
+  N`, default 2048) and a broadcast `TChan`, and `publish` writes all three in **one STM
+  transaction**: that transaction is the critical section the spec's open question asks for.
+  It could not be the concurrent driver's reporter `MVar`, because there is no single one —
+  `Concurrent.walkConcurrent` makes a `reportLock` per walk and `Upkeep.startUpkeep` one per
+  supervisor, each local to its function — but each of those is *held* while `runReporter` is
+  called, so a numbering reporter whose whole effect is one transaction composes under all of
+  them: within a driver, report order and sequence order agree; across drivers and machine
+  threads, atomicity alone gives one total order. `Http.serverReporters` feeds it with
+  `Events.eventsReporter` beside the loop's own reporter (stdout and `--listen` clients are
+  unchanged), and unwraps `Serve.Tended` to the `upkeep` stream it came from. **The event
+  stream is the only place a client sees the tending machines at work** — a sync `POST` answers
+  with the reports stamped for its command, and tending happens exactly when no command is
+  being handled. Numbering is dense: every `POST /command` publishes an `enqueued` event
+  (`stream: "server"`, with the `line`) numbered from the same counter, and that number is the
+  `?async` answer, so "the reports of my command" is "events above `n` with my origin". `/dag`
+  and `/status` carry `seq`, the last number handed out, read *before* the world so that an
+  event landing between the two reads is replayed rather than skipped. `?since=N` replays what
+  the ring still holds above `N` then continues live; if `N+1` has fallen off, the first event
+  is a synthetic `{"kind":"gap","from":<oldest>,"stream":"server"}` with no `id`, never a
+  silent skip. `?stream=serve,updown,upkeep,server` and `?origin=NAME` filter server-side
+  (the spec's "clients filter" is right about who decides, wrong about who pays). A comment
+  line every `configKeepAlive` (15s) of silence keeps proxies and read timeouts from dropping
+  an idle stream; a client hanging up is a failed write, which ends the stream and its
+  subscription; the loop ending sets `serverStopped`, on which every open stream returns so
+  warp's graceful shutdown is not held behind a subscriber. `Test/ServeEventsSpec.hs`: a
+  seeded (`SALMON_EVENTS_SEED`) mid-pass disconnect-and-`?since=` equals an uninterrupted
+  subscription; strictly increasing numbers across the three streams with `supervise on` and
+  a node whose `check` always fails; ring overflow; `?async` then `?since=`; snapshot `seq`;
+  filters; keep-alive and cleanup. One hazard it documents: the suite runs groups in parallel
+  in one process and nothing in the tree passes `close_fds`, so a child spawned by another
+  test inherits any fd not marked close-on-exec — `network`'s `socket` sets `SOCK_NONBLOCK`
+  but not `SOCK_CLOEXEC` (its `accept` does), and `process`'s `createPipe` is plain — which
+  showed up as a loop whose stdin never hit EOF and a hung-up client whose socket stayed open;
+  the spec marks its own fds.
 
   `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
   in-memory producers and checks the world matches the one-script run.
@@ -862,7 +897,8 @@ my-salmon run serve --follow DIR --label L --follow-cache CACHE [--follow-refuse
                                          # ... replaying CACHE's last applied document when DIR is unreachable at startup
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
-                                         # GET /dag /status /history /help/seed, POST /command[?async]
+                                         # GET /dag /status /history /help/seed, POST /command[?async],
+                                         # GET /events[?since=N&stream=..&origin=..] (SSE; --events-ring N)
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so

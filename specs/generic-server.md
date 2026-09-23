@@ -253,7 +253,9 @@ cheap one and lands first.
   (a client resuming wants a single cursor), but `Upkeep` reports are
   emitted from machine threads while `Serve`/`UpDown` reports come from the
   loop, so the counter has to be taken under the same `MVar` the concurrent
-  driver already serialises `runReporter` through.
+  driver already serialises `runReporter` through. *Answered in milestone 4:*
+  one counter; the critical section is the numbering reporter's own STM
+  transaction, which the drivers' (several, local) `MVar`s compose over.
 - Whether `/dag` should include nodes only *retiring* declarations still
   describe (wanted `TurnDown`, not yet down). Yes, with `direction: down` —
   a teardown in progress is the most useful thing to watch — but the UI
@@ -289,7 +291,22 @@ cheap one and lands first.
    has no `NodeState` to project. `/history` folds `history-elided`'s count
    in as an `elided` field rather than answering with two objects.
 4. **`/events` (SSE) with sequence numbers and `?since=`.** Test: a client
-   that reconnects mid-pass misses nothing.
+   that reconnects mid-pass misses nothing. **Shipped**
+   (`Salmon.Actions.Serve.Events`, `GET /events` in `Salmon.Actions.Serve.Http`,
+   `--events-ring N`, `Test/ServeEventsSpec.hs`). The open question on
+   sequence numbers is answered: one counter, and the critical section is
+   an STM transaction owned by the numbering reporter (counter, ring and
+   broadcast written together), not the concurrent driver's `MVar` — there
+   is no single such `MVar` to take (one per walk, one per supervisor), but
+   each is held while `runReporter` runs, so the transaction composes under
+   all of them. Three deviations: every `POST /command` publishes an
+   `enqueued` event numbered from the same counter (so the numbering is
+   dense and the `?async` number is an event a client can see); a `Tended`
+   report is delivered as its inner `Upkeep.Report` under `stream: "upkeep"`
+   rather than as `{"kind":"tended"}`; and `?stream=`/`?origin=` filter
+   server-side after all, since a terminal client over a slow link wants
+   less on the wire. `/dag` and `/status` carry `seq`, read before the
+   snapshot so a race replays rather than skips.
 5. **`mode` in `status`/`/dag`.** **Shipped**: `status` and `/status`
    with `specs/pull-mode.md` milestone 4 (`Serve.Mode` on `StatusReport`),
    `/dag` as a top-level `mode` on the envelope, read from the server's
