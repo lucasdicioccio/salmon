@@ -278,7 +278,7 @@ instance ToJSON Serve.Report where
             Serve.Stopped -> [kind "stopped"]
             -- @from@ rather than @origin@: 'Tagged' already puts the stream's
             -- name under that key.
-            Serve.HungUp origin -> [kind "hung-up", "from" .= Serve.renderOrigin origin]
+            Serve.HungUp origin -> [kind "hung-up", "from" .= Serve.originName origin]
             Serve.BadCommand err -> [kind "bad-command", "error" .= err]
             Serve.BadSeed err -> [kind "bad-seed", "error" .= err]
             Serve.BadDirective err -> [kind "bad-directive", "error" .= err]
