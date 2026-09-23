@@ -12,6 +12,7 @@ import qualified Data.ByteString.Lazy as LBysteString
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Options.Applicative
@@ -37,6 +38,7 @@ import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
+import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.Serve.Socket as Socket
 -- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
 -- optparse-applicative's 'ParserResult' ones, which this module pattern
@@ -93,8 +95,9 @@ data RunCommand
       -- ('FollowOptions'). Last, optionally listening for the same
       -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
       -- @specs/generic-server.md@; see "Salmon.Actions.Serve.Socket"),
-      -- stdin still read beside it.
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath)
+      -- stdin still read beside it, and for HTTP on a second unix socket
+      -- (@--http PATH@, milestone 3; see "Salmon.Actions.Serve.Http").
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath)
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
@@ -239,6 +242,14 @@ runCommandParser =
                         <> Options.Applicative.metavar "PATH"
                         <> Options.Applicative.help
                             "Also accept the line protocol on a unix socket at PATH (created owner-only); each client is answered on its own connection, as JSON lines. Stdin keeps working alongside."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "http"
+                        <> Options.Applicative.metavar "PATH"
+                        <> Options.Applicative.help
+                            "Also serve HTTP on a unix socket at PATH (created owner-only): GET /dag, /status, /history, /help/seed and POST /command[?async]. Stdin keeps working alongside."
                     )
                 )
     followOptionsP =
@@ -472,7 +483,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let tagged = taggedFor fmt
             follow <- case (followDir, traverse Follow.mkLabel labels) of
@@ -507,36 +518,40 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 -- rather than as the loop's 'Serve.Stdin': its end of input
                 -- is a hang-up like any client's and only `quit` — from
                 -- stdin or from a client — ends the loop.
-                stdinP = case listen of
-                    Nothing -> Serve.stdinProducer stdin
-                    Just _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
+                stdinP = case (listen, http) of
+                    (Nothing, Nothing) -> Serve.stdinProducer stdin
+                    _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
                 producersWith more =
                     case follow of
                         Nothing -> stdinP : more
                         Just f -> Follow.follower Follow.reportText pk f (putMVar gate ()) : Follow.gated gate stdinP : more
                 onFetch = Scheduler.poke pk <$ follow
-            case listen of
-                Nothing -> do
-                    let (serveR', r') = reportersOver tagged
-                    void $ Serve.serveFollowing rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase onFetch (producersWith [])
-                Just path ->
-                    -- the listener's reporters answer each socket client on
-                    -- its own connection and hand everything on to the
-                    -- loop's own, which stays exactly as `fmt` says.
-                    Socket.withUnixListener path $ \listener -> do
-                        let (serveR', r') = Socket.listenerReporters listener tagged
-                        void $
-                            Serve.serveAttributed
-                                rewrites
-                                limit
-                                (not noAutoConverge)
-                                serveR'
-                                r'
-                                parseSeedArgs
-                                genBase
-                                traceBase
-                                onFetch
-                                (producersWith [Socket.listenerProducer listener])
+            -- the listener's reporters answer each socket client on its own
+            -- connection, the HTTP server's answer each request with its
+            -- own reports, and both hand everything on to the loop's own,
+            -- which stays exactly as `fmt` says.
+            withMaybe listen Socket.withUnixListener $ \mlistener ->
+                withMaybe http (\path -> Http.withHttpServer path (seedHelpText (parseRecord :: Parser seed))) $ \mserver -> do
+                    let (serveR0, r0) = reportersOver tagged
+                        base = case mlistener of
+                            Nothing -> (contramap Serve.attributed serveR0, contramap Serve.attributed r0)
+                            Just listener -> Socket.listenerReporters listener tagged
+                        (serveR', r') = maybe base (`Http.serverReporters` base) mserver
+                        observe = maybe (const (pure ())) Http.serverObserver mserver
+                        more = foldMap (pure . Socket.listenerProducer) mlistener <> foldMap (pure . Http.serverProducer) mserver
+                    void $
+                        Serve.serveObserved
+                            observe
+                            rewrites
+                            limit
+                            (not noAutoConverge)
+                            serveR'
+                            r'
+                            parseSeedArgs
+                            genBase
+                            traceBase
+                            onFetch
+                            (producersWith more)
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
@@ -655,6 +670,22 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 pure Nothing
             Right a -> do
                 Just <$> cont jsonbody (run traceBase a)
+
+-- | Bracket over an optional resource: the continuation gets 'Nothing'
+-- when there was nothing to acquire.
+withMaybe :: Maybe x -> (x -> (y -> IO r) -> IO r) -> (Maybe y -> IO r) -> IO r
+withMaybe Nothing _ k = k Nothing
+withMaybe (Just x) with k = with x (k . Just)
+
+{- | A seed parser's own @--help@ text, as @config --help@ prints it: what
+@GET \/help\/seed@ answers, the one non-generic surface the server has.
+-}
+seedHelpText :: Parser seed -> Text
+seedHelpText p =
+    case execParserPure defaultPrefs (info (p <**> helper) briefDesc) ["--help"] of
+        Failure failure -> Text.pack (fst (renderFailure failure "config"))
+        Success _ -> ""
+        CompletionInvoked _ -> ""
 
 {- | Runs a seed's own command-line parser over the arguments of one @run
 serve@ declaration — i.e. the same words that would follow @config@ on an
