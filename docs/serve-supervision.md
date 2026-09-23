@@ -883,6 +883,48 @@ What to know:
   `notes`, `help` and report text are as public as the logs they already
   go to. Do not put this socket where an untrusted user can open it.
 
+### The web UI: `GET /`
+
+The same socket serves a page at `/` (its script and stylesheet under
+`/ui/`, compiled into the binary, so there is nothing to install beside it)
+that draws the world as the graph it is. Milestone 7 of
+`specs/generic-server.md`, first two steps: the static picture and the live
+one. It is a client of the routes above and nothing more — it fetches
+`/dag`, lays the nodes out in layers with dependencies above dependants and
+an edge per `dependencies` entry, one box per node (short ref, shorthand,
+`direction · convergence`, the last event and check verdict), coloured by
+convergence and dashed for a node wanted `down`; then it subscribes to
+`/events?since=<the snapshot's seq>` and applies what arrives: `eval`/
+`done`/`failed` pulse the box and move its colour, `next-look` updates the
+check verdict, `converge-start`/`converge-stop` and the counts go in the
+header. It keeps no state the server does not: a `declared`, a `cleared`, a
+`converge-stop`, a `gap` or a dropped stream all mean "fetch `/dag` again and
+resubscribe from its `seq`", and the reload button is that by hand. Clicking
+a node opens a panel with its help, notes, dynamics, paths, dependencies and
+dependants (each a link), the last check and its reason, and the output
+ring. Below 700px wide the graph gives way to a list. Nothing on the page
+POSTs yet; actions and a seed form are the milestone's next two steps.
+
+A browser cannot open a unix socket, so until milestone 8 lands (TCP with
+TLS and a token — that is what makes the page reachable directly, and the
+reason nothing here listens on a port), forward the socket to a local port
+and open that:
+
+```sh
+my-salmon run serve --http /run/my-salmon.http < /dev/null &
+socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/my-salmon.http &
+xdg-open http://127.0.0.1:8080/
+
+# or, from another machine, over ssh:
+ssh -L 8080:/run/my-salmon.http host
+```
+
+Bind the forward to `127.0.0.1`: the port inherits none of the socket's
+file permissions, and whoever reaches it has the socket. The layout is a
+small longest-path layering with barycentre ordering written in
+`salmon-ops/ui/ui.js` itself — no bundler, no framework, no vendored
+library — so the three files are readable as they are served.
+
 ## 15. Gotchas
 
 - **A piped script is never supervised.** If you're testing self-healing and

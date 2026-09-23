@@ -314,5 +314,23 @@ cheap one and lands first.
    `Salmon.Reporter.Tagged` serves both. `/help/seed` does not carry it.
 6. **Terminal client** against the socket.
 7. **Web UI**: static graph from `/dag`, then live from `/events`, then
-   actions, then the seed form.
+   actions, then the seed form. **First two steps shipped** (`GET /` and
+   `/ui/*` in `Salmon.Actions.Serve.Http`, the files under `salmon-ops/ui/`
+   embedded at build time with `file-embed`; `docs/serve-supervision.md`
+   §14 "The web UI"). Three deviations from the sketch above. It is not a
+   separate `salmon-web` package and not PureScript: three static files —
+   one page, one ES module, one stylesheet, no bundler — served by the
+   binary itself, since a UI that ships inside the thing it watches needs
+   no deploy step and the read model is small enough that generated client
+   types would cost more than they save; the bridge stays an option for the
+   seed form. The layered layout is neither `dagre` nor ELK but a
+   longest-path layering with barycentre ordering written in `ui.js`,
+   because vendoring a bundle for a graph of tens of nodes is the wrong
+   trade and the layout is a hundred lines. And a browser cannot open a
+   unix socket, so the page is reached through a TCP forward (`socat`,
+   `ssh -L`) until milestone 8; nothing here listens on a port. Not yet:
+   the `Conflicting` pair side by side, collapsing a batch to its members
+   and expanding a `RemoteOp` (neither is on `/dag`, see milestone 3's
+   deviations), `history` as a timeline, and — the next two steps — the
+   `force`/`recheck`/`pause`/`resume` actions and the `/help/seed` form.
 8. **TCP + TLS + token**, opt-in, with the loud default described above.

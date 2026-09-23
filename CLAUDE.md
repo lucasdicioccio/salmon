@@ -463,6 +463,22 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   closing rule, for the same reason; `?async` answers `202 {"seq": n}` at once. Report text is
   public, no redaction (spec decision). No TLS, no token, no TCP. `Test/ServeHttpSpec.hs`
   drives it with `http-client` over the socket and rebuilds `Help.dagLines` from `/dag`.
+  **`GET /` and `/ui/*` are the web UI** (milestone 7, first two steps): `salmon-ops/ui/`'s
+  `index.html`/`ui.js`/`ui.css`, embedded at build time with `file-embed` (`embedDir` under
+  `makeRelativeToProject`, so the set is closed at compile time and a path outside it is the
+  ordinary 404; listed in `extra-source-files` so an edit is a rebuild). Plain ES module, no
+  bundler, no framework, no vendored library: `ui.js` draws `/dag` as a layered graph — its own
+  longest-path layering plus four barycentre sweeps, dependencies above dependants, one box per
+  `Ref` coloured by `convergence` and dashed for `direction: down` — then subscribes to
+  `/events?since=<the snapshot's seq>` and applies `updown`/`upkeep` events to the boxes
+  (`acted` and `tended` unwrapped to the inner report) and `converge-start`/`converge-stop` to
+  the header. It holds no state the server does not: `declared`, `cleared`, `converge-stop`, a
+  `gap`, or the stream dropping each mean fetch `/dag` again and resubscribe from its `seq` (it
+  closes the `EventSource` on error rather than let the browser reconnect, since the browser
+  resumes by `Last-Event-ID`, which the server does not read). A click opens a side panel from
+  the node object alone. Reads only — no `POST` from the page yet. A browser cannot open a unix
+  socket, so it is reached through a TCP forward (`socat`/`ssh -L`) until milestone 8's TCP
+  listener; see `docs/serve-supervision.md` §14.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a
@@ -959,7 +975,8 @@ my-salmon run serve --follow git+URL#BRANCH:SUBDIR | https://host/path | dns:ZON
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
                                          # GET /dag /status /history /help/seed, POST /command[?async],
-                                         # GET /events[?since=N&stream=..&origin=..] (SSE; --events-ring N)
+                                         # GET /events[?since=N&stream=..&origin=..] (SSE; --events-ring N),
+                                         # GET / (the web UI; forward the socket to a TCP port to open it)
 my-salmon run serve --status-sink PATH [--status-sink-interval S]
                                          # the same, also writing this host's status document to PATH
                                          # (atomically) after every pass and injection, and every S seconds
