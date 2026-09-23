@@ -32,6 +32,7 @@ import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 import qualified Salmon.Actions.Follow as Follow
 import Salmon.Actions.Follow (Document (..), Entry (..), Label)
+import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Convergence (..), Direction (..), Line (..), NodeState (..), Origin (..), Producer (..), Provenance (..), World (..))
 import qualified Salmon.Actions.UpDown as UpDown
@@ -106,6 +107,23 @@ data Driver = Driver
 interval :: Int
 interval = 100000
 
+-- | The schedule under test: rounds at 'interval', no jitter (so "several
+-- rounds' worth" means what it says), no quiet window (a change is injected
+-- at the round that saw it, as milestone 2 did — the window has its own
+-- spec, "Test.FollowSchedulerSpec"), and a short cap so that a test that
+-- leaves a document malformed for a few rounds is not left waiting on the
+-- ladder for long once it fixes it.
+schedule :: Scheduler.Config
+schedule =
+    Scheduler.Config
+        { Scheduler.schedBase = interval
+        , Scheduler.schedFactor = 2
+        , Scheduler.schedCap = 4 * interval
+        , Scheduler.schedJitter = 0
+        , Scheduler.schedDebounce = 0
+        , Scheduler.schedMaxWait = 0
+        }
+
 {- | Run a following loop over @root@: the registry is @root/reg@, the files
 land in @root/files@. The body drives it through the 'Driver' and must end
 with @quit@ (or let the block do it); the world comes back once the loop
@@ -117,14 +135,15 @@ withFollowing root labels body = do
     (nodeReporter, _) <- capture :: IO (Reporter (UpDown.Report Extension), IO [UpDown.Report Extension])
     stdinChan <- newTChanIO
     gate <- newEmptyMVar
+    pk <- Scheduler.newPoke
     let follow =
             Follow.Follow
                 { Follow.followRegistry = Follow.directoryRegistry (registryDir root)
                 , Follow.followLabels = labels
-                , Follow.followInterval = interval
+                , Follow.followSchedule = schedule
                 }
         producers =
-            [ Follow.follower followReporter follow (putMVar gate ())
+            [ Follow.follower followReporter pk follow (putMVar gate ())
             , Follow.gated gate (chanProducer stdinChan)
             ]
         driver =

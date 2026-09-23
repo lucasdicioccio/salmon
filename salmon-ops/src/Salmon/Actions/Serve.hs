@@ -127,6 +127,7 @@ module Salmon.Actions.Serve (
     serveWith,
     serveProducers,
     serveAttributed,
+    serveFollowing,
 
     -- * Input producers
     Producer (..),
@@ -474,6 +475,12 @@ data ServeCommand
       -- delivered the next time this world's nodes are tended (R2). An
       -- empty selection means every node, same as @status@\/@query@.
       Instruct !Mailbox.Instruction !Selection
+    | -- | @fetch@: ask the fetcher ("Salmon.Actions.Follow") for a round
+      -- now — its ladder forgotten, whatever it has pending injected as soon
+      -- as the round is over — rather than at its next scheduled one. The
+      -- loop cannot call into a producer, so it pulls a hook 'serveFollowing'
+      -- was given; without one, nothing is being followed and it says so.
+      Fetch
     | -- | @help@\/@help TOPIC@: print the command reference, or (when
       -- 'Just' a recognised 'Topic') a lengthier explanation of just that
       -- one command. 'Nothing', or a topic 'lookupTopic' doesn't recognise,
@@ -525,6 +532,7 @@ parseServeCommand line =
                     "recheck" -> Instruct Mailbox.Recheck <$> parseSelection args
                     "pause" -> Instruct Mailbox.Pause <$> parseSelection args
                     "resume" -> Instruct Mailbox.Resume <$> parseSelection args
+                    "fetch" -> nullary w args Fetch
                     "help" -> Help <$> helpTopic w args
                     "?" -> Help <$> helpTopic w args
                     "quit" -> nullary w args Quit
@@ -630,6 +638,9 @@ data Report
     | -- | (R2). a @force@\/@recheck@\/@pause@\/@resume@ was queued for this
       -- many nodes; takes effect once tending next starts, not immediately
       Instructed !Mailbox.Instruction !Int
+    | -- | @fetch@: whether anything is being followed (a round was asked
+      -- for), or not (nothing to ask)
+      FetchRequested !Bool
     | -- | something a node's own machine had to say between convergence
       -- passes. See 'Salmon.Actions.Upkeep.Report'; the chatty half of that
       -- stream is filtered out before it reaches here.
@@ -692,6 +703,8 @@ renderReport rep =
         Supervised False -> ["serve: not supervising (nodes are left alone between passes)"]
         AutoConverged True -> ["serve: auto-converging (each declaration converges immediately)"]
         AutoConverged False -> ["serve: not auto-converging (declarations wait for an explicit `converge`)"]
+        FetchRequested True -> ["serve: fetching now"]
+        FetchRequested False -> ["serve: nothing is being followed (start with --follow to fetch declarations)"]
         Instructed instr n ->
             [ Text.unwords
                 [ "serve: queued"
@@ -954,13 +967,14 @@ commandReference =
     , "                                 stop tending matching nodes, without touching their effect"
     , "  resume  [--select P]... [--exclude P]..."
     , "                                 start tending matching nodes again"
+    , "  fetch                          (--follow) fetch the followed documents now, not at the next round"
     , "  help, ? [TOPIC]                print this reference, or (given a topic) more about just it"
     , "  quit, exit                     leave the loop, changing nothing on the way out"
     , "serve: --select/--exclude patterns are /-separated node-path globs (* one segment, ** any depth);"
     , "       may repeat; omitting --select entirely means everything."
     , "serve: `help TOPIC` for more, where TOPIC is one of:"
     , "       up, directive, load, clear, converge, status, history, query, select, supervise,"
-    , "       autoconverge, force"
+    , "       autoconverge, force, fetch"
     ]
 
 {- | @help TOPIC@'s lookup table, matched case-insensitively (several names
@@ -990,6 +1004,7 @@ helpTopics =
     , ("recheck", instructHelp)
     , ("pause", instructHelp)
     , ("resume", instructHelp)
+    , ("fetch", fetchHelp)
     , ("select", selectHelp)
     , ("exclude", selectHelp)
     , ("pattern", selectHelp)
@@ -1249,6 +1264,21 @@ instructHelp =
     , "  machines heard it."
     ]
 
+fetchHelp :: [Text]
+fetchHelp =
+    [ "serve: fetch"
+    , ""
+    , "  Only meaningful under --follow. The fetcher polls its registry on a schedule: at a base"
+    , "  interval while rounds succeed, backing off (times --follow-factor, up to --follow-cap)"
+    , "  while they fail; and a changed document is not applied at once but held until the"
+    , "  registry has been quiet for --follow-debounce (or --follow-max-wait has elapsed since the"
+    , "  first pending change), so a publisher writing several times in a row is one pass."
+    , ""
+    , "  `fetch` cuts both short: a round runs now, the backoff is forgotten, and whatever is"
+    , "  pending afterwards is applied without waiting out the quiet window — for an operator"
+    , "  who just published and does not want to wait. Without --follow it only says so."
+    ]
+
 selectHelp :: [Text]
 selectHelp =
     [ "serve: --select PATTERN / --exclude PATTERN"
@@ -1396,13 +1426,16 @@ was — an operator's @autoconverge off@ is not silently re-enabled — and one
 @converge@ runs. The batch carries its own commands rather than text lines
 so a seed's words survive without a quoting round trip, and it is one inbox
 entry rather than several so nothing another producer types can land in the
-middle of it.
+middle of it. Each command carries its own 'Origin', because one batch can
+carry several documents' worth of declarations (several labels changed
+inside one quiet window) and @history@ must still say which document each
+came from.
 -}
 data Line
     = -- | one line of the input language, as the producer read it
       Line !Origin !String
     | -- | several commands, handled as one: see above
-      Batch !Origin ![ServeCommand]
+      Batch ![(Origin, ServeCommand)]
     | -- | this producer has nothing more to say and its thread is about to end
       Eof !Origin
     deriving (Show, Eq)
@@ -1456,7 +1489,30 @@ serveProducers ::
     Track' directive ->
     [Producer] ->
     IO (World seed directive)
-serveProducers rewrites limit autoConverge0 r nodeReporter =
+serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program =
+    serveFollowing rewrites limit autoConverge0 r nodeReporter parseSeed configure program Nothing
+
+{- | 'serveProducers', with what @fetch@ pulls: the hook a fetcher producer
+("Salmon.Actions.Follow") is poked through. 'Nothing' when nothing is being
+followed, and @fetch@ then only says so. It is a hook rather than a
+producer's method because the loop reads lines and does not know which
+producer it has; the one thing it needs of the fetcher is to be able to
+wake it. -}
+serveFollowing ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe (IO ()) ->
+    [Producer] ->
+    IO (World seed directive)
+serveFollowing rewrites limit autoConverge0 r nodeReporter =
     serveAttributed rewrites limit autoConverge0 (contramap attributed r) (contramap attributed nodeReporter)
 
 {- | 'serveProducers', reporting through reporters that are told whose
@@ -1487,11 +1543,12 @@ serveAttributed ::
     ([String] -> Either Text seed) ->
     Configure IO seed directive ->
     Track' directive ->
+    Maybe (IO ()) ->
     [Producer] ->
     IO (World seed directive)
-serveAttributed rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program producers = do
+serveAttributed rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
-    serveLoop rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program producers
+    serveLoop rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
@@ -1510,9 +1567,10 @@ serveLoop ::
     ([String] -> Either Text seed) ->
     Configure IO seed directive ->
     Track' directive ->
+    Maybe (IO ()) ->
     [Producer] ->
     IO (World seed directive)
-serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program producers = do
+serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
     world <- newIORef emptyWorld
     tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
     inbox <- newTChanIO
@@ -1570,8 +1628,8 @@ serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configu
                         keepGoing <- step tending 0 world origin l
                         writeIORef handling Nothing
                         when keepGoing (loop tending world inbox)
-                    Batch origin cmds -> do
-                        keepGoing <- batch tending world origin cmds
+                    Batch cmds -> do
+                        keepGoing <- batch tending world cmds
                         when keepGoing (loop tending world inbox)
 
     {- | Run a 'Batch': every command with @autoconverge@ held off, the
@@ -1581,8 +1639,8 @@ serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configu
     @autoconverge off@ … @autoconverge on@ … @converge@ on the inbox, except
     that only the loop knows what to put the setting back /to/. An empty
     batch converges nothing: there is no declaration to act on. -}
-    batch :: Tending -> IORef (World seed directive) -> Origin -> [ServeCommand] -> IO Bool
-    batch tending world origin cmds = do
+    batch :: Tending -> IORef (World seed directive) -> [(Origin, ServeCommand)] -> IO Bool
+    batch tending world cmds = do
         was <- readIORef (tendingAutoConverge tending)
         writeIORef (tendingAutoConverge tending) False
         keepGoing <-
@@ -1591,7 +1649,7 @@ serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configu
         pure keepGoing
       where
         runAll [] = pure True
-        runAll (cmd : rest) = do
+        runAll ((origin, cmd) : rest) = do
             go <- stepCommand tending 0 world origin cmd
             if go then runAll rest else pure False
 
@@ -1944,6 +2002,10 @@ serveLoop rewrites limit autoConverge0 handling r nodeReporter parseSeed configu
                             allowed = selr `Set.difference` excr
                         queueInstruction tending allowed instr
                         runReporter r (Instructed instr (Set.size allowed))
+                        pure True
+                    Fetch -> do
+                        sequence_ onFetch
+                        runReporter r (FetchRequested (isJust onFetch))
                         pure True
 
     -- | Filters 'worldNodes' by a 'Selection', preserving today's exact

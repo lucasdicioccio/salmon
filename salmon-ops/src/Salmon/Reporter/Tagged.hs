@@ -297,6 +297,7 @@ instance ToJSON Serve.Report where
             Serve.Supervised on -> [kind "supervised", "on" .= on]
             Serve.AutoConverged on -> [kind "auto-converged", "on" .= on]
             Serve.Instructed instr n -> [kind "instructed", "instruction" .= instructionValue instr, "nodes" .= n]
+            Serve.FetchRequested following -> [kind "fetch-requested", "following" .= following]
             Serve.Tended inner -> [kind "tended", "report" .= inner]
             Serve.ConvergeStart ndown nup -> [kind "converge-start", "down" .= ndown, "up" .= nup]
             Serve.ConvergeStop ok remaining -> [kind "converge-stop", "ok" .= ok, "remaining" .= remaining]

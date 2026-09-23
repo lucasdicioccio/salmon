@@ -212,6 +212,7 @@ serveGoldens =
     , ("Serve.Supervised", Tagged.FromServe (Serve.Supervised False), "{\"kind\":\"supervised\",\"on\":false}")
     , ("Serve.AutoConverged", Tagged.FromServe (Serve.AutoConverged True), "{\"kind\":\"auto-converged\",\"on\":true}")
     , ("Serve.Instructed", Tagged.FromServe (Serve.Instructed Mailbox.Recheck 3), "{\"kind\":\"instructed\",\"instruction\":\"recheck\",\"nodes\":3}")
+    , ("Serve.FetchRequested", Tagged.FromServe (Serve.FetchRequested False), "{\"kind\":\"fetch-requested\",\"following\":false}")
     ,
         ( "Serve.Tended"
         , Tagged.FromServe (Serve.Tended (Upkeep.Acted (UpDown.Eval fixtureAct)))

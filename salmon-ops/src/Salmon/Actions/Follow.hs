@@ -40,12 +40,21 @@ carries a 'Serve.Fetched' origin — registry, label, document id, digest — so
 that an operator can tell "I typed this" from "the document said so", which
 is the only way to find out why a host did something surprising.
 
-What is /not/ here yet: a scheduler (backoff toward the registry, debounce
-toward the loop, a @fetch@ command — milestone 3 of @specs/pull-mode.md@), a
-cached last document that survives a restart (milestone 4), signatures, and
-every registry but the directory. Rounds run on a fixed interval, plus one
-synchronous round at startup so that the first convergence is as
-deterministic as a piped script's.
+__When__ a round runs, and when what it found is injected, is the
+scheduler's ("Salmon.Actions.Follow.Scheduler"): a ladder with jitter toward
+the registry (a failed round backs off, a successful one — changed or not —
+polls at the base), and a quiet window toward the loop (a change waits for
+the registry to stop changing, or for @max_wait@, and three documents seen
+inside one window are one diff and one convergence pass). The first round
+at startup is the exception: synchronous, injected at once, so that the
+first convergence is as deterministic as a piped script's. The loop's
+@fetch@ command pokes the scheduler through a 'Scheduler.Poke': a round now,
+the ladder forgotten, whatever is pending injected the moment the round is
+over.
+
+What is /not/ here yet: a cached last document that survives a restart
+(milestone 4 of @specs/pull-mode.md@), signatures, and every registry but
+the directory.
 -}
 module Salmon.Actions.Follow (
     -- * Documents
@@ -69,6 +78,7 @@ module Salmon.Actions.Follow (
     -- * Following
     Follow (..),
     follower,
+    followerWith,
     gated,
     Applied (..),
     diffBatch,
@@ -79,25 +89,28 @@ module Salmon.Actions.Follow (
     renderReport,
 ) where
 
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, readMVar)
 import Control.Concurrent.STM (TChan, atomically, writeTChan)
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_, forever, unless)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, object, withObject, (.:), (.:?), (.=))
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isAlphaNum)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (doesFileExist, getFileSize, getModificationTime)
 import System.FilePath ((<.>), (</>))
 import System.IO (hFlush, stdout)
 
+import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import qualified Salmon.Actions.Query as Query
 import Salmon.Actions.Serve (Declaration (..), Line (..), Origin (..), Producer (..), Provenance (..), ServeCommand (..))
 import Salmon.Reporter
@@ -260,8 +273,8 @@ directoryRegistry dir = Registry (Text.pack dir) fetch
 data Follow = Follow
     { followRegistry :: Registry
     , followLabels :: [Label]
-    , followInterval :: Int
-    -- ^ microseconds between one round's end and the next one's start
+    , followSchedule :: Scheduler.Config
+    -- ^ the ladder toward the registry and the window toward the loop
     }
 
 -- | The document last applied for a label: what the next diff is against.
@@ -274,13 +287,19 @@ data Applied = Applied
     deriving (Show, Eq)
 
 data Report
-    = -- | registry, labels, interval in microseconds
-      Following !Text ![Label] !Int
+    = -- | registry, labels, schedule
+      Following !Text ![Label] !Scheduler.Config
     | -- | a changed document was injected: label, id, digest, seeds up, seeds down
       Injected !Label !Text !Digest !Int !Int
     | -- | a changed document whose seed set is the one already applied
       -- (its id or an annotation changed); recorded, nothing injected
       NoDiff !Label !Text !Digest
+    | -- | a changed document, seen after startup: it waits for the quiet
+      -- window (label, id, digest); what it turns into is the 'Injected'
+      -- or 'NoDiff' that follows
+      Deferred !Label !Text !Digest
+    | -- | a round failed: consecutive failures, microseconds until the next round
+      Backoff !Int !Int
     | -- | no document for this label
       Missing !Label
     | -- | the document was applied once and is now gone; what it declared
@@ -302,14 +321,13 @@ reportText = ReporterM $ \rep -> do
 renderReport :: Report -> [Text]
 renderReport rep =
     case rep of
-        Following reg lbls us ->
+        Following reg lbls cfg ->
             [ "follow: "
                 <> reg
                 <> " for "
                 <> Text.intercalate ", " (fmap labelText lbls)
-                <> " every "
-                <> Text.pack (show (us `div` 1000000))
-                <> "s"
+                <> " "
+                <> Scheduler.renderConfig cfg
             ]
         Injected lbl did dg nup ndown ->
             [ "follow: "
@@ -326,6 +344,10 @@ renderReport rep =
             ]
         NoDiff lbl did dg ->
             ["follow: " <> labelText lbl <> " id=" <> did <> " sha256=" <> Text.take 12 dg.unDigest <> ": same seeds as before, nothing to declare"]
+        Deferred lbl did dg ->
+            ["follow: " <> labelText lbl <> " id=" <> did <> " sha256=" <> Text.take 12 dg.unDigest <> ": changed, waiting for the registry to go quiet"]
+        Backoff n us ->
+            ["follow: " <> Text.pack (show n) <> " failed round(s) in a row; next in " <> Text.pack (show (us `div` 1000000)) <> "s"]
         Missing lbl -> ["follow: no document for " <> labelText lbl]
         Vanished lbl -> ["follow: document for " <> labelText lbl <> " is gone; its last declarations stay in force"]
         Malformed lbl dg err -> ("follow: cannot read document for " <> labelText lbl <> " (sha256=" <> Text.take 12 dg.unDigest <> "):") : Text.lines err
@@ -333,9 +355,10 @@ renderReport rep =
 
 {- | The diff-batch for a label whose document changed: what to declare up
 (in the new document, not in the old one) and down (in the old one, not in
-the new one, and not in any other label's applied document either — the
-union across labels). The old document is 'Nothing' for a label seen for the
-first time.
+the new one, and not in any other label's document either — the union
+across labels, taken over what the other labels are /about to/ say when
+several are injected together). The old document is 'Nothing' for a label
+seen for the first time.
 -}
 diffBatch :: Label -> Maybe Applied -> [Entry] -> Map Label Applied -> ([Entry], [Entry])
 diffBatch lbl previous new others =
@@ -346,23 +369,49 @@ diffBatch lbl previous new others =
     ups = [e | e <- new, e `notElem` old]
     downs = [e | e <- old, e `notElem` new, e `notElem` elsewhere]
 
+-- | The producer, on the system clock and seeded from the wall clock (so
+-- that two hosts started together draw different jitter). See 'followerWith'.
+follower :: Reporter Report -> Scheduler.Poke -> Follow -> IO () -> Producer
+follower r pk follow primed = Producer $ \inbox -> do
+    seed <- fromIntegral . (`div` 1000) . fromEnum <$> getPOSIXTime
+    produceInto (followerWith r (Scheduler.systemClock pk) (Scheduler.mkRng seed) follow primed) inbox
+
 {- | The producer. One round runs synchronously before the given action
-(meant to release the standard-input producer, see 'gated'), so that
-whatever the registry says at startup is in the inbox before anything else
-can be; rounds then repeat every 'followInterval'. The thread never sends an
-'Eof': a registry that goes quiet is not the loop ending.
+(meant to release the standard-input producer, see 'gated'), and whatever it
+found is injected at once — no window: there is nothing to coalesce yet, and
+the first convergence is meant to be as deterministic as a piped script's.
+Rounds then run on the schedule ("Salmon.Actions.Follow.Scheduler"), on the
+clock given: the system's, or a test's. The thread never sends an 'Eof': a
+registry that goes quiet is not the loop ending.
 -}
-follower :: Reporter Report -> Follow -> IO () -> Producer
-follower r follow primed = Producer $ \inbox -> do
-    runReporter r (Following (registryName follow.followRegistry) follow.followLabels follow.followInterval)
-    applied <- newIORef Map.empty
-    noise <- newIORef Map.empty
-    let round_ = forM_ follow.followLabels (fetchOne r follow.followRegistry inbox applied noise)
-    round_
+followerWith :: Reporter Report -> Scheduler.Clock -> Scheduler.Rng -> Follow -> IO () -> Producer
+followerWith r clock rng follow primed = Producer $ \inbox -> do
+    runReporter r (Following (registryName follow.followRegistry) follow.followLabels follow.followSchedule)
+    st <- Fetcher <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> newIORef Map.empty
+    _ <- round_ st
+    injectPending r follow.followRegistry st inbox
     primed
-    forever $ do
-        threadDelay follow.followInterval
-        round_
+    now <- Scheduler.clockNow clock
+    Scheduler.run
+        follow.followSchedule
+        clock
+        Scheduler.Hooks
+            { Scheduler.hookFetch = round_ st >>= \o -> deferred st o >> pure o
+            , Scheduler.hookInject = injectPending r follow.followRegistry st inbox
+            , Scheduler.hookBackoff = \n us -> runReporter r (Backoff n us)
+            }
+        (Scheduler.start follow.followSchedule rng now)
+  where
+    round_ st = mconcat <$> forM follow.followLabels (fetchOne r follow.followRegistry st)
+    -- the changes a scheduled round found are going to wait: say so once
+    -- per label, at the round that saw them
+    deferred :: Fetcher -> Scheduler.Outcome -> IO ()
+    deferred st o =
+        when (o == Scheduler.Changed) $ do
+            fresh <- atomicModifyIORef' st.fetcherFresh (\s -> (Set.empty, s))
+            seen <- readIORef st.fetcherSeen
+            forM_ (Set.toList fresh) $ \lbl ->
+                forM_ (Map.lookup lbl seen) $ \s -> runReporter r (Deferred lbl s.seenId s.seenDigest)
 
 {- | A producer that does not start until the 'MVar' is filled — what puts
 standard input behind the fetcher's first round. -}
@@ -371,64 +420,121 @@ gated gate p = Producer $ \inbox -> do
     readMVar gate
     produceInto p inbox
 
-{- | One label's share of a round. The only paths that write to the inbox
-are a document whose digest differs from the last applied one /and/ whose
-seed set differs; every other outcome is a report at most — and a repeated
-one (a label still missing, a file still malformed) is not even that, since
-a report per round about a condition that has not changed is noise. -}
-fetchOne ::
-    Reporter Report ->
-    Registry ->
-    TChan Line ->
-    IORef (Map Label Applied) ->
-    -- | the last complaint per label, so an unchanged one is not repeated
-    IORef (Map Label Report) ->
-    Label ->
-    IO ()
-fetchOne r registry inbox applied noise lbl = do
-    current <- readIORef applied
-    let previous = Map.lookup lbl current
-    outcome <- try (registryFetch registry lbl (appliedStamp <$> previous)) :: IO (Either SomeException Fetch)
+-- | A document seen and not yet applied: the latest for its label.
+data Seen = Seen
+    { seenStamp :: !Stamp
+    , seenDigest :: !Digest
+    , seenId :: !Text
+    , seenSeeds :: [Entry]
+    }
+
+-- | What a fetcher carries between rounds.
+data Fetcher = Fetcher
+    { fetcherApplied :: IORef (Map Label Applied)
+    -- ^ per label, the document the loop last heard about
+    , fetcherSeen :: IORef (Map Label Seen)
+    -- ^ per label, a newer document waiting for its window
+    , fetcherFresh :: IORef (Set Label)
+    -- ^ labels whose 'Seen' changed since last reported
+    , fetcherNoise :: IORef (Map Label Report)
+    -- ^ the last complaint per label, so an unchanged one is not repeated
+    }
+
+-- | The outcome of a round is the worst of its labels'.
+instance Semigroup Scheduler.Outcome where
+    Scheduler.Failed <> _ = Scheduler.Failed
+    _ <> Scheduler.Failed = Scheduler.Failed
+    Scheduler.Changed <> _ = Scheduler.Changed
+    _ <> Scheduler.Changed = Scheduler.Changed
+    Scheduler.Unchanged <> Scheduler.Unchanged = Scheduler.Unchanged
+
+instance Monoid Scheduler.Outcome where
+    mempty = Scheduler.Unchanged
+
+{- | One label's share of a round. Nothing here writes to the inbox: a
+document whose digest differs from the last one seen is parsed and set
+aside as this label's 'Seen', to be diffed and injected by 'injectPending'
+when the scheduler says so. Every other outcome is a report at most — and a
+repeated one (a label still missing, a file still malformed) is not even
+that, since a report per round about a condition that has not changed is
+noise. A registry that throws, or bytes that do not parse, is a 'Failed'
+round; a label with no document is not (the registry answered). -}
+fetchOne :: Reporter Report -> Registry -> Fetcher -> Label -> IO Scheduler.Outcome
+fetchOne r registry st lbl = do
+    applied <- Map.lookup lbl <$> readIORef st.fetcherApplied
+    seen <- Map.lookup lbl <$> readIORef st.fetcherSeen
+    -- what was last read, applied or not: the stamp to hand back, and the
+    -- digest a re-read is compared against
+    let (lastStamp, lastDigest) = case seen of
+            Just s -> (Just s.seenStamp, Just s.seenDigest)
+            Nothing -> (appliedStamp <$> applied, appliedDigest <$> applied)
+    outcome <- try (registryFetch registry lbl lastStamp) :: IO (Either SomeException Fetch)
     case outcome of
-        Left ex -> complain (FetchFailed lbl (Text.pack (show ex)))
-        Right Absent -> complain (maybe (Missing lbl) (const (Vanished lbl)) previous)
-        Right Unchanged -> pure ()
+        Left ex -> complain (FetchFailed lbl (Text.pack (show ex))) >> pure Scheduler.Failed
+        Right Absent -> complain (maybe (Missing lbl) (const (Vanished lbl)) applied) >> pure Scheduler.Unchanged
+        Right Unchanged -> pure Scheduler.Unchanged
         Right (Found stamp digest bytes)
             -- the mtime moved but the bytes did not: the starvation rule.
             -- Remember the new stamp so the file is not re-read every round.
-            | Just prev <- previous, prev.appliedDigest == digest -> do
-                writeIORef applied (Map.insert lbl prev{appliedStamp = stamp} current)
+            | Just digest == lastDigest -> do
+                case seen of
+                    Just s -> modifyIORef' st.fetcherSeen (Map.insert lbl s{seenStamp = stamp})
+                    Nothing -> modifyIORef' st.fetcherApplied (Map.adjust (\a -> a{appliedStamp = stamp}) lbl)
+                pure Scheduler.Unchanged
             | otherwise ->
                 case eitherDecode bytes :: Either String Document of
-                    Left err -> complain (Malformed lbl digest (Text.pack err))
+                    Left err -> complain (Malformed lbl digest (Text.pack err)) >> pure Scheduler.Failed
                     Right doc -> do
                         quiet
-                        let (ups, downs) = diffBatch lbl previous doc.docSeeds current
-                        let now = Applied stamp digest doc.docId doc.docSeeds
-                        writeIORef applied (Map.insert lbl now current)
-                        if null ups && null downs
-                            then runReporter r (NoDiff lbl doc.docId digest)
-                            else do
-                                let origin =
-                                        Fetched
-                                            Provenance
-                                                { provRegistry = registryName registry
-                                                , provLabel = labelText lbl
-                                                , provDocument = doc.docId
-                                                , provDigest = digest.unDigest
-                                                }
-                                let cmds =
-                                        fmap (entryCommand Add lbl) ups
-                                            ++ fmap (entryCommand Remove lbl) downs
-                                atomically (writeTChan inbox (Batch origin cmds))
-                                runReporter r (Injected lbl doc.docId digest (length ups) (length downs))
+                        modifyIORef' st.fetcherSeen (Map.insert lbl (Seen stamp digest doc.docId doc.docSeeds))
+                        modifyIORef' st.fetcherFresh (Set.insert lbl)
+                        pure Scheduler.Changed
   where
     -- report a complaint once per change of complaint, not once per round
     complain rep = do
-        last_ <- readIORef noise
+        last_ <- readIORef st.fetcherNoise
         unless (Map.lookup lbl last_ == Just rep) $ do
-            writeIORef noise (Map.insert lbl rep last_)
+            writeIORef st.fetcherNoise (Map.insert lbl rep last_)
             runReporter r rep
-    quiet = do
-        last_ <- readIORef noise
-        writeIORef noise (Map.delete lbl last_)
+    quiet = modifyIORef' st.fetcherNoise (Map.delete lbl)
+
+{- | Inject everything 'Seen' as one batch: per label, the diff against the
+document last applied — so three documents seen inside one window amount to
+one diff, from the one the loop knows to the latest — and one 'Serve.Batch'
+for all of them, each command carrying its own label's provenance. A label
+whose latest document turns out to say what was already applied (written
+and written back inside the window) is reported 'NoDiff' and adopted
+without a declaration. Nothing to inject writes nothing. -}
+injectPending :: Reporter Report -> Registry -> Fetcher -> TChan Line -> IO ()
+injectPending r registry st inbox = do
+    seen <- atomicModifyIORef' st.fetcherSeen (\s -> (Map.empty, s))
+    writeIORef st.fetcherFresh Set.empty
+    unless (Map.null seen) $ do
+        applied <- readIORef st.fetcherApplied
+        let adopt :: Seen -> Applied
+            adopt s = Applied s.seenStamp s.seenDigest s.seenId s.seenSeeds
+            -- what every label is about to say: the union the diff is against
+            upcoming = Map.union (fmap adopt seen) applied
+        let perLabel :: (Label, Seen) -> (Report, [(Origin, ServeCommand)])
+            perLabel (lbl, s) =
+                let previous = Map.lookup lbl applied
+                    (ups, downs) = diffBatch lbl previous s.seenSeeds upcoming
+                    origin =
+                        Fetched
+                            Provenance
+                                { provRegistry = registryName registry
+                                , provLabel = labelText lbl
+                                , provDocument = s.seenId
+                                , provDigest = s.seenDigest.unDigest
+                                }
+                 in if null ups && null downs
+                        then (NoDiff lbl s.seenId s.seenDigest, [])
+                        else
+                            ( Injected lbl s.seenId s.seenDigest (length ups) (length downs)
+                            , [(origin, cmd) | cmd <- fmap (entryCommand Add lbl) ups ++ fmap (entryCommand Remove lbl) downs]
+                            )
+            (reports, cmds) = fmap concat (unzip (fmap perLabel (Map.toList seen)))
+        writeIORef st.fetcherApplied upcoming
+        unless (null cmds) $
+            atomically (writeTChan inbox (Batch cmds))
+        forM_ reports (runReporter r)

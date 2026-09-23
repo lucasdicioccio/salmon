@@ -4,10 +4,12 @@
 module Salmon.Builtin.CommandLine where
 
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
+import Control.Applicative ((<|>))
 import Control.Monad (void, when)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -31,6 +33,7 @@ import Salmon.Op.Track
 
 import Salmon.Actions.Dot as Dot
 import qualified Salmon.Actions.Follow as Follow
+import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
@@ -86,16 +89,49 @@ data RunCommand
       -- version of @serve@ before the setting existed). Then pull mode
       -- ("Salmon.Actions.Follow"): a directory registry to follow
       -- (@--follow DIR@), the labels to fetch from it (@--label L@,
-      -- repeatable; both or neither), and the seconds between rounds
-      -- (@--follow-interval S@). Last, optionally listening for the same
+      -- repeatable; both or neither), and the fetcher's schedule
+      -- ('FollowOptions'). Last, optionally listening for the same
       -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
       -- @specs/generic-server.md@; see "Salmon.Actions.Serve.Socket"),
       -- stdin still read beside it.
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !Int !(Maybe FilePath)
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath)
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON RunCommand
 instance ToJSON RunCommand
+
+{- | The @--follow-*@ flags: the scheduler's numbers
+("Salmon.Actions.Follow.Scheduler"), in seconds where they are durations.
+@--follow-interval@ is milestone 2's name for the base delay, kept as a
+synonym of @--follow-base@; either may be given, the base's own flag wins.
+-}
+data FollowOptions = FollowOptions
+    { followBase :: !(Maybe Int)
+    , followInterval :: !(Maybe Int)
+    , followFactor :: !Double
+    , followCap :: !Int
+    , followJitter :: !Double
+    , followDebounce :: !Int
+    , followMaxWait :: !Int
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON FollowOptions
+instance ToJSON FollowOptions
+
+followSchedule :: FollowOptions -> Scheduler.Config
+followSchedule o =
+    Scheduler.Config
+        { Scheduler.schedBase = seconds (fromMaybe defaultBase (o.followBase <|> o.followInterval))
+        , Scheduler.schedFactor = max 1 o.followFactor
+        , Scheduler.schedCap = seconds o.followCap
+        , Scheduler.schedJitter = max 0 (min 1 o.followJitter)
+        , Scheduler.schedDebounce = seconds o.followDebounce
+        , Scheduler.schedMaxWait = seconds o.followMaxWait
+        }
+  where
+    seconds n = max 0 n * 1000000
+    defaultBase = Scheduler.defaultConfig.schedBase `div` 1000000
 
 {- | How the commands that execute something (@run up@, @run down@, @run
 serve@) report. @--json@ selects 'ReportJson': one JSON object per line on
@@ -196,14 +232,7 @@ runCommandParser =
                         <> Options.Applicative.help "A label to follow in the --follow registry; repeatable, the desired set is the union."
                     )
                 )
-            <*> Options.Applicative.option
-                Options.Applicative.auto
-                ( long "follow-interval"
-                    <> Options.Applicative.metavar "SECONDS"
-                    <> Options.Applicative.value 5
-                    <> showDefault
-                    <> Options.Applicative.help "Seconds between two rounds of fetching the followed labels."
-                )
+            <*> followOptionsP
             <*> optional
                 ( strOption
                     ( long "listen"
@@ -212,6 +241,66 @@ runCommandParser =
                             "Also accept the line protocol on a unix socket at PATH (created owner-only); each client is answered on its own connection, as JSON lines. Stdin keeps working alongside."
                     )
                 )
+    followOptionsP =
+        FollowOptions
+            <$> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "follow-base"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help ("Seconds between two rounds of fetching the followed labels while rounds succeed (default " <> show (defaultSecs (.schedBase)) <> ").")
+                    )
+                )
+            <*> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "follow-interval"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help "Same as --follow-base (the older name)."
+                    )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-factor"
+                    <> Options.Applicative.metavar "FACTOR"
+                    <> Options.Applicative.value Scheduler.defaultConfig.schedFactor
+                    <> showDefault
+                    <> Options.Applicative.help "How much slower each consecutive failed round makes the next one."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-cap"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (defaultSecs (.schedCap))
+                    <> showDefault
+                    <> Options.Applicative.help "The longest a failing registry is left alone between rounds."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-jitter"
+                    <> Options.Applicative.metavar "FRACTION"
+                    <> Options.Applicative.value Scheduler.defaultConfig.schedJitter
+                    <> showDefault
+                    <> Options.Applicative.help "Every delay is scaled by a uniform draw from [1-j, 1+j], so a fleet does not poll in step."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-debounce"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (defaultSecs (.schedDebounce))
+                    <> showDefault
+                    <> Options.Applicative.help "How long the registry must be quiet after a change before the change is applied; 0 applies at once."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-max-wait"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (defaultSecs (.schedMaxWait))
+                    <> showDefault
+                    <> Options.Applicative.help "The longest a change waits to be applied while the registry keeps changing."
+                )
+    defaultSecs :: (Scheduler.Config -> Int) -> Int
+    defaultSecs f = f Scheduler.defaultConfig `div` 1000000
     upP =
         RunUp
             <$> optional
@@ -383,7 +472,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels interval listen)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let tagged = taggedFor fmt
             follow <- case (followDir, traverse Follow.mkLabel labels) of
@@ -403,13 +492,15 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                             Follow.Follow
                                 { Follow.followRegistry = Follow.directoryRegistry dir
                                 , Follow.followLabels = lbls
-                                , Follow.followInterval = max 1 interval * 1000000
+                                , Follow.followSchedule = followSchedule followOptions
                                 }
             -- the fetcher's first round is in the inbox before standard
             -- input is even read, so the first convergence is what the
             -- registry says, deterministically; after that both interleave
             -- at line granularity.
             gate <- newEmptyMVar
+            -- what `fetch` pokes: the fetcher's clock wakes on it
+            pk <- Scheduler.newPoke
             let -- with a socket to talk to, the process must outlive
                 -- whatever started it (`< /dev/null &` is the ordinary way
                 -- to run it), so standard input is read as a named source
@@ -422,11 +513,12 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 producersWith more =
                     case follow of
                         Nothing -> stdinP : more
-                        Just f -> Follow.follower Follow.reportText f (putMVar gate ()) : Follow.gated gate stdinP : more
+                        Just f -> Follow.follower Follow.reportText pk f (putMVar gate ()) : Follow.gated gate stdinP : more
+                onFetch = Scheduler.poke pk <$ follow
             case listen of
                 Nothing -> do
                     let (serveR', r') = reportersOver tagged
-                    void $ Serve.serveProducers rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase (producersWith [])
+                    void $ Serve.serveFollowing rewrites limit (not noAutoConverge) serveR' r' parseSeedArgs genBase traceBase onFetch (producersWith [])
                 Just path ->
                     -- the listener's reporters answer each socket client on
                     -- its own connection and hand everything on to the
@@ -443,6 +535,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                 parseSeedArgs
                                 genBase
                                 traceBase
+                                onFetch
                                 (producersWith [Socket.listenerProducer listener])
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
