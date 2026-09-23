@@ -118,6 +118,8 @@ module Salmon.Actions.Serve (
     Producer (..),
     Line (..),
     Origin (..),
+    Provenance (..),
+    renderOrigin,
     handleProducer,
     stdinProducer,
 
@@ -151,9 +153,10 @@ module Salmon.Actions.Serve (
 import Control.Comonad.Cofree (Cofree)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.STM (TChan, TVar, atomically, isEmptyTChan, newTChanIO, readTChan, writeTChan)
-import Control.Exception (IOException, finally, try)
+import Control.Exception (IOException, SomeException, finally, try)
 import Control.Monad (forM_, unless, when)
-import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
+import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, encode, parseJSON)
+import Data.Aeson.Types (parseEither)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isSpace)
@@ -278,6 +281,9 @@ data Epoch seed directive = Epoch
     { epochId :: !EpochId
     , epochDeclaration :: !Declaration
     , epochDirection :: !Direction
+    , -- | who made this declaration: typed, loaded from a file, or fetched
+      -- from a registry. Kept for @history@.
+      epochOrigin :: !Origin
     , -- | the argv this seed was declared with, kept for @history@; a
       -- directive-file declaration (@up-directive@ and friends) gets a
       -- synthetic @["<directive-file>", path]@ here instead.
@@ -304,6 +310,7 @@ contributed, kept so @history --select@ still answers for a collected epoch.
 data LogEntry = LogEntry
     { logEpoch :: !EpochId
     , logDeclaration :: !Declaration
+    , logOrigin :: !Origin
     , logTokens :: [String]
     , logRefs :: !(Set Ref)
     }
@@ -416,6 +423,13 @@ data ServeCommand
     | -- | @up-directive@\/@only-directive@\/@down-directive@: declare a seed
       -- straight from a directive JSON file, skipping seed-arg parsing.
       DeclareDirective !Declaration !FilePath
+    | -- | the same declaration with the directive's JSON already in hand
+      -- rather than in a file. Not spelled by any line of the input language
+      -- ('parseServeCommand' never produces it); it exists for a producer
+      -- that holds a document with a directive in it ("Salmon.Actions.Follow")
+      -- and would otherwise have to write that directive to a file to name
+      -- it. The 'Text' is what @history@ prints in place of an argv.
+      DeclareInline !Declaration !Text !Value
     | -- | @load@: run a file of serve-command lines, in order, as if typed.
       Load !FilePath
     | -- | @clear@: retire every seed (everything known goes down)
@@ -605,8 +619,8 @@ data Report
     | -- | nodes, plus every live declaration's path(s) to each one (see 'worldPaths') —
       -- the thing a @--select@\/@--exclude@ pattern is actually built from.
       StatusReport ![(Ref, NodeState)] !(Map Ref [Text])
-    | -- | epoch, declaration, still active, argv
-      HistoryReport ![(EpochId, Declaration, Bool, [String])]
+    | -- | epoch, declaration, still active, who declared it, argv
+      HistoryReport ![(EpochId, Declaration, Bool, Origin, [String])]
     | -- | declarations too old to still be in 'worldLog'; emitted after a
       -- 'HistoryReport' so @history@ never silently claims to be complete
       HistoryElided !Int
@@ -621,7 +635,10 @@ data Report
 -- | Prints 'Report's in a human-readable, one-event-per-block form.
 reportText :: Reporter Report
 reportText = ReporterM $ \rep -> do
-    traverse_ Text.putStrLn (renderReport rep)
+    -- one write per report rather than one per line: another producer's
+    -- reporter ("Salmon.Actions.Follow") shares this handle from its own
+    -- thread, and two half-lines interleaved are not two reports.
+    Text.putStr (Text.unlines (renderReport rep))
     hFlush stdout
 
 renderReport :: Report -> [Text]
@@ -749,15 +766,45 @@ renderReport rep =
             | r `Set.member` sel = " [selected]"
             | otherwise = ""
 
-    renderEpochLine :: (EpochId, Declaration, Bool, [String]) -> Text
-    renderEpochLine (eid, decl, active, toks) =
-        Text.unwords
+    -- a typed line renders exactly as it did before origins existed; any
+    -- other origin is a trailing annotation, so the argv stays where an
+    -- operator's eye already looks for it.
+    renderEpochLine :: (EpochId, Declaration, Bool, Origin, [String]) -> Text
+    renderEpochLine (eid, decl, active, origin, toks) =
+        Text.unwords $
             [ " "
             , renderEpochId eid
             , Text.justifyLeft 8 ' ' (renderDeclaration decl)
             , if active then "[active]" else "[retired]"
             , Text.pack (unwords toks)
             ]
+                ++ [ann | Just ann <- [renderOrigin origin]]
+
+{- | How @history@ names where a declaration came from: 'Nothing' for a typed
+line (the common case, and the one every existing transcript shows), a
+bracketed annotation otherwise. A fetched declaration names its registry,
+label, document id and digest, which is the whole point of recording it —
+see "Salmon.Actions.Follow".
+-}
+renderOrigin :: Origin -> Maybe Text
+renderOrigin origin =
+    case origin of
+        Stdin -> Nothing
+        Origin name -> Just ("[via " <> name <> "]")
+        Loaded path -> Just ("[loaded " <> Text.pack path <> "]")
+        Fetched prov ->
+            Just $
+                Text.concat
+                    [ "[fetched "
+                    , prov.provRegistry
+                    , " label="
+                    , prov.provLabel
+                    , " id="
+                    , prov.provDocument
+                    , " sha256="
+                    , Text.take 12 prov.provDigest
+                    , "]"
+                    ]
 
 {- | The supervision events worth an operator's attention, one line each.
 
@@ -1056,6 +1103,11 @@ historyHelp =
     , "  what was asked for, kept long after the graph a declaration built has been collected —"
     , "  so a [retired] line here does not mean that graph is still held in memory."
     , ""
+    , "  A line typed at this loop shows nothing more. One run from a `load`ed file ends in"
+    , "  [loaded <file>]; one made by the fetcher (`run serve --follow`) ends in"
+    , "  [fetched <registry> label=<label> id=<document id> sha256=<digest prefix>], which is"
+    , "  how to tell what you typed from what a document said."
+    , ""
     , "  The log is capped; if older declarations have fallen off the end, a line after the"
     , "  listing says how many."
     , ""
@@ -1270,14 +1322,45 @@ declaration came from.
 data Origin
     = -- | the process's own standard input
       Stdin
-    | -- | any other source: a socket connection, a fetcher, a test
+    | -- | any other source: a socket connection, a test
       Origin !Text
+    | -- | a line run from a @load@ed file (never pushed by a producer: the
+      -- loop itself tags the file's lines as it runs them)
+      Loaded !FilePath
+    | -- | a declaration "Salmon.Actions.Follow" made from a fetched
+      -- document; see 'Provenance' for what @history@ says about it
+      Fetched !Provenance
     deriving (Show, Eq, Ord)
 
--- | What a 'Producer' pushes into the loop's inbox.
+{- | Where a fetched declaration came from, in enough detail that an operator
+reading @history@ can tell "I typed this" from "the document said so", and
+/which/ document: the registry, the label addressed in it, the document's
+own @id@ and the digest of its bytes.
+-}
+data Provenance = Provenance
+    { provRegistry :: !Text
+    , provLabel :: !Text
+    , provDocument :: !Text
+    , provDigest :: !Text
+    }
+    deriving (Show, Eq, Ord)
+
+{- | What a 'Producer' pushes into the loop's inbox.
+
+A 'Batch' is the unit a fetched document is injected as: its commands run
+back to back with @autoconverge@ held off, so the declarations record without
+each one converging on its own, then the setting is put back to whatever it
+was — an operator's @autoconverge off@ is not silently re-enabled — and one
+@converge@ runs. The batch carries its own commands rather than text lines
+so a seed's words survive without a quoting round trip, and it is one inbox
+entry rather than several so nothing another producer types can land in the
+middle of it.
+-}
 data Line
     = -- | one line of the input language, as the producer read it
       Line !Origin !String
+    | -- | several commands, handled as one: see above
+      Batch !Origin ![ServeCommand]
     | -- | this producer has nothing more to say and its thread is about to end
       Eof !Origin
     deriving (Show, Eq)
@@ -1380,9 +1463,33 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
                 stopTending tending world
                 case line of
                     Eof _ -> runReporter r Stopped
-                    Line _ l -> do
-                        keepGoing <- step tending 0 world l
+                    Line origin l -> do
+                        keepGoing <- step tending 0 world origin l
                         when keepGoing (loop tending world inbox)
+                    Batch origin cmds -> do
+                        keepGoing <- batch tending world origin cmds
+                        when keepGoing (loop tending world inbox)
+
+    {- | Run a 'Batch': every command with @autoconverge@ held off, the
+    setting put back afterwards (a @finally@, so a command that stops the
+    loop still leaves it as the operator had it), then one full convergence
+    pass — the sequence the fetcher would otherwise have to spell as
+    @autoconverge off@ … @autoconverge on@ … @converge@ on the inbox, except
+    that only the loop knows what to put the setting back /to/. An empty
+    batch converges nothing: there is no declaration to act on. -}
+    batch :: Tending -> IORef (World seed directive) -> Origin -> [ServeCommand] -> IO Bool
+    batch tending world origin cmds = do
+        was <- readIORef (tendingAutoConverge tending)
+        writeIORef (tendingAutoConverge tending) False
+        keepGoing <-
+            runAll cmds `finally` writeIORef (tendingAutoConverge tending) was
+        when (keepGoing && not (null cmds)) (converge tending world Nothing)
+        pure keepGoing
+      where
+        runAll [] = pure True
+        runAll (cmd : rest) = do
+            go <- stepCommand tending 0 world origin cmd
+            if go then runAll rest else pure False
 
     -------------------------------------------------------------------------
     -- supervision
@@ -1654,13 +1761,16 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
             forM_ (Set.toList (Rewrite.membersOf computed act.extension.ref)) $ \rf ->
                 atomicModifyIORef' world (\w -> (setConvergenceHere rf c w, ()))
 
-    step :: Tending -> Int -> IORef (World seed directive) -> String -> IO Bool
-    step tending depth world line =
+    step :: Tending -> Int -> IORef (World seed directive) -> Origin -> String -> IO Bool
+    step tending depth world origin line =
         case parseServeCommand line of
             Left err -> do
                 runReporter r (BadCommand err)
                 pure True
-            Right cmd ->
+            Right cmd -> stepCommand tending depth world origin cmd
+
+    stepCommand :: Tending -> Int -> IORef (World seed directive) -> Origin -> ServeCommand -> IO Bool
+    stepCommand tending depth world origin cmd =
                 case cmd of
                     Noop -> pure True
                     Quit -> pure False
@@ -1703,10 +1813,13 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
                         convergeIfAuto tending world
                         pure True
                     Declare decl args -> do
-                        declare tending world decl args
+                        declare tending world origin decl args
                         pure True
                     DeclareDirective decl path -> do
-                        declareDirective tending world decl path
+                        declareDirective tending world origin decl path
+                        pure True
+                    DeclareInline decl name value -> do
+                        declareDecoded tending world origin decl ["<directive>", Text.unpack name] (parseEither parseJSON value)
                         pure True
                     Load path -> loadFile tending world (depth + 1) path
                     Supervise on -> do
@@ -1758,15 +1871,26 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
             runReporter r (LoadDone path n)
             pure True
         go n (ln : rest) = do
-            keepGoing <- step tending depth world ln
+            keepGoing <- step tending depth world (Loaded path) ln
             if keepGoing then go (n + 1) rest else pure False
 
-    declare :: Tending -> IORef (World seed directive) -> Declaration -> [String] -> IO ()
-    declare tending world decl args =
+    -- | A 'Configure' that throws is reported as a bad seed and the loop
+    -- reads on, same as a seed that fails to parse. It used to take the whole
+    -- loop down, which for a typed line was a nuisance and for a fetched
+    -- document (whose author is not at this keyboard) would be a host
+    -- losing its supervisor to somebody else's typo.
+    declare :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> [String] -> IO ()
+    declare tending world origin decl args =
         case parseSeed args of
             Left err -> runReporter r (BadSeed err)
             Right seed -> do
-                directive <- gen configure seed
+                configured <- try (gen configure seed) :: IO (Either SomeException directive)
+                case configured of
+                    Left ex -> runReporter r (BadSeed (Text.pack (unwords args) <> ": configure threw: " <> Text.pack (show ex)))
+                    Right directive -> declareConfigured tending world origin decl args seed directive
+
+    declareConfigured :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> [String] -> seed -> directive -> IO ()
+    declareConfigured tending world origin decl args seed directive = do
                 w0 <- readIORef world
                 let o = run program directive
                 let gr = evalDeps o
@@ -1775,6 +1899,7 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
                             { epochId = EpochId w0.worldNextId
                             , epochDeclaration = decl
                             , epochDirection = declarationDirection decl
+                            , epochOrigin = origin
                             , epochTokens = args
                             , epochSeed = Just seed
                             , epochDirective = directive
@@ -1783,13 +1908,18 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
                             }
                 commitEpoch tending world w0 decl ep
 
-    declareDirective :: Tending -> IORef (World seed directive) -> Declaration -> FilePath -> IO ()
-    declareDirective tending world decl path = do
+    declareDirective :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> FilePath -> IO ()
+    declareDirective tending world origin decl path = do
         result <- try (LByteString.readFile path) :: IO (Either IOException ByteString)
         case result of
             Left ex -> runReporter r (BadDirective ("cannot read " <> Text.pack path <> ": " <> Text.pack (show ex)))
-            Right bytes ->
-                case eitherDecode bytes of
+            Right bytes -> declareDecoded tending world origin decl ["<directive-file>", path] (eitherDecode bytes)
+
+    -- | The tail of a directive declaration once its JSON has been read from
+    -- wherever it was: a decode failure is reported and nothing is declared.
+    declareDecoded :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> [String] -> Either String directive -> IO ()
+    declareDecoded tending world origin decl tokens decoded =
+                case decoded of
                     Left err -> runReporter r (BadDirective (Text.pack err))
                     Right directive -> do
                         w0 <- readIORef world
@@ -1800,7 +1930,8 @@ serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure p
                                     { epochId = EpochId w0.worldNextId
                                     , epochDeclaration = decl
                                     , epochDirection = declarationDirection decl
-                                    , epochTokens = ["<directive-file>", path]
+                                    , epochOrigin = origin
+                                    , epochTokens = tokens
                                     , epochSeed = Nothing
                                     , epochDirective = directive
                                     , epochKey = encode directive
@@ -2037,6 +2168,7 @@ record decl ep dag w =
         LogEntry
             { logEpoch = ep.epochId
             , logDeclaration = ep.epochDeclaration
+            , logOrigin = ep.epochOrigin
             , logTokens = ep.epochTokens
             , logRefs = Ledger.contribRefs contrib
             }
@@ -2210,9 +2342,9 @@ to call directly, since there was never a caller for one.
 historyLinesMatching ::
     (LogEntry -> Bool) ->
     World seed directive ->
-    [(EpochId, Declaration, Bool, [String])]
+    [(EpochId, Declaration, Bool, Origin, [String])]
 historyLinesMatching p w =
-    [ (e.logEpoch, e.logDeclaration, Set.member e.logEpoch activeIds, e.logTokens)
+    [ (e.logEpoch, e.logDeclaration, Set.member e.logEpoch activeIds, e.logOrigin, e.logTokens)
     | e <- reverse w.worldLog
     , p e
     ]
