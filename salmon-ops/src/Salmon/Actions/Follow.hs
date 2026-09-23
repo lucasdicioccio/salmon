@@ -92,14 +92,20 @@ otherwise reach the loop — a fetched document from any registry, and a
 cached one on replay, since a cache file is as writable as a registry file.
 A 'Left' is reported 'Rejected' with its reason, is a failed round, and the
 bytes are neither injected nor cached; the last good document stays in
-force. The one verifier here, 'noVerifier', accepts everything: the hook is
-the shape a signature check drops into (the spec's "signed documents"),
-not the check itself.
+force. A 'Right' is /the bytes to parse/: 'noVerifier', the default and
+what runs without a @--follow-key@, hands back what it was given, and
+"Salmon.Actions.Follow.Signature"'s @signedVerifier@ hands back the document
+it unwrapped from a signed envelope. The digest kept everywhere here — the
+one compared for change, reported, recorded in @history@ and written beside
+the cache entry — is that of the bytes /as fetched/, envelope included: the
+cache keeps those same bytes so that a replay goes through the verifier
+exactly as a fetch did.
 
 The status sink ("Salmon.Actions.Serve.StatusSink") reads this module's
 reports and the per-label 'Applied' cell ('appliedDocuments') and writes
-nothing here. What is /not/ here yet: signatures. The registries beyond the
-directory are in "Salmon.Actions.Follow.Registry".
+nothing here. The registries beyond the directory are in
+"Salmon.Actions.Follow.Registry", the signature scheme in
+"Salmon.Actions.Follow.Signature".
 -}
 module Salmon.Actions.Follow (
     -- * Documents
@@ -124,6 +130,7 @@ module Salmon.Actions.Follow (
     Cached (..),
     cachePath,
     readCache,
+    readCacheEntry,
     writeCache,
 
     -- * Following
@@ -384,13 +391,13 @@ directory by mistake overwrites nothing the registry serves.
 cachePath :: FilePath -> Label -> FilePath
 cachePath dir (Label t) = dir </> Text.unpack t <.> "applied" <.> "json"
 
-{- | The cached document for a label, parsed both as a cache entry and as
-the 'Document' it holds, its digest checked against the bytes: 'Nothing'
-when there is none, a reason when there is one that cannot be used. Never
-throws.
+{- | The cached entry for a label, its digest checked against the bytes:
+'Nothing' when there is none, a reason when there is one that cannot be
+used. The bytes are as fetched, so what they parse as depends on the
+verifier — see 'readCache' for the unsigned reading. Never throws.
 -}
-readCache :: FilePath -> Label -> IO (Either Text (Maybe (Cached, Document)))
-readCache dir lbl = do
+readCacheEntry :: FilePath -> Label -> IO (Either Text (Maybe Cached))
+readCacheEntry dir lbl = do
     let path = cachePath dir lbl
     present <- doesFileExist path
     if not present
@@ -403,9 +410,22 @@ readCache dir lbl = do
                     Left err -> Left (Text.pack err)
                     Right c
                         | digestOf c.cachedBytes /= c.cachedDigest -> Left "the cached bytes do not hash to the digest kept beside them"
-                        | otherwise -> case eitherDecode c.cachedBytes of
-                            Left err -> Left ("the cached document does not parse: " <> Text.pack err)
-                            Right doc -> Right (Just (c, doc))
+                        | otherwise -> Right (Just c)
+
+{- | 'readCacheEntry', with the bytes parsed as the 'Document' they hold
+directly — the reading for a cache written under 'noVerifier'. A cache
+written under a verifier that unwraps (a signed envelope) parses only
+through that verifier, which is how 'follower' reads it.
+-}
+readCache :: FilePath -> Label -> IO (Either Text (Maybe (Cached, Document)))
+readCache dir lbl = do
+    entry <- readCacheEntry dir lbl
+    pure $ case entry of
+        Left err -> Left err
+        Right Nothing -> Right Nothing
+        Right (Just c) -> case eitherDecode c.cachedBytes of
+            Left err -> Left ("the cached document does not parse: " <> Text.pack err)
+            Right doc -> Right (Just (c, doc))
 
 {- | Write a label's cache entry: to a temporary file beside it, then
 renamed over it, so that a crash mid-write leaves the previous entry rather
@@ -439,16 +459,18 @@ data Follow = Follow
     }
 
 {- | The verify-before-inject hook: the digest and the bytes exactly as
-fetched, a reason to refuse them. It may throw, which is a refusal with the
-exception's text. -}
-type Verifier = Digest -> ByteString -> IO (Either Text ())
+fetched; a reason to refuse them, or the bytes the loop is to parse as the
+'Document' — the same ones for a verifier that only checks, the unwrapped
+document for one that strips a signed envelope. It may throw, which is a
+refusal with the exception's text. -}
+type Verifier = Digest -> ByteString -> IO (Either Text ByteString)
 
--- | Accepts everything: the default, until a signature scheme fills this in.
+-- | Accepts everything as it is: the default, and unsigned mode.
 noVerifier :: Verifier
-noVerifier _ _ = pure (Right ())
+noVerifier _ bytes = pure (Right bytes)
 
 -- | 'followVerify' with a throw contained as a refusal.
-verify :: Follow -> Digest -> ByteString -> IO (Either Text ())
+verify :: Follow -> Digest -> ByteString -> IO (Either Text ByteString)
 verify follow digest bytes = do
     outcome <- try (follow.followVerify digest bytes)
     pure $ case outcome of
@@ -672,17 +694,20 @@ followerWith r clock rng mode applied follow primed = Producer $ \inbox -> do
         Just dir ->
             fmap (Map.fromList . catMaybes) $
                 forM follow.followLabels $ \lbl -> do
-                    entry <- readCache dir lbl
+                    entry <- readCacheEntry dir lbl
                     case entry of
                         Left err -> runReporter r (BadCache lbl err) >> pure Nothing
                         Right Nothing -> pure Nothing
-                        -- verified as a fetched one is: the cache is as
+                        -- verified as a fetched one is, and parsed from
+                        -- what the verifier hands back: the cache is as
                         -- writable as the registry
-                        Right (Just (c, doc)) -> do
+                        Right (Just c) -> do
                             verdict <- verify follow c.cachedDigest c.cachedBytes
                             case verdict of
                                 Left why -> runReporter r (Rejected lbl c.cachedDigest why) >> pure Nothing
-                                Right () -> pure (Just (lbl, (c, doc)))
+                                Right inner -> case eitherDecode inner of
+                                    Left err -> runReporter r (BadCache lbl ("the cached document does not parse: " <> Text.pack err)) >> pure Nothing
+                                    Right doc -> pure (Just (lbl, (c, doc)))
 
 {- | A producer that does not start until the 'MVar' is filled — what puts
 standard input behind the fetcher's first round. -}
@@ -765,7 +790,7 @@ fetchOne r follow st lbl = do
                 verdict <- verify follow digest bytes
                 case verdict of
                     Left why -> complain (Rejected lbl digest why) >> pure Scheduler.Failed
-                    Right () -> case eitherDecode bytes :: Either String Document of
+                    Right inner -> case eitherDecode inner :: Either String Document of
                         Left err -> complain (Malformed lbl digest (Text.pack err)) >> pure Scheduler.Failed
                         Right doc
                             | follow.followRefuseOlder

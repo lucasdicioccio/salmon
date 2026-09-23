@@ -513,7 +513,7 @@ verifyHook =
             refusing :: Follow.Verifier
             refusing _ bytes
                 | "evil" `Text.isInfixOf` Text.decodeUtf8Lenient (LByteString.toStrict bytes) = pure (Left "mentions evil")
-                | otherwise = pure (Right ())
+                | otherwise = pure (Right bytes)
             knobs = Knobs (Just cache) refusing
             publish bytes = createDirectoryIfMissing True reg >> LByteString.writeFile (Follow.documentPath reg web) bytes
         publish (document "web@1" [["a"]])
