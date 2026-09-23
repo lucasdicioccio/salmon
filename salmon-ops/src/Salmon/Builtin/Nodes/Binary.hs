@@ -7,6 +7,7 @@ module Salmon.Builtin.Nodes.Binary (
     withBinary,
     withBinaryStdin,
     untrackedExec,
+    untrackedExecOutput,
     CommandIO (..),
     withBinaryIO,
     untrackedExecIO,
@@ -111,6 +112,21 @@ untrackedExec binary arg dat = \r -> do
     runReporter r (CommandStopped p code out err)
     case code of
         ExitSuccess -> pure ()
+        ExitFailure n -> throwIO (CommandFailed p n out err)
+
+{- | 'untrackedExec' for a caller that wants the command's standard output
+back — a @git rev-parse@, a @dig +short@ — under the same rule about exit
+codes: non-zero throws 'CommandFailed', so what is handed back is always
+the output of a command that succeeded.
+-}
+untrackedExecOutput :: Command x a -> a -> ByteString -> Reporter Report -> IO ByteString
+untrackedExecOutput binary arg dat r = do
+    let p = prepare binary arg
+    runReporter r (CommandStart p)
+    (code, out, err) <- readCreateProcessWithExitCode p dat
+    runReporter r (CommandStopped p code out err)
+    case code of
+        ExitSuccess -> pure out
         ExitFailure n -> throwIO (CommandFailed p n out err)
 
 -- | Thrown by 'untrackedExec' (and so, transitively, by every node built on 'withBinary') on a non-zero exit.

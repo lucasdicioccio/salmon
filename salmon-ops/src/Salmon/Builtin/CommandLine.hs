@@ -35,6 +35,7 @@ import Salmon.Op.Track
 
 import Salmon.Actions.Dot as Dot
 import qualified Salmon.Actions.Follow as Follow
+import qualified Salmon.Actions.Follow.Registry as Registry
 import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
@@ -92,8 +93,10 @@ data RunCommand
       -- this flag existed), and optionally starting with @autoconverge@ off
       -- (@--no-autoconverge@; 'False' is the default, matching every
       -- version of @serve@ before the setting existed). Then pull mode
-      -- ("Salmon.Actions.Follow"): a directory registry to follow
-      -- (@--follow DIR@), the labels to fetch from it (@--label L@,
+      -- ("Salmon.Actions.Follow"): a registry to follow (@--follow
+      -- REGISTRY@, a directory or @git+URL@ — see
+      -- "Salmon.Actions.Follow.Registry"), the labels to fetch from it
+      -- (@--label L@,
       -- repeatable; both or neither), and the fetcher's schedule
       -- ('FollowOptions'). Last, optionally listening for the same
       -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
@@ -130,7 +133,8 @@ then the cache directory (@--follow-cache DIR@; none by default, in which
 case nothing survives a restart) and @--follow-refuse-older@ (see
 'Follow.followRefuseOlder'). @--follow-interval@ is milestone 2's name for
 the base delay, kept as a synonym of @--follow-base@; either may be given,
-the base's own flag wins.
+the base's own flag wins. Last, the backends' own knobs (milestone 6):
+@--follow-workdir@ for the git checkout.
 -}
 data FollowOptions = FollowOptions
     { followBase :: !(Maybe Int)
@@ -142,6 +146,7 @@ data FollowOptions = FollowOptions
     , followMaxWait :: !Int
     , followCacheDir :: !(Maybe FilePath)
     , followRefuseOlder :: !Bool
+    , followWorkdir :: !(Maybe FilePath)
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -250,8 +255,8 @@ runCommandParser =
             <*> optional
                 ( strOption
                     ( long "follow"
-                        <> Options.Applicative.metavar "DIR"
-                        <> Options.Applicative.help "Pull mode: fetch declarations from the documents in this directory (one <label>.json per --label)."
+                        <> Options.Applicative.metavar "REGISTRY"
+                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json) or git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout)."
                     )
                 )
             <*> many
@@ -372,6 +377,13 @@ runCommandParser =
             <*> switch
                 ( long "follow-refuse-older"
                     <> Options.Applicative.help "Refuse a fetched document whose `published` timestamp is older than the one already applied for its label (reported as stale, not injected). Documents without `published` are never refused."
+                )
+            <*> optional
+                ( strOption
+                    ( long "follow-workdir"
+                        <> Options.Applicative.metavar "DIR"
+                        <> Options.Applicative.help "Where a git+ registry is checked out (cloned once, then fetched and reset every round). Default: `checkout` under --follow-cache, else a directory under the system temporary directory named by the repository."
+                    )
                 )
     defaultSecs :: (Scheduler.Config -> Int) -> Int
     defaultSecs f = f Scheduler.defaultConfig `div` 1000000
@@ -552,7 +564,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             follow <- case (followDir, traverse Follow.mkLabel labels) of
                 (Nothing, Right []) -> pure Nothing
                 (Nothing, _) -> do
-                    hPutStrLn stderr "--label needs a --follow DIR to fetch from"
+                    hPutStrLn stderr "--label needs a --follow REGISTRY to fetch from"
                     exitFailure
                 (Just _, Right []) -> do
                     hPutStrLn stderr "--follow needs at least one --label to fetch"
@@ -560,11 +572,23 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 (Just _, Left err) -> do
                     hPutStrLn stderr (Text.unpack err)
                     exitFailure
-                (Just dir, Right lbls) ->
+                (Just addr, Right lbls) -> do
+                    -- the backend is chosen by the shape of the address; see
+                    -- "Salmon.Actions.Follow.Registry"
+                    address <- case Registry.parseAddress (Text.pack addr) of
+                        Left err -> hPutStrLn stderr (Text.unpack err) >> exitFailure
+                        Right a -> pure a
+                    registry <-
+                        Registry.open
+                            Registry.defaultOptions
+                                { Registry.optWorkdir = followOptions.followWorkdir
+                                , Registry.optCacheDir = followOptions.followCacheDir
+                                }
+                            address
                     pure $
                         Just
                             Follow.Follow
-                                { Follow.followRegistry = Follow.directoryRegistry dir
+                                { Follow.followRegistry = registry
                                 , Follow.followLabels = lbls
                                 , Follow.followSchedule = followSchedule followOptions
                                 , Follow.followCache = followOptions.followCacheDir
