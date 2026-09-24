@@ -14,7 +14,9 @@ a script typed through @POST \/command@ synchronously, asynchronously, and
 on standard input leaves the same world, and the synchronous form answers
 with exactly the reports each line produced; and a read answers while the
 loop is inside a node's @up@. Milestone 7's static files: @GET \/@ is the
-page, @\/ui\/ui.js@ is the script with its content type, and a path outside
+page, @\/ui\/ui.js@ is the script with its content type — one that subscribes
+from a snapshot's @seq@, writes only through @POST \/command?async@, reads
+@\/help\/seed@ for its seed form and never sends @quit@ — and a path outside
 the embedded set is the ordinary @404@.
 -}
 module Test.ServeHttpSpec (tests) where
@@ -497,6 +499,9 @@ theWebUi =
         assertEqual "the script's status" 200 jcode
         assertEqual "the script's content type" (Just "text/javascript; charset=utf-8") jtype
         assertBool "the script subscribes from the snapshot's seq" ("events?since=" `isInfixOf` LChar8.unpack js)
+        assertBool "the script's writes are asynchronous commands" ("command?async" `isInfixOf` LChar8.unpack js)
+        assertBool "the script's seed form reads the seed's help" ("help/seed" `isInfixOf` LChar8.unpack js)
+        assertBool "the script never sends quit" (not ("post(\"quit\"" `isInfixOf` LChar8.unpack js) && not ("data-line=\"quit\"" `isInfixOf` LChar8.unpack body))
         (ccode, ctype', _) <- getRaw running "/ui/ui.css"
         assertEqual "the stylesheet's status" 200 ccode
         assertEqual "the stylesheet's content type" (Just "text/css; charset=utf-8") ctype'
