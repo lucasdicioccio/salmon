@@ -29,6 +29,10 @@
     <button type="button" data-line="clear" data-confirm="Retire every seed? Everything known goes down." class="danger">clear</button>
     <button type="button" id="seeds-toggle" aria-expanded="false" aria-controls="seeds">seeds</button>
     <button id="reload" type="button" title="fetch /dag again and resubscribe">reload</button>
+    <!-- a plain form: the server answers with the expired cookie and the sign-in page -->
+    <form id="signout" method="post" action="auth/logout" hidden>
+      <button type="submit" title="end this browser's session (--http-tcp); streams it opened close too">sign out</button>
+    </form>
   </nav>
 </header>
 <main id="main">

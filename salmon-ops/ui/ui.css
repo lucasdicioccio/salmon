@@ -125,6 +125,8 @@ button.danger { color: var(--danger); }
 }
 
 #actions .pair { display: inline-flex; align-items: center; gap: 3px; }
+#signout { display: inline; margin: 0; }
+#signout[hidden] { display: none; }
 #actions .pair button { padding: 2px 6px; }
 #actions .pair button:first-of-type { border-radius: 4px 0 0 4px; }
 #actions .pair button:last-of-type { border-radius: 0 4px 4px 0; margin-left: -1px; }

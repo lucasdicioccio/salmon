@@ -58,6 +58,7 @@ async function loadDag() {
   let dag;
   try {
     const r = await fetch("dag", { cache: "no-store" });
+    if (r.status === 401) return signedOut();
     if (!r.ok) throw new Error(`/dag answered ${r.status}`);
     dag = await r.json();
   } catch (err) {
@@ -684,6 +685,7 @@ async function post(line) {
   let body;
   try {
     r = await fetch("command?async", { method: "POST", headers: { "content-type": "text/plain" }, body: line });
+    if (r.status === 401) return signedOut();
     body = await r.json();
   } catch (err) {
     toast(`not sent: ${err.message || err}`, "bad");
@@ -1023,4 +1025,25 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+// Over --http-tcp the page is signed in with a session cookie it cannot
+// read (HttpOnly), so it asks; on the unix socket the answer is false and
+// the button stays hidden.
+async function offerSignOut() {
+  try {
+    const r = await fetch("auth/session", { cache: "no-store" });
+    if (r.ok && (await r.json()).session === true) $("signout").hidden = false;
+  } catch {
+    // no button is the safe way to be wrong
+  }
+}
+
+// A 401 means the session ended — signed out in another tab, or the server
+// restarted — and the sign-in page is the only thing that fixes it.
+function signedOut() {
+  closeStream();
+  location.assign("auth");
+  return null;
+}
+
+offerSignOut();
 loadDag();

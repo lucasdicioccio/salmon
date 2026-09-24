@@ -505,7 +505,11 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `GET /` without a credential is a `303` there, a form posting the token, answered with a
   `__Host-salmon-session` cookie (`HttpOnly; Secure; SameSite=Strict`) that it then accepts
   wherever it accepts the header. The cookie is 32 random bytes per sign-in, kept as its
-  SHA-256 in the listener's `Sessions` — never the token, and gone on restart. `CommandLine.
+  SHA-256 in the listener's `Sessions` — never the token, and gone on restart. `POST
+  /auth/logout` (the page's *sign out*, a plain form) revokes it and expires the cookie, and an
+  `/events` stream opened with that session is cut there and then (`untilEnded` races the
+  response body against the session leaving the set) rather than living on in another tab;
+  `GET /auth/session` is how the page knows to show the button. `CommandLine.
   validateTcpOptions` is the pure refusal: `--http-tcp` without all three files exits 1 naming
   the missing ones, the files without `--http-tcp` are refused, `:PORT` with no host is
   refused (spell `0.0.0.0`), `[::1]:PORT` for IPv6; `Http.readTokenFile` refuses a
@@ -518,8 +522,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `BadCredentials` here rather than dying on warp's thread. `Test/ServeTlsSpec.hs` mints a
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
-  pinning exactly that certificate. Not done: client certificates, a read-only token, signing
-  out.
+  pinning exactly that certificate. Not done: client certificates, a read-only token, sessions
+  that expire on their own.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a

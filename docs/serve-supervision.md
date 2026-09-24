@@ -1053,6 +1053,15 @@ Five things to know:
   process — so the token is never stored in a browser, and restarting the
   server signs every browser out. A wrong token is a `401` and the form
   again. On the unix socket `/auth` has nothing to do and redirects to `/`.
+- **Signing out is the page's *sign out* button**, a plain form posting
+  to `/auth/logout`: the session is revoked, the cookie expired, and the
+  browser sent back to `/auth`. Every tab of that browser shared the
+  session, so each is signed out with it — an `/events` stream the session
+  opened is cut at once, and a page that then gets a `401` goes to `/auth`
+  on its own. A `GET` of `/auth/logout` is refused, so a link or a
+  prefetch cannot sign anybody out. The button shows only when
+  `GET /auth/session` says the page holds a session, so never on the unix
+  socket.
 - **The unix socket is unchanged**, token-free, and the *same server*: one
   event ring, one `seq` counter, one inbox, whichever listener a request
   came in on. What differs is the origin a command is typed under:
@@ -1142,7 +1151,7 @@ be waiting. Four places send a line:
 The page itself never handles a token. A browser cannot open a unix
 socket, so open the page on the TCP listener and sign in once at `/auth`
 (see "Reaching it over the network"); the session cookie the browser keeps
-then carries every `fetch` and the `EventSource`:
+then carries every `fetch` and the `EventSource` until *sign out*:
 
 ```sh
 my-salmon run serve --http /run/my-salmon.http \
