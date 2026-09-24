@@ -31,7 +31,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy.Char8 as LChar8
 import Data.Foldable (toList)
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -59,6 +59,8 @@ import Salmon.Actions.Serve (Attributed (..), World)
 import qualified Salmon.Actions.Serve.Events as Events
 import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Builtin.CommandLine as CLI
+import qualified Salmon.Client.Http as Client
+import Salmon.Client.Model (Event (..))
 import Salmon.Builtin.Extension (Track', deps, down, help, ignoreTrack, nodeps, op, ref, up)
 import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import Salmon.Op.Configure (Configure (..))
@@ -135,6 +137,8 @@ tests =
                 requireExecutable "openssl" overTheWire
             , testCase "a browser: / redirects to /auth, the token posted there is a session cookie, and the cookie is as good as the token" $
                 requireExecutable "openssl" signingIn
+            , testCase "Salmon.Client.Http over TLS: pinned certificate and token read, command and stream; wrong token, unpinned certificate and plain http are refused" $
+                requireExecutable "openssl" typedClient
             ]
         ]
   where
@@ -204,6 +208,7 @@ token = "correct-horse-battery-staple"
 
 data Running = Running
     { runningStdin :: Handle
+    , runningCert :: FilePath
     , runningWorld :: MVar (World Spec Spec)
     , runningUnixPath :: FilePath
     , runningPort :: Int
@@ -249,7 +254,7 @@ withRunning act =
                 other -> assertFailure ("not one IPv4 address bound: " <> show other)
             tlsManager <- trustingManager material.materialCert
             unixManager <- unixSocketManager unixPath
-            r <- act (Running stdinW worldVar unixPath port tlsManager unixManager)
+            r <- act (Running stdinW material.materialCert worldVar unixPath port tlsManager unixManager)
             _ <- try (hClose stdinW) :: IO (Either IOError ())
             ended <- timeout (10 * 1000000) (takeMVar worldVar)
             case ended of
@@ -431,6 +436,52 @@ signingIn =
     login running t = do
         req <- tlsRequest running Nothing "/auth"
         pure (HTTP.urlEncodedBody [("token", t)] req)
+
+{- | What @salmon-tui https://...@ is made of: 'Client.newTlsClient'
+pinning the minted certificate, with the token. It reads @/dag@, queues a
+command, and follows @/events@ from the snapshot to the end of that command's pass
+— every request carrying the header. With a wrong token every call is
+'Client.Refused' 401; against the system's store the self-signed
+certificate fails the handshake before any token is sent; and an
+@http://@ address is refused before anything is sent at all.
+-}
+typedClient :: IO ()
+typedClient =
+    withRunning $ \running -> do
+        let url = "https://" <> Text.unpack serverName <> ":" <> show (runningPort running)
+        client <- Client.newTlsClient (Client.TlsTarget url token (Just (runningCert running)))
+        snapshot <- Client.dag client
+        since <- case field "seq" snapshot of
+            Just (Number n) -> pure (Just (round n))
+            other -> assertFailure ("no seq on /dag: " <> show other)
+        queued <- Client.commandAsync client "up c1"
+        seen <- newIORef []
+        done <-
+            timeout (10 * 1000000) $
+                Client.events client since Client.noFilter $ \ev -> do
+                    atomicModifyIORef' seen (\es -> (ev : es, ()))
+                    pure (ev.eventOrigin /= Just queued.enqueuedOrigin || ev.eventKind /= "converge-stop")
+        assertBool "the stream reached the end of the command's pass" (done == Just ())
+        evs <- readIORef seen
+        assertBool "the command's reports came over the stream" (any (\ev -> ev.eventOrigin == Just queued.enqueuedOrigin) evs)
+
+        wrong <- Client.newTlsClient (Client.TlsTarget url "wrong" (Just (runningCert running)))
+        refused <- try (Client.status wrong)
+        case refused of
+            Left (Client.Refused code _) -> assertEqual "a wrong token" 401 code
+            other -> assertFailure ("a wrong token was not refused: " <> show (fmap (const ()) other))
+
+        unpinned <- Client.newTlsClient (Client.TlsTarget url token Nothing)
+        handshake <- try (Client.status unpinned)
+        assertBool "a self-signed certificate is not trusted from the system store" (isLeftSome handshake)
+
+        plain <- try (Client.newTlsClient (Client.TlsTarget ("http://127.0.0.1:" <> show (runningPort running)) token Nothing))
+        case plain of
+            Left (Client.BadTarget _) -> pure ()
+            _ -> assertFailure "an http:// address was accepted"
+  where
+    isLeftSome :: Either SomeException a -> Bool
+    isLeftSome = either (const True) (const False)
 
 -- | Status, headers and body, redirects not followed.
 raw :: HTTP.Manager -> HTTP.Request -> IO (Int, HTTP.ResponseHeaders, LChar8.ByteString)

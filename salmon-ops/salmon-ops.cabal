@@ -118,6 +118,8 @@ library
                     , containers
                     , contravariant
                     , crypton
+                    , crypton-connection
+                    , crypton-x509-store
                     , cryptohash-sha256
                     , directory
                     , file-embed
