@@ -96,7 +96,8 @@ compared in constant time ('sameSecret') against the file's trimmed
 content, or a session cookie a browser got by posting that token to
 @\/auth@ (a browser cannot put a header on a navigation or an
 @EventSource@), @401@ with a JSON error otherwise — @GET \/@ excepted,
-which redirects to @\/auth@. It is a middleware rather than
+which redirects to @\/auth@. @POST \/auth\/logout@ revokes the session,
+cutting any event stream it had open. It is a middleware rather than
 a check inside 'application' because the unix socket must stay token-free
 (its permissions are its access story, and every client of it today is a
 local one), and so that a route added to 'application' is covered without
@@ -109,7 +110,7 @@ counter, one inbox — so sequence numbers are one sequence across them, and
 an origin is 'originFor': @PATH#n@ on the unix socket, @ADDR:PORT#n@ (the
 client's) over TCP, so @history@ says who typed a line from the network.
 Not here: a client certificate instead of a token, a read-only token, a
-plaintext option behind any flag, signing out.
+plaintext option behind any flag, sessions that expire on their own.
 
 = Sequence numbers
 
@@ -170,11 +171,11 @@ module Salmon.Actions.Serve.Http (
     application,
 ) where
 
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (race, withAsync)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTChan, writeTVar)
 import Control.Exception (Exception, bracket, finally, fromException, throwIO)
-import Control.Monad (forM_, join, unless, when)
+import Control.Monad (forM_, join, unless, void, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Crypto.Random as Random
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.=))
@@ -403,13 +404,21 @@ header on a navigation or on an @EventSource@. Every route, the event
 stream included: a read of the output ring is as sensitive as a command
 (the spec's decision), so there is no route a network client gets for free.
 
-Two routes are this middleware's own and are answered before the check:
+Four routes are this middleware's own and are answered before the check.
 @GET \/auth@ is a form asking for the token, and @POST \/auth@ with the
 token as the form's @token@ field answers @303@ to @\/@ with a
 @__Host-salmon-session@ cookie (@HttpOnly@, @Secure@, @SameSite=Strict@,
 @Path=\/@), or @401@ and the form again. And @GET \/@ without either
 credential is a @303@ to @\/auth@ rather than a @401@, since whoever asks
 for the page is a browser that can do something about it.
+@POST \/auth\/logout@ revokes the session the request carries, if any,
+and answers @303@ to @\/auth@ with the cookie expired — the same answer
+whoever asks, so it says nothing about whether the cookie was good — and
+an @\/events@ stream opened with that session ends at once rather than
+at its next request ('untilEnded'). @GET \/auth\/session@ answers
+@{"session": true}@ when the request's cookie is a live session, which is
+how the page knows to offer the button; on the unix socket, where nothing
+is signed in, the application answers @false@.
 
 The cookie is not the token: it is 32 random bytes minted per login and
 known only to this listener ('Sessions'), so the token a script uses is
@@ -440,14 +449,39 @@ requireToken token sessions app req respond =
                             ""
                 _ -> respond (loginPage HTTP.status401 True)
         (_, ["auth"]) -> respond (methodNotAllowed ["GET", "POST"])
+        ("POST", ["auth", "logout"]) -> do
+            -- whoever asks, the answer is the same: the cookie expired and
+            -- the form; a session is revoked only if the request carried it
+            forM_ (cookieOf req) (endSession sessions)
+            respond $
+                Wai.responseLBS
+                    HTTP.status303
+                    [ (HTTP.hLocation, "/auth")
+                    , ("Set-Cookie", sessionCookie <> "=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0")
+                    , (HTTP.hCacheControl, "no-store")
+                    ]
+                    ""
+        (_, ["auth", "logout"]) -> respond (methodNotAllowed ["POST"])
+        ("GET", ["auth", "session"]) -> do
+            signedIn <- maybe (pure False) (knownSession sessions) (cookieOf req)
+            respond (json HTTP.status200 (object ["session" .= signedIn]))
+        (_, ["auth", "session"]) -> respond (methodNotAllowed ["GET"])
         _ -> do
-            ok <-
+            credential <-
                 case bearerOf =<< lookup HTTP.hAuthorization (Wai.requestHeaders req) of
-                    Just presented -> pure (sameSecret presented token)
-                    Nothing -> maybe (pure False) (knownSession sessions) (cookieOf req)
-            case (ok, Wai.requestMethod req, Wai.pathInfo req) of
-                (True, _, _) -> app req respond
-                (False, "GET", []) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/auth")] "")
+                    Just presented -> pure (if sameSecret presented token then ByToken else NoCredential)
+                    Nothing -> case cookieOf req of
+                        Nothing -> pure NoCredential
+                        Just cookie -> do
+                            known <- knownSession sessions cookie
+                            pure (if known then BySession cookie else NoCredential)
+            case (credential, Wai.requestMethod req, Wai.pathInfo req) of
+                (ByToken, _, _) -> app req respond
+                -- a stream outlives the check that let it in, so one opened
+                -- with a session ends when the session does
+                (BySession cookie, _, ["events"]) -> app req (respond . untilEnded sessions cookie)
+                (BySession _, _, _) -> app req respond
+                (NoCredential, "GET", []) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/auth")] "")
                 _ ->
                     respond $
                         Wai.responseLBS
@@ -461,6 +495,21 @@ requireToken token sessions app req respond =
          in if Char8.map toLower scheme == "bearer"
                 then Just (Char8.dropWhileEnd isSpace (Char8.dropWhile (== ' ') rest))
                 else Nothing
+
+-- | What a request presented that let it in.
+data Credential = ByToken | BySession ByteString.ByteString | NoCredential
+
+{- | The response with its body cut short the moment the session is
+revoked: 'Wai.responseToStream' is every response as a streaming one, and
+the body races a wait on the session's membership. For an @\/events@
+stream that is the difference between signing out and signing out except
+in the tab still watching.
+-}
+untilEnded :: Sessions -> ByteString.ByteString -> Response -> Response
+untilEnded sessions cookie resp =
+    let (status, headers, withBody) = Wai.responseToStream resp
+     in Wai.responseStream status headers $ \write flush ->
+            withBody $ \body -> void (race (body write flush) (atomically (sessionEnded sessions cookie)))
 
 -- | The session cookie's name; @__Host-@ makes a browser refuse it unless @Secure@, @Path=\/@ and no @Domain@.
 sessionCookie :: ByteString.ByteString
@@ -503,9 +552,9 @@ loginPage status refused =
     refusal = "<p class=\"refused\">That is not the token.</p>"
 
 {- | The sessions a TCP listener has handed out at @\/auth@, by the SHA-256
-of their cookie. They live as long as the process: nothing expires them
-and nothing needs to, since the cookie itself ends with the browser
-session.
+of their cookie. One lives until @POST \/auth\/logout@ is sent with it
+('endSession') or the process ends: nothing expires them otherwise, and
+the cookie itself ends with the browser session.
 -}
 newtype Sessions = Sessions (TVar (Set.Set ByteString.ByteString))
 
@@ -522,6 +571,14 @@ newSession (Sessions var) = do
 
 knownSession :: Sessions -> ByteString.ByteString -> IO Bool
 knownSession (Sessions var) cookie = Set.member (SHA256.hash cookie) <$> readTVarIO var
+
+-- | Revoke a session; a cookie that was never one is nothing to revoke.
+endSession :: Sessions -> ByteString.ByteString -> IO ()
+endSession (Sessions var) cookie = atomically (modifyTVar' var (Set.delete (SHA256.hash cookie)))
+
+-- | Blocks until the session is no longer known.
+sessionEnded :: Sessions -> ByteString.ByteString -> STM.STM ()
+sessionEnded (Sessions var) cookie = readTVar var >>= STM.check . not . Set.member (SHA256.hash cookie)
 
 {- | Equal, in time that depends on the lengths and not on where the first
 differing byte is: every byte is folded whether or not an earlier one
@@ -723,6 +780,8 @@ application server req respond =
         ("GET", []) -> respond (static "index.html")
         -- over TCP 'requireToken' answers this; anywhere else there is nothing to log into
         ("GET", ["auth"]) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/")] "")
+        ("POST", ["auth", "logout"]) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/")] "")
+        ("GET", ["auth", "session"]) -> respond (json HTTP.status200 (object ["session" .= False]))
         ("GET", ("ui" : rest)) -> respond (static (Text.unpack (Text.intercalate "/" rest)))
         (_, ["events"]) -> respond (methodNotAllowed ["GET"])
         (_, ["dag"]) -> respond (methodNotAllowed ["GET"])

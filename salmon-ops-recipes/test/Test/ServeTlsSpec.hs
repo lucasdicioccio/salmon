@@ -139,6 +139,8 @@ tests =
                 requireExecutable "openssl" signingIn
             , testCase "Salmon.Client.Http over TLS: pinned certificate and token read, command and stream; wrong token, unpinned certificate and plain http are refused" $
                 requireExecutable "openssl" typedClient
+            , testCase "signing out: /auth/session says whether, logout expires the cookie, revokes the session and cuts the stream it opened" $
+                requireExecutable "openssl" signingOut
             ]
         ]
   where
@@ -482,6 +484,76 @@ typedClient =
   where
     isLeftSome :: Either SomeException a -> Bool
     isLeftSome = either (const True) (const False)
+
+{- | The other half of 'signingIn'. @/auth/session@ is how the page knows to
+offer the button: @true@ with a live cookie, @false@ without one (and on
+the unix socket, where nobody signs in). @POST /auth/logout@ answers
+@303@ to @/auth@ with the cookie expired, and from then on the cookie is
+nothing: a read is @401@, @/@ is a redirect to the form. An @/events@
+stream opened with the session before it ended does not stay open until
+its next request — there is none — but ends there and then. A logout with
+no cookie gets the same answer and revokes nothing, and a @GET@ of it is
+refused, so a link or a prefetch cannot sign anybody out.
+-}
+signingOut :: IO ()
+signingOut =
+    withRunning $ \running -> do
+        let tls = runningTls running
+            withCookie c route = do
+                req <- tlsRequest running Nothing route
+                pure req{HTTP.requestHeaders = [(HTTP.hCookie, c) | not (ByteString.null c)]}
+            sessionOf c = do
+                (code, v) <- exchange tls =<< withCookie c "/auth/session"
+                assertEqual "/auth/session answers" 200 code
+                pure (field "session" v)
+        loginReq <- tlsRequest running Nothing "/auth"
+        (_, lheaders, _) <- raw tls (HTTP.urlEncodedBody [("token", token)] loginReq)
+        cookie <- maybe (assertFailure "no cookie") (pure . Char8.takeWhile (/= ';')) (lookup "Set-Cookie" lheaders)
+        other <- maybe (assertFailure "no cookie") (pure . Char8.takeWhile (/= ';')) . lookup "Set-Cookie" . (\(_, h, _) -> h) =<< raw tls (HTTP.urlEncodedBody [("token", token)] loginReq)
+
+        assertEqual "signed in" (Just (Bool True)) =<< sessionOf cookie
+        assertEqual "no cookie, no session" (Just (Bool False)) =<< sessionOf ""
+
+        (gcode, _, _) <- raw tls =<< withCookie cookie "/auth/logout"
+        assertEqual "a GET cannot sign out" 405 gcode
+        assertEqual "and did not" (Just (Bool True)) =<< sessionOf cookie
+
+        (acode, aheaders, _) <- raw tls . (\r -> r{HTTP.method = "POST"}) =<< tlsRequest running Nothing "/auth/logout"
+        assertEqual "a logout without a cookie" 303 acode
+        assertEqual "still expires one" True (maybe False ("Max-Age=0" `ByteString.isInfixOf`) (lookup "Set-Cookie" aheaders))
+        assertEqual "and revokes nothing" (Just (Bool True)) =<< sessionOf cookie
+
+        ev <- withCookie cookie "/events?since=0"
+        HTTP.withResponse ev tls $ \resp -> do
+            assertEqual "/events with the cookie" 200 (HTTP.statusCode (HTTP.responseStatus resp))
+            _ <- readUntilData (HTTP.responseBody resp) ByteString.empty
+
+            logout <- withCookie cookie "/auth/logout"
+            (ocode, oheaders, _) <- raw tls logout{HTTP.method = "POST"}
+            assertEqual "signed out" 303 ocode
+            assertEqual "to the form" (Just "/auth") (lookup HTTP.hLocation oheaders)
+            expired <- maybe (assertFailure "no Set-Cookie on logout") pure (lookup "Set-Cookie" oheaders)
+            assertBool ("the cookie is expired: " <> Char8.unpack expired) ("__Host-salmon-session=;" `ByteString.isPrefixOf` expired && "Max-Age=0" `ByteString.isInfixOf` expired)
+
+            ended <- timeout (5 * 1000000) (drain (HTTP.responseBody resp))
+            assertEqual "the stream the session opened ends" (Just ()) ended
+
+        assertEqual "the session is gone" (Just (Bool False)) =<< sessionOf cookie
+        (scode, _, _) <- raw tls =<< withCookie cookie "/status"
+        assertEqual "a read with the old cookie" 401 scode
+        (rcode, rheaders, _) <- raw tls =<< withCookie cookie "/"
+        assertEqual "the page with the old cookie" 303 rcode
+        assertEqual "sends the browser to sign in" (Just "/auth") (lookup HTTP.hLocation rheaders)
+        assertEqual "another browser's session is untouched" (Just (Bool True)) =<< sessionOf other
+
+        ureq <- HTTP.parseRequest "http://salmon/auth/session"
+        (ucode, uv) <- exchange (runningUnix running) ureq
+        assertEqual "/auth/session on the unix socket" 200 ucode
+        assertEqual "nobody signs in there" (Just (Bool False)) (field "session" uv)
+  where
+    drain body = do
+        chunk <- HTTP.brRead body
+        unless (ByteString.null chunk) (drain body)
 
 -- | Status, headers and body, redirects not followed.
 raw :: HTTP.Manager -> HTTP.Request -> IO (Int, HTTP.ResponseHeaders, LChar8.ByteString)
