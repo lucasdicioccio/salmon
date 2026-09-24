@@ -1,7 +1,12 @@
 # Property-based testing for `run serve`
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan.
+Status: implemented, v1 scope. `Test/ServeModelSpec.hs` (`tasty-quickcheck`,
+the library decision below) generates `up`/`down`/`only`/`clear`/`converge`
+sequences over a fixed universe, folds them through an independent shadow model,
+and checks the real loop in piped-script mode agrees in its final `World` and in
+per-node `up`/`down` counts — invariants 1, 2, 3 and 6. Invariants 4, 5 and 7
+and `Rewrite`-aware properties remain example-based or unwritten, as the
+non-goals below anticipated. Kept as the design record.
 
 ## Problem
 

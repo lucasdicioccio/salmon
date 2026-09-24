@@ -1,6 +1,13 @@
 # Advanced querying: targeting `run` at a subset of nodes
 
-Status: draft / not implemented. This is a design sketch to react to, not a committed plan.
+Status: implemented. `query show`/`query plan`/`query extract-directive`,
+`--select`/`--exclude` path globs (plus `#ref` selectors for rewrite-introduced
+nodes), the `Plan` artifact with its directive digest, `run up --plan`
+(`--force-stale-plan` as the dumb escape hatch), and `forceSkip` all shipped in
+`Salmon.Actions.Query` and `Salmon.Builtin.CommandLine`; `serve`'s
+`status`/`query`/`converge --select` reuse the same resolver. Still open as
+written below: re-validating a plan's refs at `run` time, tag-based addressing,
+selection-only execution, and a plan for `downTree`. Kept as the design record.
 
 ## Problem
 

@@ -103,19 +103,25 @@ one module per concern:
 | `Bash` | ad-hoc shell script ops |
 | `Binary` | the shared subprocess-running plumbing (`untrackedExec`, exit-code-checked exec) every other builtin is built on |
 | `Cabal` | building Haskell projects with cabal |
+| `Capabilities` | Linux file capabilities (`setcap`/`getcap`), so a binary can do one privileged thing unprivileged |
 | `Certificates` | TLS certificate generation/signing |
 | `Continuation` | chaining/sequencing op continuations |
 | `CronTask` | cron job management |
+| `Daemon` | a process salmon owns and keeps running — the one builtin with a `managed` action, for where there is no systemd (see `docs/serve-supervision.md`) |
+| `Demo` | a toy graph (`collatz`) for trying the drivers on |
 | `Debian.Debootstrap`, `Debian.Package`, `Debian.OS` | Debian package installs and base-system setup |
 | `Filesystem` | directories, file contents, copy/move/replace-directory (the canonical small example — see `docs/howto-ops.md`) |
+| `Gcp.*` | Google Cloud: projects and billing (`ResourceManager`, `Billing`, `ServiceUsage`), `Iam`, `Storage`, `ArtifactRegistry`, `CloudRun`, `Compute`, `LoadBalancing`, `SecretManager`, `SshAccess` — driven through `gcloud`; see `docs/gcp-toy-validation.md` |
 | `Git` | git repository operations |
 | `Keys` | key material management |
+| `LinuxBridge` | Linux bridge and tap devices, a real L2 network for qemu VMs to sit on |
 | `Netfilter` | `nft` firewall rules (with `check`-based idempotency, since `nft add rule` itself isn't idempotent) |
 | `Nginx` | nginx site/config management |
 | `Npm` | npm package operations |
 | `PgBouncer` | PgBouncer connection-pooler configuration |
 | `Podman` | container image/volume/network/env lifecycle |
 | `Postgres` | cluster creation, users/groups/grants, WAL streaming replication, `pg_hba.conf` management |
+| `Qemu` | a qemu VM as a systemd unit, booted from a debootstrap chroot over 9p (`specs/qemu-test-vms.md`) |
 | `Routes` | IP routing table entries |
 | `Rsync` | file/secret transport over rsync |
 | `Secrets` | secret material placement |
@@ -146,9 +152,16 @@ above, where this project's own conventions get enforced:
 | `MicroDNS` | a minimal DNS server setup |
 | `PostgresInit` | database/user/group/grant setup for a Postgres cluster (locally or driven onto a remote machine via `Self`) |
 | `PostgresMigrations` | shipping and running migrations, local or remote-connstring |
+| `PostgresBackup` | periodic `pg_dump` backups: the script, the schedule, and a node that notices when no recent dump exists |
 | `PostgresPair` | two machines, one Postgres cluster, and a *declared* primary: switchover, operator-decided failover, `pg_rewind` rejoins, and pgbouncer routing that follows — see [`docs/postgres-pair.md`](docs/postgres-pair.md) |
+| `PostgresTemplate` | template databases: build once, lock, hand out clones (`salmon-migrator config template`/`clone`) |
+| `PostgresTls` | Postgres authenticating clients by certificate, and the material that makes it possible |
 | `Postgrest` | PostgREST service configuration |
 | `WireGuardVpn` | a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange |
+| `Gcp.CloudRunDeploy` | build a podman image, push it to Artifact Registry, deploy it to Cloud Run |
+| `Gcp.PostgrestCloudRun` | PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate |
+| `Gcp.PreviewEnvironment` | several Cloud Run deploys composed into one named node: a preview environment |
+| `Gcp.VmProvision` | turn up a GCE instance, then run a salmon binary on it over SSH via `Self` |
 
 `salmon-ops-recipes-experimental/src/SreBox/` (not part of the default
 package set — see [Build](#build)): `KitchenSinkBlog`,
