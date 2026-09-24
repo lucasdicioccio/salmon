@@ -312,7 +312,30 @@ cheap one and lands first.
    `/dag` as a top-level `mode` on the envelope, read from the server's
    accessor at the moment of the request; one `ToJSON Serve.Mode` in
    `Salmon.Reporter.Tagged` serves both. `/help/seed` does not carry it.
-6. **Terminal client** against the socket.
+6. **Terminal client** against the socket. **Shipped** (`salmon-tui PATH` in
+   `salmon-apps`, over `Salmon.Client.Http` and the pure `Salmon.Client.Model`
+   in `salmon-ops`, `Test/ClientModelSpec.hs`): `/dag` once, `/events` from
+   its `seq`, a node table with direction, state, last check and last
+   event, `enter` for a node's help/notes/output, `:` for a command sent
+   `?async` with its seq echoed, `r` to re-read, reconnect with `?since=`,
+   re-read on `gap`. Three deviations from the "Clients" section. It is a
+   *table* in `/dag`'s order (the `Dag`'s first-seen order, what `run tree`
+   prints), not a tree view: with the edges in both directions on every
+   node and a node appearing once whatever number of paths reach it, a tree
+   would repeat nodes and a table with an expand does not, so the tree
+   waits for the web UI's layered layout. There is no separate report pane
+   tailing `/events`: the last event is one footer line and each node's row
+   carries the last event about it, which is what a pane tailing the stream
+   would mostly be showing; a scrollback of events is a place the client
+   would hold state the server does not. And the model drops a replayed
+   event *per stamp* (a node's own seq, the loop's own seq) rather than by
+   one cursor, because a `/dag` snapshot carries the nodes' state and not
+   the pass's, so a re-read after `declared` would otherwise swallow the
+   `converge-stop` of a pass the client had already shown starting. Two
+   things the spec did not say that the client needed: a snapshot must be
+   *rebased* onto a folding model (`Model.rebase`), and `declared` must
+   trigger a re-read, since an event names nodes by ref and no event
+   describes a node the client has never seen.
 7. **Web UI**: static graph from `/dag`, then live from `/events`, then
    actions, then the seed form. **First two steps shipped** (`GET /` and
    `/ui/*` in `Salmon.Actions.Serve.Http`, the files under `salmon-ops/ui/`

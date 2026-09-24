@@ -32,6 +32,10 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   sense but the reader's side of `run serve --status-sink` — `salmon-fleet status DIR` folds a
   directory of status documents into one line per host (`Salmon.Actions.Fleet` is the fold; the
   binary only parses flags and prints). It never writes.
+  `salmon-tui` (`Tui.hs`) is the other reader: a `brick` terminal over `Salmon.Client` (below)
+  against `run serve --http PATH`'s socket — `salmon-tui PATH` reads `/dag` once, follows
+  `/events`, and draws the node table with a `:` command line that is the only thing on the
+  screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
   itself, with a client that keeps writing while the primary moves: a demo of
   `specs/pg-switchover.md`, and the throwaway-validation counterpart to `salmon-gcp-toy`. Its two
@@ -680,6 +684,31 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   reason only — `--select` resolves *path* patterns, and a `Dag` has `Ref`s and edges but no
   paths. Registered `Rewrite`s run once per convergence pass (not per declaration), because what
   they partition on is a property of the whole ledger at that moment.
+- **`Client/Http.hs`** and **`Client/Model.hs`** are milestone 6 of `specs/generic-server.md`, the
+  client's half, with no terminal in them. `Salmon.Client.Http` is a small typed client over
+  `http-client` for a unix socket (no TCP, no auth, until milestone 8): `dag`/`status`/`history`/
+  `seedHelp` for the reads — which bypass the loop and never stand a machine down — `command`
+  (sync, the reports) and `commandAsync` (the enqueue seq and origin), and `events`, which opens
+  `/events` once with `?since=`/`?stream=`/`?origin=` and hands each event to a callback until it
+  says stop or the stream ends; reconnecting is the caller's, with the last seq it saw.
+  `Salmon.Client.Model` is the spec's `dag ⊕ events since the dag's seq`, pure: `fromDag` reads a
+  `/dag` answer into one `Node` per ref in `dagOrder` (ref, shorthand, direction, convergence,
+  last check, output ring, edges, paths), `step` folds one wire event — as *data*, never decoded
+  back into the four report sums, so a kind the client was not written for still shows as a
+  node's last event — and `rebase old fresh` joins a re-read snapshot to a model that has been
+  folding. Two things are load-bearing. **Replays are dropped per stamp, and there are two
+  stamps**: each node carries `nodeSeq` (the snapshot's, then each event's about it) and the
+  loop-level fields (`modelPass`, `modelSupervised`, the resync request) carry `modelLoopSeq`,
+  because a `/dag` snapshot says everything about the nodes and nothing about the loop — a client
+  that re-reads after `declared` gets a seq past the whole pass, and one stamp would swallow the
+  `converge-stop` of a pass whose start it had already shown. And **the model asks to be re-read
+  rather than guessing** (`modelResync`, set by `declared`, `cleared` and `gap`): an event names
+  nodes by ref and cannot describe a node the model has never seen, so the client holds no state
+  the server does not, and a restart is one `/dag` read. `renderNodeRow`/`renderHeader` are the
+  text a terminal shows, kept here so `Test/ClientModelSpec.hs` can assert on it: a recorded
+  pass folded onto a snapshot, replay and rebase, the SSE parser against what `Events` renders,
+  and, at Layer 1, the client itself against a real `withHttpServer` (`dag`, `commandAsync`,
+  `events` from that seq, the model converges).
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
@@ -982,6 +1011,7 @@ my-salmon run serve --status-sink PATH [--status-sink-interval S]
                                          # (atomically) after every pass and injection, and every S seconds
 salmon-fleet status DIR [--label L] [--stale S] [--json]
                                          # one line per host from a directory of such documents; reads only
+salmon-tui PATH                          # a terminal over --http PATH: /dag once, /events live, `:` to type a command
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
@@ -1039,7 +1069,8 @@ the same world over HTTP on a second socket — `curl --unix-socket PATH http://
 `POST /command` with a line as the body — see `Actions/Serve/Http.hs` above and §14.
 `--status-sink PATH` writes the host's status document there after every pass and injection and
 on a timer — see `Actions/Serve/StatusSink.hs` above and §12's "Status flows back" — and
-`salmon-fleet status DIR` folds a directory of them.
+`salmon-fleet status DIR` folds a directory of them. `salmon-tui PATH` is a terminal client of
+`--http PATH` — see `Client/Http.hs`/`Client/Model.hs` above and §14's last paragraph.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

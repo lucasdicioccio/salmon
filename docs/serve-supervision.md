@@ -879,6 +879,36 @@ What to know:
   the server. An idle stream carries a comment line every 15 seconds so
   proxies and read timeouts keep it open; hanging up is all a client has to
   do to unsubscribe. `curl -N` or any `EventSource` reads it.
+- **`salmon-tui PATH` is a terminal over all of the above** (milestone 6;
+  `salmon-apps`, over `Salmon.Client.Http` and the pure `Salmon.Client.Model`).
+  It reads `/dag` once, follows `/events` from that snapshot's `seq`, and
+  draws a header (socket, mode, seq, converged/errored/total, the current
+  pass, `stream=live|reconnecting`), the node table in `/dag`'s order —
+  ref, shorthand, direction, state, last check, last event — and a footer.
+  `j`/`k` move, `enter` expands the selected node (help, notes, paths, edges,
+  check reason, error, the output ring of the last snapshot), `r` re-reads
+  `/dag`, `q` quits leaving the server as it was, and `:` opens a command
+  line: the line is sent as `POST /command?async` and the footer echoes the
+  seq it was queued at. **That line is the only thing on the screen that
+  stands the tending machines down** — every read bypasses the loop, so
+  the TUI can stay open on a box without perturbing it, and the footer
+  says so. It holds no state the server does not: a `declared` or a `gap`
+  makes it re-read `/dag` (rebased onto what it was showing), and a lost
+  stream is retried with `?since=` the last number it saw. Works unchanged
+  over `ssh -L /tmp/remote.http:/run/my-salmon.http host` — it is a client
+  of the socket, not a mode of `serve`. What the fixture looks like right
+  after `:up --dir /tmp/play --name web --file index.html --file style.css`:
+
+  ```
+  /tmp/x.http mode=interactive seq=17 converged=4 errored=0 total=4 converged  stream=live
+    ref        shorthand              dir  state     check        last event
+  > MTE5MDg2   file-contents          up   converged -            done #8
+    ODQwMTE0   directory              up   converged -            reapplying #16
+    bjU3MjUz   serve-fixture-bundle   up   converged -            parked #17
+    bjczNjY4   file-contents          up   converged -            done #10
+  #17 upkeep parked bjU3MjUz serve-fixture-bundle
+  j/k move  enter expand  : command (async; stands the machines down)  r re-read /dag  q quit
+  ```
 - **Permissions are the whole access story.** No TLS, no token, no TCP;
   `notes`, `help` and report text are as public as the logs they already
   go to. Do not put this socket where an untrusted user can open it.
