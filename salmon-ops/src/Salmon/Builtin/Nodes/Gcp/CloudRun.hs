@@ -96,6 +96,15 @@ data CloudRunOptions = CloudRunOptions
     -- default) leaves the deploy alone rather than passing
     -- @--no-allow-unauthenticated@, so a service fronted by a load balancer
     -- or governed by an org policy is not fought with on every pass.
+    , croInvokerIamCheckDisabled :: Bool
+    -- ^ @--no-invoker-iam-check@: the service answers every caller without
+    -- consulting IAM at all. This is the way to make a service public under
+    -- an organization whose @iam.allowedPolicyMemberDomains@ policy forbids
+    -- the @allUsers@ binding that 'croAllowUnauthenticated' asks for: there,
+    -- @gcloud run deploy --allow-unauthenticated@ deploys fine, only warns
+    -- that the binding was refused, and the service answers 403 to everyone.
+    -- Being part of the service's spec rather than a separate IAM write, it
+    -- either deploys or fails. 'False' (the default) leaves the deploy alone.
     }
     deriving (Eq, Show)
 
@@ -110,6 +119,7 @@ defaultCloudRunOptions =
         , croTimeoutSeconds = Nothing
         , croPort = Nothing
         , croAllowUnauthenticated = False
+        , croInvokerIamCheckDisabled = False
         }
 
 -- | A CloudRun service.
@@ -186,6 +196,7 @@ optionArgs opts =
         , maybe [] (\v -> ["--timeout", show v]) opts.croTimeoutSeconds
         , maybe [] (\v -> ["--port", show v]) opts.croPort
         , ["--allow-unauthenticated" | opts.croAllowUnauthenticated]
+        , ["--no-invoker-iam-check" | opts.croInvokerIamCheckDisabled]
         ]
 
 cloudRunCommand :: Command "gcloud" CloudRunCommand
