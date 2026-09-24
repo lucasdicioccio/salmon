@@ -670,6 +670,7 @@ gceInstance spec vm =
           -- instance from the first pass -- there is no adding it later to a
           -- machine the balancer has already been pointed at.
           Compute.instanceTags = [sshTag spec] <> [lbTag spec | spec.tier >= 3]
+        , Compute.instancePower = Compute.PoweredOn
         }
 
 -------------------------------------------------------------------------------

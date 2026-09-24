@@ -4,6 +4,7 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     MachineType (..),
     BootDisk (..),
     Instance (..),
+    InstancePower (..),
     gceInstance,
     Address (..),
     address,
@@ -23,6 +24,7 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     instanceGroupMember,
     interpretGroupMembership,
     interpretInstanceStatus,
+    interpretInstancePresence,
     InstanceUpPlan (..),
     planInstanceUp,
     Report (..),
@@ -85,9 +87,20 @@ data BootDisk = BootDisk
     }
     deriving (Eq, Show)
 
+{- | Whether the declared instance is meant to be running or stopped
+(@TERMINATED@). A stopped instance keeps its disks and its reserved address
+and bills for those only, so 'PoweredOff' is how a recipe pauses a machine
+without giving up what is on it; @up@ moves between the two, and @down@
+deletes either.
+-}
+data InstancePower = PoweredOn | PoweredOff
+    deriving (Eq, Show)
+
 -- | A GCE instance.
 data Instance = Instance
     { instanceName :: Text
+    , instancePower :: InstancePower
+    -- ^ the state @up@ converges to; 'PoweredOn' is the usual one
     , instanceProject :: Project
     , instanceZone :: Zone
     , instanceMachineType :: MachineType
@@ -109,26 +122,33 @@ data Instance = Instance
 
 -- | Idempotently manages a GCE instance.
 --
--- * 'up': create the instance if absent, start it if stopped (@TERMINATED@),
---   resume it if @SUSPENDED@. See 'planInstanceUp'.
--- * 'down': delete the instance.
--- * 'check': report 'Success' if the instance is @RUNNING@.
+-- * 'up': create the instance if absent, then bring it to 'instancePower':
+--   start it if @TERMINATED@ or resume it if @SUSPENDED@ for 'PoweredOn',
+--   stop it if @RUNNING@ for 'PoweredOff'. See 'planInstanceUp'.
+-- * 'down': delete the instance, whatever state it is in.
+-- * 'check': report 'Success' if the instance is in the declared state.
 gceInstance :: Reporter Report -> Track' (Binary "gcloud") -> Instance -> Op
 gceInstance r gcloudTrack inst =
     withBinary gcloudTrack computeCommand (InstancesCreate inst) $ \create ->
         withBinary gcloudTrack computeCommand (InstancesStart inst) $ \start ->
             withBinary gcloudTrack computeCommand (InstancesResume inst) $ \resume ->
-                withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
-                    op "gcp-instance" nodeps $ \actions ->
-                        actions
-                            { help = Text.unwords ["creates GCE instance", inst.instanceName]
-                            , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
-                            , up = bringUp create start resume
-                            , down = Core.downIfPresent (uncurry interpretInstanceStatus <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
-                            , check = uncurry interpretInstanceStatus <$> describeStatus
-                            }
+                withBinary gcloudTrack computeCommand (InstancesStop inst) $ \stop ->
+                    withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
+                        op "gcp-instance" nodeps $ \actions ->
+                            actions
+                                { help = Text.unwords [verb, "GCE instance", inst.instanceName]
+                                , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
+                                , up = bringUp create start resume stop
+                                , -- presence, not state: a stopped instance is still there to delete
+                                  down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
+                                , check = uncurry (interpretInstanceStatus inst.instancePower) <$> describeStatus
+                                }
   where
     rFor cmd = contramap (RunComputeCommand cmd) r
+
+    verb = case inst.instancePower of
+        PoweredOn -> "creates"
+        PoweredOff -> "creates, stopped,"
 
     describeStatus :: IO (ExitCode, Text)
     describeStatus = do
@@ -142,39 +162,56 @@ gceInstance r gcloudTrack inst =
     -- unrecoverable: the check says 'Failure', 'up' runs @create@, and
     -- @create@ refuses because the instance exists. Asking first costs one
     -- describe that the check has usually just done.
-    bringUp create start resume = do
-        plan <- uncurry planInstanceUp <$> describeStatus
+    bringUp create start resume stop = do
+        plan <- uncurry (planInstanceUp inst.instancePower) <$> describeStatus
         case plan of
-            CreateInstance -> create (rFor (InstancesCreate inst))
+            CreateInstance -> do
+                create (rFor (InstancesCreate inst))
+                -- a created instance runs; a stopped declaration stops it right after
+                case inst.instancePower of
+                    PoweredOn -> pure ()
+                    PoweredOff -> stop (rFor (InstancesStop inst))
             StartInstance -> start (rFor (InstancesStart inst))
             ResumeInstance -> resume (rFor (InstancesResume inst))
-            AlreadyRunning -> pure ()
+            StopInstance -> stop (rFor (InstancesStop inst))
+            AlreadyThere -> pure ()
             CannotActYet status ->
                 throwIO (userError ("instance " <> Text.unpack inst.instanceName <> " is " <> Text.unpack status <> "; retry once it settles"))
 
 -- | The verdict drawn from @gcloud compute instances describe
--- --format=value(status)@, split out for testability.
-interpretInstanceStatus :: ExitCode -> Text -> CheckResult
-interpretInstanceStatus (ExitFailure n) _ =
+-- --format=value(status)@ against the declared power state, split out for
+-- testability.
+interpretInstanceStatus :: InstancePower -> ExitCode -> Text -> CheckResult
+interpretInstanceStatus _ (ExitFailure n) _ =
     Failure ("could not describe instance (exit " <> Text.pack (show n) <> ")")
-interpretInstanceStatus ExitSuccess status =
+interpretInstanceStatus power ExitSuccess status =
     case status of
-        "RUNNING" -> Success
+        "RUNNING" -> case power of
+            PoweredOn -> Success
+            PoweredOff -> Failure "instance is RUNNING, stopped wanted"
+        "TERMINATED" -> case power of
+            PoweredOn -> Failure "instance is TERMINATED"
+            PoweredOff -> Success
         "PROVISIONING" -> Unknown
         "STAGING" -> Unknown
         "STOPPING" -> Unknown
         "SUSPENDING" -> Unknown
         "REPAIRING" -> Unknown
-        "TERMINATED" -> Failure "instance is TERMINATED"
         "SUSPENDED" -> Failure "instance is SUSPENDED"
         _ -> Failure ("unexpected instance status: " <> status)
 
--- | What 'gceInstance'\'s 'up' does given the instance's current status.
+-- | Whether the instance exists at all, whatever it is doing: what @down@ asks.
+interpretInstancePresence :: ExitCode -> Text -> CheckResult
+interpretInstancePresence (ExitFailure n) _ = Failure ("could not describe instance (exit " <> Text.pack (show n) <> ")")
+interpretInstancePresence ExitSuccess _ = Success
+
+-- | What 'gceInstance'\'s 'up' does given the declared power state and the instance's current status.
 data InstanceUpPlan
     = CreateInstance
     | StartInstance
     | ResumeInstance
-    | AlreadyRunning
+    | StopInstance
+    | AlreadyThere
     | -- | a transitional (or unrecognized) status: nothing safe to run now
       CannotActYet Text
     deriving (Eq, Show)
@@ -182,15 +219,22 @@ data InstanceUpPlan
 {- | Split out of 'gceInstance' for testability. A failing describe is read
 as "absent": if it failed for another reason (credentials, a missing API)
 the @create@ that follows fails too, and says why more clearly than a
-describe would.
+describe would. A @SUSPENDED@ instance cannot be stopped directly (gcloud
+wants it resumed first), so for 'PoweredOff' it is left alone with a word.
 -}
-planInstanceUp :: ExitCode -> Text -> InstanceUpPlan
-planInstanceUp (ExitFailure _) _ = CreateInstance
-planInstanceUp ExitSuccess status =
+planInstanceUp :: InstancePower -> ExitCode -> Text -> InstanceUpPlan
+planInstanceUp _ (ExitFailure _) _ = CreateInstance
+planInstanceUp PoweredOn ExitSuccess status =
     case status of
-        "RUNNING" -> AlreadyRunning
+        "RUNNING" -> AlreadyThere
         "TERMINATED" -> StartInstance
         "SUSPENDED" -> ResumeInstance
+        _ -> CannotActYet status
+planInstanceUp PoweredOff ExitSuccess status =
+    case status of
+        "RUNNING" -> StopInstance
+        "TERMINATED" -> AlreadyThere
+        "SUSPENDED" -> CannotActYet "SUSPENDED (resume it before declaring it stopped)"
         _ -> CannotActYet status
 
 -------------------------------------------------------------------------------
@@ -474,6 +518,7 @@ data ComputeCommand
     | InstancesDescribeStatus Instance
     | InstancesStart Instance
     | InstancesResume Instance
+    | InstancesStop Instance
     | InstancesDelete Instance
     | AddressesCreate Address
     | AddressesDescribe Address
@@ -548,6 +593,16 @@ computeCommand = Command $ \cmd -> case cmd of
                     [ "compute"
                     , "instances"
                     , "start"
+                    , Text.unpack inst.instanceName
+                    ]
+                )
+    InstancesStop inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "stop"
                     , Text.unpack inst.instanceName
                     ]
                 )

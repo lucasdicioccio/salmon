@@ -80,28 +80,64 @@ adcTests =
 instanceTests :: [TestTree]
 instanceTests =
     [ testCase "RUNNING is satisfied" $
-        assertEqual "" Success (Compute.interpretInstanceStatus ExitSuccess "RUNNING")
+        assertEqual "" Success (Compute.interpretInstanceStatus on ExitSuccess "RUNNING")
     , testCase "TERMINATED needs bringing up" $
-        assertBool "" (isFailure (Compute.interpretInstanceStatus ExitSuccess "TERMINATED"))
+        assertBool "" (isFailure (Compute.interpretInstanceStatus on ExitSuccess "TERMINATED"))
     , testCase "transitional states are Unknown, not Failure" $ do
-        assertEqual "provisioning" Unknown (Compute.interpretInstanceStatus ExitSuccess "PROVISIONING")
-        assertEqual "staging" Unknown (Compute.interpretInstanceStatus ExitSuccess "STAGING")
-        assertEqual "stopping" Unknown (Compute.interpretInstanceStatus ExitSuccess "STOPPING")
+        assertEqual "provisioning" Unknown (Compute.interpretInstanceStatus on ExitSuccess "PROVISIONING")
+        assertEqual "staging" Unknown (Compute.interpretInstanceStatus on ExitSuccess "STAGING")
+        assertEqual "stopping" Unknown (Compute.interpretInstanceStatus on ExitSuccess "STOPPING")
     , testCase "an unrecognized status is a Failure, not a crash" $
-        assertBool "" (isFailure (Compute.interpretInstanceStatus ExitSuccess "SOME-NEW-STATUS"))
+        assertBool "" (isFailure (Compute.interpretInstanceStatus on ExitSuccess "SOME-NEW-STATUS"))
     , testCase "describe failing outright (e.g. instance absent) is a Failure" $
-        assertBool "" (isFailure (Compute.interpretInstanceStatus (ExitFailure 1) ""))
+        assertBool "" (isFailure (Compute.interpretInstanceStatus on (ExitFailure 1) ""))
     , testCase "up creates an absent instance" $
-        assertEqual "" Compute.CreateInstance (Compute.planInstanceUp (ExitFailure 1) "")
+        assertEqual "" Compute.CreateInstance (Compute.planInstanceUp on (ExitFailure 1) "")
     , testCase "up starts a stopped instance rather than re-creating it" $
-        assertEqual "" Compute.StartInstance (Compute.planInstanceUp ExitSuccess "TERMINATED")
+        assertEqual "" Compute.StartInstance (Compute.planInstanceUp on ExitSuccess "TERMINATED")
     , testCase "up resumes a suspended instance" $
-        assertEqual "" Compute.ResumeInstance (Compute.planInstanceUp ExitSuccess "SUSPENDED")
+        assertEqual "" Compute.ResumeInstance (Compute.planInstanceUp on ExitSuccess "SUSPENDED")
     , testCase "up leaves a running instance alone" $
-        assertEqual "" Compute.AlreadyRunning (Compute.planInstanceUp ExitSuccess "RUNNING")
+        assertEqual "" Compute.AlreadyThere (Compute.planInstanceUp on ExitSuccess "RUNNING")
     , testCase "up refuses to act on a transitional status" $
-        assertEqual "" (Compute.CannotActYet "STOPPING") (Compute.planInstanceUp ExitSuccess "STOPPING")
+        assertEqual "" (Compute.CannotActYet "STOPPING") (Compute.planInstanceUp on ExitSuccess "STOPPING")
+    , testCase "declared stopped: TERMINATED is satisfied and RUNNING is not" $ do
+        assertEqual "" Success (Compute.interpretInstanceStatus off ExitSuccess "TERMINATED")
+        assertBool "" (isFailure (Compute.interpretInstanceStatus off ExitSuccess "RUNNING"))
+    , testCase "declared stopped: up stops a running instance and leaves a stopped one alone" $ do
+        assertEqual "" Compute.StopInstance (Compute.planInstanceUp off ExitSuccess "RUNNING")
+        assertEqual "" Compute.AlreadyThere (Compute.planInstanceUp off ExitSuccess "TERMINATED")
+        assertEqual "" Compute.CreateInstance (Compute.planInstanceUp off (ExitFailure 1) "")
+    , testCase "declared stopped: a suspended instance is not stopped blindly" $
+        assertBool "" (case Compute.planInstanceUp off ExitSuccess "SUSPENDED" of Compute.CannotActYet _ -> True; _ -> False)
+    , testCase "for down, a stopped instance is still present; an absent one is not" $ do
+        assertEqual "" Success (Compute.interpretInstancePresence ExitSuccess "TERMINATED")
+        assertBool "" (isFailure (Compute.interpretInstancePresence (ExitFailure 1) ""))
+    , testCase "stop is rendered like start" $
+        assertEqual
+            ""
+            (RawCommand "gcloud" ["compute", "instances", "stop", "toy-vm", "--zone", "europe-west1-b", "--project", "p"])
+            (cmdspec (prepare Compute.computeCommand (Compute.InstancesStop toyInstance)))
     ]
+  where
+    on = Compute.PoweredOn
+    off = Compute.PoweredOff
+    toyInstance =
+        Compute.Instance
+            { Compute.instanceName = "toy-vm"
+            , Compute.instanceProject = Core.Project "p"
+            , Compute.instanceZone = Core.Zone "europe-west1-b"
+            , Compute.instanceMachineType = Compute.Custom "e2-micro"
+            , Compute.instanceBootDisk = Compute.BootDisk 10 Nothing (Just "ubuntu-2404-lts-amd64") (Just "ubuntu-os-cloud")
+            , Compute.instanceNetwork = "default"
+            , Compute.instanceSubnet = "default"
+            , Compute.instanceServiceAccount = Nothing
+            , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
+            , Compute.instanceAddress = Just "toy-ip"
+            , Compute.instanceTags = ["toy-ssh"]
+            , Compute.instancePower = Compute.PoweredOn
+            }
 
 -------------------------------------------------------------------------------
 
@@ -559,6 +595,7 @@ vmTests =
             , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
             , Compute.instanceAddress = Just "toy-ip"
             , Compute.instanceTags = ["toy-ssh"]
+            , Compute.instancePower = Compute.PoweredOn
             }
 
 -------------------------------------------------------------------------------
