@@ -509,7 +509,13 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   /auth/logout` (the page's *sign out*, a plain form) revokes it and expires the cookie, and an
   `/events` stream opened with that session is cut there and then (`untilEnded` races the
   response body against the session leaving the set) rather than living on in another tab;
-  `GET /auth/session` is how the page knows to show the button. `CommandLine.
+  `GET /auth/session` is how the page knows to show the button. A session also ends on its own
+  (`SessionPolicy`, `--session-lifetime` default 12h from sign-in, `--session-idle` default 1h
+  unused, `0` for none): the lifetime ends it however busy, cutting an open stream on time, while
+  an open `/events` stream counts as use so a watched page does not idle out. Ended sessions are
+  swept at every sign-in and dropped when next presented, which is what bounds the store to one
+  lifetime's worth of sign-ins; the cookie carries the lifetime as `Max-Age`, and a stale cookie on
+  `/` is sent to `/auth?ended`. The clock is a `SessionClock` so tests move it. `CommandLine.
   validateTcpOptions` is the pure refusal: `--http-tcp` without all three files exits 1 naming
   the missing ones, the files without `--http-tcp` are refused, `:PORT` with no host is
   refused (spell `0.0.0.0`), `[::1]:PORT` for IPv6; `Http.readTokenFile` refuses a
@@ -522,8 +528,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `BadCredentials` here rather than dying on warp's thread. `Test/ServeTlsSpec.hs` mints a
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
-  pinning exactly that certificate. Not done: client certificates, a read-only token, sessions
-  that expire on their own.
+  pinning exactly that certificate. Not done: client certificates, a read-only token.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a
@@ -1078,7 +1083,9 @@ my-salmon run serve --http PATH          # the same, also serving HTTP on a unix
                                          # GET / (the web UI; forward the socket to a TCP port to open it)
 my-salmon run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key FILE --token-file FILE
                                          # the same HTTP over TCP with TLS, every request needing
-                                         # `Authorization: Bearer <token>`; all three files or it refuses
+                                         # `Authorization: Bearer <token>`; all three files or it refuses;
+                                         # a browser signs in at /auth for a session lasting
+                                         # --session-lifetime S (12h) / --session-idle S (1h, an open stream is use)
 my-salmon run serve --status-sink PATH [--status-sink-interval S]
                                          # the same, also writing this host's status document to PATH
                                          # (atomically) after every pass and injection, and every S seconds
