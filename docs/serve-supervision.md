@@ -663,11 +663,66 @@ signature does not verify against fleet-signing-key
 ```
 
 The bytes are neither injected nor cached; the last good document stays in
-force. The verifier shipped today accepts everything (`Follow.noVerifier`):
-the hook is the place a signature check drops into, not the check itself.
+force. **Without `--follow-key` the verifier accepts everything**
+(`Follow.noVerifier`): unsigned mode is the default, and a document is taken
+as the registry serves it.
 
-Not there yet (`specs/pull-mode.md`): signatures, other sinks (a bucket
-object, an HTTP `POST`), and authenticated bucket access.
+### Signed documents: `--follow-key`
+
+With `--follow-key FILE` (repeatable) the host requires every document —
+fetched from any registry, and a cached one on replay — to be a *signed
+envelope* carrying a signature by one of those keys; any one suffices. The
+round trip needs no tool but `salmon-fleet`:
+
+```
+$ salmon-fleet keygen --out fleet.key
+salmon-fleet: wrote fleet.key (private, 0600) and fleet.key.pub (public); key id 51d3c2152fb2…
+$ cat fleet.key.pub
+{"crv":"Ed25519","kty":"OKP","x":"Esc7UxOvyQCXne0_TqOseUq2e5CHmdFhjsr4wglADHk"}
+$ salmon-fleet sign --key fleet.key < web.json > /srv/reg/web.json
+$ cat /srv/reg/web.json
+{"document":{"id":"web@1","salmon":1,"seeds":[{"seed":["--dir","/tmp/play","--name","web","--file","index.html"]}]},
+ "salmon-signed":1,
+ "signatures":[{"alg":"EdDSA","key":"51d3c2152fb2…","sig":"+rS1PN29nf1o…"}]}
+$ my-salmon run serve --follow /srv/reg --label web --follow-key fleet.key.pub
+follow: /srv/reg for web every 30s (...)
+follow: web id=web@1 sha256=b2014a4513e7: 1 seed(s) up, 0 down
+```
+
+The document rides inside the envelope as you wrote it (annotations and
+all); the signature is over its *canonical* bytes — aeson's own encoding of
+the parsed value, keys sorted — so a registry or a proxy that re-serialises
+the envelope (other key order, other whitespace) leaves the signature valid,
+and only a change of content breaks it. What the loop parses is the document
+inside; the `sha256` in reports, `history` and the cache is that of the bytes
+as fetched, the envelope's. Keys are JWK files (the format `Keys.jwkKey`
+already writes), Ed25519, and a key's id is its RFC 7638 thumbprint.
+
+Hand-edit the file inside its envelope, and the host says why:
+
+```
+follow: refusing the document for web (sha256=6fd186d7f55f):
+no signature verifies against any of the 1 configured key(s): signature by 51d3c2152fb2 does not verify: the document was altered after signing, or signed by another key
+```
+
+Serve a plain document to a host started with a key:
+
+```
+follow: refusing the document for web (sha256=4ed68ba04fd8):
+unsigned document: a signing key is configured (--follow-key) and this document carries no signed envelope
+```
+
+An envelope that does not parse, one with no signatures, or one signed by a
+key the host does not hold are refused the same way, each naming its cause;
+and a `--follow-key` file that does not load is an exit 1 with the path
+before any loop starts — a host that then refused everything, or accepted
+everything, would be worse than none. To rotate a key, run hosts with both
+the old and the new `--follow-key` while documents are re-signed, then drop
+the old one; nothing more than that exists (no revocation, no key in the
+document).
+
+Not there yet (`specs/pull-mode.md`): other sinks (a bucket object, an HTTP
+`POST`), and authenticated bucket access.
 
 ### Status flows back: `--status-sink`
 

@@ -671,12 +671,36 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   the HTTP one under a URL template (virtual-hosted S3, GCS's `storage.googleapis.com`, or
   path-style under `--follow-bucket-endpoint`): public or presigned objects only, no SDK, no
   credentials. **`followVerify`** is the verify-before-inject hook: `Digest -> ByteString -> IO
-  (Either Text ())`, run on the raw bytes after the digest comparison and before the parser, on
-  every backend *and on a cache replay* (a cache file is as writable as a registry file); a
-  `Left` is `Rejected label digest reason`, a failed round, never injected and never cached.
-  `noVerifier` is the default until signatures (E2) fill it in. `Binary.untrackedExecOutput` is
+  (Either Text ByteString)`, run on the raw bytes after the digest comparison and before the
+  parser, on every backend *and on a cache replay* (a cache file is as writable as a registry
+  file); a `Left` is `Rejected label digest reason`, a failed round, never injected and never
+  cached; a `Right` is *the bytes the loop parses*. `noVerifier` hands back what it got and is
+  the default — **unsigned mode is the default** — and `Binary.untrackedExecOutput` is
   `untrackedExec` handing stdout back, for `git rev-parse` and `dig`. See
   `Test/FollowRegistrySpec.hs`: a bare repo, a `warp` server with `ETag`s, a stubbed resolver.
+  **`Actions/Follow/Signature.hs` is the verifier that fills the hook** (E2, the spec's "Signed
+  documents"): `run serve --follow ... --follow-key FILE` (repeatable, any one matching signature
+  accepts) sets `followVerify = signedVerifier keys`, and a document must then arrive as a
+  *signed envelope*, `{"salmon-signed": 1, "document": <the document as fetched>, "signatures":
+  [{"key": <id>, "alg": "EdDSA", "sig": <base64>}]}`, signed over the canonical bytes of the
+  `document` member. Canonical means `Data.Aeson.encode` of the parsed `Value` — sorted keys
+  (aeson 2's `KeyMap` is a `Map` under its default flag; the plan pins aeson 2.2.5.1) and one
+  spelling per scalar — so a registry, proxy or pretty-printer re-serialising the envelope leaves
+  the signature valid, and both signer and verifier parse-then-encode with the same function
+  rather than depending on a canonical-JSON library. The verifier hands the loop the *inner*
+  document, so what `Document`'s parser sees is exactly what was signed; the digest kept
+  everywhere (change detection, `Rejected`, `history`, the cache) is that of the bytes *as
+  fetched* — the envelope — because the cache keeps those bytes and a replay goes through the
+  verifier as a fetch did (`readCacheEntry` is the read without the parse). Keys are **JWK
+  files** — the format `Nodes/Keys.hs` already writes with `jose` — and the algorithm is EdDSA
+  on Ed25519 (`jose` on `crypton`, already dependencies; RSA/EC keys sign with `bestJWSAlg`);
+  `none` and the HMACs are refused outright since a public key verifies neither; the key id is
+  the RFC 7638 SHA-256 thumbprint. Refusals name their cause: unsigned under a key, an envelope
+  that does not parse, no signatures, or every signature failing (which key, and why). A
+  `--follow-key` that does not load exits 1 with the path before any loop starts. `salmon-fleet
+  keygen --out FILE` (FILE 0600 and FILE.pub) and `salmon-fleet sign --key FILE < doc > signed`
+  are the controller's half. Out of scope: rotation/revocation beyond several `--follow-key`s,
+  signing inside a registry. See `Test/FollowSignatureSpec.hs`.
   `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
   never spelled by a line of the input language. And a `Configure` that throws is now a
   `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
@@ -1030,6 +1054,9 @@ my-salmon run serve --follow DIR --label L --follow-cache CACHE [--follow-refuse
 my-salmon run serve --follow git+URL#BRANCH:SUBDIR | https://host/path | dns:ZONE | s3://B/P | gs://B/P --label L
                                          # the other registries (Salmon.Actions.Follow.Registry), chosen by the address's shape;
                                          # --follow-timeout S, --follow-workdir DIR, --follow-bucket-endpoint URL are theirs
+my-salmon run serve --follow REG --label L --follow-key PUB.jwk [--follow-key PUB2.jwk]
+                                         # ... requiring every document (cache replay included) to be a signed envelope one of
+                                         # these keys signed (Salmon.Actions.Follow.Signature); without --follow-key, unsigned
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
 my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
                                          # GET /dag /status /history /help/seed, POST /command[?async],
@@ -1044,6 +1071,8 @@ my-salmon run serve --status-sink PATH [--status-sink-interval S]
 salmon-fleet status DIR [--label L] [--stale S] [--json]
                                          # one line per host from a directory of such documents; reads only
 salmon-tui PATH                          # a terminal over --http PATH: /dag once, /events live, `:` to type a command
+salmon-fleet keygen --out FILE           # an Ed25519 signing pair: FILE (JWK, 0600) and FILE.pub (for --follow-key)
+salmon-fleet sign --key FILE < doc.json  # the document wrapped in a signed envelope, on stdout (or --out FILE)
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so

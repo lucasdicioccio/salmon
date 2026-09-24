@@ -1,10 +1,10 @@
 # Pull mode: a `serve` that fetches its own declarations
 
-Status: milestones 1 to 6 below are implemented (`Salmon.Actions.Follow`,
+Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,
 `Salmon.Actions.Follow.Scheduler`, `Salmon.Actions.Follow.Registry` and its
 git/HTTP/DNS backends, `run serve --follow`, `--follow-cache`, `mode` in
 `status`, `--status-sink`, `salmon-fleet status`, the verify-before-inject
-hook); the rest is a
+hook, and signed documents behind `--follow-key`); the rest is a
 design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion
 idea (a generic salmon server with web/terminal clients that render the live
 `Dag`) is a separate sketch and is only referenced here where the two meet.
@@ -295,6 +295,15 @@ last good one stays in force. Not in v1, but the hook (verify-before-inject)
 should be there from the start so it's a function to fill in, not a
 restructuring.
 
+*Shipped* (milestone 7 below: `Salmon.Actions.Follow.Signature`,
+`--follow-key`, `salmon-fleet keygen`/`sign`, `Test.FollowSignatureSpec`),
+with deviations listed there. The one worth reading here: the key is a
+**JWK**, not something `Certificates` produces — the tree's JWT signing
+(`SreBox.JWTSigning`) is HMAC over a shared secret, which a host cannot be
+handed without also handing it the power to sign, and `Keys.jwkKey` is the
+one public-key format already written by the tree; the signature is EdDSA
+over Ed25519 through `jose`, not a JWS.
+
 ### Bootstrap is the existing push pattern, once
 
 `Self.uploadSelf`, then `ssh host bin run serve --follow <registry> --label …`
@@ -357,7 +366,9 @@ zero".
 - Rollout orchestration (wait for A before B) beyond what labels + registry
   writes give.
 - Any selector or query language: a label is an address, nothing more.
-- Signing (hook only).
+- ~~Signing (hook only).~~ Shipped in milestone 7; still out: rotation and
+  revocation beyond "several `--follow-key` flags", signing inside a
+  registry.
 - A label file re-read at runtime (labels are start-time flags in v1).
 
 ## Decisions taken
@@ -532,3 +543,37 @@ zero".
    last good document staying in force as the "Signed documents" section
    asks. Three flags joined the `--follow-*` family for the backends'
    sake: `--follow-timeout`, `--follow-workdir`, `--follow-bucket-endpoint`.
+7. **Signed documents.** *Shipped* (`Salmon.Actions.Follow.Signature`,
+   `--follow-key FILE` repeatable, `salmon-fleet keygen --out FILE` and
+   `salmon-fleet sign --key FILE`, `Test.FollowSignatureSpec`), with five
+   deviations from the sketch and the work item's brief. **The envelope
+   wraps the document rather than signing its bytes**: `{"salmon-signed": 1,
+   "document": <the document as fetched>, "signatures": [{"key", "alg",
+   "sig"}]}`, the signature over the canonical bytes of the `document`
+   member — `Data.Aeson.encode` of the parsed value, whose sorted keys and
+   single spelling per scalar are what let a registry re-serialise an
+   envelope without breaking it; both sides parse-then-encode with the same
+   function, and no canonical-JSON library is involved. **The verifier
+   hands the loop the inner document**, so `Verifier` became `Digest ->
+   ByteString -> IO (Either Text ByteString)` (the bytes to parse) rather
+   than `Either Text ()`; `noVerifier` returns its input. **The digest is
+   the envelope's, not the document's**, everywhere the fetcher keeps one
+   (change detection, `Rejected`, `history`, the cache): the cache keeps the
+   bytes as fetched so a replay is verified exactly as a fetch, its
+   integrity check is over those bytes, and `Rejected` for an envelope that
+   does not even parse has no other digest to name; the brief asked for the
+   document's, and that would have meant a second digest per node for the
+   sake of one report field. **The key is a JWK, not PEM**: the brief said
+   "PEM public key" and also "the tree's existing key format", and those
+   disagree — `Keys.jwkKey` writes JWK through `jose`, and nothing in the
+   tree parses PEM, so JWK it is; `--follow-key` reads either the public
+   file or the private one (taking its public half). **Ed25519 via `jose`**,
+   which already sat on `crypton` in the plan; `bestJWSAlg` means an RSA or
+   EC JWK signs too, while `none` and the HMACs are refused before `jose`
+   sees them (its `verify` of `none` against an empty signature answers
+   true). Refusals say which: unsigned under a key, an envelope that does
+   not parse, no signatures, every signature failing (naming the key and
+   whether it was unknown, tampered, or an algorithm a public key cannot
+   verify). A `--follow-key` that does not load exits 1 with the path; the
+   flag without `--follow` is refused as `--label` is. Unsigned mode is the
+   default and the docs say so.
