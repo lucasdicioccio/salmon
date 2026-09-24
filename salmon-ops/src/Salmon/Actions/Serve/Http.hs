@@ -153,8 +153,19 @@ module Salmon.Actions.Serve.Http (
     withHttpServerOn,
     BadCredentials (..),
     requireToken,
+    SessionPolicy (..),
+    defaultSessionPolicy,
+    SessionClock (..),
+    systemSessionClock,
     Sessions,
     newSessions,
+    newSessionsWith,
+    newSession,
+    knownSession,
+    endSession,
+    sessionCount,
+    withStream,
+    sessionOver,
     sameSecret,
     TokenError (..),
     readTokenFile,
@@ -171,10 +182,11 @@ module Salmon.Actions.Serve.Http (
     application,
 ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race, withAsync)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTChan, writeTVar)
-import Control.Exception (Exception, bracket, finally, fromException, throwIO)
+import Control.Exception (Exception, bracket, bracket_, finally, fromException, throwIO)
 import Control.Monad (forM_, join, unless, void, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Crypto.Random as Random
@@ -198,6 +210,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Read as Text
 import Data.Word (Word64, Word8)
+import GHC.Clock (getMonotonicTimeNSec)
 import System.FilePath (takeExtension)
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Socket as Socket
@@ -281,6 +294,8 @@ data TlsBind = TlsBind
     , tlsCertFile :: FilePath
     , tlsKeyFile :: FilePath
     , tlsToken :: ByteString.ByteString
+    , tlsSessions :: SessionPolicy
+    -- ^ how long a browser's sign-in lasts ('defaultSessionPolicy' unless told)
     }
     deriving (Show)
 
@@ -365,7 +380,7 @@ withHttpServerOn cfg binds seedHelp mode act = do
                         (Just WarpTLS.InsecureConnectionDenied, _) -> pure ()
                         (_, Just (_ :: TLS.TLSException)) -> pure ()
                         _ -> Warp.defaultOnException mreq e
-            sessions <- newSessions
+            sessions <- newSessions tls.tlsSessions
             withAsync (WarpTLS.runTLSSocket tlsSettings (quietly settings) sock (requireToken tls.tlsToken sessions (application server))) $ \_ ->
                 listenOn server more
 
@@ -432,7 +447,9 @@ about the cookie either.
 requireToken :: ByteString.ByteString -> Sessions -> Wai.Middleware
 requireToken token sessions app req respond =
     case (Wai.requestMethod req, Wai.pathInfo req) of
-        ("GET", ["auth"]) -> respond (loginPage HTTP.status200 False)
+        ("GET", ["auth"])
+            | "ended" `elem` map fst (Wai.queryString req) -> respond (loginPage HTTP.status200 SessionEnded)
+            | otherwise -> respond (loginPage HTTP.status200 NoNote)
         ("POST", ["auth"]) -> do
             body <- boundedBody 4096 req
             let presented = join . lookup "token" . HTTP.parseQuery =<< body
@@ -443,11 +460,11 @@ requireToken token sessions app req respond =
                         Wai.responseLBS
                             HTTP.status303
                             [ (HTTP.hLocation, "/")
-                            , ("Set-Cookie", sessionCookie <> "=" <> cookie <> "; Path=/; Secure; HttpOnly; SameSite=Strict")
+                            , ("Set-Cookie", sessionCookie <> "=" <> cookie <> "; Path=/; Secure; HttpOnly; SameSite=Strict" <> maxAge)
                             , (HTTP.hCacheControl, "no-store")
                             ]
                             ""
-                _ -> respond (loginPage HTTP.status401 True)
+                _ -> respond (loginPage HTTP.status401 WrongToken)
         (_, ["auth"]) -> respond (methodNotAllowed ["GET", "POST"])
         ("POST", ["auth", "logout"]) -> do
             -- whoever asks, the answer is the same: the cookie expired and
@@ -481,7 +498,9 @@ requireToken token sessions app req respond =
                 -- with a session ends when the session does
                 (BySession cookie, _, ["events"]) -> app req (respond . untilEnded sessions cookie)
                 (BySession _, _, _) -> app req respond
-                (NoCredential, "GET", []) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/auth")] "")
+                -- a cookie that is no longer a session was one: say so on the form
+                (NoCredential, "GET", []) ->
+                    respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, maybe "/auth" (const "/auth?ended") (cookieOf req))] "")
                 _ ->
                     respond $
                         Wai.responseLBS
@@ -489,6 +508,10 @@ requireToken token sessions app req respond =
                             [(HTTP.hContentType, "application/json"), ("WWW-Authenticate", "Bearer")]
                             (encode (object ["error" .= ("a bearer token is required" :: Text)]))
   where
+    -- the browser forgets the cookie when the server does, when there is a when
+    maxAge :: ByteString.ByteString
+    maxAge = maybe "" (\l -> "; Max-Age=" <> Char8.pack (show (ceiling l :: Int))) sessions.sessionsPolicy.sessionLifetime
+
     bearerOf :: ByteString.ByteString -> Maybe ByteString.ByteString
     bearerOf h =
         let (scheme, rest) = Char8.break (== ' ') h
@@ -499,8 +522,9 @@ requireToken token sessions app req respond =
 -- | What a request presented that let it in.
 data Credential = ByToken | BySession ByteString.ByteString | NoCredential
 
-{- | The response with its body cut short the moment the session is
-revoked: 'Wai.responseToStream' is every response as a streaming one, and
+{- | The response with its body cut short the moment the session is over
+(signed out, or past its lifetime; 'sessionOver'), and held as one of the
+session's open streams while it runs ('withStream'): 'Wai.responseToStream' is every response as a streaming one, and
 the body races a wait on the session's membership. For an @\/events@
 stream that is the difference between signing out and signing out except
 in the tab still watching.
@@ -509,7 +533,8 @@ untilEnded :: Sessions -> ByteString.ByteString -> Response -> Response
 untilEnded sessions cookie resp =
     let (status, headers, withBody) = Wai.responseToStream resp
      in Wai.responseStream status headers $ \write flush ->
-            withBody $ \body -> void (race (body write flush) (atomically (sessionEnded sessions cookie)))
+            withBody $ \body ->
+                withStream sessions cookie (void (race (body write flush) (sessionOver sessions cookie)))
 
 -- | The session cookie's name; @__Host-@ makes a browser refuse it unless @Secure@, @Path=\/@ and no @Domain@.
 sessionCookie :: ByteString.ByteString
@@ -539,46 +564,170 @@ boundedBody limit req = go 0 []
             then pure (Just (ByteString.concat (reverse acc)))
             else if n' > limit then pure Nothing else go n' (chunk : acc)
 
--- | @ui\/auth.html@, with a line saying the last attempt was refused when it was.
-loginPage :: HTTP.Status -> Bool -> Response
-loginPage status refused =
+-- | What the form says above the button, if anything.
+data FormNote = NoNote | WrongToken | SessionEnded
+
+-- | @ui\/auth.html@, with the note in its place.
+loginPage :: HTTP.Status -> FormNote -> Response
+loginPage status note =
     Wai.responseLBS
         status
         [(HTTP.hContentType, "text/html; charset=utf-8"), (HTTP.hCacheControl, "no-store")]
-        (LByteString.fromStrict (if refused then before <> refusal <> after else page))
+        (LByteString.fromStrict (before <> line <> after))
   where
     page = maybe "" id (lookup "auth.html" uiFiles)
     (before, after) = ByteString.breakSubstring "<!--refused-->" page
-    refusal = "<p class=\"refused\">That is not the token.</p>"
+    line = case note of
+        NoNote -> ""
+        WrongToken -> "<p class=\"refused\">That is not the token.</p>"
+        SessionEnded -> "<p class=\"ended\">Your session ended; sign in again.</p>"
+
+{- | How long a session lasts. Two limits, each 'Nothing' for none, because
+they guard against different things. The __lifetime__ counts from sign-in
+and ends a session however busy it is — it bounds how long a stolen
+cookie or a tab left open over a weekend stays good, and it cuts an event
+stream the session has open. The __idle__ limit counts from the session's
+last use, and an open @\/events@ stream is use: the page makes almost no
+requests while it is being watched, and a dashboard left open should not
+expire for being looked at. So "idle" means nobody is looking, and the
+lifetime is what ends a session somebody is.
+
+What bounds the listener's memory is that an ended session is dropped at
+every sign-in ('newSession'), and at the next request that presents it —
+at most the sessions signed in within one lifetime are held. With both
+limits off nothing ends a session but signing out or a restart.
+-}
+data SessionPolicy = SessionPolicy
+    { sessionLifetime :: Maybe Double
+    -- ^ seconds from sign-in
+    , sessionIdle :: Maybe Double
+    -- ^ seconds since last use, not counting while a stream is open
+    }
+    deriving (Show, Eq)
+
+-- | Twelve hours from sign-in, one hour of nobody looking.
+defaultSessionPolicy :: SessionPolicy
+defaultSessionPolicy = SessionPolicy (Just (12 * 3600)) (Just 3600)
+
+{- | Where sessions get their time: now, and a wait for a moment to come,
+both in seconds on one monotonic scale. 'systemSessionClock' is the real
+one; a test's moves when it says so.
+-}
+data SessionClock = SessionClock
+    { clockNow :: IO Double
+    , clockSleepUntil :: Double -> IO ()
+    }
+
+systemSessionClock :: SessionClock
+systemSessionClock = SessionClock now sleepUntil
+  where
+    now = (/ 1e9) . fromIntegral <$> getMonotonicTimeNSec
+    sleepUntil t = do
+        n <- now
+        when (n < t) $ do
+            -- in slices, so a far deadline is not one huge threadDelay
+            threadDelay (ceiling (min 60 (t - n) * 1e6))
+            sleepUntil t
+
+-- | One session: when it was signed in, when it was last used, how many streams it holds open.
+data Session = Session
+    { sessionCreated :: !Double
+    , sessionLastSeen :: !Double
+    , sessionStreams :: !Int
+    }
 
 {- | The sessions a TCP listener has handed out at @\/auth@, by the SHA-256
-of their cookie. One lives until @POST \/auth\/logout@ is sent with it
-('endSession') or the process ends: nothing expires them otherwise, and
-the cookie itself ends with the browser session.
+of their cookie. One lives until it is signed out ('endSession'), until
+the 'SessionPolicy' ends it, or until the process ends.
 -}
-newtype Sessions = Sessions (TVar (Set.Set ByteString.ByteString))
+data Sessions = Sessions
+    { sessionsPolicy :: SessionPolicy
+    , sessionsClock :: SessionClock
+    , sessionsVar :: TVar (Map ByteString.ByteString Session)
+    }
 
-newSessions :: IO Sessions
-newSessions = Sessions <$> newTVarIO Set.empty
+newSessions :: SessionPolicy -> IO Sessions
+newSessions policy = newSessionsWith policy systemSessionClock
 
--- | Mint a session and hand back its cookie value.
+newSessionsWith :: SessionPolicy -> SessionClock -> IO Sessions
+newSessionsWith policy clock = Sessions policy clock <$> newTVarIO Map.empty
+
+-- | Whether the policy still lets a session stand at this moment.
+live :: SessionPolicy -> Double -> Session -> Bool
+live policy now sess =
+    maybe True (\l -> now - sess.sessionCreated < l) policy.sessionLifetime
+        && (sess.sessionStreams > 0 || maybe True (\i -> now - sess.sessionLastSeen < i) policy.sessionIdle)
+
+{- | Mint a session and hand back its cookie value, dropping every session
+the policy has ended on the way: signing in is the one moment the set
+grows, so it is the moment it is swept.
+-}
 newSession :: Sessions -> IO ByteString.ByteString
-newSession (Sessions var) = do
+newSession sessions = do
     raw <- Random.getRandomBytes 32
+    now <- sessions.sessionsClock.clockNow
     let cookie = Base64.encodeUnpadded raw
-    atomically (modifyTVar' var (Set.insert (SHA256.hash cookie)))
+    atomically $
+        modifyTVar' sessions.sessionsVar $
+            Map.insert (SHA256.hash cookie) (Session now now 0) . Map.filter (live sessions.sessionsPolicy now)
     pure cookie
 
+{- | Whether the cookie is a session that still stands, counting this as a
+use of it. One the policy has ended is dropped here, so it is gone for
+every request after this one too.
+-}
 knownSession :: Sessions -> ByteString.ByteString -> IO Bool
-knownSession (Sessions var) cookie = Set.member (SHA256.hash cookie) <$> readTVarIO var
+knownSession sessions cookie = do
+    now <- sessions.sessionsClock.clockNow
+    let key = SHA256.hash cookie
+    atomically $ do
+        m <- readTVar sessions.sessionsVar
+        case Map.lookup key m of
+            Nothing -> pure False
+            Just sess
+                | live sessions.sessionsPolicy now sess -> do
+                    writeTVar sessions.sessionsVar (Map.insert key sess{sessionLastSeen = now} m)
+                    pure True
+                | otherwise -> do
+                    writeTVar sessions.sessionsVar (Map.delete key m)
+                    pure False
 
 -- | Revoke a session; a cookie that was never one is nothing to revoke.
 endSession :: Sessions -> ByteString.ByteString -> IO ()
-endSession (Sessions var) cookie = atomically (modifyTVar' var (Set.delete (SHA256.hash cookie)))
+endSession sessions cookie = atomically (modifyTVar' sessions.sessionsVar (Map.delete (SHA256.hash cookie)))
 
--- | Blocks until the session is no longer known.
-sessionEnded :: Sessions -> ByteString.ByteString -> STM.STM ()
-sessionEnded (Sessions var) cookie = readTVar var >>= STM.check . not . Set.member (SHA256.hash cookie)
+-- | How many sessions are held, ended or not: what a sweep is for.
+sessionCount :: Sessions -> IO Int
+sessionCount sessions = Map.size <$> readTVarIO sessions.sessionsVar
+
+{- | Run the action as a stream the session holds open: the idle clock
+stops while it runs, and restarts from the moment it ends.
+-}
+withStream :: Sessions -> ByteString.ByteString -> IO a -> IO a
+withStream sessions cookie = bracket_ (adjust 1) (adjust (-1))
+  where
+    key = SHA256.hash cookie
+    adjust n = do
+        now <- sessions.sessionsClock.clockNow
+        atomically $ modifyTVar' sessions.sessionsVar $ Map.adjust (\sess -> sess{sessionStreams = sess.sessionStreams + n, sessionLastSeen = now}) key
+
+{- | Blocks until the session is over: signed out, or past its lifetime —
+in which case it is dropped here, so the requests after it see as much.
+The idle limit does not end a session with a stream open, so a stream
+has only these two to wait for.
+-}
+sessionOver :: Sessions -> ByteString.ByteString -> IO ()
+sessionOver sessions cookie = do
+    created <- fmap (.sessionCreated) . Map.lookup key <$> readTVarIO sessions.sessionsVar
+    case (created, sessions.sessionsPolicy.sessionLifetime) of
+        (Nothing, _) -> pure ()
+        (Just c, Just lifetime) -> do
+            r <- race (atomically removed) (sessions.sessionsClock.clockSleepUntil (c + lifetime))
+            either pure (const (endSession sessions cookie)) r
+        (Just _, Nothing) -> atomically removed
+  where
+    key = SHA256.hash cookie
+    removed = readTVar sessions.sessionsVar >>= STM.check . not . Map.member key
 
 {- | Equal, in time that depends on the lengths and not on where the first
 differing byte is: every byte is folded whether or not an earlier one

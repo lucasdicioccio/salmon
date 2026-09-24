@@ -21,9 +21,9 @@ module Test.ServeTlsSpec (tests) where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.STM (readTVarIO)
+import Control.Concurrent.STM (atomically, check, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, void)
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecode)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -94,12 +94,12 @@ tests =
             , testCase "all four is a listener" $
                 assertEqual
                     "parsed"
-                    (Right (Just (CLI.TcpListen "127.0.0.1" 8443 "/c.pem" "/k.pem" "/t")))
+                    (Right (Just (CLI.TcpListen "127.0.0.1" 8443 "/c.pem" "/k.pem" "/t" Http.defaultSessionPolicy)))
                     (CLI.validateTcpOptions (allFour "127.0.0.1:8443"))
             , testCase "an IPv6 address in brackets" $
                 assertEqual
                     "parsed"
-                    (Right (Just (CLI.TcpListen "::1" 8443 "/c.pem" "/k.pem" "/t")))
+                    (Right (Just (CLI.TcpListen "::1" 8443 "/c.pem" "/k.pem" "/t" Http.defaultSessionPolicy)))
                     (CLI.validateTcpOptions (allFour "[::1]:8443"))
             , testCase "a port alone is refused: the host is spelled, 0.0.0.0 included" $
                 assertBool "refused" (isLeft (CLI.validateTcpOptions (allFour ":8443")))
@@ -111,6 +111,24 @@ tests =
                 case CLI.validateTcpOptions CLI.noTcp{CLI.tcpTokenFile = Just "/t"} of
                     Left err -> assertBool (Text.unpack err) ("--http-tcp" `Text.isInfixOf` err)
                     Right r -> assertFailure ("accepted: " <> show r)
+            , testCase "--session-lifetime/--session-idle: defaults, 0 is off, negative refused, nothing without --http-tcp" $ do
+                let policyOf o = fmap (fmap (.tcpSessionPolicy)) (CLI.validateTcpOptions o)
+                    base = allFour "127.0.0.1:8443"
+                assertEqual "defaults" (Right (Just Http.defaultSessionPolicy)) (policyOf base)
+                assertEqual "given" (Right (Just (Http.SessionPolicy (Just 60) (Just 5)))) (policyOf base{CLI.tcpSessionLifetime = Just 60, CLI.tcpSessionIdle = Just 5})
+                assertEqual "0 is off" (Right (Just (Http.SessionPolicy Nothing (Just 3600)))) (policyOf base{CLI.tcpSessionLifetime = Just 0})
+                case policyOf base{CLI.tcpSessionIdle = Just (-1)} of
+                    Left err -> assertBool (Text.unpack err) ("--session-idle" `Text.isInfixOf` err)
+                    Right r -> assertFailure ("a negative limit was accepted: " <> show r)
+                case CLI.validateTcpOptions CLI.noTcp{CLI.tcpSessionLifetime = Just 60} of
+                    Left err -> assertBool (Text.unpack err) ("--session-lifetime" `Text.isInfixOf` err && "--http-tcp" `Text.isInfixOf` err)
+                    Right r -> assertFailure ("accepted: " <> show r)
+            ]
+        , testGroup
+            "sessions (a clock the test moves)"
+            [ testCase "the lifetime ends a session however busy; the idle limit ends one nobody uses" sessionLimits
+            , testCase "an open stream holds the idle limit off but not the lifetime, which ends the stream's wait" streamPresence
+            , testCase "signing in sweeps every ended session, so the store holds what is live" signInSweeps
             ]
         , testGroup
             "the token file"
@@ -141,10 +159,12 @@ tests =
                 requireExecutable "openssl" typedClient
             , testCase "signing out: /auth/session says whether, logout expires the cookie, revokes the session and cuts the stream it opened" $
                 requireExecutable "openssl" signingOut
+            , testCase "a session's lifetime: the cookie's Max-Age, the open stream cut on time, then 401 and /auth?ended" $
+                requireExecutable "openssl" sessionExpiry
             ]
         ]
   where
-    allFour hostPort = CLI.TcpOptions (Just hostPort) (Just "/c.pem") (Just "/k.pem") (Just "/t")
+    allFour hostPort = CLI.TcpOptions (Just hostPort) (Just "/c.pem") (Just "/k.pem") (Just "/t") Nothing Nothing
     isLeft (Left _) = True
     isLeft _ = False
 
@@ -220,7 +240,10 @@ data Running = Running
     }
 
 withRunning :: (Running -> IO a) -> IO a
-withRunning act =
+withRunning = withRunningWith Http.defaultSessionPolicy
+
+withRunningWith :: Http.SessionPolicy -> (Running -> IO a) -> IO a
+withRunningWith policy act =
     withTempDir $ \dir -> do
         material <- mintMaterial (dir </> "tls")
         let unixPath = dir </> "serve.http"
@@ -230,7 +253,7 @@ withRunning act =
         upsRef <- newIORef Map.empty
         let binds =
                 [ Http.BindUnix unixPath
-                , Http.BindTls (Http.TlsBind "127.0.0.1" 0 material.materialCert material.materialKey token)
+                , Http.BindTls (Http.TlsBind "127.0.0.1" 0 material.materialCert material.materialKey token policy)
                 ]
         Http.withHttpServerOn Events.defaultConfig binds "usage: config NAME...\n" (pure Serve.Interactive) $ \server -> do
             let base = (contramap attributed (Tagged.serveStream own), contramap attributed (Tagged.updownStream own))
@@ -543,13 +566,120 @@ signingOut =
         assertEqual "a read with the old cookie" 401 scode
         (rcode, rheaders, _) <- raw tls =<< withCookie cookie "/"
         assertEqual "the page with the old cookie" 303 rcode
-        assertEqual "sends the browser to sign in" (Just "/auth") (lookup HTTP.hLocation rheaders)
+        assertEqual "sends the browser to sign in, saying the session ended" (Just "/auth?ended") (lookup HTTP.hLocation rheaders)
         assertEqual "another browser's session is untouched" (Just (Bool True)) =<< sessionOf other
 
         ureq <- HTTP.parseRequest "http://salmon/auth/session"
         (ucode, uv) <- exchange (runningUnix running) ureq
         assertEqual "/auth/session on the unix socket" 200 ucode
         assertEqual "nobody signs in there" (Just (Bool False)) (field "session" uv)
+  where
+    drain body = do
+        chunk <- HTTP.brRead body
+        unless (ByteString.null chunk) (drain body)
+
+-------------------------------------------------------------------------------
+-- sessions, against a clock the test moves
+
+-- | A clock at 0 that moves only when told, and whose waits wake when it does.
+fakeClock :: IO (Http.SessionClock, Double -> IO ())
+fakeClock = do
+    t <- newTVarIO 0
+    let clock = Http.SessionClock (readTVarIO t) (\d -> atomically (readTVar t >>= check . (>= d)))
+    pure (clock, \dt -> atomically (modifyTVar' t (+ dt)))
+
+sessionLimits :: IO ()
+sessionLimits = do
+    (clock, advance) <- fakeClock
+    sessions <- Http.newSessionsWith (Http.SessionPolicy (Just 100) (Just 10)) clock
+    busy <- Http.newSession sessions
+    quiet <- Http.newSession sessions
+    -- used every 5s, `busy` never idles; `quiet` is never used again
+    forM_ [1 .. 3 :: Int] $ \_ -> advance 5 >> (assertBool "busy is used" =<< Http.knownSession sessions busy)
+    assertBool "quiet idled out after 15s" . not =<< Http.knownSession sessions quiet
+    forM_ [1 .. 16 :: Int] $ \_ -> advance 5 >> void (Http.knownSession sessions busy)
+    -- 95s in: still inside its lifetime; 100s: past it, busy or not
+    assertBool "busy at 95s" =<< Http.knownSession sessions busy
+    advance 5
+    assertBool "busy at its lifetime" . not =<< Http.knownSession sessions busy
+    assertEqual "both dropped when they were looked at" 0 =<< Http.sessionCount sessions
+
+streamPresence :: IO ()
+streamPresence = do
+    (clock, advance) <- fakeClock
+    sessions <- Http.newSessionsWith (Http.SessionPolicy (Just 100) (Just 10)) clock
+    cookie <- Http.newSession sessions
+    over <- newEmptyMVar
+    opened <- newEmptyMVar
+    closing <- newEmptyMVar
+    _ <- forkIO $ Http.withStream sessions cookie $ do
+        putMVar opened ()
+        Http.sessionOver sessions cookie
+        putMVar over ()
+        takeMVar closing
+    takeMVar opened
+    advance 50
+    assertBool "50s of watching is not idle" =<< Http.knownSession sessions cookie
+    advance 49
+    r <- timeout 100000 (takeMVar over)
+    assertEqual "the stream's wait is still on at 99s" Nothing r
+    advance 1
+    r' <- timeout (5 * 1000000) (takeMVar over)
+    assertEqual "the lifetime ends the stream's wait" (Just ()) r'
+    putMVar closing ()
+    assertBool "and the session with it" . not =<< Http.knownSession sessions cookie
+    -- the idle clock restarts when a stream closes, not before
+    other <- Http.newSession sessions
+    done <- newEmptyMVar
+    _ <- forkIO $ Http.withStream sessions other (advance 30) >> putMVar done ()
+    takeMVar done
+    advance 9
+    assertBool "9s after its stream closed" =<< Http.knownSession sessions other
+    advance 10
+    assertBool "10s after its last use" . not =<< Http.knownSession sessions other
+
+signInSweeps :: IO ()
+signInSweeps = do
+    (clock, advance) <- fakeClock
+    sessions <- Http.newSessionsWith (Http.SessionPolicy (Just 60) Nothing) clock
+    -- a sign-in every 10s for 10 minutes, and nothing ever looked at again
+    forM_ [1 .. 60 :: Int] $ \_ -> Http.newSession sessions >> advance 10
+    held <- Http.sessionCount sessions
+    assertBool ("at most one lifetime's worth held: " <> show held) (held <= 7)
+
+-------------------------------------------------------------------------------
+
+{- | The same over the wire, with a real two-second lifetime. The cookie
+carries it as @Max-Age@; a stream opened with the session is cut when it
+runs out, with nothing else happening; and from then on the cookie is a
+@401@ on a read and, on @/@, a redirect to @/auth?ended@, whose form says
+the session ended.
+-}
+sessionExpiry :: IO ()
+sessionExpiry =
+    withRunningWith (Http.SessionPolicy (Just 2) Nothing) $ \running -> do
+        let tls = runningTls running
+            withCookie c route = do
+                req <- tlsRequest running Nothing route
+                pure req{HTTP.requestHeaders = [(HTTP.hCookie, c)]}
+        loginReq <- tlsRequest running Nothing "/auth"
+        (_, lheaders, _) <- raw tls (HTTP.urlEncodedBody [("token", token)] loginReq)
+        setCookie <- maybe (assertFailure "no cookie") pure (lookup "Set-Cookie" lheaders)
+        assertBool ("Max-Age is the lifetime: " <> Char8.unpack setCookie) ("Max-Age=2" `ByteString.isInfixOf` setCookie)
+        let cookie = Char8.takeWhile (/= ';') setCookie
+        ev <- withCookie cookie "/events?since=0"
+        ended <- timeout (10 * 1000000) $
+            HTTP.withResponse ev tls $ \resp -> do
+                assertEqual "/events with the cookie" 200 (HTTP.statusCode (HTTP.responseStatus resp))
+                drain (HTTP.responseBody resp)
+        assertEqual "the stream ends with the session" (Just ()) ended
+        (scode, _, _) <- raw tls =<< withCookie cookie "/status"
+        assertEqual "a read after the lifetime" 401 scode
+        (rcode, rheaders, _) <- raw tls =<< withCookie cookie "/"
+        assertEqual "the page after the lifetime" 303 rcode
+        assertEqual "to the form, saying why" (Just "/auth?ended") (lookup HTTP.hLocation rheaders)
+        (_, _, form) <- raw tls =<< tlsRequest running Nothing "/auth?ended"
+        assertBool "the form says the session ended" ("session ended" `ByteString.isInfixOf` LChar8.toStrict form)
   where
     drain body = do
         chunk <- HTTP.brRead body

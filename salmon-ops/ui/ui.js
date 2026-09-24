@@ -1037,11 +1037,11 @@ async function offerSignOut() {
   }
 }
 
-// A 401 means the session ended — signed out in another tab, or the server
-// restarted — and the sign-in page is the only thing that fixes it.
+// A 401 means the session ended — signed out in another tab, expired, or
+// the server restarted — and the sign-in page is the only thing that fixes it.
 function signedOut() {
   closeStream();
-  location.assign("auth");
+  location.assign("auth?ended");
   return null;
 }
 

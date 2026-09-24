@@ -1062,6 +1062,15 @@ Five things to know:
   prefetch cannot sign anybody out. The button shows only when
   `GET /auth/session` says the page holds a session, so never on the unix
   socket.
+- **A session also ends on its own.** `--session-lifetime S` (default
+  43200, 12h) counts from sign-in and ends a session however busy it is,
+  cutting its open event stream on time; `--session-idle S` (default 3600,
+  1h) ends one nothing has used, where an open event stream *is* use, so a
+  page left open to watch does not idle out. `0` turns either off. The
+  cookie carries the lifetime as `Max-Age`, a page whose session ended
+  lands on `/auth?ended` ("Your session ended; sign in again"), and ended
+  sessions are dropped at every sign-in — so the server holds at most the
+  sign-ins of one lifetime, however long it runs.
 - **The unix socket is unchanged**, token-free, and the *same server*: one
   event ring, one `seq` counter, one inbox, whichever listener a request
   came in on. What differs is the origin a command is typed under:

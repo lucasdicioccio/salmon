@@ -10,7 +10,7 @@ import Data.Foldable (traverse_)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
-import Data.Maybe (fromJust, fromMaybe)
+import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -129,6 +129,10 @@ data TcpOptions = TcpOptions
     -- ^ @--tls-key FILE@
     , tcpTokenFile :: !(Maybe FilePath)
     -- ^ @--token-file FILE@
+    , tcpSessionLifetime :: !(Maybe Double)
+    -- ^ @--session-lifetime SECONDS@, @0@ for none
+    , tcpSessionIdle :: !(Maybe Double)
+    -- ^ @--session-idle SECONDS@, @0@ for none
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -137,7 +141,7 @@ instance ToJSON TcpOptions
 
 -- | No network listener at all: the default.
 noTcp :: TcpOptions
-noTcp = TcpOptions Nothing Nothing Nothing Nothing
+noTcp = TcpOptions Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | A validated 'TcpOptions': where to listen and the three files, all present.
 data TcpListen = TcpListen
@@ -146,8 +150,10 @@ data TcpListen = TcpListen
     , tcpCertFile :: !FilePath
     , tcpKeyFile :: !FilePath
     , tcpTokenPath :: !FilePath
+    , tcpSessionPolicy :: !Http.SessionPolicy
+    -- ^ 'Http.defaultSessionPolicy' with whatever @--session-*@ said
     }
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Show)
 
 {- | The loud default, as a pure function so it can be tested without a
 process: 'Nothing' when none of the four is given; a 'TcpListen' when all
@@ -158,7 +164,10 @@ attempt — or, for @--tls-cert@\/@--tls-key@\/@--token-file@ without
 @--http-tcp@, that they do nothing on their own. @HOST@ is never implied:
 @:8443@ is refused, since listening on every address is exactly the thing
 that should have to be spelled out (@0.0.0.0:8443@ does it). An IPv6 address
-is written in brackets, @[::1]:8443@.
+is written in brackets, @[::1]:8443@. @--session-lifetime@\/@--session-idle@
+are the browser sign-in's limits ('Http.SessionPolicy'), @0@ turning one
+off, a negative one refused, and like the files they do nothing without
+@--http-tcp@.
 -}
 validateTcpOptions :: TcpOptions -> Either Text (Maybe TcpListen)
 validateTcpOptions opts =
@@ -170,7 +179,9 @@ validateTcpOptions opts =
             case missing of
                 [] -> do
                     (host, port) <- parseHostPort hostPort
-                    Right (Just (TcpListen host port (fromJust opts.tcpCert) (fromJust opts.tcpKey) (fromJust opts.tcpTokenFile)))
+                    lifetime <- limit "--session-lifetime" opts.tcpSessionLifetime Http.defaultSessionPolicy.sessionLifetime
+                    idle <- limit "--session-idle" opts.tcpSessionIdle Http.defaultSessionPolicy.sessionIdle
+                    Right (Just (TcpListen host port (fromJust opts.tcpCert) (fromJust opts.tcpKey) (fromJust opts.tcpTokenFile) (Http.SessionPolicy lifetime idle)))
                 _ ->
                     Left
                         ( "--http-tcp needs "
@@ -183,8 +194,18 @@ validateTcpOptions opts =
         , ("--tls-key", opts.tcpKey)
         , ("--token-file", opts.tcpTokenFile)
         ]
-    given = [flag | (flag, Just _) <- named]
+    given =
+        [flag | (flag, Just _) <- named]
+            ++ [flag | (flag, True) <- [("--session-lifetime", isJust opts.tcpSessionLifetime), ("--session-idle", isJust opts.tcpSessionIdle)]]
     missing = [flag | (flag, Nothing) <- named]
+    limit :: Text -> Maybe Double -> Maybe Double -> Either Text (Maybe Double)
+    limit flag typed dflt =
+        case typed of
+            Nothing -> Right dflt
+            Just 0 -> Right Nothing
+            Just n
+                | n > 0 -> Right (Just n)
+                | otherwise -> Left (flag <> ": not a number of seconds: " <> Text.pack (show n) <> " (0 turns it off)")
 
 -- | @HOST:PORT@, with @[v6]:PORT@ for an IPv6 address; the port is 0..65535.
 parseHostPort :: String -> Either Text (String, Int)
@@ -428,6 +449,22 @@ runCommandParser =
                     ( long "token-file"
                         <> Options.Applicative.metavar "FILE"
                         <> Options.Applicative.help "A file holding the bearer token every --http-tcp request must present (surrounding whitespace ignored). Refused if readable by others."
+                    )
+                )
+            <*> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "session-lifetime"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help "How long a browser's sign-in at /auth on --http-tcp lasts, however busy; an event stream it holds is cut at the end (default 43200, 12h; 0 for no limit)."
+                    )
+                )
+            <*> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "session-idle"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help "How long a browser's sign-in on --http-tcp lasts with nothing using it; an open event stream counts as use (default 3600, 1h; 0 for no limit)."
                     )
                 )
     sinkOptionsP =
@@ -743,7 +780,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                     Left (Http.TokenFileEmpty path) -> do
                         hPutStrLn stderr ("--token-file " <> path <> " is empty")
                         exitFailure
-                    Right tok -> pure (Http.BindTls (Http.TlsBind t.tcpHost t.tcpPort t.tcpCertFile t.tcpKeyFile tok))
+                    Right tok -> pure (Http.BindTls (Http.TlsBind t.tcpHost t.tcpPort t.tcpCertFile t.tcpKeyFile tok t.tcpSessionPolicy))
             let binds = [Http.BindUnix path | Just path <- [http]] ++ tlsBinds
             follow <- case (followDir, traverse Follow.mkLabel labels) of
                 (Nothing, _) | not (null followOptions.followKeys) -> do
