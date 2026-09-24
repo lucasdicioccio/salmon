@@ -99,6 +99,7 @@ test-suite salmon-ops-recipes-test
                     , Test.FollowCacheSpec
                     , Test.FollowRegistrySpec
                     , Test.FollowSchedulerSpec
+                    , Test.FollowSignatureSpec
                     , Test.FollowSpec
                     , Test.GcpSpec
                     , Test.PodmanCommandSpec

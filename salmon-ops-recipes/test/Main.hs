@@ -12,6 +12,7 @@ import qualified Test.FilesystemSpec as FilesystemSpec
 import qualified Test.FollowCacheSpec as FollowCacheSpec
 import qualified Test.FollowRegistrySpec as FollowRegistrySpec
 import qualified Test.FollowSchedulerSpec as FollowSchedulerSpec
+import qualified Test.FollowSignatureSpec as FollowSignatureSpec
 import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
@@ -98,6 +99,7 @@ main =
             , FollowCacheSpec.tests
             , FollowRegistrySpec.tests
             , FollowSchedulerSpec.tests
+            , FollowSignatureSpec.tests
             , FollowSpec.tests
             , GcpSpec.tests
             , JWTSigningSpec.tests
