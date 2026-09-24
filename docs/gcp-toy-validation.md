@@ -15,6 +15,11 @@ Two pieces do that:
   usual seed → directive → ops protocol.
 - **`salmon-apps/scripts/gcp-toy-validate.sh`**, which runs that binary through
   `up` → `up` → `down` and reports what each pass did.
+- **`salmon-apps/scripts/gcp-toy-serve.sh`**, which keeps that binary up as a
+  `run serve` server instead — the HTTP surface, the web UI, `salmon-tui` —
+  and changes what it wants one word at a time (`tier0`, `tier1`, `tag v2`,
+  `down`), with tier 2's two passes driven through pull mode by editing a
+  registry document. Use it once tier 0 is clean under the validator.
 
 The blast radius is bounded by the project: by default the toy *creates* the
 project it works in, which makes the project the deepest node of the graph, so
