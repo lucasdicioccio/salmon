@@ -303,10 +303,19 @@ cloudRunOptionTests =
         assertBool (show bare) (not ("--set-secrets" `elem` bare))
         assertBool (show bare) (not ("--cpu" `elem` bare))
         assertBool (show bare) (not ("--allow-unauthenticated" `elem` bare))
+        assertBool (show bare) (not ("--no-invoker-iam-check" `elem` bare))
         let full = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc))
         assertBool (show full) (["--cpu", "1000m"] `isSubsequenceOf` full)
         assertBool (show full) (["--memory", "256Mi"] `isSubsequenceOf` full)
         assertBool (show full) (["--concurrency", "80"] `isSubsequenceOf` full)
+    , testCase "disabling the invoker IAM check is a deploy flag, not an IAM write" $ do
+        -- Under iam.allowedPolicyMemberDomains, --allow-unauthenticated
+        -- deploys and only warns that allUsers was refused; the flag form is
+        -- part of the spec, so it either lands or the deploy fails.
+        let opts = CloudRun.defaultCloudRunOptions{CloudRun.croInvokerIamCheckDisabled = True}
+            args = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc{CloudRun.crsOptions = opts}))
+        assertBool (show args) ("--no-invoker-iam-check" `elem` args)
+        assertBool (show args) (not ("--allow-unauthenticated" `elem` args))
     ]
   where
     svc =
