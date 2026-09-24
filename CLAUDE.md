@@ -428,7 +428,9 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `specs/generic-server.md`): `withUnixListener` binds a unix socket (bind, then chmod 0600,
   then listen — race-free without a process-global umask, because a bound-but-unlistened
   socket refuses connections; a stale file is replaced only if a connect to it fails, a live one
-  is `AlreadyListening`, a non-socket is `NotASocket`), `listenerProducer` accepts connections
+  is `AlreadyListening`, a non-socket is `NotASocket`, a path too long for `sun_path` is
+  `PathTooLong` before anything is touched, and `run serve` refuses such a `--listen`/`--http`
+  path up front), `listenerProducer` accepts connections
   and reads each as lines under its own `Origin "PATH#n"`, and `listenerReporters` wraps the
   loop's one `Reporter Tagged` so that a report stamped with a connection's origin is also
   written to that connection as `reportJSONLines` — clients always get JSON, the loop's stdout

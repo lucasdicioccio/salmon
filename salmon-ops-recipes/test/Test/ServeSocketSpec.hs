@@ -64,7 +64,7 @@ tests =
         , testCase "a client hanging up is reported and does not end the loop" hangUpDoesNotEndTheLoop
         , testCase "`quit` from a client ends the loop" quitFromAClientEndsTheLoop
         , testCase "a client that half-closes after typing still gets its reports" halfCloseStillAnswered
-        , testCase "the socket is owner-only, refused while live, replaced when stale" socketFileRules
+        , testCase "the socket is owner-only, refused while live, replaced when stale, refused when too long" socketFileRules
         ]
 
 -------------------------------------------------------------------------------
@@ -396,6 +396,15 @@ socketFileRules =
         writeFile path "not a socket\n"
         notSock <- try (Socket.withUnixListener path (const (pure ())))
         assertEqual "a regular file is refused" (Left (Socket.NotASocket path)) notSock
+        -- the longest path a unix address holds binds; one character more is
+        -- refused by name, not by network's crash from inside bind
+        let sized n = dir </> replicate (n - length dir - 1) 'x'
+            longest = sized (Socket.unixPathMax - 1)
+            tooLong = sized Socket.unixPathMax
+        fits <- try (Socket.withUnixListener longest (const (pure ())))
+        assertEqual "the longest path binds" (Right ()) (fits :: Either Socket.ListenError ())
+        over <- try (Socket.withUnixListener tooLong (const (pure ())))
+        assertEqual "one more is refused" (Left (Socket.PathTooLong tooLong Socket.unixPathMax (Socket.unixPathMax - 1))) over
 
 -------------------------------------------------------------------------------
 
