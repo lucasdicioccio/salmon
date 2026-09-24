@@ -93,7 +93,10 @@ The token is 'requireToken', a middleware on the TCP listener only:
 @Authorization: Bearer \<token\>@ on every route — the reads, the command,
 the event stream, anything a later milestone adds to the application —
 compared in constant time ('sameSecret') against the file's trimmed
-content, @401@ with a JSON error otherwise. It is a middleware rather than
+content, or a session cookie a browser got by posting that token to
+@\/auth@ (a browser cannot put a header on a navigation or an
+@EventSource@), @401@ with a JSON error otherwise — @GET \/@ excepted,
+which redirects to @\/auth@. It is a middleware rather than
 a check inside 'application' because the unix socket must stay token-free
 (its permissions are its access story, and every client of it today is a
 local one), and so that a route added to 'application' is covered without
@@ -106,7 +109,7 @@ counter, one inbox — so sequence numbers are one sequence across them, and
 an origin is 'originFor': @PATH#n@ on the unix socket, @ADDR:PORT#n@ (the
 client's) over TCP, so @history@ says who typed a line from the network.
 Not here: a client certificate instead of a token, a read-only token, a
-plaintext option behind any flag.
+plaintext option behind any flag, signing out.
 
 = Sequence numbers
 
@@ -149,6 +152,8 @@ module Salmon.Actions.Serve.Http (
     withHttpServerOn,
     BadCredentials (..),
     requireToken,
+    Sessions,
+    newSessions,
     sameSecret,
     TokenError (..),
     readTokenFile,
@@ -169,13 +174,16 @@ import Control.Concurrent.Async (withAsync)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTChan, writeTVar)
 import Control.Exception (Exception, bracket, finally, fromException, throwIO)
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM_, join, unless, when)
+import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Crypto.Random as Random
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.=))
 import Data.FileEmbed (embedDir, makeRelativeToProject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bits (xor, (.&.), (.|.))
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isSpace, toLower)
@@ -356,7 +364,8 @@ withHttpServerOn cfg binds seedHelp mode act = do
                         (Just WarpTLS.InsecureConnectionDenied, _) -> pure ()
                         (_, Just (_ :: TLS.TLSException)) -> pure ()
                         _ -> Warp.defaultOnException mreq e
-            withAsync (WarpTLS.runTLSSocket tlsSettings (quietly settings) sock (requireToken tls.tlsToken (application server))) $ \_ ->
+            sessions <- newSessions
+            withAsync (WarpTLS.runTLSSocket tlsSettings (quietly settings) sock (requireToken tls.tlsToken sessions (application server))) $ \_ ->
                 listenOn server more
 
 -- | The certificate or key given for a TCP listener did not load.
@@ -385,24 +394,66 @@ withTcpListener host port act = do
 -------------------------------------------------------------------------------
 -- the token
 
-{- | Refuse every request on this listener that does not carry
-@Authorization: Bearer <token>@ for exactly this token, with @401@ and a
-JSON error. Every route, the event stream included: a read of the output
-ring is as sensitive as a command (the spec's decision), so there is no
-route a network client gets for free. The comparison is constant-time
-('sameSecret'); the scheme name is matched without regard to case, the
-token itself exactly.
+{- | Refuse every request on this listener that is not authenticated, with
+@401@ and a JSON error. Authenticated is either of two things: an
+@Authorization: Bearer <token>@ header for exactly this token — what a
+script or @curl@ sends — or a session cookie the listener handed out at
+@\/auth@, which is what a browser sends, since nothing lets a page put a
+header on a navigation or on an @EventSource@. Every route, the event
+stream included: a read of the output ring is as sensitive as a command
+(the spec's decision), so there is no route a network client gets for free.
+
+Two routes are this middleware's own and are answered before the check:
+@GET \/auth@ is a form asking for the token, and @POST \/auth@ with the
+token as the form's @token@ field answers @303@ to @\/@ with a
+@__Host-salmon-session@ cookie (@HttpOnly@, @Secure@, @SameSite=Strict@,
+@Path=\/@), or @401@ and the form again. And @GET \/@ without either
+credential is a @303@ to @\/auth@ rather than a @401@, since whoever asks
+for the page is a browser that can do something about it.
+
+The cookie is not the token: it is 32 random bytes minted per login and
+known only to this listener ('Sessions'), so the token a script uses is
+never stored in a browser, and a restart logs every browser out.
+@SameSite=Strict@ is what keeps another site's page from posting a
+command with it. The token comparison is constant-time ('sameSecret'), the
+scheme name is matched without regard to case, the token itself exactly;
+a session is looked up by its SHA-256, so the lookup's timing says nothing
+about the cookie either.
 -}
-requireToken :: ByteString.ByteString -> Wai.Middleware
-requireToken token app req respond =
-    case bearerOf =<< lookup HTTP.hAuthorization (Wai.requestHeaders req) of
-        Just presented | sameSecret presented token -> app req respond
-        _ ->
-            respond $
-                Wai.responseLBS
-                    HTTP.status401
-                    [(HTTP.hContentType, "application/json"), ("WWW-Authenticate", "Bearer")]
-                    (encode (object ["error" .= ("a bearer token is required" :: Text)]))
+requireToken :: ByteString.ByteString -> Sessions -> Wai.Middleware
+requireToken token sessions app req respond =
+    case (Wai.requestMethod req, Wai.pathInfo req) of
+        ("GET", ["auth"]) -> respond (loginPage HTTP.status200 False)
+        ("POST", ["auth"]) -> do
+            body <- boundedBody 4096 req
+            let presented = join . lookup "token" . HTTP.parseQuery =<< body
+            case presented of
+                Just p | sameSecret p token -> do
+                    cookie <- newSession sessions
+                    respond $
+                        Wai.responseLBS
+                            HTTP.status303
+                            [ (HTTP.hLocation, "/")
+                            , ("Set-Cookie", sessionCookie <> "=" <> cookie <> "; Path=/; Secure; HttpOnly; SameSite=Strict")
+                            , (HTTP.hCacheControl, "no-store")
+                            ]
+                            ""
+                _ -> respond (loginPage HTTP.status401 True)
+        (_, ["auth"]) -> respond (methodNotAllowed ["GET", "POST"])
+        _ -> do
+            ok <-
+                case bearerOf =<< lookup HTTP.hAuthorization (Wai.requestHeaders req) of
+                    Just presented -> pure (sameSecret presented token)
+                    Nothing -> maybe (pure False) (knownSession sessions) (cookieOf req)
+            case (ok, Wai.requestMethod req, Wai.pathInfo req) of
+                (True, _, _) -> app req respond
+                (False, "GET", []) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/auth")] "")
+                _ ->
+                    respond $
+                        Wai.responseLBS
+                            HTTP.status401
+                            [(HTTP.hContentType, "application/json"), ("WWW-Authenticate", "Bearer")]
+                            (encode (object ["error" .= ("a bearer token is required" :: Text)]))
   where
     bearerOf :: ByteString.ByteString -> Maybe ByteString.ByteString
     bearerOf h =
@@ -410,6 +461,67 @@ requireToken token app req respond =
          in if Char8.map toLower scheme == "bearer"
                 then Just (Char8.dropWhileEnd isSpace (Char8.dropWhile (== ' ') rest))
                 else Nothing
+
+-- | The session cookie's name; @__Host-@ makes a browser refuse it unless @Secure@, @Path=\/@ and no @Domain@.
+sessionCookie :: ByteString.ByteString
+sessionCookie = "__Host-salmon-session"
+
+-- | The value of 'sessionCookie' among the request's cookies, from every @Cookie@ header (HTTP\/2 may split them).
+cookieOf :: Request -> Maybe ByteString.ByteString
+cookieOf req =
+    lookup sessionCookie
+        [ (name, ByteString.drop 1 value)
+        | (h, v) <- Wai.requestHeaders req
+        , h == HTTP.hCookie
+        , pair <- Char8.split ';' v
+        , let (name, value) = Char8.break (== '=') (Char8.dropWhile isSpace pair)
+        ]
+
+{- | The body, if it is no longer than the limit: a login form is a few
+dozen bytes, and nothing unauthenticated gets to make the server hold more.
+-}
+boundedBody :: Int -> Request -> IO (Maybe ByteString.ByteString)
+boundedBody limit req = go 0 []
+  where
+    go n acc = do
+        chunk <- Wai.getRequestBodyChunk req
+        let n' = n + ByteString.length chunk
+        if ByteString.null chunk
+            then pure (Just (ByteString.concat (reverse acc)))
+            else if n' > limit then pure Nothing else go n' (chunk : acc)
+
+-- | @ui\/auth.html@, with a line saying the last attempt was refused when it was.
+loginPage :: HTTP.Status -> Bool -> Response
+loginPage status refused =
+    Wai.responseLBS
+        status
+        [(HTTP.hContentType, "text/html; charset=utf-8"), (HTTP.hCacheControl, "no-store")]
+        (LByteString.fromStrict (if refused then before <> refusal <> after else page))
+  where
+    page = maybe "" id (lookup "auth.html" uiFiles)
+    (before, after) = ByteString.breakSubstring "<!--refused-->" page
+    refusal = "<p class=\"refused\">That is not the token.</p>"
+
+{- | The sessions a TCP listener has handed out at @\/auth@, by the SHA-256
+of their cookie. They live as long as the process: nothing expires them
+and nothing needs to, since the cookie itself ends with the browser
+session.
+-}
+newtype Sessions = Sessions (TVar (Set.Set ByteString.ByteString))
+
+newSessions :: IO Sessions
+newSessions = Sessions <$> newTVarIO Set.empty
+
+-- | Mint a session and hand back its cookie value.
+newSession :: Sessions -> IO ByteString.ByteString
+newSession (Sessions var) = do
+    raw <- Random.getRandomBytes 32
+    let cookie = Base64.encodeUnpadded raw
+    atomically (modifyTVar' var (Set.insert (SHA256.hash cookie)))
+    pure cookie
+
+knownSession :: Sessions -> ByteString.ByteString -> IO Bool
+knownSession (Sessions var) cookie = Set.member (SHA256.hash cookie) <$> readTVarIO var
 
 {- | Equal, in time that depends on the lengths and not on where the first
 differing byte is: every byte is folded whether or not an earlier one
@@ -609,6 +721,8 @@ application server req respond =
         ("POST", ["command"]) -> command >>= respond
         ("GET", ["events"]) -> events
         ("GET", []) -> respond (static "index.html")
+        -- over TCP 'requireToken' answers this; anywhere else there is nothing to log into
+        ("GET", ["auth"]) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/")] "")
         ("GET", ("ui" : rest)) -> respond (static (Text.unpack (Text.intercalate "/" rest)))
         (_, ["events"]) -> respond (methodNotAllowed ["GET"])
         (_, ["dag"]) -> respond (methodNotAllowed ["GET"])

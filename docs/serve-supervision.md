@@ -1041,6 +1041,16 @@ Five things to know:
   command is never queued. The token file must not be readable by others
   (`chmod 600`), and must not be empty. Checking it queues nothing — a read
   is still a read.
+- **A browser signs in at `/auth`**, because nothing lets a page put a
+  header on a navigation or an `EventSource`. `GET /` with no credential
+  is a `303` to `/auth`, a form asking for the token; posting the right one
+  answers `303` back to `/` with a `__Host-salmon-session` cookie
+  (`HttpOnly`, `Secure`, `SameSite=Strict`), which the TCP listener then
+  accepts wherever it accepts the bearer header. The cookie is not the
+  token — 32 random bytes minted per sign-in and known only to the running
+  process — so the token is never stored in a browser, and restarting the
+  server signs every browser out. A wrong token is a `401` and the form
+  again. On the unix socket `/auth` has nothing to do and redirects to `/`.
 - **The unix socket is unchanged**, token-free, and the *same server*: one
   event ring, one `seq` counter, one inbox, whichever listener a request
   came in on. What differs is the origin a command is typed under:
@@ -1057,9 +1067,9 @@ Five things to know:
   (`openssl x509 -req` without extensions), which OpenSSL-based clients
   accept and crypton-based Haskell clients reject (`LeafNotV3`).
 
-Not yet: `salmon-tui` and the web UI (§6/§7 of the spec) speak to the unix
-socket only; they will need a `--token` and a TCP address to reach a
-server started this way. Mutual TLS and a read-only token are the spec's
+Not yet: `salmon-tui` speaks to the unix socket only; it will need a
+`--token` and a TCP address to reach a server started this way. The web UI
+reaches it through `/auth` above. Mutual TLS and a read-only token are the spec's
 own v2.
 
 ### The web UI: `GET /`
@@ -1118,26 +1128,25 @@ be waiting. Four places send a line:
   and `help` included, whose reports land in the log rather than on the
   page.
 
-The page does not send a bearer token, because nothing yet asks for one;
-that arrives with milestone 8 (TCP, TLS, a token) and the page will carry
-it then.
-
-A browser cannot open a unix socket, so until milestone 8 lands (TCP with
-TLS and a token — that is what makes the page reachable directly, and the
-reason nothing here listens on a port), forward the socket to a local port
-and open that:
+The page itself never handles a token. A browser cannot open a unix
+socket, so open the page on the TCP listener and sign in once at `/auth`
+(see "Reaching it over the network"); the session cookie the browser keeps
+then carries every `fetch` and the `EventSource`:
 
 ```sh
-my-salmon run serve --http /run/my-salmon.http < /dev/null &
-socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/my-salmon.http &
-xdg-open http://127.0.0.1:8080/
-
-# or, from another machine, over ssh:
-ssh -L 8080:/run/my-salmon.http host
+my-salmon run serve --http /run/my-salmon.http \
+    --http-tcp 127.0.0.1:8443 --tls-cert server.pem --tls-key server.key \
+    --token-file token < /dev/null &
+xdg-open https://localhost:8443/        # redirected to /auth; paste the token
 ```
 
-Bind the forward to `127.0.0.1`: the port inherits none of the socket's
-file permissions, and whoever reaches it has the socket. The layout is a
+A self-signed certificate is a browser warning to click through (or add
+it to the browser's trust store). Without a TCP listener, a forward of the
+unix socket still works — `ssh -L 8080:/run/my-salmon.http host` from
+another machine, or `socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork
+UNIX-CONNECT:/run/my-salmon.http` locally — but bind it to `127.0.0.1`:
+the port inherits none of the socket's file permissions, and whoever
+reaches it has the socket. The layout is a
 small longest-path layering with barycentre ordering written in
 `salmon-ops/ui/ui.js` itself — no bundler, no framework, no vendored
 library — so the three files are readable as they are served.

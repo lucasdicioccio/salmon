@@ -41,6 +41,7 @@ module Salmon.Actions.Serve.Socket (
     listenerSocket,
     withUnixListener,
     ListenError (..),
+    unixPathMax,
 
     -- * Plugging into the loop
     listenerProducer,
@@ -50,7 +51,7 @@ module Salmon.Actions.Serve.Socket (
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, swapTVar, writeTChan, writeTVar)
 import Control.Exception (Exception, IOException, bracket, finally, throwIO, try)
-import Control.Monad (forM_, forever, void)
+import Control.Monad (forM_, forever, void, when)
 import Data.Foldable (traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
@@ -88,7 +89,18 @@ data ListenError
       AlreadyListening FilePath
     | -- | the path exists and is not a socket, so it is not ours to remove
       NotASocket FilePath
+    | -- | the path is longer than a unix socket address holds: its length,
+      -- and the most 'unixPathMax' allows
+      PathTooLong FilePath Int Int
     deriving (Show, Eq)
+
+{- | The size of @sockaddr_un@'s @sun_path@ on Linux, which the path and its
+terminating NUL must fit in. @network@ checks the same bound, but with
+'error' from inside 'Socket.bind' — a crash naming @pokeSockAddr@ — and
+does not export its constant, so it is spelled here and checked first.
+-}
+unixPathMax :: Int
+unixPathMax = 108
 
 instance Exception ListenError
 
@@ -97,7 +109,10 @@ way out close every connection still open, close the socket, and remove
 the file.
 
 Refuses with 'AlreadyListening' if a connection to the path succeeds — the
-path is somebody's — and with 'NotASocket' if a non-socket sits there. A
+path is somebody's — with 'NotASocket' if a non-socket sits there, and with
+'PathTooLong' before touching anything if the path cannot be a socket
+address at all (a deep temp directory reaches the limit sooner than one
+would think). A
 socket file nothing answers on is stale (its @serve@ died without removing
 it) and is removed first.
 
@@ -113,6 +128,8 @@ withUnixListener path = bracket acquire release
   where
     acquire :: IO Listener
     acquire = do
+        -- the same count network makes: one byte per character
+        when (length path >= unixPathMax) (throwIO (PathTooLong path (length path) (unixPathMax - 1)))
         clearStale
         sock <- Socket.socket Socket.AF_UNIX Socket.Stream Socket.defaultProtocol
         Socket.bind sock (Socket.SockAddrUnix path) `onFailure` Socket.close sock

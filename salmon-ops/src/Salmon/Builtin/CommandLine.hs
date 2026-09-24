@@ -728,6 +728,12 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                     hPutStrLn stderr (Text.unpack err)
                     exitFailure
                 Right t -> pure t
+            -- and so is a socket path no unix address can hold, which
+            -- would otherwise surface as network's own crash from bind
+            forM_ [(flag, path) | (flag, Just path) <- [("--listen", listen), ("--http", http)]] $ \(flag, path) ->
+                when (length path >= Socket.unixPathMax) $ do
+                    hPutStrLn stderr (flag <> " " <> path <> " is " <> show (length path) <> " characters; a unix socket path holds at most " <> show (Socket.unixPathMax - 1) <> " (pick a shorter one, e.g. under /run or /tmp)")
+                    exitFailure
             tlsBinds <- forM (maybe [] pure tcp) $ \t -> do
                 token <- Http.readTokenFile t.tcpTokenPath
                 case token of
