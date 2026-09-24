@@ -487,9 +487,9 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   under it with a `down` per active row) and a raw command line. The outcome is read off
   `/events` by the request's origin — the events carrying it outline the nodes touched and fill
   the log under the command line until the loop's `hung-up` for that origin. No `quit` on the
-  page, and no bearer token sent until milestone 8 asks for one. A browser cannot open a unix
-  socket, so it is reached through a TCP forward (`socat`/`ssh -L`) until milestone 8's TCP
-  listener; see `docs/serve-supervision.md` §14.
+  page, and the page never handles a token. A browser cannot open a unix socket, so it is
+  reached on milestone 8's TCP listener (below), signing in at `/auth`, or through a forward
+  of the unix socket (`ssh -L`); see `docs/serve-supervision.md` §14.
   **Milestone 8, the same HTTP over a network**: `run serve --http-tcp HOST:PORT --tls-cert
   FILE --tls-key FILE --token-file FILE` adds a warp-tls listener (`Http.withHttpServerOn`
   over a list of `Bind`s — `BindUnix PATH | BindTls TlsBind`, no plaintext constructor) running
@@ -497,7 +497,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `requireToken`, a middleware on the TCP listener only that wants `Authorization: Bearer
   <token>` on every route, `/events` included, compared in constant time (`sameSecret`) and
   answering `401 {"error": ...}` otherwise. It is a middleware so a route added to
-  `application` later is covered without knowing the token exists. `CommandLine.
+  `application` later is covered without knowing the token exists. A browser cannot send that
+  header (not on a navigation, not from `EventSource`), so the same middleware owns `/auth`:
+  `GET /` without a credential is a `303` there, a form posting the token, answered with a
+  `__Host-salmon-session` cookie (`HttpOnly; Secure; SameSite=Strict`) that it then accepts
+  wherever it accepts the header. The cookie is 32 random bytes per sign-in, kept as its
+  SHA-256 in the listener's `Sessions` — never the token, and gone on restart. `CommandLine.
   validateTcpOptions` is the pure refusal: `--http-tcp` without all three files exits 1 naming
   the missing ones, the files without `--http-tcp` are refused, `:PORT` with no host is
   refused (spell `0.0.0.0`), `[::1]:PORT` for IPv6; `Http.readTokenFile` refuses a
@@ -511,7 +516,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
   pinning exactly that certificate. Not done: client certificates, a read-only token, TCP/token
-  support in `salmon-tui` and the web UI.
+  support in `salmon-tui`, signing out.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a

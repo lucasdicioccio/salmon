@@ -23,6 +23,7 @@ extra-source-files: CHANGELOG.md
                     ui/index.html
                     ui/ui.js
                     ui/ui.css
+                    ui/auth.html
 
 library
     exposed-modules: Salmon.Actions.Concurrent
@@ -116,6 +117,7 @@ library
                     , bytestring
                     , containers
                     , contravariant
+                    , crypton
                     , cryptohash-sha256
                     , directory
                     , file-embed

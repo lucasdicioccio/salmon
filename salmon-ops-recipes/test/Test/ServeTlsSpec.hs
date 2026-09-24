@@ -133,6 +133,8 @@ tests =
             "over the wire"
             [ testCase "with the token over TLS, /status answers; without or wrong, 401; plain TCP is refused; /events streams; the unix socket needs none" $
                 requireExecutable "openssl" overTheWire
+            , testCase "a browser: / redirects to /auth, the token posted there is a session cookie, and the cookie is as good as the token" $
+                requireExecutable "openssl" signingIn
             ]
         ]
   where
@@ -366,6 +368,77 @@ overTheWire =
   where
     arrayOf (Array xs) = toList xs
     arrayOf _ = []
+
+{- | The browser's path to the UI over TCP, with redirects not followed so
+each hop is visible: @/@ sends a client with no credential to @/auth@, a
+wrong token posted there is refused and mints nothing, the right one is a
+@303@ back to @/@ with a cookie that then stands in for the bearer header on
+every route — the page, the reads, a command, the event stream — while a
+cookie the listener never minted is refused like no credential at all. On
+the unix socket, @/auth@ has nothing to do and sends the browser to @/@.
+-}
+signingIn :: IO ()
+signingIn =
+    withRunning $ \running -> do
+        let tls = runningTls running
+        (rcode, rheaders, _) <- raw tls =<< tlsRequest running Nothing "/"
+        assertEqual "/ without a credential" 303 rcode
+        assertEqual "redirected to the form" (Just "/auth") (lookup HTTP.hLocation rheaders)
+
+        (fcode, fheaders, fbody) <- raw tls =<< tlsRequest running Nothing "/auth"
+        assertEqual "the form" 200 fcode
+        assertEqual "as HTML" (Just "text/html; charset=utf-8") (lookup HTTP.hContentType fheaders)
+        assertBool "a token field" ("name=\"token\"" `ByteString.isInfixOf` LChar8.toStrict fbody)
+
+        (wcode, wheaders, wbody) <- raw tls =<< login running "not-it"
+        assertEqual "a wrong token" 401 wcode
+        assertEqual "mints nothing" Nothing (lookup "Set-Cookie" wheaders)
+        assertBool "and says so" ("not the token" `ByteString.isInfixOf` LChar8.toStrict wbody)
+
+        (lcode, lheaders, _) <- raw tls =<< login running token
+        assertEqual "the right token" 303 lcode
+        assertEqual "back to the page" (Just "/") (lookup HTTP.hLocation lheaders)
+        setCookie <- maybe (assertFailure "no cookie") pure (lookup "Set-Cookie" lheaders)
+        forM_ ["HttpOnly", "Secure", "SameSite=Strict", "Path=/"] $ \attr ->
+            assertBool ("cookie is " <> Char8.unpack attr <> ": " <> Char8.unpack setCookie) (attr `ByteString.isInfixOf` setCookie)
+        let cookie = Char8.takeWhile (/= ';') setCookie
+        assertBool ("the cookie is not the token: " <> Char8.unpack cookie) (not (token `ByteString.isInfixOf` cookie))
+
+        let withCookie c route = do
+                req <- tlsRequest running Nothing route
+                pure req{HTTP.requestHeaders = [(HTTP.hCookie, c)]}
+        (pcode, _, pbody) <- raw tls =<< withCookie cookie "/"
+        assertEqual "the page with the cookie" 200 pcode
+        assertBool "is the UI" ("ui/ui.js" `ByteString.isInfixOf` LChar8.toStrict pbody)
+        (scode, _) <- exchange tls =<< withCookie ("other=1; " <> cookie) "/status"
+        assertEqual "a read with the cookie among others" 200 scode
+        post <- withCookie cookie "/command"
+        (ccode, _) <- exchange tls post{HTTP.method = "POST", HTTP.requestHeaders = HTTP.requestHeaders post ++ [(HTTP.hContentType, "text/plain")], HTTP.requestBody = HTTP.RequestBodyLBS "supervise off"}
+        assertEqual "a command with the cookie" 200 ccode
+        ev <- withCookie cookie "/events?since=0"
+        HTTP.withResponse ev tls $ \resp ->
+            assertEqual "/events with the cookie" 200 (HTTP.statusCode (HTTP.responseStatus resp))
+
+        forM_ ["/status", "/command"] $ \route -> do
+            (bcode, _, _) <- raw tls =<< withCookie "__Host-salmon-session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" route
+            assertEqual ("a cookie never minted on " <> route) 401 bcode
+
+        ureq <- HTTP.parseRequest "http://salmon/auth"
+        (ucode, uheaders, _) <- raw (runningUnix running) ureq
+        assertEqual "/auth on the unix socket" 303 ucode
+        assertEqual "sends the browser to the page" (Just "/") (lookup HTTP.hLocation uheaders)
+  where
+    login running t = do
+        req <- tlsRequest running Nothing "/auth"
+        pure (HTTP.urlEncodedBody [("token", t)] req)
+
+-- | Status, headers and body, redirects not followed.
+raw :: HTTP.Manager -> HTTP.Request -> IO (Int, HTTP.ResponseHeaders, LChar8.ByteString)
+raw manager req = do
+    r <- timeout (10 * 1000000) (HTTP.httpLbs req{HTTP.redirectCount = 0} manager)
+    case r of
+        Nothing -> assertFailure ("no answer within 10s to " <> show (HTTP.path req))
+        Just resp -> pure (HTTP.statusCode (HTTP.responseStatus resp), HTTP.responseHeaders resp, HTTP.responseBody resp)
 
 -- | Read the stream until a complete @data:@ line has arrived, 10s at most.
 readUntilData :: HTTP.BodyReader -> ByteString.ByteString -> IO ByteString.ByteString
