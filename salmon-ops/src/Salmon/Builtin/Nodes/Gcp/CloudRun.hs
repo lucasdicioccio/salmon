@@ -9,6 +9,7 @@ module Salmon.Builtin.Nodes.Gcp.CloudRun (
     CloudRunService (..),
     cloudRunService,
     interpretServiceDescribe,
+    interpretServicePresence,
     Report (..),
     CloudRunCommand (..),
     cloudRunCommand,
@@ -147,19 +148,26 @@ cloudRunService r gcloudTrack svc =
                     { help = Text.unwords ["deploys CloudRun service", svc.crsName]
                     , ref = mkRef "gcp-cloudrun-service" (svc.crsProject.projectId, svc.crsRegion.regionName, svc.crsName)
                     , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (deploy r')
-                    , down = Core.downIfPresent checkService (delete r')
+                    , -- Presence, not the image: a service running an older
+                      -- image than the one declared is still there to delete.
+                      -- Checking the image here made `down` skip every service
+                      -- whose tag had moved with the code since its deploy.
+                      down = Core.downIfPresent (uncurry interpretServicePresence <$> describeService) (delete r')
                     , check = checkService
                     }
   where
     r' = contramap (RunCloudRunCommand (RunDeploy svc)) r
 
-    checkService :: IO CheckResult
-    checkService = do
+    describeService :: IO (ExitCode, Text)
+    describeService = do
         (code, out, _err) <-
             readCreateProcessWithExitCode
                 (prepare cloudRunCommand (RunDescribe svc))
                 ""
-        pure $ interpretServiceDescribe svc.crsImage code (Text.decodeUtf8 out)
+        pure (code, Text.decodeUtf8 out)
+
+    checkService :: IO CheckResult
+    checkService = uncurry (interpretServiceDescribe svc.crsImage) <$> describeService
 
 -- | The verdict drawn from @gcloud run services describe@'s exit code and
 -- output, split out for testability.
@@ -170,6 +178,11 @@ interpretServiceDescribe image ExitSuccess outText =
     if image `Text.isInfixOf` outText
         then Success
         else Failure ("CloudRun service found but image does not match " <> image)
+
+-- | Whether the service exists at all, whatever it runs: what @down@ asks.
+interpretServicePresence :: ExitCode -> Text -> CheckResult
+interpretServicePresence (ExitFailure n) _ = Failure ("CloudRun service not found (exit " <> Text.pack (show n) <> ")")
+interpretServicePresence ExitSuccess _ = Success
 
 -------------------------------------------------------------------------------
 
