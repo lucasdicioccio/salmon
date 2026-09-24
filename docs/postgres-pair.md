@@ -54,27 +54,33 @@ progress file that could disagree with the machines.
 ## Using it
 
 ```
-salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --seed B \
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --bouncer 10.0.0.4 --seed B \
   | salmon-pgpair run up
 
-salmon-pgpair config --primary B --a 10.0.0.2 --b 10.0.0.3 \
+salmon-pgpair config --primary B --a 10.0.0.2 --b 10.0.0.3 --bouncer 10.0.0.4 \
   | salmon-pgpair run up          # the switchover
 ```
 
-`run tree` prints what that declares before anything runs:
+`run tree` prints what the first of those declares before anything runs:
 
 ```
-pg-pair-role   primary of app is on B
+pg-pair-role (n2504805732311083189) primary of app is on A
   <- pg-pair-bouncer
   <- pg-pair-seed
   <- pg-pair-member
   <- pg-pair-member
+pg-pair-bouncer (n671955809932212377) pgbouncer 10.0.0.4 in front of app
+pg-pair-seed (7089073737010868211) seeds 10.0.0.3 from 10.0.0.2
+  <- pg-pair-member
+  <- pg-pair-member
+pg-pair-member (n6118828710077022853) member of app on 10.0.0.3
+pg-pair-member (2659614637461449593) member of app on 10.0.0.2
 ```
 
 What it assumes was done before it ever ran, because a recipe that ships
 secrets has chosen a transport for everyone who uses it: both machines have a
 Postgres cluster and the two `.pgpass` files the pair names, and the bouncer
-has pgbouncer and a `userlist.txt`. The recipe is given paths.
+has pgbouncer, a `userlist.txt` and the `.pgpass` for its admin console. The recipe is given paths.
 
 `--seed B` is the first clone of a pair's life, and the only way back from a
 standby that has fallen too far behind (see the slot budget below). It is safe
@@ -104,9 +110,9 @@ PauseBouncers -> StopMember A -> Promote B -> RepointBouncers B -> Rejoin A -> D
 
 Traffic moves through pgbouncer's admin console, and the routing lives in its
 own file pulled in with `%include`. That is a seam between two writers:
-`PgBouncer.setup` owns the ini and *watches* it, so a change there is applied
-by a restart; the role node owns the routing file, which is not watched, and
-applies a change gently. One file with two writers is how a switchover becomes
+`bouncerSetup` owns the ini, so a change there is applied by a restart; the
+role node owns the routing file (`bouncerSetup` writes it only when it is
+missing), and applies a change gently. One file with two writers is how a switchover becomes
 an outage.
 
 ## When it refuses, and why
@@ -176,7 +182,8 @@ user with two capabilities granted once (`capsh` needs `cap_net_admin`, qemu
 needs `cap_dac_override,cap_chown,cap_fowner`; see
 [`specs/qemu-test-vms-progress.md`](../specs/qemu-test-vms-progress.md)).
 
-Try `--may-discard B` with machine B's guest paused, and the refusal turns
+After the demo B is the primary: pause machine B's guest, declare
+`up --primary A`, and it refuses; add `--may-discard B` and the refusal turns
 into a failover.
 
 ## What is tested, and what that is worth

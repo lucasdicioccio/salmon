@@ -114,7 +114,9 @@ reachable via two different paths or not, it is one node, applied once.
 single most important thing when writing a new node** — get it wrong (too
 coarse, e.g. reusing one `Ref` for two different files) and you silently skip
 work; get it wrong the other way (varying per-call for what should be the same
-resource) and you silently do the work twice.
+resource) and you silently do the work twice. Forgetting `ref` altogether is the
+first kind: the default is `mkRef "noop" shorthand`, so every node sharing a
+`ShortHand` collapses into one.
 
 Note what the identity key is *not*: the node's behaviour. `filecontents` keys
 on the path alone, so an equal `Ref` means "the same effect site", not an equal
@@ -153,8 +155,9 @@ Daemon.daemon reportPrint (Daemon.defaultDaemon "webserver" (proc "nginx" ["-g",
 
 or, if your node needs dependencies or a liveness `check` of its own, build
 it around `Daemon.runDaemon`, which is the same action without the node
-wrapped round it. Either way you get the teardown: `SIGTERM` to the process
-*group*, a grace period, then `SIGKILL`. Writing that yourself is easy to get
+wrapped round it. Either way you get the teardown: a signal (`SIGTERM` by
+default, `daemon_stop.stop_signal` otherwise) to the process *group*, a grace
+period, then `SIGKILL`. Writing that yourself is easy to get
 subtly wrong.
 
 Three things to know before reaching for this:
@@ -189,7 +192,8 @@ dir directory =
             { help = Text.pack $ "ensures " <> path <> " exists, including subdirs"
             , ref = mkRef "directory" path
             , up = createDirectoryIfMissing True path
-            , down = removeDirectory path
+            , down = removeDirectoryIfPresent path
+            , dynamics = [supervised defaultSupervision{supReapply = True}]
             }
   where
     path = directory.directoryPath
@@ -208,12 +212,18 @@ filecontents fcontents =
             , ref = mkRef "file-contents" path
             , check = checkFileContents fcontents
             , up = ByteString.writeFile path =<< encodeFileContents fcontents.contents
-            , down = removeFile path
+            , down = removeFileIfPresent path
             }
   where
     enclosingdir = dir (Directory $ takeDirectory path)
     path = fcontents.filePath
 ```
+
+Note both `down`s tolerate the effect already being gone
+(`removeDirectoryIfPresent`/`removeFileIfPresent`, not `removeDirectory`/
+`removeFile`): a `down` that throws leaves its node "still standing" and
+blocks the teardown of everything under it (§5), so `down` needs the same
+run-twice safety as `up`.
 
 Note the pattern: `filecontents` doesn't take a `Directory` as an argument — it
 *derives* the directory it needs (`takeDirectory path`) and constructs that
@@ -374,6 +384,14 @@ to "keep going" — that defeats `Failed`/`Blocked` propagation and makes a real
 failure look like success to the traversal and to anything scripting around
 this binary's exit code.
 
+All of the above is the one-shot drivers (`run up`/`run down`). Under `run
+serve` a node is *tended* rather than applied once (`Salmon.Actions.Upkeep`):
+a failing `up` is retried on a backing-off delay, and a dependant waits for
+its dependency to recover rather than being reported `Blocked` for good. The
+node's `Supervision` (§7) says what to do when it keeps failing; see
+[`serve-supervision.md`](serve-supervision.md). The rule for `up` itself is
+the same either way: throw.
+
 ## 6. Composing with `Track`/`Tracked` — when a node needs a value from elsewhere
 
 Sometimes one node's construction genuinely needs a *value* that another part
@@ -408,7 +426,7 @@ reach for it when you're deliberately decoupling "how do I build a value" from
 
 `dynamics :: [Dynamic]` lets you stash arbitrary typed metadata on a node that
 some other part of the codebase can later recover by type, without changing
-`Extension` itself. Two real uses:
+`Extension` itself. A few real uses:
 
 - `placeholder` (in `Salmon.Builtin.Extension`) stashes a `PlaceHolder Text` so
   dot-graph rendering can show a label without the node needing real `up`/
@@ -432,7 +450,7 @@ some other part of the codebase can later recover by type, without changing
   ```
 
   Amend `defaultSupervision` rather than spelling out every field: the record
-  has grown twice and will again, and a node that only cares about its
+  has grown three times and will again, and a node that only cares about its
   watchdog should not have to have an opinion about giving up.
 
   `supStrategy` is the one field authored for somebody else's benefit. The
@@ -451,7 +469,9 @@ some other part of the codebase can later recover by type, without changing
   knows their content is load-bearing, while each service reading it would
   otherwise have to know, separately, that it might change underneath. Only
   `run serve` acts on it (a one-shot pass has no "already up" to send back
-  from), and it costs nothing at all until a node opts in.
+  from), and it costs nothing at all until a node opts in. The full
+  field list (`supStableAfter`, `supGiveUpAfter`, `supReapply`, ...) is in
+  [`serve-supervision.md`](serve-supervision.md) §6.
 
 That last one is what the field is really for, and it's worth understanding
 the shape. A node says *"I am a `Package`"* without knowing what will be done
@@ -527,8 +547,14 @@ recipe), every salmon binary follows the same two-subcommand shape via
 
 ```sh
 my-salmon config <seed-args...>   # seed (CLI-friendly) -> JSON directive on stdout
-my-salmon run Up|Tree|DAG         # reads a JSON directive on stdin, executes/prints it
+my-salmon run up|down|tree|dag    # reads a JSON directive on stdin, executes/prints it
+my-salmon run serve               # reads seed declarations as lines on stdin, converges and tends them
 ```
+
+(`run serve` is the long-running driver; see
+[`serve-supervision.md`](serve-supervision.md). There is also a `query`
+subcommand — `query show`/`query plan`/`query extract-directive` — for
+looking at or excluding part of the graph; see `specs/advance-querying.md`.)
 
 You need three things (see `salmon-apps/src/Migrator.hs` as the worked,
 complete example):
@@ -553,6 +579,11 @@ configure :: Configure IO Seed Spec
 configure = Configure $ \seed -> ... build a Spec from seed ...
 ```
 
+`Migrator.hs` itself calls `CLI.execCommandOrSeedWithRewrites`, which is the
+same plus a reporter for `run serve`'s own reports and a list of `Rewrite`
+phases to run over the graph (§7). Use `execCommandOrSeed` if you have no
+rewrites.
+
 This split exists so config generation (impure, human-parametrized, runs on
 the commanding machine) and execution (must be IO/hermetic, meant to run
 unattended, e.g. piped to a remote box over ssh) stay separate, independently
@@ -565,8 +596,9 @@ run via `cabal test salmon-ops-recipes`. All the plumbing you need is in
 `Test.Harness` (`salmon-ops-recipes/test/Test/Harness.hs`) — **read that file**;
 this section is a guide to it, not a replacement for it.
 
-Tests are organized into three tiers by IO cost/blast-radius. Pick the
-*cheapest* tier that actually exercises what you changed.
+Tests are organized into four tiers by IO cost/blast-radius (Layers 0–3; this
+section covers the first three, which are what a new node almost always needs).
+Pick the *cheapest* tier that actually exercises what you changed.
 
 ### Layer 0 — structural, no side effects
 
@@ -661,6 +693,19 @@ silently failed to start the cluster — a Layer 0 test would never have caught
 this, because the graph *shape* was perfectly correct; only running it for
 real against a real (if disposable) Debian container did.
 
+### Layer 3 — a whole machine, via a qemu VM
+
+For what a container can't exercise well (systemd as PID 1, real network
+interfaces), `Test.Harness` also boots a qemu VM from a debootstrapped rootfs
+(`withVm`/`withVmAt`, then `sshToVm`/`scpToVm`), dogfooding
+`Salmon.Builtin.Nodes.LinuxBridge`/`Qemu` as the provisioner. It needs root or
+the one-time `setcap` grants described on `hasVmPrivileges`, and skips loudly
+otherwise; see `QemuSmokeSpec.hs` for the smallest example and
+`specs/qemu-test-vms.md` for the design. Layer 2 and 3 specs contend for
+process-global resources (`PATH` shims, one test bridge), so `test/Main.hs`
+runs them inside one `sequentialTestGroup` — add yours there, not to the
+concurrent list.
+
 ### Choosing a layer: a quick decision guide
 
 - Changed how ops are wired together (deps/ordering/ref dedup)? → **Layer 0**
@@ -672,6 +717,8 @@ real against a real (if disposable) Debian container did.
   that service's actual behavior? → **Layer 2** — a Layer 0/1 test would pass
   even if the actual command is wrong, wrong-ordered, or the tool's real
   idempotency behavior doesn't match what you assumed.
+- Needs a real init system, real interfaces, or more than one machine? →
+  **Layer 3**.
 
 ### Running the tests
 

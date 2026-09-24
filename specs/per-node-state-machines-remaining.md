@@ -1,6 +1,12 @@
 # What is left of `specs/per-node-state-machines.md`
 
-Status: living plan, update as work continues. Companion to
+Status: living plan, update as work continues. As of this writing every
+(R) item (R1–R9) and I1, I3, I5, I6 are done — e.g. `supReapply`,
+`supDemoteEvery` (`Op/Supervision.hs`), `ConcurrencyLimit` behind `run serve
+--max-concurrency` (`Op/Concurrency.hs`), `Serve.Stale` with `filecontents`'
+`contentFingerprint`, `Query.resolveRewrittenSelectors` — and only I2 and I4
+(both matters of taste) remain. The commit hashes in "Where this stands"
+predate the merge into master. Companion to
 `specs/per-node-state-machines.md` (the design, whose milestone list is the
 source of truth for 1–9) — this file is what remains, why each remaining
 piece is worth doing, and what order I would do it in. Read the design first
@@ -11,7 +17,10 @@ things stand or what to pick up next.
 
 ## Where this stands
 
-Everything below is on branch `serve-supervision`, on top of `0bc3ed4`.
+Everything below was built on branch `serve-supervision` (on top of `0bc3ed4`) and
+has since merged to `master`. The commit hashes are that branch's, and some did
+not survive into `master`'s history as-is: find the change by its milestone in
+`git log` rather than by hash.
 
 ### Shipped
 

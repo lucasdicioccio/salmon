@@ -7,8 +7,9 @@
 <p align="center">
   Yet another approach to xyz-dependencies: express provisioning, CI/CD, and
   general infrastructure operations as DAGs of idempotent operations
-  ("ops"), with uniform up/down/check/notify semantics whether a node is as
-  small as "create a file" or as large as "turn a server up."
+  ("ops"), with uniform up/down/check semantics whether a node is as small as
+  "create a file" or as large as "turn a server up." Run a graph once, or
+  keep it converged and supervised with a long-running `run serve`.
 </p>
 
 ## Why
@@ -18,7 +19,7 @@ Provisioning/CI-CD tooling tends to force a choice between one-off scripts
 behavior and their configuration become inseparable). Salmon's bet: both are
 the same problem at different scales if operations are represented as an
 inspectable dependency graph rather than a flat ordered script — with the
-graph itself given real up/down/check/notify semantics, so it converges to a
+graph itself given real up/down/check semantics, so it converges to a
 target state (and back) instead of just running once. See
 [`docs/salmon-core.md`](docs/salmon-core.md) for the full model and where
 else it could be pointed.
@@ -39,18 +40,21 @@ salmon-core  <-  salmon-ops  <-  salmon-ops-recipes  <-  salmon-apps
   server up" be the same type. No IO-heavy deps; kept minimal on purpose.
 - **`salmon-ops`** — IO-heavy primitives for provisioning/CI-CD (files,
   systemd, Debian packages, podman, postgres, wireguard, certificates, ssh,
-  netfilter, cron, rsync, ...), plus the CLI plumbing
+  netfilter, cron, rsync, qemu, GCP, ...), the drivers that execute a graph
+  (one-shot `up`/`down`, and the long-running `serve` loop with its
+  supervision, HTTP API, web UI and pull mode), and the CLI plumbing
   (`Salmon.Builtin.CommandLine`) every salmon-based binary shares.
 - **`salmon-ops-recipes`** — higher-level, opinionated compositions of
   `salmon-ops` builtins, where project conventions get enforced (e.g. whether
   migrations ship and run locally vs. via a remote connstring). Has a real
   test suite (see [Testing](#testing) below).
-- **`salmon-ops-recipes-experimental`** — recipes needing heavier/less-stable
-  dependencies (e.g. `kitchen-sink`-based site generation); kept out of
+- **`salmon-ops-recipes-experimental`** — recipes and builtins needing
+  heavier/less-stable dependencies (`kitchen-sink`-based site generation, and
+  ACME certificate issuance through `acme-not-a-joke`); kept out of
   `salmon-ops-recipes` so that package stays fast to build. Not part of the
   default `cabal.project` package set.
 - **`salmon-apps`** — blessed, project-useful binaries built from the above
-  (e.g. `salmon-migrator`, `salmon-pgpair`, `salmon-gcp-toy`).
+  (see [Binaries](#binaries)).
 
 ## Build
 
@@ -75,6 +79,38 @@ to run real recipes against disposable containers. See
 [`docs/howto-ops.md`](docs/howto-ops.md#10-testing-ops) for the full
 breakdown and how to write new ones.
 
+## Using it
+
+Every salmon binary speaks the same two-step protocol: `config` turns
+human-facing command-line arguments (a *seed*) into a JSON *directive*, and
+`run` reads that directive on stdin and acts on the graph it expands to.
+
+```sh
+my-salmon config <seed-args...>                        # seed -> JSON directive on stdout
+my-salmon config <seed-args...> | my-salmon run up     # converge the graph
+my-salmon config <seed-args...> | my-salmon run down   # tear it down
+my-salmon config <seed-args...> | my-salmon run tree   # print the dependency tree (run dag: Graphviz)
+my-salmon config <seed-args...> | my-salmon query show --select '/some/path/**'
+my-salmon run serve                                    # read seed declarations as commands, keep converging
+```
+
+The split keeps the possibly-impure "decide what I want" step separate from
+the hermetic "make it so" step, which is meant to run unattended, often on
+another machine. `run up`/`run down`/`run serve` take `--json` for one JSON
+object per report. `query` targets a subset of the graph: `query plan
+--exclude PATTERN` writes a plan that `run up --plan FILE` honours.
+
+`run serve` is the long-running mode. It reads `up`/`down`/`only`/`clear`/
+`converge`/`status`/... lines, keeps a world of every declared seed, converges
+after each one, and between commands *tends* the nodes, re-applying what goes
+missing under a per-node supervision policy. The same loop can also be driven
+over a unix socket (`--listen`), over HTTP with an event stream and a web UI
+(`--http`, or `--http-tcp` with TLS and a token), from a terminal client
+(`salmon-tui`), or pull its declarations from a registry — a directory, git,
+HTTPS, DNS or a bucket, optionally signed (`--follow`, pull mode) — and report
+back through a status file (`--status-sink`, read by `salmon-fleet status`).
+See [`docs/serve-supervision.md`](docs/serve-supervision.md).
+
 ## The model, in one paragraph
 
 An `Op` (`OpGraph Identity Actions'`) is a graph node centered on itself, with
@@ -84,11 +120,13 @@ type-check identically. Every op carries `up`/`down` (bring the effect into
 being / undo it), `check` (a `CheckResult` answering "is my effect already in
 place", which is what makes a node idempotent to re-run), and a `Ref` that
 gives it a stable identity so the traversal can
-dedupe a resource reached via multiple graph paths. `upTree`/`downTree`
-(`Salmon.Actions.UpDown`) walk the materialized graph, catch and propagate
-real failures (a thrown exception marks a node `Failed` and blocks everything
-that depends on it, rather than being silently swallowed), and report exactly
-what happened, node by node. Full details: [`docs/salmon-core.md`](docs/salmon-core.md)
+dedupe a resource reached via multiple graph paths. The drivers
+(`Salmon.Actions.UpDown`, and `Salmon.Actions.Concurrent` under `serve`)
+collapse the materialized graph into a DAG with one node per `Ref`, walk it in
+dependency order (or the reverse, for teardown), catch and propagate real
+failures (a thrown exception marks a node `Failed` and blocks everything that
+depends on it, rather than being silently swallowed), and report exactly what
+happened, node by node. Full details: [`docs/salmon-core.md`](docs/salmon-core.md)
 (the general model) and [`docs/howto-ops.md`](docs/howto-ops.md) (concrete
 patterns for writing and testing ops).
 
@@ -99,7 +137,6 @@ one module per concern:
 
 | Module | Covers |
 |---|---|
-| `Acme` | ACME/Let's Encrypt certificate issuance |
 | `Bash` | ad-hoc shell script ops |
 | `Binary` | the shared subprocess-running plumbing (`untrackedExec`, exit-code-checked exec) every other builtin is built on |
 | `Cabal` | building Haskell projects with cabal |
@@ -144,7 +181,6 @@ above, where this project's own conventions get enforced:
 | Module | Covers |
 |---|---|
 | `CabalBuilding` | building and publishing cabal-based binaries |
-| `CertSigning` | certificate signing workflows |
 | `DNSRegistration` | DNS record registration |
 | `Environment` | environment/machine bootstrapping |
 | `Initialize` | initial setup sequencing |
@@ -163,9 +199,26 @@ above, where this project's own conventions get enforced:
 | `Gcp.PreviewEnvironment` | several Cloud Run deploys composed into one named node: a preview environment |
 | `Gcp.VmProvision` | turn up a GCE instance, then run a salmon binary on it over SSH via `Self` |
 
-`salmon-ops-recipes-experimental/src/SreBox/` (not part of the default
-package set — see [Build](#build)): `KitchenSinkBlog`,
-`KitchenSinkMultiSites`, `GeneratedSite`.
+`salmon-ops-recipes-experimental` (not part of the default package set — see
+[Build](#build)) holds `SreBox.CertSigning` (certificate signing workflows),
+`SreBox.KitchenSinkBlog`, `SreBox.KitchenSinkMultiSites`,
+`SreBox.GeneratedSite`, and the `Salmon.Builtin.Nodes.Acme` builtin
+(ACME/Let's Encrypt certificate issuance).
+
+## Binaries
+
+`salmon-apps/` — each one is a small `Main` over a recipe:
+
+| Binary | Does |
+|---|---|
+| `salmon-migrator` | Postgres migrations, template databases and clones (`config template`/`clone`) |
+| `salmon-pgpair` | a Postgres primary/standby pair whose primary is a declaration — see [`docs/postgres-pair.md`](docs/postgres-pair.md) |
+| `salmon-pg-backup` | take a Postgres dump now, or install the cron job that keeps taking one, here or on another machine |
+| `salmon-init-locally` | the local-machine salmon setup (sudoers, the salmon user and group) |
+| `salmon-gcp-toy` | a tiered, throwaway exercise of the GCP builtins against a real project — see [`docs/gcp-toy-validation.md`](docs/gcp-toy-validation.md) |
+| `salmon-toy-qemu-pg-ha` | the `salmon-pgpair` demo on three qemu guests, with a client that keeps writing while the primary moves |
+| `salmon-fleet` | the controller's side of pull mode: `status DIR` folds the hosts' status documents into one line per host; `keygen`/`sign` make signed documents |
+| `salmon-tui` | a terminal client for `run serve --http` (or `--http-tcp`) |
 
 ## Docs
 
@@ -188,7 +241,12 @@ package set — see [Build](#build)): `KitchenSinkBlog`,
   the GCP builtins against a real, throwaway project with the `salmon-gcp-toy`
   binary: what it declares, how to read an `up`/`up`/`down` run, and what the
   automated (Layer 0) tests cannot tell you.
-- [`CLAUDE.md`](CLAUDE.md) — repository-level conventions (package layering,
+- [`docs/salmon-ops-patterns.md`](docs/salmon-ops-patterns.md) — recurring
+  shapes worth reusing across recipes (e.g. a one-time privileged bootstrap).
+- [`specs/`](specs/) — design sketches, each headed by a `Status:` line saying
+  what of it has shipped.
+- [`CLAUDE.md`](CLAUDE.md) — the architecture module by module, and
+  repository-level conventions (package layering,
   idempotency conventions, failure-propagation rules) for anyone (human or
   AI) working in this codebase.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.

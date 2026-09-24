@@ -1,7 +1,11 @@
 # HA Postgres + bouncer + app-instance + LB control plane
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan.
+Status: draft / not implemented as a whole. Of the phased plan, only the
+first half of phase 1 exists: the operator-driven pair of
+`specs/pg-switchover.md` (`SreBox.PostgresPair`, `salmon-pgpair`); the
+Patroni half is still a sketch, and phases 3–7 (app-instance recipe, LB and
+DNS wiring, `ControlPlaneSeed`, hardware profiles, monitoring) have no code.
+This is a design sketch to react to, not a committed plan.
 
 The database tier (§1–2) has moved to `pg-switchover.md` (operator-driven,
 two nodes) and `pg-patroni.md` (automatic failover). This spec keeps the

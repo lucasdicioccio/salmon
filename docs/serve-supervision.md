@@ -119,7 +119,8 @@ up <seed>
 status
 ```
 
-You should see your nodes listed, `TurnUp`/`Converged`. Now perturb something
+You should see `serve: mode: interactive`, then your nodes listed,
+`up`/`Converged`. Now perturb something
 underneath it from another terminal — if any of your nodes is a
 `Filesystem.filecontents` or a `Filesystem.dir`, edit or delete the file/
 directory by hand. Then:
@@ -161,7 +162,10 @@ quit
 ```
 
 `help` at any point prints the full command reference; `help TOPIC` (e.g.
-`help select`, `help force`) prints more about one command.
+`help select`, `help force`) prints more about one command. Two commands
+this doc does not otherwise use: `load FILE` runs a file of these lines, in
+order, as if typed, and `up-directive`/`only-directive`/`down-directive FILE`
+declare straight from a directive JSON file instead of seed args.
 
 ## 4. What's free vs. what needs decoration
 
@@ -183,6 +187,8 @@ quit
 | reports a script can parse | ❌ (text by default) | `--json` (§11) |
 | fetching declarations from a registry instead of typing them | ❌ (stdin only) | `--follow DIR --label L` (§12) |
 | a second operator or a tool attached to a running `serve` | ❌ (stdin only by default) | `--listen PATH` (§13) |
+| reads, commands and a live event stream over HTTP, a terminal client, a web page | ❌ | `--http PATH` (§14), `--http-tcp HOST:PORT` with TLS and a token for a network |
+| a status document a fleet reader can fold | ❌ | `--status-sink PATH` (§12) |
 
 ## 5. Decorating nodes: `check`
 
@@ -430,8 +436,9 @@ flag is absent.
 
 Every object has a `kind` (the report's constructor, kebab-cased:
 `declared`, `converge-start`, `done`, `failed`, `wedged`, ...), a `stream`
-(`serve` for the loop's own reports, `updown` for what a node did; the
-tending loop's reports arrive nested inside `serve`'s `tended`), a `ref`
+(`serve` for the loop's own reports, `updown` for what a node did, `follow`
+for the fetcher's under `--follow` (§12); the tending loop's reports arrive
+nested inside `serve`'s `tended`), a `ref`
 whenever the report is about one node (`{"short": ..., "full": ...}`, the
 same short tag `status`/`query show` print after `#`, so it pastes back in as
 a selector), and the node's `shorthand`/`help`/`notes` under `node`. Report
@@ -444,7 +451,7 @@ out with a `seq` added.
 
 Two things the flag does not cover. A node's *own* subprocess output — the
 `Binary.Report`s a node's builder was handed a `reportPrint` for — is not one
-of the three streams and still prints as text, so a binary whose nodes were
+of the four streams and still prints as text, so a binary whose nodes were
 built with `reportPrint` (all of `salmon-apps` today) interleaves those lines
 with the JSON ones; a consumer should skip lines that are not JSON. And
 `run tree`/`run dag`/`query` are renderings of their own, not reports, and
@@ -486,7 +493,7 @@ What happens when nothing changed: **nothing**. The registry's mtime and size
 say whether to read the file at all, the sha256 of the bytes says whether
 anything changed, and an unchanged round is invisible to the loop. That rule
 is load-bearing: every line reaching the loop stands the tending machines
-down (§3), so a fetcher that injected on every poll would keep the supervisor
+down (§1), so a fetcher that injected on every poll would keep the supervisor
 from ever reaching a steady state. Poll as often as you like.
 
 `history` tells the fetcher's declarations from yours:
@@ -659,7 +666,7 @@ reported and is a failed round:
 
 ```
 follow: refusing the document for web (sha256=1f0d2c9a7b3e):
-signature does not verify against fleet-signing-key
+unsigned document: a signing key is configured (--follow-key) and this document carries no signed envelope
 ```
 
 The bytes are neither injected nor cached; the last good document stays in
@@ -812,15 +819,16 @@ Four things to know:
   With a socket to talk to, the process is expected to outlive whatever
   started it (`< /dev/null &`, a unit file), so stdin is one more source
   whose hang-up is reported and read past; only `quit` — typed anywhere —
-  or a signal ends it. Without `--listen`, stdin closing ends the loop as
-  it always has.
+  or a signal ends it. The same holds under `--http`/`--http-tcp` (§14).
+  Without any of them, stdin closing ends the loop as it always has.
 - **The socket is owner-only (mode 0600) and the path is checked before it
   is taken.** A stale socket file (its `serve` died without removing it) is
   replaced; one something still answers on is refused (`AlreadyListening`),
   as is a path holding something that is not a socket. Permissions are the
   whole access story: there is no authentication, and no TCP — see the
   spec's security section for why a salmon server must never listen on a
-  network without both.
+  network without both (`--http-tcp`, §14, is the one listener that does,
+  and it has both).
 
 The commands are still one inbox: a line from a client stands the tending
 machines down before it runs, same as a line from stdin, and two clients'
@@ -940,9 +948,9 @@ What to know:
   `salmon-apps`, over `Salmon.Client.Http` and the pure `Salmon.Client.Model`).
   It reads `/dag` once, follows `/events` from that snapshot's `seq`, and
   draws a header (socket, mode, seq, converged/errored/total, the current
-  pass, `stream=live|reconnecting`), the node table in `/dag`'s order —
+  pass, `supervising`/`not supervising`, `stream=live|reconnecting`), the node table in `/dag`'s order —
   ref, shorthand, direction, state, last check, last event — and a footer.
-  `j`/`k` move, `enter` expands the selected node (help, notes, paths, edges,
+  `j`/`k` (or the arrows) move, `g`/`G` jump to the first/last row, `enter` expands the selected node (help, notes, paths, edges,
   check reason, error, the output ring of the last snapshot), `r` re-reads
   `/dag`, `q` quits leaving the server as it was, and `:` opens a command
   line: the line is sent as `POST /command?async` and the footer echoes the
@@ -1025,7 +1033,7 @@ $ curl -s --unix-socket /run/my-salmon.http http://x/history | jq -c '.seeds[] |
 {"kind":"other","name":"127.0.0.1:51510#0"}                  # the unix socket: no token, and who typed the line
 ```
 
-Five things to know:
+Eight things to know:
 
 - **There is no plaintext option, behind any flag.** `Http.Bind` has a
   unix constructor and a TLS constructor and nothing else; `--http-tcp`

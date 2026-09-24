@@ -56,7 +56,12 @@ exposed as a standalone fixture binary
 `bootstrap` seed on a unified CLI binary — folding it into the latter
 shape (a proper `Seed = Bootstrap User | BootVm VmSpec | ...`) is the
 natural next step if/when this tier grows a real production binary instead
-of remaining test-only support code.
+of remaining test-only support code. `salmon-toy-qemu-pg-ha`
+(`salmon-apps/src/QemuPgHaToy.hs`) already has the two-seed shape — a
+`prereqs` seed run once under `sudo` (root filesystems, and `/etc/ssh`
+handed to the unprivileged user), then `up`/`client` without it — though
+its two capability grants are still a documented manual `setcap`, not a
+node in `prereqs`.
 
 **Related, but not this pattern:** if the privileged step *isn't* safely
 re-runnable (e.g. a real schema migration, a one-shot data backfill), don't

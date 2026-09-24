@@ -7,8 +7,8 @@ The whole point of this binary is that moving the primary is an /edit/, not
 a procedure: one word of the seed changes, and a pass makes the machines
 agree with it.
 
-> salmon-pgpair config --primary A | salmon-pgpair run up
-> salmon-pgpair config --primary B | salmon-pgpair run up
+> salmon-pgpair config --primary A --a HOST_A --b HOST_B --bouncer HOST_C | salmon-pgpair run up
+> salmon-pgpair config --primary B --a HOST_A --b HOST_B --bouncer HOST_C | salmon-pgpair run up
 
 What it assumes was done before it ever ran, because a recipe that ships
 secrets has chosen a transport for everybody who uses it: the two machines

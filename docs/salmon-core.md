@@ -106,9 +106,10 @@ place where "recipe for finding neighbors" becomes "the neighbors."
 A flat ordered script conflates two different things: "must happen before"
 and "happens to be listed first." A DAG keeps them separate — two independent
 branches of provisioning can be *expressed* as unordered (`Overlay`) and a
-traversal is free to run them concurrently, retry just one, or report exactly
-which one failed, without the script author having had to think about
-interleaving at authoring time. The DAG shape is also what makes **dedup**
+traversal is free to run them concurrently (`run serve` does, one thread per
+node — `Salmon.Actions.Concurrent`), retry just one, or report exactly which
+one failed, without the script author having had to think about interleaving
+at authoring time. The DAG shape is also what makes **dedup**
 possible: because nodes carry an explicit identity (`Ref`, at the `salmon-ops`
 layer — see [`howto-ops.md`](howto-ops.md) §2.1), the same logical resource
 reached via two different paths through the graph is recognized as one node,
@@ -149,7 +150,7 @@ would support a differently-shaped `ext`, as long as:
   flat list.
 
 Concretely, this points at use cases beyond "provision a server," building on
-the same up/down/check/notify shape:
+the same up/down/check shape:
 
 - **CI/CD pipelines** — the existing use case in this repo (see
   `SreBox.CabalBuilding`, `SreBox.GeneratedSite`): a build/test/publish
@@ -239,6 +240,15 @@ These terms recur throughout the codebase and its documentation:
   writing and testing `salmon-ops` nodes on top of this model.
 - `salmon-core/src/Salmon/Op/{Graph,OpGraph,Track,Eval}.hs` — the actual
   source, all four modules short enough to read end to end in one sitting.
+  `Salmon.Op.GraphFold` and `Salmon.FoldBranch` are the two generic folds
+  over an expanded `Cofree Graph` (context carried from ancestor to
+  descendant; root-to-node paths, which `run tree` and `query` print).
+- `salmon-ops/src/Salmon/Op/Dag.hs` — how an expanded graph is collapsed into
+  a DAG with one node per `Ref`, and edges both ways; every driver walks that
+  rather than the tree.
 - `salmon-ops/src/Salmon/Actions/UpDown.hs` — the reference traversal
-  (`upTree`/`downTree`) built on `Eval.expand`; the closest thing to a
-  "how do I fold over one of these graphs for real" example.
+  (`upTree`/`downTree`) built on `Eval.expand` and `Dag`; the closest thing to
+  a "how do I fold over one of these graphs for real" example.
+  `Salmon.Actions.Concurrent` and `Salmon.Actions.Upkeep` are the concurrent
+  and continuously-supervising versions `run serve` uses — see
+  [`serve-supervision.md`](serve-supervision.md).

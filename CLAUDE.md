@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Salmon is a Haskell library/toolkit for expressing infrastructure/provisioning/CI-CD operations
-("xyz-dependencies") as DAGs of idempotent operations ("ops"), with uniform up/down/check/notify
+("xyz-dependencies") as DAGs of idempotent operations ("ops"), with uniform up/down/check
 semantics regardless of whether a node is as small as "create a file" or as large as "turn a server up".
 
 ## Packages (cabal multi-package project)
@@ -17,12 +17,13 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   (`Salmon.Builtin.CommandLine`) that all salmon-based binaries use. Tries to stay light on
   cabal deps but allows heavier deps for genuinely deep tasks (e.g. cert generation/signing).
 - `salmon-ops-recipes` — higher-level, opinionated "recipes" built out of `salmon-ops` builtins
-  (e.g. `SreBox.PostgresMigrations`, `SreBox.CertSigning`, `SreBox.MicroDNS`). This is where
+  (e.g. `SreBox.PostgresMigrations`, `SreBox.PostgresPair`, `SreBox.MicroDNS`). This is where
   conventions get enforced (e.g. whether migrations ship and run locally vs. via a remote
   connstring). Kept deliberately free of heavy/unstable dependencies.
 - `salmon-ops-recipes-experimental` — recipes that need heavier or less-stable dependencies:
   `SreBox.KitchenSinkBlog`/`SreBox.KitchenSinkMultiSites` (pull in the `kitchen-sink` library) and
-  `SreBox.GeneratedSite` (builds/publishes kitchen-sink-generated sites via `SreBox.CabalBuilding`).
+  `SreBox.GeneratedSite` (builds/publishes kitchen-sink-generated sites via `SreBox.CabalBuilding`),
+  plus `SreBox.CertSigning` and the `Salmon.Builtin.Nodes.Acme` builtin (pull in `acme-not-a-joke`).
   Split out of `salmon-ops-recipes` so that package's build stays fast; **not** part of the
   default `cabal.project` package set — it's only built via `cabal.perso.project` (see below).
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
@@ -897,8 +898,9 @@ argument. What follows is the list of things that are load-bearing; each was a d
 - **Traffic moves through pgbouncer's admin console**: `PAUSE`, rewrite, `RELOAD`, `RESUME`, never
   a restart, since a restart drops the clients the bouncer is there to hold. That is why the
   routing lives in its own file pulled in by `%include` and deliberately *not* among
-  `systemdServiceWatching`'s watched files: the ini has one writer (`PgBouncer.setup`, which
-  restarts on change) and the routing file has another (the role node, which does not), and one
+  `systemdServiceWatching`'s watched files: the ini has one writer (`bouncerSetup`, which renders
+  it with `PgBouncer.renderIni` over ssh and restarts on change — `PgBouncer.setup` is the local
+  equivalent, and watches the ini the same way) and the routing file has another (the role node, which does not), and one
   file with two writers is how a switchover becomes an outage.
 
 `Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;

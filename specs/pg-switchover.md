@@ -1,6 +1,15 @@
 # Two-node Postgres with salmon-driven switchover and failover
 
-Status: partly implemented, and the rest is still a sketch to react to.
+Status: implemented — phases 1 to 6 of the phased plan and the disaster
+catalogue S1–S8, in `SreBox.PostgresPair` (`member`, `seedMember` via
+`pair_seed`, `bouncerSetup`, `pairRole`, `pairOp`), `salmon-pgpair` and
+`salmon-toy-qemu-pg-ha`, tested by `Test.PostgresPairSpec`,
+`Test.PostgresSwitchoverSpec` and `Test.PgPairDemoSpec`. The paragraphs
+below record how it got there; where an earlier one says something is not
+done (the re-seeding half of phase 6), a later one says it since was.
+Still open: the questions at the end (`pair_synchronous` is not offered;
+the old `primaryReplicationSetup`/`standbyReplicationSetup` still exist
+beside the symmetric members). Kept as the design record.
 
 Done: the prerequisites P1-P5; the state table and the probe
 (`SreBox.PostgresPair`, phase 2), covered at Layer 0 including every
