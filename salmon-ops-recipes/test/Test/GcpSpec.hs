@@ -148,6 +148,10 @@ cloudRunTests =
             (isFailure (CloudRun.interpretServiceDescribe "us-docker.pkg.dev/p/r/img:2" ExitSuccess "image: us-docker.pkg.dev/p/r/img:1\n"))
     , testCase "describe failing means the service is absent" $
         assertBool "" (isFailure (CloudRun.interpretServiceDescribe "img:1" (ExitFailure 1) ""))
+    , testCase "for down, a service on a stale image is still present" $ do
+        -- down deletes what exists; the image only matters for up.
+        assertEqual "" Success (CloudRun.interpretServicePresence ExitSuccess "image: us-docker.pkg.dev/p/r/img:1\n")
+        assertBool "" (isFailure (CloudRun.interpretServicePresence (ExitFailure 1) ""))
     ]
 
 -------------------------------------------------------------------------------
