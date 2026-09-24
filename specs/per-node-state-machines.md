@@ -1,7 +1,14 @@
 # Per-node state machines: a supervised tree over a folded graph
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan.
+Status: milestones 1 to 9 below are implemented, each marked *landed* with
+its deviations recorded in place: `check :: IO CheckResult`
+(`Builtin/Extension.hs`), `Salmon.Op.Dag`, `Salmon.Op.Ledger`, both synchronous
+drivers over them (`Actions/UpDown.hs`), `Salmon.Op.Rewrite`,
+`Salmon.Op.Status`/`Salmon.Op.Mailbox`/`Salmon.Actions.Concurrent`,
+`Salmon.Actions.Upkeep` with `Salmon.Op.Supervision`, `Extension.managed` with
+`Nodes/Daemon.hs`, and `supStrategy = RestForOne`. What is left — the (R)
+and (I) items, of which only I2 and I4 are still open — is tracked in
+`specs/per-node-state-machines-remaining.md`. Kept as the design record.
 
 This revision follows the `deptrack-devops` precedent
 ([`Devops/Graph.hs`](https://github.com/lucasdicioccio/deptrack-project/blob/master/deptrack-devops/src/Devops/Graph.hs)),

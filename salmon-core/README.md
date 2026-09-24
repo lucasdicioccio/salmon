@@ -1,5 +1,8 @@
 # Salmon
 
+Early design notes, kept as written. For the model as it stands see
+[`docs/salmon-core.md`](../docs/salmon-core.md); for the project, the
+[top-level README](../README.md).
 
 # Idea
 
@@ -30,7 +33,7 @@ Goal of Salmon: address both needs, still provide good re-usability, good report
   - spec: a json-encoded (goal is to carry large objects for robots on stdin)
 
 - Pipe the two:
-   - `my-salmon config 123 | my-salmon run Up`
+   - `my-salmon config 123 | my-salmon run up`
 
 
 ## manual configs

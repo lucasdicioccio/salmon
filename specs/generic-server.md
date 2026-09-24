@@ -1,7 +1,20 @@
 # A generic salmon server: `serve` behind an API, with clients that show the DAG
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan. Companion to `specs/pull-mode.md` (which is about a host
+Status: milestones 1 to 8 below are implemented (`--json` via
+`Salmon.Reporter.Tagged`; `run serve --listen` via `Salmon.Actions.Serve.Socket`;
+`run serve --http` via `Salmon.Actions.Serve.Http` with `/dag`, `/status`,
+`/history`, `/help/seed`, `POST /command[?async]`; `GET /events` via
+`Salmon.Actions.Serve.Events` and `--events-ring`; `mode` on `status`/`/dag`;
+`salmon-tui` over `Salmon.Client.Http`/`Salmon.Client.Model`; the web UI under
+`salmon-ops/ui/` served at `GET /`; and `--http-tcp` with `--tls-cert`,
+`--tls-key`, `--token-file`), each with its deviations recorded in place in
+the milestone list. Milestone 8's closing "Not done: the clients" has since
+been done: `salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]`,
+and a browser signs in at `/auth` for a session cookie (`--session-lifetime`,
+`--session-idle`, sign-out at `/auth/logout`). Still open: the web UI's
+"Not yet" items under milestone 7 (a `Conflicting` pair side by side, batch
+and `RemoteOp` expansion, `history` as a timeline), client certificates and
+a read-only token. Kept as the design record. Companion to `specs/pull-mode.md` (which is about a host
 *fetching* its declarations); this one is about *talking to* a running
 `serve` — a web UI, a terminal UI, tooling — and about finally showing the
 DAG as what it is while it is being converged and tended.
@@ -351,7 +364,8 @@ cheap one and lands first.
    because vendoring a bundle for a graph of tens of nodes is the wrong
    trade and the layout is a hundred lines. And a browser cannot open a
    unix socket, so the page is reached through a TCP forward (`socat`,
-   `ssh -L`) until milestone 8; nothing here listens on a port. The
+   `ssh -L`) until milestone 8, which added `--http-tcp` and the `/auth`
+   sign-in, so a browser now reaches it directly. The
    actions and the seed form add three more deviations, all on the write
    side. Every write is `POST /command?async` and never the synchronous
    form — the page reads the outcome off `/events` by the request's
@@ -365,7 +379,8 @@ cheap one and lands first.
    epoch's nodes, so the panel offers every live declaration's `down`
    instead and the operator picks. Also deliberate: no `quit` on the page
    (the page is served by the process it would stop), and no bearer token
-   sent, because nothing asks for one until milestone 8. Not yet: the
+   sent: over `--http-tcp` the browser signs in at `/auth` and carries a
+   session cookie instead (milestone 8). Not yet: the
    `Conflicting` pair side by side, collapsing a batch to its members and
    expanding a `RemoteOp` (neither is on `/dag`, see milestone 3's
    deviations), and `history` as a timeline — it is a table under the

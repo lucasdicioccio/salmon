@@ -1,7 +1,15 @@
 # Local qemu VMs + tap/bridge networking for recipe testing
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan.
+Status: phases 1 to 5 of the phased plan are implemented:
+`Salmon.Builtin.Nodes.LinuxBridge` (`bridge`/`tap`), `Debootstrap.ensureVm9pBoot`
+(9p root, `-kernel`/`-initrd`), `Salmon.Builtin.Nodes.Qemu` (a VM as a
+`systemdService`), and the Layer 3 tier in `Test.Harness` (`withVm`/`withVmAt`,
+`Test.QemuSmokeSpec`), whose first real recipe test is
+`Test.PostgresReplicationSpec`. The first "Future work" item shipped too:
+`Test.PostgresSwitchoverSpec` and `Test.PgPairDemoSpec` run several VMs on
+one bridge. Not done: phase 6 (a raw disk image) and snapshot/clone support.
+How it was built, and what departed from this design, is in
+`specs/qemu-test-vms-progress.md`. Kept as the design record.
 
 ## Problem
 

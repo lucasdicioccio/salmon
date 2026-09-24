@@ -1,14 +1,17 @@
 # Salmon as PID 1: an init system whose unit graph is a real DAG
 
-Status: draft / not implemented — **revised** after the supervision work it
-asked for shipped (`Nodes/Daemon.hs`, `Op/Supervision.hs`,
-`Actions/Upkeep.hs`, `Actions/Serve.hs`'s tending loop) and after two
-companion sketches were written (`specs/pull-mode.md`,
-`specs/generic-server.md`). This is a design sketch to react to, not a
-committed plan. Sections below that describe something as missing have been
-re-checked against the tree as of 2026-09-23; where the original text has
-been overtaken it is rewritten rather than annotated, so the spec reads as
-one argument.
+Status: the init system itself is not implemented — milestones 1 to 6
+(the Rust `salmon-init`, the spawn protocol, a `SalmonInit.service` node,
+ordered shutdown) have no code. All four prerequisites it consumes have
+shipped: 0a supervision (`Nodes/Daemon.hs`, `Op/Supervision.hs`,
+`Actions/Upkeep.hs`, `Actions/Serve.hs`'s tending loop), 0b history
+retention, 0c the serve-language socket (`run serve --listen`,
+`Salmon.Actions.Serve.Socket`; also `--http`), and 0d pull mode with a
+cached last document (`run serve --follow ... --follow-cache`,
+`Salmon.Actions.Follow`). Sections below were
+re-checked against the tree as of 2026-09-23; where the original text had
+been overtaken it was rewritten rather than annotated. A design sketch to
+react to, not a committed plan.
 
 ## What has shipped since this was first written
 
@@ -26,8 +29,8 @@ this spec now *consumes* them:
 | a supervisor that survives its own commands | `Upkeep.Kept`: machines holding a `managed` effect outlive the supervisor that started them and are adopted by the next (`Upkeep.Under`) |
 | `worldHistory` retention | done (`885d9f0`) |
 | a magma keyed by `Ref` | `Op/Dag.hs`, `Op/Ledger.hs`, `Op/Rewrite.hs` |
-| a control socket speaking the `serve` language | not shipped; now specified in `specs/generic-server.md` |
-| reconfiguration by re-reading a file | not shipped; `specs/pull-mode.md` gives a stronger answer (below) |
+| a control socket speaking the `serve` language | shipped: `run serve --listen PATH` (`Actions/Serve/Socket.hs`, `specs/generic-server.md` milestone 2) |
+| reconfiguration by re-reading a file | shipped as pull mode: `run serve --follow` and `--follow-cache` (`specs/pull-mode.md`) |
 
 What is still genuinely missing is **PID 1 itself** — reaping, signals,
 stage-0 mounts, `reboot(2)` — and the process-topology decision that follows

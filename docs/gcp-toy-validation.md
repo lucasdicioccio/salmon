@@ -8,7 +8,7 @@ rendered `gcloud` argument lists. Nothing in `cabal test` ever talks to Google,
 so "does an `up` actually converge, and is it idempotent, and does `down` take
 it all away" is a question only a real project can answer.
 
-Two pieces do that:
+Three pieces do that:
 
 - `salmon-apps`'s **`salmon-gcp-toy`** binary (`salmon-apps/src/GcpToy.hs`), a
   tiered, throwaway stack built out of the Gcp builtins, driven through the
@@ -70,7 +70,7 @@ then provisions with *this same binary*.
 | `Gcp.SshAccess.installMetadataCaKey` | the CA's public key, into project metadata |
 | `Gcp.Compute.gceInstance` | the VM, claiming the address and carrying the tag |
 | `Gcp.SshAccess.sshAvailable` | waits for sshd to answer *as that user, with that certificate* |
-| `Self.uploadAndCallSelfAsSudoWithIdentity` | rsyncs this binary over and runs `run up` on it there |
+| `Self.uploadAndCallSelfAsSudoWith` (via `SreBox.Gcp.VmProvision.provisionedVm`) | rsyncs this binary over and runs `run up` on it there |
 
 The startup script is what closes the gap `installMetadataCaKey` leaves:
 nothing on a GCE instance reads that metadata key by itself. It fetches the
@@ -81,7 +81,8 @@ it passwordless sudo, and makes sure `rsync` is there for the upload.
 
 **Tier 2 runs in two passes, and the script drives both.** GCP picks the
 address, so the first pass reserves it and stops; the driver then reads the
-IP (`Compute.readAddress`) and re-issues the directive with `--vm-ip`, and
+IP (`gcloud compute addresses describe`, the call `Compute.readAddress`
+wraps) and re-issues the directive with `--vm-ip`, and
 the second pass declares the same graph plus the provisioning step. That is
 not a wart of the toy: an `Op` naming the host has to be built before any
 `up` runs, so *something* outside the graph has to carry the address across.

@@ -1,5 +1,14 @@
 # GCP Support Plan for Salmon
 
+Status: phase 1 (gcloud-first) is implemented through all ten steps of §15:
+`Salmon.Builtin.Nodes.Gcp.{Core,Storage,Compute,SshAccess,Iam,ArtifactRegistry,CloudRun,LoadBalancing}`
+(instance-group and serverless-NEG backends), plus modules the plan did not
+list (`ResourceManager`, `Billing`, `ServiceUsage`, `SecretManager`), the
+recipes `SreBox.Gcp.{VmProvision,CloudRunDeploy,PostgrestCloudRun,PreviewEnvironment}`,
+`salmon-gcp-toy` and `Test.GcpSpec`. Not done: phase 2 (direct REST calls),
+the `SreBox.Gcp.WebStack` recipe of §2, CloudRun job executions, and a
+configurable `gcloud` path (both deferred by §17). Kept as the design record.
+
 This document proposes adding Google Cloud Platform (GCP) resource support to Salmon. The goal is to enable Salmon DAGs that turn up VMs, load balancers, Artifact Registry repositories, Cloud Storage buckets, and CloudRun services, while provisioning the VMs over SSH using an SSH-CA trust model.
 
 The design stays within Salmon's existing patterns: resources are modelled as `Op` nodes, GCP tools are wrapped via `Salmon.Builtin.Nodes.Binary`, and VM provisioning reuses the existing `Self`, `Ssh`, `Keys`, and `Rsync` machinery.
