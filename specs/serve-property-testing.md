@@ -1,7 +1,19 @@
 # Property-based testing for `run serve`
 
-Status: draft / not implemented. This is a design sketch to react to, not a
-committed plan.
+Status: v1 implemented, in `salmon-ops-recipes/test/Test/ServeModelSpec.hs`.
+It generates `up`/`down`/`only`/`clear`/`converge` sequences over a fixed
+three-seed universe, folds them through an independent shadow model, and checks
+that the real loop in piped-script mode agrees on its final `World` and on the
+per-node `up`/`down` counts: invariants 1, 2 and 3 (`prop_convergesLikeModel`)
+and 6 (`prop_clearSettlesToEmpty`, plus a bookkeeping check inside the first).
+Invariant 7 is covered implicitly, as suggested below: the suite finds each
+node in `worldNodes` by a `Ref` computed from its name alone (`nodeRef`), so a
+`Ref` that depended on history would make the lookup miss and the property
+fail. A third property, `prop_producersTakingTurnsAgree`, came later with
+`Serve.serveProducers` and is not one of the invariants below. Invariants 4
+and 5 stay example-based in `Test.ServeSpec`, per the non-goals.
+`Rewrite`-registered batching (v2) is not written yet. The three decisions at
+the end are resolved; the rest of this document is kept as the design record.
 
 ## Problem
 
@@ -178,3 +190,17 @@ and the spy's counters against the model's expected call counts.
   multi-seed overlap reliably, short enough that a first failing run is
   already close to minimal before shrinking does its work — needs a bit of
   experimentation once the harness exists rather than a guess up front.
+
+### How they were decided
+
+- **Library:** QuickCheck, through `tasty-quickcheck`, as the smaller
+  addition beside `tasty`/`tasty-hunit`. Both are test-only dependencies of
+  `salmon-ops-recipes`, and nothing else in the tree depends on them.
+- **Where the shadow model lives:** its own module, `Test.ServeModelSpec`,
+  separate from `Test.ServeSpec`.
+- **Commands per sequence:** between 1 and `min 30 (size + 5)` (`genCommands`).
+  With three seeds that overlap pairwise, that is enough to reach the
+  shared-node cases, and shrinking brings a failure down to a few lines. The
+  model's two subtleties (a node with no `check` is applied whenever it is
+  freshly tracked, and a node that settles `TurnDown` leaves `worldNodes`)
+  were found this way. Its haddock records them.
