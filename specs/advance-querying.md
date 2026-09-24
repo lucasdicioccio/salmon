@@ -7,7 +7,9 @@ nodes), the `Plan` artifact with its directive digest, `run up --plan`
 `Salmon.Actions.Query` and `Salmon.Builtin.CommandLine`; `serve`'s
 `status`/`query`/`converge --select` reuse the same resolver. Still open as
 written below: re-validating a plan's refs at `run` time, tag-based addressing,
-selection-only execution, and a plan for `downTree`. Kept as the design record.
+selection-only execution, and a plan for `downTree`. Where the code differs
+from the design, "Deviations from this design" at the end says how and why.
+Open question 2 is settled (see there). Kept as the design record.
 
 ## Problem
 
@@ -244,6 +246,9 @@ Mirrors `run tree`'s indentation, annotating matched lines:
   hatch dumb (skip the check entirely, operator's responsibility) rather than
   clever (silently re-resolve and hope the patterns still mean the same
   thing).
+  **Settled:** the escape hatch stayed dumb. `--force-stale-plan` prints a
+  warning naming both digests and applies `planExcludedRefs` as they are,
+  without re-resolving the patterns.
 - Tag/dynamics-based addressing (nodes opting into stable labels via the
   existing `dynamics` field, independent of tree position) would be more
   refactor-resistant than path globs, but requires node authors to annotate
@@ -263,3 +268,33 @@ Mirrors `run tree`'s indentation, annotating matched lines:
   yourself in the foot than the exclusion case).
 - The same `Plan`/digest idea applied to `downTree`, once teardown gets a
   `prelim`-equivalent.
+
+## Deviations from this design
+
+- **The digest is of the raw stdin bytes, not of canonical JSON.**
+  `Query.digestBytes` hashes exactly the bytes `run`/`query` read off stdin.
+  aeson gives no guarantee that decoding and re-encoding reproduces the same
+  bytes across invocations, and a digest that could change between `query
+  plan` and `run up` would refuse good plans. As a result, a directive that
+  was reformatted, even with the same meaning, no longer matches its plan.
+  That errs on the safe side, and `--force-stale-plan` is the way past it.
+- **`Plan` gained `planDirective`**, empty unless `query plan
+  --embed-directive` fills it with the directive's bytes. That makes the plan
+  a self-contained, replayable artifact, for example for an audit trail.
+  `query extract-directive PLAN` prints the embedded directive, so callers
+  never read the field directly.
+- **There is no `prelim` any more.** `Extension`'s `prelim` merged into `check
+  :: IO CheckResult` (see `CLAUDE.md`'s "`check`, not `prelim`"). `forceSkip`
+  replaces `check` with `pure Skipped`, and `Skipped` exists for this purpose
+  alone: it records a decision about the node, not a fact about its effect.
+  `run up --plan` does not go through `forceSkip` either. It passes the
+  excluded refs to `upDag` as an `UpDown.Gate`, so the exclusion composes with
+  collection rewrites: a batch runs if any of its members is wanted. The
+  report is the same `Skip` either way.
+- **`#ref` selectors were added** beside the path globs. A rewrite can
+  introduce a node, such as a batch, that has no declared tree position for a
+  path to match. A pattern starting with `#` matches by `Ref` instead: a
+  prefix of `shortRef` or of the full ref text. It expands through
+  `Rewrite.membersOf` to the declared nodes it stands for
+  (`Query.resolveRewrittenSelectors`). A plan's exclusion set still holds
+  declared refs only.
