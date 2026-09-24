@@ -23,6 +23,8 @@ extra-source-files: CHANGELOG.md
 
 library
     exposed-modules:
+                    Fleet
+                    Tui
                     Migrator
                     PgPair
                     QemuPgHaToy
@@ -36,6 +38,7 @@ library
 
     build-depends:    base >=4.16.3.0
                     , aeson
+                    , brick
                     , bytestring
                     , containers
                     , directory
@@ -48,6 +51,7 @@ library
                     , salmon-ops-recipes
                     , text
                     , time
+                    , vty
                     , unix
     ghc-options:   -Wall
     hs-source-dirs:   src
@@ -114,11 +118,30 @@ executable salmon-pg-backup
     ghc-options:      -threaded
     default-language: Haskell2010
 
+executable salmon-fleet
+    main-is:          FleetApp.hs
+
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
+    hs-source-dirs:   app
+    ghc-options:      -threaded
+    default-language: Haskell2010
+
 executable salmon-gcp-toy
     main-is:          GcpToyApp.hs
 
     build-depends:    base >=4.16.3.0
                     , salmon-apps
     hs-source-dirs:   app
+    ghc-options:      -threaded
+    default-language: Haskell2010
+
+executable salmon-tui
+    main-is:          TuiApp.hs
+
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
+    hs-source-dirs:   app
+    -- the stream is followed on its own thread while brick owns the terminal
     ghc-options:      -threaded
     default-language: Haskell2010

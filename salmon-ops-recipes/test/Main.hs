@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Test.CheckSpec as CheckSpec
+import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
@@ -8,6 +9,11 @@ import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
+import qualified Test.FollowCacheSpec as FollowCacheSpec
+import qualified Test.FollowRegistrySpec as FollowRegistrySpec
+import qualified Test.FollowSchedulerSpec as FollowSchedulerSpec
+import qualified Test.FollowSignatureSpec as FollowSignatureSpec
+import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpSpec as GcpSpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
@@ -29,9 +35,15 @@ import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
+import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
+import qualified Test.ServeEventsSpec as ServeEventsSpec
+import qualified Test.ServeHttpSpec as ServeHttpSpec
 import qualified Test.ServeModelSpec as ServeModelSpec
+import qualified Test.ServeSocketSpec as ServeSocketSpec
 import qualified Test.ServeSpec as ServeSpec
+import qualified Test.ServeTlsSpec as ServeTlsSpec
+import qualified Test.StatusSinkSpec as StatusSinkSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
@@ -77,12 +89,18 @@ main =
                 , PgPairDemoSpec.tests
                 ]
             , CheckSpec.tests
+            , ClientModelSpec.tests
             , ConcurrentSpec.tests
             , DaemonSpec.tests
             , DagSpec.tests
             , DebianPackageSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
+            , FollowCacheSpec.tests
+            , FollowRegistrySpec.tests
+            , FollowSchedulerSpec.tests
+            , FollowSignatureSpec.tests
+            , FollowSpec.tests
             , GcpSpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests
@@ -97,9 +115,15 @@ main =
             , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests
             , QuerySpec.tests
+            , ReportJsonSpec.tests
             , RewriteSpec.tests
+            , ServeEventsSpec.tests
+            , ServeHttpSpec.tests
             , ServeModelSpec.tests
+            , ServeSocketSpec.tests
             , ServeSpec.tests
+            , ServeTlsSpec.tests
+            , StatusSinkSpec.tests
             , SystemdSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests

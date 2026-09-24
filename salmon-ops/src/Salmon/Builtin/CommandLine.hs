@@ -3,19 +3,24 @@
 
 module Salmon.Builtin.CommandLine where
 
-import Control.Monad (void, when)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar)
+import Control.Applicative ((<|>))
+import Control.Monad (forM, forM_, void, when)
+import Data.Foldable (traverse_)
 import Control.Monad.Identity
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as LBysteString
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Options.Applicative
 import qualified Options.Applicative
 import Options.Generic
 import System.Exit (exitFailure)
-import System.IO (stdin)
+import System.IO (hPutStrLn, stderr, stdin, stdout)
 
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Concurrency as Concurrency
@@ -29,15 +34,25 @@ import Salmon.Op.OpGraph
 import Salmon.Op.Track
 
 import Salmon.Actions.Dot as Dot
+import qualified Salmon.Actions.Follow as Follow
+import qualified Salmon.Actions.Follow.Registry as Registry
+import qualified Salmon.Actions.Follow.Registry.Http as Registry.Http
+import qualified Salmon.Actions.Follow.Scheduler as Scheduler
+import qualified Salmon.Actions.Follow.Signature as Signature
 import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
+import qualified Salmon.Actions.Serve.Events as Events
+import qualified Salmon.Actions.Serve.Http as Http
+import qualified Salmon.Actions.Serve.Socket as Socket
+import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 -- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
 -- optparse-applicative's 'ParserResult' ones, which this module pattern
 -- matches on. Nothing here needs a 'CheckResult'.
 import Salmon.Actions.UpDown as UpDown hiding (Failure, Success)
 import Salmon.Builtin.Extension
 import Salmon.Reporter
+import qualified Salmon.Reporter.Tagged as Tagged
 
 data Command seed
     = Config seed
@@ -70,8 +85,8 @@ argForBaseCommand = \case
 -- @--plan@/@--force-stale-plan@ pair.
 data RunCommand
     = -- | @run up@, optionally honoring a @query plan@-emitted 'Query.Plan' file.
-      RunUp !(Maybe FilePath) !Bool
-    | RunDown
+      RunUp !(Maybe FilePath) !Bool !ReportFormat
+    | RunDown !ReportFormat
     | RunTree
     | RunDAG
     | -- | @run serve@, optionally capping how many nodes converge at once
@@ -79,12 +94,200 @@ data RunCommand
       -- 'Nothing' is unbounded, matching every version of @serve@ before
       -- this flag existed), and optionally starting with @autoconverge@ off
       -- (@--no-autoconverge@; 'False' is the default, matching every
-      -- version of @serve@ before the setting existed).
-      RunServe !(Maybe Int) !Bool
+      -- version of @serve@ before the setting existed). Then pull mode
+      -- ("Salmon.Actions.Follow"): a registry to follow (@--follow
+      -- REGISTRY@, a directory, @git+URL@, an HTTP URL, @dns:ZONE@ or a
+      -- bucket — see "Salmon.Actions.Follow.Registry"), the labels to
+      -- fetch from it (@--label L@,
+      -- repeatable; both or neither), and the fetcher's schedule
+      -- ('FollowOptions'). Last, optionally listening for the same
+      -- line protocol on a unix socket (@--listen PATH@, milestone 2 of
+      -- @specs/generic-server.md@; see "Salmon.Actions.Serve.Socket"),
+      -- stdin still read beside it, and for HTTP on a second unix socket
+      -- (@--http PATH@, milestone 3; see "Salmon.Actions.Serve.Http").
+      -- Last, the status sink ('SinkOptions', milestone 5 of
+      -- @specs/pull-mode.md@; see "Salmon.Actions.Serve.StatusSink").
+      -- The HTTP server's event stream keeps @--events-ring N@ events for a
+      -- client to resume from (milestone 4; see "Salmon.Actions.Serve.Events").
+      -- Last of all, the same HTTP over the network ('TcpOptions', milestone
+      -- 8): @--http-tcp HOST:PORT@ with @--tls-cert@, @--tls-key@ and
+      -- @--token-file@, all three or nothing.
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions
     deriving (Eq, Ord, Generic, Show)
+
+{- | The four flags that put the HTTP surface on a network, as typed. What
+they mean together is 'validateTcpOptions': there is no way to spell a
+plaintext listener, and the only accepted shapes are none of them or all of
+them.
+-}
+data TcpOptions = TcpOptions
+    { tcpBind :: !(Maybe String)
+    -- ^ @--http-tcp HOST:PORT@
+    , tcpCert :: !(Maybe FilePath)
+    -- ^ @--tls-cert FILE@
+    , tcpKey :: !(Maybe FilePath)
+    -- ^ @--tls-key FILE@
+    , tcpTokenFile :: !(Maybe FilePath)
+    -- ^ @--token-file FILE@
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON TcpOptions
+instance ToJSON TcpOptions
+
+-- | No network listener at all: the default.
+noTcp :: TcpOptions
+noTcp = TcpOptions Nothing Nothing Nothing Nothing
+
+-- | A validated 'TcpOptions': where to listen and the three files, all present.
+data TcpListen = TcpListen
+    { tcpHost :: !String
+    , tcpPort :: !Int
+    , tcpCertFile :: !FilePath
+    , tcpKeyFile :: !FilePath
+    , tcpTokenPath :: !FilePath
+    }
+    deriving (Eq, Ord, Show)
+
+{- | The loud default, as a pure function so it can be tested without a
+process: 'Nothing' when none of the four is given; a 'TcpListen' when all
+four are and the address parses; otherwise the message the binary exits
+with, naming every flag that is missing — so an operator who typed
+@--http-tcp@ alone is told about all three at once rather than one per
+attempt — or, for @--tls-cert@\/@--tls-key@\/@--token-file@ without
+@--http-tcp@, that they do nothing on their own. @HOST@ is never implied:
+@:8443@ is refused, since listening on every address is exactly the thing
+that should have to be spelled out (@0.0.0.0:8443@ does it). An IPv6 address
+is written in brackets, @[::1]:8443@.
+-}
+validateTcpOptions :: TcpOptions -> Either Text (Maybe TcpListen)
+validateTcpOptions opts =
+    case opts.tcpBind of
+        Nothing
+            | null given -> Right Nothing
+            | otherwise -> Left (Text.intercalate ", " given <> " need --http-tcp HOST:PORT to apply to; there is no network listener without it")
+        Just hostPort ->
+            case missing of
+                [] -> do
+                    (host, port) <- parseHostPort hostPort
+                    Right (Just (TcpListen host port (fromJust opts.tcpCert) (fromJust opts.tcpKey) (fromJust opts.tcpTokenFile)))
+                _ ->
+                    Left
+                        ( "--http-tcp needs "
+                            <> Text.intercalate ", " missing
+                            <> ": a salmon server never listens on a network without TLS and a token"
+                        )
+  where
+    named =
+        [ ("--tls-cert", opts.tcpCert)
+        , ("--tls-key", opts.tcpKey)
+        , ("--token-file", opts.tcpTokenFile)
+        ]
+    given = [flag | (flag, Just _) <- named]
+    missing = [flag | (flag, Nothing) <- named]
+
+-- | @HOST:PORT@, with @[v6]:PORT@ for an IPv6 address; the port is 0..65535.
+parseHostPort :: String -> Either Text (String, Int)
+parseHostPort s =
+    case break (== ':') (reverse s) of
+        (portRev, ':' : hostRev) -> do
+            let host = unbracket (reverse hostRev)
+                portText = reverse portRev
+            port <- case reads portText of
+                [(n, "")] | n >= 0 && n <= 65535 -> Right n
+                _ -> Left ("--http-tcp: not a port: " <> Text.pack (show portText))
+            when (null host) (Left ("--http-tcp: no host in " <> Text.pack (show s) <> "; spell the address, 0.0.0.0 included"))
+            Right (host, port)
+        _ -> Left ("--http-tcp: expected HOST:PORT, got " <> Text.pack (show s))
+  where
+    unbracket h
+        | Just inner <- stripBrackets h = inner
+        | otherwise = h
+    stripBrackets ('[' : rest) | not (null rest) && last rest == ']' = Just (init rest)
+    stripBrackets _ = Nothing
+
+{- | @--status-sink PATH@ and @--status-sink-interval SECONDS@ (default
+'StatusSink.defaultInterval'): where this host's status document is written,
+and how often between the writes a convergence pass or a follow injection
+triggers on their own. 'Nothing' writes none.
+-}
+data SinkOptions = SinkOptions
+    { sinkPath :: !(Maybe FilePath)
+    , sinkInterval :: !Int
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON SinkOptions
+instance ToJSON SinkOptions
 
 instance FromJSON RunCommand
 instance ToJSON RunCommand
+
+{- | The @--follow-*@ flags: the scheduler's numbers
+("Salmon.Actions.Follow.Scheduler"), in seconds where they are durations,
+then the cache directory (@--follow-cache DIR@; none by default, in which
+case nothing survives a restart) and @--follow-refuse-older@ (see
+'Follow.followRefuseOlder'). @--follow-interval@ is milestone 2's name for
+the base delay, kept as a synonym of @--follow-base@; either may be given,
+the base's own flag wins. Then the backends' own knobs (milestone 6):
+@--follow-timeout@ for the HTTP-backed ones, @--follow-workdir@ for the git
+checkout, @--follow-bucket-endpoint@ for an S3-compatible store. Last,
+@--follow-key FILE@ (repeatable): the public keys a document must be signed
+by ("Salmon.Actions.Follow.Signature"); with none given, documents are
+taken as they come — __unsigned mode is the default__.
+-}
+data FollowOptions = FollowOptions
+    { followBase :: !(Maybe Int)
+    , followInterval :: !(Maybe Int)
+    , followFactor :: !Double
+    , followCap :: !Int
+    , followJitter :: !Double
+    , followDebounce :: !Int
+    , followMaxWait :: !Int
+    , followCacheDir :: !(Maybe FilePath)
+    , followRefuseOlder :: !Bool
+    , followTimeout :: !Int
+    , followWorkdir :: !(Maybe FilePath)
+    , followBucketEndpoint :: !(Maybe Text)
+    , followKeys :: ![FilePath]
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON FollowOptions
+instance ToJSON FollowOptions
+
+followSchedule :: FollowOptions -> Scheduler.Config
+followSchedule o =
+    Scheduler.Config
+        { Scheduler.schedBase = seconds (fromMaybe defaultBase (o.followBase <|> o.followInterval))
+        , Scheduler.schedFactor = max 1 o.followFactor
+        , Scheduler.schedCap = seconds o.followCap
+        , Scheduler.schedJitter = max 0 (min 1 o.followJitter)
+        , Scheduler.schedDebounce = seconds o.followDebounce
+        , Scheduler.schedMaxWait = seconds o.followMaxWait
+        }
+  where
+    defaultBase = Scheduler.defaultConfig.schedBase `div` 1000000
+
+-- | A flag in seconds, as the microseconds the schedule and the backends take.
+seconds :: Int -> Int
+seconds n = max 0 n * 1000000
+
+{- | How the commands that execute something (@run up@, @run down@, @run
+serve@) report. @--json@ selects 'ReportJson': one JSON object per line on
+stdout, in the encoding "Salmon.Reporter.Tagged" defines, in place of the
+binary's own text reporters — so @run up --json | jq@ works, and a client
+of the server @specs\/generic-server.md@ sketches reads the same objects.
+Absent, 'ReportText' hands every report to the reporters the binary
+passed in, untouched.
+-}
+data ReportFormat
+    = ReportText
+    | ReportJson
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON ReportFormat
+instance ToJSON ReportFormat
 
 data QueryCommand
     = -- | @query show@: annotate the directive's tree with [selected]/[excluded].
@@ -133,7 +336,7 @@ runCommandParser =
     hsubparser $
         mconcat
             [ command "up" (info upP (progDesc "Runs (up) the directive on stdin."))
-            , command "down" (info (pure RunDown) (progDesc "Tears down (down) the directive on stdin."))
+            , command "down" (info (RunDown <$> reportFormatP) (progDesc "Tears down (down) the directive on stdin."))
             , command "tree" (info (pure RunTree) (progDesc "Prints a human-readable dependency tree."))
             , command "dag" (info (pure RunDAG) (progDesc "Prints Graphviz dot output."))
             , command "serve" (info serveP (progDesc "Reads a stream of seed declarations on stdin and converges."))
@@ -154,6 +357,196 @@ runCommandParser =
                     <> Options.Applicative.help
                         "Start with `autoconverge off`: declarations are recorded but not converged until an explicit `converge`."
                 )
+            <*> reportFormatP
+            <*> optional
+                ( strOption
+                    ( long "follow"
+                        <> Options.Applicative.metavar "REGISTRY"
+                        <> Options.Applicative.help "Pull mode: fetch declarations (one document per --label) from a registry: a directory (DIR/<label>.json), git+URL[#BRANCH[:SUBDIR]] (SUBDIR/<label>.json in the checkout), an http(s):// URL (<base>/<label>.json, or {label} placed in it), dns:ZONE (a TXT index at <label>.ZONE naming an https URL and a sha256), or s3://BUCKET/PREFIX / gs://BUCKET/PREFIX (public or presigned object URLs; no SDK, no credentials)."
+                    )
+                )
+            <*> many
+                ( strOption
+                    ( long "label"
+                        <> Options.Applicative.metavar "LABEL"
+                        <> Options.Applicative.help "A label to follow in the --follow registry; repeatable, the desired set is the union."
+                    )
+                )
+            <*> followOptionsP
+            <*> optional
+                ( strOption
+                    ( long "listen"
+                        <> Options.Applicative.metavar "PATH"
+                        <> Options.Applicative.help
+                            "Also accept the line protocol on a unix socket at PATH (created owner-only); each client is answered on its own connection, as JSON lines. Stdin keeps working alongside."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "http"
+                        <> Options.Applicative.metavar "PATH"
+                        <> Options.Applicative.help
+                            "Also serve HTTP on a unix socket at PATH (created owner-only): GET /dag, /status, /history, /help/seed and POST /command[?async]. Stdin keeps working alongside."
+                    )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "events-ring"
+                    <> Options.Applicative.metavar "N"
+                    <> Options.Applicative.value (Events.configRing Events.defaultConfig)
+                    <> Options.Applicative.showDefault
+                    <> Options.Applicative.help "How many events --http's /events keeps for a client to resume from with ?since=; a client further behind is sent a gap event."
+                )
+            <*> sinkOptionsP
+            <*> tcpOptionsP
+    tcpOptionsP =
+        TcpOptions
+            <$> optional
+                ( strOption
+                    ( long "http-tcp"
+                        <> Options.Applicative.metavar "HOST:PORT"
+                        <> Options.Applicative.help
+                            "Also serve the same HTTP over TCP at HOST:PORT, with TLS and a bearer token on every request. Requires --tls-cert, --tls-key and --token-file; there is no plaintext option. Spell the host ([::1]:8443 for IPv6)."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "tls-cert"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "The PEM certificate (with its chain, if any) --http-tcp serves."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "tls-key"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "The PEM private key for --tls-cert."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "token-file"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "A file holding the bearer token every --http-tcp request must present (surrounding whitespace ignored). Refused if readable by others."
+                    )
+                )
+    sinkOptionsP =
+        SinkOptions
+            <$> optional
+                ( strOption
+                    ( long "status-sink"
+                        <> Options.Applicative.metavar "PATH"
+                        <> Options.Applicative.help "Write this host's status document (JSON: host, mode, applied documents per label, the `status` object, the last converge and follow reports) to PATH, atomically, after every convergence pass and follow injection and on a timer; `salmon-fleet status DIR` folds a directory of them."
+                    )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "status-sink-interval"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (StatusSink.defaultInterval `div` 1000000)
+                    <> showDefault
+                    <> Options.Applicative.help "Seconds between two status sink writes when nothing triggers one."
+                )
+    followOptionsP =
+        FollowOptions
+            <$> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "follow-base"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help ("Seconds between two rounds of fetching the followed labels while rounds succeed (default " <> show (defaultSecs (.schedBase)) <> ").")
+                    )
+                )
+            <*> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "follow-interval"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help "Same as --follow-base (the older name)."
+                    )
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-factor"
+                    <> Options.Applicative.metavar "FACTOR"
+                    <> Options.Applicative.value Scheduler.defaultConfig.schedFactor
+                    <> showDefault
+                    <> Options.Applicative.help "How much slower each consecutive failed round makes the next one."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-cap"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (defaultSecs (.schedCap))
+                    <> showDefault
+                    <> Options.Applicative.help "The longest a failing registry is left alone between rounds."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-jitter"
+                    <> Options.Applicative.metavar "FRACTION"
+                    <> Options.Applicative.value Scheduler.defaultConfig.schedJitter
+                    <> showDefault
+                    <> Options.Applicative.help "Every delay is scaled by a uniform draw from [1-j, 1+j], so a fleet does not poll in step."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-debounce"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (defaultSecs (.schedDebounce))
+                    <> showDefault
+                    <> Options.Applicative.help "How long the registry must be quiet after a change before the change is applied; 0 applies at once."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-max-wait"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (defaultSecs (.schedMaxWait))
+                    <> showDefault
+                    <> Options.Applicative.help "The longest a change waits to be applied while the registry keeps changing."
+                )
+            <*> optional
+                ( strOption
+                    ( long "follow-cache"
+                        <> Options.Applicative.metavar "DIR"
+                        <> Options.Applicative.help "Keep each label's last applied document in DIR, and replay it at startup when the registry cannot be reached (status then says `mode: replay`). Without it a restart against an unreachable registry declares nothing."
+                    )
+                )
+            <*> switch
+                ( long "follow-refuse-older"
+                    <> Options.Applicative.help "Refuse a fetched document whose `published` timestamp is older than the one already applied for its label (reported as stale, not injected). Documents without `published` are never refused."
+                )
+            <*> Options.Applicative.option
+                Options.Applicative.auto
+                ( long "follow-timeout"
+                    <> Options.Applicative.metavar "SECONDS"
+                    <> Options.Applicative.value (Registry.Http.defaultOptions.optTimeout `div` 1000000)
+                    <> showDefault
+                    <> Options.Applicative.help "The longest one HTTP fetch may take, for the http(s)://, dns: and bucket registries; longer is a failed round."
+                )
+            <*> optional
+                ( strOption
+                    ( long "follow-workdir"
+                        <> Options.Applicative.metavar "DIR"
+                        <> Options.Applicative.help "Where a git+ registry is checked out (cloned once, then fetched and reset every round). Default: `checkout` under --follow-cache, else a directory under the system temporary directory named by the repository."
+                    )
+                )
+            <*> optional
+                ( strOption
+                    ( long "follow-bucket-endpoint"
+                        <> Options.Applicative.metavar "URL"
+                        <> Options.Applicative.help "For an s3:// registry, an S3-compatible endpoint (MinIO, Ceph RGW...) to address the bucket under, path-style: URL/BUCKET/PREFIX/<label>.json. Without it, https://BUCKET.s3.amazonaws.com."
+                    )
+                )
+            <*> many
+                ( strOption
+                    ( long "follow-key"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help "A public key (JWK, as `salmon-fleet keygen` writes FILE.pub) every fetched or replayed document must carry a signature by; repeatable, any one suffices. Without it documents are not required to be signed (the default). With it, an unsigned document is refused and never applied."
+                    )
+                )
+    defaultSecs :: (Scheduler.Config -> Int) -> Int
+    defaultSecs f = f Scheduler.defaultConfig `div` 1000000
     upP =
         RunUp
             <$> optional
@@ -167,6 +560,14 @@ runCommandParser =
                 ( long "force-stale-plan"
                     <> Options.Applicative.help "Proceed even if the plan's directive digest doesn't match stdin."
                 )
+            <*> reportFormatP
+    reportFormatP =
+        Options.Applicative.flag
+            ReportText
+            ReportJson
+            ( long "json"
+                <> Options.Applicative.help "Report as one JSON object per line on stdout (see Salmon.Reporter.Tagged) instead of text."
+            )
 
 queryCommandParser :: Parser QueryCommand
 queryCommandParser =
@@ -273,10 +674,10 @@ execCommandOrSeedWithRewrites ::
     IO ()
 execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     case cmd of
-        (Run (RunUp Nothing _)) -> do
-            result <- withGraph (runUp Set.empty)
+        (Run (RunUp Nothing _ fmt)) -> do
+            result <- withGraph (runUp (updownFor fmt) Set.empty)
             when (result == Just False) exitFailure
-        (Run (RunUp (Just planPath) forceStale)) -> do
+        (Run (RunUp (Just planPath) forceStale fmt)) -> do
             result <- withGraphAndBytes $ \dirBytes op -> do
                 planBytes <- LBysteString.readFile planPath
                 case eitherDecode planBytes of
@@ -287,7 +688,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         let actual = Query.digestBytes dirBytes
                         let expected = Query.planDirectiveDigest plan
                         if actual == expected
-                            then runUp (Set.fromList (Query.planExcludedRefs plan)) op
+                            then runUp (updownFor fmt) (Set.fromList (Query.planExcludedRefs plan)) op
                             else
                                 if forceStale
                                     then do
@@ -297,7 +698,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                                 <> ", this directive hashes to "
                                                 <> Text.unpack actual
                                                 <> "); proceeding due to --force-stale-plan"
-                                        runUp (Set.fromList (Query.planExcludedRefs plan)) op
+                                        runUp (updownFor fmt) (Set.fromList (Query.planExcludedRefs plan)) op
                                     else do
                                         putStrLn $
                                             "refusing to run stale plan: plan expects digest "
@@ -306,8 +707,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                                 <> Text.unpack actual
                                         exitFailure
             when (result == Just False) exitFailure
-        (Run RunDown) -> do
-            result <- withGraph runDown
+        (Run (RunDown fmt)) -> do
+            result <- withGraph (runDown (updownFor fmt))
             when (result == Just False) exitFailure
         (Run RunTree) -> do
             -- (R4): the computed 'Dag' is what @run up@ would actually walk
@@ -317,9 +718,143 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions)) -> do
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
-            void $ Serve.serveWith rewrites limit (not noAutoConverge) serveR r parseSeedArgs genBase traceBase stdin
+            let own = taggedFor fmt
+            -- the network listener is refused before anything is bound or
+            -- read: the flags as a whole, then the token file itself
+            tcp <- case validateTcpOptions tcpOptions of
+                Left err -> do
+                    hPutStrLn stderr (Text.unpack err)
+                    exitFailure
+                Right t -> pure t
+            tlsBinds <- forM (maybe [] pure tcp) $ \t -> do
+                token <- Http.readTokenFile t.tcpTokenPath
+                case token of
+                    Left (Http.TokenFileReadable path) -> do
+                        hPutStrLn stderr ("--token-file " <> path <> " is readable by others; a token anyone on the box can read is not one (chmod 600 it)")
+                        exitFailure
+                    Left (Http.TokenFileEmpty path) -> do
+                        hPutStrLn stderr ("--token-file " <> path <> " is empty")
+                        exitFailure
+                    Right tok -> pure (Http.BindTls (Http.TlsBind t.tcpHost t.tcpPort t.tcpCertFile t.tcpKeyFile tok))
+            let binds = [Http.BindUnix path | Just path <- [http]] ++ tlsBinds
+            follow <- case (followDir, traverse Follow.mkLabel labels) of
+                (Nothing, _) | not (null followOptions.followKeys) -> do
+                    hPutStrLn stderr "--follow-key needs a --follow REGISTRY whose documents it verifies"
+                    exitFailure
+                (Nothing, Right []) -> pure Nothing
+                (Nothing, _) -> do
+                    hPutStrLn stderr "--label needs a --follow REGISTRY to fetch from"
+                    exitFailure
+                (Just _, Right []) -> do
+                    hPutStrLn stderr "--follow needs at least one --label to fetch"
+                    exitFailure
+                (Just _, Left err) -> do
+                    hPutStrLn stderr (Text.unpack err)
+                    exitFailure
+                (Just addr, Right lbls) -> do
+                    -- the backend is chosen by the shape of the address; see
+                    -- "Salmon.Actions.Follow.Registry"
+                    address <- case Registry.parseAddress (Text.pack addr) of
+                        Left err -> hPutStrLn stderr (Text.unpack err) >> exitFailure
+                        Right a -> pure a
+                    -- a key that cannot be loaded must not start a loop that
+                    -- would then refuse everything, or accept everything
+                    keys <- forM followOptions.followKeys $ \path -> do
+                        loaded <- Signature.readPublicKeyFile path
+                        case loaded of
+                            Left err -> hPutStrLn stderr ("--follow-key " <> path <> ": " <> Text.unpack err) >> exitFailure
+                            Right k -> pure k
+                    let verifier = if null keys then Follow.noVerifier else Signature.signedVerifier keys
+                    registry <-
+                        Registry.open
+                            Registry.defaultOptions
+                                { Registry.optHttp = Registry.Http.Options{Registry.Http.optTimeout = seconds followOptions.followTimeout}
+                                , Registry.optWorkdir = followOptions.followWorkdir
+                                , Registry.optCacheDir = followOptions.followCacheDir
+                                , Registry.optBucketEndpoint = followOptions.followBucketEndpoint
+                                }
+                            address
+                    pure $
+                        Just
+                            Follow.Follow
+                                { Follow.followRegistry = registry
+                                , Follow.followLabels = lbls
+                                , Follow.followSchedule = followSchedule followOptions
+                                , Follow.followCache = followOptions.followCacheDir
+                                , Follow.followRefuseOlder = followOptions.followRefuseOlder
+                                , Follow.followVerify = verifier
+                                }
+            -- the fetcher's first round is in the inbox before standard
+            -- input is even read, so the first convergence is what the
+            -- registry says, deterministically; after that both interleave
+            -- at line granularity.
+            gate <- newEmptyMVar
+            -- what `fetch` pokes: the fetcher's clock wakes on it; and
+            -- what `status` reads: the fetcher's mode
+            pk <- Scheduler.newPoke
+            modeVar <- Follow.newMode
+            appliedVar <- Follow.newApplied
+            host <- StatusSink.hostName
+            let onFetch = Follow.followed pk modeVar appliedVar <$ follow
+                sinkConfig path =
+                    StatusSink.Config
+                        { StatusSink.configPath = path
+                        , StatusSink.configInterval = max 1 sinkOptions.sinkInterval * 1000000
+                        , StatusSink.configHost = host
+                        }
+            -- the status sink watches the loop's stream for its triggers,
+            -- so what everything below reports through is the loop's own
+            -- reporter with the sink beside it; the sink's own complaints
+            -- go to the loop's own alone.
+            withMaybe sinkOptions.sinkPath (\path -> StatusSink.withSink (sinkConfig path) onFetch own) $ \msink -> do
+              let tagged = maybe own (reportBoth own . StatusSink.sinkReporter) msink
+                  -- with a socket to talk to, the process must outlive
+                  -- whatever started it (`< /dev/null &` is the ordinary way
+                  -- to run it), so standard input is read as a named source
+                  -- rather than as the loop's 'Serve.Stdin': its end of input
+                  -- is a hang-up like any client's and only `quit` — from
+                  -- stdin or from a client — ends the loop.
+                  stdinP = case (listen, binds) of
+                      (Nothing, []) -> Serve.stdinProducer stdin
+                      _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
+                  producersWith more =
+                      case follow of
+                          Nothing -> stdinP : more
+                          Just f -> Follow.follower (Tagged.followStream tagged) pk modeVar appliedVar f (putMVar gate ()) : Follow.gated gate stdinP : more
+              -- the listener's reporters answer each socket client on its own
+              -- connection, the HTTP server's answer each request with its
+              -- own reports, and both hand everything on to the loop's own,
+              -- which stays exactly as `fmt` says.
+              withMaybe listen Socket.withUnixListener $ \mlistener ->
+                withMaybe (nonEmptyList binds) (\bs -> Http.withHttpServerOn Events.defaultConfig{Events.configRing = eventsRing} bs (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
+                    -- exactly one line, once the listener is up, saying what
+                    -- is now reachable from the network and on what terms
+                    forM_ tcp $ \t ->
+                        hPutStrLn stderr ("serve: exposing HTTP on " <> t.tcpHost <> ":" <> show t.tcpPort <> " with TLS, token from " <> t.tcpTokenPath)
+                    let (serveR0, r0) = reportersOver tagged
+                        base = case mlistener of
+                            Nothing -> (contramap Serve.attributed serveR0, contramap Serve.attributed r0)
+                            Just listener -> Socket.listenerReporters listener tagged
+                        (serveR', r') = maybe base (`Http.serverReporters` base) mserver
+                        observe acc = do
+                            traverse_ (`Http.serverObserver` acc) mserver
+                            traverse_ (`StatusSink.sinkObserver` acc) msink
+                        more = foldMap (pure . Socket.listenerProducer) mlistener <> foldMap (pure . Http.serverProducer) mserver
+                    void $
+                        Serve.serveObserved
+                            observe
+                            rewrites
+                            limit
+                            (not noAutoConverge)
+                            serveR'
+                            r'
+                            parseSeedArgs
+                            genBase
+                            traceBase
+                            onFetch
+                            (producersWith more)
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
@@ -353,6 +888,27 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
   where
     nat = pure . runIdentity
 
+    {- | The one 'Tagged.Tagged' reporter a @run up@\/@run down@\/@run
+    serve@ speaks through, by 'ReportFormat': for 'ReportText' it dispatches
+    back to the reporters the binary passed in (so nothing about the text
+    output changes), for 'ReportJson' it is "Salmon.Reporter.Tagged"'s line
+    writer on stdout in their place. The tending loop's own stream never
+    reaches here on its own — @serve@ forwards what it keeps of it as
+    'Serve.Tended', which the encoding nests — so its slot is 'silent'. The
+    fetcher's stream ("Salmon.Actions.Follow") goes through here too, so
+    that @--json@ covers it and a status sink can watch it. -}
+    taggedFor :: ReportFormat -> Reporter Tagged.Tagged
+    taggedFor fmt = case fmt of
+        ReportText -> Tagged.reportTexts serveR r silent Follow.reportText
+        ReportJson -> Tagged.reportJSONLines stdout
+
+    -- | The tagged reporter split contravariantly into the two the drivers take.
+    reportersOver :: Reporter Tagged.Tagged -> (Reporter Serve.Report, Reporter (UpDown.Report Extension))
+    reportersOver tagged = (Tagged.serveStream tagged, Tagged.updownStream tagged)
+
+    updownFor :: ReportFormat -> Reporter (UpDown.Report Extension)
+    updownFor = snd . reportersOver . taggedFor
+
     {- | @run up@: everything in this one directive's graph is wanted up, so
     that is the rewrites' 'phaseDesired'. @excluded@ (a plan's skipped
     refs) is what they must not collect: batching a node the operator asked
@@ -362,20 +918,20 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     composes with collections — a batch is worth running iff some member of
     it is, which is the same 'Rewrite.membersOf' translation @serve@'s gate
     does. The report stream is identical either way: both produce a 'Skip'. -}
-    runUp :: Set Ref -> Op -> IO Bool
-    runUp excluded op = do
-        dag <- UpDown.expandDag r nat op
+    runUp :: Reporter (UpDown.Report Extension) -> Set Ref -> Op -> IO Bool
+    runUp r' excluded op = do
+        dag <- UpDown.expandDag r' nat op
         let computed = Rewrite.rewrite rewrites (Phase (Set.fromList (Dag.dagOrder dag)) excluded) dag
-        UpDown.upDag (excluding computed excluded) r (Rewrite.computedDag computed)
+        UpDown.upDag (excluding computed excluded) r' (Rewrite.computedDag computed)
 
     {- | @run down@: nothing is wanted up, which is what makes a
     direction-aware rewrite emit a teardown batch here and an install batch
     under @run up@, from the same registered phase. -}
-    runDown :: Op -> IO Bool
-    runDown op = do
-        dag <- UpDown.expandDag r nat op
+    runDown :: Reporter (UpDown.Report Extension) -> Op -> IO Bool
+    runDown r' op = do
+        dag <- UpDown.expandDag r' nat op
         let computed = Rewrite.rewrite rewrites (Phase Set.empty Set.empty) dag
-        UpDown.downDag UpDown.alwaysRequired r (Rewrite.computedDag computed)
+        UpDown.downDag UpDown.alwaysRequired r' (Rewrite.computedDag computed)
 
     {- | (R4): the whole-graph 'Rewritten' `run tree`\/`run dag`\/`query`
     all read from — everything in the declared graph is "desired" and
@@ -419,6 +975,27 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 pure Nothing
             Right a -> do
                 Just <$> cont jsonbody (run traceBase a)
+
+-- | Bracket over an optional resource: the continuation gets 'Nothing'
+-- when there was nothing to acquire.
+withMaybe :: Maybe x -> (x -> (y -> IO r) -> IO r) -> (Maybe y -> IO r) -> IO r
+withMaybe Nothing _ k = k Nothing
+withMaybe (Just x) with k = with x (k . Just)
+
+-- | 'Nothing' for an empty list, for 'withMaybe' over a list of resources.
+nonEmptyList :: [x] -> Maybe [x]
+nonEmptyList [] = Nothing
+nonEmptyList xs = Just xs
+
+{- | A seed parser's own @--help@ text, as @config --help@ prints it: what
+@GET \/help\/seed@ answers, the one non-generic surface the server has.
+-}
+seedHelpText :: Parser seed -> Text
+seedHelpText p =
+    case execParserPure defaultPrefs (info (p <**> helper) briefDesc) ["--help"] of
+        Failure failure -> Text.pack (fst (renderFailure failure "config"))
+        Success _ -> ""
+        CompletionInvoked _ -> ""
 
 {- | Runs a seed's own command-line parser over the arguments of one @run
 serve@ declaration — i.e. the same words that would follow @config@ on an

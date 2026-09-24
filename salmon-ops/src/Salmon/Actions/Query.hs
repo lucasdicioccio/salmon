@@ -26,7 +26,7 @@ module Salmon.Actions.Query (
     forceSkip,
 
     -- * Human-readable output
-    shortRef,
+    shortRef, -- re-exported from "Salmon.Op.Ref", where it lives
     renderAnnotated,
     printAnnotated,
 
@@ -38,7 +38,6 @@ module Salmon.Actions.Query (
 import Control.Comonad.Cofree (Cofree (..))
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Base64.URL as Base64.URL
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Foldable (toList, traverse_)
@@ -49,7 +48,6 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import GHC.Generics (Generic)
 import Numeric (showHex)
@@ -60,7 +58,7 @@ import Salmon.Op.Actions
 import Salmon.Op.Graph (Graph)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph
-import Salmon.Op.Ref (Ref, unRef)
+import Salmon.Op.Ref (Ref, shortRef, unRef)
 import Salmon.Op.Rewrite (Rewritten)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Actions.UpDown (CheckResult (Skipped))
@@ -229,14 +227,6 @@ forceSkip refs = fmap (fmap rewrite)
         | otherwise = ext
 
 -------------------------------------------------------------------------------
-
-{- | A short, stable, content-derived tag for a 'Ref' (the base64url encoding
-of its own text, truncated to 8 characters) — the same "git abbreviated SHA"
-idea, used to disambiguate colliding path text in 'renderAnnotated' without
-resorting to an arbitrary, traversal-order-dependent counter.
--}
-shortRef :: Ref -> Text
-shortRef = Text.take 8 . Text.decodeUtf8 . Base64.URL.encode . Text.encodeUtf8 . unRef
 
 {- | Mirrors 'Salmon.Actions.Help.printHelpCograph', annotating matched paths.
 

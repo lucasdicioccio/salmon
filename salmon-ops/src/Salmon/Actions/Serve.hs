@@ -81,6 +81,40 @@ command). Two things fall out, and the second is the reason:
 scopes the /pass/, not the standing watch — a node the pass skipped is still
 tended once the loop goes idle.
 
+== Where the lines come from
+
+The loop reads one inbox. What fills it is a list of 'Producer's, each on a
+thread of its own, each pushing 'Line's tagged with the 'Origin' that typed
+them; 'serveWith' is the one-producer case, standard input, and behaves
+exactly as it did when the loop read a 'Handle' directly. The inbox is still
+the loop's whole notion of idle — machines are tended while it is empty and
+stand down before any command, whoever typed it — and a piped script is
+still every line queued before the first pass ends. Two producers
+interleave at line granularity and nothing more: a command is handled whole
+before the next is read, and the order in which two producers' lines land
+in the inbox is the order they are handled.
+
+One decision is new with the list. /Only standard input's end of input ends
+the loop./ Any other producer's 'Eof' is not a command — nothing is about to
+act, so the machines are not stood down for it — and the loop reads on; a
+socket client hanging up or a fetcher going quiet must not take the server
+with it. A loop with no 'Stdin' producer at all therefore ends only on
+@quit@. Such a producer hanging up is reported, as 'HungUp', at the moment
+the loop reads its 'Eof' — which, the inbox being one queue, is after every
+line it typed has been handled. Whoever holds a connection for that origin
+can close it on that report and know nothing typed on it is still pending.
+
+== Whose report is it
+
+A report emitted while a command is handled belongs to whoever typed the
+command; one emitted between commands (the tending machines' own) belongs
+to nobody in particular. 'serveAttributed' says which, by stamping every
+report with the 'Origin' of the line being handled — 'Nothing' outside a
+command — through 'Attributed'. That is what lets a second client be
+answered on its own connection rather than on the loop's standard output
+("Salmon.Actions.Serve.Socket"); 'serveProducers' is the same loop with the
+stamp thrown away.
+
 This is what replaced @serveWakingWith@, an "these nodes want attention" hook
 nothing in the repo ever drove. It was there because a node had no state of
 its own to block on; now one does, so the hook is not a smaller version of
@@ -91,6 +125,27 @@ module Salmon.Actions.Serve (
     -- * Running
     serve,
     serveWith,
+    serveProducers,
+    serveAttributed,
+    serveFollowing,
+    serveObserved,
+    Followed (..),
+    AppliedDocument (..),
+    Mode (..),
+    renderMode,
+
+    -- * Input producers
+    Producer (..),
+    Line (..),
+    Origin (..),
+    Provenance (..),
+    renderOrigin,
+    originName,
+    handleProducer,
+    stdinProducer,
+
+    -- * Attributing reports
+    Attributed (..),
 
     -- * Input language
     ServeCommand (..),
@@ -113,6 +168,11 @@ module Salmon.Actions.Serve (
     Direction (..),
     Convergence (..),
 
+    -- * Reading a world
+    worldDag,
+    worldPaths,
+    historyLinesMatching,
+
     -- * Reporting
     Report (..),
     reportText,
@@ -122,9 +182,10 @@ module Salmon.Actions.Serve (
 import Control.Comonad.Cofree (Cofree)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.STM (TChan, TVar, atomically, isEmptyTChan, newTChanIO, readTChan, writeTChan)
-import Control.Exception (IOException, finally, try)
+import Control.Exception (IOException, SomeException, finally, try)
 import Control.Monad (forM_, unless, when)
-import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.=))
+import Data.Aeson.Types (parseEither)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isSpace)
@@ -140,6 +201,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.Time.Clock (UTCTime)
 import System.IO (Handle, hFlush, hGetLine, hIsEOF, stdout)
 
 import qualified Salmon.Actions.Query as Query
@@ -249,6 +311,9 @@ data Epoch seed directive = Epoch
     { epochId :: !EpochId
     , epochDeclaration :: !Declaration
     , epochDirection :: !Direction
+    , -- | who made this declaration: typed, loaded from a file, or fetched
+      -- from a registry. Kept for @history@.
+      epochOrigin :: !Origin
     , -- | the argv this seed was declared with, kept for @history@; a
       -- directive-file declaration (@up-directive@ and friends) gets a
       -- synthetic @["<directive-file>", path]@ here instead.
@@ -275,6 +340,7 @@ contributed, kept so @history --select@ still answers for a collected epoch.
 data LogEntry = LogEntry
     { logEpoch :: !EpochId
     , logDeclaration :: !Declaration
+    , logOrigin :: !Origin
     , logTokens :: [String]
     , logRefs :: !(Set Ref)
     }
@@ -387,6 +453,13 @@ data ServeCommand
     | -- | @up-directive@\/@only-directive@\/@down-directive@: declare a seed
       -- straight from a directive JSON file, skipping seed-arg parsing.
       DeclareDirective !Declaration !FilePath
+    | -- | the same declaration with the directive's JSON already in hand
+      -- rather than in a file. Not spelled by any line of the input language
+      -- ('parseServeCommand' never produces it); it exists for a producer
+      -- that holds a document with a directive in it ("Salmon.Actions.Follow")
+      -- and would otherwise have to write that directive to a file to name
+      -- it. The 'Text' is what @history@ prints in place of an argv.
+      DeclareInline !Declaration !Text !Value
     | -- | @load@: run a file of serve-command lines, in order, as if typed.
       Load !FilePath
     | -- | @clear@: retire every seed (everything known goes down)
@@ -413,6 +486,12 @@ data ServeCommand
       -- delivered the next time this world's nodes are tended (R2). An
       -- empty selection means every node, same as @status@\/@query@.
       Instruct !Mailbox.Instruction !Selection
+    | -- | @fetch@: ask the fetcher ("Salmon.Actions.Follow") for a round
+      -- now — its ladder forgotten, whatever it has pending injected as soon
+      -- as the round is over — rather than at its next scheduled one. The
+      -- loop cannot call into a producer, so it pulls a hook 'serveFollowing'
+      -- was given; without one, nothing is being followed and it says so.
+      Fetch
     | -- | @help@\/@help TOPIC@: print the command reference, or (when
       -- 'Just' a recognised 'Topic') a lengthier explanation of just that
       -- one command. 'Nothing', or a topic 'lookupTopic' doesn't recognise,
@@ -464,6 +543,7 @@ parseServeCommand line =
                     "recheck" -> Instruct Mailbox.Recheck <$> parseSelection args
                     "pause" -> Instruct Mailbox.Pause <$> parseSelection args
                     "resume" -> Instruct Mailbox.Resume <$> parseSelection args
+                    "fetch" -> nullary w args Fetch
                     "help" -> Help <$> helpTopic w args
                     "?" -> Help <$> helpTopic w args
                     "quit" -> nullary w args Quit
@@ -546,6 +626,10 @@ data Report
     = Started
     | -- | input closed
       Stopped
+    | -- | a producer other than standard input has no more lines, and every
+      -- line it did have has been handled. Never for 'Stdin', whose end of
+      -- input is 'Stopped'.
+      HungUp !Origin
     | BadCommand !Text
     | BadSeed !Text
     | BadDirective !Text
@@ -565,6 +649,9 @@ data Report
     | -- | (R2). a @force@\/@recheck@\/@pause@\/@resume@ was queued for this
       -- many nodes; takes effect once tending next starts, not immediately
       Instructed !Mailbox.Instruction !Int
+    | -- | @fetch@: whether anything is being followed (a round was asked
+      -- for), or not (nothing to ask)
+      FetchRequested !Bool
     | -- | something a node's own machine had to say between convergence
       -- passes. See 'Salmon.Actions.Upkeep.Report'; the chatty half of that
       -- stream is filtered out before it reaches here.
@@ -573,11 +660,12 @@ data Report
       ConvergeStart !Int !Int
     | -- | everything applied cleanly, nodes still not converged
       ConvergeStop !Bool !Int
-    | -- | nodes, plus every live declaration's path(s) to each one (see 'worldPaths') —
-      -- the thing a @--select@\/@--exclude@ pattern is actually built from.
-      StatusReport ![(Ref, NodeState)] !(Map Ref [Text])
-    | -- | epoch, declaration, still active, argv
-      HistoryReport ![(EpochId, Declaration, Bool, [String])]
+    | -- | the loop's 'Mode', then nodes, plus every live declaration's
+      -- path(s) to each one (see 'worldPaths') — the thing a
+      -- @--select@\/@--exclude@ pattern is actually built from.
+      StatusReport !Mode ![(Ref, NodeState)] !(Map Ref [Text])
+    | -- | epoch, declaration, still active, who declared it, argv
+      HistoryReport ![(EpochId, Declaration, Bool, Origin, [String])]
     | -- | declarations too old to still be in 'worldLog'; emitted after a
       -- 'HistoryReport' so @history@ never silently claims to be complete
       HistoryElided !Int
@@ -587,12 +675,20 @@ data Report
       -- didn't recognise), or a lengthier explanation of just that one
       -- recognised 'Topic'.
       HelpText !(Maybe Topic)
+    | -- | the status sink ("Salmon.Actions.Serve.StatusSink") could not
+      -- write its document: path, why. Emitted from the sink's own thread,
+      -- once per run of failures rather than once per attempt, and never
+      -- attributed to a typist; the loop keeps serving.
+      SinkFailed !FilePath !Text
     deriving (Show)
 
 -- | Prints 'Report's in a human-readable, one-event-per-block form.
 reportText :: Reporter Report
 reportText = ReporterM $ \rep -> do
-    traverse_ Text.putStrLn (renderReport rep)
+    -- one write per report rather than one per line: another producer's
+    -- reporter ("Salmon.Actions.Follow") shares this handle from its own
+    -- thread, and two half-lines interleaved are not two reports.
+    Text.putStr (Text.unlines (renderReport rep))
     hFlush stdout
 
 renderReport :: Report -> [Text]
@@ -603,6 +699,7 @@ renderReport rep =
             , "serve: type `help` for the command reference"
             ]
         Stopped -> ["serve: input closed"]
+        HungUp origin -> ["serve: " <> originName origin <> " hung up"]
         BadCommand err -> ["serve: " <> err]
         BadSeed err -> ("serve: cannot configure seed:") : Text.lines err
         BadDirective err -> ("serve: cannot decode directive:") : Text.lines err
@@ -623,6 +720,8 @@ renderReport rep =
         Supervised False -> ["serve: not supervising (nodes are left alone between passes)"]
         AutoConverged True -> ["serve: auto-converging (each declaration converges immediately)"]
         AutoConverged False -> ["serve: not auto-converging (declarations wait for an explicit `converge`)"]
+        FetchRequested True -> ["serve: fetching now"]
+        FetchRequested False -> ["serve: nothing is being followed (start with --follow to fetch declarations)"]
         Instructed instr n ->
             [ Text.unwords
                 [ "serve: queued"
@@ -647,8 +746,8 @@ renderReport rep =
                 , if ok then ")" else ", including a failure)"
                 ]
             ]
-        StatusReport [] _ -> ["serve: no nodes"]
-        StatusReport xs paths -> "serve: nodes:" : concatMap (renderNode paths) (sortOn statusOrder xs)
+        StatusReport mode [] _ -> ["serve: mode: " <> renderMode mode, "serve: no nodes"]
+        StatusReport mode xs paths -> ("serve: mode: " <> renderMode mode) : "serve: nodes:" : concatMap (renderNode paths) (sortOn statusOrder xs)
         HistoryReport [] -> ["serve: no seed declared yet"]
         HistoryReport xs -> "serve: seeds:" : fmap renderEpochLine xs
         HistoryElided n -> ["serve: " <> tshow n <> " earlier declaration(s) elided"]
@@ -658,6 +757,7 @@ renderReport rep =
             case mtopic >>= lookupTopic of
                 Just detailed -> detailed
                 Nothing -> commandReference
+        SinkFailed path err -> ("serve: status sink " <> Text.pack path <> " could not be written:") : Text.lines err
   where
     statusOrder :: (Ref, NodeState) -> (Direction, Convergence, ShortHand, Text)
     statusOrder (r, st) = (st.nodeDirection, st.nodeConvergence, st.nodeShorthand, unRef r)
@@ -720,15 +820,45 @@ renderReport rep =
             | r `Set.member` sel = " [selected]"
             | otherwise = ""
 
-    renderEpochLine :: (EpochId, Declaration, Bool, [String]) -> Text
-    renderEpochLine (eid, decl, active, toks) =
-        Text.unwords
+    -- a typed line renders exactly as it did before origins existed; any
+    -- other origin is a trailing annotation, so the argv stays where an
+    -- operator's eye already looks for it.
+    renderEpochLine :: (EpochId, Declaration, Bool, Origin, [String]) -> Text
+    renderEpochLine (eid, decl, active, origin, toks) =
+        Text.unwords $
             [ " "
             , renderEpochId eid
             , Text.justifyLeft 8 ' ' (renderDeclaration decl)
             , if active then "[active]" else "[retired]"
             , Text.pack (unwords toks)
             ]
+                ++ [ann | Just ann <- [renderOrigin origin]]
+
+{- | How @history@ names where a declaration came from: 'Nothing' for a typed
+line (the common case, and the one every existing transcript shows), a
+bracketed annotation otherwise. A fetched declaration names its registry,
+label, document id and digest, which is the whole point of recording it —
+see "Salmon.Actions.Follow".
+-}
+renderOrigin :: Origin -> Maybe Text
+renderOrigin origin =
+    case origin of
+        Stdin -> Nothing
+        Origin name -> Just ("[via " <> name <> "]")
+        Loaded path -> Just ("[loaded " <> Text.pack path <> "]")
+        Fetched prov ->
+            Just $
+                Text.concat
+                    [ "[fetched "
+                    , prov.provRegistry
+                    , " label="
+                    , prov.provLabel
+                    , " id="
+                    , prov.provDocument
+                    , " sha256="
+                    , Text.take 12 prov.provDigest
+                    , "]"
+                    ]
 
 {- | The supervision events worth an operator's attention, one line each.
 
@@ -855,13 +985,14 @@ commandReference =
     , "                                 stop tending matching nodes, without touching their effect"
     , "  resume  [--select P]... [--exclude P]..."
     , "                                 start tending matching nodes again"
+    , "  fetch                          (--follow) fetch the followed documents now, not at the next round"
     , "  help, ? [TOPIC]                print this reference, or (given a topic) more about just it"
     , "  quit, exit                     leave the loop, changing nothing on the way out"
     , "serve: --select/--exclude patterns are /-separated node-path globs (* one segment, ** any depth);"
     , "       may repeat; omitting --select entirely means everything."
     , "serve: `help TOPIC` for more, where TOPIC is one of:"
     , "       up, directive, load, clear, converge, status, history, query, select, supervise,"
-    , "       autoconverge, force"
+    , "       autoconverge, force, fetch"
     ]
 
 {- | @help TOPIC@'s lookup table, matched case-insensitively (several names
@@ -891,6 +1022,7 @@ helpTopics =
     , ("recheck", instructHelp)
     , ("pause", instructHelp)
     , ("resume", instructHelp)
+    , ("fetch", fetchHelp)
     , ("select", selectHelp)
     , ("exclude", selectHelp)
     , ("pattern", selectHelp)
@@ -994,7 +1126,11 @@ statusHelp :: [Text]
 statusHelp =
     [ "serve: status [--select PATTERN]... [--exclude PATTERN]..."
     , ""
-    , "  Lists every node this world is still concerned with, unified by Ref across every seed"
+    , "  First says which mode the loop is in — `interactive` (nothing followed: every declaration"
+    , "  was typed or loaded), `following` (the world is what the registry last said), or `replay`"
+    , "  (the registry could not be reached at startup and the world is a cached document: the"
+    , "  last one applied before the restart, until a round in which every label answers)."
+    , "  Then lists every node this world is still concerned with, unified by Ref across every seed"
     , "  that shares it, with its wanted direction (up/down) and convergence (Pending/Stale/"
     , "  Converged/Errored/Blocked). A node that has finished going down is dropped, so a world whose seeds"
     , "  have all been retired and converged lists nothing at all — `history` still shows they"
@@ -1026,6 +1162,11 @@ historyHelp =
     , "  original argv (or, for a directive-file declaration, the file path). This is a log of"
     , "  what was asked for, kept long after the graph a declaration built has been collected —"
     , "  so a [retired] line here does not mean that graph is still held in memory."
+    , ""
+    , "  A line typed at this loop shows nothing more. One run from a `load`ed file ends in"
+    , "  [loaded <file>]; one made by the fetcher (`run serve --follow`) ends in"
+    , "  [fetched <registry> label=<label> id=<document id> sha256=<digest prefix>], which is"
+    , "  how to tell what you typed from what a document said."
     , ""
     , "  The log is capped; if older declarations have fallen off the end, a line after the"
     , "  listing says how many."
@@ -1145,6 +1286,21 @@ instructHelp =
     , "  machines heard it."
     ]
 
+fetchHelp :: [Text]
+fetchHelp =
+    [ "serve: fetch"
+    , ""
+    , "  Only meaningful under --follow. The fetcher polls its registry on a schedule: at a base"
+    , "  interval while rounds succeed, backing off (times --follow-factor, up to --follow-cap)"
+    , "  while they fail; and a changed document is not applied at once but held until the"
+    , "  registry has been quiet for --follow-debounce (or --follow-max-wait has elapsed since the"
+    , "  first pending change), so a publisher writing several times in a row is one pass."
+    , ""
+    , "  `fetch` cuts both short: a round runs now, the backoff is forgotten, and whatever is"
+    , "  pending afterwards is applied without waiting out the quiet window — for an operator"
+    , "  who just published and does not want to wait. Without --follow it only says so."
+    ]
+
 selectHelp :: [Text]
 selectHelp =
     [ "serve: --select PATTERN / --exclude PATTERN"
@@ -1174,7 +1330,9 @@ selectHelp =
 {- | Read declarations from a handle until EOF (or @quit@), converging after
 each one, and hand back the 'World' as it stands when the loop ends. Never
 tears anything down on its way out: exiting the loop leaves the machine as
-the last convergence left it.
+the last convergence left it. The handle is the loop's standard input
+('stdinProducer'); see 'serveProducers' for feeding it from more than one
+place.
 -}
 serve ::
     forall seed directive.
@@ -1225,36 +1383,319 @@ serveWith ::
     Track' directive ->
     Handle ->
     IO (World seed directive)
-serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure program h = do
-    world <- newIORef emptyWorld
-    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
-    inbox <- newTChanIO
-    -- the input handle is read on its own thread so that the loop is never
-    -- itself blocked in a read: the supervisor's machines run while it
-    -- waits, and stopping them has to be able to interleave with a command
-    -- arriving.
-    reader <- forkIO (readInto inbox)
-    runReporter r Started
-    loop tending world inbox `finally` (stopTending tending world >> killThread reader)
-    readIORef world
+serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure program h =
+    serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program [stdinProducer h]
+
+-------------------------------------------------------------------------------
+-- input producers
+
+{- | Who typed a line. Standard input is singled out because its end of input
+is the one that ends the loop (see 'serveProducers'); every other source is
+named, so that a report or a history entry can one day say where a
+declaration came from.
+-}
+data Origin
+    = -- | the process's own standard input
+      Stdin
+    | -- | any other source: a socket connection, a test
+      Origin !Text
+    | -- | a line run from a @load@ed file (never pushed by a producer: the
+      -- loop itself tags the file's lines as it runs them)
+      Loaded !FilePath
+    | -- | a declaration "Salmon.Actions.Follow" made from a fetched
+      -- document; see 'Provenance' for what @history@ says about it
+      Fetched !Provenance
+    deriving (Show, Eq, Ord)
+
+{- | Where a fetched declaration came from, in enough detail that an operator
+reading @history@ can tell "I typed this" from "the document said so", and
+/which/ document: the registry, the label addressed in it, the document's
+own @id@ and the digest of its bytes.
+-}
+data Provenance = Provenance
+    { provRegistry :: !Text
+    , provLabel :: !Text
+    , provDocument :: !Text
+    , provDigest :: !Text
+    }
+    deriving (Show, Eq, Ord)
+
+{- | An 'Origin' as a report names it in a sentence ("stdin hung up"), as
+opposed to 'renderOrigin', the bracketed annotation @history@ appends.
+-}
+originName :: Origin -> Text
+originName Stdin = "stdin"
+originName (Origin t) = t
+originName (Loaded path) = "loaded " <> Text.pack path
+originName (Fetched prov) = "fetched " <> prov.provRegistry <> " label=" <> prov.provLabel
+
+{- | A report, and the 'Origin' of the command it was emitted for: 'Nothing'
+for one emitted between commands (the tending loop's), or before the first
+and after the last. See 'serveAttributed'.
+-}
+data Attributed a = Attributed
+    { attributedTo :: !(Maybe Origin)
+    , attributed :: !a
+    }
+    deriving (Show, Functor)
+
+{- | What a 'Producer' pushes into the loop's inbox.
+
+A 'Batch' is the unit a fetched document is injected as: its commands run
+back to back with @autoconverge@ held off, so the declarations record without
+each one converging on its own, then the setting is put back to whatever it
+was — an operator's @autoconverge off@ is not silently re-enabled — and one
+@converge@ runs. The batch carries its own commands rather than text lines
+so a seed's words survive without a quoting round trip, and it is one inbox
+entry rather than several so nothing another producer types can land in the
+middle of it. Each command carries its own 'Origin', because one batch can
+carry several documents' worth of declarations (several labels changed
+inside one quiet window) and @history@ must still say which document each
+came from.
+-}
+data Line
+    = -- | one line of the input language, as the producer read it
+      Line !Origin !String
+    | -- | several commands, handled as one: see above
+      Batch ![(Origin, ServeCommand)]
+    | -- | this producer has nothing more to say and its thread is about to end
+      Eof !Origin
+    deriving (Show, Eq)
+
+{- | A source of 'Line's. 'serveProducers' runs 'produceInto' on a thread of
+its own, hands it the loop's one inbox, and kills the thread when the loop
+ends; a producer is expected to push an 'Eof' as its last word and return.
+-}
+newtype Producer = Producer {produceInto :: TChan Line -> IO ()}
+
+-- | Read a handle line by line until end of file, then 'Eof'.
+handleProducer :: Origin -> Handle -> Producer
+handleProducer origin h = Producer go
   where
-    -- | 'Nothing' marks end of input, after which the reader stops.
-    readInto :: TChan (Maybe String) -> IO ()
-    readInto inbox = do
+    go inbox = do
         eof <- hIsEOF h
         if eof
-            then atomically (writeTChan inbox Nothing)
+            then atomically (writeTChan inbox (Eof origin))
             else do
                 line <- hGetLine h
-                atomically (writeTChan inbox (Just line))
-                readInto inbox
+                atomically (writeTChan inbox (Line origin line))
+                go inbox
 
+{- | The producer 'serveWith' runs: 'handleProducer' with the 'Stdin' origin,
+which is what makes its end of input the loop's. The handle need not be the
+process's actual standard input — a test's pipe or script file is the same
+thing to the loop.
+-}
+stdinProducer :: Handle -> Producer
+stdinProducer = handleProducer Stdin
+
+{- | 'serveWith', fed by any number of 'Producer's rather than one handle.
+Each runs on its own thread so that the loop is never itself blocked in a
+read: the supervisor's machines run while it waits, and stopping them has to
+be able to interleave with a command arriving.
+
+The loop ends on @quit@, or on 'Eof' from the 'Stdin' origin; an 'Eof' from
+any other origin is read past. With no 'Stdin' producer in the list, only
+@quit@ ends it.
+-}
+serveProducers ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    [Producer] ->
+    IO (World seed directive)
+serveProducers rewrites limit autoConverge0 r nodeReporter parseSeed configure program =
+    serveFollowing rewrites limit autoConverge0 r nodeReporter parseSeed configure program Nothing
+
+{- | What the loop knows of a fetcher producer ("Salmon.Actions.Follow"):
+how to wake it (what @fetch@ pulls) and which 'Mode' it is in (what @status@
+prints). It is a pair of hooks rather than a producer's methods because the
+loop reads lines and does not know which producer it has; these two are the
+only things it needs of the fetcher, and both are read-only from its side.
+-}
+data Followed = Followed
+    { followedFetch :: IO ()
+    -- ^ a round now; see 'Salmon.Actions.Follow.Scheduler.poke'
+    , followedMode :: IO Mode
+    -- ^ never 'Interactive'
+    , followedApplied :: IO [AppliedDocument]
+    -- ^ the document last applied per label, for the status sink
+    -- ("Salmon.Actions.Serve.StatusSink"); read-only, a plain read of the
+    -- fetcher's own cell
+    }
+
+{- | What the fetcher last applied for one label, as the status sink
+publishes it: the label, the document's @id@, its sha256 and when it was
+injected. Defined here rather than in "Salmon.Actions.Follow" because the
+loop's 'Followed' names it and the fetcher imports the loop, not the other
+way round. -}
+data AppliedDocument = AppliedDocument
+    { appliedDocLabel :: !Text
+    , appliedDocId :: !Text
+    , appliedDocDigest :: !Text
+    , appliedDocAt :: !UTCTime
+    }
+    deriving (Show, Eq)
+
+instance ToJSON AppliedDocument where
+    toJSON a = object ["label" .= a.appliedDocLabel, "id" .= a.appliedDocId, "sha256" .= a.appliedDocDigest, "applied" .= a.appliedDocAt]
+
+instance FromJSON AppliedDocument where
+    parseJSON = withObject "applied document" $ \o ->
+        AppliedDocument <$> o .: "label" <*> o .: "id" <*> o .: "sha256" <*> o .: "applied"
+
+{- | Which guarantees apply to the world right now, for @status@ (see
+@specs/pull-mode.md@, "what this does not solve"). 'Interactive' when nothing
+is followed: every declaration was typed, loaded or batched by a client.
+'Following' when a fetcher is running and the world is what the registry
+last said. 'Replay' when the registry could not be reached at startup and
+the fetcher applied its cached document instead — the world is the last
+thing this host knew, not necessarily what the registry says now — until a
+later round in which every followed label answers. -}
+data Mode = Interactive | Replay | Following
+    deriving (Show, Eq, Ord)
+
+renderMode :: Mode -> Text
+renderMode Interactive = "interactive"
+renderMode Replay = "replay"
+renderMode Following = "following"
+
+{- | 'serveProducers', with a 'Followed' for what @fetch@ and @status@ ask
+of a fetcher producer. 'Nothing' when nothing is being followed: @fetch@
+then only says so, and @status@ reports 'Interactive'. -}
+serveFollowing ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveFollowing rewrites limit autoConverge0 r nodeReporter =
+    serveAttributed rewrites limit autoConverge0 (contramap attributed r) (contramap attributed nodeReporter)
+
+{- | 'serveProducers', reporting through reporters that are told whose
+report each one is.
+
+The loop keeps one private "line being handled" cell, written when a line
+is taken off the inbox and cleared when its command is done, and every
+report — the loop's own and the per-node ones a pass emits — is stamped
+with it on the way out ('Salmon.Reporter.pulls'). Nothing else about the
+loop changes: a command is handled whole before the next is read, so the
+cell is stable for as long as a command's reports are being emitted, and
+the concurrent walks a pass runs all report inside that window. What
+arrives outside it — a machine tending a node between commands — is stamped
+'Nothing'.
+
+The cell is written /after/ 'stopTending', not before: the machines standing
+down are not something the operator who typed the command asked for, so
+whatever they say on their way out is nobody's.
+-}
+serveAttributed ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveAttributed = serveObserved (const (pure ()))
+
+{- | 'serveAttributed', handing an observer a way to read the 'World' before
+the first line is read.
+
+The accessor is a plain read of the loop's own cell — never a copy, never a
+lock — so what it returns is whatever the loop has committed so far: a
+declaration's nodes the moment it is recorded (a pass has not necessarily
+run), and the tending snapshot 'stopTending' last filed on each node. It is
+what a server answering reads ("Salmon.Actions.Serve.Http") holds instead of
+a seat in the inbox, which is the whole of how a read stays a read: it never
+stands the machines down and never waits behind a command, including one
+whose @up@ is taking a while.
+
+The observer is called once, synchronously, before any producer starts; a
+server that wants to run for the loop's lifetime forks from it. The loop
+does not kill anything the observer started — a server's own bracket owns
+that — but it does return, so an observer holding the accessor after that
+reads the final 'World', the same value this returns. It is the first
+argument, ahead of everything 'serveAttributed' takes, so that the two
+signatures read as one prefixed by the other.
+-}
+serveObserved ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveObserved observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
+    handling <- newIORef Nothing
+    serveLoop observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+  where
+    stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
+    stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
+
+-- | The loop itself: 'serveAttributed' with the stamping already applied
+-- and the cell it reads from in hand.
+serveLoop ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    IORef (Maybe Origin) ->
+    Reporter Report ->
+    Reporter (UpDown.Report Extension) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
+    world <- newIORef emptyWorld
+    observe (readIORef world)
+    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
+    inbox <- newTChanIO
+    readers <- traverse (\p -> forkIO (produceInto p inbox)) producers
+    runReporter r Started
+    loop tending world inbox `finally` (stopTending tending world >> traverse_ killThread readers)
+    readIORef world
+  where
     -- | Deepest chain of nested @load@s allowed, to bound a self-referential
     -- (or mutually-referential) load file rather than looping forever.
     maxLoadDepth :: Int
     maxLoadDepth = 8
 
-    loop :: Tending -> IORef (World seed directive) -> TChan (Maybe String) -> IO ()
+    loop :: Tending -> IORef (World seed directive) -> TChan Line -> IO ()
     loop tending world inbox = do
         {- Tend the nodes only while there is genuinely nothing to do.
 
@@ -1277,14 +1718,51 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
         idle <- atomically (isEmptyTChan inbox)
         when idle (startTending tending world)
         line <- atomically (readTChan inbox)
-        -- a command is about to act on these nodes, so the machines stand
-        -- down. Waits for anything in flight rather than cutting it.
-        stopTending tending world
         case line of
-            Nothing -> runReporter r Stopped
-            Just l -> do
-                keepGoing <- step tending 0 world l
-                when keepGoing (loop tending world inbox)
+            -- another producer hanging up is not a command: nothing is about
+            -- to act, so the machines are not stood down, and the loop goes
+            -- back to waiting (they are left running if they were). It is
+            -- said, though: every line that origin typed has been handled
+            -- by now, which is what whoever holds its connection waits for.
+            Eof origin | origin /= Stdin -> do
+                runReporter r (HungUp origin)
+                loop tending world inbox
+            _ -> do
+                -- a command is about to act on these nodes, so the machines
+                -- stand down. Waits for anything in flight rather than
+                -- cutting it.
+                stopTending tending world
+                case line of
+                    Eof _ -> runReporter r Stopped
+                    Line origin l -> do
+                        writeIORef handling (Just origin)
+                        keepGoing <- step tending 0 world origin l
+                        writeIORef handling Nothing
+                        when keepGoing (loop tending world inbox)
+                    Batch cmds -> do
+                        keepGoing <- batch tending world cmds
+                        when keepGoing (loop tending world inbox)
+
+    {- | Run a 'Batch': every command with @autoconverge@ held off, the
+    setting put back afterwards (a @finally@, so a command that stops the
+    loop still leaves it as the operator had it), then one full convergence
+    pass — the sequence the fetcher would otherwise have to spell as
+    @autoconverge off@ … @autoconverge on@ … @converge@ on the inbox, except
+    that only the loop knows what to put the setting back /to/. An empty
+    batch converges nothing: there is no declaration to act on. -}
+    batch :: Tending -> IORef (World seed directive) -> [(Origin, ServeCommand)] -> IO Bool
+    batch tending world cmds = do
+        was <- readIORef (tendingAutoConverge tending)
+        writeIORef (tendingAutoConverge tending) False
+        keepGoing <-
+            runAll cmds `finally` writeIORef (tendingAutoConverge tending) was
+        when (keepGoing && not (null cmds)) (converge tending world Nothing)
+        pure keepGoing
+      where
+        runAll [] = pure True
+        runAll ((origin, cmd) : rest) = do
+            go <- stepCommand tending 0 world origin cmd
+            if go then runAll rest else pure False
 
     -------------------------------------------------------------------------
     -- supervision
@@ -1556,13 +2034,16 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
             forM_ (Set.toList (Rewrite.membersOf computed act.extension.ref)) $ \rf ->
                 atomicModifyIORef' world (\w -> (setConvergenceHere rf c w, ()))
 
-    step :: Tending -> Int -> IORef (World seed directive) -> String -> IO Bool
-    step tending depth world line =
+    step :: Tending -> Int -> IORef (World seed directive) -> Origin -> String -> IO Bool
+    step tending depth world origin line =
         case parseServeCommand line of
             Left err -> do
                 runReporter r (BadCommand err)
                 pure True
-            Right cmd ->
+            Right cmd -> stepCommand tending depth world origin cmd
+
+    stepCommand :: Tending -> Int -> IORef (World seed directive) -> Origin -> ServeCommand -> IO Bool
+    stepCommand tending depth world origin cmd =
                 case cmd of
                     Noop -> pure True
                     Quit -> pure False
@@ -1571,7 +2052,8 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                         pure True
                     Status sel -> do
                         w <- readIORef world
-                        runReporter r (StatusReport (filterNodes w sel) (worldPaths w))
+                        mode <- maybe (pure Interactive) followedMode onFetch
+                        runReporter r (StatusReport mode (filterNodes w sel) (worldPaths w))
                         pure True
                     History sel -> do
                         w <- readIORef world
@@ -1605,10 +2087,13 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                         convergeIfAuto tending world
                         pure True
                     Declare decl args -> do
-                        declare tending world decl args
+                        declare tending world origin decl args
                         pure True
                     DeclareDirective decl path -> do
-                        declareDirective tending world decl path
+                        declareDirective tending world origin decl path
+                        pure True
+                    DeclareInline decl name value -> do
+                        declareDecoded tending world origin decl ["<directive>", Text.unpack name] (parseEither parseJSON value)
                         pure True
                     Load path -> loadFile tending world (depth + 1) path
                     Supervise on -> do
@@ -1629,6 +2114,10 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                             allowed = selr `Set.difference` excr
                         queueInstruction tending allowed instr
                         runReporter r (Instructed instr (Set.size allowed))
+                        pure True
+                    Fetch -> do
+                        traverse_ followedFetch onFetch
+                        runReporter r (FetchRequested (isJust onFetch))
                         pure True
 
     -- | Filters 'worldNodes' by a 'Selection', preserving today's exact
@@ -1660,15 +2149,26 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
             runReporter r (LoadDone path n)
             pure True
         go n (ln : rest) = do
-            keepGoing <- step tending depth world ln
+            keepGoing <- step tending depth world (Loaded path) ln
             if keepGoing then go (n + 1) rest else pure False
 
-    declare :: Tending -> IORef (World seed directive) -> Declaration -> [String] -> IO ()
-    declare tending world decl args =
+    -- | A 'Configure' that throws is reported as a bad seed and the loop
+    -- reads on, same as a seed that fails to parse. It used to take the whole
+    -- loop down, which for a typed line was a nuisance and for a fetched
+    -- document (whose author is not at this keyboard) would be a host
+    -- losing its supervisor to somebody else's typo.
+    declare :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> [String] -> IO ()
+    declare tending world origin decl args =
         case parseSeed args of
             Left err -> runReporter r (BadSeed err)
             Right seed -> do
-                directive <- gen configure seed
+                configured <- try (gen configure seed) :: IO (Either SomeException directive)
+                case configured of
+                    Left ex -> runReporter r (BadSeed (Text.pack (unwords args) <> ": configure threw: " <> Text.pack (show ex)))
+                    Right directive -> declareConfigured tending world origin decl args seed directive
+
+    declareConfigured :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> [String] -> seed -> directive -> IO ()
+    declareConfigured tending world origin decl args seed directive = do
                 w0 <- readIORef world
                 let o = run program directive
                 let gr = evalDeps o
@@ -1677,6 +2177,7 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                             { epochId = EpochId w0.worldNextId
                             , epochDeclaration = decl
                             , epochDirection = declarationDirection decl
+                            , epochOrigin = origin
                             , epochTokens = args
                             , epochSeed = Just seed
                             , epochDirective = directive
@@ -1685,13 +2186,18 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                             }
                 commitEpoch tending world w0 decl ep
 
-    declareDirective :: Tending -> IORef (World seed directive) -> Declaration -> FilePath -> IO ()
-    declareDirective tending world decl path = do
+    declareDirective :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> FilePath -> IO ()
+    declareDirective tending world origin decl path = do
         result <- try (LByteString.readFile path) :: IO (Either IOException ByteString)
         case result of
             Left ex -> runReporter r (BadDirective ("cannot read " <> Text.pack path <> ": " <> Text.pack (show ex)))
-            Right bytes ->
-                case eitherDecode bytes of
+            Right bytes -> declareDecoded tending world origin decl ["<directive-file>", path] (eitherDecode bytes)
+
+    -- | The tail of a directive declaration once its JSON has been read from
+    -- wherever it was: a decode failure is reported and nothing is declared.
+    declareDecoded :: Tending -> IORef (World seed directive) -> Origin -> Declaration -> [String] -> Either String directive -> IO ()
+    declareDecoded tending world origin decl tokens decoded =
+                case decoded of
                     Left err -> runReporter r (BadDirective (Text.pack err))
                     Right directive -> do
                         w0 <- readIORef world
@@ -1702,7 +2208,8 @@ serveWith rewrites limit autoConverge0 r nodeReporter parseSeed configure progra
                                     { epochId = EpochId w0.worldNextId
                                     , epochDeclaration = decl
                                     , epochDirection = declarationDirection decl
-                                    , epochTokens = ["<directive-file>", path]
+                                    , epochOrigin = origin
+                                    , epochTokens = tokens
                                     , epochSeed = Nothing
                                     , epochDirective = directive
                                     , epochKey = encode directive
@@ -1939,6 +2446,7 @@ record decl ep dag w =
         LogEntry
             { logEpoch = ep.epochId
             , logDeclaration = ep.epochDeclaration
+            , logOrigin = ep.epochOrigin
             , logTokens = ep.epochTokens
             , logRefs = Ledger.contribRefs contrib
             }
@@ -2112,9 +2620,9 @@ to call directly, since there was never a caller for one.
 historyLinesMatching ::
     (LogEntry -> Bool) ->
     World seed directive ->
-    [(EpochId, Declaration, Bool, [String])]
+    [(EpochId, Declaration, Bool, Origin, [String])]
 historyLinesMatching p w =
-    [ (e.logEpoch, e.logDeclaration, Set.member e.logEpoch activeIds, e.logTokens)
+    [ (e.logEpoch, e.logDeclaration, Set.member e.logEpoch activeIds, e.logOrigin, e.logTokens)
     | e <- reverse w.worldLog
     , p e
     ]

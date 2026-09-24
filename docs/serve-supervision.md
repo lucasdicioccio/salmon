@@ -48,7 +48,8 @@ Take any existing salmon binary — built the ordinary way, via
   currently-active seed's graph reaches it at — the exact text a
   `--select`/`--exclude` pattern matches, pasteable straight back in.
   Without this a pattern could only be *guessed*; `status` is where it comes
-  from. `history` lists what was declared, when. `query` annotates nodes
+  from. `history` lists what was declared, when, and by whom — a typed line,
+  a `load`ed file, or (§12) a fetched document. `query` annotates nodes
   `[selected]`/`[excluded]` against a `--select`/`--exclude` pattern without
   acting on anything — useful for checking a pattern before you `force`/
   `pause` with it for real.
@@ -179,6 +180,9 @@ quit
 | a non-`managed` node re-applying itself on a timer instead of parking | ❌ | `supReapply` (§6), narrowly |
 | addressing a batch/rewrite-introduced node that has no declared path | ❌ | a `#ref` selector (§9) |
 | bounding how many nodes converge at once | ❌ (unbounded by default) | `--max-concurrency N` (§10) |
+| reports a script can parse | ❌ (text by default) | `--json` (§11) |
+| fetching declarations from a registry instead of typing them | ❌ (stdin only) | `--follow DIR --label L` (§12) |
+| a second operator or a tool attached to a running `serve` | ❌ (stdin only by default) | `--listen PATH` (§13) |
 
 ## 5. Decorating nodes: `check`
 
@@ -414,7 +418,731 @@ outbound connection limit) rather than two specific nodes fighting over one
 resource — that case is still an edge (a dependency) or a collection's job,
 not this flag's. Omit it for the old, unbounded behavior (the default).
 
-## 11. Gotchas
+## 11. Machine-readable reports: `--json`
+
+Everything above prints text: `serve:`-prefixed lines for the loop itself,
+`Show`n `UpDown.Report`s for what each node did. `run serve --json` (and
+`run up --json`/`run down --json`, the same flag) replaces all of that with
+**one JSON object per line on stdout**, flushed as each report happens, so
+`my-salmon run up --json | jq` streams and a script can watch a `serve` for
+`converge-stop` without parsing prose. The text output is unchanged when the
+flag is absent.
+
+Every object has a `kind` (the report's constructor, kebab-cased:
+`declared`, `converge-start`, `done`, `failed`, `wedged`, ...), a `stream`
+(`serve` for the loop's own reports, `updown` for what a node did; the
+tending loop's reports arrive nested inside `serve`'s `tended`), a `ref`
+whenever the report is about one node (`{"short": ..., "full": ...}`, the
+same short tag `status`/`query show` print after `#`, so it pastes back in as
+a selector), and the node's `shorthand`/`help`/`notes` under `node`. Report
+text is public: `notes`, failure messages and a `status`'s output ring go
+out verbatim, so keep secrets out of them (see the `filecontents` failure
+text for the convention). `Salmon.Reporter.Tagged` is the encoding, and
+`Test/ReportJsonSpec.hs` holds a golden object per constructor. Sequence
+numbers exist only on `--http`'s `/events` (§14), where the same objects go
+out with a `seq` added.
+
+Two things the flag does not cover. A node's *own* subprocess output — the
+`Binary.Report`s a node's builder was handed a `reportPrint` for — is not one
+of the three streams and still prints as text, so a binary whose nodes were
+built with `reportPrint` (all of `salmon-apps` today) interleaves those lines
+with the JSON ones; a consumer should skip lines that are not JSON. And
+`run tree`/`run dag`/`query` are renderings of their own, not reports, and
+are untouched.
+
+## 12. Pull mode: `--follow`
+
+`run serve --follow REGISTRY --label L [--label L]... [--follow-base S] ...`
+makes the loop fetch its own declarations instead of only waiting to be
+typed at. A *registry* is anything that answers "the latest document for
+this label"; the simplest is a directory with one JSON document per label at
+`DIR/<label>.json` (the others are below), each the **desired set** of seeds
+for that label — not a log of commands:
+
+```json
+{
+  "salmon": 1,
+  "id": "web-api@2026-09-23T10:41:07Z",
+  "seeds": [
+    { "seed": ["--dir", "/tmp/play", "--name", "web", "--file", "index.html"] },
+    { "directive": { "...": "a directive JSON, as `up-directive` takes" } }
+  ]
+}
+```
+
+`salmon` is the format version (only `1`), `id` is whatever the publisher
+calls this revision, and anything else at the top level is ignored. A host
+following several labels wants the union of their documents.
+
+What happens on a change: the fetcher diffs the document against the one it
+last applied *for that label* and injects one batch — `up` for each seed
+newly present, `down` for each seed no longer present and not carried by any
+other followed label either — which the loop runs with `autoconverge` held
+off, restores, and converges once. Seeds you typed interactively are never in
+that diff (unless you typed the exact seed a document then drops: the ledger
+identifies a seed by its directive, not by who declared it).
+
+What happens when nothing changed: **nothing**. The registry's mtime and size
+say whether to read the file at all, the sha256 of the bytes says whether
+anything changed, and an unchanged round is invisible to the loop. That rule
+is load-bearing: every line reaching the loop stands the tending machines
+down (§3), so a fetcher that injected on every poll would keep the supervisor
+from ever reaching a steady state. Poll as often as you like.
+
+`history` tells the fetcher's declarations from yours:
+
+```
+serve: seeds:
+  #0 up       [active] --dir /tmp/play --name web --file index.html [fetched /srv/reg label=web-api id=web-api@2026-09-23T10:41:07Z sha256=32ea59311d97]
+  #1 up       [active] --dir /tmp/play --name api --file openapi.json [fetched /srv/reg label=web-api id=web-api@2026-09-23T10:41:07Z sha256=32ea59311d97]
+  #2 up       [active] --dir /tmp/play --name scratch --file notes
+```
+
+(`#2` was typed; a line run from `load <file>` says `[loaded <file>]`.)
+
+The first fetch runs before standard input is read, so the first convergence
+is deterministic — what the registry said at startup — and later changes
+arrive live, handled like any typed command. A document that fails to parse,
+a seed the binary cannot parse, or a seed whose `config` step throws, is
+reported and skipped; the loop keeps serving and the last good document stays
+in force.
+
+### When rounds run, and when a change is applied
+
+Two schedules, pointing in opposite directions, both on the `--follow-*`
+flags (seconds unless said otherwise):
+
+| flag | default | what it is |
+|---|---|---|
+| `--follow-base` | 30 | seconds between rounds while they succeed (`--follow-interval` is the older name for the same thing) |
+| `--follow-factor` | 2 | how much slower each consecutive *failed* round makes the next one |
+| `--follow-cap` | 600 | the longest a failing registry is left alone |
+| `--follow-jitter` | 0.2 | every delay is scaled by a draw from `[1-j, 1+j]`, so a fleet does not poll in step |
+| `--follow-debounce` | 5 | how long the registry must be quiet after a change before the change is applied; `0` applies at the round that saw it |
+| `--follow-max-wait` | 60 | the longest a change waits while the registry keeps changing |
+| `--follow-cache` | none | a directory to keep each label's last applied document in, replayed at startup if the registry cannot be reached (below) |
+| `--follow-refuse-older` | off | refuse a document whose `published` is older than the one already applied for its label (below) |
+| `--follow-timeout` | 30 | the longest one HTTP fetch may take (the `http(s)://`, `dns:` and bucket registries) |
+| `--follow-workdir` | see below | where a `git+` registry is checked out |
+| `--follow-bucket-endpoint` | none | an S3-compatible endpoint for an `s3://` registry, path-style |
+
+**Toward the registry**: a round that succeeds — changed or not — schedules
+the next one one base away; a round that fails (the registry threw, or the
+bytes do not parse; a label with no document is *not* a failure, the
+registry answered) climbs a ladder, `min(cap, base · factor^(n-1))` after
+`n` failures in a row, and the first success steps off it. `follow: 3 failed
+round(s) in a row; next in 120s` is what that looks like.
+
+**Toward the loop**: a changed document is not applied at once. It is set
+aside (`follow: web id=web@2 ...: changed, waiting for the registry to go
+quiet`) and applied once no round has seen a further change for `debounce`,
+or `max_wait` after the first pending one, whichever comes first — and what
+is applied is the diff from the document the loop *last heard about* to the
+*latest* one, so a publisher writing three times in a row is one batch and
+one pass, and a half-published state is never applied. Several labels
+changing inside one window are one batch too. The startup round is the
+exception and applies at once: nothing to coalesce yet.
+
+**`fetch`** cuts both short: a round now, the ladder forgotten, and whatever
+is pending afterwards applied without waiting out the window — for the
+operator who just published and does not want to wait. Without `--follow`
+it only says nothing is being followed.
+
+### Across a restart: `--follow-cache`
+
+The world is in memory. Without more, a host restarted while its registry is
+unreachable comes up empty, tears nothing down, and looks converged — worse
+than no puller at all. `--follow-cache DIR` closes that: after every batch
+the fetcher writes each label's just-applied document to
+`DIR/<label>.applied.json` (bytes, sha256 and id; written to a temp file and
+renamed, so a crash mid-write leaves the previous entry), and at startup a
+label whose fetch *fails* — the registry directory is missing, or the file
+does not parse — is replayed from there:
+
+```
+follow: fetching web failed: user error (registry directory does not exist: /srv/reg)
+follow: web: registry unreachable; replaying the cached document id=web@1 sha256=8a8e1c180390
+follow: web id=web@1 sha256=8a8e1c180390: 1 seed(s) up, 0 down
+serve: epoch #0 up (4 nodes, 1 active seed(s))
+```
+
+A replayed document is treated exactly as a fetched one from then on — same
+diff, same batch, same `[fetched ...]` in `history` — and its digest is what
+the registry's answer is later compared against, so a registry that comes
+back with the same bytes injects **nothing** (the starvation rule holds
+across restarts) and one that comes back with a different document is
+diffed against the replayed one, not applied from scratch. A label the
+registry answers "no document" for is *not* replayed: the registry answered.
+A cache entry that cannot be read is reported once and ignored, one that
+cannot be written is reported and the batch goes in regardless; the cache
+never takes the loop down. Without the flag nothing is cached, and a restart
+against an unreachable registry declares nothing, as before.
+
+### Which mode is this?
+
+`status` now starts with which guarantees apply to the world:
+
+```
+serve: mode: replay
+serve: nodes:
+  ...
+```
+
+- `interactive` — nothing is followed; every declaration was typed, loaded
+  or sent by a client.
+- `following` — a fetcher is running and the world is what the registry
+  last said.
+- `replay` — the registry could not be reached at startup and at least one
+  label's world is its cached document: the last thing this host knew, not
+  necessarily what the registry says now.
+
+`replay` turns into `following` at the first round in which every label
+answers, changed or not. It is only ever *entered* at startup: after a
+successful round the world already is the registry's last word, a round
+failing later changes nothing about it (the last good document stays in
+force), and `follow: N failed round(s) in a row` is what says the registry
+is gone. Under `--json` the status object carries `"mode"`; the HTTP
+surface's `/status` is the same object, and `/dag`'s envelope carries the
+same field.
+
+### Refusing to move backwards: `--follow-refuse-older`
+
+A document may carry a `published` timestamp (RFC 3339) at its top level.
+Nothing reads it unless `--follow-refuse-older` is given, under which a
+fetched document published *before* the one already applied (or pending)
+for its label is reported and left alone:
+
+```
+follow: web id=web@0: published before the document already applied; refused (--follow-refuse-older)
+```
+
+That is what a registry serving from a lagging replica would otherwise do to
+a host. Off by default; a document without `published`, on either side, is
+never refused. A `published` that does not parse is a malformed document,
+not an ignored annotation.
+
+### The registries: what `--follow` can name
+
+The backend is chosen by the shape of the address, and each one owns the
+rule that turns a label into an address and the cheap "has it moved?" test
+that keeps an unchanged round from reading anything:
+
+| `--follow` | the document for `<label>` | unchanged when | notes |
+|---|---|---|---|
+| `/srv/reg` | `/srv/reg/<label>.json` | mtime and size match | the directory missing is a failed round, not "no document" |
+| `git+URL[#BRANCH[:SUBDIR]]` | `SUBDIR/<label>.json` at `origin/BRANCH` (the remote's default branch without `BRANCH`) | the branch points at the same commit | cloned once into `--follow-workdir` (default `checkout` under `--follow-cache`, else a temp directory named by the repository), then `git fetch` + `git reset --hard` every round; the subdirectory comes *after* the branch because URLs have colons of their own (`git+ssh://h:22/r#main:hosts`, `git+https://h/r#:hosts`); credential prompts are off, so a private repository fails rather than hangs |
+| `http://…` / `https://…` | `<base>/<label>.json`, or the URL with `{label}` replaced (`https://h/seed/latest/{label}`) | `304` to `If-None-Match` (`ETag`) or `If-Modified-Since` (`Last-Modified`) | `404` is "no document"; `5xx`, `403`, a refused connection or `--follow-timeout` running out is a failed round |
+| `dns:ZONE` | a `TXT` record at `<label>.ZONE` reading `v=salmon1 url=<https url> sha256=<hex>`, then that URL | the record's `sha256` is the one last seen — one lookup, no HTTP at all | a body that does not hash to what the record announces is refused with that reason (a failed round, never applied); no record is "no document"; the lookup is `dig +short`, so `dig` must be installed |
+| `s3://BUCKET/PREFIX` / `gs://BUCKET/PREFIX` | `https://BUCKET.s3.amazonaws.com/PREFIX/<label>.json`, `https://storage.googleapis.com/BUCKET/PREFIX/<label>.json`, or `ENDPOINT/BUCKET/PREFIX/<label>.json` under `--follow-bucket-endpoint` | as HTTP | the HTTP backend under a template: **public or presigned objects only** — no SDK, no credentials, and a private bucket's `403` is a failed round that says so |
+
+Three things hold for every backend. The stamp above decides whether to
+*read*, the sha256 of the bytes decides whether anything *changed*, and only
+a changed document reaches the loop — so a `git commit --allow-empty`, a
+re-uploaded identical object or a rewritten identical file injects nothing.
+`history` names the registry as you gave it (`[fetched
+git+https://h/r#main:hosts label=web ...]`). And a fetch that throws leaves
+the last good document in force and climbs the ladder, whatever threw.
+
+The DNS shape is the cheap one for a fleet: a host's round is one UDP
+lookup answered from the resolver's cache until the record's TTL runs out,
+and the controller *publishes* by writing a record — which salmon can
+already do as a node (`SreBox.MicroDNS`, `SreBox.DNSRegistration`). Publish
+the document first and the record second, since a record announcing a
+digest the store does not yet serve is refused until it does.
+
+### Before anything is applied: the verifier
+
+Every document — from any registry, and a cached one on replay, since a
+cache file is as writable as a registry file — goes through
+`Follow.followVerify` on its raw bytes *before* it is parsed. A refusal is
+reported and is a failed round:
+
+```
+follow: refusing the document for web (sha256=1f0d2c9a7b3e):
+signature does not verify against fleet-signing-key
+```
+
+The bytes are neither injected nor cached; the last good document stays in
+force. **Without `--follow-key` the verifier accepts everything**
+(`Follow.noVerifier`): unsigned mode is the default, and a document is taken
+as the registry serves it.
+
+### Signed documents: `--follow-key`
+
+With `--follow-key FILE` (repeatable) the host requires every document —
+fetched from any registry, and a cached one on replay — to be a *signed
+envelope* carrying a signature by one of those keys; any one suffices. The
+round trip needs no tool but `salmon-fleet`:
+
+```
+$ salmon-fleet keygen --out fleet.key
+salmon-fleet: wrote fleet.key (private, 0600) and fleet.key.pub (public); key id 51d3c2152fb2…
+$ cat fleet.key.pub
+{"crv":"Ed25519","kty":"OKP","x":"Esc7UxOvyQCXne0_TqOseUq2e5CHmdFhjsr4wglADHk"}
+$ salmon-fleet sign --key fleet.key < web.json > /srv/reg/web.json
+$ cat /srv/reg/web.json
+{"document":{"id":"web@1","salmon":1,"seeds":[{"seed":["--dir","/tmp/play","--name","web","--file","index.html"]}]},
+ "salmon-signed":1,
+ "signatures":[{"alg":"EdDSA","key":"51d3c2152fb2…","sig":"+rS1PN29nf1o…"}]}
+$ my-salmon run serve --follow /srv/reg --label web --follow-key fleet.key.pub
+follow: /srv/reg for web every 30s (...)
+follow: web id=web@1 sha256=b2014a4513e7: 1 seed(s) up, 0 down
+```
+
+The document rides inside the envelope as you wrote it (annotations and
+all); the signature is over its *canonical* bytes — aeson's own encoding of
+the parsed value, keys sorted — so a registry or a proxy that re-serialises
+the envelope (other key order, other whitespace) leaves the signature valid,
+and only a change of content breaks it. What the loop parses is the document
+inside; the `sha256` in reports, `history` and the cache is that of the bytes
+as fetched, the envelope's. Keys are JWK files (the format `Keys.jwkKey`
+already writes), Ed25519, and a key's id is its RFC 7638 thumbprint.
+
+Hand-edit the file inside its envelope, and the host says why:
+
+```
+follow: refusing the document for web (sha256=6fd186d7f55f):
+no signature verifies against any of the 1 configured key(s): signature by 51d3c2152fb2 does not verify: the document was altered after signing, or signed by another key
+```
+
+Serve a plain document to a host started with a key:
+
+```
+follow: refusing the document for web (sha256=4ed68ba04fd8):
+unsigned document: a signing key is configured (--follow-key) and this document carries no signed envelope
+```
+
+An envelope that does not parse, one with no signatures, or one signed by a
+key the host does not hold are refused the same way, each naming its cause;
+and a `--follow-key` file that does not load is an exit 1 with the path
+before any loop starts — a host that then refused everything, or accepted
+everything, would be worse than none. To rotate a key, run hosts with both
+the old and the new `--follow-key` while documents are re-signed, then drop
+the old one; nothing more than that exists (no revocation, no key in the
+document).
+
+Not there yet (`specs/pull-mode.md`): other sinks (a bucket object, an HTTP
+`POST`), and authenticated bucket access.
+
+### Status flows back: `--status-sink`
+
+A host in pull mode converges with nobody watching. `--status-sink PATH`
+makes it write down what came of it — a JSON document, to a temp file
+renamed over `PATH` so a reader never sees half of one — after every
+convergence pass, after every follow injection, and every
+`--status-sink-interval` seconds (default 10) otherwise:
+
+```json
+{
+  "salmon-status": 1,
+  "host": "web-3",
+  "written": "2026-09-24T10:41:07.12Z",
+  "mode": "following",
+  "labels": [{"label": "web", "id": "web@42", "sha256": "…", "applied": "2026-09-24T10:40:58.51Z"}],
+  "status": { "kind": "status", "mode": "following", "nodes": [ ... ] },
+  "last": {
+    "converge": { "stream": "serve", "kind": "converge-stop", "ok": true, "remaining": 0 },
+    "follow":   { "stream": "follow", "kind": "injected", "label": "web", "document": "web@42", ... }
+  }
+}
+```
+
+`status` is the very object `status --json` prints (and `/status` answers);
+`labels` is the document each followed label last applied; `last` holds
+the most recent converge-stop and the most recent follow report, as
+`--json` prints them. The fetcher's own reports (`injected`, `backoff`,
+`replayed`, ...) are a `--json` stream in their own right now — `"stream":
+"follow"` — which is what lets the sink carry them.
+
+The sink never touches the loop: it is a reporter watching the loop's
+stream for its triggers and a reader of the world through the same accessor
+`/status` uses, so a write stands no tending machine down. A path that
+cannot be written is reported once (`serve: status sink PATH could not be
+written:`), and again only after a write has succeeded in between; the loop
+keeps serving. A host gone quiet therefore shows as a document whose
+`written` is old — not as one that says all is well.
+
+Fleet status is a fold over a directory of these, computed by whoever reads
+it. `salmon-fleet status DIR` is that reader, one line per host:
+
+```
+$ salmon-fleet status /srv/status
+host      mode       labels                      converged  errored  age   flags
+web-1     following  web=web@42@32ea59311d97     4/4        0        3s
+web-2     following  web=web@42@32ea59311d97     3/4        1        5s
+db-1      replay     db=db@7@d00ef24caea4        3/3        0        94s   stale
+```
+
+`--label L` keeps only hosts whose applied documents include `L`,
+`--stale SECONDS` (default 60) sets when a host is flagged, `--json` emits
+the rows as one array. It only reads; a stale host is a visible fact, not a
+decision, and nothing here decides a host is dead. Two documents naming one
+host (two loops on one machine, as in the tests) are two rows.
+
+
+## 13. A second way in: `--listen`
+
+`run serve --listen PATH` binds a unix socket at `PATH` and accepts the
+*same line protocol* on it — `up`, `status`, `force --select ...`, `quit`,
+every command §3 typed on stdin — from any number of clients at once, while
+stdin keeps working alongside. Milestone 2 of `specs/generic-server.md`;
+`Salmon.Actions.Serve.Socket` is the implementation.
+
+```sh
+my-salmon run serve --listen /run/my-salmon.sock < /dev/null &
+printf 'status\n' | socat - UNIX-CONNECT:/run/my-salmon.sock
+ssh -L /tmp/remote.sock:/run/my-salmon.sock host   # then the same, locally
+```
+
+Four things to know:
+
+- **Each client reads exactly the reports for its own lines**, as JSON
+  lines in the §11 encoding, whatever the loop's own stdout is set to
+  (text by default, JSON under `--json`; it sees everything either way).
+  What another client typed, and what the tending loop says between
+  commands, never reaches a client — the loop stamps every report with who
+  typed the command it belongs to, and the socket only echoes the ones
+  stamped for it. There is no per-client text mode.
+- **A client hanging up is not `quit`.** It is reported on the loop's stdout
+  (`serve: PATH#N hung up`) once every line that client typed has been
+  handled, and the connection is closed then — so `printf 'status\n' |
+  socat ...` gets its answer even though it half-closes immediately. `quit`
+  from a client ends the loop exactly as it does from stdin.
+- **Under `--listen`, stdin's end of input does not end the loop either.**
+  With a socket to talk to, the process is expected to outlive whatever
+  started it (`< /dev/null &`, a unit file), so stdin is one more source
+  whose hang-up is reported and read past; only `quit` — typed anywhere —
+  or a signal ends it. Without `--listen`, stdin closing ends the loop as
+  it always has.
+- **The socket is owner-only (mode 0600) and the path is checked before it
+  is taken.** A stale socket file (its `serve` died without removing it) is
+  replaced; one something still answers on is refused (`AlreadyListening`),
+  as is a path holding something that is not a socket. Permissions are the
+  whole access story: there is no authentication, and no TCP — see the
+  spec's security section for why a salmon server must never listen on a
+  network without both.
+
+The commands are still one inbox: a line from a client stands the tending
+machines down before it runs, same as a line from stdin, and two clients'
+lines interleave at line granularity in arrival order.
+
+## 14. HTTP on a socket: `--http`
+
+`run serve --http PATH` binds a *second* unix socket and serves HTTP on it
+— reads of the live world as JSON, and the same command language as
+`POST`. Milestone 3 of `specs/generic-server.md`;
+`Salmon.Actions.Serve.Http` is the implementation. It is its own path
+rather than HTTP detected on `--listen`'s socket, so use both flags if you
+want both; the socket file has the same owner-only mode and the same
+live/stale checks as §13's.
+
+```sh
+my-salmon run serve --http /run/my-salmon.http < /dev/null &
+C='curl -s --unix-socket /run/my-salmon.http'
+
+$C http://x/dag | jq '.nodes[] | {shorthand, ref: .ref.short, direction, convergence,
+                                  deps: [.dependencies[].short]}'
+$C http://x/status | jq .        # the object `status` prints under --json
+$C http://x/history | jq .       # likewise `history`, plus an `elided` count
+$C http://x/help/seed | jq -r .seed   # this binary's own `config --help`
+
+$C -X POST -d 'up --name web --file index.html' http://x/command      # sync
+$C -X POST -d 'up --name api' 'http://x/command?async'                # {"seq": n}
+$C -X POST -H 'content-type: application/json' -d '{"line": "status"}' http://x/command
+
+curl -sN --unix-socket /run/my-salmon.http http://x/events            # live, forever
+curl -sN --unix-socket /run/my-salmon.http 'http://x/events?since=42' # replay after 42, then live
+curl -sN --unix-socket /run/my-salmon.http 'http://x/events?stream=upkeep,updown&origin=stdin'
+```
+
+What the `-N` client sees while another posts an `up` (the fixture binary,
+`salmon-ops-serve-fixture run serve --json --http /tmp/x.http --events-ring 64`,
+abridged):
+
+```
+id: 3
+data: {"kind":"enqueued","line":"up --dir /tmp/play --name web --file index.html","origin":{"kind":"other","name":"/tmp/x.http#0"},"seq":3,"stream":"server"}
+
+id: 4
+data: {"active_seeds":1,"direction":"up","epoch":0,"kind":"declared","nodes":3,"origin":{...},"seq":4,"stream":"serve"}
+
+id: 6
+data: {"kind":"eval","node":{"shorthand":"directory",...},"origin":{...},"ref":{...},"seq":6,"stream":"updown"}
+...
+id: 12
+data: {"kind":"converge-stop","ok":true,"origin":{...},"remaining":0,"seq":12,"stream":"serve"}
+
+id: 13
+data: {"from":"/tmp/x.http#0","kind":"hung-up","seq":13,"stream":"serve"}
+
+id: 14
+data: {"down":0,"kind":"supervising","seq":14,"stream":"upkeep","up":3}
+
+id: 16
+data: {"delay_us":2000000,"kind":"reapplying","node":{"shorthand":"directory",...},"ref":{...},"seq":16,"stream":"upkeep"}
+```
+
+The `?async` answer was `{"seq":3}`: everything numbered above 3 with that
+origin is that command; from 14 on, with no origin, it is the machines
+tending between commands — which a sync `POST` never shows, since tending
+happens exactly when no command is being handled.
+
+What to know:
+
+- **Reads never touch the inbox.** `/dag`, `/status`, `/history` and
+  `/help/seed` read the loop's own `World` directly — they do not stand the
+  tending machines down, do not wait behind a command, and answer while a
+  node's `up` is still running. The price is that a read is at most one
+  command old: each node's `status` is the snapshot the last command took
+  (§11's `status` field, `null` for a node never tended). Motion between
+  commands is on `/events`, below, and `/status` and `/dag` carry a `seq`
+  — the last event number at the moment of the read — so that
+  `/events?since=<that seq>` starts exactly where the snapshot left off.
+- **`/dag` is the graph a pass walks**, not the declared tree: one object
+  per `Ref`, with `dependencies` and `dependants` as ref lists both ways,
+  the node's `shorthand`/`help`/`notes`/`dynamics` (the fields §8's
+  `Stale` detection compares), and its `direction`/`convergence`/`status`/
+  `paths` as `status` lists them. It is populated the moment something is
+  declared — under `autoconverge off` every node reads `pending` with its
+  edges already in place — and a retired seed's nodes stay in it with
+  `direction: "down"` until their teardown is done. A batch a `Rewrite`
+  would introduce is not shown; the nodes it would stand in for are. The
+  envelope's top-level `mode` is §12's (`interactive`, `following`,
+  `replay`), read at the moment of the request — the same value `/status`
+  opens with, so a client showing nodes as tended knows whether they are.
+- **`POST /command` is one line of §3's language**, `text/plain` or
+  `{"line": "..."}`, and it is handled like any other line: it stands the
+  machines down first and takes its turn in the inbox. Synchronous by
+  default, the response is a JSON array of exactly the reports that line
+  produced (§11's objects), returned when the loop has finished with it —
+  what a script or a CI step wants. `?async` returns `202 {"seq": n}` the
+  moment the line is queued; `n` is the number of the `enqueued` event on
+  `/events`, and that command's reports are the events above `n` carrying
+  its `origin`. `quit` works from here too and answers `[]`.
+- **`/events` is one stream, numbered, replayable.** `text/event-stream`:
+  each event is `id: <seq>` and one `data:` line holding the §11 object with
+  `seq` added, plus `origin` (the object `history` entries use) when the
+  report was produced for a command. Three streams and the server's own:
+  `serve`, `updown`, `upkeep` (the tending machines' reports, which reach a
+  client here and nowhere else) and `server` (`enqueued`, and `gap`). One
+  counter numbers everything — enqueues and reports, from the loop and from
+  machine threads — so one cursor is enough. `?since=N` replays what the
+  ring still holds after `N`, then continues live; the ring keeps the last
+  `--events-ring N` events (default 2048), and a client further behind than
+  that is sent `{"kind":"gap","from":<oldest>,"stream":"server"}` first
+  (no `id`), never a silent skip. `?stream=a,b` and `?origin=NAME` filter on
+  the server. An idle stream carries a comment line every 15 seconds so
+  proxies and read timeouts keep it open; hanging up is all a client has to
+  do to unsubscribe. `curl -N` or any `EventSource` reads it.
+- **`salmon-tui PATH` is a terminal over all of the above** (milestone 6;
+  `salmon-apps`, over `Salmon.Client.Http` and the pure `Salmon.Client.Model`).
+  It reads `/dag` once, follows `/events` from that snapshot's `seq`, and
+  draws a header (socket, mode, seq, converged/errored/total, the current
+  pass, `stream=live|reconnecting`), the node table in `/dag`'s order —
+  ref, shorthand, direction, state, last check, last event — and a footer.
+  `j`/`k` move, `enter` expands the selected node (help, notes, paths, edges,
+  check reason, error, the output ring of the last snapshot), `r` re-reads
+  `/dag`, `q` quits leaving the server as it was, and `:` opens a command
+  line: the line is sent as `POST /command?async` and the footer echoes the
+  seq it was queued at. **That line is the only thing on the screen that
+  stands the tending machines down** — every read bypasses the loop, so
+  the TUI can stay open on a box without perturbing it, and the footer
+  says so. It holds no state the server does not: a `declared` or a `gap`
+  makes it re-read `/dag` (rebased onto what it was showing), and a lost
+  stream is retried with `?since=` the last number it saw. Works unchanged
+  over `ssh -L /tmp/remote.http:/run/my-salmon.http host` — it is a client
+  of the socket, not a mode of `serve`. What the fixture looks like right
+  after `:up --dir /tmp/play --name web --file index.html --file style.css`:
+
+  ```
+  /tmp/x.http mode=interactive seq=17 converged=4 errored=0 total=4 converged  stream=live
+    ref        shorthand              dir  state     check        last event
+  > MTE5MDg2   file-contents          up   converged -            done #8
+    ODQwMTE0   directory              up   converged -            reapplying #16
+    bjU3MjUz   serve-fixture-bundle   up   converged -            parked #17
+    bjczNjY4   file-contents          up   converged -            done #10
+  #17 upkeep parked bjU3MjUz serve-fixture-bundle
+  j/k move  enter expand  : command (async; stands the machines down)  r re-read /dag  q quit
+  ```
+- **Permissions are the whole access story on the socket.** No token is
+  asked for on it; `notes`, `help` and report text are as public as the
+  logs they already go to. Do not put this socket where an untrusted user
+  can open it. Reaching the same server over a network is the next
+  paragraph, and it is TLS with a token or nothing.
+
+### Reaching it over the network: `--http-tcp`
+
+Milestone 8 of `specs/generic-server.md`. The same HTTP — every route
+above, `/events` included — can also listen on a TCP address, and the only
+way to spell that is with all three of a certificate, its key and a token
+file:
+
+```sh
+my-salmon run serve --http /run/my-salmon.http \
+    --http-tcp 0.0.0.0:8443 --tls-cert /etc/my-salmon/server.pem \
+    --tls-key /etc/my-salmon/server.key --token-file /etc/my-salmon/token < /dev/null &
+# stderr, once: serve: exposing HTTP on 0.0.0.0:8443 with TLS, token from /etc/my-salmon/token
+
+T="Authorization: Bearer $(cat /etc/my-salmon/token)"
+curl -s --cacert ca.pem -H "$T" https://host:8443/status | jq .
+curl -s --cacert ca.pem -H "$T" -X POST -d 'up --name web --file index.html' https://host:8443/command
+curl -sN --cacert ca.pem -H "$T" 'https://host:8443/events?since=0'
+```
+
+What the fixture binary does with each way of getting it wrong (the
+refusals are `exit 1` before anything is bound or read; the option check
+itself is a pure function, `CommandLine.validateTcpOptions`):
+
+```
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443
+--http-tcp needs --tls-cert, --tls-key, --token-file: a salmon server never listens on a network without TLS and a token
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443 --tls-cert tls/server.pem
+--http-tcp needs --tls-key, --token-file: a salmon server never listens on a network without TLS and a token
+$ salmon-ops-serve-fixture run serve --token-file token
+--token-file need --http-tcp HOST:PORT to apply to; there is no network listener without it
+$ ls -l token
+-rw-r--r-- token
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443 --tls-cert tls/server.pem --tls-key tls/server.key --token-file token
+--token-file token is readable by others; a token anyone on the box can read is not one (chmod 600 it)
+$ salmon-ops-serve-fixture run serve --http-tcp :8443 --tls-cert tls/server.pem --tls-key tls/server.key --token-file token
+--http-tcp: no host in ":8443"; spell the address, 0.0.0.0 included
+```
+
+and, once it is up (`chmod 600 token` first), what a client sees:
+
+```
+$ curl -s --cacert tls/server.pem https://localhost:8443/status
+{"error":"a bearer token is required"}                       # 401, WWW-Authenticate: Bearer
+$ curl -s --cacert tls/server.pem -H "Authorization: Bearer $(cat token)" https://localhost:8443/status
+{"kind":"status","mode":"interactive","nodes":[],"seq":2,"stream":"serve"}
+$ curl -s --cacert tls/server.pem -H "Authorization: Bearer wrong" https://localhost:8443/dag
+{"error":"a bearer token is required"}
+$ curl -si http://localhost:8443/status                      # plain HTTP on the TLS port
+HTTP/1.1 426 Upgrade Required
+$ curl -s --unix-socket /run/my-salmon.http http://x/history | jq -c '.seeds[] | .origin'
+{"kind":"other","name":"127.0.0.1:51510#0"}                  # the unix socket: no token, and who typed the line
+```
+
+Five things to know:
+
+- **There is no plaintext option, behind any flag.** `Http.Bind` has a
+  unix constructor and a TLS constructor and nothing else; `--http-tcp`
+  without all three files is refused with every missing one named, and the
+  three files without `--http-tcp` are refused too, since silently unused
+  is how a listener ends up open by accident. `HOST` is spelled, always:
+  `:8443` is refused, `0.0.0.0:8443` is how listening on every address is
+  written, `[::1]:8443` for IPv6. A salmon server is root on the box, one
+  `up` away — the spec's security section is binding on this.
+- **The token is on every route of the TCP listener**, `Authorization:
+  Bearer <token>`, compared in constant time against the file's content
+  with surrounding whitespace removed (so `echo secret > token` is fine).
+  Reads and `/events` are not exempt: a node's output ring is as sensitive
+  as a command. `401` with `{"error": ...}` otherwise, and a refused
+  command is never queued. The token file must not be readable by others
+  (`chmod 600`), and must not be empty. Checking it queues nothing — a read
+  is still a read.
+- **The unix socket is unchanged**, token-free, and the *same server*: one
+  event ring, one `seq` counter, one inbox, whichever listener a request
+  came in on. What differs is the origin a command is typed under:
+  `PATH#n` on the socket, the client's own `ADDR:PORT#n` over TCP, so
+  `history` says who typed a line from the network.
+- **Plain HTTP on the TLS port is refused by warp-tls** with `426 Upgrade
+  Required` before any route is reached; a client with a wrong CA sees a
+  failed handshake. Both are the listener working, and neither is traced on
+  stderr — the startup line is deliberately the only thing written there.
+- **Mint the certificate however you like; the tree can do it.**
+  `Certificates.certificateAuthority` writes a v3 self-signed certificate
+  a client can pin with `--cacert`; a CA-issued one works the same. Note
+  that `Certificates.selfSign` and `caSign` write X.509 *v1* certificates
+  (`openssl x509 -req` without extensions), which OpenSSL-based clients
+  accept and crypton-based Haskell clients reject (`LeafNotV3`).
+
+Not yet: `salmon-tui` and the web UI (§6/§7 of the spec) speak to the unix
+socket only; they will need a `--token` and a TCP address to reach a
+server started this way. Mutual TLS and a read-only token are the spec's
+own v2.
+
+### The web UI: `GET /`
+
+The same socket serves a page at `/` (its script and stylesheet under
+`/ui/`, compiled into the binary, so there is nothing to install beside it)
+that draws the world as the graph it is and drives it. Milestone 7 of
+`specs/generic-server.md`: the static picture, the live one, the actions
+and the seed form. It is a client of the routes above and nothing more — it fetches
+`/dag`, lays the nodes out in layers with dependencies above dependants and
+an edge per `dependencies` entry, one box per node (short ref, shorthand,
+`direction · convergence`, the last event and check verdict), coloured by
+convergence and dashed for a node wanted `down`; then it subscribes to
+`/events?since=<the snapshot's seq>` and applies what arrives: `eval`/
+`done`/`failed` pulse the box and move its colour, `next-look` updates the
+check verdict, `converge-start`/`converge-stop` and the counts go in the
+header. It keeps no state the server does not: a `declared`, a `cleared`, a
+`converge-stop`, a `gap` or a dropped stream all mean "fetch `/dag` again and
+resubscribe from its `seq`", and the reload button is that by hand. Clicking
+a node opens a panel with its help, notes, dynamics, paths, dependencies and
+dependants (each a link), the last check and its reason, and the output
+ring. Below 700px wide the graph gives way to a list.
+
+Everything the page *does* is one `POST /command?async` and then the event
+stream: the answer is the `seq` the line was queued at and the origin it was
+queued under (a toast shows both), and the events above that `seq` carrying
+that origin are what the command did — they outline the nodes it touched
+(the amber "touched" outline in the legend, until the loop's `hung-up` for
+that origin says the line has been handled), and they go into the log under
+the command line. The page never uses the synchronous form: a sync `up`
+holds the request for the whole pass, and the page is the thing that would
+be waiting. Four places send a line:
+
+- **The node panel** has `force`, `recheck`, `pause` and `resume` for the
+  selected node, sent as `<verb> --select #<short ref>` — the `#` selector
+  from §9, so what the box prints is what the command names. A node does
+  not know which seed declared it and `/history` does not say which nodes
+  an epoch declared, so retiring "the seed behind this node" is the
+  operator's choice: the panel lists every live declaration under *retire a
+  seed*, each with its `down`.
+- **The header** has the world's commands: `converge`, `supervise on|off`,
+  `autoconverge on|off`, `fetch` (which the loop answers "nothing is being
+  followed" without `--follow`) and `clear`, which asks first since it
+  retires every seed. `quit` is deliberately not there: the page is served
+  by the process it would be stopping, and leaving the loop is the one
+  thing that should take a terminal.
+- **The seed form** (the `seeds` button) shows `/help/seed` — this binary's
+  own `config --help`, and the loop's command reference under it — a text
+  field for the seed words, and `up`/`only`/`down`, sending `<verb> <words>`
+  as typed. `/history` is listed under it, one row per declaration with its
+  epoch, verb, words, origin and whether it is still active, a `down` on
+  each active row, and the words clickable to put them back in the field.
+  The list is fetched again on every `declared` and `cleared`.
+- **The command line** at the bottom (`:` focuses it, as in `vi` and `less`;
+  Esc leaves it) sends any line of §3's language as typed — `status`
+  and `help` included, whose reports land in the log rather than on the
+  page.
+
+The page does not send a bearer token, because nothing yet asks for one;
+that arrives with milestone 8 (TCP, TLS, a token) and the page will carry
+it then.
+
+A browser cannot open a unix socket, so until milestone 8 lands (TCP with
+TLS and a token — that is what makes the page reachable directly, and the
+reason nothing here listens on a port), forward the socket to a local port
+and open that:
+
+```sh
+my-salmon run serve --http /run/my-salmon.http < /dev/null &
+socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/my-salmon.http &
+xdg-open http://127.0.0.1:8080/
+
+# or, from another machine, over ssh:
+ssh -L 8080:/run/my-salmon.http host
+```
+
+Bind the forward to `127.0.0.1`: the port inherits none of the socket's
+file permissions, and whoever reaches it has the socket. The layout is a
+small longest-path layering with barycentre ordering written in
+`salmon-ops/ui/ui.js` itself — no bundler, no framework, no vendored
+library — so the three files are readable as they are served.
+
+## 15. Gotchas
 
 - **A piped script is never supervised.** If you're testing self-healing and
   piping a script in, you won't see it — there's no idle moment for the
@@ -440,7 +1168,7 @@ not this flag's. Omit it for the old, unbounded behavior (the default).
   node with no `check` never notices its own file changing, and nothing
   standing on it is ever bounced, however that node is decorated otherwise.
 
-## 12. Where to read more
+## 16. Where to read more
 
 - `docs/howto-ops.md` — writing and testing the `Op`s this doc assumes.
 - `CLAUDE.md`'s "`salmon-ops` layer" section — the implementation-level

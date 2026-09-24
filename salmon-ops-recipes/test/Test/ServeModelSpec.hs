@@ -16,6 +16,7 @@ failure/retry, which 'Test.ServeSpec' already covers by hand.
 -}
 module Test.ServeModelSpec (tests) where
 
+import Control.Concurrent.STM (TChan, TVar, atomically, modifyTVar', newTVarIO, readTVar, retry, writeTChan)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (foldl')
@@ -32,7 +33,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Salmon.Actions.Serve as Serve
-import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
+import Salmon.Actions.Serve (Convergence (..), Direction (..), Line (..), NodeState (..), Origin (..), Producer (..), World (..))
 import Salmon.Builtin.Extension (Track', deps, nodeps, op, ref, up, down)
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (Ref, mkRef)
@@ -45,6 +46,10 @@ tests =
         "Salmon.Actions.Serve (property-based)"
         [ testProperty "convergence matches an independent shadow model" prop_convergesLikeModel
         , testProperty "clear settles the world to empty, whatever came before" prop_clearSettlesToEmpty
+        , testGroup
+            "input producers"
+            [ testProperty "two producers taking turns agree with the one-script run" prop_producersTakingTurnsAgree
+            ]
         ]
 
 -------------------------------------------------------------------------------
@@ -328,6 +333,111 @@ worldBookkeepingMatchesModel m w
     | Set.null (modelLive m) && Map.null (modelTracked m) =
         null w.worldEpochs && Map.null w.worldLedger && Map.null w.worldMagma
     | otherwise = True
+
+-------------------------------------------------------------------------------
+-- Input producers: the same script, typed by two producers taking turns.
+
+{- | The refactor that let 'Serve.serveProducers' take a list of producers
+claims no behaviour change: what the loop sees is one inbox, and a line is
+a line whoever typed it. So a script split line by line between two
+producers — every even line from one, every odd from the other, in lockstep
+so that the inbox receives them in script order — must leave the world, and
+the up\/down tally, exactly where the one-handle run leaves them.
+
+Lockstep is what keeps this a comparison and not a race: two free-running
+producers would interleave differently every run, and a script whose lines
+arrive in a different order is a different script. The one thing the
+producers /cannot/ control is whether the loop catches the inbox empty
+between two turns and starts tending; @supervise off@ heads both scripts so
+that a tending machine, which is not what this property is about, never
+gets to touch a node either way.
+
+Only the 'Stdin' producer's 'Eof' ends the loop, so it is the one that
+sends its 'Eof' last — after the other producer's, which the loop must read
+past rather than stop on. That order is the one new decision in the
+refactor, and this is the test of it.
+-}
+prop_producersTakingTurnsAgree :: Property
+prop_producersTakingTurnsAgree =
+    forAllShrink genCommands shrinkCommands $ \cmds ->
+        let script = "supervise off" : fmap renderCommand cmds
+         in counterexample ("script:\n" <> unlines script) $
+                ioProperty $ do
+                    (upsA, downsA, wA) <- tally (\prog -> runServe prog script)
+                    (upsB, downsB, wB) <- tally (\prog -> runProducers prog script)
+                    pure $
+                        counterexample ("one-handle world: " <> show (worldShape wA)) $
+                            counterexample ("two-producer world: " <> show (worldShape wB)) $
+                                conjoin
+                                    [ counterexample "up counts agreed" (upsA == upsB)
+                                    , counterexample "down counts agreed" (downsA == downsB)
+                                    , counterexample "worlds agreed" (worldShape wA == worldShape wB)
+                                    ]
+  where
+    tally run = do
+        upsRef <- newIORef Map.empty
+        downsRef <- newIORef Map.empty
+        w <- run (spyProgram upsRef downsRef)
+        ups <- readIORef upsRef
+        downs <- readIORef downsRef
+        pure (ups, downs, w)
+
+{- | The comparable part of a 'World': 'NodeState' has no 'Eq' (it carries a
+machine's status snapshot), so project each node down to where it is wanted
+and whether it got there, and take the bookkeeping by its keys and sizes.
+-}
+worldShape :: World Spec Spec -> (Map Ref (Direction, Convergence), Set Ref, Int, Int, Int)
+worldShape w =
+    ( Map.map (\st -> (st.nodeDirection, st.nodeConvergence)) w.worldNodes
+    , Map.keysSet w.worldMagma
+    , Map.size w.worldLedger
+    , length w.worldEpochs
+    , length w.worldLog
+    )
+
+{- | Drive the loop over the same script typed by two producers taking
+turns, line for line, in script order. Lines are numbered; a producer sends
+its line only when the shared turn counter has reached that number, then
+passes the turn. The non-'Stdin' producer sends its 'Eof' as soon as its
+lines are out (which the loop must ignore); the 'Stdin' one waits for every
+line to be out first, so its 'Eof' is what ends the loop, exactly as the
+end of a script file does.
+-}
+runProducers :: Track' Spec -> [String] -> IO (World Spec Spec)
+runProducers prog script = do
+    turn <- newTVarIO 0
+    let numbered = zip [0 :: Int ..] script
+        total = length script
+        mine k = [(n, l) | (n, l) <- numbered, n `mod` 2 == k]
+        producers =
+            [ turnProducer turn total Stdin (mine 0)
+            , turnProducer turn total (Origin "second") (mine 1)
+            ]
+    Serve.serveProducers [] Nothing True silent silent parseSpec (Configure pure) prog producers
+
+turnProducer :: TVar Int -> Int -> Origin -> [(Int, String)] -> Producer
+turnProducer turn total origin ls = Producer $ \inbox -> do
+    mapM_ (say inbox) ls
+    -- the 'Stdin' producer's 'Eof' ends the loop, so it must come after the
+    -- last line whoever typed it; the other producer's is read past, so it
+    -- may come whenever.
+    case origin of
+        Stdin -> await (>= total)
+        _ -> pure ()
+    atomically (writeTChan inbox (Eof origin))
+  where
+    say :: TChan Line -> (Int, String) -> IO ()
+    say inbox (n, l) = do
+        await (== n)
+        atomically $ do
+            writeTChan inbox (Line origin l)
+            modifyTVar' turn (+ 1)
+    await :: (Int -> Bool) -> IO ()
+    await p = atomically $ do
+        t <- readTVar turn
+        if p t then pure () else retry
+
+-------------------------------------------------------------------------------
 
 -- | Drive the loop over a scripted stdin, piped-script mode (never idle, so
 -- deterministic) — same shape as 'Test.ServeSpec.runServe'/'withScript',

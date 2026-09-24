@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>salmon serve</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="ui/ui.css">
+</head>
+<body>
+<header id="header">
+  <h1>salmon</h1>
+  <dl id="summary">
+    <div><dt>mode</dt><dd id="h-mode">–</dd></div>
+    <div><dt>seq</dt><dd id="h-seq">–</dd></div>
+    <div><dt>nodes</dt><dd id="h-counts">–</dd></div>
+    <div><dt>last converge</dt><dd id="h-converge">–</dd></div>
+    <div><dt>stream</dt><dd id="h-stream">connecting</dd></div>
+  </dl>
+  <nav id="actions" aria-label="world actions">
+    <button type="button" data-line="converge" title="re-attempt whatever has not converged">converge</button>
+    <span class="pair">supervise
+      <button type="button" data-line="supervise on">on</button><button type="button" data-line="supervise off">off</button>
+    </span>
+    <span class="pair">autoconverge
+      <button type="button" data-line="autoconverge on">on</button><button type="button" data-line="autoconverge off">off</button>
+    </span>
+    <button type="button" data-line="fetch" title="ask the fetcher for a round now (--follow)">fetch</button>
+    <button type="button" data-line="clear" data-confirm="Retire every seed? Everything known goes down." class="danger">clear</button>
+    <button type="button" id="seeds-toggle" aria-expanded="false" aria-controls="seeds">seeds</button>
+    <button id="reload" type="button" title="fetch /dag again and resubscribe">reload</button>
+  </nav>
+</header>
+<main id="main">
+  <section id="graph-wrap">
+    <section id="seeds" hidden aria-label="seeds">
+      <h2>seeds</h2>
+      <details id="seed-help-wrap" open>
+        <summary>this binary's seed (<code>config --help</code>)</summary>
+        <pre id="seed-help">loading…</pre>
+      </details>
+      <details id="seed-commands-wrap">
+        <summary>the loop's commands</summary>
+        <pre id="seed-commands"></pre>
+      </details>
+      <form id="seed-form">
+        <label for="seed-words">seed words</label>
+        <input id="seed-words" type="text" autocomplete="off" spellcheck="false" placeholder="the words that would follow config">
+        <span class="buttons">
+          <button type="submit" data-verb="up" title="declare this seed up">up</button>
+          <button type="button" data-verb="only" title="declare this seed up and retire every other one">only</button>
+          <button type="button" data-verb="down" title="retire this seed">down</button>
+        </span>
+      </form>
+      <h3>history <span id="history-elided" class="muted"></span></h3>
+      <p id="history-empty" class="muted" hidden>no seed declared yet</p>
+      <table id="history">
+        <thead><tr><th>epoch</th><th>declared</th><th>seed</th><th>origin</th><th>state</th><th></th></tr></thead>
+        <tbody id="history-rows"></tbody>
+      </table>
+    </section>
+    <p id="empty" hidden>Nothing declared yet. Declare a seed (the <em>seeds</em> button above, or <code>POST /command</code> with <code>up …</code>) and it appears here.</p>
+    <svg id="graph" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="the world's dag">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z"></path>
+        </marker>
+      </defs>
+      <g id="edges"></g>
+      <g id="nodes"></g>
+    </svg>
+    <ol id="list"></ol>
+    <ul id="legend">
+      <li class="pending">pending</li>
+      <li class="stale">stale</li>
+      <li class="converged">converged</li>
+      <li class="errored">errored</li>
+      <li class="blocked">blocked</li>
+      <li class="retiring">retiring (wanted down)</li>
+      <li class="touched">touched by a command from this page</li>
+    </ul>
+  </section>
+  <aside id="panel" hidden>
+    <button id="panel-close" type="button" aria-label="close">×</button>
+    <div id="panel-body"></div>
+  </aside>
+</main>
+<footer id="cli">
+  <form id="cli-form">
+    <label for="cli-line" class="mono">:</label>
+    <input id="cli-line" type="text" autocomplete="off" spellcheck="false" placeholder="a line of the input language — up …, status, help … (: focuses, Esc leaves)">
+    <button type="submit">send</button>
+  </form>
+  <details id="cli-log">
+    <summary>log <span id="cli-log-count" class="muted"></span></summary>
+    <ol id="cli-log-list"></ol>
+  </details>
+</footer>
+<div id="toasts" aria-live="polite"></div>
+<script type="module" src="ui/ui.js"></script>
+</body>
+</html>

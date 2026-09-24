@@ -28,6 +28,14 @@ semantics regardless of whether a node is as small as "create a file" or as larg
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
   see `Migrator.hs` / `MigratorApp.hs`; and `salmon-pgpair`, see `PgPair.hs`, whose directive is
   simply a `SreBox.PostgresPair.Pair` — moving a primary is then an edit to one word of the seed).
+  `salmon-fleet` (`Fleet.hs`) is the odd one out: not a salmon binary in the seed → directive
+  sense but the reader's side of `run serve --status-sink` — `salmon-fleet status DIR` folds a
+  directory of status documents into one line per host (`Salmon.Actions.Fleet` is the fold; the
+  binary only parses flags and prints). It never writes.
+  `salmon-tui` (`Tui.hs`) is the other reader: a `brick` terminal over `Salmon.Client` (below)
+  against `run serve --http PATH`'s socket — `salmon-tui PATH` reads `/dag` once, follows
+  `/events`, and draws the node table with a `:` command line that is the only thing on the
+  screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
   itself, with a client that keeps writing while the primary moves: a demo of
   `specs/pg-switchover.md`, and the throwaway-validation counterpart to `salmon-gcp-toy`. Its two
@@ -398,6 +406,306 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   pass must be the only thing touching anything. This is what replaced `serveWakingWith`, a
   "these nodes want attention" hook nothing ever drove: it existed because a node had no state
   of its own to block on.
+  **The input is one inbox filled by a list of `Producer`s** (`serveProducers`), each on a
+  thread of its own pushing `Line`s tagged with the `Origin` that typed them; `serveWith` is
+  the one-producer case, `stdinProducer` over a `Handle`, and is unchanged for every caller.
+  "Idle" is still `isEmptyTChan` on that one inbox, whoever fills it, and every command still
+  runs `stopTending` first. The one decision the list adds: **only the `Stdin` origin's `Eof`
+  ends the loop**; another producer's `Eof` is not a command (nothing acts, so nothing stands
+  down) and is read past — a socket client hanging up or a fetcher going quiet must not take
+  the server with it, so a loop with no `Stdin` producer ends only on `quit`. Such a hang-up is
+  reported as `HungUp origin` at the moment the loop reads its `Eof` — which, the inbox being
+  one queue, is after every line that origin typed has been handled, and is what whoever holds
+  a connection for it waits for before closing.   **Whose report is it** is the loop's knowledge and nobody else's, so `serveAttributed` is the
+  entry point that says: it takes reporters over `Attributed a` (a `Maybe Origin` beside the
+  report) and stamps every report — the loop's own and the per-node ones a pass emits — with
+  the origin of the line being handled, `Nothing` outside a command (the tending machines'
+  reports). The mechanism is one private `IORef (Maybe Origin)` written in `loop` after
+  `stopTending` and cleared when `step` returns, applied through `Reporter.pulls`; it is
+  private on purpose, so the API is two contravariant reporters and no mutable state.
+  `serveProducers`/`serveWith` are the same loop with the stamp thrown away.
+  **`Actions/Serve/Socket.hs`** is the first producer beyond stdin (milestone 2 of
+  `specs/generic-server.md`): `withUnixListener` binds a unix socket (bind, then chmod 0600,
+  then listen — race-free without a process-global umask, because a bound-but-unlistened
+  socket refuses connections; a stale file is replaced only if a connect to it fails, a live one
+  is `AlreadyListening`, a non-socket is `NotASocket`), `listenerProducer` accepts connections
+  and reads each as lines under its own `Origin "PATH#n"`, and `listenerReporters` wraps the
+  loop's one `Reporter Tagged` so that a report stamped with a connection's origin is also
+  written to that connection as `reportJSONLines` — clients always get JSON, the loop's stdout
+  stays whatever `--json` said. Two ordering facts are load-bearing: a connection is closed on
+  the loop's `HungUp` for it and **not** when its reader hits EOF (a client that half-closes
+  after typing is still owed its reports, which the loop may not have reached yet), and the
+  producer's own teardown closes every connection so a client attached when `quit` ends the
+  loop reads EOF. Under `--listen`, `CommandLine` hands stdin over as `Origin "stdin"` rather
+  than `Stdin`: with a socket to talk to the process must outlive whatever started it
+  (`< /dev/null &`), so stdin's EOF is a hang-up like any client's and only `quit` — from
+  anywhere — ends the loop. `Test/ServeSocketSpec.hs` drives it with real connections.
+  **`Actions/Serve/Http.hs`** is milestone 3: `run serve --http PATH` serves HTTP (warp) on a
+  *second* unix socket, bound through the same `withUnixListener` (owner-only, live path
+  refused) — its own path rather than protocol detection on `--listen`'s, because the line
+  protocol reads through a `Handle` that cannot hand peeked bytes back, and sharing would have
+  meant rewriting both over raw sockets plus a warp `Internal` shim for the price of one flag.
+  **Reads bypass the inbox**: `GET /dag`, `/status`, `/history`, `/help/seed` read the loop's
+  `World` cell through the accessor `serveObserved` hands its observer (`serveAttributed` is
+  that with a no-op observer; the accessor is `readIORef`, nothing more), plus the (R3) tending
+  snapshot already on each `NodeState` — so a read never runs `stopTending`, never wakes a
+  machine, and answers while a node's `up` is still running in the loop; it is at most one
+  command old. `/dag` is `worldDag` (magma plus the ledger's precedence, the structure a pass
+  walks, *unrewritten*), one object per `Ref` in `dagOrder` with `dependencies`/`dependants`
+  both ways and the `Act` projection — exactly the fields `Dag.sameRepresentative` compares
+  (`shorthand`/`help`/`notes`/rendered `dynamics`, via `Dag.representative`) plus the loop's
+  `direction`/`convergence`/`status` through `Tagged.nodeStatePairs`, one encoding not two. It
+  exists from the first declaration on (every node `pending` under `autoconverge off`), and a
+  retiring node is in it with `direction: down` until `prune` drops it. `/status` and
+  `/history` are the objects `--json` prints for the commands (`history` folds the elided count
+  in as a field); `/help/seed` is the seed parser's own `--help` (`CommandLine.seedHelpText`)
+  and the command reference. **`POST /command`** is one line of the input language as one more
+  `Producer`: the `Line` and its `Eof` are written in one STM transaction under an origin minted
+  per request (`PATH#n`), so every arrival still runs `stopTending` first and nothing another
+  producer types lands between the two. Sync (default) collects every report the loop stamps
+  with that origin and answers, as a JSON array, on the loop's `HungUp` for it — Socket's
+  closing rule, for the same reason; `?async` answers `202 {"seq": n}` at once. Report text is
+  public, no redaction (spec decision). No token on the unix socket. `Test/ServeHttpSpec.hs`
+  drives it with `http-client` over the socket and rebuilds `Help.dagLines` from `/dag`.
+  **`GET /` and `/ui/*` are the web UI** (milestone 7, first two steps): `salmon-ops/ui/`'s
+  `index.html`/`ui.js`/`ui.css`, embedded at build time with `file-embed` (`embedDir` under
+  `makeRelativeToProject`, so the set is closed at compile time and a path outside it is the
+  ordinary 404; listed in `extra-source-files` so an edit is a rebuild). Plain ES module, no
+  bundler, no framework, no vendored library: `ui.js` draws `/dag` as a layered graph — its own
+  longest-path layering plus four barycentre sweeps, dependencies above dependants, one box per
+  `Ref` coloured by `convergence` and dashed for `direction: down` — then subscribes to
+  `/events?since=<the snapshot's seq>` and applies `updown`/`upkeep` events to the boxes
+  (`acted` and `tended` unwrapped to the inner report) and `converge-start`/`converge-stop` to
+  the header. It holds no state the server does not: `declared`, `cleared`, `converge-stop`, a
+  `gap`, or the stream dropping each mean fetch `/dag` again and resubscribe from its `seq` (it
+  closes the `EventSource` on error rather than let the browser reconnect, since the browser
+  resumes by `Last-Event-ID`, which the server does not read). A click opens a side panel from
+  the node object alone. **Every write is `POST /command?async`**, never the sync form (a sync
+  `up` holds the request for the whole pass): the panel's `force`/`recheck`/`pause`/`resume`
+  (`--select #<short ref>`), the header's `converge`/`supervise`/`autoconverge`/`fetch`/`clear`,
+  the seed form (`/help/seed`'s text, a field for the words, `up`/`only`/`down`, `/history`
+  under it with a `down` per active row) and a raw command line. The outcome is read off
+  `/events` by the request's origin — the events carrying it outline the nodes touched and fill
+  the log under the command line until the loop's `hung-up` for that origin. No `quit` on the
+  page, and no bearer token sent until milestone 8 asks for one. A browser cannot open a unix
+  socket, so it is reached through a TCP forward (`socat`/`ssh -L`) until milestone 8's TCP
+  listener; see `docs/serve-supervision.md` §14.
+  **Milestone 8, the same HTTP over a network**: `run serve --http-tcp HOST:PORT --tls-cert
+  FILE --tls-key FILE --token-file FILE` adds a warp-tls listener (`Http.withHttpServerOn`
+  over a list of `Bind`s — `BindUnix PATH | BindTls TlsBind`, no plaintext constructor) running
+  the *same* `application` on the *same* `Server` (one ring, one counter, one inbox), behind
+  `requireToken`, a middleware on the TCP listener only that wants `Authorization: Bearer
+  <token>` on every route, `/events` included, compared in constant time (`sameSecret`) and
+  answering `401 {"error": ...}` otherwise. It is a middleware so a route added to
+  `application` later is covered without knowing the token exists. `CommandLine.
+  validateTcpOptions` is the pure refusal: `--http-tcp` without all three files exits 1 naming
+  the missing ones, the files without `--http-tcp` are refused, `:PORT` with no host is
+  refused (spell `0.0.0.0`), `[::1]:PORT` for IPv6; `Http.readTokenFile` refuses a
+  world-readable or empty file. Exactly one line goes to stderr on startup (`serve: exposing
+  HTTP on HOST:PORT with TLS, token from FILE`), and the listener's `onException` drops
+  warp-tls's `InsecureConnectionDenied` (a plain-HTTP client, answered 426 first) and TLS-level
+  connection errors (curl closes without close-notify on every request) so it stays the only
+  line. Origins over TCP are the client's `ADDR:PORT#n` (`originFor`), the socket's `PATH#n`
+  as before. The certificate and key are loaded before binding, so a bad file throws
+  `BadCredentials` here rather than dying on warp's thread. `Test/ServeTlsSpec.hs` mints a
+  certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
+  which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
+  pinning exactly that certificate. Not done: client certificates, a read-only token, TCP/token
+  support in `salmon-tui` and the web UI.
+  **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
+  of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
+  added and `origin` — the object `history` entries use — when the report was stamped for a
+  command). The `Events` value is the counter, a bounded ring (`Data.Sequence`, `--events-ring
+  N`, default 2048) and a broadcast `TChan`, and `publish` writes all three in **one STM
+  transaction**: that transaction is the critical section the spec's open question asks for.
+  It could not be the concurrent driver's reporter `MVar`, because there is no single one —
+  `Concurrent.walkConcurrent` makes a `reportLock` per walk and `Upkeep.startUpkeep` one per
+  supervisor, each local to its function — but each of those is *held* while `runReporter` is
+  called, so a numbering reporter whose whole effect is one transaction composes under all of
+  them: within a driver, report order and sequence order agree; across drivers and machine
+  threads, atomicity alone gives one total order. `Http.serverReporters` feeds it with
+  `Events.eventsReporter` beside the loop's own reporter (stdout and `--listen` clients are
+  unchanged), and unwraps `Serve.Tended` to the `upkeep` stream it came from. **The event
+  stream is the only place a client sees the tending machines at work** — a sync `POST` answers
+  with the reports stamped for its command, and tending happens exactly when no command is
+  being handled. Numbering is dense: every `POST /command` publishes an `enqueued` event
+  (`stream: "server"`, with the `line`) numbered from the same counter, and that number is the
+  `?async` answer, so "the reports of my command" is "events above `n` with my origin". `/dag`
+  and `/status` carry `seq`, the last number handed out, read *before* the world so that an
+  event landing between the two reads is replayed rather than skipped. `?since=N` replays what
+  the ring still holds above `N` then continues live; if `N+1` has fallen off, the first event
+  is a synthetic `{"kind":"gap","from":<oldest>,"stream":"server"}` with no `id`, never a
+  silent skip. `?stream=serve,updown,upkeep,server` and `?origin=NAME` filter server-side
+  (the spec's "clients filter" is right about who decides, wrong about who pays). A comment
+  line every `configKeepAlive` (15s) of silence keeps proxies and read timeouts from dropping
+  an idle stream; a client hanging up is a failed write, which ends the stream and its
+  subscription; the loop ending sets `serverStopped`, on which every open stream returns so
+  warp's graceful shutdown is not held behind a subscriber. `Test/ServeEventsSpec.hs`: a
+  seeded (`SALMON_EVENTS_SEED`) mid-pass disconnect-and-`?since=` equals an uninterrupted
+  subscription; strictly increasing numbers across the three streams with `supervise on` and
+  a node whose `check` always fails; ring overflow; `?async` then `?since=`; snapshot `seq`;
+  filters; keep-alive and cleanup. One hazard it documents: the suite runs groups in parallel
+  in one process and nothing in the tree passes `close_fds`, so a child spawned by another
+  test inherits any fd not marked close-on-exec — `network`'s `socket` sets `SOCK_NONBLOCK`
+  but not `SOCK_CLOEXEC` (its `accept` does), and `process`'s `createPipe` is plain — which
+  showed up as a loop whose stdin never hit EOF and a hung-up client whose socket stayed open;
+  the spec marks its own fds.
+  **`Actions/Serve/StatusSink.hs`** is milestone 5 of `specs/pull-mode.md`: `run serve
+  --status-sink PATH [--status-sink-interval S]` writes a JSON document about this host —
+  `salmon-status: 1`, `host` (`uname -n`), `written`, `mode`, `labels` (the document applied per
+  followed label: id, sha256, when), `status` (the very object `status --json` prints) and `last`
+  (the last `converge-stop` and the last follow-stream object, tagged, as `--json` prints them) —
+  to a temp file renamed over `PATH`, so a reader never sees half of one. It is **a reporter and
+  a timer, not a producer**: `sinkReporter` is composed beside the loop's `Reporter Tagged` with
+  `reportBoth` and wakes the writer on `ConvergeStop` and `Follow.Injected`; `sinkObserver` is
+  handed to `serveObserved` (sequenced after the HTTP server's) and reads the world through the
+  same accessor `/status` does; a tick every interval rewrites it regardless. Nothing about it
+  touches the inbox, so no write ever stands a machine down, and a host gone quiet is one whose
+  `written` is old, not one whose file says all is well. A write that fails is `Serve.SinkFailed`
+  — once per run of failures, re-armed by the next success, emitted from the sink's thread and
+  attributed to nobody — and the loop keeps serving. The fetcher's `Applied` gained `appliedAt`
+  and its cell is made by the caller (`Follow.newApplied`, beside `newMode`) so `Followed` can
+  carry `followedApplied :: IO [AppliedDocument]`; the spec's "the sink is an op in the host's
+  graph" was not done, because a node runs *in* a pass and the sink must write *after* it. The
+  fetcher's reports are the fourth `Tagged` stream (`FromFollow`, `stream: "follow"`) as of the
+  same change — before it they printed as text whatever `--json` said, and no sink could see
+  them. **`Actions/Fleet.hs`** is the reader: `readStatusDir` (every `*.json` that parses as a
+  sink document, the rest listed with why) and a pure `fold` — one `Row` per document in host
+  order, `converged`/`errored`/total read off `status.nodes[].convergence`, the label filter,
+  `rowStale` past `optStale` (a visible fact, not a decision: nothing decides a host is dead) —
+  which `salmon-fleet status DIR [--label L] [--stale S] [--json]` in `salmon-apps` is a thin
+  command line over. Two documents naming one host are two rows; the fold reports, it does not
+  pick. See `Test/StatusSinkSpec.hs`.
+
+  `Test/ServeModelSpec.hs`'s "input producers" group drives the loop from two lockstep
+  in-memory producers and checks the world matches the one-script run.
+  **`Actions/Follow.hs` is the second producer**, pull mode (`specs/pull-mode.md`, milestones
+  2–3): `run serve --follow DIR --label L [--label L]... [--follow-base S ...]` fetches a JSON
+  `Document` per label from a `Registry` (`directoryRegistry`: one `<dir>/<label>.json` per
+  label) and injects the *diff* against that label's previously applied document — `up` for
+  seeds newly present, `down` for seeds gone from it and from every other followed label's
+  document, since the ledger keys a declaration by its directive and cannot tell one label's
+  copy from another's. Three things there are load-bearing. **Change is detected before
+  injection** (the registry's stamp — mtime and size — decides whether to read, the sha256
+  digest whether anything changed, and the seed-set diff whether anything is declared): an
+  unchanged round is invisible to the loop, because every inbox entry stands the machines down
+  and a poller that injected on every tick would starve supervision (`Test/FollowSpec.hs`'s
+  "rewriting the same bytes injects nothing" is that rule as a test). **A diff is one `Batch`
+  inbox entry**, a `Line` constructor the loop runs with `autoconverge` held off, restores to
+  whatever the operator had set, and follows with one `converge` — one entry so nothing
+  another producer types lands in the middle of it, and restored by the loop because only the
+  loop knows the setting. **The fetcher is a named actor in `history`**: `Origin` grew
+  `Loaded path` and `Fetched Provenance` (registry, label, document id, digest), every
+  `Epoch`/`LogEntry` carries the origin of the line that made it, and `history` renders it as
+  a trailing `[fetched ... label=... id=... sha256=...]` — a typed line renders as before. The
+  first round runs synchronously and stdin is held behind it (`Follow.gated`), so the first
+  convergence is what the registry says, and what it found is injected at once.
+  **When every later round runs, and when what it found reaches the loop, is
+  `Actions/Follow/Scheduler.hs`** (milestone 3): a pure step over a small state (consecutive
+  failures, the next round's deadline, a pending change and when it was first and last seen)
+  and one `IO` loop around it that takes a `Clock` from the caller — the system's, or a test's
+  that moves time (`Test/FollowSchedulerSpec.hs`). Toward the registry, a ladder: a successful
+  round (changed or not) polls at `base`, a failed one — the registry threw, or its bytes do not
+  parse; a label with no document is *not* a failure — at `min(cap, base·factor^(n-1))`, every
+  delay jittered so a fleet does not poll in step. Toward the loop, a quiet window: a changed
+  document is set aside as that label's latest `Seen`, and injected once the registry has been
+  quiet for `debounce` or `max_wait` after the first pending change, diffed against the document
+  last *applied* — so three writes inside one window are one diff and one pass, and a
+  half-published state is never applied. A window can close over several labels at once, which
+  is why `Batch` carries `[(Origin, ServeCommand)]`: one inbox entry, each declaration still
+  naming its own document in `history`. `fetch` is the one place inbound events touch the
+  scheduler — a round now, the ladder forgotten, whatever is pending injected the moment the
+  round is over — and since the loop cannot call into a producer, `serveFollowing` takes the
+  hook it pulls (`serveProducers` is that with none; without `--follow`, `fetch` says nothing is
+  being followed) and `Scheduler.Poke` is the flag the fetcher's clock wakes on. A round and an
+  injection due at the same instant go round first, deliberately: a poke makes both due now, and
+  its point is to inject what that round finds. The flags are `--follow-base` (30s;
+  `--follow-interval` is its older name), `--follow-factor` (2), `--follow-cap` (10m),
+  `--follow-jitter` (0.2), `--follow-debounce` (5s; 0 injects at the round that saw the change)
+  and `--follow-max-wait` (60s).
+  **The last applied document survives a restart** (milestone 4): with `--follow-cache DIR`,
+  `injectPending` writes each label's just-applied document — bytes, digest, id — to
+  `DIR/<label>.applied.json` (a temp file and a rename, so a crash mid-write leaves the previous
+  entry), and the startup round replays it for any label whose fetch *failed* (the registry
+  threw, or its bytes did not parse — a label the registry answers `Absent` for is not replayed,
+  the registry answered). A replayed document is that label's `Seen` with no stamp, so it goes
+  through the same diff and batch as a fetched one, and its digest is compared exactly as an
+  applied one's is: a registry coming back with the same bytes injects nothing, which is the
+  starvation rule across restarts. `Serve.Mode` is what `status` says about it — `interactive`
+  (no `--follow`), `following` (the world is what the registry last said), `replay` (at least one
+  label came from the cache) — and it is only ever *entered* at startup, because the cache stands
+  in for a world, not for a round: before the first round there is nothing else, and after a
+  successful one the world already is the registry's last word, a later failure changes nothing
+  about it, and the scheduler's `Backoff` is what says the registry is gone. `Replay` turns to
+  `Following` at the first later round in which every label answers. The loop reads the mode
+  through `Serve.Followed` — the fetch hook and an `IO Mode`, one record in the slot the hook
+  had, `Nothing` meaning interactive — and `StatusReport` carries it as its first field, so the
+  text render's first line is `serve: mode: ...` and the JSON object has `mode`. `Document` also
+  gained an optional `published` (RFC 3339; a *malformed* one is a parse error, not ignored), and
+  `--follow-refuse-older` refuses a fetched document published before the one already applied
+  *or pending* for its label (`Stale`, not injected) — off by default, and without `published`
+  on both sides the latest is whatever the registry says. A cache entry that cannot be read
+  (`BadCache`) or written (`CacheFailed`) is reported and otherwise ignored; the cache never
+  takes the loop down. `directoryRegistry` now *throws* when its directory is missing rather than
+  answering `Absent`, since that is the difference between "the registry is unreachable" and "no
+  document for this label", and the cache hinges on it. See `Test/FollowCacheSpec.hs`.
+  **The other registries are `Actions/Follow/Registry.hs`** (milestone 6), one `Registry` value
+  per backend, each owning the template that turns a label into an address, chosen by the shape
+  of `--follow` (`parseAddress`) and opened by `open`; `follower` and the scheduler see none of
+  it. `Registry/Git.hs` (`git+URL[#BRANCH[:SUBDIR]]`): cloned once into `--follow-workdir` (default
+  `checkout` under the cache directory, else a temp directory named by the repository), then
+  `git fetch` and `git reset --hard` onto the branch every round, all through `Binary` with
+  `GIT_TERMINAL_PROMPT=0`; the document is `SUBDIR/<label>.json` in the checkout and the *stamp is
+  the commit*, so a round that finds the same commit reads nothing. The subdirectory comes after
+  the branch, not after the URL, because URLs have colons of their own. `Registry/Http.hs`
+  (`http(s)://...`, `{label}` placed or `/<label>.json` appended): the stamp is the `ETag`, else
+  `Last-Modified`, sent back as `If-None-Match`/`If-Modified-Since` so an unchanged document is a
+  `304` and no body crosses; `404` is `Absent`, anything else throws (a failed round). One manager
+  per registry, `--follow-timeout` on the whole response. `Registry/Dns.hs` (`dns:ZONE`): one
+  `TXT` at `<label>.ZONE` reading `v=salmon1 url=<https url> sha256=<hex>`; **the record's digest
+  is the stamp**, so a round is one lookup and the URL is fetched only when the announced digest
+  moved, and a body that does not hash to what the record announces throws `IndexMismatch` —
+  a failed round with that reason, never applied. The resolver is a `Resolver` record so tests
+  stub it; the shipped one shells out to `dig +short` (nothing in the tree resolved DNS before,
+  and one TXT lookup did not buy a resolver library). The bucket backends (`s3://`, `gs://`) are
+  the HTTP one under a URL template (virtual-hosted S3, GCS's `storage.googleapis.com`, or
+  path-style under `--follow-bucket-endpoint`): public or presigned objects only, no SDK, no
+  credentials. **`followVerify`** is the verify-before-inject hook: `Digest -> ByteString -> IO
+  (Either Text ByteString)`, run on the raw bytes after the digest comparison and before the
+  parser, on every backend *and on a cache replay* (a cache file is as writable as a registry
+  file); a `Left` is `Rejected label digest reason`, a failed round, never injected and never
+  cached; a `Right` is *the bytes the loop parses*. `noVerifier` hands back what it got and is
+  the default — **unsigned mode is the default** — and `Binary.untrackedExecOutput` is
+  `untrackedExec` handing stdout back, for `git rev-parse` and `dig`. See
+  `Test/FollowRegistrySpec.hs`: a bare repo, a `warp` server with `ETag`s, a stubbed resolver.
+  **`Actions/Follow/Signature.hs` is the verifier that fills the hook** (E2, the spec's "Signed
+  documents"): `run serve --follow ... --follow-key FILE` (repeatable, any one matching signature
+  accepts) sets `followVerify = signedVerifier keys`, and a document must then arrive as a
+  *signed envelope*, `{"salmon-signed": 1, "document": <the document as fetched>, "signatures":
+  [{"key": <id>, "alg": "EdDSA", "sig": <base64>}]}`, signed over the canonical bytes of the
+  `document` member. Canonical means `Data.Aeson.encode` of the parsed `Value` — sorted keys
+  (aeson 2's `KeyMap` is a `Map` under its default flag; the plan pins aeson 2.2.5.1) and one
+  spelling per scalar — so a registry, proxy or pretty-printer re-serialising the envelope leaves
+  the signature valid, and both signer and verifier parse-then-encode with the same function
+  rather than depending on a canonical-JSON library. The verifier hands the loop the *inner*
+  document, so what `Document`'s parser sees is exactly what was signed; the digest kept
+  everywhere (change detection, `Rejected`, `history`, the cache) is that of the bytes *as
+  fetched* — the envelope — because the cache keeps those bytes and a replay goes through the
+  verifier as a fetch did (`readCacheEntry` is the read without the parse). Keys are **JWK
+  files** — the format `Nodes/Keys.hs` already writes with `jose` — and the algorithm is EdDSA
+  on Ed25519 (`jose` on `crypton`, already dependencies; RSA/EC keys sign with `bestJWSAlg`);
+  `none` and the HMACs are refused outright since a public key verifies neither; the key id is
+  the RFC 7638 SHA-256 thumbprint. Refusals name their cause: unsigned under a key, an envelope
+  that does not parse, no signatures, or every signature failing (which key, and why). A
+  `--follow-key` that does not load exits 1 with the path before any loop starts. `salmon-fleet
+  keygen --out FILE` (FILE 0600 and FILE.pub) and `salmon-fleet sign --key FILE < doc > signed`
+  are the controller's half. Out of scope: rotation/revocation beyond several `--follow-key`s,
+  signing inside a registry. See `Test/FollowSignatureSpec.hs`.
+  `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
+  never spelled by a line of the input language. And a `Configure` that throws is now a
+  `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
+  a document's author is not at the keyboard, and their typo must not cost a host its
+  supervisor.
   (R2): `force`/`recheck`/`pause`/`resume [--select P]... [--exclude P]...` finally make
   `Op/Mailbox.hs`'s `Instruction`s reachable from the input language, reusing
   `parseSelection`/`resolveWorldSelectors` the same way `status`/`query`/`converge --select`
@@ -429,6 +737,31 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   reason only — `--select` resolves *path* patterns, and a `Dag` has `Ref`s and edges but no
   paths. Registered `Rewrite`s run once per convergence pass (not per declaration), because what
   they partition on is a property of the whole ledger at that moment.
+- **`Client/Http.hs`** and **`Client/Model.hs`** are milestone 6 of `specs/generic-server.md`, the
+  client's half, with no terminal in them. `Salmon.Client.Http` is a small typed client over
+  `http-client` for a unix socket (no TCP, no auth, until milestone 8): `dag`/`status`/`history`/
+  `seedHelp` for the reads — which bypass the loop and never stand a machine down — `command`
+  (sync, the reports) and `commandAsync` (the enqueue seq and origin), and `events`, which opens
+  `/events` once with `?since=`/`?stream=`/`?origin=` and hands each event to a callback until it
+  says stop or the stream ends; reconnecting is the caller's, with the last seq it saw.
+  `Salmon.Client.Model` is the spec's `dag ⊕ events since the dag's seq`, pure: `fromDag` reads a
+  `/dag` answer into one `Node` per ref in `dagOrder` (ref, shorthand, direction, convergence,
+  last check, output ring, edges, paths), `step` folds one wire event — as *data*, never decoded
+  back into the four report sums, so a kind the client was not written for still shows as a
+  node's last event — and `rebase old fresh` joins a re-read snapshot to a model that has been
+  folding. Two things are load-bearing. **Replays are dropped per stamp, and there are two
+  stamps**: each node carries `nodeSeq` (the snapshot's, then each event's about it) and the
+  loop-level fields (`modelPass`, `modelSupervised`, the resync request) carry `modelLoopSeq`,
+  because a `/dag` snapshot says everything about the nodes and nothing about the loop — a client
+  that re-reads after `declared` gets a seq past the whole pass, and one stamp would swallow the
+  `converge-stop` of a pass whose start it had already shown. And **the model asks to be re-read
+  rather than guessing** (`modelResync`, set by `declared`, `cleared` and `gap`): an event names
+  nodes by ref and cannot describe a node the model has never seen, so the client holds no state
+  the server does not, and a restart is one `/dag` read. `renderNodeRow`/`renderHeader` are the
+  text a terminal shows, kept here so `Test/ClientModelSpec.hs` can assert on it: a recorded
+  pass folded onto a snapshot, replay and rebase, the SSE parser against what `Events` renders,
+  and, at Layer 1, the client itself against a real `withHttpServer` (`dag`, `commandAsync`,
+  `events` from that seq, the model converges).
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
@@ -714,6 +1047,32 @@ subcommands via `Salmon.Builtin.CommandLine.execCommandOrSeed`:
 my-salmon config <seed-args...>          # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
 my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
+my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--follow-debounce S] ...
+                                         # the same loop, also fetching documents from DIR (pull mode)
+my-salmon run serve --follow DIR --label L --follow-cache CACHE [--follow-refuse-older]
+                                         # ... replaying CACHE's last applied document when DIR is unreachable at startup
+my-salmon run serve --follow git+URL#BRANCH:SUBDIR | https://host/path | dns:ZONE | s3://B/P | gs://B/P --label L
+                                         # the other registries (Salmon.Actions.Follow.Registry), chosen by the address's shape;
+                                         # --follow-timeout S, --follow-workdir DIR, --follow-bucket-endpoint URL are theirs
+my-salmon run serve --follow REG --label L --follow-key PUB.jwk [--follow-key PUB2.jwk]
+                                         # ... requiring every document (cache replay included) to be a signed envelope one of
+                                         # these keys signed (Salmon.Actions.Follow.Signature); without --follow-key, unsigned
+my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
+my-salmon run serve --http PATH          # the same, also serving HTTP on a unix socket at PATH:
+                                         # GET /dag /status /history /help/seed, POST /command[?async],
+                                         # GET /events[?since=N&stream=..&origin=..] (SSE; --events-ring N),
+                                         # GET / (the web UI; forward the socket to a TCP port to open it)
+my-salmon run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key FILE --token-file FILE
+                                         # the same HTTP over TCP with TLS, every request needing
+                                         # `Authorization: Bearer <token>`; all three files or it refuses
+my-salmon run serve --status-sink PATH [--status-sink-interval S]
+                                         # the same, also writing this host's status document to PATH
+                                         # (atomically) after every pass and injection, and every S seconds
+salmon-fleet status DIR [--label L] [--stale S] [--json]
+                                         # one line per host from a directory of such documents; reads only
+salmon-tui PATH                          # a terminal over --http PATH: /dag once, /events live, `:` to type a command
+salmon-fleet keygen --out FILE           # an Ed25519 signing pair: FILE (JWK, 0600) and FILE.pub (for --follow-key)
+salmon-fleet sign --key FILE < doc.json  # the document wrapped in a signed envelope, on stdout (or --out FILE)
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
@@ -722,6 +1081,26 @@ IO/hermetic and is meant to run unattended, e.g. on a remote box) are distinct, 
 inspectable steps — the JSON directive is the contract between them. `run tree` prints a
 human-readable dependency tree (`Actions.Help`); `run dag` prints Graphviz dot output
 (`Actions.Dot`); `run down` tears the directive's graph down (`downTree`).
+
+`run up`/`run down`/`run serve` take `--json` (milestone 1 of `specs/generic-server.md`): the
+binary's text reporters are replaced by one JSON object per line on stdout, flushed per report,
+so `run up --json | jq` streams. `Salmon.Reporter.Tagged` is the whole of it — a `Tagged` sum of
+the four report streams (`Serve.Report`, `UpDown.Report Extension`, `Upkeep.Report Extension`,
+and, since the status sink needed to see it, `Follow.Report`)
+tagged by `stream` (not `origin`, which names who typed a command), the four `ToJSON` instances (orphans, kept together there because the two
+parametric streams are only encodable at `Extension`, which `UpDown` cannot import), and two
+reporters over the sum: `reportTexts`, which dispatches back to the four text reporters
+unchanged, and `reportJSONLines`. `CommandLine` builds exactly one `Reporter Tagged` per run and
+`contramap`s it into the two the drivers take, so `--json` is a choice of reporter and not a
+second reporting mechanism; the `Reporter` stays contravariant and text output is byte-identical
+without the flag. Every object has a `kind` (constructor, kebab-cased), a `ref` as
+`{short, full}` (`Op/Ref.hs`'s `shortRef`, moved there from `Query` for this) where the report is
+about one node, and named fields; a nested report (`Upkeep.Acted`, `Serve.Tended`) reuses the
+inner instance under `report`. Report text is public and encoded verbatim, per the spec's
+decision. `Test/ReportJsonSpec.hs` holds a golden object per constructor of all four streams, and one for
+the status sink document.
+Not covered: a node's own `Binary.Report`s (handed a `reportPrint` by the recipe, printed as
+text regardless), and sequence numbers (a later milestone).
 
 `run serve` is the odd one out: it reads *seeds* (not a directive) as command lines, one
 declaration per line, and keeps converging a `Salmon.Actions.Serve.World` across all of them —
@@ -734,12 +1113,28 @@ down <seed args...>    # retire this seed (its nodes go down unless another seed
 clear                  # retire every seed
 converge               # re-attempt whatever hasn't converged (e.g. after fixing what made it fail)
 supervise on|off       # whether to tend nodes while the loop is idle (default on)
-status | history       # dump the per-node state / the seed+graph history
+status | history       # dump the per-node state (first line: `mode: interactive|following|replay`) /
+                       # the seed+graph history (each entry annotated [loaded <file>] or
+                       # [fetched <registry> label=.. id=.. sha256=..] unless typed)
+fetch                  # (--follow) fetch the followed documents now, ladder forgotten, and apply
+                       # whatever is pending without waiting out the quiet window
 quit                   # leave the loop, changing nothing on the way out
 ```
 
 Seed args are parsed with the binary's own `ParseRecord seed` — the same words that would follow
 `config` — so a seed is identified by the directive it configures to, not by its spelling.
+`--listen PATH` (beside `--max-concurrency`/`--no-autoconverge`/`--json`) accepts the same lines
+on a unix socket from any number of clients, each answered on its own connection as JSON lines;
+see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §13. `--http PATH` serves
+the same world over HTTP on a second socket — `curl --unix-socket PATH http://x/dag`, and
+`POST /command` with a line as the body — see `Actions/Serve/Http.hs` above and §14.
+`--http-tcp HOST:PORT` puts the same HTTP on a network, and only with `--tls-cert`,
+`--tls-key` and `--token-file` all given — there is no plaintext option — see §14's "Reaching
+it over the network".
+`--status-sink PATH` writes the host's status document there after every pass and injection and
+on a timer — see `Actions/Serve/StatusSink.hs` above and §12's "Status flows back" — and
+`salmon-fleet status DIR` folds a directory of them. `salmon-tui PATH` is a terminal client of
+`--http PATH` — see `Client/Http.hs`/`Client/Model.hs` above and §14's last paragraph.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

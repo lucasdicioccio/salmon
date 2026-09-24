@@ -242,6 +242,12 @@ waiters rs =
 evalsOf :: Text -> [Report Extension] -> Int
 evalsOf name rs = length (filter (== name) (evals rs))
 
+{- | How many times this one node's @up@ /finished/. 'evalsOf' counts the
+'Salmon.Actions.UpDown.Eval' said on the way in, before the action runs, so
+a case that checks the action's effect must wait on this one instead. -}
+donesOf :: Text -> [Report Extension] -> Int
+donesOf name rs = length [() | Acted (UpDown.Done act) <- rs, act.shorthand == name]
+
 reachedBy :: Text -> UpkeepState -> [Report Extension] -> Int
 reachedBy name want rs = length (filter (== name) (reached want rs))
 
@@ -1329,7 +1335,9 @@ dirSelfHeals = within 10 $ withTempDir $ \tmp -> do
         removeDirectory path
         assertBool "really gone" . not =<< doesDirectoryExist path
         void (Upkeep.instruct sup theRef Recheck)
-        await trace (\rs -> evalsOf "directory" rs >= 2)
+        -- 'Done', not 'Eval': the latter is said before @up@ runs, and
+        -- checking the directory then is a race this case used to lose.
+        await trace (\rs -> donesOf "directory" rs >= 2)
         assertBool "put back without anybody re-declaring it" =<< doesDirectoryExist path
         rs <- seen trace
         assertEqual "nothing ever demoted, since this node has no dependants" [] (demotions rs)

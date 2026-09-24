@@ -88,6 +88,7 @@ test-suite salmon-ops-recipes-test
     hs-source-dirs:   test
     other-modules:    Test.Harness
                     , Test.CheckSpec
+                    , Test.ClientModelSpec
                     , Test.DebianPackageSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
@@ -95,6 +96,11 @@ test-suite salmon-ops-recipes-test
                     , Test.DagSpec
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
+                    , Test.FollowCacheSpec
+                    , Test.FollowRegistrySpec
+                    , Test.FollowSchedulerSpec
+                    , Test.FollowSignatureSpec
+                    , Test.FollowSpec
                     , Test.GcpSpec
                     , Test.PodmanCommandSpec
                     , Test.JWTSigningSpec
@@ -117,9 +123,15 @@ test-suite salmon-ops-recipes-test
                     , Test.QemuResolveKernelSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
+                    , Test.ReportJsonSpec
                     , Test.RewriteSpec
+                    , Test.ServeEventsSpec
+                    , Test.ServeHttpSpec
                     , Test.ServeModelSpec
+                    , Test.ServeSocketSpec
                     , Test.ServeSpec
+                    , Test.ServeTlsSpec
+                    , Test.StatusSinkSpec
                     , Test.SystemdSpec
                     , Test.UpTreeSpec
                     , Test.UpkeepSpec
@@ -130,10 +142,16 @@ test-suite salmon-ops-recipes-test
                     , comonad
                     , containers
                     , contravariant
+                    , crypton-connection
+                    , crypton-x509-store
                     , directory
                     , filepath
                     , free
+                    , http-client
+                    , http-client-tls
+                    , http-types
                     , mtl
+                    , network
                     , process
                     , process-extras
                     , stm
@@ -146,7 +164,10 @@ test-suite salmon-ops-recipes-test
                     , temporary
                     , text
                     , time
+                    , tls
                     , unix
+                    , wai
+                    , warp
     -- Salmon.Actions.Serve reads its input handle on a forked thread, so a
     -- test driving the loop wants a runtime where a blocking read does not
     -- stall every other Haskell thread.

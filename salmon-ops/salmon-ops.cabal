@@ -20,15 +20,32 @@ maintainer:         lucas@dicioccio.fr
 -- copyright:
 -- category:
 extra-source-files: CHANGELOG.md
+                    ui/index.html
+                    ui/ui.js
+                    ui/ui.css
 
 library
     exposed-modules: Salmon.Actions.Concurrent
+                   , Salmon.Actions.Follow
+                   , Salmon.Actions.Follow.Registry
+                   , Salmon.Actions.Follow.Registry.Dns
+                   , Salmon.Actions.Follow.Registry.Git
+                   , Salmon.Actions.Follow.Registry.Http
+                   , Salmon.Actions.Follow.Scheduler
+                   , Salmon.Actions.Follow.Signature
                    , Salmon.Actions.Help
                    , Salmon.Actions.Serve
+                   , Salmon.Actions.Serve.Events
+                   , Salmon.Actions.Serve.Http
+                   , Salmon.Actions.Serve.Socket
+                   , Salmon.Actions.Serve.StatusSink
+                   , Salmon.Actions.Fleet
                    , Salmon.Actions.UpDown
                    , Salmon.Actions.Upkeep
                    , Salmon.Actions.Dot
                    , Salmon.Actions.Query
+                   , Salmon.Client.Http
+                   , Salmon.Client.Model
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.CommandLine
                    , Salmon.Builtin.Helpers
@@ -91,6 +108,7 @@ library
                    , Salmon.Op.Configure
                    , Salmon.Op.Ref
                    , Salmon.Reporter
+                   , Salmon.Reporter.Tagged
     build-depends:    base >=4.16.3.0
                     , async
                     , aeson
@@ -100,13 +118,16 @@ library
                     , contravariant
                     , cryptohash-sha256
                     , directory
+                    , file-embed
                     , filepath
                     , free
                     , hashable
                     , http-client
                     , http-client-tls
+                    , http-types
                     , jose
                     , mtl
+                    , network
                     , optparse-applicative
                     , optparse-generic
                     , process
@@ -116,6 +137,10 @@ library
                     , text
                     , time
                     , unix
+                    , wai
+                    , warp
+                    , tls
+                    , warp-tls
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions: KindSignatures
