@@ -480,7 +480,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `gap`, or the stream dropping each mean fetch `/dag` again and resubscribe from its `seq` (it
   closes the `EventSource` on error rather than let the browser reconnect, since the browser
   resumes by `Last-Event-ID`, which the server does not read). A click opens a side panel from
-  the node object alone. Reads only — no `POST` from the page yet. A browser cannot open a unix
+  the node object alone. **Every write is `POST /command?async`**, never the sync form (a sync
+  `up` holds the request for the whole pass): the panel's `force`/`recheck`/`pause`/`resume`
+  (`--select #<short ref>`), the header's `converge`/`supervise`/`autoconverge`/`fetch`/`clear`,
+  the seed form (`/help/seed`'s text, a field for the words, `up`/`only`/`down`, `/history`
+  under it with a `down` per active row) and a raw command line. The outcome is read off
+  `/events` by the request's origin — the events carrying it outline the nodes touched and fill
+  the log under the command line until the loop's `hung-up` for that origin. No `quit` on the
+  page, and no bearer token sent until milestone 8 asks for one. A browser cannot open a unix
   socket, so it is reached through a TCP forward (`socat`/`ssh -L`) until milestone 8's TCP
   listener; see `docs/serve-supervision.md` §14.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record

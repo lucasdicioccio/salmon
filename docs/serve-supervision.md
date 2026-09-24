@@ -917,9 +917,9 @@ What to know:
 
 The same socket serves a page at `/` (its script and stylesheet under
 `/ui/`, compiled into the binary, so there is nothing to install beside it)
-that draws the world as the graph it is. Milestone 7 of
-`specs/generic-server.md`, first two steps: the static picture and the live
-one. It is a client of the routes above and nothing more — it fetches
+that draws the world as the graph it is and drives it. Milestone 7 of
+`specs/generic-server.md`: the static picture, the live one, the actions
+and the seed form. It is a client of the routes above and nothing more — it fetches
 `/dag`, lays the nodes out in layers with dependencies above dependants and
 an edge per `dependencies` entry, one box per node (short ref, shorthand,
 `direction · convergence`, the last event and check verdict), coloured by
@@ -932,8 +932,46 @@ header. It keeps no state the server does not: a `declared`, a `cleared`, a
 resubscribe from its `seq`", and the reload button is that by hand. Clicking
 a node opens a panel with its help, notes, dynamics, paths, dependencies and
 dependants (each a link), the last check and its reason, and the output
-ring. Below 700px wide the graph gives way to a list. Nothing on the page
-POSTs yet; actions and a seed form are the milestone's next two steps.
+ring. Below 700px wide the graph gives way to a list.
+
+Everything the page *does* is one `POST /command?async` and then the event
+stream: the answer is the `seq` the line was queued at and the origin it was
+queued under (a toast shows both), and the events above that `seq` carrying
+that origin are what the command did — they outline the nodes it touched
+(the amber "touched" outline in the legend, until the loop's `hung-up` for
+that origin says the line has been handled), and they go into the log under
+the command line. The page never uses the synchronous form: a sync `up`
+holds the request for the whole pass, and the page is the thing that would
+be waiting. Four places send a line:
+
+- **The node panel** has `force`, `recheck`, `pause` and `resume` for the
+  selected node, sent as `<verb> --select #<short ref>` — the `#` selector
+  from §9, so what the box prints is what the command names. A node does
+  not know which seed declared it and `/history` does not say which nodes
+  an epoch declared, so retiring "the seed behind this node" is the
+  operator's choice: the panel lists every live declaration under *retire a
+  seed*, each with its `down`.
+- **The header** has the world's commands: `converge`, `supervise on|off`,
+  `autoconverge on|off`, `fetch` (which the loop answers "nothing is being
+  followed" without `--follow`) and `clear`, which asks first since it
+  retires every seed. `quit` is deliberately not there: the page is served
+  by the process it would be stopping, and leaving the loop is the one
+  thing that should take a terminal.
+- **The seed form** (the `seeds` button) shows `/help/seed` — this binary's
+  own `config --help`, and the loop's command reference under it — a text
+  field for the seed words, and `up`/`only`/`down`, sending `<verb> <words>`
+  as typed. `/history` is listed under it, one row per declaration with its
+  epoch, verb, words, origin and whether it is still active, a `down` on
+  each active row, and the words clickable to put them back in the field.
+  The list is fetched again on every `declared` and `cleared`.
+- **The command line** at the bottom (`:` focuses it, as in `vi` and `less`;
+  Esc leaves it) sends any line of §3's language as typed — `status`
+  and `help` included, whose reports land in the log rather than on the
+  page.
+
+The page does not send a bearer token, because nothing yet asks for one;
+that arrives with milestone 8 (TCP, TLS, a token) and the page will carry
+it then.
 
 A browser cannot open a unix socket, so until milestone 8 lands (TCP with
 TLS and a token — that is what makes the page reachable directly, and the

@@ -337,7 +337,7 @@ cheap one and lands first.
    trigger a re-read, since an event names nodes by ref and no event
    describes a node the client has never seen.
 7. **Web UI**: static graph from `/dag`, then live from `/events`, then
-   actions, then the seed form. **First two steps shipped** (`GET /` and
+   actions, then the seed form. **Shipped, all four steps** (`GET /` and
    `/ui/*` in `Salmon.Actions.Serve.Http`, the files under `salmon-ops/ui/`
    embedded at build time with `file-embed`; `docs/serve-supervision.md`
    §14 "The web UI"). Three deviations from the sketch above. It is not a
@@ -351,9 +351,23 @@ cheap one and lands first.
    because vendoring a bundle for a graph of tens of nodes is the wrong
    trade and the layout is a hundred lines. And a browser cannot open a
    unix socket, so the page is reached through a TCP forward (`socat`,
-   `ssh -L`) until milestone 8; nothing here listens on a port. Not yet:
-   the `Conflicting` pair side by side, collapsing a batch to its members
-   and expanding a `RemoteOp` (neither is on `/dag`, see milestone 3's
-   deviations), `history` as a timeline, and — the next two steps — the
-   `force`/`recheck`/`pause`/`resume` actions and the `/help/seed` form.
+   `ssh -L`) until milestone 8; nothing here listens on a port. The
+   actions and the seed form add three more deviations, all on the write
+   side. Every write is `POST /command?async` and never the synchronous
+   form — the page reads the outcome off `/events` by the request's
+   origin, which is what marks the nodes a command touched and fills the
+   log under its command line; the sketch's "what a UI wants" turned out
+   to be the whole of it. The seed form is `/help/seed`'s text in a `<pre>`
+   and a free-text field for the words, not a form derived from the
+   `ParseRecord` — no schema is served, and the bridge stays unused. And
+   "retire the seed behind this node" is not a per-node action: a node
+   does not know its declaring seed and `/history` does not list an
+   epoch's nodes, so the panel offers every live declaration's `down`
+   instead and the operator picks. Also deliberate: no `quit` on the page
+   (the page is served by the process it would stop), and no bearer token
+   sent, because nothing asks for one until milestone 8. Not yet: the
+   `Conflicting` pair side by side, collapsing a batch to its members and
+   expanding a `RemoteOp` (neither is on `/dag`, see milestone 3's
+   deviations), and `history` as a timeline — it is a table under the
+   seed form.
 8. **TCP + TLS + token**, opt-in, with the loud default described above.
