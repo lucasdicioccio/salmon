@@ -33,7 +33,8 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   directory of status documents into one line per host (`Salmon.Actions.Fleet` is the fold; the
   binary only parses flags and prints). It never writes.
   `salmon-tui` (`Tui.hs`) is the other reader: a `brick` terminal over `Salmon.Client` (below)
-  against `run serve --http PATH`'s socket — `salmon-tui PATH` reads `/dag` once, follows
+  against `run serve --http PATH`'s socket, or `--http-tcp`'s listener given `https://HOST:PORT
+  --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
@@ -517,8 +518,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `BadCredentials` here rather than dying on warp's thread. `Test/ServeTlsSpec.hs` mints a
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
-  pinning exactly that certificate. Not done: client certificates, a read-only token, TCP/token
-  support in `salmon-tui`, signing out.
+  pinning exactly that certificate. Not done: client certificates, a read-only token, signing
+  out.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a
@@ -746,7 +747,9 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   they partition on is a property of the whole ledger at that moment.
 - **`Client/Http.hs`** and **`Client/Model.hs`** are milestone 6 of `specs/generic-server.md`, the
   client's half, with no terminal in them. `Salmon.Client.Http` is a small typed client over
-  `http-client` for a unix socket (no TCP, no auth, until milestone 8): `dag`/`status`/`history`/
+  `http-client` for the unix socket (`newUnixClient`) or an `--http-tcp` listener (`newTlsClient`:
+  `https` only, a bearer token on every request, the server's certificate verified against
+  `--cacert` alone when given and the system store otherwise, no switch to skip it): `dag`/`status`/`history`/
   `seedHelp` for the reads — which bypass the loop and never stand a machine down — `command`
   (sync, the reports) and `commandAsync` (the enqueue seq and origin), and `events`, which opens
   `/events` once with `?since=`/`?stream=`/`?origin=` and hands each event to a callback until it
@@ -1078,6 +1081,8 @@ my-salmon run serve --status-sink PATH [--status-sink-interval S]
 salmon-fleet status DIR [--label L] [--stale S] [--json]
                                          # one line per host from a directory of such documents; reads only
 salmon-tui PATH                          # a terminal over --http PATH: /dag once, /events live, `:` to type a command
+salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]
+                                         # the same over --http-tcp, pinning FILE's certificate when given
 salmon-fleet keygen --out FILE           # an Ed25519 signing pair: FILE (JWK, 0600) and FILE.pub (for --follow-key)
 salmon-fleet sign --key FILE < doc.json  # the document wrapped in a signed envelope, on stdout (or --out FILE)
 ```
@@ -1141,7 +1146,8 @@ it over the network".
 `--status-sink PATH` writes the host's status document there after every pass and injection and
 on a timer — see `Actions/Serve/StatusSink.hs` above and §12's "Status flows back" — and
 `salmon-fleet status DIR` folds a directory of them. `salmon-tui PATH` is a terminal client of
-`--http PATH` — see `Client/Http.hs`/`Client/Model.hs` above and §14's last paragraph.
+`--http PATH` (and `salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]` of
+`--http-tcp`) — see `Client/Http.hs`/`Client/Model.hs` above and §14's last paragraph.
 
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by

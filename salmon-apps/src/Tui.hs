@@ -2,7 +2,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 {- | @salmon-tui PATH@: a terminal client against @run serve --http PATH@
-(milestone 6 of @specs\/generic-server.md@).
+(milestone 6 of @specs\/generic-server.md@); or @salmon-tui
+https:\/\/HOST:PORT --token-file FILE [--cacert FILE]@ against @run serve
+--http-tcp HOST:PORT@'s listener (milestone 8), presenting the token from
+the file — the same file the server was given, refused if others can read
+it — on every request and trusting only the certificate in @--cacert@ when
+one is named (a self-signed one is pinned this way), the system's store
+otherwise.
 
 The whole client is "Salmon.Client.Http" for the socket and
 "Salmon.Client.Model" for the state; this module is a @brick@ rendering
@@ -44,18 +50,21 @@ module Tui (main) where
 import Brick
 import Brick.BChan (BChan, newBChan, writeBChan)
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Exception (SomeException, displayException, try)
+import Control.Exception (SomeException, displayException, fromException, try)
 import Control.Monad (forever, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
 import qualified Graphics.Vty as Vty
+import qualified Network.HTTP.Client as HTTP
 import System.Environment (getArgs, getProgName)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
+import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Client.Http as Client
 import qualified Salmon.Client.Model as Model
 import Salmon.Client.Model (Model, Node (..))
@@ -79,7 +88,7 @@ data Msg
       Queued !Text !(Either Text Client.Enqueued)
 
 data St = St
-    { stPath :: !FilePath
+    { stTarget :: !String
     , stClient :: !Client.Client
     , stChan :: !(BChan Msg)
     , stModel :: !Model
@@ -96,17 +105,11 @@ data St = St
 main :: IO ()
 main = do
     args <- getArgs
-    path <- case args of
-        [p] -> pure p
-        _ -> do
-            prog <- getProgName
-            hPutStrLn stderr ("usage: " <> prog <> " PATH   (the socket `run serve --http PATH` listens on)")
-            exitFailure
-    client <- Client.newUnixClient path
+    client <- either (\err -> usage err >> exitFailure) id (clientFor args)
     first <- try (Client.dag client)
     model <- case first of
         Left (e :: SomeException) -> do
-            hPutStrLn stderr ("salmon-tui: cannot read /dag on " <> path <> ": " <> displayException e)
+            hPutStrLn stderr ("salmon-tui: cannot read /dag on " <> Client.clientTarget client <> ": " <> describe e)
             exitFailure
         Right v -> either (\err -> hPutStrLn stderr ("salmon-tui: " <> err) >> exitFailure) pure (Model.fromDag v)
     chan <- newBChan 256
@@ -114,7 +117,7 @@ main = do
     _ <- forkIO (follow client chan cursor)
     let st0 =
             St
-                { stPath = path
+                { stTarget = Client.clientTarget client
                 , stClient = client
                 , stChan = chan
                 , stModel = model
@@ -125,6 +128,57 @@ main = do
                 , stStream = "connecting"
                 }
     void (customMainWithDefaultVty (Just chan) app st0)
+
+{- | The client the arguments name: a socket path alone, or an @https@ URL
+with the token file and optionally the certificate to pin. A token file
+without a URL, or a URL without one, is refused rather than guessed at.
+-}
+clientFor :: [String] -> Either String (IO Client.Client)
+clientFor args =
+    case args of
+        [path] | not (isUrl path) -> Right (Client.newUnixClient path)
+        url : flags | isUrl url -> do
+            opts <- flagsOf flags (Nothing, Nothing)
+            case opts of
+                (Nothing, _) -> Left (url <> " needs --token-file FILE: the listener answers nothing without the token")
+                (Just tokenFile, caFile) -> Right $ do
+                    token <- Http.readTokenFile tokenFile
+                    case token of
+                        Left (Http.TokenFileReadable p) -> die ("--token-file " <> p <> " is readable by others; a token anyone on the box can read is not one (chmod 600 it)")
+                        Left (Http.TokenFileEmpty p) -> die ("--token-file " <> p <> " is empty")
+                        Right tok -> do
+                            r <- try (Client.newTlsClient (Client.TlsTarget url tok caFile))
+                            either (\(e :: SomeException) -> die (describe e)) pure r
+        _ -> Left ""
+  where
+    isUrl a = "https://" `isPrefixOf` a || "http://" `isPrefixOf` a
+    flagsOf [] acc = Right acc
+    flagsOf ("--token-file" : f : rest) (_, ca) = flagsOf rest (Just f, ca)
+    flagsOf ("--cacert" : f : rest) (tok, _) = flagsOf rest (tok, Just f)
+    flagsOf (other : _) _ = Left ("unexpected argument: " <> other)
+    die msg = hPutStrLn stderr ("salmon-tui: " <> msg) >> exitFailure
+
+{- | An exception as one line: a refusal or a bad address as what the server
+or the client said, a connection failure as its cause alone —
+@http-client@'s own rendering prints the whole request first, which is
+twenty lines of nothing the reader asked about.
+-}
+describe :: SomeException -> String
+describe e
+    | Just (Client.Refused code err) <- fromException e = show code <> " " <> Text.unpack err
+    | Just (Client.BadTarget err) <- fromException e = Text.unpack err
+    | Just (Client.Undecodable err) <- fromException e = Text.unpack err
+    | Just (HTTP.HttpExceptionRequest _ content) <- fromException e = show content
+    | otherwise = displayException e
+
+usage :: String -> IO ()
+usage err = do
+    prog <- getProgName
+    mapM_ (hPutStrLn stderr) $
+        [err | not (null err)]
+            ++ [ "usage: " <> prog <> " PATH                                            (the socket `run serve --http PATH` listens on)"
+               , "       " <> prog <> " https://HOST:PORT --token-file FILE [--cacert FILE]   (`run serve --http-tcp HOST:PORT`)"
+               ]
 
 -------------------------------------------------------------------------------
 -- the threads
@@ -145,7 +199,7 @@ follow client chan cursor = forever $ do
             writeBChan chan (Streamed e)
             pure True
     case r of
-        Left (e :: SomeException) -> writeBChan chan (StreamLost (Text.pack (displayException e)))
+        Left (e :: SomeException) -> writeBChan chan (StreamLost (Text.pack (describe e)))
         Right () -> writeBChan chan (StreamLost "the stream ended")
     threadDelay 1000000
 
@@ -154,7 +208,7 @@ refresh :: St -> IO ()
 refresh st = void . forkIO $ do
     r <- try (Client.dag st.stClient)
     writeBChan st.stChan . Snapshot $ case r of
-        Left (e :: SomeException) -> Left (Text.pack (displayException e))
+        Left (e :: SomeException) -> Left (Text.pack (describe e))
         Right v -> either (Left . Text.pack) Right (Model.fromDag v)
 
 -- | Send a line asynchronously; the answer arrives as 'Queued'.
@@ -162,7 +216,7 @@ send :: St -> Text -> IO ()
 send st line = void . forkIO $ do
     r <- try (Client.commandAsync st.stClient line)
     writeBChan st.stChan . Queued line $ case r of
-        Left (e :: SomeException) -> Left (Text.pack (displayException e))
+        Left (e :: SomeException) -> Left (Text.pack (describe e))
         Right q -> Right q
 
 -------------------------------------------------------------------------------
@@ -272,7 +326,7 @@ draw st = [vBox [header, table, detail, footer]]
 
     header =
         withAttr (attrName "header") . padRight Max . txt $
-            Model.renderHeader (Text.pack st.stPath) m <> " stream=" <> st.stStream
+            Model.renderHeader (Text.pack st.stTarget) m <> " stream=" <> st.stStream
 
     columns = Text.unwords [pad 10 "ref", pad 22 "shorthand", pad 4 "dir", pad 9 "state", pad 12 "check", "last event"]
     pad n = Text.justifyLeft n ' '

@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 {- | A small typed client over the five HTTP surfaces of @run serve --http
-PATH@ ("Salmon.Actions.Serve.Http"): the four reads, the command in both
+PATH@ (or @--http-tcp HOST:PORT@) ("Salmon.Actions.Serve.Http"): the four reads, the command in both
 modes, and the event stream.
 
 Milestone 6 of @specs\/generic-server.md@ ("terminal client against the
@@ -15,10 +15,17 @@ the server's Haskell types — the same generic stance the server takes
 (the protocol never interprets a seed), so this client drives any salmon
 binary.
 
-Unix socket only, no TCP, no auth: the spec's security section says
-permissions are the whole access story until TLS and a token exist
-(milestone 8), and a client with no TCP in it cannot be pointed at a
-network by mistake.
+Two ways to reach a server, and no third: 'newUnixClient' for the unix
+socket, where permissions are the whole access story and nothing is sent
+but the request, and 'newTlsClient' for @--http-tcp@'s listener, which is
+only ever TLS with a bearer token (milestone 8) — so there is no
+constructor for plain HTTP over TCP here either, matching the server's
+'Salmon.Actions.Serve.Http.Bind'. The TLS client verifies the server's
+certificate: against exactly the one in @--cacert@ when given (a
+self-signed certificate is pinned, not trusted in general), against the
+system's store otherwise; there is no switch that turns verification off,
+since the token is sent on every request and a client that would send it
+to anyone is how it leaks.
 
 = Reads bypass the loop
 
@@ -41,8 +48,10 @@ comment line is consumed here and never reaches the callback.
 module Salmon.Client.Http (
     -- * A client
     Client,
-    clientPath,
+    clientTarget,
     newUnixClient,
+    TlsTarget (..),
+    newTlsClient,
     ClientError (..),
 
     -- * Reads
@@ -83,12 +92,16 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.X509.CertificateStore as X509
+import qualified Network.Connection as Connection
 import Data.Word (Word64)
 import qualified Network.HTTP.Client as HTTP
+import qualified Network.HTTP.Client.TLS as HTTPS
 import Network.HTTP.Client.Internal (makeConnection)
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Socket as Socket
 import qualified Network.Socket.ByteString as SocketBS
+import qualified Network.TLS as TLS
 import System.Posix.IO (FdOption (CloseOnExec), setFdOption)
 import System.Posix.Types (Fd (..))
 import Text.Read (readMaybe)
@@ -98,9 +111,14 @@ import Salmon.Client.Model (Event (..), eventOf)
 
 -------------------------------------------------------------------------------
 
--- | A connection factory for one socket path.
+-- | A connection factory for one server: a socket path, or a TLS address with its token.
 data Client = Client
-    { clientPath :: FilePath
+    { clientTarget :: String
+    -- ^ what the client points at, for messages: the socket path or the base URL
+    , clientBase :: String
+    -- ^ what every route is appended to
+    , clientHeaders :: [HTTP.Header]
+    -- ^ sent with every request: the bearer token over TLS, nothing on the socket
     , clientManager :: HTTP.Manager
     }
 
@@ -123,7 +141,48 @@ newUnixClient path = do
                 , -- a stream is open for as long as the loop runs
                   HTTP.managerResponseTimeout = HTTP.responseTimeoutNone
                 }
-    pure (Client path manager)
+    pure (Client path "http://salmon" [] manager)
+
+-- | Where an @--http-tcp@ listener is, and what to present to it.
+data TlsTarget = TlsTarget
+    { tlsUrl :: String
+    -- ^ @https:\/\/HOST:PORT@, a trailing slash allowed
+    , tlsToken :: ByteString.ByteString
+    -- ^ the content of the server's @--token-file@, trimmed
+    , tlsCaFile :: Maybe FilePath
+    -- ^ the certificate to trust, and only it; the system's store when 'Nothing'
+    }
+
+{- | A client for an @--http-tcp@ listener. Refuses a URL that is not
+@https@ (a 'BadTarget' naming it) rather than sending a token in the
+clear, and a CA file with no certificate in it. The token goes in an
+@Authorization: Bearer@ header on every request, @\/events@ included.
+Connections are made by @http-client-tls@ and not marked close-on-exec,
+unlike 'newUnixClient''s — a caller spawning children while a stream is
+open should know.
+-}
+newTlsClient :: TlsTarget -> IO Client
+newTlsClient t = do
+    let base = reverse (dropWhile (== '/') (reverse t.tlsUrl))
+    req <- HTTP.parseRequest base
+    unless (HTTP.secure req && HTTP.path req == "/" && ByteString.null (HTTP.queryString req)) $
+        throwIO (BadTarget ("not an https://HOST:PORT address: " <> Text.pack t.tlsUrl))
+    settings <- case t.tlsCaFile of
+        Nothing -> pure HTTPS.tlsManagerSettings
+        Just caFile -> do
+            mstore <- X509.readCertificateStore caFile
+            store <- maybe (throwIO (BadTarget ("no certificate in " <> Text.pack caFile))) pure mstore
+            let params0 = TLS.defaultParamsClient (Char8.unpack (HTTP.host req)) ""
+                params = params0{TLS.clientShared = params0.clientShared{TLS.sharedCAStore = store}}
+            pure (HTTPS.mkManagerSettings (Connection.TLSSettings params) Nothing)
+    manager <- HTTP.newManager settings{HTTP.managerResponseTimeout = HTTP.responseTimeoutNone}
+    pure (Client base base [(HTTP.hAuthorization, "Bearer " <> t.tlsToken)] manager)
+
+-- | A request for the route on the client's server, with its headers.
+request :: Client -> String -> IO HTTP.Request
+request c route = do
+    req <- HTTP.parseRequest (c.clientBase <> route)
+    pure req{HTTP.requestHeaders = c.clientHeaders ++ HTTP.requestHeaders req}
 
 -- | What the server answered with when it did not answer the question.
 data ClientError
@@ -131,6 +190,9 @@ data ClientError
       Refused !Int !Text
     | -- | a 2xx answer that was not the JSON expected
       Undecodable !Text
+    | -- | 'newTlsClient' was handed something it will not send a token to:
+      -- not an @https@ address, or a CA file with no certificate in it
+      BadTarget !Text
     deriving (Show, Eq)
 
 instance Exception ClientError
@@ -156,7 +218,7 @@ seedHelp c = getJSON c "/help/seed"
 
 getJSON :: Client -> String -> IO Value
 getJSON c route = do
-    req <- HTTP.parseRequest ("http://salmon" <> route)
+    req <- request c route
     resp <- HTTP.httpLbs req c.clientManager
     decodeAnswer resp
 
@@ -192,11 +254,11 @@ commandAsync c line = do
 
 postLine :: Client -> String -> Text -> IO Value
 postLine c route line = do
-    req0 <- HTTP.parseRequest ("http://salmon" <> route)
+    req0 <- request c route
     let req =
             req0
                 { HTTP.method = "POST"
-                , HTTP.requestHeaders = [(HTTP.hContentType, "application/json")]
+                , HTTP.requestHeaders = HTTP.requestHeaders req0 ++ [(HTTP.hContentType, "application/json")]
                 , HTTP.requestBody = HTTP.RequestBodyLBS (encode (object ["line" .= line]))
                 }
     resp <- HTTP.httpLbs req c.clientManager
@@ -228,7 +290,7 @@ raises. The @gap@ event arrives like any other, with 'eventSeq' 'Nothing'.
 -}
 events :: Client -> Since -> Filter -> (Event -> IO Bool) -> IO ()
 events c since filt onEvent = do
-    req <- HTTP.parseRequest ("http://salmon/events" <> query)
+    req <- request c ("/events" <> query)
     HTTP.withResponse req c.clientManager $ \resp -> do
         let code = HTTP.statusCode (HTTP.responseStatus resp)
         unless (code == 200) $ do

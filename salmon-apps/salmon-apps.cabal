@@ -40,6 +40,7 @@ library
                     , aeson
                     , brick
                     , bytestring
+                    , http-client
                     , containers
                     , directory
                     , filepath

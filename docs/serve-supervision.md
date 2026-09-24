@@ -935,6 +935,8 @@ What to know:
   proxies and read timeouts keep it open; hanging up is all a client has to
   do to unsubscribe. `curl -N` or any `EventSource` reads it.
 - **`salmon-tui PATH` is a terminal over all of the above** (milestone 6;
+  `salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]` for a
+  `--http-tcp` listener, see "Reaching it over the network";
   `salmon-apps`, over `Salmon.Client.Http` and the pure `Salmon.Client.Model`).
   It reads `/dag` once, follows `/events` from that snapshot's `seq`, and
   draws a header (socket, mode, seq, converged/errored/total, the current
@@ -1067,10 +1069,19 @@ Five things to know:
   (`openssl x509 -req` without extensions), which OpenSSL-based clients
   accept and crypton-based Haskell clients reject (`LeafNotV3`).
 
-Not yet: `salmon-tui` speaks to the unix socket only; it will need a
-`--token` and a TCP address to reach a server started this way. The web UI
-reaches it through `/auth` above. Mutual TLS and a read-only token are the spec's
-own v2.
+`salmon-tui` reaches it too, given the URL, the token file and — for a
+self-signed certificate — the certificate to pin:
+
+```sh
+salmon-tui https://host:8443 --token-file token --cacert server.pem
+```
+
+Without `--cacert` the system's trust store decides, and a self-signed
+certificate fails the handshake before the token is sent; there is no flag
+that turns verification off. An `http://` address is refused outright, and
+so is a token file others can read, as the server refuses its own. The web
+UI reaches it through `/auth` above. Mutual TLS and a read-only token are
+the spec's own v2.
 
 ### The web UI: `GET /`
 
