@@ -4,3 +4,17 @@ cabal.perso.project.local
 salmon-personal-apps/
 gcp-toy-runs/
 gcp-toy-work/
+.dogfood-robots/
+
+# Kitchen-Sink site build output. website/src/ is source and stays tracked.
+website/www/
+
+# Mirrored pages written by website/scripts/sync-repo-docs.sh from docs/,
+# specs/ and README.md — mechanical output, not source.
+website/src/docs-*.cmark
+website/src/specs-*.cmark
+website/src/specs.cmark
+website/src/builtins.cmark
+
+# python bytecode from website/scripts
+__pycache__/

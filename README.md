@@ -250,3 +250,15 @@ above, where this project's own conventions get enforced:
   idempotency conventions, failure-propagation rules) for anyone (human or
   AI) working in this codebase.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
+
+## Website
+
+The site in [`website/`](website) is a [Kitchen-Sink](https://kitchensink-tech.github.io/)
+project, the same shape as tramaj's: `website/src/` is the source, and the
+guides, specs and the tables above are mirrored into it by a script rather
+than copied by hand. To regenerate and preview it:
+
+```sh
+./website/scripts/sync-repo-docs.sh     # docs/, specs/ and the README's tables -> website/src/*.cmark
+kitchen-sink serve --srcDir website/src --outDir website/www --servMode DEV --httpPort 7655
+```

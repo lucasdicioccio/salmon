@@ -1,0 +1,7 @@
+{ "title": "salmon"
+, "publishURL": "https://lucasdicioccio.github.io"
+, "basePath": "/salmon"
+, "twitterLogin": "lucasdicioccio"
+, "commands": []
+, "api": {"tag":"NoProxying"}
+}
