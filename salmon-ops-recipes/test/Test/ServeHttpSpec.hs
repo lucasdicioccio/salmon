@@ -73,6 +73,9 @@ tests =
         , testCase "/dag is populated from the first declaration on, before any pass" dagBeforeAnyPass
         , testCase "a retired seed's nodes stay in /dag wanted down until they are gone" retiredNodesAreDown
         , testCase "sync, async and stdin leave the same world; sync answers with the line's reports" syncAndAsyncAgree
+        , testCase "a text line, {\"line\"} and {\"verb\", \"seed\"} bodies give the same reports and world" bodyFormsAgree
+        , testCase "a malformed JSON command body is a 400, not a command" badStructuredBodies
+        , testCase "a structured body renders to a line that tokenizes back to its seed" structuredRoundTrips
         , testCase "reads answer while the loop is inside a long up" readsDuringLongUp
         , testCase "/help/seed, /history and the error responses" theOtherReads
         , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
@@ -228,6 +231,18 @@ post running route line = do
                 { HTTP.method = "POST"
                 , HTTP.requestHeaders = [(HTTP.hContentType, "text/plain")]
                 , HTTP.requestBody = HTTP.RequestBodyLBS (LChar8.pack line)
+                }
+    exchange running req
+
+-- | A @POST \/command@ with a given content type and body, decoded.
+postAs :: Running -> String -> String -> IO (Int, Value)
+postAs running ctype body = do
+    req0 <- HTTP.parseRequest "http://salmon/command"
+    let req =
+            req0
+                { HTTP.method = "POST"
+                , HTTP.requestHeaders = [(HTTP.hContentType, LChar8.toStrict (LChar8.pack ctype))]
+                , HTTP.requestBody = HTTP.RequestBodyLBS (LChar8.pack body)
                 }
     exchange running req
 
@@ -468,6 +483,58 @@ syncAndAsyncAgree = do
     isConvergeStop t = case t of
         Tagged.FromServe Serve.ConvergeStop{} -> True
         _ -> False
+
+-- | The same script sent as text, as @{"line"}@ and as @{"verb", "seed"}@.
+bodyFormsAgree :: IO ()
+bodyFormsAgree = do
+    results <- forM forms $ \(name, encodeBody) -> withRunning $ \running -> do
+        kinds <- fmap concat $ forM script $ \l -> do
+            (code, v) <- uncurry (postAs running) (encodeBody l)
+            assertEqual ("status of " <> name <> ": " <> l) 200 code
+            pure (maybe [] (fmap kindOf) (arrayMaybe v))
+        w <- finish running
+        ups <- readIORef (runningUps running)
+        pure (sort kinds, ups, worldShape w)
+    case results of
+        (r0 : rest) -> forM_ rest (assertEqual "every body form gives the text form's reports, ups and world" r0)
+        [] -> pure ()
+  where
+    script = ["supervise off", "up n1", "up n1 n2", "down n1", "history"]
+    forms =
+        [ ("text", \l -> ("text/plain", l))
+        , ("line", \l -> ("application/json", jsonObject [("line", jsonString l)]))
+        , ("verb+seed", \l -> let (v : seed) = words l in ("application/json", jsonObject [("verb", jsonString v), ("seed", "[" <> commaSep (fmap jsonString seed) <> "]")]))
+        ]
+    jsonString x = show x
+    jsonObject kvs = "{" <> commaSep [show k <> ":" <> v | (k, v) <- kvs] <> "}"
+    commaSep = foldr1' (\a b -> a <> "," <> b)
+    foldr1' _ [] = ""
+    foldr1' f xs = foldr1 f xs
+    arrayMaybe v = case v of Array xs -> Just (toList xs); _ -> Nothing
+
+badStructuredBodies :: IO ()
+badStructuredBodies =
+    withRunning $ \running -> do
+        forM_
+            [ ("both forms", "{\"line\": \"up n1\", \"verb\": \"up\"}")
+            , ("neither form", "{}")
+            , ("a seed with a line", "{\"line\": \"up n1\", \"seed\": [\"n1\"]}")
+            , ("a seed that is not a list of words", "{\"verb\": \"up\", \"seed\": 3}")
+            , ("a newline in a word", "{\"verb\": \"up\", \"seed\": [\"a\\nhistory\"]}")
+            ]
+            $ \(why, body) -> do
+                (code, _) <- postAs running "application/json" body
+                assertEqual ("400 for " <> why) 400 code
+        -- and nothing was declared by any of them
+        (_, hist) <- get running "/history"
+        assertEqual "no declaration was made" 0 (length (maybe [] arrayOf (field "seeds" hist)))
+
+structuredRoundTrips :: IO ()
+structuredRoundTrips =
+    forM_ seeds $ \seed ->
+        assertEqual ("the seed " <> show seed) (Right (Serve.Declare Serve.Add seed)) (Serve.parseServeCommand (Http.renderStructured "up" seed))
+  where
+    seeds = [["a", "b"], ["with space", "x"], ["it's", "say \"hi\""], ["back\\slash"], [""], []]
 
 readsDuringLongUp :: IO ()
 readsDuringLongUp =

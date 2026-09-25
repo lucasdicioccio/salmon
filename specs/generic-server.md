@@ -102,7 +102,8 @@ that channel (the same generalization `specs/pull-mode.md` milestone 1
 asks for), plus a *reader* of `World` and the report streams. Concretely:
 
 1. **Commands** — `POST /command` with `{"line": "up pgpair primary=db1"}`
-   or a structured form `{"verb":"up","seed":[...]}`; the server writes the
+   or a structured form `{"verb":"up","seed":[...]}` (both accepted, the second
+   rendered to the first); the server writes the
    line to the inbox. **Both a sync and an async mode**: sync (the default)
    blocks and returns the reports that command produced, since the loop
    already knows when a command's reports end (`step` returns) — what
