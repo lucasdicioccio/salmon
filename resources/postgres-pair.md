@@ -82,10 +82,11 @@ secrets has chosen a transport for everyone who uses it: both machines have a
 Postgres cluster and the two `.pgpass` files the pair names, and the bouncer
 has pgbouncer, a `userlist.txt` and the `.pgpass` for its admin console. The recipe is given paths.
 
-`--seed B` is the first clone of a pair's life, and the only way back from a
-standby that has fallen too far behind (see the slot budget below). It is safe
-to leave declared — the clone does nothing once the two sides share a system
-identifier, and refuses a machine holding a cluster it does not recognise.
+`--seed B` is the first clone of a pair's life. It is safe to leave declared —
+the clone does nothing once the two sides share a system identifier, and
+refuses a machine holding a cluster it does not recognise. It is *not* the way
+back from a standby that has fallen too far behind (see the slot budget
+below): that is `--reseed`.
 
 ## What a switchover actually does
 
@@ -149,7 +150,14 @@ catch up.
 That is a good trade and a terrible surprise, so the pair says it out loud:
 the check reports the lost slot by name and **does nothing**. `pg_rewind`
 would succeed and change nothing; the only way back is a re-seed, and wiping a
-machine is an operator's decision, declared with `--seed`.
+machine is an operator's decision, declared with `--reseed B` (the side that is
+not `--primary`). The declaration acts only on that one diagnosis — the
+primary reporting that side's slot lost — so it is safe to leave in place: a
+healthy or merely lagging standby is never wiped. The pass stops the machine,
+removes its data directory (only if it is this pair's own cluster or empty;
+a stranger's is refused by name), clones it again from the primary, drops the
+lost slot and lets the machine make its own. A pass killed half-way is
+finished by the next one.
 
 ## Watching it happen
 

@@ -21,7 +21,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 import qualified SreBox.PostgresPair as Pair
 
@@ -38,6 +38,7 @@ tests =
         , testGroup "nextStep, with the primary declared on B" stepTests
         , testGroup "nextStep, with the primary declared on A" mirrorTests
         , testGroup "stepCommand" commandTests
+        , testGroup "re-seeding a standby whose slot is lost (pair_reseed)" reseedTests
         ]
 
 {- | What a step actually does to a machine. Pure, so the destructive half of
@@ -191,6 +192,7 @@ pair =
         , Pair.pair_seed = Nothing
         , Pair.pair_bouncers = [bouncer]
         , Pair.pair_may_discard = Nothing
+        , Pair.pair_reseed = Nothing
         , Pair.pair_repl_role = "replicator"
         , Pair.pair_repl_passfile = "/etc/postgresql/repl.pgpass"
         , Pair.pair_rewind_role = "rewinder"
@@ -615,3 +617,68 @@ refuses _ = False
 degraded :: Pair.Step -> Bool
 degraded (Pair.Degraded _) = True
 degraded _ = False
+
+-------------------------------------------------------------------------------
+
+{- | The re-seeding half of S6: the one place a pass wipes a data directory
+that belongs to the pair, so it has to be shown to need /both/ things at
+once -- the primary saying the slot is lost, and the operator naming the
+side -- and to do nothing otherwise.
+-}
+reseedTests :: [TestTree]
+reseedTests =
+    [ testCase "lost, declared, standby not streaming: re-seed it" $
+        assertEqual "" (Pair.Reseed Pair.A) (stepR (Just Pair.A) (pointedAt "10.0.0.2" "0/5") (primaryWithLostSlot "0/5"))
+    , testCase "lost, declared, standby stopped: re-seed it, not rewind it" $
+        assertEqual "" (Pair.Reseed Pair.A) (stepR (Just Pair.A) (stoppedAt "0/4") (primaryWithLostSlot "0/5"))
+    , testCase "lost, declared, and the data directory is already gone: carry on" $ do
+        assertEqual "" (Pair.Reseed Pair.A) (stepR (Just Pair.A) Pair.Absent (primaryWithLostSlot "0/5"))
+        assertEqual "" (Pair.Reseed Pair.A) (stepR (Just Pair.A) (Pair.Unreachable "the probe reported no status") (primaryWithLostSlot "0/5"))
+    , testCase "lost but not declared: still only said, never done" $
+        assertBool "" (degraded (stepR Nothing (stoppedAt "0/4") (primaryWithLostSlot "0/5")))
+    , testCase "declared for the other side: nothing about this one" $
+        assertBool "" (degraded (stepR (Just Pair.B) (stoppedAt "0/4") (primaryWithLostSlot "0/5")))
+    , testCase "declared, but the slot is fine: a lagging standby is never wiped" $ do
+        assertEqual "" (Pair.Rejoin Pair.A) (stepR (Just Pair.A) (stoppedAt "0/4") (primaryAt "0/5"))
+        assertEqual "" (Pair.AwaitStreaming Pair.A) (stepR (Just Pair.A) (pointedAt "10.0.0.2" "0/5") (primaryAt "0/5"))
+    , testCase "declared, and somebody else's slot is the lost one: nothing to do with this pair" $
+        assertEqual "" (Pair.Rejoin Pair.A) (stepR (Just Pair.A) (stoppedAt "0/4") (Pair.Primary "7000" 1 (lsn "0/5") [("somebody_elses", "lost")]))
+    , testCase "declared and healthy: the pair is done" $
+        assertEqual "" Pair.Done (stepR (Just Pair.A) (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5"))
+    , testCase "two different clusters are refused before anything is wiped" $
+        assertBool "" (isRefuse (stepR (Just Pair.A) (Pair.Stopped "OTHER" 1 (lsn "0/4") True) (primaryWithLostSlot "0/5")))
+    , testCase "the lost slot's reason says what to declare" $
+        case stepR Nothing (stoppedAt "0/4") (primaryWithLostSlot "0/5") of
+            Pair.Degraded why -> assertBool (Text.unpack why) ("pair_reseed" `Text.isInfixOf` why)
+            other -> assertFailure (show other)
+    , testCase "the script wipes only the pair's own data, then clones, then swaps the slot" $ do
+        let s = reseedScriptOn Pair.A
+        -- the wipe is behind the system identifier comparison
+        assertBool s ("[ \"$local_sysid\" = \"$primary_sysid\" ]" `isInfixOf` s)
+        assertBool s (at "IDENTIFY_SYSTEM" s < at "rm -rf" s)
+        assertBool s (at "$local_sysid\" = \"$primary_sysid" s < at "rm -rf" s)
+        -- and the rest is the seed script: the clone (whose own guard refuses
+        -- a foreign cluster), the drop of the lost slot only after it, then
+        -- the member's own slot
+        assertBool s (at "rm -rf" s < at "pg_basebackup" s)
+        assertBool s (at "pg_basebackup" s < at "DROP_REPLICATION_SLOT salmon_pair_app_a" s)
+        assertBool s (at "DROP_REPLICATION_SLOT salmon_pair_app_a" s < at "CREATE_REPLICATION_SLOT salmon_pair_app_a" s)
+        assertBool s ("could not drop the lost slot" `isInfixOf` s)
+    , testCase "the script runs on the side being rebuilt and reads the primary's identity from the other" $ do
+        case Pair.stepCommand pairReseed (Pair.Reseed Pair.A) of
+            Right [(Pair.OnMember m, sc)] -> do
+                assertEqual "" "10.0.0.1" (Pair.member_host m)
+                assertBool sc ("host=10.0.0.2" `isInfixOf` sc)
+            other -> assertFailure (show other)
+    ]
+  where
+    stepR r a b = Pair.nextStep pair{Pair.pair_reseed = r} a b settled
+    isRefuse (Pair.Refuse _) = True
+    isRefuse _ = False
+    pairReseed = pair{Pair.pair_reseed = Just Pair.A}
+    reseedScriptOn side = case Pair.stepCommand pairReseed (Pair.Reseed side) of
+        Right [(_, sc)] -> sc
+        _ -> ""
+    at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
+    tails' [] = [[]]
+    tails' xs@(_ : rest) = xs : tails' rest

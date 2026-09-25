@@ -46,7 +46,7 @@ tests =
         , testCase "a crashed primary is failed over only when its writes are declared expendable" failsOverFromACrash
         , testCase "a partition is waited out, not acted on" holdsThroughAPartition
         , testCase "a failover across a partition leaves two primaries, and rewinds one" splitBrainIsRewound
-        , testCase "a standby that falls off the slot budget is said so, not silently re-seeded" theSlotBudgetBoundsTheDisk
+        , testCase "a standby that falls off the slot budget is said so, not silently re-seeded, and re-seeded once declared" theSlotBudgetBoundsTheDisk
         , testCase "a pair stopped in either order comes back with the declared primary, losing nothing" recoversFromBothStopped
         , testCase "a stranger's cluster where a member should be is refused, and nothing is deleted" refusesAStrangersCluster
         ]
@@ -223,6 +223,24 @@ theSlotBudgetBoundsTheDisk = requirePgVmPrereqs $ do
             assertPrimaryIs b
             insertRow b "written-after-the-slot-was-lost"
             waitForRows b ["before-the-slot-budget", "written-after-the-slot-was-lost"]
+
+            -- the operator now says that machine may be rebuilt: the same pass
+            -- that only said so before wipes it, clones it again, swaps the
+            -- lost slot for a live one, and the pair is whole (S6, continued).
+            let reseed = p{Pair.pair_reseed = Just Pair.A}
+            okReseed <- runUp (Pair.pairRole silent reseed)
+            assertBool "the re-seeding pass failed" okReseed
+            identity'' <- dataDirectoryIdentity a
+            assertBool "the standby was declared rebuildable and was not rebuilt" (identity'' /= identity)
+            assertStandbyOf a testVmAddr2
+            after <- Pair.decide reseed
+            assertEqual ("the pair is not whole after the re-seed: " <> show after) Success (Pair.verdict after)
+            waitFor ("the slot " <> slot <> " is not live again") $ do
+                (_, out, _) <- psql b ("SELECT wal_status FROM pg_replication_slots WHERE slot_name = '" <> slot <> "';")
+                pure (any (`isInfixOf` out) ["reserved", "extended"], out)
+            -- and it is a standby again in the sense that matters
+            insertRow b "written-after-the-reseed"
+            waitForRows a ["before-the-slot-budget", "written-after-the-slot-was-lost", "written-after-the-reseed"]
 
             -- put the budget back: this rootfs outlives the VM, and a 32MB
             -- cap is a trap to leave lying around for the next spec.
@@ -601,6 +619,7 @@ pairWith a b side =
           Pair.pair_bouncers = []
         , Pair.pair_seed = Nothing
         , Pair.pair_may_discard = Nothing
+        , Pair.pair_reseed = Nothing
         }
   where
     member host identity = Pair.Member "root" host "main" 5432 (Just identity)
