@@ -1,0 +1,282 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Advanced querying: targeting `run` at a subset of nodes</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-advance-querying.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: implemented. `query show`/`query plan`/`query extract-directive`,"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Advanced querying: targeting `run` at a subset of nodes"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: implemented. `query show`/`query plan`/`query extract-directive`,"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Advanced querying: targeting `run` at a subset of nodes"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-advance-querying.html"><meta property="og:description" content="Status: implemented. `query show`/`query plan`/`query extract-directive`,"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-advance-querying.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-advance-querying.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: implemented. `query show`/`query plan`/`query extract-directive`,","headline":"Advanced querying: targeting `run` at a subset of nodes","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-advance-querying.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Advanced querying: targeting `run` at a subset of nodes</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1690 words, 8 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-multi-user-privilege-separation.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">15/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-gcloud-support.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/advance-querying.md"><code>specs/advance-querying.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="advanced-querying-targeting-run-at-a-subset-of-nodes">Advanced querying: targeting <code>run</code> at a subset of nodes</h2>
+<p>Status: implemented. <code>query show</code>/<code>query plan</code>/<code>query extract-directive</code>,
+<code>--select</code>/<code>--exclude</code> path globs (plus <code>#ref</code> selectors for rewrite-introduced
+nodes), the <code>Plan</code> artifact with its directive digest, <code>run up --plan</code>
+(<code>--force-stale-plan</code> as the dumb escape hatch), and <code>forceSkip</code> all shipped in
+<code>Salmon.Actions.Query</code> and <code>Salmon.Builtin.CommandLine</code>; <code>serve</code>’s
+<code>status</code>/<code>query</code>/<code>converge --select</code> reuse the same resolver. Still open as
+written below: re-validating a plan’s refs at <code>run</code> time, tag-based addressing,
+selection-only execution, and a plan for <code>downTree</code>. Where the code differs
+from the design, “Deviations from this design” at the end says how and why.
+Open question 2 is settled (see there). Kept as the design record.</p>
+<h3 id="problem">Problem</h3>
+<p>Today <code>execCommandOrSeed</code> (<code>Salmon.Builtin.CommandLine</code>) only offers whole-graph
+operations: <code>run Up</code> executes every node, <code>run Tree</code>/<code>run DAG</code> describe every
+node. There is no way to say “run everything except this node” or “show me
+just this subtree” without hand-editing the recipe. As graphs grow (a single
+<code>initialize</code> already nests user/group/chown/ssh-key subtrees), operators want
+to:</p>
+<ul>
+<li>inspect a subtree or subgraph in isolation (debugging, code review of a
+recipe change, onboarding),
+</li>
+<li>run <code>Up</code> while skipping a known-bad or intentionally-deferred node, without
+losing the rest of the DAG’s ordering/dedup/failure-propagation behavior.
+</li>
+</ul>
+<h3 id="design-goals--non-goals">Design goals / non-goals</h3>
+<p>Goals:</p>
+<ul>
+<li>A query surface to talk about “this subtree”, “this subgraph”, “all of X
+except Y” against an already-expanded graph.
+</li>
+<li>A <code>run</code>-compatible execution mode that skips excluded nodes but otherwise
+preserves exact DAG semantics (ordering, <code>Ref</code> dedup, <code>Failed</code>/<code>Blocked</code>
+propagation).
+</li>
+<li>Safe by construction against the seed/config/query/run split already being
+four independent process invocations: nothing should let an exclusion list
+computed against one graph get silently applied to a different one.
+</li>
+</ul>
+<p>Non-goals (v1):</p>
+<ul>
+<li>Running <em>only</em> a subtree in isolation (as opposed to “everything, minus
+some exclusions”) — interesting, but a distinct feature; see “Future work”.
+</li>
+<li>A general boolean query language (intersection, negation of a whole
+expression, etc.) — v1 covers union-of-selections minus union-of-exclusions,
+which is what the motivating use case needs.
+</li>
+<li>Down/teardown-with-plan — <code>downTree</code> has no <code>prelim</code>-equivalent today (see
+CLAUDE.md), so “skip on down” needs its own design; out of scope here.
+</li>
+</ul>
+<h3 id="why-the-addressingdigest-scheme-has-to-start-from-the-directive-not-the-seed">Why the addressing/digest scheme has to start from the directive, not the seed</h3>
+<p>Recall the existing two-phase protocol (<code>Salmon.Builtin.CommandLine</code>):</p>
+<pre><code>my-salmon config &lt;seed-args...&gt;   # seed -&gt; directive JSON  (Configure IO seed directive: impure)
+my-salmon run Up|Tree|DAG         # directive JSON -&gt; Op -&gt; execute            (Track' directive: pure)
+</code></pre>
+<p><code>Configure</code>’s own haddock is explicit that this split exists so the “turn a
+seed into a directive” step can be impure (reads files, env vars, whatever)
+while “turn a directive into ops and run them” is meant to be hermetic. In
+every existing recipe, <code>Track' directive</code> builds an <code>Op = OpGraph Identity Actions'</code> — the <code>Identity</code> means <code>expand</code> is pure. <strong>Given the same directive
+JSON, the DAG shape (nodes, <code>Ref</code>s, edges) is fully deterministic.</strong> All the
+non-determinism in the whole pipeline lives in the seed → directive step.</p>
+<p>That has one immediate consequence for this design: a <code>query</code> command must
+consume the <strong>directive</strong> (the same JSON <code>run</code> already reads from stdin), not
+the seed. If <code>query</code> instead re-ran <code>Configure</code> from a seed, two separate
+invocations of an impure <code>Configure</code> (one for <code>query</code>, one later for <code>run</code>)
+could silently produce two different directives — and therefore two
+different graphs — while looking like “the same seed” to a human. Consuming
+the directive sidesteps that: it’s already the hermetic boundary the project
+chose on purpose.</p>
+<p>This also gives us the digest mechanism for free: hashing the directive’s
+canonical JSON bytes pins the exact DAG shape a plan was computed against, and
+<code>run</code> can cheaply re-check that hash against whatever directive it’s handed
+before trusting a plan.</p>
+<h3 id="node-addressing">Node addressing</h3>
+<p>Reuse the path format <code>run tree</code> (<code>Salmon.Actions.Help</code>) already prints —
+<code>/initialize/chown/deb</code> etc. — as the human-facing selector syntax, since
+operators already read that format when debugging today.</p>
+<pre><code>/initialize/chown/deb            -- exact path
+/initialize/chown/*               -- one segment wildcard (direct children)
+/initialize/chown/**               -- subtree wildcard (any depth)
+</code></pre>
+<p>Important subtlety: a path is a <em>position</em> in the expanded tree, not a node
+identity — the same <code>Ref</code> can appear at multiple paths (that’s exactly the
+repeated-subtree phenomenon from the <code>passwordless</code>/<code>chown</code> example earlier
+in this project). So resolving a selector is a two-step process:</p>
+<ol>
+<li>Match the pattern against every path in the expanded <code>Cofree Graph</code> (same
+traversal <code>Help.printHelpCograph</code> and <code>Dot.printCograph</code> already do),
+collecting the <code>Ref</code> at each matching path.
+</li>
+<li>Selections and exclusions are ultimately <strong>sets of <code>Ref</code>s</strong> — this is also
+what <code>upTree</code>’s dedup-by-<code>Ref</code> already keys on, so “exclude this <code>Ref</code>”
+composes cleanly with “the second occurrence of this node is <code>Redundant</code>
+anyway”: whichever occurrence is walked first is the one whose <code>prelim</code>
+gets forced.
+</li>
+</ol>
+<h3 id="query-language-v1">Query language (v1)</h3>
+<p>Repeated flags, applied as one union-then-difference, no operator precedence
+to think about:</p>
+<pre><code>--select PATTERN     -- may repeat; union. Omitted entirely = &quot;everything&quot;.
+--exclude PATTERN     -- may repeat; union, then subtracted from the selection.
+</code></pre>
+<p><code>resolvedRefs = union(matches(select_i)) \ union(matches(exclude_j))</code></p>
+<p>This is enough to express both motivating cases:</p>
+<ul>
+<li>“show me this subtree”: <code>--select '/initialize/chown/**'</code>
+</li>
+<li>“run everything except this node”: <code>--exclude '/initialize/passwordless'</code>
+</li>
+</ul>
+<h3 id="new-cli-surface">New CLI surface</h3>
+<p>Add a <code>query</code> subcommand alongside <code>config</code>/<code>run</code>, and let <code>run up</code> accept an
+optional plan.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Command</span> seed</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Config</span> seed</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Query</span> <span class="dt">QueryCommand</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Run</span> <span class="dt">BaseCommand</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">QueryCommand</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">QueryCommand</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> queryMode ::</span> <span class="dt">QueryMode</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> querySelect ::</span> [<span class="dt">Text</span>]   <span class="co">-- PATTERN, repeatable</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> queryExclude ::</span> [<span class="dt">Text</span>]  <span class="co">-- PATTERN, repeatable</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">QueryMode</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">ShowMatches</span>   <span class="co">-- human-readable, like `run tree` but annotated</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">EmitPlan</span>       <span class="co">-- JSON `Plan` to stdout</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">BaseCommand</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Up</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">UpWithPlan</span> <span class="dt">FilePath</span>   <span class="co">-- new: run Up, but honor an emitted Plan</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Tree</span></span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">DAG</span></span></code></pre></div></div><p>Both <code>Query</code> and <code>UpWithPlan</code> read the directive from stdin exactly like
+<code>Run</code> does today — no new input channel, same hermetic boundary.</p>
+<pre><code class="language-sh"># inspect a subtree
+my-salmon config &lt;seed-args&gt; | my-salmon query show --select '/initialize/chown/**'
+
+# build an exclusion plan
+my-salmon config &lt;seed-args&gt; | my-salmon query plan --exclude '/initialize/passwordless' &gt; plan.json
+
+# apply it
+my-salmon config &lt;seed-args&gt; | my-salmon run up --plan plan.json
+</code></pre>
+<h3 id="the-plan-artifact">The <code>Plan</code> artifact</h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Plan</span> <span class="ot">=</span> <span class="dt">Plan</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> planDirectiveDigest ::</span> <span class="dt">Text</span>        <span class="co">-- sha256 of the canonical directive JSON</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> planExcludedRefs ::</span> [<span class="dt">Ref</span>]          <span class="co">-- resolved at `query plan` time</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> planExcludedPatterns ::</span> [<span class="dt">Text</span>]     <span class="co">-- kept for humans re-reading the file</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p><code>query plan</code> emits this after resolving patterns against the directive it was
+handed. <code>run up --plan plan.json</code>:</p>
+<ol>
+<li>Reads the directive from stdin (unchanged).
+</li>
+<li>Recomputes <code>sha256</code> of the same canonical encoding and compares it to
+<code>planDirectiveDigest</code>. Mismatch → refuse to run (non-zero exit, loud
+error naming both digests), unless <code>--force-stale-plan</code> is passed.
+This is the guard against the two-invocation race: if anything upstream
+(a re-run of <code>config</code> with different seed args, a change to the recipe
+binary between builds, …) produced a different directive than the one
+<code>query plan</code> saw, the plan is refused rather than silently mis-applied.
+</li>
+<li>Expands the directive into the <code>Op</code> graph as usual.
+</li>
+<li>Applies <code>forceSkip planExcludedRefs</code> (see below).
+</li>
+<li>Runs <code>upTree</code> unchanged.
+</li>
+</ol>
+<h4 id="forceskip"><code>forceSkip</code></h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">forceSkip ::</span> <span class="dt">Set</span> <span class="dt">Ref</span> <span class="ot">-&gt;</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p>Walks the graph and, for every node whose <code>ref</code> is in the given set, replaces
+<code>prelim</code> with <code>pure Skippable</code>, leaving <code>up</code>, <code>down</code>, <code>ref</code>, <code>dynamics</code>, and
+the graph topology completely untouched. <code>OpGraph</code>’s derived
+<code>Functor</code>/<code>Traversable</code> (<code>salmon-core/src/Salmon/Op/OpGraph.hs</code>) already maps
+a function over every <code>node</code> in the structure including through the effectful
+<code>predecessors</code>, which is the natural place to hang this rewrite.</p>
+<p>Net effect on <code>upTree</code> (see <code>Salmon.Actions.UpDown</code>): a forced-skip node is
+walked exactly like today, dedup-by-<code>Ref</code> still applies, but it reports <code>Skip</code>
+unconditionally instead of running its own <code>prelim</code>/<code>up</code>. Everything that
+depends on it runs exactly as if it had genuinely been up-to-date — this is
+the “keep the original DAG ordering” property asked for: nothing is cut out
+of the graph, so a dependent that (incorrectly) assumed the excluded node’s
+effect doesn’t silently get reordered or vanish, it just sees a no-op
+predecessor.</p>
+<p>Caveat worth documenting prominently: this can absolutely produce a broken
+system if a dependent’s correctness genuinely required the excluded node’s
+<code>up</code> to have run (e.g. excluding user creation but not the things that log in
+as that user). The tool enforces graph-shape consistency (the digest check);
+it cannot and should not try to enforce semantic safety of an operator’s
+chosen exclusion set.</p>
+<h3 id="query-show-output-sketch"><code>query show</code> output sketch</h3>
+<p>Mirrors <code>run tree</code>’s indentation, annotating matched lines:</p>
+<pre><code>/initialize
+/initialize/file-contents writes /etc/sudoers.d/salmon with some contents
+/initialize/file-contents/directory ensures /etc/sudoers.d exists, including subdirs
+/initialize/passwordless removes a system user's password          [excluded]
+/initialize/passwordless/user creates a system user
+...
+/initialize/chown sets ownership of /home/salmon to salmon:salmon   [selected]
+</code></pre>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li>Should <code>query plan</code>’s resolved <code>Ref</code>s be re-validated at <code>run</code> time against
+the freshly-expanded graph (i.e. warn/fail if an excluded <code>Ref</code> from the
+plan no longer appears anywhere), separately from the digest check? Given
+the digest already pins the whole directive, this may be redundant, but a
+friendlier error message (“this plan excludes a node that doesn’t exist in
+this graph”) might be worth the extra check.
+</li>
+<li><code>--force-stale-plan</code>: allow proceeding on a digest mismatch by re-resolving
+<code>planExcludedPatterns</code> (not <code>planExcludedRefs</code>) against the new directive?
+That would make the plan resilient to some classes of directive drift
+(e.g. an unrelated field changed) at the cost of re-introducing the exact
+risk the digest was meant to close. Leaning towards: no, keep the escape
+hatch dumb (skip the check entirely, operator’s responsibility) rather than
+clever (silently re-resolve and hope the patterns still mean the same
+thing).
+<strong>Settled:</strong> the escape hatch stayed dumb. <code>--force-stale-plan</code> prints a
+warning naming both digests and applies <code>planExcludedRefs</code> as they are,
+without re-resolving the patterns.
+</li>
+<li>Tag/dynamics-based addressing (nodes opting into stable labels via the
+existing <code>dynamics</code> field, independent of tree position) would be more
+refactor-resistant than path globs, but requires node authors to annotate
+their ops. Worth a v2 if path-glob addressing turns out too fragile once
+recipes change shape.
+</li>
+</ul>
+<h3 id="future-work">Future work</h3>
+<ul>
+<li>Selection-only execution (“run just this subtree, treating its own
+external dependencies as already-satisfied”) rather than
+everything-minus-exclusions. Same <code>forceSkip</code> machinery, inverted:
+force-skip everything <em>not</em> reachable from the selection’s roots, then run
+the selection’s own roots normally. Deferred because it changes the
+“predecessor’s a real dependency” invariant in a way that needs its own
+correctness argument (a truly-required predecessor outside the selection
+would need to be forced skippable, which is a much easier way to shoot
+yourself in the foot than the exclusion case).
+</li>
+<li>The same <code>Plan</code>/digest idea applied to <code>downTree</code>, once teardown gets a
+<code>prelim</code>-equivalent.
+</li>
+</ul>
+<h3 id="deviations-from-this-design">Deviations from this design</h3>
+<ul>
+<li><strong>The digest is of the raw stdin bytes, not of canonical JSON.</strong>
+<code>Query.digestBytes</code> hashes exactly the bytes <code>run</code>/<code>query</code> read off stdin.
+aeson gives no guarantee that decoding and re-encoding reproduces the same
+bytes across invocations, and a digest that could change between <code>query plan</code> and <code>run up</code> would refuse good plans. As a result, a directive that
+was reformatted, even with the same meaning, no longer matches its plan.
+That errs on the safe side, and <code>--force-stale-plan</code> is the way past it.
+</li>
+<li><strong><code>Plan</code> gained <code>planDirective</code></strong>, empty unless <code>query plan --embed-directive</code> fills it with the directive’s bytes. That makes the plan
+a self-contained, replayable artifact, for example for an audit trail.
+<code>query extract-directive PLAN</code> prints the embedded directive, so callers
+never read the field directly.
+</li>
+<li><strong>There is no <code>prelim</code> any more.</strong> <code>Extension</code>’s <code>prelim</code> merged into <code>check :: IO CheckResult</code> (see <code>CLAUDE.md</code>’s “<code>check</code>, not <code>prelim</code>”). <code>forceSkip</code>
+replaces <code>check</code> with <code>pure Skipped</code>, and <code>Skipped</code> exists for this purpose
+alone: it records a decision about the node, not a fact about its effect.
+<code>run up --plan</code> does not go through <code>forceSkip</code> either. It passes the
+excluded refs to <code>upDag</code> as an <code>UpDown.Gate</code>, so the exclusion composes with
+collection rewrites: a batch runs if any of its members is wanted. The
+report is the same <code>Skip</code> either way.
+</li>
+<li><strong><code>#ref</code> selectors were added</strong> beside the path globs. A rewrite can
+introduce a node, such as a batch, that has no declared tree position for a
+path to match. A pattern starting with <code>#</code> matches by <code>Ref</code> instead: a
+prefix of <code>shortRef</code> or of the full ref text. It expands through
+<code>Rewrite.membersOf</code> to the declared nodes it stands for
+(<code>Query.resolveRewrittenSelectors</code>). A plan’s exclusion set still holds
+declared refs only.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

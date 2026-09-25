@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">salmon</title><id>https://lucasdicioccio.github.io/salmon/atom.xml</id><updated>2026-09-25T12:00:00Z</updated><entry><id>https://lucasdicioccio.github.io/salmon/getting-started.html</id><title type="text">Getting started with salmon</title><updated>2026-09-25T12:00:00Z</updated><author><name>Lucas DiCioccio</name></author><content type="html">&lt;div class="main-article"&gt;&lt;section class="main-section"&gt;&lt;h2 id="getting-started-with-salmon"&gt;Getting started with salmon&lt;/h2&gt;
+&lt;p&gt;Salmon is a Haskell library and toolkit, not a hosted service: you write a
+small binary over the recipes you need, and that binary provisions things.
+This page gets you from a checkout to a running graph.&lt;/p&gt;
+&lt;h3 id="build"&gt;Build&lt;/h3&gt;
+&lt;pre&gt;&lt;code class="language-sh"&gt;git clone https://github.com/lucasdicioccio/salmon
+cd salmon
+cabal build all
+cabal build salmon-core salmon-ops salmon-ops-recipes salmon-apps   # individual packages
+cabal build salmon-migrator                                          # a single executable
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;The project is layered strictly bottom-to-top:&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;salmon-core  &amp;lt;-  salmon-ops  &amp;lt;-  salmon-ops-recipes  &amp;lt;-  salmon-apps
+                                        ^
+                                        |
+                          salmon-ops-recipes-experimental
+&lt;/code&gt;&lt;/pre&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;salmon-core&lt;/code&gt;&lt;/strong&gt; — the algebraic &lt;code&gt;Graph&lt;/code&gt;, and the &lt;code&gt;OpGraph&lt;/code&gt;/&lt;code&gt;Track&lt;/code&gt;/&lt;code&gt;Eval&lt;/code&gt;
+abstractions that let “create a file” and “turn a server up” be the same
+type. No IO-heavy dependencies, kept minimal on purpose.
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;salmon-ops&lt;/code&gt;&lt;/strong&gt; — IO-heavy primitives (files, systemd, Debian packages,
+podman, postgres, wireguard, certificates, ssh, netfilter, cron, rsync,
+qemu, GCP, …), the drivers that execute a graph (one-shot &lt;code&gt;up&lt;/code&gt;/&lt;code&gt;down&lt;/code&gt;,
+and the long-running &lt;code&gt;serve&lt;/code&gt; loop with its supervision, HTTP API, web UI
+and pull mode), and the CLI plumbing every salmon binary shares.
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;salmon-ops-recipes&lt;/code&gt;&lt;/strong&gt; — higher-level, opinionated compositions of the
+builtins, where project conventions get enforced. Has the real test suite.
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;salmon-ops-recipes-experimental&lt;/code&gt;&lt;/strong&gt; — recipes needing heavier or less
+stable dependencies (kitchen-sink site generation, ACME certificates). Not
+in the default package set.
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;salmon-apps&lt;/code&gt;&lt;/strong&gt; — the shipped binaries, each a small &lt;code&gt;Main&lt;/code&gt; over a recipe.
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Some git dependencies in &lt;code&gt;cabal.project&lt;/code&gt; point at the author’s other
+repositories, pinned by commit; they are not on Hackage.&lt;/p&gt;
+&lt;h3 id="test"&gt;Test&lt;/h3&gt;
+&lt;pre&gt;&lt;code class="language-sh"&gt;cabal test salmon-ops-recipes
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Tests are tiered by IO cost and blast radius: cheap in-process assertions on
+graph shape and traversal, up through tests that dogfood the project’s own
+&lt;code&gt;Podman&lt;/code&gt; builtins to run real recipes against disposable containers, and a
+few that build qemu VMs. The container and VM tiers need &lt;code&gt;podman&lt;/code&gt; or &lt;code&gt;qemu&lt;/code&gt;
+on the machine and are skipped loudly otherwise. See
+&lt;a href="/salmon/docs-howto-ops.html"&gt;Writing ops, §10&lt;/a&gt; for the breakdown.&lt;/p&gt;
+&lt;h3 id="using-a-salmon-binary"&gt;Using a salmon binary&lt;/h3&gt;
+&lt;p&gt;Every salmon binary speaks the same two-step protocol: &lt;code&gt;config&lt;/code&gt; turns
+human-facing command-line arguments (a &lt;em&gt;seed&lt;/em&gt;) into a JSON &lt;em&gt;directive&lt;/em&gt;, and
+&lt;code&gt;run&lt;/code&gt; reads that directive on standard input and acts on the graph it
+expands to.&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-sh"&gt;my-salmon config &amp;lt;seed-args...&amp;gt;                        # seed -&amp;gt; JSON directive on stdout
+my-salmon config &amp;lt;seed-args...&amp;gt; | my-salmon run up     # converge the graph
+my-salmon config &amp;lt;seed-args...&amp;gt; | my-salmon run down   # tear it down
+my-salmon config &amp;lt;seed-args...&amp;gt; | my-salmon run tree   # print the dependency tree (run dag: Graphviz)
+my-salmon config &amp;lt;seed-args...&amp;gt; | my-salmon query show --select '/some/path/**'
+my-salmon run serve                                    # read seed declarations as commands, keep converging
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;The split keeps the possibly-impure “decide what I want” step separate from
+the hermetic “make it so” step, which is meant to run unattended, often on
+another machine. &lt;code&gt;run up&lt;/code&gt;/&lt;code&gt;run down&lt;/code&gt;/&lt;code&gt;run serve&lt;/code&gt; take &lt;code&gt;--json&lt;/code&gt; for one JSON
+object per report. &lt;code&gt;query&lt;/code&gt; targets a subset of the graph: &lt;code&gt;query plan --exclude PATTERN&lt;/code&gt; writes a plan that &lt;code&gt;run up --plan FILE&lt;/code&gt; honours.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;run serve&lt;/code&gt; is the long-running mode. It reads &lt;code&gt;up&lt;/code&gt;/&lt;code&gt;down&lt;/code&gt;/&lt;code&gt;only&lt;/code&gt;/&lt;code&gt;clear&lt;/code&gt;/
+&lt;code&gt;converge&lt;/code&gt;/&lt;code&gt;status&lt;/code&gt;/… lines, keeps a world of every declared seed,
+converges after each one, and between commands &lt;em&gt;tends&lt;/em&gt; the nodes,
+re-applying what goes missing under a per-node supervision policy. The same
+loop can be driven over a unix socket, over HTTP with an event stream and a
+web UI (or TLS and a token over TCP), from a terminal client, or pull its
+declarations from a registry — a directory, git, HTTPS, DNS or a bucket,
+optionally signed — and report back through a status file that
+&lt;code&gt;salmon-fleet status&lt;/code&gt; folds. All of that is
+&lt;a href="/salmon/docs-serve-supervision.html"&gt;&lt;code&gt;run serve&lt;/code&gt;: convergence and supervision&lt;/a&gt;.&lt;/p&gt;
+&lt;h3 id="the-model-in-one-paragraph"&gt;The model, in one paragraph&lt;/h3&gt;
+&lt;p&gt;An &lt;code&gt;Op&lt;/code&gt; is a graph node centered on itself, with an &lt;em&gt;effectful&lt;/em&gt; recipe for
+finding its own predecessors — this is what lets a one-line filesystem op
+and a whole clustered-database-with-replication setup type-check
+identically. Every op carries &lt;code&gt;up&lt;/code&gt;/&lt;code&gt;down&lt;/code&gt; (bring the effect into being /
+undo it), &lt;code&gt;check&lt;/code&gt; (a &lt;code&gt;CheckResult&lt;/code&gt; answering “is my effect already in
+place”, which is what makes a node idempotent to re-run), and a &lt;code&gt;Ref&lt;/code&gt; that
+gives it a stable identity so the traversal can dedupe a resource reached
+via several graph paths. The drivers collapse the materialized graph into a
+DAG with one node per &lt;code&gt;Ref&lt;/code&gt;, walk it in dependency order (or the reverse,
+for teardown), contain real failures (a thrown exception marks a node
+&lt;code&gt;Failed&lt;/code&gt; and blocks everything depending on it rather than being swallowed),
+and report exactly what happened, node by node.&lt;/p&gt;
+&lt;h3 id="write-your-own-binary"&gt;Write your own binary&lt;/h3&gt;
+&lt;p&gt;Define a &lt;code&gt;seed&lt;/code&gt; type, a &lt;code&gt;directive&lt;/code&gt; type (&lt;code&gt;FromJSON&lt;/code&gt;/&lt;code&gt;ToJSON&lt;/code&gt;), a
+&lt;code&gt;Configure IO seed directive&lt;/code&gt;, and a &lt;code&gt;Track' directive&lt;/code&gt; that turns a
+directive into an &lt;code&gt;Op&lt;/code&gt; by composing builtin nodes and recipes; then hand the
+four to &lt;code&gt;Salmon.Builtin.CommandLine.execCommandOrSeed&lt;/code&gt;. The
+&lt;a href="/salmon/docs-howto-ops.html"&gt;cookbook&lt;/a&gt; walks through each piece with a worked
+example, and &lt;code&gt;salmon-apps/src/Migrator.hs&lt;/code&gt; in the repository is a complete
+one.&lt;/p&gt;
+&lt;/section&gt;&lt;/div&gt;</content><link href="https://lucasdicioccio.github.io/salmon/getting-started.html" rel="alternate"/><summary type="text">Build the packages, run the tests, and read the two-step protocol every salmon binary speaks.</summary></entry></feed>

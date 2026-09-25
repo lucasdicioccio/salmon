@@ -1,0 +1,312 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Validating the GCP builtins against a real project</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Validating the GCP builtins against a real project"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Validating the GCP builtins against a real project"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html"><meta property="og:description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/docs-gcp-toy-validation.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-gcp-toy-validation.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"This is the playbook for running salmon's `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes' automated tests are all Layer 0: they check the *pure* verdict funct","headline":"Validating the GCP builtins against a real project","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Validating the GCP builtins against a real project</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 2182 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs-howto-ops.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">2/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-postgres-pair.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/gcp-toy-validation.md"><code>resources/gcp-toy-validation.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="validating-the-gcp-builtins-against-a-real-project">Validating the GCP builtins against a real project</h2>
+<p>This is the playbook for running salmon’s <code>Salmon.Builtin.Nodes.Gcp.*</code> builtins
+against real GCP, in a sandbox you are willing to destroy. It exists because the
+GCP nodes’ automated tests are all Layer 0: they check the <em>pure</em> verdict
+functions (<code>interpretInstanceStatus</code>, <code>interpretBillingDescribe</code>, …) and the
+rendered <code>gcloud</code> argument lists. Nothing in <code>cabal test</code> ever talks to Google,
+so “does an <code>up</code> actually converge, and is it idempotent, and does <code>down</code> take
+it all away” is a question only a real project can answer.</p>
+<p>Three pieces do that:</p>
+<ul>
+<li><code>salmon-apps</code>’s <strong><code>salmon-gcp-toy</code></strong> binary (<code>salmon-apps/src/GcpToy.hs</code>), a
+tiered, throwaway stack built out of the Gcp builtins, driven through the
+usual seed → directive → ops protocol.
+</li>
+<li><strong><code>salmon-apps/scripts/gcp-toy-validate.sh</code></strong>, which runs that binary through
+<code>up</code> → <code>up</code> → <code>down</code> and reports what each pass did.
+</li>
+<li><strong><code>salmon-apps/scripts/gcp-toy-serve.sh</code></strong>, which keeps that binary up as a
+<code>run serve</code> server instead — the HTTP surface, the web UI, <code>salmon-tui</code> —
+and changes what it wants one word at a time (<code>tier0</code>, <code>tier1</code>, <code>tag v2</code>,
+<code>down</code>), with tier 2’s two passes driven through pull mode by editing a
+registry document. Use it once tier 0 is clean under the validator.
+</li>
+</ul>
+<p>The blast radius is bounded by the project: by default the toy <em>creates</em> the
+project it works in, which makes the project the deepest node of the graph, so
+<code>run down</code> tears every resource down individually first (that is the part being
+validated) and then deletes the project, which sweeps anything a buggy <code>down</code>
+left behind.</p>
+<h3 id="what-the-toy-declares">What the toy declares</h3>
+<p>Tiers are cumulative, ordered by cost. Pick one with <code>--tier</code>.</p>
+<p><strong>Tier 0</strong> (≈ free — nothing here is billed beyond negligible storage):</p>
+<table>
+<tr><th>Node</th><th>Resource</th></tr>
+<tr><td><code>Gcp.Core.applicationDefaultCredentials</code></td><td>validates ADC before anything else runs</td></tr>
+<tr><td><code>Gcp.ResourceManager.project</code></td><td>the project itself (skipped with <code>--existing-project</code>)</td></tr>
+<tr><td><code>Gcp.Billing.linkBillingAccount</code></td><td>links the billing account</td></tr>
+<tr><td><code>Gcp.ServiceUsage.enableService</code></td><td><code>storage</code>, <code>iam</code>, <code>artifactregistry</code> (and <code>run</code> at tier 1)</td></tr>
+<tr><td><code>Gcp.Storage.bucket</code></td><td><code>&lt;project&gt;-&lt;prefix&gt;</code> , uniform bucket-level access</td></tr>
+<tr><td><code>Gcp.Iam.serviceAccount</code></td><td><code>&lt;prefix&gt;-sa@&lt;project&gt;.iam.gserviceaccount.com</code></td></tr>
+<tr><td><code>Gcp.ArtifactRegistry.artifactRepository</code></td><td><code>&lt;prefix&gt;-repo</code>, docker format</td></tr>
+<tr><td><code>Gcp.Iam.iamBinding</code> ×2</td><td><code>storage.objectViewer</code> on the bucket, <code>artifactregistry.reader</code> on the repo</td></tr>
+</table>
+<p><strong>Tier 1</strong> (cents) adds <code>SreBox.Gcp.CloudRunDeploy.buildPushDeploy</code>: podman
+builds an image, logs in to <code>&lt;region&gt;-docker.pkg.dev</code> with an isolated
+authfile, pushes, and <code>Gcp.CloudRun.cloudRunService</code> deploys it as
+<code>&lt;prefix&gt;-hello</code> running as the tier-0 service account, <code>--max-instances 1</code>.</p>
+<p>The image is either <code>FROM --base-image</code> (Google’s <code>cloudrun/container/hello</code>
+sample by default, plus a label carrying <code>--image-tag</code> so each tag really is a
+distinct image) or your own <code>--containerfile PATH</code>, built with that file’s
+directory as the podman build context. Whatever you deploy must serve HTTP on
+<code>$PORT</code> and be linux/amd64, or the revision never becomes ready. The service is
+deployed <em>without</em> <code>--allow-unauthenticated</code>: the toy asserts the deploy
+happened and runs the expected image, it never issues an HTTP request to it.</p>
+<p><strong>Tier 2</strong> (an <code>e2-micro</code>’s hourly rate, plus a reserved IP) is
+<code>specs/gcloud-support.md</code> §6’s “objective”: a VM salmon boots, trusts and
+then provisions with <em>this same binary</em>.</p>
+<table>
+<tr><th>Node</th><th>Resource</th></tr>
+<tr><td><code>Gcp.Compute.address</code></td><td>a reserved regional external IP, <code>&lt;prefix&gt;-ip</code></td></tr>
+<tr><td><code>Gcp.Compute.firewallRule</code></td><td><code>tcp:22</code> from <code>--ssh-source-range</code> to instances tagged <code>&lt;prefix&gt;-ssh</code></td></tr>
+<tr><td><code>Filesystem.filecontents</code></td><td>the startup script, passed as <code>--metadata-from-file</code></td></tr>
+<tr><td><code>Keys.sshKey</code> ×2, <code>Keys.signKey</code></td><td>a CA and a client key, and a certificate for <code>--vm-user</code></td></tr>
+<tr><td><code>Gcp.SshAccess.installMetadataCaKey</code></td><td>the CA's public key, into project metadata</td></tr>
+<tr><td><code>Gcp.Compute.gceInstance</code></td><td>the VM, claiming the address and carrying the tag</td></tr>
+<tr><td><code>Gcp.SshAccess.sshAvailable</code></td><td>waits for sshd to answer <em>as that user, with that certificate</em></td></tr>
+<tr><td><code>Self.uploadAndCallSelfAsSudoWith</code> (via <code>SreBox.Gcp.VmProvision.provisionedVm</code>)</td><td>rsyncs this binary over and runs <code>run up</code> on it there</td></tr>
+</table>
+<p>The startup script is what closes the gap <code>installMetadataCaKey</code> leaves:
+nothing on a GCE instance reads that metadata key by itself. It fetches the
+CA from the metadata server into <code>/etc/ssh/salmon_ca.pub</code>, points sshd’s
+<code>TrustedUserCAKeys</code> at it, creates the login user the certificate names as
+its principal (with no OS Login, a principal must be a local account), gives
+it passwordless sudo, and makes sure <code>rsync</code> is there for the upload.</p>
+<p><strong>Tier 2 runs in two passes, and the script drives both.</strong> GCP picks the
+address, so the first pass reserves it and stops; the driver then reads the
+IP (<code>gcloud compute addresses describe</code>, the call <code>Compute.readAddress</code>
+wraps) and re-issues the directive with <code>--vm-ip</code>, and
+the second pass declares the same graph plus the provisioning step. That is
+not a wart of the toy: an <code>Op</code> naming the host has to be built before any
+<code>up</code> runs, so <em>something</em> outside the graph has to carry the address across.</p>
+<p>What proves it worked is the file the uploaded binary writes on the VM,
+<code>/var/lib/salmon-toy/provisioned</code>; the script reads it back over ssh. The
+binary runs there with the same directive, tagged <code>OnVm</code>, which is why the
+payload is declared in the same <code>Track'</code> as everything else.</p>
+<p><strong>Tier 3</strong> (a forwarding rule’s hourly rate on top of tier 2) puts a
+<em>regional external</em> Application Load Balancer in front of that VM.</p>
+<table>
+<tr><th>Node</th><th>Resource</th></tr>
+<tr><td><code>Gcp.Compute.subnet</code></td><td>the proxy-only subnet, <code>&lt;prefix&gt;-proxy</code>, <code>REGIONAL_MANAGED_PROXY</code>/<code>ACTIVE</code></td></tr>
+<tr><td><code>Gcp.Compute.instanceGroup</code></td><td>an unmanaged, zonal group, <code>&lt;prefix&gt;-ig</code></td></tr>
+<tr><td><code>Gcp.Compute.instanceGroupMember</code></td><td>the tier-2 VM, put in it</td></tr>
+<tr><td><code>Gcp.Compute.firewallRule</code></td><td><code>tcp:&lt;--lb-port&gt;</code> from the proxy range <strong>and</strong> the health-check ranges, to instances tagged <code>&lt;prefix&gt;-lb</code></td></tr>
+<tr><td><code>Gcp.LoadBalancing.applicationLoadBalancer</code></td><td>health check, backend service, named ports, URL map, target proxy, forwarding rule</td></tr>
+<tr><td><code>Systemd.systemdService</code> (on the VM)</td><td><code>salmon-toy-web.service</code>, a <code>python3 -m http.server</code> over a page salmon wrote</td></tr>
+</table>
+<p>Three of those exist only because a regional external ALB is an Envoy fleet
+rather than a Google frontend, and that is what the tier is really testing:
+the proxies run <em>inside</em> the VPC, in a proxy-only subnet that must already
+exist in the region; they reach the backends <strong>from that subnet’s range</strong>, so
+the backend firewall has to allow it — as does the separate
+<code>35.191.0.0/16</code> + <code>130.211.0.0/22</code> pair the <em>health checks</em> come from, which
+is a different source entirely and the usual reason a balancer that came up
+cleanly still answers <code>502</code>; and a VM is not a backend, an instance group is.</p>
+<p>The web server is declared on the <strong>VM side</strong>, by the tier-2 payload. That is
+deliberate: a forwarding rule that merely exists proves nothing, so what the
+script checks is a <code>200</code> carrying the project id, and the only thing that can
+put that body there is salmon running on the machine. A green tier 3 is
+therefore a second, independent proof that the tier-2 hand-off worked — this
+time through the front door.</p>
+<h3 id="step-1--dry-run-no-gcp-calls">Step 1 — dry run, no GCP calls</h3>
+<p><code>run tree</code> only expands the graph; it never shells out to <code>gcloud</code>. Do this
+first, with a throwaway billing id, to see what a given set of flags declares:</p>
+<pre><code class="language-sh">cd &lt;repo&gt;
+cabal build salmon-gcp-toy
+TOY=$(cabal list-bin salmon-gcp-toy)
+
+$TOY config --project salmon-toy-$(date +%s) \
+      --billing-account 000000-000000-000000 --tier 0 \
+  | $TOY run tree
+</code></pre>
+<p><code>config</code> also validates the flags (project id shape, prefix length, that
+<code>--containerfile</code> exists, that a created project has a billing account), so a
+typo fails here rather than half-way through an <code>up</code>.</p>
+<h3 id="step-2--find-the-real-ids">Step 2 — find the real ids</h3>
+<pre><code class="language-sh">gcloud billing accounts list   # ACCOUNT_ID -&gt; --billing-account
+gcloud organizations list      # ID         -&gt; --organization (omit if you have none)
+</code></pre>
+<p>The billing account must be one the <em>active account</em> can see in that listing
+<strong>and</strong> <code>OPEN: True</code> — a closed account cannot be linked, and an id you cannot
+see fails with a permission error that reads as if the id might not exist. The
+script pre-flights this (<code>gcloud billing accounts describe</code>) before it declares
+anything, because linking is the first step that touches something the caller
+may not own, and by then a project has already been created.</p>
+<h3 id="step-3--point-gcloud-at-the-sandbox">Step 3 — point gcloud at the sandbox</h3>
+<p>The toy needs credentials twice over: the <code>gcp-adc</code> node checks <em>application
+default credentials</em>, while every <code>gcloud</code> invocation uses the <em>active account</em>.
+They are separate logins, and a stale one is the most common cause of a
+first-run failure.</p>
+<pre><code class="language-sh">gcloud config configurations create salmon-sandbox   # leaves other configs alone
+gcloud auth login
+gcloud auth application-default login
+gcloud config get-value account                      # confirm the sandbox identity
+</code></pre>
+<p>The script prints the active account and the ambient project when it starts.
+The ambient project should not matter: every node passes <code>--project</code>
+explicitly. If a run only works when the ambient project happens to be right,
+that is a bug in a node, and worth reporting.</p>
+<h3 id="step-4--the-real-run">Step 4 — the real run</h3>
+<pre><code class="language-sh">salmon-apps/scripts/gcp-toy-validate.sh -- \
+  --project salmon-toy-$(date +%s) \
+  --organization YOUR_ORG_ID \
+  --billing-account YOUR_BILLING_ACCOUNT \
+  --tier 0
+</code></pre>
+<p>Then, once tier 0 is clean, the same with <code>--tier 1</code> (needs <code>podman</code>), and/or
+<code>--containerfile ./myapp/Containerfile</code> to deploy your own app. Tier 2 adds
+<code>--vm-zone</code> (default <code>&lt;region&gt;-b</code>), <code>--vm-machine-type</code> (<code>e2-micro</code>),
+<code>--vm-image-family</code>/<code>--vm-image-project</code> (Ubuntu 24.04 LTS), <code>--vm-user</code>
+(<code>salmon</code>) and <code>--ssh-source-range</code> (<code>0.0.0.0/0</code> — narrow it to your own
+address if the sandbox is not disposable). Tier 3 adds <code>--lb-proxy-range</code>
+(<code>192.168.100.0/24</code>) and <code>--lb-port</code> (<code>8080</code>).</p>
+<p>Script options, before the <code>--</code>: <code>-y</code> skips the confirmation prompt, <code>--keep</code>
+skips teardown (it then prints the <code>run down</code> command to finish up later).
+Everything after the <code>--</code> goes verbatim to <code>salmon-gcp-toy config</code>. <code>OUT=&lt;dir&gt;</code>
+and <code>SALMON_GCP_TOY=&lt;binary&gt;</code> override the log directory and the binary.</p>
+<p><strong>Use a fresh project id every run.</strong> A deleted project sits in
+<code>DELETE_REQUESTED</code> for ~30 days and nobody can reuse its id in that window —
+<code>$(date +%s)</code> in the id is there for exactly this. <code>Gcp.ResourceManager</code>’s check
+reports that state with its own message rather than as a plain “not found”,
+because the <code>up</code> that follows is going to fail on the id, not on credentials.</p>
+<h3 id="what-the-passes-mean">What the passes mean</h3>
+<table>
+<tr><th>Pass</th><th>What a clean result looks like</th><th>What a dirty one tells you</th></tr>
+<tr><td><code>up</code> &amp;#35;1</td><td>converges first time</td><td>a failure triggers <strong>one</strong> retry; "converged ONLY ON RETRY" means something needed time — IAM propagation after creating a service account, or a just-enabled API — that no node waits out yet</td></tr>
+<tr><td><code>up</code> &amp;#35;2</td><td>every node with a real <code>check</code> reports <code>Skip</code></td><td>a node listed as "RE-APPLIED DESPITE A CHECK" has a <code>check</code> that never says <code>Success</code>, i.e. it is not idempotent under <code>run up</code></td></tr>
+<tr><td><code>down</code></td><td>succeeds, then the project is <code>DELETE_REQUESTED</code> (or, with <code>--existing-project</code>, every resource fails to <code>describe</code>)</td><td>a failed <code>down</code> leaves that node standing and <code>Blocked</code>s everything it depends on — including, deliberately, the project delete, so the leftovers are still there to look at</td></tr>
+</table>
+<p>Nodes that legitimately have no <code>check</code> today re-apply on every pass; the
+script lists them separately rather than counting them as findings. Tier 2
+adds the expensive members of that list: <code>rsync:sendfile</code> re-uploads the
+binary and <code>ssh:call</code> re-runs the remote directive every pass. The remote run
+is itself idempotent — it streams its own report back over ssh, and on the
+second pass it reports <code>Skip</code> for its file node, which the script surfaces.</p>
+<p>Two nodes also cannot go <em>down</em> on a workstation, by design rather than by
+accident, and the script says so instead of calling the teardown failed:
+<code>deb</code> tears down with <code>apt-get remove</code>, which needs root and would uninstall
+a system package salmon did not put there; and <code>directory</code> refuses a
+non-empty directory, which the ssh key dir always is, because <code>Keys.sshKey</code>
+deliberately “keeps keys around”. The logs
+(<code>gcp-toy-runs/&lt;timestamp&gt;/up-1.log</code>, <code>up-2.log</code>, <code>down.log</code>, plus <code>tree.txt</code>
+and <code>directive.json</code>) hold the full <code>UpDown</code> report stream.</p>
+<p>The script exits non-zero on any failure, retry, unexpected re-apply, or
+leftover.</p>
+<h3 id="things-that-will-bite">Things that will bite</h3>
+<ul>
+<li>
+<p><strong>Org policies.</strong> A freshly created organization enforces several policies by
+default. None of the tier 0/1 resources needs a service-account <em>key</em>, which
+is the usual casualty, but an unexpected <code>up</code> failure mentioning
+<code>constraints/...</code> is a policy, not a salmon bug.</p>
+</li>
+<li>
+<p><strong><code>gcloud</code> prompts.</strong> The script exports <code>CLOUDSDK_CORE_DISABLE_PROMPTS=1</code>; a
+prompt in a non-interactive <code>up</code> would otherwise hang forever.</p>
+</li>
+<li>
+<p><strong>Bucket names are global.</strong> The toy scopes them by project id, so two
+sandboxes cannot collide, but a name you pick by hand can collide with the
+whole world.</p>
+</li>
+<li>
+<p><strong>Permissions.</strong> Creating a project and linking billing need
+<code>resourcemanager.projects.create</code> on the parent and
+<code>billing.resourceAssociations.create</code> on the billing account (i.e.
+<code>roles/billing.user</code>, which only a billing administrator can grant — being
+able to <em>see</em> an account, or to create projects, does not imply it).
+<code>--existing-project</code> avoids both if you would rather have someone else create
+the project and attach billing.</p>
+</li>
+<li>
+<p><strong>A failed run is resumable.</strong> Nothing is torn down when <code>up</code> fails twice, and
+re-running with the <em>same</em> <code>--project</code> reuses the project rather than burning
+a new id: its check reports <code>ACTIVE</code> and the node is skipped. Fix the cause
+(or the flag), re-run the same command line, or <code>run down &lt; directive.json</code>
+to drop what was built.</p>
+</li>
+<li>
+<p><strong><code>--workdir</code> is deleted by <code>down</code>.</strong> The Containerfile and the podman
+authfile live there, and the directory node that holds them removes the
+directory on teardown — so point it at a scratch path, not at a directory
+with anything else in it. (Tier 1’s first real run failed here: <code>podman logout</code> empties the authfile but leaves it, and the leftover file kept the
+directory from being removed. <code>Podman.login</code>’s <code>down</code> now deletes the file it
+caused to exist.)</p>
+</li>
+<li>
+<p><strong>Eventual consistency is real, and nodes now ride it out.</strong> Two cases were
+found by running this toy: a create issued seconds after its API was enabled
+is denied for up to a minute (<code>PERMISSION_DENIED ... (or it may not exist)</code>,
+even for a project owner), and a binding naming a just-created service
+account is rejected by the service owning the resource. <code>Gcp.Core.retryingIO</code>
+is the shared remedy: bucket/repository/Cloud Run creates retry ~6×10s,
+<code>Iam.iamBinding</code> 5×3s, and <code>Iam.serviceAccount</code>’s <code>up</code> additionally waits for
+its own <code>describe</code> to answer. Retries show up in the logs as repeated
+<code>CommandStart</code> reports for one node, which is how to tell “needed the retry”
+from “worked first time”.</p>
+</li>
+<li>
+<p><strong>Tier 2 needs a local glibc no newer than the VM’s.</strong> The binary is
+rsynced and run as-is, so the image family has to be at least as new as the
+machine running the toy. Ubuntu 24.04 (glibc 2.39) is the default because
+that is what this was developed against; an older image will fail at
+exec time with a version error, not at build time.</p>
+</li>
+<li>
+<p><strong>Tier 2’s <code>--ssh-source-range</code> defaults to the whole internet.</strong> A
+throwaway VM reachable on 22 by anybody, trusting only a certificate, is an
+acceptable risk for an hour; narrow it anyway when the project is not
+disposable.</p>
+</li>
+<li>
+<p><strong>Tier 3’s proxy range must avoid <code>10.128.0.0/9</code>.</strong> The <code>default</code> network is
+an <em>auto mode</em> VPC, and that whole block belongs to the subnets GCP creates
+per region on its own — including for regions that do not exist yet. Hence
+the <code>192.168.100.0/24</code> default. It also has to be <code>/26</code> or larger, and only
+one <code>ACTIVE</code> proxy-only subnet may exist per network per region, so a second
+concurrent tier-3 run in the <em>same</em> project (not the same organization) will
+collide.</p>
+</li>
+<li>
+<p><strong>A tier-3 backend is <code>UNHEALTHY</code> for a minute or two after <code>up</code>.</strong> The
+balancer answers <code>502</code> until the first health checks pass, which is why the
+script waits up to five minutes for the page rather than fetching once. If
+it never arrives, the script prints the backend’s health, because the
+cause is nearly always a firewall rule rather than the balancer.</p>
+</li>
+</ul>
+<h3 id="gaps-this-does-not-cover">Gaps this does not cover</h3>
+<ul>
+<li><strong>The VM’s own teardown is the project delete.</strong> <code>down</code> removes the
+instance, the address and the firewall rule as declared nodes, but nothing
+checks that the guest was left in any particular state.
+</li>
+<li><strong>Host identity is trust-on-first-use, per recipe.</strong> The user is
+authenticated by certificate, but the <em>host</em> is not: <code>VmProvision</code> keeps a
+known-hosts file next to the client key and accepts a new host on sight.
+Signing host certificates with the same CA would close that, and needs
+<code>ssh-keygen -s -h</code> support in <code>Keys</code> plus a way to get each VM’s host key
+signed at boot.
+</li>
+<li><strong>The serverless-NEG backend is still unexercised.</strong> Tier 3 drives
+<code>Gcp.LoadBalancing</code>’s <code>InstanceGroupBackend</code>; the <code>CloudRunBackend</code> branch
+(a serverless NEG in front of tier 1’s Cloud Run service) renders but has
+never been run. Mixing the two in one balancer is not an option — a backend
+service holds one kind of backend — so exercising it means a second
+balancer.
+</li>
+<li><strong>HTTPS, and anything past the default route.</strong> The URL map has one default
+service and the forwarding rule is plain <code>:80</code>; managed certificates, host
+and path rules, and the <code>--network</code>-carrying form of the forwarding rule are
+all rendered-but-unrun.
+</li>
+<li><strong>Two credentials, one identity assumed.</strong> <code>gcp-adc</code> validates ADC;
+<code>Core.printAccessToken</code> (the registry login password) uses the active account.
+Log both in as the same identity.
+</li>
+<li><strong><code>CloudRun</code>’s check is a substring match</strong> on the image, so <code>img:1</code> matches
+<code>img:10</code>, and a changed env var or service account is not noticed.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

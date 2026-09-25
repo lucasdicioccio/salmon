@@ -1,0 +1,45 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Specs</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, design, roadmap, status"><meta name="description" content="The design sketches under specs/, each headed by a Status line saying what of it has shipped."><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Specs"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="The design sketches under specs/, each headed by a Status line saying what of it has shipped."><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Specs"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs.html"><meta property="og:description" content="The design sketches under specs/, each headed by a Status line saying what of it has shipped."><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"The design sketches under specs/, each headed by a Status line saying what of it has shipped.","headline":"Specs","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="design"><meta name="article:tag" content="roadmap"><meta name="article:tag" content="status"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Specs</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 432 words, 0 code snippets, 19 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-netns-traffic-pinning.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">6/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-pg-switchover.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><h2 id="specs">Specs</h2>
+<p>The <code>specs/</code> directory holds design sketches: opinionated documents to react
+to, some of which then got built. Each starts with a <strong>Status</strong> line saying
+what of it has shipped, which is reproduced here. These pages are generated
+from the <a href="https://github.com/lucasdicioccio/salmon/blob/master/../tree/master/specs">salmon repository</a> — the repository
+is the canonical source, and may be ahead of what is published here.</p>
+<ul>
+<li><a href="/salmon/specs-advance-querying.html"><strong>Advanced querying: targeting <code>run</code> at a subset of nodes</strong></a> — <em>Status:</em> implemented. <code>query show</code>/<code>query plan</code>/<code>query extract-directive</code>,
+</li>
+<li><a href="/salmon/specs-future-work.html"><strong>Future work: what a running world knows, and who gets to see it</strong></a> — <em>Status:</em> ideas, not a plan. Four notes taken after trying <code>run serve</code> with the
+</li>
+<li><a href="/salmon/specs-gcloud-support.html"><strong>GCP Support Plan for Salmon</strong></a> — <em>Status:</em> phase 1 (gcloud-first) is implemented through all ten steps of §15:
+</li>
+<li><a href="/salmon/specs-generic-server.html"><strong>A generic salmon server: <code>serve</code> behind an API, with clients that show the DAG</strong></a> — <em>Status:</em> milestones 1 to 8 below are implemented (<code>--json</code> via
+</li>
+<li><a href="/salmon/specs-multi-user-privilege-separation.html"><strong>Multi-user / privilege separation: running parts of a graph as a lesser identity</strong></a> — <em>Status:</em> draft / not implemented. This is a design sketch to react to, not a
+</li>
+<li><a href="/salmon/specs-netns-traffic-pinning.html"><strong>Pinning an application’s traffic to a chosen interface via dedicated network namespaces</strong></a> — <em>Status:</em> draft / not implemented. This is a design sketch to react to, not a
+</li>
+<li><a href="/salmon/specs-per-node-state-machines.html"><strong>Per-node state machines: a supervised tree over a folded graph</strong></a> — <em>Status:</em> milestones 1 to 9 below are implemented, each marked <em>landed</em> with
+</li>
+<li><a href="/salmon/specs-per-node-state-machines-remaining.html"><strong>What is left of <code>specs/per-node-state-machines.md</code></strong></a> — <em>Status:</em> living plan, update as work continues. As of this writing every
+</li>
+<li><a href="/salmon/specs-pg-ha-control-plane.html"><strong>HA Postgres + bouncer + app-instance + LB control plane</strong></a> — <em>Status:</em> draft / not implemented as a whole. Of the phased plan, only the
+</li>
+<li><a href="/salmon/specs-pg-patroni.html"><strong>Postgres with automatic failover: salmon provisions, Patroni decides</strong></a> — <em>Status:</em> draft / not implemented. A design sketch to react to, not a committed
+</li>
+<li><a href="/salmon/specs-pg-switchover.html"><strong>Two-node Postgres with salmon-driven switchover and failover</strong></a> — <em>Status:</em> implemented — phases 1 to 6 of the phased plan and the disaster
+</li>
+<li><a href="/salmon/specs-pull-mode.html"><strong>Pull mode: a <code>serve</code> that fetches its own declarations</strong></a> — <em>Status:</em> milestones 1 to 7 below are implemented (<code>Salmon.Actions.Follow</code>,
+</li>
+<li><a href="/salmon/specs-qemu-test-vms.html"><strong>Local qemu VMs + tap/bridge networking for recipe testing</strong></a> — <em>Status:</em> phases 1 to 5 of the phased plan are implemented:
+</li>
+<li><a href="/salmon/specs-qemu-test-vms-progress.html"><strong>Implementation progress: <code>specs/qemu-test-vms.md</code></strong></a> — <em>Status:</em> living doc, update as work continues. Companion to
+</li>
+<li><a href="/salmon/specs-salmon-as-init.html"><strong>Salmon as PID 1: an init system whose unit graph is a real DAG</strong></a> — <em>Status:</em> the init system itself is not implemented — milestones 1 to 6
+</li>
+<li><a href="/salmon/specs-serve-property-testing.html"><strong>Property-based testing for <code>run serve</code></strong></a> — <em>Status:</em> v1 implemented, in <code>salmon-ops-recipes/test/Test/ServeModelSpec.hs</code>.
+</li>
+<li><a href="/salmon/specs-service-sandboxing.html"><strong>Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail</strong></a> — <em>Status:</em> draft / not implemented. This is a design sketch to react to, not a
+</li>
+<li><a href="/salmon/specs-terraform-integration.html"><strong>Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</strong></a> — <em>Status:</em> draft / not implemented. This is a design sketch to react to, not a
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

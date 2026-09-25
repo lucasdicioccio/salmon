@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">salmon</title><id>https://lucasdicioccio.github.io/salmon/atom.xml</id><updated>2026-09-25T12:58:47Z</updated><entry><id>https://lucasdicioccio.github.io/salmon/builtins.html</id><title type="text">Builtins, recipes and binaries</title><updated>2026-09-25T12:58:47Z</updated><author><name>Lucas DiCioccio</name></author><content type="html">&lt;div class="main-article"&gt;&lt;section class="main-section"&gt;&lt;p&gt;&lt;em&gt;Generated from &lt;a href="https://github.com/lucasdicioccio/salmon/blob/master/README.md"&gt;&lt;code&gt;README.md&lt;/code&gt;&lt;/a&gt; — the repository is the canonical source, and may be ahead of this page.&lt;/em&gt;&lt;/p&gt;
+&lt;h2 id="builtins-recipes-and-binaries"&gt;Builtins, recipes and binaries&lt;/h2&gt;
+&lt;h3 id="builtin-nodes"&gt;Builtin nodes&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;salmon-ops/src/Salmon/Builtin/Nodes/&lt;/code&gt; — mostly atomic, small-diameter ops,
+one module per concern:&lt;/p&gt;
+&lt;table&gt;
+&lt;tr&gt;&lt;th&gt;Module&lt;/th&gt;&lt;th&gt;Covers&lt;/th&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Bash&lt;/code&gt;&lt;/td&gt;&lt;td&gt;ad-hoc shell script ops&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Binary&lt;/code&gt;&lt;/td&gt;&lt;td&gt;the shared subprocess-running plumbing (&lt;code&gt;untrackedExec&lt;/code&gt;, exit-code-checked exec) every other builtin is built on&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Cabal&lt;/code&gt;&lt;/td&gt;&lt;td&gt;building Haskell projects with cabal&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Capabilities&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Linux file capabilities (&lt;code&gt;setcap&lt;/code&gt;/&lt;code&gt;getcap&lt;/code&gt;), so a binary can do one privileged thing unprivileged&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Certificates&lt;/code&gt;&lt;/td&gt;&lt;td&gt;TLS certificate generation/signing&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Continuation&lt;/code&gt;&lt;/td&gt;&lt;td&gt;chaining/sequencing op continuations&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;CronTask&lt;/code&gt;&lt;/td&gt;&lt;td&gt;cron job management&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Daemon&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a process salmon owns and keeps running — the one builtin with a &lt;code&gt;managed&lt;/code&gt; action, for where there is no systemd (see &lt;code&gt;resources/serve-supervision.md&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Demo&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a toy graph (&lt;code&gt;collatz&lt;/code&gt;) for trying the drivers on&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Debian.Debootstrap&lt;/code&gt;, &lt;code&gt;Debian.Package&lt;/code&gt;, &lt;code&gt;Debian.OS&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Debian package installs and base-system setup&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Filesystem&lt;/code&gt;&lt;/td&gt;&lt;td&gt;directories, file contents, copy/move/replace-directory (the canonical small example — see &lt;code&gt;resources/howto-ops.md&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Gcp.*&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Google Cloud: projects and billing (&lt;code&gt;ResourceManager&lt;/code&gt;, &lt;code&gt;Billing&lt;/code&gt;, &lt;code&gt;ServiceUsage&lt;/code&gt;), &lt;code&gt;Iam&lt;/code&gt;, &lt;code&gt;Storage&lt;/code&gt;, &lt;code&gt;ArtifactRegistry&lt;/code&gt;, &lt;code&gt;CloudRun&lt;/code&gt;, &lt;code&gt;Compute&lt;/code&gt;, &lt;code&gt;LoadBalancing&lt;/code&gt;, &lt;code&gt;SecretManager&lt;/code&gt;, &lt;code&gt;SshAccess&lt;/code&gt; — driven through &lt;code&gt;gcloud&lt;/code&gt;; see &lt;code&gt;resources/gcp-toy-validation.md&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Git&lt;/code&gt;&lt;/td&gt;&lt;td&gt;git repository operations&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Keys&lt;/code&gt;&lt;/td&gt;&lt;td&gt;key material management&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;LinuxBridge&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Linux bridge and tap devices, a real L2 network for qemu VMs to sit on&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Netfilter&lt;/code&gt;&lt;/td&gt;&lt;td&gt;&lt;code&gt;nft&lt;/code&gt; firewall rules (with &lt;code&gt;check&lt;/code&gt;-based idempotency, since &lt;code&gt;nft add rule&lt;/code&gt; itself isn't idempotent)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Nginx&lt;/code&gt;&lt;/td&gt;&lt;td&gt;nginx site/config management&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Npm&lt;/code&gt;&lt;/td&gt;&lt;td&gt;npm package operations&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PgBouncer&lt;/code&gt;&lt;/td&gt;&lt;td&gt;PgBouncer connection-pooler configuration&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Podman&lt;/code&gt;&lt;/td&gt;&lt;td&gt;container image/volume/network/env lifecycle&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Postgres&lt;/code&gt;&lt;/td&gt;&lt;td&gt;cluster creation, users/groups/grants, WAL streaming replication, &lt;code&gt;pg_hba.conf&lt;/code&gt; management&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Qemu&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a qemu VM as a systemd unit, booted from a debootstrap chroot over 9p (&lt;code&gt;specs/qemu-test-vms.md&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Routes&lt;/code&gt;&lt;/td&gt;&lt;td&gt;IP routing table entries&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Rsync&lt;/code&gt;&lt;/td&gt;&lt;td&gt;file/secret transport over rsync&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Secrets&lt;/code&gt;&lt;/td&gt;&lt;td&gt;secret material placement&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Self&lt;/code&gt;&lt;/td&gt;&lt;td&gt;uploading and re-invoking this binary on a remote machine&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Spago&lt;/code&gt;&lt;/td&gt;&lt;td&gt;PureScript/Spago builds&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Ssh&lt;/code&gt;&lt;/td&gt;&lt;td&gt;SSH remote-machine plumbing&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Sysctl&lt;/code&gt;&lt;/td&gt;&lt;td&gt;kernel parameter tuning&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Systemd&lt;/code&gt;&lt;/td&gt;&lt;td&gt;systemd unit management&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Tar&lt;/code&gt;&lt;/td&gt;&lt;td&gt;archive creation/extraction&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Upx&lt;/code&gt;&lt;/td&gt;&lt;td&gt;binary compression&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;User&lt;/code&gt;&lt;/td&gt;&lt;td&gt;OS user/group accounts&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Web&lt;/code&gt;&lt;/td&gt;&lt;td&gt;HTTP-facing ops&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;WireGuard&lt;/code&gt;&lt;/td&gt;&lt;td&gt;WireGuard VPN interfaces, keys, and routing&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&lt;h3 id="recipes"&gt;Recipes&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;salmon-ops-recipes/src/SreBox/&lt;/code&gt; — opinionated compositions of the builtins
+above, where this project’s own conventions get enforced:&lt;/p&gt;
+&lt;table&gt;
+&lt;tr&gt;&lt;th&gt;Module&lt;/th&gt;&lt;th&gt;Covers&lt;/th&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;CabalBuilding&lt;/code&gt;&lt;/td&gt;&lt;td&gt;building and publishing cabal-based binaries&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;DNSRegistration&lt;/code&gt;&lt;/td&gt;&lt;td&gt;DNS record registration&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Environment&lt;/code&gt;&lt;/td&gt;&lt;td&gt;environment/machine bootstrapping&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Initialize&lt;/code&gt;&lt;/td&gt;&lt;td&gt;initial setup sequencing&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;JWTSigning&lt;/code&gt;&lt;/td&gt;&lt;td&gt;JWT signing key management&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;MicroDNS&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a minimal DNS server setup&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PostgresInit&lt;/code&gt;&lt;/td&gt;&lt;td&gt;database/user/group/grant setup for a Postgres cluster (locally or driven onto a remote machine via &lt;code&gt;Self&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PostgresMigrations&lt;/code&gt;&lt;/td&gt;&lt;td&gt;shipping and running migrations, local or remote-connstring&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PostgresBackup&lt;/code&gt;&lt;/td&gt;&lt;td&gt;periodic &lt;code&gt;pg_dump&lt;/code&gt; backups: the script, the schedule, and a node that notices when no recent dump exists&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PostgresPair&lt;/code&gt;&lt;/td&gt;&lt;td&gt;two machines, one Postgres cluster, and a &lt;em&gt;declared&lt;/em&gt; primary: switchover, operator-decided failover, &lt;code&gt;pg_rewind&lt;/code&gt; rejoins, and pgbouncer routing that follows — see [&lt;code&gt;resources/postgres-pair.md&lt;/code&gt;](/docs-postgres-pair.html)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PostgresTemplate&lt;/code&gt;&lt;/td&gt;&lt;td&gt;template databases: build once, lock, hand out clones (&lt;code&gt;salmon-migrator config template&lt;/code&gt;/&lt;code&gt;clone&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;PostgresTls&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Postgres authenticating clients by certificate, and the material that makes it possible&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Postgrest&lt;/code&gt;&lt;/td&gt;&lt;td&gt;PostgREST service configuration&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;WireGuardVpn&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Gcp.CloudRunDeploy&lt;/code&gt;&lt;/td&gt;&lt;td&gt;build a podman image, push it to Artifact Registry, deploy it to Cloud Run&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Gcp.PostgrestCloudRun&lt;/code&gt;&lt;/td&gt;&lt;td&gt;PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Gcp.PreviewEnvironment&lt;/code&gt;&lt;/td&gt;&lt;td&gt;several Cloud Run deploys composed into one named node: a preview environment&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;Gcp.VmProvision&lt;/code&gt;&lt;/td&gt;&lt;td&gt;turn up a GCE instance, then run a salmon binary on it over SSH via &lt;code&gt;Self&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;code&gt;salmon-ops-recipes-experimental&lt;/code&gt; (not part of the default package set — see
+&lt;a href="#build"&gt;Build&lt;/a&gt;) holds &lt;code&gt;SreBox.CertSigning&lt;/code&gt; (certificate signing workflows),
+&lt;code&gt;SreBox.KitchenSinkBlog&lt;/code&gt;, &lt;code&gt;SreBox.KitchenSinkMultiSites&lt;/code&gt;,
+&lt;code&gt;SreBox.GeneratedSite&lt;/code&gt;, and the &lt;code&gt;Salmon.Builtin.Nodes.Acme&lt;/code&gt; builtin
+(ACME/Let’s Encrypt certificate issuance).&lt;/p&gt;
+&lt;h3 id="binaries"&gt;Binaries&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;salmon-apps/&lt;/code&gt; — each one is a small &lt;code&gt;Main&lt;/code&gt; over a recipe:&lt;/p&gt;
+&lt;table&gt;
+&lt;tr&gt;&lt;th&gt;Binary&lt;/th&gt;&lt;th&gt;Does&lt;/th&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-migrator&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Postgres migrations, template databases and clones (&lt;code&gt;config template&lt;/code&gt;/&lt;code&gt;clone&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-pgpair&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a Postgres primary/standby pair whose primary is a declaration — see [&lt;code&gt;resources/postgres-pair.md&lt;/code&gt;](/docs-postgres-pair.html)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-pg-backup&lt;/code&gt;&lt;/td&gt;&lt;td&gt;take a Postgres dump now, or install the cron job that keeps taking one, here or on another machine&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-init-locally&lt;/code&gt;&lt;/td&gt;&lt;td&gt;the local-machine salmon setup (sudoers, the salmon user and group)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-gcp-toy&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a tiered, throwaway exercise of the GCP builtins against a real project — see [&lt;code&gt;resources/gcp-toy-validation.md&lt;/code&gt;](/docs-gcp-toy-validation.html)&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-toy-qemu-pg-ha&lt;/code&gt;&lt;/td&gt;&lt;td&gt;the &lt;code&gt;salmon-pgpair&lt;/code&gt; demo on three qemu guests, with a client that keeps writing while the primary moves&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-fleet&lt;/code&gt;&lt;/td&gt;&lt;td&gt;the controller's side of pull mode: &lt;code&gt;status DIR&lt;/code&gt; folds the hosts' status documents into one line per host; &lt;code&gt;keygen&lt;/code&gt;/&lt;code&gt;sign&lt;/code&gt; make signed documents&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-tui&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a terminal client for &lt;code&gt;run serve --http&lt;/code&gt; (or &lt;code&gt;--http-tcp&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&lt;/section&gt;&lt;/div&gt;</content><link href="https://lucasdicioccio.github.io/salmon/builtins.html" rel="alternate"/><summary type="text">Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them.</summary></entry></feed>

@@ -1,0 +1,86 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Builtins, recipes and binaries</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/builtins.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="reference, builtins, recipes, binaries, nodes"><meta name="description" content="Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them."><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Builtins, recipes and binaries"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them."><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Builtins, recipes and binaries"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/builtins.html"><meta property="og:description" content="Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them."><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/builtins.cmark.json"><meta name="ks:article_text" content="/salmon/text/builtins.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them.","headline":"Builtins, recipes and binaries","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/builtins.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="reference"><meta name="article:tag" content="builtins"><meta name="article:tag" content="recipes"><meta name="article:tag" content="binaries"><meta name="article:tag" content="nodes"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Builtins, recipes and binaries</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 74 words, 0 code snippets, 1 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><span class="topic-nav-boundary">|</span></span><a class="topic-link" href="/salmon/topics/reference.html"><span class="topic-name">reference</span><span class="topic-count">1/1</span></a><span class="topic-nav topic-next-link"><span class="topic-nav-boundary">|</span></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/README.md"><code>README.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="builtins-recipes-and-binaries">Builtins, recipes and binaries</h2>
+<h3 id="builtin-nodes">Builtin nodes</h3>
+<p><code>salmon-ops/src/Salmon/Builtin/Nodes/</code> — mostly atomic, small-diameter ops,
+one module per concern:</p>
+<table>
+<tr><th>Module</th><th>Covers</th></tr>
+<tr><td><code>Bash</code></td><td>ad-hoc shell script ops</td></tr>
+<tr><td><code>Binary</code></td><td>the shared subprocess-running plumbing (<code>untrackedExec</code>, exit-code-checked exec) every other builtin is built on</td></tr>
+<tr><td><code>Cabal</code></td><td>building Haskell projects with cabal</td></tr>
+<tr><td><code>Capabilities</code></td><td>Linux file capabilities (<code>setcap</code>/<code>getcap</code>), so a binary can do one privileged thing unprivileged</td></tr>
+<tr><td><code>Certificates</code></td><td>TLS certificate generation/signing</td></tr>
+<tr><td><code>Continuation</code></td><td>chaining/sequencing op continuations</td></tr>
+<tr><td><code>CronTask</code></td><td>cron job management</td></tr>
+<tr><td><code>Daemon</code></td><td>a process salmon owns and keeps running — the one builtin with a <code>managed</code> action, for where there is no systemd (see <code>resources/serve-supervision.md</code>)</td></tr>
+<tr><td><code>Demo</code></td><td>a toy graph (<code>collatz</code>) for trying the drivers on</td></tr>
+<tr><td><code>Debian.Debootstrap</code>, <code>Debian.Package</code>, <code>Debian.OS</code></td><td>Debian package installs and base-system setup</td></tr>
+<tr><td><code>Filesystem</code></td><td>directories, file contents, copy/move/replace-directory (the canonical small example — see <code>resources/howto-ops.md</code>)</td></tr>
+<tr><td><code>Gcp.*</code></td><td>Google Cloud: projects and billing (<code>ResourceManager</code>, <code>Billing</code>, <code>ServiceUsage</code>), <code>Iam</code>, <code>Storage</code>, <code>ArtifactRegistry</code>, <code>CloudRun</code>, <code>Compute</code>, <code>LoadBalancing</code>, <code>SecretManager</code>, <code>SshAccess</code> — driven through <code>gcloud</code>; see <code>resources/gcp-toy-validation.md</code></td></tr>
+<tr><td><code>Git</code></td><td>git repository operations</td></tr>
+<tr><td><code>Keys</code></td><td>key material management</td></tr>
+<tr><td><code>LinuxBridge</code></td><td>Linux bridge and tap devices, a real L2 network for qemu VMs to sit on</td></tr>
+<tr><td><code>Netfilter</code></td><td><code>nft</code> firewall rules (with <code>check</code>-based idempotency, since <code>nft add rule</code> itself isn't idempotent)</td></tr>
+<tr><td><code>Nginx</code></td><td>nginx site/config management</td></tr>
+<tr><td><code>Npm</code></td><td>npm package operations</td></tr>
+<tr><td><code>PgBouncer</code></td><td>PgBouncer connection-pooler configuration</td></tr>
+<tr><td><code>Podman</code></td><td>container image/volume/network/env lifecycle</td></tr>
+<tr><td><code>Postgres</code></td><td>cluster creation, users/groups/grants, WAL streaming replication, <code>pg_hba.conf</code> management</td></tr>
+<tr><td><code>Qemu</code></td><td>a qemu VM as a systemd unit, booted from a debootstrap chroot over 9p (<code>specs/qemu-test-vms.md</code>)</td></tr>
+<tr><td><code>Routes</code></td><td>IP routing table entries</td></tr>
+<tr><td><code>Rsync</code></td><td>file/secret transport over rsync</td></tr>
+<tr><td><code>Secrets</code></td><td>secret material placement</td></tr>
+<tr><td><code>Self</code></td><td>uploading and re-invoking this binary on a remote machine</td></tr>
+<tr><td><code>Spago</code></td><td>PureScript/Spago builds</td></tr>
+<tr><td><code>Ssh</code></td><td>SSH remote-machine plumbing</td></tr>
+<tr><td><code>Sysctl</code></td><td>kernel parameter tuning</td></tr>
+<tr><td><code>Systemd</code></td><td>systemd unit management</td></tr>
+<tr><td><code>Tar</code></td><td>archive creation/extraction</td></tr>
+<tr><td><code>Upx</code></td><td>binary compression</td></tr>
+<tr><td><code>User</code></td><td>OS user/group accounts</td></tr>
+<tr><td><code>Web</code></td><td>HTTP-facing ops</td></tr>
+<tr><td><code>WireGuard</code></td><td>WireGuard VPN interfaces, keys, and routing</td></tr>
+</table>
+<h3 id="recipes">Recipes</h3>
+<p><code>salmon-ops-recipes/src/SreBox/</code> — opinionated compositions of the builtins
+above, where this project’s own conventions get enforced:</p>
+<table>
+<tr><th>Module</th><th>Covers</th></tr>
+<tr><td><code>CabalBuilding</code></td><td>building and publishing cabal-based binaries</td></tr>
+<tr><td><code>DNSRegistration</code></td><td>DNS record registration</td></tr>
+<tr><td><code>Environment</code></td><td>environment/machine bootstrapping</td></tr>
+<tr><td><code>Initialize</code></td><td>initial setup sequencing</td></tr>
+<tr><td><code>JWTSigning</code></td><td>JWT signing key management</td></tr>
+<tr><td><code>MicroDNS</code></td><td>a minimal DNS server setup</td></tr>
+<tr><td><code>PostgresInit</code></td><td>database/user/group/grant setup for a Postgres cluster (locally or driven onto a remote machine via <code>Self</code>)</td></tr>
+<tr><td><code>PostgresMigrations</code></td><td>shipping and running migrations, local or remote-connstring</td></tr>
+<tr><td><code>PostgresBackup</code></td><td>periodic <code>pg_dump</code> backups: the script, the schedule, and a node that notices when no recent dump exists</td></tr>
+<tr><td><code>PostgresPair</code></td><td>two machines, one Postgres cluster, and a <em>declared</em> primary: switchover, operator-decided failover, <code>pg_rewind</code> rejoins, and pgbouncer routing that follows — see [<code>resources/postgres-pair.md</code>](/docs-postgres-pair.html)</td></tr>
+<tr><td><code>PostgresTemplate</code></td><td>template databases: build once, lock, hand out clones (<code>salmon-migrator config template</code>/<code>clone</code>)</td></tr>
+<tr><td><code>PostgresTls</code></td><td>Postgres authenticating clients by certificate, and the material that makes it possible</td></tr>
+<tr><td><code>Postgrest</code></td><td>PostgREST service configuration</td></tr>
+<tr><td><code>WireGuardVpn</code></td><td>a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange</td></tr>
+<tr><td><code>Gcp.CloudRunDeploy</code></td><td>build a podman image, push it to Artifact Registry, deploy it to Cloud Run</td></tr>
+<tr><td><code>Gcp.PostgrestCloudRun</code></td><td>PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate</td></tr>
+<tr><td><code>Gcp.PreviewEnvironment</code></td><td>several Cloud Run deploys composed into one named node: a preview environment</td></tr>
+<tr><td><code>Gcp.VmProvision</code></td><td>turn up a GCE instance, then run a salmon binary on it over SSH via <code>Self</code></td></tr>
+</table>
+<p><code>salmon-ops-recipes-experimental</code> (not part of the default package set — see
+<a href="#build">Build</a>) holds <code>SreBox.CertSigning</code> (certificate signing workflows),
+<code>SreBox.KitchenSinkBlog</code>, <code>SreBox.KitchenSinkMultiSites</code>,
+<code>SreBox.GeneratedSite</code>, and the <code>Salmon.Builtin.Nodes.Acme</code> builtin
+(ACME/Let’s Encrypt certificate issuance).</p>
+<h3 id="binaries">Binaries</h3>
+<p><code>salmon-apps/</code> — each one is a small <code>Main</code> over a recipe:</p>
+<table>
+<tr><th>Binary</th><th>Does</th></tr>
+<tr><td><code>salmon-migrator</code></td><td>Postgres migrations, template databases and clones (<code>config template</code>/<code>clone</code>)</td></tr>
+<tr><td><code>salmon-pgpair</code></td><td>a Postgres primary/standby pair whose primary is a declaration — see [<code>resources/postgres-pair.md</code>](/docs-postgres-pair.html)</td></tr>
+<tr><td><code>salmon-pg-backup</code></td><td>take a Postgres dump now, or install the cron job that keeps taking one, here or on another machine</td></tr>
+<tr><td><code>salmon-init-locally</code></td><td>the local-machine salmon setup (sudoers, the salmon user and group)</td></tr>
+<tr><td><code>salmon-gcp-toy</code></td><td>a tiered, throwaway exercise of the GCP builtins against a real project — see [<code>resources/gcp-toy-validation.md</code>](/docs-gcp-toy-validation.html)</td></tr>
+<tr><td><code>salmon-toy-qemu-pg-ha</code></td><td>the <code>salmon-pgpair</code> demo on three qemu guests, with a client that keeps writing while the primary moves</td></tr>
+<tr><td><code>salmon-fleet</code></td><td>the controller's side of pull mode: <code>status DIR</code> folds the hosts' status documents into one line per host; <code>keygen</code>/<code>sign</code> make signed documents</td></tr>
+<tr><td><code>salmon-tui</code></td><td>a terminal client for <code>run serve --http</code> (or <code>--http-tcp</code>)</td></tr>
+</table>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

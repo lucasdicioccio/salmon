@@ -22,14 +22,14 @@
 }
 
 =base:summary.cmark
-The guides, mirrored from the repository's docs/ directory: the model, the cookbook, run serve, the Postgres pair, the GCP playbook.
+The guides, mirrored from the repository's resources/ directory: the model, the cookbook, run serve, the Postgres pair, the GCP playbook.
 
 =base:main-content.cmark
 
 # Guides
 
-These pages are generated straight from the `docs/` directory of the
-[salmon repository](https://github.com/lucasdicioccio/salmon/tree/master/docs)
+These pages are generated straight from the `resources/` directory of the
+[salmon repository](https://github.com/lucasdicioccio/salmon/tree/master/resources)
 — the repository is always the canonical source, and may be ahead of what is
 published here.
 

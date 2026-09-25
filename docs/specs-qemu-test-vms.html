@@ -1,0 +1,239 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Local qemu VMs + tap/bridge networking for recipe testing</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-qemu-test-vms.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: phases 1 to 5 of the phased plan are implemented:"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Local qemu VMs + tap/bridge networking for recipe testing"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: phases 1 to 5 of the phased plan are implemented:"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Local qemu VMs + tap/bridge networking for recipe testing"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-qemu-test-vms.html"><meta property="og:description" content="Status: phases 1 to 5 of the phased plan are implemented:"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-qemu-test-vms.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-qemu-test-vms.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: phases 1 to 5 of the phased plan are implemented:","headline":"Local qemu VMs + tap/bridge networking for recipe testing","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-qemu-test-vms.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Local qemu VMs + tap/bridge networking for recipe testing</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1470 words, 5 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-switchover.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">8/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-future-work.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/qemu-test-vms.md"><code>specs/qemu-test-vms.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="local-qemu-vms--tapbridge-networking-for-recipe-testing">Local qemu VMs + tap/bridge networking for recipe testing</h2>
+<p>Status: phases 1 to 5 of the phased plan are implemented:
+<code>Salmon.Builtin.Nodes.LinuxBridge</code> (<code>bridge</code>/<code>tap</code>), <code>Debootstrap.ensureVm9pBoot</code>
+(9p root, <code>-kernel</code>/<code>-initrd</code>), <code>Salmon.Builtin.Nodes.Qemu</code> (a VM as a
+<code>systemdService</code>), and the Layer 3 tier in <code>Test.Harness</code> (<code>withVm</code>/<code>withVmAt</code>,
+<code>Test.QemuSmokeSpec</code>), whose first real recipe test is
+<code>Test.PostgresReplicationSpec</code>. The first “Future work” item shipped too:
+<code>Test.PostgresSwitchoverSpec</code> and <code>Test.PgPairDemoSpec</code> run several VMs on
+one bridge. Not done: phase 6 (a raw disk image) and snapshot/clone support.
+How it was built, and what departed from this design, is in
+<code>specs/qemu-test-vms-progress.md</code>. Kept as the design record.</p>
+<h3 id="problem">Problem</h3>
+<p><code>salmon-ops-recipes/test/Test/Harness.hs</code> already tiers tests by IO cost/
+blast-radius, and its Layer 2 (<code>podmanTrack</code>/<code>withContainer</code>) dogfoods
+<code>Podman.pullImage</code>/<code>Podman.runContainer</code> to get a real, disposable sandbox
+for recipes that need a real service (Postgres, in <code>Test.PostgresInitSpec</code>).
+That works well for anything that fits in a container, but several things
+this project increasingly needs to test do not:</p>
+<ul>
+<li>systemd units as PID 1 actually manages them (<code>Systemd.hs</code> is used all
+over <code>salmon-ops</code>/<code>SreBox</code>, but a container’s systemd, if present at all,
+behaves differently from a real boot),
+</li>
+<li>real network interfaces/routing (<code>WireGuard.hs</code>, <code>Routes.hs</code>,
+<code>Netfilter.hs</code>), where a podman container’s network namespace doesn’t
+exercise the same code paths as a genuine host interface,
+</li>
+<li>multi-machine topologies where “machine” needs to mean something closer
+to a real boot (kernel, init, network stack) — exactly what the [[pg-ha
+control plane spec]] (<code>specs/pg-ha-control-plane.md</code>) needs to test the
+diagonal replication pair, bouncer failover, etc. against something more
+realistic than two podman containers.
+</li>
+</ul>
+<p>There’s an unfinished start at this: <code>Debian.Debootstrap.rootTree</code> builds a
+debootstrapped root filesystem at a path (idempotent via <code>skipIfFileExists</code>
+on <code>etc/issue</code>) but nothing turns that into something bootable, and there’s
+no qemu or bridge/tap networking builtin at all — <code>Netfilter.hs</code> literally
+has <code>-- TODO: Ip, Ip6, Arp, Bridge, NetDev</code> and stops there.</p>
+<h3 id="goal">Goal</h3>
+<p>A Layer 3 addition to the same test-harness tiering: real qemu VMs, on a
+local bridge, reachable over SSH, disposable the same way Layer 2’s podman
+containers are — dogfooding new salmon builtins (bridge/tap setup, qemu
+VM lifecycle) as the sandbox provisioner, same philosophy as Layer 2.</p>
+<h3 id="design-goals--non-goals">Design goals / non-goals</h3>
+<p>Goals:</p>
+<ul>
+<li>New builtins follow every existing convention: <code>op</code>/<code>Track'</code>-shaped,
+idempotent <code>up</code> (see CLAUDE.md’s “Conventions for node authors”),
+<code>down</code> implemented (this project’s <code>downTree</code> machinery assumes it, and
+disposable-sandbox teardown is the whole point here).
+</li>
+<li>Reuse <code>Systemd.hs</code> for the VM process lifecycle instead of inventing a
+new “manage a long-running process” mechanism — a qemu VM is just another
+systemd unit from the host’s point of view (see §2).
+</li>
+<li>Reuse <code>Ssh.hs</code> for reaching into a running VM, exactly like Layer 2 uses
+<code>podman exec</code>.
+</li>
+<li>Finish <code>Debootstrap</code> enough to produce something qemu can boot, without
+inventing a whole image-building subsystem.
+</li>
+</ul>
+<p>Non-goals (v1):</p>
+<ul>
+<li>Production VM hosting (this is a <em>test</em> sandbox mechanism, not a new
+“salmon runs your workload in a VM” feature — no live migration, no
+resize, no snapshots).
+</li>
+<li>libvirt/virsh — plain <code>qemu-system-x86_64</code> + a monitor socket is enough
+for scripted start/stop; libvirt’s XML/daemon layer adds nothing v1 needs.
+</li>
+<li>Multi-host bridging (VXLAN, etc.) — a single-host Linux bridge is enough
+for “several VMs on one test machine talk to each other and to podman
+containers if needed.”
+</li>
+</ul>
+<h3 id="proposed-builtins">Proposed builtins</h3>
+<h4 id="1-salmonbuiltinnodeslinuxbridge-new">1. <code>Salmon.Builtin.Nodes.LinuxBridge</code> (new)</h4>
+<p>The bridge + tap primitives <code>Netfilter.hs</code>’s TODO never got to:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Bridge</span> <span class="ot">=</span> <span class="dt">Bridge</span> {<span class="ot"> bridge_name ::</span> <span class="dt">Text</span> }</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Tap</span> <span class="ot">=</span> <span class="dt">Tap</span> {<span class="ot"> tap_name ::</span> <span class="dt">Text</span>,<span class="ot"> tap_bridge ::</span> <span class="dt">Bridge</span>,<span class="ot"> tap_owner ::</span> <span class="dt">Maybe</span> <span class="dt">User.User</span> }</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a><span class="ot">bridge ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;ip&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">Bridge</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="ot">tap    ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;ip&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">Tap</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p><code>up</code>: <code>ip link add name &lt;br&gt; type bridge &amp;&amp; ip link set &lt;br&gt; up</code>;
+<code>ip tuntap add dev &lt;tap&gt; mode tap [user &lt;owner&gt;] &amp;&amp; ip link set &lt;tap&gt; master &lt;br&gt; &amp;&amp; ip link set &lt;tap&gt; up</code>. Neither <code>ip link add</code> nor <code>ip tuntap add</code> is
+idempotent (both fail with “File exists” on retry) — same shape as
+<code>Netfilter.rule</code>’s problem, so use the same fix already established as this
+project’s convention: <code>prelim</code> checks <code>ip link show &lt;name&gt;</code> and reports
+<code>Skippable</code> if it’s already there, rather than trying to force the <code>ip</code>
+invocation itself to be idempotent. <code>down</code>: <code>ip link delete &lt;name&gt;</code>.</p>
+<h4 id="2-salmonbuiltinnodesqemu-new">2. <code>Salmon.Builtin.Nodes.Qemu</code> (new)</h4>
+<p>A VM as a systemd unit, mirroring <code>Nginx.setup</code>/<code>PgBouncer.setup</code>’s exact
+shape (render a start command, hand it to <code>Systemd.systemdService</code>):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">VmConfig</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">VmConfig</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> vm_name ::</span> <span class="dt">Text</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_memory_mb ::</span> <span class="dt">Int</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_smp ::</span> <span class="dt">Int</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_disk ::</span> <span class="dt">FilePath</span>          <span class="co">-- see §3, the boot image</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_tap ::</span> <span class="dt">LinuxBridge.Tap</span>    <span class="co">-- depends on §1</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_mac ::</span> <span class="dt">Text</span>               <span class="co">-- stable MAC so the host can predict/reserve a DHCP lease if needed</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_monitor_socket ::</span> <span class="dt">FilePath</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> vm_extra_args ::</span> [<span class="dt">Text</span>]</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a><span class="ot">setup ::</span> <span class="dt">Reporter</span> <span class="dt">Systemd.Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;systemctl&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;qemu-system-x86_64&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">VmConfig</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p><code>up</code>/<code>down</code> are exactly “start/stop the systemd unit” (free, via
+<code>Systemd.hs</code>) — no new process-management code. Command line:</p>
+<pre><code>qemu-system-x86_64 -name &lt;vm_name&gt; -m &lt;memory_mb&gt; -smp &lt;smp&gt;
+  -drive file=&lt;disk&gt;,if=virtio,format=raw
+  -netdev tap,id=net0,ifname=&lt;tap&gt;,script=no,downscript=no
+  -device virtio-net-pci,netdev=net0,mac=&lt;mac&gt;
+  -monitor unix:&lt;monitor_socket&gt;,server,nowait
+  -nographic -serial mon:stdio
+  -enable-kvm   -- if /dev/kvm exists; fall back to TCG otherwise (slow but portable, worth keeping as a fallback for CI boxes without nested virt)
+</code></pre>
+<p>Graceful shutdown on <code>down</code> ideally goes through the monitor socket
+(<code>system_powerdown</code>) rather than <code>systemctl stop</code> sending SIGTERM straight
+to qemu — worth a small <code>Qemu.shutdown</code> helper that writes to the monitor
+socket and polls for the process to exit before falling back to a hard
+stop, so the guest gets a real ACPI shutdown instead of losing an in-flight
+<code>up</code>/write. Exact mechanism (raw socket write vs <code>qemu-system-x86_64</code>’s own
+<code>-monitor</code> command tooling, if any exists on the host) is an implementation
+detail to work out against a real qemu version, not a design blocker.</p>
+<h4 id="3-finishing-debootstrap-from-chroot-dir-to-bootable-disk">3. Finishing <code>Debootstrap</code>: from chroot dir to bootable disk</h4>
+<p>Two options, both worth having eventually but starting with the first:</p>
+<p><strong>a. 9p virtfs passthrough (recommended v1 default)</strong> — skip image-building
+entirely; boot the existing <code>RootTree</code> directory straight off the host
+filesystem via qemu’s <code>virtfs</code>:</p>
+<pre><code>-fsdev local,id=root,path=&lt;rootTree.path&gt;,security_model=mapped
+-device virtio-9p-pci,fsdev=root,mount_tag=/dev/root
+-kernel &lt;rootTree.path&gt;/boot/vmlinuz-*  -initrd &lt;rootTree.path&gt;/boot/initrd.img-*
+-append &quot;root=/dev/root rootfstype=9p rootflags=trans=virtio rw console=ttyS0&quot;
+</code></pre>
+<p>No mkfs/loop-mount step, no separate image artifact to keep in sync with
+the chroot, fast to rebuild (<code>debootstrap</code> again just overwrites the dir,
+same idempotency the node already has). Tradeoff: 9p root is nonstandard
+enough that a few recipes’ assumptions (real block device semantics,
+<code>fsync</code> behavior a Postgres data directory cares about) might not transfer
+1:1 to production behavior — acceptable for “does the recipe’s <code>up</code>/<code>down</code>/
+<code>check</code> logic run correctly,” not for filesystem-performance testing.</p>
+<p><strong>b. Raw disk image (future work, if 9p’s divergence bites)</strong> — extend
+<code>Debootstrap</code> with a variant that targets a loop-mounted <code>.raw</code>/<code>.img</code> file
+instead of a plain directory (<code>losetup</code>, <code>mkfs.ext4</code>, mount, run
+<code>debootstrap</code> against the mountpoint, install a bootloader or keep using
+direct <code>-kernel</code>/<code>-initrd</code> boot to skip GRUB entirely), producing a real
+block-device-backed VM. More moving parts (loop device idempotency/cleanup
+needs its own care — a stale loop device from a crashed previous run is
+exactly the kind of thing <code>down</code> needs to handle), so deferred until 9p
+proves insufficient.</p>
+<p>Either way, <code>RootTree.includes</code> needs to grow to cover what a bootable VM
+needs that a plain chroot doesn’t: a kernel package (<code>linux-image-&lt;arch&gt;</code>),
+<code>openssh-server</code> (so §4’s SSH-based test harness can reach in), and enough
+of an init to reach multi-user (Debian’s default <code>systemd-sysv</code> — already
+implied by <code>debootstrap</code> unless <code>--variant=minbase</code> was used, worth
+confirming <code>RootTree</code> isn’t passing that).</p>
+<h4 id="4-test-harness-layer-3">4. Test harness: Layer 3</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- Test.Harness additions, mirroring podmanTrack/withContainer/podmanExec_</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="ot">qemuTrack ::</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;qemu-system-x86_64&quot;</span>)</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">withVm ::</span> <span class="dt">VmConfig</span> <span class="ot">-&gt;</span> (<span class="dt">Ssh.Remote</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> a) <span class="ot">-&gt;</span> <span class="dt">IO</span> a   <span class="co">-- boots, polls SSH readiness, runs action, tears down</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="ot">vmExec_ ::</span> <span class="dt">Ssh.Remote</span> <span class="ot">-&gt;</span> <span class="dt">Text</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span></code></pre></div></div><p><code>withVm</code> runs <code>Qemu.setup</code>’s <code>Op</code> through <code>runUp</code>/<code>runDown</code> exactly like
+<code>withContainer</code> does for podman — real IO, no mocking, dogfooding the new
+builtins as their own test infrastructure. “Boot readiness” is poll-SSH-
+until-it-answers (a VM takes real seconds to boot, unlike a podman
+container being “up”), with a timeout that fails loudly rather than hanging
+a test suite — same “skip loudly, don’t hang” spirit as <code>requireExecutable</code>.</p>
+<p><code>requireExecutable &quot;qemu-system-x86_64&quot;</code> (already-generic) gates the whole
+tier the same way Layer 2 gates on <code>podman</code>, so a machine without qemu
+skips these tests instead of failing.</p>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>KVM availability in CI/dev containers</strong>: nested virtualization may not
+be available everywhere this test suite runs. <code>-enable-kvm</code> needs a
+<code>/dev/kvm</code>-exists fallback to TCG (§2 already notes this) — worth
+confirming up front whether TCG boot times are tolerable for a test
+suite before committing to “VMs boot fast enough to be a normal test
+tier” as an assumption.
+</li>
+<li><strong>Bridge lifecycle scope</strong>: one shared bridge reused across test runs
+(persistent, created once, VMs’ taps attach/detach per test), or a fresh
+bridge per test run (fully disposable, more <code>sudo ip</code>-shaped setup/teardown
+noise per test)? Leaning towards one persistent bridge (named distinctly,
+e.g. <code>salmontest0</code>) with per-test taps, mirroring how Layer 2 doesn’t
+recreate podman’s network each test either.
+</li>
+<li><strong>Privilege</strong>: <code>ip link add</code>/<code>tuntap add</code> and (for KVM) <code>/dev/kvm</code> access
+typically need root or specific capabilities/group membership
+(<code>CAP_NET_ADMIN</code>, the <code>kvm</code> group). Does the test harness assume the
+invoking user already has these (documented prerequisite, same as
+<code>podman</code> needing to be installed/usable), or does it need a sudo-wrapped
+path? Recommend the former (documented prerequisite) to match how Layer 2
+already assumes a working, usable <code>podman</code> rather than trying to grant
+privileges itself.
+</li>
+<li><strong>Where do prebuilt kernel/initrd come from</strong>: <code>debootstrap</code> installs
+<code>/boot/vmlinuz-*</code>/<code>initrd.img-*</code> only if a kernel package is in
+<code>includes</code> (§3) — confirm the target suite’s kernel package name
+(<code>linux-image-amd64</code> on Debian stable) and that <code>update-initramfs</code> runs
+automatically as part of package postinst inside the chroot (it should,
+via the chroot’s own dpkg triggers) rather than needing an explicit step.
+</li>
+</ul>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li><code>LinuxBridge</code> (§1): bridge + tap nodes, prelim-based idempotency, <code>down</code>.
+Test by hand (<code>ip link show</code>) before anything qemu-shaped depends on it.
+</li>
+<li>Extend <code>Debootstrap</code>’s <code>includes</code>/confirm kernel+ssh presence (§3a); by
+hand, boot the resulting chroot directly with a one-off qemu command
+line (no salmon <code>Op</code> yet) to validate the 9p+<code>-kernel</code> approach works at
+all before wrapping it in a node.
+</li>
+<li><code>Qemu</code> node (§2) wrapping the now-validated command line as a
+<code>Systemd.systemdService</code>, against the §1 bridge.
+</li>
+<li><code>Test.Harness</code> Layer 3 (§4): <code>withVm</code>, SSH-readiness polling, one smoke
+test that boots a VM and runs a trivial command over SSH.
+</li>
+<li>Pick one existing recipe that Layer 2 can’t exercise well (a <code>Systemd</code>-
+or <code>WireGuard</code>-dependent one) and add its first Layer 3 test, proving
+the tier end to end.
+</li>
+<li>Raw disk image variant (§3b), only if 9p’s divergence from a real block
+device turns out to matter for something concrete.
+</li>
+</ol>
+<h3 id="future-work">Future work</h3>
+<ul>
+<li>Multi-VM topologies on the same bridge for testing the [[pg-ha control
+plane]]’s diagonal replication pair against two real VMs instead of two
+podman containers, once Layer 3 itself is proven out.
+</li>
+<li>Snapshot/clone support (qemu <code>-snapshot</code> or backing-file qcow2 images) to
+make repeated test runs cheaper once the raw-image variant (§3b) exists.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

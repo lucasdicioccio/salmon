@@ -16,7 +16,7 @@
 #   salmon-apps/scripts/gcp-toy-serve.sh down                        # clear every seed (tears everything down), then quit
 #
 # Fill in ORG and BILLING below (or export them). Use a fresh PROJECT per run:
-# a deleted project keeps its id for ~30 days. See docs/gcp-toy-validation.md.
+# a deleted project keeps its id for ~30 days. See resources/gcp-toy-validation.md.
 set -euo pipefail
 
 ORG=${ORG:-YOUR_ORG_ID}

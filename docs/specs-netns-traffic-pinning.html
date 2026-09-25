@@ -1,0 +1,231 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Pinning an application&#39;s traffic to a chosen interface via dedicated network namespaces</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-netns-traffic-pinning.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Pinning an application&#39;s traffic to a chosen interface via dedicated network namespaces"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Pinning an application&#39;s traffic to a chosen interface via dedicated network namespaces"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-netns-traffic-pinning.html"><meta property="og:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-netns-traffic-pinning.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-netns-traffic-pinning.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: draft / not implemented. This is a design sketch to react to, not a","headline":"Pinning an application's traffic to a chosen interface via dedicated network namespaces","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-netns-traffic-pinning.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Pinning an application&#39;s traffic to a chosen interface via dedicated network namespaces</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1334 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-service-sandboxing.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">5/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/netns-traffic-pinning.md"><code>specs/netns-traffic-pinning.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="pinning-an-applications-traffic-to-a-chosen-interface-via-dedicated-network-namespaces">Pinning an application’s traffic to a chosen interface via dedicated network namespaces</h2>
+<p>Status: draft / not implemented. This is a design sketch to react to, not a
+committed plan.</p>
+<h3 id="problem">Problem</h3>
+<p>Sometimes one particular app/service’s traffic needs to go out a specific
+interface — e.g. only one app instance’s egress should go through a
+WireGuard tunnel while everything else on the box uses the normal uplink,
+or (on a multi-homed box) a specific service needs to be pinned to a
+secondary physical NIC. This is occasional, per-service, not a host-wide
+routing policy change.</p>
+<p>This is exactly the open edge <code>specs/service-sandboxing.md</code> left dangling:
+its “network-namespace tradeoff” section flagged that Tier B’s
+<code>--unshare-net</code> gives a sandboxed process <em>zero</em> connectivity until
+something wires it back up, and deferred solving that. This spec is that
+“something” — and it turns out solving it well also directly answers “how
+do I pin an app to an interface,” because <strong>the namespace boundary and the
+interface-selection mechanism are the same mechanism</strong>: whatever
+interface(s) live inside a given network namespace are the <em>only</em> ones a
+process joined to it can use, full stop. No <code>ip rule</code>/fwmark policy routing
+needed, no risk of a routing-table rule silently not matching what you
+expected — the kernel simply doesn’t hand that process any other device.</p>
+<h3 id="why-a-persistent-named-namespace-instead-of-bwraps---unshare-net">Why a <em>persistent, named</em> namespace instead of bwrap’s <code>--unshare-net</code></h3>
+<p><code>specs/service-sandboxing.md</code>’s Tier B creates its network namespace
+<em>ephemerally</em>, as a side effect of the sandboxed process starting
+(<code>bwrap --unshare-net ...</code>). That’s fine for “isolate this process from the
+network,” useless for “wire this process to a specific interface”: there’s
+no namespace to attach a veth peer or move a device into <em>before</em> the
+process exists, and no stable name to reference it by afterwards.</p>
+<p>Linux (via <code>ip netns</code>) also supports <strong>persistent, named</strong> network
+namespaces, independent of any process — created with <code>ip netns add &lt;name&gt;</code>, they show up as bind-mounted files under <code>/run/netns/&lt;name&gt;</code> and
+stick around until explicitly deleted. This is the right primitive here:
+the host can fully wire a namespace’s networking (create/move interfaces,
+assign addresses, set routes) <em>before</em> anything joins it, and systemd has
+a native way to join a unit’s process to one: <strong><code>NetworkNamespacePath=</code></strong>
+(systemd ≥245). This composes cleanly with everything in
+<code>specs/service-sandboxing.md</code>’s Tier A — network-namespace selection and
+mount/capability hardening are orthogonal <code>Systemd.Service</code> fields, not
+competing mechanisms.</p>
+<p>Recommendation: <strong>for anything network-namespace-related, prefer a
+persistent named <code>ip netns</code> + <code>NetworkNamespacePath=</code> over bwrap’s
+<code>--unshare-net</code>.</strong> Tier B (bwrap) remains valuable for the <em>other</em>
+namespaces (mount, in particular) it’s already recommended for; this spec
+effectively narrows bwrap’s job back to “everything except networking” and
+gives networking its own, more host-controllable mechanism.</p>
+<h3 id="proposed-design">Proposed design</h3>
+<h4 id="1-salmonbuiltinnodesnetnamespace-new">1. <code>Salmon.Builtin.Nodes.NetNamespace</code> (new)</h4>
+<p>Same shape as <code>Salmon.Builtin.Nodes.LinuxBridge</code> (prelim-based idempotency,
+since neither <code>ip netns add</code> nor <code>ip link set ... netns ...</code> is idempotent
+on its own):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">NetNs</span> <span class="ot">=</span> <span class="dt">NetNs</span> {<span class="ot">netnsName ::</span> <span class="dt">Text</span>}</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Show</span>)</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Creates a persistent, named network namespace.</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a><span class="ot">netns ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;ip&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">NetNs</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Moves an already-existing interface into a namespace. Depends on both</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="co">-- the namespace and (by &#39;Ref&#39;, not a hardcoded call) whatever created the</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="co">-- interface in the first place -- callers pass that Op in explicitly since</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a><span class="co">-- this module has no idea whether it&#39;s a WireGuard iface, a veth end, or</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a><span class="co">-- anything else.</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="ot">moveInterface ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;ip&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">NetNs</span> <span class="ot">-&gt;</span> <span class="dt">LinuxBridge.DevName</span> <span class="ot">-&gt;</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a><span class="co">-- | A veth pair: one end moved into the namespace, the other attached to a</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a><span class="co">-- &#39;LinuxBridge.Bridge&#39; (reusing the qemu spec&#39;s bridge primitive, here for</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a><span class="co">-- a very different purpose -- wiring a process sandbox to an uplink instead</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a><span class="co">-- of a VM).</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">VethPair</span> <span class="ot">=</span> <span class="dt">VethPair</span> {<span class="ot"> veth_inside_name ::</span> <span class="dt">LinuxBridge.DevName</span>,<span class="ot"> veth_outside_name ::</span> <span class="dt">LinuxBridge.DevName</span>,<span class="ot"> veth_ns ::</span> <span class="dt">NetNs</span>,<span class="ot"> veth_bridge ::</span> <span class="dt">LinuxBridge.Bridge</span> }</span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a><span class="ot">vethIntoBridge ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;ip&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">VethPair</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p><code>prelim</code> for <code>netns</code>: <code>ip netns list</code> (grep for the name) — same “does the
+effect already exist” shape as every other <code>ip</code>-backed idempotency check in
+this codebase. <code>moveInterface</code>’s <code>prelim</code>: <code>ip netns exec &lt;ns&gt; ip link show &lt;dev&gt;</code> succeeding means it’s already there. <code>down</code> for <code>netns</code>: <code>ip netns delete &lt;name&gt;</code> — same teardown-ordering concern
+<code>Salmon.Actions.UpDown.downTree</code>’s module-level docs already describe for
+any predecessor shared by several dependents (a namespace shouldn’t be
+deleted while a device still sits in it, or while a systemd unit is still
+joined to it) — nothing new to design here, <code>downTree</code>’s existing
+reverse-dependency-order teardown already handles this as long as the
+<code>Op</code> graph’s edges reflect the real dependency (interface-in-namespace
+depends on namespace existing, exactly as sketched above).</p>
+<h4 id="2-setting-up-routing-inside-the-namespace">2. Setting up routing <em>inside</em> the namespace</h4>
+<p>Once an interface is moved in, configuring anything about it — including
+the namespace’s own default route — has to run <em>inside</em> that namespace,
+not the host’s. <code>Routes.route</code>/<code>Netfilter</code>’s existing ops build plain
+<code>proc &quot;ip&quot; [...]</code>/<code>proc &quot;nft&quot; [...]</code> <code>CreateProcess</code> values; rather than
+duplicating those modules with namespace-aware copies, a small generic
+combinator lets every existing <code>Command</code>-shaped builtin in this codebase
+be reused unmodified:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Rewrites any CreateProcess to run inside a namespace via `ip netns exec`.</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="ot">inNetNamespace ::</span> <span class="dt">NetNs</span> <span class="ot">-&gt;</span> <span class="dt">CreateProcess</span> <span class="ot">-&gt;</span> <span class="dt">CreateProcess</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>inNetNamespace ns cp <span class="ot">=</span> <span class="kw">case</span> cmdspec cp <span class="kw">of</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="dt">RawCommand</span> path args <span class="ot">-&gt;</span> cp{cmdspec <span class="ot">=</span> <span class="dt">RawCommand</span> <span class="st">&quot;ip&quot;</span> ([<span class="st">&quot;netns&quot;</span>, <span class="st">&quot;exec&quot;</span>, Text.unpack ns<span class="op">.</span>netnsName, path] <span class="op">&lt;&gt;</span> args)}</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">ShellCommand</span> s <span class="ot">-&gt;</span> cp{cmdspec <span class="ot">=</span> <span class="dt">RawCommand</span> <span class="st">&quot;ip&quot;</span> [<span class="st">&quot;netns&quot;</span>, <span class="st">&quot;exec&quot;</span>, Text.unpack ns<span class="op">.</span>netnsName, <span class="st">&quot;sh&quot;</span>, <span class="st">&quot;-c&quot;</span>, s]}</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Same, at the Command level -- wrap once, every Op built from the</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="co">-- wrapped Command runs inside the namespace, no changes needed to</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="co">-- Routes.hs/Netfilter.hs/WireGuard.hs/anything else.</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a><span class="ot">wrapCommand ::</span> <span class="dt">NetNs</span> <span class="ot">-&gt;</span> <span class="dt">Command</span> sym arg <span class="ot">-&gt;</span> <span class="dt">Command</span> sym arg</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>wrapCommand ns (<span class="dt">Command</span> prepare) <span class="ot">=</span> <span class="dt">Command</span> (inNetNamespace ns <span class="op">.</span> prepare)</span></code></pre></div></div><p>This is the one genuinely new idea worth calling out: <strong>no existing
+builtin needs to change.</strong> <code>Routes.route reporter (wrapCommand ns Routes.ipcommand ... )</code> — wait, <code>Routes.route</code>’s current signature takes a
+<code>Track' (Binary &quot;ip&quot;)</code>, not a <code>Command</code> directly, so the wrapping has to
+happen one layer up, at whichever <code>Command</code> value a builtin’s smart
+constructor closes over internally. <strong>This is a real, small prerequisite
+change</strong>: <code>Routes.route</code>/<code>WireGuard.iface</code>/etc. would need their internal
+<code>ipcommand</code>/<code>wgcommand</code> value exposed as a parameter (or a namespace-aware
+variant added) rather than hardcoded in the function body, mirroring how
+<code>Systemd.systemdService</code> already takes its <code>Track' (Binary &quot;systemctl&quot;)</code>
+as a parameter instead of assuming one binary track globally. Small,
+mechanical, per-module change — flagged rather than hidden, same spirit as
+<code>specs/service-sandboxing.md</code>’s “not a source-breaking change hidden
+behind a default” note about threading <code>Hardening</code> through <code>Service</code>.</p>
+<h4 id="3-joining-a-systemd-unit-to-the-namespace">3. Joining a systemd unit to the namespace</h4>
+<p>Extend <code>Systemd.Service</code> (the same record <code>specs/service-sandboxing.md</code>
+is already extending with <code>service_hardening</code>) with one more optional
+field:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Service</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Service</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    { <span class="co">-- ...existing + service_hardening from specs/service-sandboxing.md...</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> service_network_namespace ::</span> <span class="dt">Maybe</span> <span class="dt">FilePath</span>   <span class="co">-- NetworkNamespacePath=/run/netns/&lt;name&gt;, or Nothing (today&#39;s behavior: host&#39;s default netns)</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p><code>render_service</code> emits <code>NetworkNamespacePath=&lt;path&gt;</code> only when <code>Just</code>. The
+namespace itself, and everything inside it, is provisioned by an ordinary
+<code>Op</code> dependency (§1/§2 above) the same way <code>PgBouncer.setup</code>’s config files
+are a dependency of its systemd unit — <code>deps [netns r ip ns, ...]</code> at the
+service’s own <code>op</code> construction, so the namespace and its interface exist
+before <code>systemctl start</code> ever runs.</p>
+<h4 id="4-worked-example-pin-one-app-instances-egress-through-wireguard">4. Worked example: pin one app instance’s egress through WireGuard</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">appNs ::</span> <span class="dt">NetNs</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>appNs <span class="ot">=</span> <span class="dt">NetNs</span> <span class="st">&quot;ns-internaltool-a-0&quot;</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="ot">wgIfaceOp ::</span> <span class="dt">Op</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>wgIfaceOp <span class="ot">=</span> WireGuard.iface reporter ipTrack <span class="st">&quot;wg-internaltool-a-0&quot;</span> (<span class="dt">Ipv4Cidr</span> <span class="st">&quot;10.66.0.2&quot;</span> <span class="dv">32</span>)</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- ...peer/key setup as any other WireGuardVpn.hs-style recipe already does...</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="ot">pinnedOp ::</span> <span class="dt">Op</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>pinnedOp <span class="ot">=</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    Systemd.systemdService reporter systemctl trackConfig cfg</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>        <span class="ot">`inject`</span> NetNamespace.moveInterface reporter ipTrack appNs <span class="st">&quot;wg-internaltool-a-0&quot;</span> wgIfaceOp</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>        <span class="ot">`inject`</span> defaultRouteInsideNs</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>  <span class="kw">where</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    defaultRouteInsideNs <span class="ot">=</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>        Routes.route reporter (wrapCommand appNs Routes.ipcommand <span class="op">|&gt;</span> asTrack) (<span class="dt">Routes.Route</span> <span class="dt">Routes.Default</span> <span class="st">&quot;wg-internaltool-a-0&quot;</span> <span class="dt">Nothing</span>)</span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>        <span class="co">-- ^ pseudocode: see §2&#39;s note that Routes.route needs a small parameter</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>        <span class="co">-- change before this composes as cleanly as sketched</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>    cfg <span class="ot">=</span> <span class="op">/*</span> <span class="dt">Systemd.Config</span> with service_network_namespace <span class="ot">=</span> <span class="dt">Just</span> <span class="st">&quot;/run/netns/ns-internaltool-a-0&quot;</span> <span class="op">*/</span></span></code></pre></div></div><p>The app instance’s own binary needs no awareness of any of this — it just
+opens sockets normally; the kernel only ever shows it <code>wg-internaltool-a-0</code> (plus
+loopback). No policy-routing rule to get subtly wrong, no fwmark to leak
+across a recipe boundary.</p>
+<h4 id="5-worked-example-pin-traffic-to-a-specific-physical-uplink">5. Worked example: pin traffic to a specific physical uplink</h4>
+<p>Same shape, but §4’s WireGuard interface is replaced by §1’s <code>VethPair</code>
+into a <code>LinuxBridge.Bridge</code> that’s itself attached to (or routes toward) the
+secondary physical NIC — reuses the qemu spec’s bridge primitive for a
+third purpose now (VM networking, then test-VM networking, now process
+traffic pinning), which is a good sign the primitive is at the right level
+of abstraction rather than over-fit to one caller.</p>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>DNS resolution inside the namespace</strong>: <code>ip netns exec</code> bind-mounts
+<code>/etc/netns/&lt;name&gt;/*</code> over <code>/etc/*</code> if present — so a pinned app needing
+working DNS resolution needs <code>/etc/netns/ns-internaltool-a-0/resolv.conf</code>
+written (a plain <code>FS.filecontents</code> op, nothing new needed) pointing at a
+resolver actually reachable from inside the namespace (not necessarily
+the host’s own <code>/etc/resolv.conf</code> contents, if that resolver is only
+reachable via the interface being deliberately excluded).
+</li>
+<li><strong>Is this actually static-per-restart, and is that acceptable?</strong>
+<code>NetworkNamespacePath=</code> is read at unit start; changing which namespace
+(or what’s inside it) takes effect on the next restart, not live. Given
+the “sometimes” framing in the original ask, confirm that “toggle by
+redeploying/restarting the service” is the right granularity, as opposed
+to something that needs to flip while the process keeps running (which
+would need an entirely different mechanism — e.g. runtime policy routing
+after all).
+</li>
+<li><strong>The <code>Command</code>-parameterization prerequisite (§2)</strong>: how many existing
+builtins actually need this before the worked examples stop being
+pseudocode — <code>Routes.hs</code> for sure (default route inside the namespace);
+<code>Netfilter.hs</code> possibly, if per-namespace firewall rules are ever wanted
+inside a pinned namespace too. Worth doing as its own small prerequisite
+pass (mirroring <code>specs/service-sandboxing.md</code>’s Tier A prerequisite of
+threading <code>Hardening</code> through <code>Service</code>’s call sites) rather than
+ad hoc per-recipe.
+</li>
+<li><strong><code>ip link add ... netns &lt;ns&gt;</code> direct-create vs. create-then-move</strong>:
+modern iproute2 can create a link directly inside a target namespace in
+one command; §1 sketches the safer, universally-supported
+create-in-host-namespace-then-move sequence instead (lets
+<code>WireGuard.iface</code> stay completely unmodified). Worth revisiting once
+this is actually run against the target iproute2 version — may simplify
+the sequencing, doesn’t change the design.
+</li>
+<li><strong>Relevance to the pg-ha control plane vs. WireGuardVpn</strong>: is the actual
+motivating case an app-instance (from <code>specs/pg-ha-control-plane.md</code>)
+needing to reach something only over a VPN, or is this more about the
+control-plane’s <em>own</em> management traffic, or something outside either
+spec entirely (the original ask didn’t specify)? Affects which recipe
+gets the first real integration in the phased plan below.
+</li>
+</ul>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li><code>Salmon.Builtin.Nodes.NetNamespace</code>: <code>netns</code>, <code>moveInterface</code>,
+<code>inNetNamespace</code>/<code>wrapCommand</code>. Hand-validate against a throwaway
+interface (a dummy/veth, not WireGuard yet) before anything real depends
+on it.
+</li>
+<li>The <code>Command</code>-parameterization prerequisite (open question above) for
+<code>Routes.hs</code> specifically — smallest slice that makes §4’s worked example
+real instead of pseudocode.
+</li>
+<li><code>Systemd.Service</code>’s <code>service_network_namespace</code> field +
+<code>NetworkNamespacePath=</code> rendering, threaded through existing call sites
+with <code>Nothing</code> (behavior-preserving), same discipline as
+<code>specs/service-sandboxing.md</code>’s Tier A rollout.
+</li>
+<li>End-to-end worked example (§4), against a real WireGuard tunnel, on
+whichever recipe the answer to the last open question points at.
+</li>
+<li><code>VethPair</code>/§5 (physical-uplink pinning), only once §4 is proven and if a
+concrete need for the non-VPN case shows up.
+</li>
+</ol>
+<h3 id="future-work">Future work</h3>
+<ul>
+<li><code>/etc/netns/&lt;name&gt;/</code> resolv.conf management as its own small helper if
+this pattern gets reused often enough to be worth a smart constructor
+rather than a one-off <code>FS.filecontents</code> call each time.
+</li>
+<li>Revisiting whether a live-reconfigurable mechanism (policy routing after
+all, or some other dynamic scheme) is ever actually needed, depending on
+the answer to the “static-per-restart” open question above.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

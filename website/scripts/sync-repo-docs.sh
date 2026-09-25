@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerates the mirrored pages of website/src from the repository:
 #
-#   docs/<name>.md      -> website/src/docs-<name>.cmark
+#   resources/<name>.md -> website/src/docs-<name>.cmark
 #   specs/<name>.md     -> website/src/specs-<name>.cmark
 #   README.md's tables  -> website/src/builtins.cmark   (Builtin nodes / Recipes / Binaries)
 #   the specs' Status:  -> website/src/specs.cmark      (one line per spec)
@@ -9,12 +9,11 @@
 # so the site never needs hand-copying when a doc changes. Everything this
 # writes is mechanical output, not a source of truth — gitignored (see
 # .gitignore) and regenerated fresh each run, including the "generated" date.
+# build-site.sh runs this and then produces the site.
 set -euo pipefail
 cd "$(dirname "$0")/../.."  # repo root
 
 OUT=website/src
-# the output skeleton `kitchen-sink produce` writes into and does not create
-mkdir -p website/www/{audios,css,docs,gen,hashtags,images,js,json,raw,text,topics,videos}
 MIRROR="python3 website/scripts/mirror.py"
 GITHUB="https://github.com/lucasdicioccio/salmon/blob/master"
 DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -27,8 +26,8 @@ summary_of() {
     | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/ $//' | cut -c1-240
 }
 
-# docs/: the guides
-for src in docs/*.md; do
+# resources/: the guides
+for src in resources/*.md; do
   name="$(basename "$src" .md)"
   $MIRROR --kind docs --source "$src" --title "$(title_of "$src")" --topic docs \
     --keywords "guide, documentation" --summary "$(summary_of "$src")" \

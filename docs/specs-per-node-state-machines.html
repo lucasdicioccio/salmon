@@ -1,0 +1,1262 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Per-node state machines: a supervised tree over a folded graph</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-per-node-state-machines.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: milestones 1 to 9 below are implemented, each marked *landed* with"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Per-node state machines: a supervised tree over a folded graph"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: milestones 1 to 9 below are implemented, each marked *landed* with"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Per-node state machines: a supervised tree over a folded graph"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-per-node-state-machines.html"><meta property="og:description" content="Status: milestones 1 to 9 below are implemented, each marked *landed* with"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-per-node-state-machines.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-per-node-state-machines.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: milestones 1 to 9 below are implemented, each marked *landed* with","headline":"Per-node state machines: a supervised tree over a folded graph","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-per-node-state-machines.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Per-node state machines: a supervised tree over a folded graph</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 10233 words, 15 code snippets, 1 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-patroni.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">3/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-service-sandboxing.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/per-node-state-machines.md"><code>specs/per-node-state-machines.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="per-node-state-machines-a-supervised-tree-over-a-folded-graph">Per-node state machines: a supervised tree over a folded graph</h2>
+<p>Status: milestones 1 to 9 below are implemented, each marked <em>landed</em> with
+its deviations recorded in place: <code>check :: IO CheckResult</code>
+(<code>Builtin/Extension.hs</code>), <code>Salmon.Op.Dag</code>, <code>Salmon.Op.Ledger</code>, both synchronous
+drivers over them (<code>Actions/UpDown.hs</code>), <code>Salmon.Op.Rewrite</code>,
+<code>Salmon.Op.Status</code>/<code>Salmon.Op.Mailbox</code>/<code>Salmon.Actions.Concurrent</code>,
+<code>Salmon.Actions.Upkeep</code> with <code>Salmon.Op.Supervision</code>, <code>Extension.managed</code> with
+<code>Nodes/Daemon.hs</code>, and <code>supStrategy = RestForOne</code>. What is left — the (R)
+and (I) items, of which only I2 and I4 are still open — is tracked in
+<code>specs/per-node-state-machines-remaining.md</code>. Kept as the design record.</p>
+<p>This revision follows the <code>deptrack-devops</code> precedent
+(<a href="https://github.com/lucasdicioccio/deptrack-project/blob/master/deptrack-devops/src/Devops/Graph.hs"><code>Devops/Graph.hs</code></a>),
+which already solved most of this, and refines its per-node <em>intent stream</em>
+into a per-node <em>ledger</em>. It supersedes the first draft’s five-state machine.</p>
+<p><strong>For where this stands — what shipped, what is left, and which tradeoffs are
+still reversible — read <code>specs/per-node-state-machines-remaining.md</code>
+§“Where this stands” rather than this file.</strong> This one is the design and the
+record: every milestone below is marked <em>landed</em> with its departures written
+in place, which is the right place to read them (next to what they changed)
+and the wrong place to get an overview.
+<code>Salmon.Builtin.Nodes.Supervised</code> — a first cut at supervision under the
+current execution model — has since been removed in favour of this design;
+<code>Serve.serveWith</code> still exists but has no consumer, and is subsumed here too.</p>
+<p>A later revision corrected six things checked against the tree rather than
+remembered: <code>Ref</code> is location-addressed and not content-addressed; the ledger
+has to carry edges and retire rather than delete a retracted contribution; the
+magma holds <code>Extension</code>s and not <code>Op</code>s; the synchronous driver cannot be built
+on the FSMs because nothing in them is terminal; <code>Completed</code> is a
+<code>CheckResult</code>; and merging <code>prelim</code> into <code>check</code> is not quite behaviour-free.
+Each is marked in place.</p>
+<h3 id="problem">Problem</h3>
+<p>Execution in salmon is a <strong>traversal</strong>. <code>upTreeWith</code>
+(<code>Actions/UpDown.hs:128</code>) walks an expanded <code>Cofree Graph</code> post-order;
+<code>downTreeWith</code> (<code>:233</code>) collapses that <code>Cofree</code> into a <code>Ref</code>-level DAG and
+releases nodes in reverse-dependency order. Both are one-shot: they start,
+visit each node once, and return <code>IO Bool</code>.</p>
+<p>Three consequences:</p>
+<ol>
+<li><strong>Nothing is long-lived</strong>, so “keep this running” needs apparatus bolted
+on the side. The removed <code>Supervised</code> carried a pid table, a polling reaper
+and an STM wakeup channel — 584 lines — for no reason other than that
+<code>Extension.up :: IO ()</code> (<code>Builtin/Extension.hs:39</code>) returns and forgets,
+leaving a handle nowhere to live.
+</li>
+<li><strong>No dependency-aware restart.</strong> A predecessor going away is not an event
+any dependent can observe; <code>serve</code>’s <code>converge</code>
+(<code>Actions/Serve.hs:1013</code>) gates on direction and convergence only.
+</li>
+<li><strong>No parallelism.</strong> Independent subtrees are walked one at a time, though
+the DAG already <em>is</em> the parallelism structure.
+</li>
+</ol>
+<p>And one structural gap that (3) hides: the traversal only ever knows a node’s
+<strong>predecessors</strong>. Teardown ordering — “free once your <em>last</em> dependent is
+done” — has to be recovered by collapsing the <code>Cofree</code> and counting
+dependents (<code>Actions/UpDown.hs:266</code>–<code>:317</code>), which is where the “directory
+not empty” bug CLAUDE.md records came from.</p>
+<h3 id="the-model-four-structures-one-control-loop">The model: four structures, one control loop</h3>
+<p>Everything below is derived from folding declared graphs into state, rather
+than from walking a graph:</p>
+<table>
+<tr><th>structure</th><th>type</th><th>what it is</th></tr>
+<tr><td><strong>magma</strong></td><td><code>HashMap Ref Node</code></td><td>every node ever seen, one representative per <code>Ref</code>; <code>Node</code> is the <code>Extension</code> plus its shorthand, <strong>not</strong> an <code>Op</code></td></tr>
+<tr><td><strong>precedence</strong></td><td><code>HashMap Ref [Ref]</code> ×2</td><td>dependencies <em>and</em> dependants, derived from the ledger</td></tr>
+<tr><td><strong>ledger</strong></td><td><code>Map DirectiveDigest Contribution</code></td><td>which declarations still want which nodes <em>and edges</em></td></tr>
+<tr><td><strong>processes</strong></td><td><code>HashMap Ref (Async (), TVar Status, TBQueue Instruction)</code></td><td>the machine per node, its observable state, and its mailbox</td></tr>
+</table>
+<p>The magma and precedence come from the comonadic fold: <code>expand</code> already
+produces the <code>Cofree</code>, and the collapse <code>downTreeWith</code> used to perform
+internally becomes a first-class reusable step that emits both adjacency
+directions instead of one — <code>Salmon.Op.Dag</code>, as of milestone 2. Because it is keyed by <code>Ref</code>, folding a <em>second</em>
+graph into the same structures is a merge, not a replacement — which is what
+makes the graph dynamic.</p>
+<h4 id="ref-is-location-addressed-not-content-addressed"><code>Ref</code> is location-addressed, not content-addressed</h4>
+<p><code>mkRef</code> (<code>salmon-ops/src/Salmon/Op/Ref.hs</code>) hashes a kind tag plus an
+<em>author-chosen identity key</em>, and that key is deliberately not the node’s
+behaviour: <code>filecontents</code> keys on the path alone (<code>Nodes/Filesystem.hs:59</code> —
+<code>mkRef &quot;file-contents&quot; path</code>), as do <code>dir</code> and <code>bash-run</code>. So an equal <code>Ref</code>
+means “the same effect site”, <strong>not</strong> an equal node. An earlier draft of this
+document said the opposite and leaned on it twice; both leanings are
+withdrawn.</p>
+<p>The consequence for the magma is that a <code>Ref</code> collision between two
+declarations is a real choice, not a no-op: two live declarations writing
+different bytes to <code>/etc/foo</code> produce one magma entry, and something has to
+decide whose.</p>
+<p><strong>Decided: last-writer-wins, and the fold reports the conflict.</strong> Last-wins
+because re-declaring is the normal way an operator changes a node, and
+first-wins would make the second declaration silently inert. Reported because
+the fold is the first thing in salmon that <em>can</em> notice: <code>upTree</code> dedupes by
+<code>Ref</code> today (<code>Actions/UpDown.hs:144</code>, first-encountered wins) but
+per-traversal and discarded at the end, so two declarations fighting over one
+file is currently invisible. The fold sees both representatives at once.</p>
+<p>Comparing representatives needs an equality the magma can compute, and
+<code>Extension</code> has none — <code>up :: IO ()</code> is not <code>Eq</code>. So the conflict test is on
+the fields that <em>are</em> comparable: <code>help</code>, <code>notes</code>, the shorthand, and the
+rendering of <code>dynamics</code>. That is a heuristic and will miss a node whose action
+changed behind an identical description. It is still strictly more than the
+zero available today.</p>
+<p>This still does <strong>not</strong> need <code>instance Semigroup Extension</code>
+(<code>Builtin/Extension.hs:58</code>), whose <code>up a &lt;&gt; up b</code> would run both actions:
+choosing a representative is not combining two.</p>
+<p>Two knock-on effects, both real:</p>
+<ul>
+<li><strong>A <code>Managed</code> node whose command line changed but whose ref key did not is
+the same node.</strong> Last-writer-wins replaces the magma entry, but the running
+process belongs to a machine started from the old one, so that machine has
+to be restarted when its representative is replaced. This is the one case
+where swapping the <code>Async</code> is right — see the mailbox section, which is
+where the earlier draft’s second, wrong argument lived.
+</li>
+<li><strong>Tightening a ref key is a per-node fix, not a global one.</strong> Putting a
+content digest in <code>filecontents</code>’ key would make a content change a
+different node — correct there, but the same move on a long-running service
+would make every config tweak a new machine. Left to node authors, node by
+node, and out of scope here.
+</li>
+</ul>
+<h4 id="storage-is-bounded-by-nodes-and-live-declarations-not-by-history">Storage is bounded by nodes and live declarations, not by history</h4>
+<p>This is what makes the retention work already shipped (<code>worldEpochs</code>/<code>prune</code>,
+<code>Actions/Serve.hs:1190</code>) <em>smaller</em>, not absent — an earlier draft said
+“unnecessary”, which was too strong. Today a retired epoch’s whole
+<code>Cofree Graph Op</code> is kept because it is the only remaining description of how
+to tear its nodes down. Here the magma holds each node’s <code>down</code> once, keyed by
+<code>Ref</code>, and the ledger holds the edges as flat <code>Set (Ref, Ref)</code>s — so nothing
+needs a per-declaration <em>graph</em>, which is where the saving is. What a
+retracted declaration does still need is its <code>Contribution</code>: two flat sets,
+kept only until its nodes settle. That is <code>prune</code>’s existing rule
+(<code>Actions/Serve.hs:1190</code>: keep an epoch if it is active, or if it still
+describes a node wanted <code>TurnDown</code>) applied to something orders of magnitude
+smaller than a graph.</p>
+<p><strong><code>Node</code> is the <code>Extension</code> plus its shorthand, never an <code>Op</code>.</strong> Not a detail:
+<code>Op = OpGraph Identity Actions'</code>, whose <code>predecessors</code> field retains the whole
+expanded closure, so a <code>HashMap Ref Op</code> would retain every graph ever folded
+and bound nothing at all. All structure lives in <code>precedence</code>; the magma holds
+only what a node <em>is</em>. <code>Serve.NodeState</code> (<code>Actions/Serve.hs:163</code>) already does
+exactly this — shorthand and help text, never the <code>Op</code> — which is why
+<code>worldNodes</code> is affordable today.</p>
+<p>A node leaves all four structures when it has dropped out of <code>desired</code> <em>and</em>
+its machine has settled in <code>Down</code>; a <code>Contribution</code> leaves the ledger once
+none of its refs is still standing.</p>
+<h3 id="folding-declarations-into-the-ledger">Folding declarations into the ledger</h3>
+<p><strong>Decided: the ledger is a set, not a count — and it carries edges as well as
+nodes.</strong></p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> <span class="dt">Edge</span> <span class="ot">=</span> (<span class="dt">Ref</span>, <span class="dt">Ref</span>)          <span class="co">-- (dependency, dependant)</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Contribution</span> <span class="ot">=</span> <span class="dt">Contribution</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> contribRefs  ::</span> <span class="op">!</span>(<span class="dt">Set</span> <span class="dt">Ref</span>)</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> contribEdges ::</span> <span class="op">!</span>(<span class="dt">Set</span> <span class="dt">Edge</span>)</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> contribLive  ::</span> <span class="op">!</span><span class="dt">Bool</span>   <span class="co">-- False once retracted, until its nodes settle</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> <span class="dt">Ledger</span> <span class="ot">=</span> <span class="dt">Map</span> <span class="dt">DirectiveDigest</span> <span class="dt">Contribution</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a><span class="ot">desired ::</span> <span class="dt">Ledger</span> <span class="ot">-&gt;</span> <span class="dt">Set</span> <span class="dt">Ref</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>desired <span class="ot">=</span> Set.unions <span class="op">.</span> <span class="fu">fmap</span> contribRefs <span class="op">.</span> <span class="fu">filter</span> contribLive <span class="op">.</span> Map.elems</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a><span class="ot">precedenceOf ::</span> <span class="dt">Ledger</span> <span class="ot">-&gt;</span> <span class="dt">Set</span> <span class="dt">Edge</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>precedenceOf <span class="ot">=</span> Set.unions <span class="op">.</span> <span class="fu">fmap</span> contribEdges <span class="op">.</span> Map.elems</span></code></pre></div></div><p>A declaration is a <code>(graph, direction)</code> pair, and folding it is an insert or a
+retraction keyed by the encoded directive — which is exactly what <code>worldActive</code>
+(<code>Actions/Serve.hs</code>) already does, with the ref-set <code>LogEntry.logRefs</code> already
+carries. A node is wanted up iff it appears in <em>some</em> live contribution.</p>
+<p>Worked through the example — <code>g0</code> declares <code>{A,B}</code> up, <code>g1</code> retracts <code>g0</code>, <code>g2</code>
+declares <code>{A}</code> up:</p>
+<pre><code>                       ledger                          desired
+  up   g0 {A,B}        {g0: {A,B} live}                {A, B}
+  down g0              {g0: {A,B} retiring}            {}       A and B both go down
+  (A,B settle Down)    {}                              {}       g0 collected
+  up   g2 {A}          {g2: {A} live}                  {A}      A back up, B stays down
+</code></pre>
+<p>Counting was the wrong instinct — mine as much as anyone’s — and every
+property it needed hand-maintaining, the set gets structurally:</p>
+<table>
+<tr><th>hazard under counting</th><th>under sets</th></tr>
+<tr><td>a node reached by several paths in one graph double-counts</td><td>it is a <code>Set</code>; one membership</td></tr>
+<tr><td><code>down</code> of something never up drives the count negative</td><td>delete of an absent key is a no-op</td></tr>
+<tr><td>re-declaring the same seed reaches 2, so one <code>down</code> strands it up</td><td>same digest, same key: insert replaces</td></tr>
+<tr><td>two declarations wanting the same node must not cancel each other</td><td>union; the node leaves when the last set does</td></tr>
+</table>
+<p>The one thing counting bought was <code>O(1)</code> lookup per node. That is not worth
+buying: declarations are rare (a human or a control plane types them), while
+node state changes are the hot path and do not touch the ledger at all. So
+recompute <code>desired</code> on declaration change, and memoise only if it ever shows
+up in a profile.</p>
+<p>Storage stays bounded by the <em>live and retiring</em> declarations rather than by
+history — and by two flat sets each rather than a graph — so the append-only
+problem <code>worldEpochs</code> had does not come back.</p>
+<h4 id="why-edges-are-in-the-ledger-and-why-a-retraction-retires-rather-than-deletes">Why edges are in the ledger, and why a retraction retires rather than deletes</h4>
+<p>Both answers are the same answer: edges have to be <strong>retractable</strong>, and a
+retracted declaration’s edges are needed <em>after</em> it is retracted.</p>
+<p>An earlier draft kept <code>precedence</code> as a single accumulating structure and said
+nothing about how an edge leaves it. That is not a harmless omission, because
+a stale edge is not inert here the way it would be in a walk. Given a stale
+<code>A → B</code> where <code>B</code> is no longer in <code>desired</code>, <code>B</code> settles
+<code>Down</code>/<code>TurnDown</code>/<code>Stable</code>, and <code>A</code>’s <code>waitStability TurnUp Stable [B]</code>
+retries forever: a silent deadlock, no report, no failure — strictly worse
+than the <code>Blocked</code> a traversal would have produced. So <code>precedence</code> is derived
+from the ledger on declaration change, exactly as <code>desired</code> is, and for the
+same reason.</p>
+<p>But it cannot be derived from the <em>live</em> contributions alone. Retracting <code>g0</code>
+is precisely the moment <code>A → B</code> matters most: both nodes are wanted
+<code>TurnDown</code>, and that edge is what says <code>B</code> comes down before <code>A</code> does. Delete
+the contribution outright and the teardown order is gone with it. Hence
+<code>contribLive</code>: a retraction clears the flag, which removes the contribution
+from <code>desired</code> while leaving its edges in <code>precedenceOf</code>, and the contribution
+is collected only once none of its refs is still standing.</p>
+<p>That is <code>prune</code>’s rule (<code>Actions/Serve.hs:1190</code>) restated over two flat sets
+instead of a <code>Cofree Graph Op</code>, which is the whole of the saving claimed
+above.</p>
+<h3 id="the-node-process">The node process</h3>
+<p><code>deptrack</code> does not use one five-state machine. It uses <strong>two</strong>, and that is
+better: an <em>upkeep</em> machine and a <em>downkeep</em> machine, three states each.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">UpkeepState</span>   <span class="ot">=</span> <span class="dt">WaitUp</span>   <span class="op">|</span> <span class="dt">Upping</span>  <span class="op">|</span> <span class="dt">Up</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">DownkeepState</span> <span class="ot">=</span> <span class="dt">WaitDown</span> <span class="op">|</span> <span class="dt">Downing</span> <span class="op">|</span> <span class="dt">Down</span></span></code></pre></div></div><p>Plus the piece the first draft missed entirely — a node’s observable state is
+not just which state it is in, but <strong>whether it has settled</strong>:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Stability</span> <span class="ot">=</span> <span class="dt">Stable</span> <span class="op">|</span> <span class="dt">Transient</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Status</span> <span class="ot">=</span> <span class="dt">Status</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> statusCheck      ::</span> <span class="op">!</span><span class="dt">CheckResult</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> statusDirection  ::</span> <span class="op">!</span><span class="dt">Direction</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> statusStability  ::</span> <span class="op">!</span><span class="dt">Stability</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> statusLastActive ::</span> <span class="op">!</span><span class="dt">Word64</span>   <span class="co">-- monotonic ns; see below</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> statusOutput     ::</span> <span class="op">!</span>(<span class="dt">Ring</span> <span class="dt">Text</span>)</span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p><strong>A node’s <code>TVar Status</code> is created <code>Transient</code>, before its machine starts.</strong>
+<code>waitStability</code> below reads direction and stability only, so a status
+initialised <code>Stable</code>/<code>TurnUp</code> would let every dependant proceed before the
+node had done anything at all. One line, and otherwise the kind of thing that
+surfaces as a heisenbug on a wide graph.</p>
+<h4 id="progress-not-just-settledness">Progress, not just settledness</h4>
+<p><code>deptrack</code> has exactly two stability values, and two is one short: a node that
+has been <code>Transient</code> for four seconds because it is building, and a node that
+has been <code>Transient</code> for four seconds because it is wedged, are the same value.
+That is precisely the distinction a supervisor’s restart decision needs.</p>
+<p><strong>Decided: keep two states, and add a monotonic activity timestamp.</strong> Anything
+observable the node does bumps <code>statusLastActive</code> — a state transition, a check
+completing, and in particular a line arriving in the output ring. “Wedged” is
+then a derived predicate rather than a third state:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>wedged now st <span class="ot">=</span> statusStability st <span class="op">==</span> <span class="dt">Transient</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>             <span class="op">&amp;&amp;</span> now <span class="op">-</span> statusLastActive st <span class="op">&gt;</span> watchdog</span></code></pre></div></div><p><strong>Decided: <code>watchdog</code> is authored on the node, not guessed globally.</strong> A
+<code>cabal build</code> is legitimately silent for minutes and a web server’s startup is
+not, and no global or per-kind default can know the difference — the node
+author does. This is <code>systemd</code>’s <code>WatchdogSec=</code> in all but name, and it lives
+next to <code>Restart</code> as part of the same per-node policy. A node that declares no
+watchdog is never considered wedged, which is the right default: silence is
+only evidence when someone has said what silence would mean.</p>
+<p>This keeps <code>Stable</code>/<code>Transient</code> as the thing <code>waitStability</code> blocks on (a
+timestamp would make that condition unstable and wake dependants constantly)
+while giving the supervisor what it needs to tell slow from stuck. It also
+means a chatty build is <em>visibly</em> progressing for free, which is the common
+case and the one an operator most wants to see.</p>
+<h4 id="output-a-bounded-ring-per-node">Output: a bounded ring per node</h4>
+<p><strong>Decided: each node keeps a bounded ring of its recent output.</strong> Ownership
+(below) makes capturing a <code>Managed</code> node’s stdout/stderr possible for the first
+time; a ring rather than a buffer is what stops a chatty service from being
+quietly accumulated into the heap. It pays for itself three times over: it is
+what an operator wants when a node is <code>Failure</code>, it is what feeds
+<code>statusLastActive</code>, and it means a crash report can carry the last N lines that
+preceded it rather than just an exit code.</p>
+<p>Size is per-node and small (a few hundred lines); anything wanting real logs
+should be shipping them somewhere, which is a node of its own.</p>
+<h4 id="ordering-is-stm-not-messages">Ordering is STM, not messages</h4>
+<p>Dependency ordering is a blocking read of the neighbours’ <code>TVar Status</code>:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">waitStability ::</span> <span class="dt">Direction</span> <span class="ot">-&gt;</span> <span class="dt">Stability</span> <span class="ot">-&gt;</span> [<span class="dt">TVar</span> <span class="dt">Status</span>] <span class="ot">-&gt;</span> <span class="dt">STM</span> ()</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>waitStability dir stab tvars <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    sts <span class="ot">&lt;-</span> <span class="fu">traverse</span> readTVar tvars</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">if</span> <span class="fu">all</span> (<span class="op">\</span>s <span class="ot">-&gt;</span> statusStability s <span class="op">==</span> stab <span class="op">&amp;&amp;</span> statusDirection s <span class="op">==</span> dir) sts</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        <span class="kw">then</span> <span class="fu">pure</span> ()</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        <span class="kw">else</span> retry</span></code></pre></div></div><p>A node turning up waits on its <em>dependencies</em> being <code>Stable</code>/<code>TurnUp</code>; a node
+turning down waits on its <em>dependants</em> being <code>Stable</code>/<code>TurnDown</code>. That single
+inversion is the whole of the teardown-ordering problem the current
+<code>downTreeWith</code> spends eighty lines on — and it is only expressible because the
+fold kept both adjacency directions.</p>
+<p><code>retry</code> also means no polling, no wakeup channel and no scheduler: a node
+blocks until a neighbour’s state actually changes. <code>Serve.serveWith</code>’s
+<code>STM (Set Ref)</code> plumbing exists only because nodes today have no state of
+their own to block on.</p>
+<h4 id="but-instructions-are-messages-one-mailbox-per-node">…but instructions are messages: one mailbox per node</h4>
+<p>Neighbour state is <em>pulled</em> with <code>retry</code>. Instructions have to be <em>pushed</em>,
+because a node must be tellable things that are not derivable from its
+neighbours at all:</p>
+<ul>
+<li><code>Force</code> — run <code>up</code> even though <code>check</code> says <code>Skipped</code>; the operator knows
+something the check does not;
+</li>
+<li><code>Skip</code> — treat as satisfied without acting (<code>Query.forceSkip</code>’s semantics);
+</li>
+<li><code>Recheck</code> — collapse the adaptive delay to its floor and check now;
+</li>
+<li><code>Pause</code>/<code>Resume</code> — stop the upkeep FSM without tearing the effect down.
+</li>
+</ul>
+<p><strong>Decided: a bounded mailbox per node, rather than swapping the <code>Async</code> in the
+magma.</strong> Swapping cannot express a <em>transient</em> instruction without killing and
+restarting the machine — for a <code>Managed</code> node that means killing a healthy
+process to set a flag.</p>
+<p>An earlier draft gave a second reason — that swapping is redundant, since “a
+node whose definition really changed has a different <code>Ref</code>” — and that reason
+is withdrawn, for the reason §“<code>Ref</code> is location-addressed” gives: a ref key
+is an effect <em>site</em>, not a behaviour. So swapping keeps one narrow job after
+all, and only that one: when the fold replaces a node’s representative under
+last-writer-wins, the machine started from the old representative is
+cancelled and restarted. That is a fold-time event, not an instruction.
+Everything an <em>operator</em> wants to say still goes through the mailbox.</p>
+<p>Decoration still has a place, but at <strong>fold time</strong> rather than run time. A
+<code>Plan</code> is part of a declaration, so <code>Query.forceSkip</code> is applied as the graph
+is folded into the magma: the node enters with its check pre-answered and no
+running machine is disturbed. Declaration-time forcing is decoration; run-time
+forcing is the mailbox. That split is what keeps <code>run up --plan</code> meaning the
+same thing it does today while still allowing an operator to force one node in
+a live <code>serve</code>.</p>
+<p>The two inputs compose in STM, which is the point:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>atomically <span class="op">$</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>      (<span class="dt">Left</span>  <span class="op">&lt;$&gt;</span> readTBQueue mailbox)</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="op">&lt;|&gt;</span> (<span class="dt">Right</span> <span class="op">&lt;$&gt;</span> waitStability <span class="dt">TurnUp</span> <span class="dt">Stable</span> dependencies)</span></code></pre></div></div><p>Bounded, because a control plane can outrun a node busy doing something slow,
+and an unbounded mailbox turns a wedged node into a memory leak. Overflow
+drops the <em>oldest</em> — these are statements about current intent, so stale ones
+are the ones to lose — and a dropped instruction appears in the report stream,
+or forcing a node becomes silently unreliable.</p>
+<p>Provisional on purpose. Whether drop-oldest is right, or whether a coalescing
+mailbox (at most one pending instruction of each kind) is better, depends on
+how instructions actually get used, and there is no way to know that before
+something is driving them.</p>
+<h4 id="keep-this-running-is-check-plus-re-up">“Keep this running” is <code>check</code> plus re-<code>up</code></h4>
+<p>The upkeep machine’s steady state is not “hold a process handle”. It is a
+periodic check with an adaptive delay:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>fsm delay <span class="dt">Up</span> xyz <span class="ot">=</span> threadDelay delay <span class="op">&gt;&gt;</span> <span class="kw">do</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    newStatus <span class="ot">&lt;-</span> checkUpStatus xyz</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">case</span> statusCheck newStatus <span class="kw">of</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Success</span> <span class="ot">-&gt;</span> fsm (increaseDelay delay) <span class="dt">Up</span>     xyz   <span class="co">-- ×2, capped 60s</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Skipped</span> <span class="ot">-&gt;</span> fsm (increaseDelay delay) <span class="dt">Up</span>     xyz</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        _       <span class="ot">-&gt;</span> fsm (decreaseDelay delay) <span class="dt">Upping</span> xyz   <span class="co">-- ÷2, floor 500ms</span></span></code></pre></div></div><p>This is the most important idea to take from <code>deptrack</code>, and it is why
+<code>Supervised</code> was deleted rather than ported. Supervision becomes:</p>
+<ul>
+<li><code>up</code> — spawn it;
+</li>
+<li><code>check</code> — is it alive?;
+</li>
+<li><code>down</code> — kill it;
+</li>
+</ul>
+<p>with the FSM’s adaptive delay <em>being</em> the backoff, and no pid table, no
+reaper, no <code>getProcessExitCode</code>, no wakeup channel.</p>
+<p><strong>Decided: a check may be arbitrarily expensive.</strong> Most should be cheap, but
+there is no reason to forbid one that probes a remote endpoint or runs a real
+query, and forbidding it would just push authors into writing a worse check.
+Three consequences follow, and are the whole cost of the decision:</p>
+<ul>
+<li>the adaptive value is a <em>delay between</em> checks, not a period, so a slow
+check reduces its own frequency and the load is self-limiting;
+</li>
+<li>a check in flight must not hold the status <code>TVar</code> or block the mailbox, or a
+slow check makes the node unresponsive to <code>Force</code> and to teardown — and
+<code>cancel</code> must be able to interrupt one, which means checks must be
+interruptible <code>IO</code> rather than a long uninterruptible FFI call;
+</li>
+<li>a check in progress counts as activity for the watchdog above, or every slow
+check would look exactly like a wedge. It also generalises past
+what <code>Supervised</code> can do: a node whose process salmon does not own — a systemd
+unit, a container, something on another host — is supervised exactly the same
+way, because the model never assumed ownership.
+</li>
+</ul>
+<h4 id="check-is-the-field-nobody-implements"><code>check</code> is the field nobody implements</h4>
+<p><code>Extension</code> already has <code>check :: IO ()</code> (<code>Builtin/Extension.hs:42</code>). It is
+assigned by <strong>zero</strong> nodes across <code>salmon-ops</code> and <code>salmon-ops-recipes</code>, and
+<code>Salmon.Actions.Check.checkTree</code> has <strong>zero callers</strong> — it is not wired into
+<code>CommandLine</code> at all. Meanwhile <code>prelim :: IO Requirement</code> (<code>:40</code>) is
+implemented 23 times and answers very nearly the question the FSM needs:
+<code>Skippable</code> means “the effect is already in place”.</p>
+<p>So the change is a merge, not an addition:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">CheckResult</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Success</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Skipped</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Completed</span>        <span class="co">-- did its work and stopped; see the restart policy</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Failure</span> <span class="op">!</span><span class="dt">Text</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Unknown</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="ot">check ::</span> <span class="dt">IO</span> <span class="dt">CheckResult</span>     <span class="co">-- replaces both `prelim` and today&#39;s dead `check`</span></span></code></pre></div></div><p><code>Requirement</code> derives from it: <code>Success</code>/<code>Skipped</code>/<code>Completed</code> ⇒ <code>Skippable</code>,
+<code>Failure</code>/<code>Unknown</code> ⇒ <code>Required</code>. Erring toward <code>Required</code> is the safe
+direction — a node whose check cannot tell gets re-<code>up</code>’d, and <code>up</code> is
+required to be idempotent anyway — but it is a choice, and it is the one that
+keeps a node with a broken check converging rather than stalling.</p>
+<p>Of the 23 <code>prelim</code> sites, 22 are nodes and port mechanically. The
+twenty-third is <code>Query.forceSkip</code> (<code>Actions/Query.hs:146</code>), which <em>rewrites</em>
+the field rather than implementing it, and it is the one this document later
+reinterprets as fold-time decoration. <code>Salmon.Actions.Check</code> is deleted rather
+than fixed.</p>
+<p>One behaviour change rides along, and it is an improvement worth naming rather
+than a regression to hide: today <code>act.extension.prelim</code> is evaluated <em>outside</em>
+the <code>try @SomeException</code> that wraps <code>up</code> (<code>Actions/UpDown.hs:157</code> vs <code>:164</code>),
+so a <code>prelim</code> that throws escapes <code>upTreeWith</code> entirely and kills the whole
+traversal instead of failing one node. Under <code>check :: IO CheckResult</code> that
+becomes a <code>Failure</code> value, contained like any other. So milestone 1 is
+mechanical but not quite “no behaviour change”.</p>
+<p><code>notify :: IO ()</code> (<code>:43</code>) is the same story and gets the same treatment:
+zero implementations, and <code>Salmon.Actions.Notify.notifyTree</code> has zero callers.
+<strong>Decided: removed</strong>, along with <code>Salmon.Actions.Notify</code>. Whatever it was
+reaching for, <code>Broadcast</code>/<code>Reporter</code> is the thing that actually carries
+per-node events here.</p>
+<p>That covers every effect salmon does <em>not</em> own. For one it does own, <code>check</code>
+is necessary but not sufficient — see the next section.</p>
+<h4 id="recovering-process-ownership">Recovering process ownership</h4>
+<p>Polling <code>check</code> is the right answer for an effect salmon did not spawn: a
+systemd unit, a container, a service on another host. It is a poor answer for
+a process salmon started itself, and an earlier draft of this document gave
+ownership up too readily. Three things go with it:</p>
+<ul>
+<li><strong>The exit status.</strong> <code>check</code> answers alive-or-dead; <code>waitForProcess</code> answers
+<code>ExitFailure 137</code>. Without it there is no way to express
+<code>Restart=on-failure</code> — the common and correct policy of <em>not</em> restarting a
+service that exited cleanly.
+</li>
+<li><strong>Timeliness.</strong> The adaptive delay backs <em>off</em> on success, to a 60s cap. A
+service that dies a second after a successful check stays dead for a minute.
+For anything user-facing that is the difference between supervision and a
+cron job.
+</li>
+<li><strong>Identity.</strong> A pidfile plus <code>kill -0</code> cannot survive pid reuse, and cannot
+tell a live process from a zombie.
+</li>
+</ul>
+<p>The per-node machine recovers all three, and it is precisely the machine that
+makes it possible: <strong>the handle never has to escape, because the node’s own
+thread is in scope for the effect’s entire lifetime.</strong> That was impossible
+under the traversal, where <code>up :: IO ()</code> ran and returned into nothing.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Lifecycle</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">OneShot</span> (<span class="dt">IO</span> ())        <span class="co">-- returns; the effect persists on its own</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Managed</span> (<span class="dt">IO</span> <span class="dt">ExitCode</span>)  <span class="co">-- blocks while the effect is up; returns when it stops</span></span></code></pre></div></div><p>A <code>Managed</code> node’s action <em>is</em> the process:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="dt">Managed</span> <span class="op">$</span> withProcess cp <span class="op">$</span> <span class="op">\</span>ph <span class="ot">-&gt;</span> waitForProcess ph</span></code></pre></div></div><p><code>Upping</code> runs the action. A <code>OneShot</code> node reaches <code>Up</code> when it returns; a
+<code>Managed</code> node is <code>Up</code> <em>for as long as it is still running</em>, and the
+<code>ExitCode</code> it eventually yields is the reason it stopped. Teardown is <code>cancel</code>
+on the <code>Async</code>, and the <code>bracket</code> inside <code>withProcess</code> does the killing. This
+is why no pid table appears anywhere in this design: the pid is a local
+variable on the owning thread’s stack.</p>
+<p>So <code>Up</code> has two exits, and a node may have either or both: the action
+returning (a managed process died, with its status) or a check failing (an
+unowned effect went away). Concretely <code>Up</code> races the running action against
+the adaptive check timer; a node supplying only <code>check</code> behaves exactly as the
+previous section describes, and one supplying only <code>Managed</code> never polls.</p>
+<p>Three consequences worth settling before this is built:</p>
+<ul>
+<li><strong><code>-threaded</code> stops being a recommendation and becomes a requirement.</strong>
+<code>waitForProcess</code> blocks the entire runtime on the non-threaded RTS, and this
+design has one such call per managed node. The test suite already met this:
+the (now removed) <code>Test.SupervisedSpec</code> needed <code>ghc-options: -threaded</code>
+before a blocking read stopped freezing the reaper along with everything
+else. That flag is still on the test suite for <code>serve</code>’s own reader thread.
+</li>
+<li><strong><code>cancel</code> alone is not a stop.</strong> <code>withCreateProcess</code>’s cleanup sends
+<code>SIGTERM</code> and waits; a service that ignores it wedges the teardown. The
+grace-then-<code>SIGKILL</code> escalation <code>Supervised.serviceDown</code> had is worth
+recovering into the bracket, as is <code>create_group = True</code> so the whole group
+goes. Both are in git history at <code>f9d7116</code> rather than lost.
+</li>
+<li><strong>This is <code>waitpid(pid)</code>, not <code>waitpid(-1)</code>.</strong> <code>Supervised</code>
+polled <code>getProcessExitCode</code> partly to dodge a race with
+<code>Binary.untrackedExec</code> that, on reflection, never applied to it — waiting on
+a <em>specific</em> child cannot steal another child’s status. That race is real
+only for a process obliged to reap orphans it never spawned, i.e. PID 1,
+which is exactly why <code>specs/salmon-as-init.md</code> keeps a Rust half. Owned
+children are waited on individually; orphans stay someone else’s problem.
+</li>
+</ul>
+<h4 id="the-restart-policy-reads-the-exit-code">The restart policy reads the exit code</h4>
+<p><strong>Decided: yes</strong> — that is most of what ownership is <em>for</em>, and it is what
+makes <code>Restart=on-failure</code> expressible at all.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Restart</span> <span class="ot">=</span> <span class="dt">Always</span> <span class="op">|</span> <span class="dt">OnFailure</span> <span class="op">|</span> <span class="dt">Never</span></span></code></pre></div></div><p>With one ordering subtlety that falls out of having both mechanisms: <strong>consult
+<code>check</code> before the policy.</strong> A process that exits 0 because it daemonised is
+still up, and <code>check</code> is the only thing that can say so.</p>
+<pre><code>on exit with code c:
+    check &gt;&gt;= \case
+        Success -&gt; Up              -- it forked; the effect is there regardless
+        _       -&gt; apply policy to c
+</code></pre>
+<p>That single line handles the double-fork case for free — the one shape
+<code>Supervised</code> could not have handled at all, since a handle to a process that
+has exited tells you nothing about the daemon it left behind.</p>
+<p>Default <code>OnFailure</code>. A <code>Managed</code> node that exits cleanly finished on purpose,
+and restarting it fights its own decision.</p>
+<p><strong>Decided: <code>Completed</code> is a <code>CheckResult</code>, not a fourth upkeep state.</strong> An
+earlier draft called it “a terminal <code>Completed</code> condition that is visibly not
+<code>Up</code>”, which does not typecheck against either structure this document
+declares: <code>UpkeepState</code> has three constructors, and <code>Status</code> has no field that
+could hold a fourth. So the machine rests in <code>Up</code> and <code>statusCheck</code> reads
+<code>Completed</code> rather than <code>Success</code>.</p>
+<p>Two things follow, and both are wanted:</p>
+<ul>
+<li><strong>It counts as converged.</strong> The batch driver treats it as done and it does
+not hold up quiescence, so a job modelled as <code>Managed</code> lets <code>run up</code>
+terminate normally.
+</li>
+<li><strong>Its dependants proceed.</strong> <code>waitStability</code> reads direction and stability
+only, so a <code>Completed</code> node is indistinguishable from an <code>Up</code> one to
+everything downstream — which is exactly right for a migration or a build
+step, and is the reason <code>Completed</code> belongs in <code>CheckResult</code> rather than
+somewhere <code>waitStability</code> would have to learn about.
+</li>
+</ul>
+<p>The price is that <code>status</code> must render <code>Up</code>+<code>Completed</code> differently from
+<code>Up</code>+<code>Success</code> rather than collapsing both to “fine” — a service that quietly
+completed is exactly the thing an operator needs to see. <code>Always</code> is for
+services that exit 0 on reload; <code>Never</code> for a one-shot job modelled as
+<code>Managed</code> only to capture its output.</p>
+<p>Note this default differs from systemd’s <code>Restart=no</code>, deliberately: a node
+<em>declared up</em> that has stopped being up is a convergence gap, and quietly
+accepting it would make this model weaker than <code>run up</code> is today.</p>
+<h3 id="the-supervision-tree">The supervision tree</h3>
+<p>Framing the node machines as Erlang processes under a supervisor gives two
+things beyond “an <code>Async</code> per node”.</p>
+<p><strong>Let it crash.</strong> A node machine that throws is not caught inline. The control
+process monitors its children (<code>waitCatch</code> on the <code>Async</code>) and applies a
+restart policy. That splits two kinds of failure the current design conflates:
+<em>the managed effect stopped</em> (handled inside the upkeep FSM, <code>Up → Upping</code>)
+versus <em>the machine managing it died</em> (handled by the supervisor). It is the
+same two-level structure as <code>specs/salmon-as-init.md</code>’s PID-1 floor versus
+supervisor policy, which is a good sign the shape is right.</p>
+<p><strong>Restart strategies map onto the DAG.</strong> Erlang’s <code>one_for_one</code> is “restart
+just this node”; <code>rest_for_one</code> is “restart this node and everything after
+it”. Along dependency edges <code>rest_for_one</code> <em>is</em> dependency-aware restart — a
+node leaving <code>Up</code> demotes its dependants to <code>WaitUp</code>, and <code>waitStability</code>
+already makes them block. It is also today’s <code>Blocked</code> semantics
+(<code>Actions/UpDown.hs:150</code>) expressed as a supervision policy rather than as a
+<code>Bool</code> threaded through a walk. Making the strategy per-node is then a natural
+knob: a config-file node probably wants <code>rest_for_one</code>, a log shipper probably
+wants <code>one_for_one</code>.</p>
+<h3 id="two-drivers-over-one-node-model">Two drivers over one node model</h3>
+<p>The first draft treated <code>run up</code>’s batch semantics as a hard problem needing a
+quiescence predicate. <code>deptrack</code> shows the simpler answer: keep <strong>both</strong>
+drivers over the same node definitions.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">syncTurnupGraph  ::</span> <span class="dt">Broadcast</span> <span class="ot">-&gt;</span> <span class="dt">OpGraph</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()                 <span class="co">-- topological, one-shot</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="ot">asyncTurnupGraph ::</span> <span class="dt">Broadcast</span> <span class="ot">-&gt;</span> <span class="dt">Statuses</span> <span class="ot">-&gt;</span> <span class="dt">Intents</span> <span class="ot">-&gt;</span> <span class="dt">OpGraph</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">upkeepGraph      ::</span> <span class="op">...</span> <span class="ot">-&gt;</span> <span class="dt">UpkeepFSM</span> <span class="ot">-&gt;</span> <span class="dt">DownkeepFSM</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()      <span class="co">-- continuous</span></span></code></pre></div></div><p><code>run up</code>/<code>run down</code> keep the synchronous topological driver and therefore keep
+returning <code>IO Bool</code> with today’s exact failure containment; <code>serve</code> uses the
+async supervised driver. What the two share is <strong>node definitions, the magma,
+the ledger and the precedence graph — not the machines</strong>; see §“no separate
+<code>Blocked</code> status” below, which is where the earlier draft left two
+incompatible answers. No quiescence predicate is needed for the batch case at
+all, because the synchronous driver still terminates by construction — and
+with <code>Completed</code> counting as converged, a <code>Managed</code> node that finishes its
+work does not hold it open either.
+<code>Broadcast</code> — in <code>deptrack</code>, <code>(OpUniqueId, CheckResult, Stability, Direction) -&gt; IO ()</code> — is salmon’s <code>Reporter</code>, so the report stream is where the two
+drivers stay comparable.</p>
+<p><strong>Decided: no separate <code>Blocked</code> status; <code>WaitUp</code> is it — and the synchronous
+driver does not run the FSMs at all.</strong> A node waiting on a predecessor that
+will never arrive is in the same state as one waiting on a predecessor that is
+merely slow. What differs is what the <em>driver</em> does about it, and an earlier
+draft left that in two incompatible halves: one section said the batch driver
+“still terminates by construction”, another said it “recognises waiting on
+something terminal”.</p>
+<p>The second is not available, because <strong>nothing in the node model is
+terminal.</strong> <code>Upping</code> retries on the adaptive delay, and <code>Always</code>/<code>OnFailure</code>
+loop by construction; only <code>Completed</code> and <code>Never</code> stop, and <em>failure never
+does</em>. A driver built on the FSMs has no terminality to recognise, so it has
+no termination condition — which for <code>run up</code> is not a refinement to postpone,
+it is whether the command returns.</p>
+<p>So the first half wins, and sharply: <code>syncTurnupGraph</code> keeps today’s semantics
+exactly — one pass in topological order, one attempt per node, <code>check</code> then
+<code>up</code>, termination structural in the finite graph it walks. It reports
+<code>Blocked</code> for a node whose predecessor failed <em>in this pass</em>, which is a
+statement about the pass and needs no notion of terminality at all
+(<code>Actions/UpDown.hs:151</code>). <code>upkeepGraph</code> runs the FSMs and waits
+indefinitely, correctly so: the predecessor may yet be repaired, and the node
+should then proceed without anyone re-declaring anything.</p>
+<p><code>Blocked</code> therefore survives as a <em>report</em> emitted by the synchronous driver,
+rather than as a node state — which is what keeps the existing suites
+meaningful, since they assert on the report stream, while the node’s own
+machine stays three-valued.</p>
+<h3 id="bounding-concurrency">Bounding concurrency</h3>
+<p><strong>Decided in two parts, and the first is not a concurrency limit at all.</strong></p>
+<p><strong>(i) Collections.</strong> The answer to “a graph with two hundred <code>apt-get install</code>
+nodes” is that it should not have two hundred nodes. <code>Debian.Package</code> already
+does this today: <code>installAllDebsAtOnceWith</code> (<code>Nodes/Debian/Package.hs</code>) is an
+<code>Op -&gt; Op</code> rewrite that harvests every <code>Package</code> from the graph’s <code>dynamics</code>
+and replaces the per-package nodes with a single batched <code>debs</code> node, while
+<code>removeSinglePackages</code> prunes the originals.</p>
+<p>Under this design that rewrite becomes <em>more</em> valuable, not less: the
+collection is one node with one machine, so 199 <code>Async</code>s never exist to need
+limiting. It also generalises past apt — anything whose underlying tool is
+dramatically cheaper in bulk (package managers, <code>nft</code> rulesets, a batch of DNS
+records) wants a collection rewrite rather than a semaphore.</p>
+<p><strong>Decided: the rewrite runs <em>after</em> the fold, and is direction-aware.</strong> This
+is the opposite of what an earlier draft of this document guessed, and the
+reason is decisive: a collection must not sweep together packages that are
+being installed with packages that are being removed, and <em>nothing before the
+fold knows which is which</em>. <code>desired</code> is what tells a <code>deb</code> node whether it is
+wanted up or down, so <code>installAllDebsAtOnceWith</code> has to take that as an input
+and partition on it, emitting an install batch and a removal batch rather than
+one blind batch.</p>
+<p><strong>The partition is conservative: still-required wins.</strong> A node in <code>desired</code>
+goes to the install batch; only a node <em>absent</em> from <code>desired</code> goes to the
+removal batch. Two live declarations can disagree — one still wants <code>nginx</code>,
+another was retracted and would have removed it — and the ledger has already
+answered that by union. The rewrite inherits that answer rather than deriving
+its own, so a package any live declaration still wants is never swept into a
+removal. Erring the other way would let a retraction pull a package out from
+under something still standing on it, which is the one failure mode here that
+retrying does not recover.</p>
+<p><strong>A batch reports failure for all of its members.</strong> <code>apt-get install a b c</code>
+exiting non-zero says the batch failed, not which package; narrowing it would
+mean parsing apt’s prose, which is a fragile thing to make a node’s status
+depend on. So every member goes to <code>Failure</code> with the batch’s exit status, and
+the batch’s output ring is where the actual message lives. This is the
+accepted trade — collections buy efficiency and pay in attribution. If it ever
+bites, the fix is bisection rather than parsing: on a batch failure, fall back
+to per-node execution for that batch on the next pass. A refinement, not a
+requirement.</p>
+<p>That settles the “do the ledger and the magma disagree about what exists?”
+worry by drawing the line somewhere else than either draft did:</p>
+<ul>
+<li>the <strong>ledger is declared intent</strong>, and keeps the user’s own per-package
+nodes. <code>status</code> still reports per package, which is what an operator wants;
+</li>
+<li>the <strong>rewrite is an execution-plan detail</strong>. The collection node exists only
+in the process layer, its lifetime derived from the set of package nodes it
+subsumes, and edges into a collected node redirect to it.
+</li>
+</ul>
+<p>So they never disagree, because they are answering different questions. It
+also means the rewrite has to redirect <em>precedence</em> edges, not just replace
+nodes — anything that depended on <code>deb foo</code> now waits on the batch that
+installs it.</p>
+<h4 id="why-a-recipe-cannot-do-this-itself">Why a recipe cannot do this itself</h4>
+<p>The ordering is not a scheduling convenience. It follows from a real
+expressiveness limit in the pipeline, and naming that limit is the better
+argument for “after the fold”.</p>
+<p>A recipe author supplies <code>Track' directive</code>, i.e. <code>directive -&gt; Op</code>
+(<code>Op/Track.hs</code>) — a function of <strong>one directive in isolation</strong>. It cannot see
+the other live declarations, it cannot see their directions, and it cannot see
+what was declared before. So “batch this package with the other packages that
+are also currently wanted up” is not awkward to write in a recipe; it is
+inexpressible there. Nothing in <code>directive -&gt; Op</code> has the second argument.</p>
+<p>That limit is why <code>dynamics :: [Dynamic]</code> (<code>Builtin/Extension.hs:44</code>) exists at
+all. It is the escape hatch by which a node says <em>“I am a <code>Package</code>”</em> without
+knowing what will be done about it, so that a later pass can collect the set
+and act on it — which is exactly what <code>installAllDebsAtOnceWith</code> does. The
+channel is already the right shape; it is only under-supplied, because today
+that later pass runs over a single expanded graph and therefore knows no more
+than the recipe did.</p>
+<p>Folding is what enriches it. The same <code>dynamics</code> mechanism, read across the
+whole magma with each node’s <code>desired</code> direction in hand, gives the later pass
+the two things the recipe structurally cannot have: <strong>other declarations, and
+directions</strong>. “After the fold” is simply where that information first exists.</p>
+<p>The tempting alternative is to widen the recipe instead — <code>Ledger -&gt; directive -&gt; Op</code> — and it should be rejected on three counts:</p>
+<ul>
+<li><strong>expansion stops being deterministic in the directive.</strong> A directive that
+expands differently depending on what else happens to be declared makes
+<code>run up</code> irreproducible;
+</li>
+<li><strong>it breaks the plan contract.</strong> <code>Query.planDirectiveDigest</code> pins a plan to
+the digest of the directive it was computed from
+(<code>Builtin/CommandLine.hs</code>); if the graph is a function of ambient state too,
+the digest no longer identifies the graph;
+</li>
+<li><strong>it breaks retraction.</strong> The ledger’s <code>down</code> assumes what a declaration
+contributed is a property of that declaration. If expansion depended on the
+ledger, a declaration’s contribution would depend on the order declarations
+arrived, and retracting it could not be computed at all.
+</li>
+</ul>
+<p>So the split stands, and gets sharper: <strong>recipes stay a pure function of their
+own directive; cross-declaration knowledge lives in a post-fold pass.</strong> The
+practical consequence is that a rewrite stops being an <code>Op -&gt; Op</code> an
+application remembers to apply, and becomes a registered phase the control
+process runs — roughly <code>Set Ref -&gt; Magma -&gt; Precedence -&gt; (Magma, Precedence)</code>, with <code>dynamics</code> as its input channel.</p>
+<p><strong>Decided: <code>query</code> shows the computed graph by default, and the declared one
+on request.</strong> The default has to be what will actually execute, or <code>query</code>
+describes a fiction and <code>run up --plan</code>’s excluded refs are written against
+the wrong node set. The declared view stays available behind a flag, because
+it is what the operator wrote and what they will edit.</p>
+<p>One subtlety this exposes: for <code>run up</code> the computed graph is a function of a
+single directive, so it is as reproducible as the directive itself and
+<code>Query.planDirectiveDigest</code> stays meaningful. Under <code>serve</code> it depends on
+<em>every</em> live declaration, so a plan captured against it is valid only while
+the rest of the ledger holds still. Plans are a batch-mode affordance and
+should probably stay one.</p>
+<h4 id="the-lock-the-two-batches-fight-over">The lock the two batches fight over</h4>
+<p>Splitting by direction creates one new problem: <code>apt-get install</code> and <code>apt-get remove</code> both want the dpkg lock, and as two nodes they may run concurrently.
+Retries do cover it, and are the fallback, but they are the weakest of the
+available answers — a retry loop has to distinguish “could not acquire the
+lock” from “no such package”, and if it cannot, it retries real failures too.</p>
+<p>Two better answers, both already available:</p>
+<ol>
+<li><strong>An edge.</strong> The rewrite emits both batches, so it can also emit the
+ordering between them, and the DAG then serialises them for free with no
+retry and no new mechanism. Removals before installs is the right order —
+it is what one would do by hand to clear conflicts, and it matches the
+existing <code>converge</code> sequence (<code>downTree</code> pass, then <code>upTree</code> pass).
+</li>
+<li><strong>The bounding primitive of (ii).</strong> This is precisely the case that
+motivates it: a named exclusive resource (<code>dpkg</code>) that several nodes
+declare they need. When that primitive exists, the edge becomes an
+unnecessary special case.
+</li>
+</ol>
+<p>Recommend the edge now and the primitive later, with retries as the safety net
+rather than the design.</p>
+<p><strong>(ii) Bounding primitives, later.</strong> Some resources are genuinely exclusive
+and cannot be collected away: the <code>dpkg</code> lock, a single-writer migration, a
+shared build directory. Those want an explicit primitive — a named bounded
+resource a node declares it needs, with the control process holding the
+semaphore — rather than a global thread cap. Deferred deliberately, because
+(i) removes most of the pressure and because the right shape is much easier to
+see once real graphs have run under this model.</p>
+<p>The ordering matters: a global concurrency cap is the easy answer and the
+wrong one, since it slows every unrelated node in the graph in order to
+protect one contended resource.</p>
+<h3 id="what-this-removes">What this removes</h3>
+<table>
+<tr><th>shipped</th><th>fate</th></tr>
+<tr><td><code>Nodes/Supervised.hs</code> (584 lines: pid table, reaper, wakeups, <code>Policy</code>)</td><td>already removed; <code>up</code>/<code>check</code>/<code>down</code> + adaptive-delay FSM replace it</td></tr>
+<tr><td><code>Serve.serveWith</code> + <code>STM (Set Ref)</code> wakeups</td><td>deleted; <code>waitStability</code> is the event source</td></tr>
+<tr><td><code>Serve</code>'s <code>worldEpochs</code>/<code>prune</code> retention</td><td>shrunk, not deleted; a retracted declaration keeps two flat sets until its nodes settle, never a graph</td></tr>
+<tr><td><code>Serve.Convergence</code> (<code>:146</code>)</td><td>replaced by <code>Status</code> (check + direction + stability)</td></tr>
+<tr><td><code>Extension.prelim</code>, <code>Extension.check</code>, <code>Actions/Check.hs</code></td><td>merged into <code>check :: IO CheckResult</code></td></tr>
+<tr><td><code>Extension.notify</code>, <code>Actions/Notify.hs</code></td><td>deleted; 0 implementations, 0 callers</td></tr>
+<tr><td><code>upTree</code>/<code>downTree</code></td><td>kept, re-expressed as the synchronous driver</td></tr>
+</table>
+<p>Nothing is lost by that removal. Process ownership — the one capability
+<code>Supervised</code> had that a check-and-re-<code>up</code> loop does not — returns as
+<code>Managed</code>, and stronger, because
+the owning thread outlives the effect and so the handle never needs a table to
+live in. <code>Supervised</code>’s genuinely useful parts are not lost either — they sit
+in <code>f9d7116</code> waiting to be recovered:
+<code>create_group = True</code>, the grace-then-<code>SIGKILL</code> escalation, and the
+requested-exit-versus-crash distinction all move into the <code>Managed</code> bracket
+and the <code>ExitCode</code> it returns. What goes is the bookkeeping that only existed
+because <code>up :: IO ()</code> had nowhere to put a pid: the table, the reaper, the
+wakeup channel, and the <code>run_stopping</code> flag.</p>
+<h3 id="suggested-milestones">Suggested milestones</h3>
+<ol>
+<li>
+<p><strong><code>check :: IO CheckResult</code></strong> — <em>landed</em>. Absorbing <code>prelim</code>; delete
+<code>Salmon.Actions.Check</code> and <code>Salmon.Actions.Notify</code> with the <code>notify</code> field.
+Mechanical across 22 node call sites plus <code>Query.forceSkip</code>, and a
+prerequisite for everything else. One deliberate behaviour change comes
+with it: a throwing check stops killing the traversal.</p>
+<p>One departure, added later and after milestone 9, once there was a loop to
+feel it: <strong>the type has a sixth constructor, <code>Immaterial</code>, and it is the
+default</strong>. The sketch above has <code>Unknown</code> doing two jobs — “a check ran and
+could not tell” and “nobody wrote a check” — which is harmless for the
+one-shot drivers this milestone was written for and not harmless for a
+supervisor, which has to decide whether to keep asking. <code>Immaterial</code> says
+<em>there is nothing here worth asking about</em>: applying the effect costs about
+what finding out would, which is the same property that makes these nodes
+idempotent. <code>requirement</code> maps it to <code>Required</code>, so <code>run up</code> is unchanged
+and the two are indistinguishable to it; <code>Actions/Upkeep</code> parks such a node
+instead of polling it. See (R1) in the companion document for why this was
+the half of that item worth doing first.</p>
+</li>
+<li>
+<p><strong><code>Salmon.Op.Dag</code></strong> — <em>landed</em>. The comonadic fold to magma + both
+adjacency directions, lifted out of <code>downTreeWith</code>. Pure and unit-testable,
+and <code>downTree</code> keeps using it, so it is a refactor with no behaviour change
+— except that this is also where last-writer-wins and the
+conflicting-representative report land, so §“<code>Ref</code> is location-addressed”
+has to be settled <em>before</em> this step rather than during it. Two things the
+fold does that the inline collapse did not, beyond the report: it keeps the
+edges of <em>every</em> occurrence of a node rather than only the first one’s
+(without which <code>mergeDag</code> would silently drop the joining graph’s edges,
+which is the entire point of the module), and it therefore drops the
+<code>seen</code>-pruning of the walk — the same full traversal <code>upTree</code>’s
+<code>postOrderM</code> already does. <code>Conflicting</code> is a new <code>UpDown.Report</code>
+constructor; only <code>downTreeWith</code> emits it, because only <code>downTreeWith</code> goes
+through the fold until step 4.</p>
+</li>
+<li>
+<p><strong>The ledger</strong> — <em>landed</em>. Per-declaration <code>Contribution</code>s (ref set <em>and</em>
+edge set), <code>desired</code> as the union over live ones and <code>precedence</code> as the
+union over live <em>and retiring</em> ones, shrinking <code>worldEpochs</code>/<code>prune</code> in
+<code>serve</code> to a graph-free equivalent. Still no concurrency; <code>Test.ServeSpec</code>
+is the regression net, and the retraction cases it already covers are what
+prove the edge sets retract correctly.</p>
+<p>Two things this turned out to need that the section above did not say.
+First, “graph-free” is only true of the <em>teardown</em>: <code>upTreeWith</code> still
+walks a <code>Cofree</code> of its own, so an epoch’s graph is still what the up pass
+reads, and the saving is that an epoch is now dropped the moment its
+declaration is retired or superseded rather than being held until its
+nodes are down. Step 4 is what closes that. Second, running a teardown off
+the magma needs <code>downTreeWith</code> split in two: <code>downDag</code> is the walk over a
+<code>Dag</code>, and <code>downTreeWith</code> is <code>expand</code> plus the fold plus <code>downDag</code>. The
+<code>Dag</code> a <code>serve</code> teardown walks is rebuilt from the magma and
+<code>precedenceOf</code> by <code>Dag.fromMagma</code>, which is <code>dagEdges</code>’ inverse.</p>
+<p><code>worldActive</code> is gone, absorbed: the ledger’s liveness is the only source
+of truth for what is declared up, and <code>worldEpochs</code> after <code>prune</code> is
+exactly the live declarations’ newest epochs. <code>NodeState.nodeEpoch</code> is
+gone too — it was write-only, and there is no longer an epoch to name once
+a declaration retires.</p>
+</li>
+<li>
+<p><strong>Sync drivers re-expressed</strong> — <em>landed</em>. Over the magma and ledger.
+<code>run up</code>/<code>run down</code> produce the same <code>Report</code> stream and the same <code>Bool</code>;
+<code>Test.DownTreeSpec</code>/<code>Test.QuerySpec</code> are the net.</p>
+<p>“The same <code>Report</code> stream” turned out to be one constructor too strong.
+<code>Redundant</code> was a statement about a repeated <em>occurrence in the expanded
+<code>Cofree</code></em>, and there are no occurrences left once the fold has run: a node
+is one node however many paths reach it, which is exactly what the magma
+means. So <code>Redundant</code> is deleted rather than preserved, and <code>upTree</code> now
+matches <code>downTree</code>, which never emitted it. Nothing consumed it —
+<code>Serve.stateWriter</code> ignored it, and <code>Test.QuerySpec</code>’s assertion was that
+the excluded node reported <code>Skip</code> <em>once</em>, which is now structural rather
+than incidental. The “how many paths reach this node” question it half
+answered is <code>length . dependantsOf</code>.</p>
+<p>Both drivers are now the same walk — <code>UpDown.walk</code>, parameterised by which
+adjacency direction a node waits on — so <code>upDag</code> and <code>downDag</code> differ only
+in direction and in which action they run. That is the shape §“Two drivers
+over one node model” asks for, one step early: the <em>synchronous</em> driver is
+now single, and step 6’s async driver joins it over the same structures.</p>
+<p>One behaviour change falls out of the merge and is worth having. A <code>Dag</code>
+built from a flat edge set can describe a cycle — impossible from an
+expanded <code>Cofree</code>, but reachable now that two declarations can each
+contribute one leg — and a node on a cycle never becomes ready. Both
+drivers used to leave it silently unapplied and still report success. The
+walk now sweeps for unreached nodes at the end and reports them <code>Blocked</code>.</p>
+<p><code>serve</code> loses its last graph-driven pass: <code>worldDag</code> rebuilds one structure
+from the magma and <code>precedenceOf</code>, and both directions run over it.
+<code>epochOp</code> is gone with <code>upOps</code> and <code>forest</code>. <code>epochGraph</code> survives for one
+reason, which is worth stating because it is the residue this milestone did
+/not/ eliminate: <code>--select</code> resolves <em>path</em> patterns, and a <code>Dag</code> has refs
+and edges but no paths.</p>
+</li>
+<li>
+<p><strong>Rewrites as a registered post-fold phase</strong> — <em>landed</em>. Taking <code>desired</code>
+and reading <code>dynamics</code> across the magma. <code>installAllDebsAtOnceWith</code> ports
+to it and becomes direction-aware: an install batch and a removal batch
+with an ordering edge between them, and precedence edges redirected onto
+them. Worth doing before parallelism rather than after, since it is what
+stops the first wide graph from wanting a concurrency limit — and it is
+the step where applications stop applying <code>Op -&gt; Op</code> passes by hand.</p>
+<p>The phase input needed a second field. <code>desired</code> alone is not enough,
+because a plan’s excluded refs and a <code>converge --select</code>’s complement are
+nodes the traversal will not touch — and batching one of those into a
+collection would run exactly the work the operator asked to skip, under
+another node’s name. So a phase gets <code>Phase { phaseDesired, phaseIgnored }</code>
+and must leave the second alone. That also settles how <code>run up --plan</code>
+composes with collections: exclusion moved from <code>Query.forceSkip</code> to a
+<code>Gate</code>, so a batch is worth running iff some member of it is — the same
+<code>membersOf</code> translation <code>serve</code>’s gate does, and the same <code>Skip</code> report
+either way.</p>
+<p>The membership map is the other thing the section above did not name.
+A collection node has no <code>NodeState</code> and no ledger entry — it exists only
+here — so both the gate and the convergence recording go through
+<code>membersOf</code>: a batch is worth touching iff any declared node it stands in
+for is, and what happened to it happened to all of them. That is what
+makes “a batch reports failure for all of its members” fall out rather
+than needing special-casing, and it is why <code>status</code> still reports per
+package. For a node no rewrite touched, <code>membersOf</code> is the singleton of
+itself, so nothing else changed.</p>
+<p><code>installAllDebsAtOnce</code>/<code>removeSinglePackages</code> are kept and deprecated
+rather than deleted: the author’s own out-of-tree apps still call them,
+and porting is a one-line change they can make when they choose.</p>
+<p>Not done, and deliberately so: <strong><code>query</code> still shows the declared graph</strong>,
+not the computed one. The decision above stands, but a rewritten <code>Dag</code> has
+refs and edges and no <em>paths</em>, and <code>--select</code> matches path patterns — so
+printing the computed graph needs a renderer that does not exist yet. The
+fiction the section warns about is narrower than it was, since plan
+exclusion now composes with collections through <code>membersOf</code> rather than
+silently missing them.</p>
+</li>
+<li>
+<p><strong><code>TVar Status</code> per node and <code>waitStability</code></strong> — <em>landed</em>. Plus the async
+drivers and the per-node mailbox. Parallelism appears here.</p>
+<p><code>Salmon.Actions.Concurrent</code> is one thread per node, ordering by
+<code>waitStability</code> rather than by counters, with the same <code>Report</code> stream,
+the same <code>IO Bool</code> and the same failure containment as the sequential
+drivers. <code>serve</code> converges through it; <code>run up</code>/<code>run down</code> stay
+synchronous, per §“Two drivers over one node model”. <strong>Convergence is
+therefore now parallel and unbounded</strong> — the protection against contention
+is the DAG’s own edges plus milestone 5’s collections, exactly as
+§“Bounding concurrency” argues, and nothing else. Recipes with a hidden
+shared resource that were safe only because the traversal was sequential
+are not safe any more.</p>
+<p>Four things the sections above did not have to say, because they only
+arise once nodes run at once:</p>
+<ul>
+<li><strong>Failure containment cannot live in <code>Status</code>.</strong> <code>waitStability</code> reads
+direction and stability only, so a node that settled having failed is
+indistinguishable from one that settled having succeeded — which the
+spec wants, since the two drivers answer “proceed past a failure?”
+differently. So the pass keeps a <code>TVar (Set Ref)</code> of what did not
+succeed, and recording that failure and settling have to be <em>one</em>
+transaction, or a dependant can observe <code>Stable</code> before the failure is
+visible and proceed against a node that in fact failed.
+</li>
+<li><strong>Reports have to be serialised.</strong> The reporter belongs to the caller
+and cannot be assumed thread-safe; a multi-line report interleaving with
+another node’s is garbage. One <code>MVar</code> around every <code>runReporter</code>.
+</li>
+<li><strong>A cycle has to be found before the walk, not after.</strong> The sequential
+drivers discover unreachable nodes by finishing and noticing what they
+never touched. A thread waiting on a node in a cycle simply never wakes,
+so <code>Dag.stuck</code> is consulted up front.
+</li>
+<li><strong><code>serve</code>’s own bookkeeping had a latent bug</strong> that only parallelism
+could expose: <code>stateWriter</code> recorded convergence with <code>modifyIORef'</code>,
+which is not atomic, so concurrent nodes reporting into one <code>World</code>
+would silently lose records.
+</li>
+</ul>
+<p><code>Instruction</code>’s <code>Skip</code> is spelled <code>Satisfy</code>, to stay out of
+<code>UpDown.Report.Skip</code>’s way. <code>Recheck</code>/<code>Pause</code>/<code>Resume</code> are read and
+reported but mean nothing to a single-pass driver; they are for the upkeep
+FSM in step 7. <code>statusOutput</code> is live — a node narrates its own
+transitions into the ring — but nothing else writes to it until <code>Managed</code>
+in step 8.</p>
+</li>
+<li>
+<p><strong>Upkeep/downkeep FSMs</strong> with adaptive delay, over <code>OneShot</code> nodes only,
+plus the authored watchdog — <em>landed</em>. Supervision of unowned effects
+appears here.</p>
+<p><code>Salmon.Actions.Upkeep</code> is the continuous driver: <code>UpkeepState</code> and
+<code>DownkeepState</code> exactly as declared above, <code>waitStability</code> for ordering,
+the adaptive delay as the backoff, one mailbox per node, and a single
+scanning thread for the watchdogs. <code>Salmon.Op.Supervision</code> is the policy —
+<code>Restart</code> plus <code>Maybe</code> watchdog, riding <code>dynamics</code>, read back with the
+same <code>getDynamics</code> the collection rewrite uses, first-wins with the losers
+reported. Neither one owns a process; that is step 8.</p>
+<p>Eight places this differs from what the sections above say, six of them
+because the sections were written about one pass and this is a loop.</p>
+<ul>
+<li><strong><code>Unknown</code> restarts nothing.</strong> §“Keep this running” reads
+<code>_ -&gt; fsm (decreaseDelay delay) Upping</code>, which lumps <code>Unknown</code> in with
+<code>Failure</code>. That is right for the one-shot drivers, where
+<code>requirement Unknown = Required</code> errs safely over an idempotent action,
+and a spin loop here: a node with no <code>check</code> answered <code>Unknown</code> forever,
+so it would re-run <code>up</code> at the 500ms floor for as long as <code>serve</code> lived.
+“I could not look” is not evidence the effect went away. Only <code>Failure</code>
+demotes a node out of <code>Up</code>. (A node with no <code>check</code> now answers
+<code>Immaterial</code> rather than <code>Unknown</code>, and is parked rather than polled —
+see milestone 1’s departure. The rule stated here is unchanged; it just
+applies to far fewer nodes than it did when it was written, which is the
+improvement.)
+</li>
+<li><strong>A failing <code>up</code> backs off; only a vanished effect tightens.</strong> The spec
+adapts the delay on what the <em>check</em> said and is silent on how often to
+retry an <code>up</code> that keeps throwing. Tightening there would retry
+<code>apt-get</code> twice a second, so <code>Upping</code> doubles toward the cap on each
+failure while <code>Up -&gt; Upping</code> still halves toward the floor.
+</li>
+<li><strong>The restart policy is consulted before satisfaction, not after.</strong>
+§“The restart policy” wants <code>Always</code> to rerun a <code>Completed</code> node, and
+<code>Completed</code> is a <em>satisfied</em> verdict — so a <code>look</code> that asks
+“satisfied?” first can never reach the policy, and <code>Always</code> would be
+unreachable. Hence <code>Intent</code>: arriving in <code>Upping</code> from <code>WaitUp</code> consults
+the check, arriving from <code>Up</code> (or from a <code>Force</code>) does not, because the
+answer already in hand is the <em>reason</em>.
+</li>
+<li><strong>A supervisor is told what the last pass achieved</strong> (<code>Standing</code>). This
+is not in the spec at all and is load-bearing: almost nothing in this
+repository implements <code>check</code>, so a supervisor started after a
+convergence pass would consult every node, get no usable answer, and run
+every <code>up</code> in the graph a second time. <code>Settled</code> skips the first <code>up</code> and
+nothing else — the node is still watched, and still put back if its
+check later says the effect is gone.
+</li>
+<li><strong><code>serve</code> supervises only while it is idle</strong>, rather than “<code>serve</code> uses
+the async supervised driver” wholesale (§“Two drivers”). The machines
+start when nothing is waiting in the input and stand down before any
+command is handled. Two reasons, and the second is the real one: a
+piped script has every line, EOF included, queued before the first pass
+ends, so it is never supervised and <code>serve &lt; script</code> stays a
+deterministic sequence of passes; and starting machines only to stop
+them because a command had been sitting in the queue would make
+“was this node acted on?” depend on thread timing. <code>run up</code>/<code>run down</code>
+are untouched, as §“Two drivers” wants.
+</li>
+<li><strong>A restricted <code>converge --select</code> scopes the pass, not the world.</strong>
+Supervision is unrestricted, so a node a restricted pass skipped is
+still tended once the loop goes idle. The alternative — carrying a
+transient flag into the standing watch — would mean a one-off
+<code>--select</code> silently stopped watching everything else, which is a worse
+surprise than the one it avoids. <code>supervise off</code> is the way to get a
+pass that is the only thing touching anything.
+</li>
+<li><strong>The watchdog reports and does not kill.</strong> Interrupting an <code>up</code> needs
+the teardown-through-a-bracket that owning the process buys, i.e. step
+8. Reporting is still most of the value: it is what tells a slow node
+from a stuck one.
+</li>
+<li><strong><code>Down</code> is terminal, <code>Up</code> is not.</strong> Nothing in the model answers “is it
+still gone” — <code>check</code> answers “does my effect need creating” — so a
+downkeep machine that reaches <code>Down</code> exits, while an upkeep machine that
+reaches <code>Up</code> has only started. The asymmetry is in the two state names
+above but its consequence was never stated.
+</li>
+</ul>
+<p>Time is <code>Micros</code> (an <code>Int</code>) rather than <code>DiffTime</code>: salmon-ops has no
+<code>time</code> dependency and neither consumer of the value wants one —
+<code>threadDelay</code> takes microseconds and <code>getMonotonicTimeNSec</code> returns an
+integral nanosecond count.</p>
+<p>Three things fell out. <code>serveWakingWith</code>/<code>noWakeups</code>/<code>Woken</code> are <strong>gone</strong>,
+which its own todo predicted: the hook existed because a node had no state
+of its own to block on, and it is not a smaller version of this. Serve’s
+<code>Direction</code> was a second, identical declaration of <code>Status.Direction</code> and
+is now that one, re-exported. And <code>Instruction</code>’s <code>Recheck</code>/<code>Pause</code>/
+<code>Resume</code> mean something for the first time.</p>
+<p><strong>What this does not yet buy, and it is worth being blunt about it.</strong>
+Supervision is exactly as good as nodes’ <code>check</code>s, and at this milestone
+almost no node had one: <code>filecontents</code> did not, so a managed file deleted
+behind salmon’s back was not noticed. The engine is here and tested;
+making it <em>do</em> anything for a real graph is a per-node question — which is
+the ordering question §“Open questions” already logged against <code>todo</code>, now
+sharper: it is not “does this shape work”, it is “which nodes get a
+<code>check</code>”. <code>filecontents</code> comparing its own contents is the obvious first
+one, and it changes what <code>run up</code> does for every existing caller, so it
+was deliberately not smuggled in here. (It, and
+<code>Systemd.systemdService</code>, have since been done — see (R1) in the
+companion document, including the part where the file node turned out to
+be what made the unit node’s promise true.)</p>
+<p>Nothing demotes a node’s <em>dependants</em> when it stops being up; that is step
+9. A node that has actually failed does hold off a dependant still in
+<code>WaitUp</code>, which is the containment the one-shot drivers have, expressed as
+a wait rather than as a <code>Blocked</code>.</p>
+</li>
+<li>
+<p><strong><code>Managed</code> nodes</strong> — <em>landed</em>. <code>Up</code> races the running action against the
+check timer, <code>cancel</code> tears down through the bracket, and exit statuses
+reach the restart policy. This is the step that restored what removing
+<code>Supervised</code> gave up.</p>
+<p><code>Extension.managed :: Maybe (Output -&gt; IO ExitCode)</code> is the action;
+<code>Salmon.Builtin.Nodes.Daemon</code> is the one builtin that fills it in, and
+<code>Test/DaemonSpec.hs</code> covers the part only a real subprocess shows.
+The state machine changes in exactly one place: <code>Up</code>’s nap becomes a
+four-way STM race (nap, mailbox, the action’s own exit, and — for a
+machine that holds one — never the halt flag), and the exit is what the
+policy reads.</p>
+<p>Six departures, three of them shapes this document guessed wrong.</p>
+<ul>
+<li><strong><code>Lifecycle</code> is a field, not a sum.</strong> §“Recovering process ownership”
+declares <code>OneShot (IO ()) | Managed (IO ExitCode)</code>. Replacing <code>up</code>’s
+type would rewrite all 106 <code>up =</code> sites in the tree for a feature a
+handful of nodes use, so <code>managed</code> sits beside <code>up</code> and <code>Nothing</code> is
+every existing node, unchanged and uninspected. The sum is the better
+type; it is not worth that diff until a third lifecycle exists.
+</li>
+<li><strong>The action takes an <code>Output</code> sink.</strong> The declared type is
+<code>IO ExitCode</code>, which leaves §“Output: a bounded ring per node” unable to
+deliver what it promised — ownership was the thing that made capturing
+stdout possible, and with no channel the ring can only ever hold the
+machine’s own narration. So the action is handed a <code>Text -&gt; IO ()</code> that
+writes into it. The pipes are drained <em>while</em> the process runs rather
+than after, or one that fills a pipe buffer blocks forever and looks
+wedged for a reason nobody could see.
+</li>
+<li><strong>A machine holding a process is <code>Kept</code>, not stopped.</strong> This is the
+largest thing the document did not anticipate, and it follows from
+milestone 7’s own choice to rebuild the supervisor whenever the loop
+goes idle. Stopping a supervisor means “stop tending”, and <code>serve</code>
+stands its machines down before every command — so a supervisor that
+wound its processes down with it would restart every service every time
+anybody typed <code>status</code>. Holding machines therefore survive their
+supervisor and the next one <strong>adopts</strong> them, on precisely the condition
+§“<code>Ref</code> is location-addressed” identified as the one legitimate reason
+to swap a machine: still wanted <code>TurnUp</code>, and its representative
+unchanged. Everything else it left is <strong>released</strong> — cancelled, which
+tears the effect down through the action’s own bracket.
+</li>
+<li><strong>A managed node is invisible to both convergence passes</strong>, and the
+ordering around that is load-bearing. <code>run up</code> cannot host it (so its
+<code>up</code> throws, loudly, rather than no-oping into a world that then
+believes it is up) and there is nothing left for a one-shot <code>down</code> to
+do. But letting go of the machine has to happen <strong>before</strong> the down
+pass, because the down pass is what removes the daemon’s config file and
+working directory. <code>Serve.settleManaged</code> is that step, and it records
+those nodes down as it goes — exact rather than optimistic, since for an
+effect that only exists while something holds it, “nothing holds it” is
+what being down <em>is</em>.
+</li>
+<li><strong>The restart policy needed two more fields.</strong> <code>Restart</code> alone cannot
+express a crash loop, and the module deleted at <code>f9d7116</code> already knew
+it: <code>supStableAfter</code> (having been up this long forgets the earlier
+failures) and <code>supGiveUpAfter</code>. Without the first the second latches off
+any long-lived node eventually — a service that falls over once a day
+reaches any finite limit in that many days, having never been in a crash
+loop. A node that gives up is <em>parked</em>, not gone: its dependants must
+keep seeing it settled-and-failing, and an operator has to be able to
+change their mind (<code>Force</code> or <code>Recheck</code>).
+</li>
+<li><strong>A managed node whose check already says the effect is there is not
+spawned.</strong> It is treated as an unowned effect and polled, because
+starting a second copy of something already running is worse than not
+owning what is running. Worth naming because it means a process left
+behind by a <code>serve</code> that has since exited is never re-adopted — the
+pidfile problem §“Non-goals” excludes, showing up in the one place it
+still bites.
+</li>
+</ul>
+<p><code>Settled</code> is never claimed about a managed node, whatever the caller
+believes: a <code>Settled</code> claim is about an effect that persists on its own,
+and a managed effect does not persist without its machine. <code>withAsync</code>
+rather than <code>async</code> is what makes the teardown work at all — cancelling
+the machine cancels the action, and whatever bracket the action is built
+from does the killing, which is why no pid table appears anywhere here.
+The grace-then-<code>SIGKILL</code> escalation and <code>create_group = True</code> are
+recovered from <code>f9d7116</code> as this document said they should be, not
+reinvented.</p>
+<p>One bug worth recording, because of how it hid: adding <code>Ended</code> to the
+machine’s <code>Wake</code> type left <code>announce</code> non-exhaustive, so every managed
+node’s thread died of a pattern-match failure the moment its action
+returned. The <code>-Wincomplete-patterns</code> sweep that would have caught it
+reported nothing, because <code>cabal build</code> with different <code>--ghc-options</code> in
+an up-to-date build directory does not recompile. Sweep in a fresh
+<code>--builddir</code> or not at all.</p>
+</li>
+<li>
+<p><strong><code>rest_for_one</code></strong>: a node leaving <code>Up</code> demotes its dependants — <em>landed</em>.
+<code>Supervision</code> gains <code>supStrategy :: Strategy</code> (<code>OneForOne</code>/<code>RestForOne</code>,
+defaulting to <code>OneForOne</code>), a node in <code>Up</code> watches the dependencies that
+declared <code>RestForOne</code>, and one of them leaving sends it back to <code>WaitUp</code>.
+<code>Test/UpkeepSpec.hs</code> covers the eight behaviours, <code>Test/ServeSpec.hs</code> the
+ninth that only exists under <code>serve</code>. Five departures, and the first two
+are corrections to this document rather than choices:</p>
+<ul>
+<li><strong>A level read of a neighbour’s <code>Stability</code> cannot see a departure at
+all.</strong> §9.1’s sketch — “<code>resting</code>‘s STM choice gains a branch watching
+its dependencies’ statuses” — misses every transition it is for: a
+dependency that fell over and recovered between two of a dependant’s
+waits is <code>Stable</code> at both of them, and STM keeps no queue of what
+happened in between. A config file rewritten in milliseconds is exactly
+that shape, so the feature would have worked only for slow failures. The
+fix is a monotonic <code>Status.statusEpoch</code>, bumped when a settled node
+unsettles: the dependant remembers the number it last saw and compares.
+Level-triggered STM, turned into edge detection by remembering.
+</li>
+<li><strong>The remembered number is only meaningful with the machine it came
+from.</strong> Under <code>serve</code> a dependency gets a <em>new</em> machine on every command
+— a fresh <code>Status</code>, counting from zero — so a dependant comparing its
+memory of the old one would read a departure every time an operator
+typed anything, restarting every service, which is precisely what
+<code>Kept</code> exists to prevent. The <code>TVar</code> is therefore remembered alongside
+the epoch, and a dependency whose machine has been replaced is re-armed
+rather than acted on.
+</li>
+<li><strong>An adopted machine had to be given its supervisor’s state, not just
+watched with it.</strong> Everything a machine waits on — the statuses, the
+failure set, the neighbour lists, <em>and the halt flag</em> — belongs to a
+supervisor, while a machine holding a <code>managed</code> action outlives the one
+that started it. Before this milestone that was invisible, because such
+a machine only ever took paths that ignore the halt flag; a demoted one
+takes <code>standby</code>, which heeds it, and would have read a permanently-set
+flag and quietly exited, orphaning its process. Hence <code>Upkeep.Under</code>,
+which <code>startUpkeep</code> writes into every machine it adopts. It also fixes a
+bug that predates this milestone: an adopted machine was recording its
+failures in a set no dependant read.
+</li>
+<li><strong>A dependency that has not been seen up cannot demote anybody.</strong> Not in
+the plan, and without it this milestone would have undone milestone 7’s
+<code>Standing</code>: a supervisor starting over a graph a pass has just converged
+would send every opted-in node back to <code>WaitUp</code> before its dependencies’
+machines had settled, re-running every <code>up</code> in the cone once per command.
+A dependency is armed the first time it is seen settled up, and not
+before.
+</li>
+<li><strong><code>supStableAfter</code> is used as a rate limit, not as a settling delay.</strong>
+§9.3 asks for the second and it cannot work: a settling delay swallows
+the case the feature is for, since the config file a service stands on is
+back within milliseconds of being rewritten. So an isolated departure is
+always honoured whenever it comes, and what is dropped is a <em>second</em>
+demotion inside the node’s own <code>supStableAfter</code> — which is what a flap
+looks like and a change does not. That bounds a flapping dependency to
+rebuilding the cone behind it once per interval.
+</li>
+</ul>
+<p>The thundering herd §9.1 worried about does not arise, because the watch is
+authored on the node that goes away rather than on the ones that get
+bounced: a machine with no <code>RestForOne</code> dependency subscribes to no
+statuses at all, and <code>crossing</code> is skipped rather than being a branch that
+never fires. The cascade needed no code — a demoted node is itself no
+longer up, which is all a dependant of <em>it</em> that opted in has to see.</p>
+<p>Those departures, plus two things found by building a demonstration of
+this milestone (<code>salmon-ops-serve-fixture --daemon</code>), are written up as
+wanting another pass in <code>specs/per-node-state-machines-remaining.md</code>
+§“Landed, but wanting another iteration” — they are decided, not settled.
+Two of them are not matters of taste: a demoted <code>managed</code> node whose check
+is satisfied is torn down and never restarted while reporting itself <code>Up</code>
+(I1), and a convergence pass does nothing about a re-declaration that
+changed a node’s content, so only a node with a <code>check</code> ever picks one up
+(I6).</p>
+</li>
+</ol>
+<h3 id="non-goals-v1">Non-goals (v1)</h3>
+<ul>
+<li>Cross-machine supervision. <code>Nodes/Self.hs</code>’s remote-op flattening is
+unaffected.
+</li>
+<li>Replacing <code>Configure</code>/the seed→directive protocol; this is execution only.
+</li>
+<li>Persisting machine state across a <code>serve</code> restart — the pidfile convention
+above is what makes a restart recoverable, not a state file.
+</li>
+<li>A general actor framework. Two three-state FSMs and a supervisor.
+</li>
+</ul>
+<h3 id="open-questions">Open questions</h3>
+<p>Four rounds of these are now settled in the sections above — the ledger shape
+(nodes <em>and</em> edges, retiring rather than deleted), what <code>Ref</code> equality does
+and does not mean, what the magma stores, concurrency, <code>notify</code>, the plan
+machinery, captured output, exit codes, <code>Transient</code>, where the rewrite runs
+and why, <code>Completed</code>, mailbox overflow, check cost, collection conservatism,
+batch failure attribution, <code>Blocked</code> versus <code>WaitUp</code> and what separates the
+two drivers, and what <code>query</code> shows.</p>
+<p>The one question the last round left open — <strong>how is a node’s watchdog
+authored?</strong> — is settled too, and the answer was already in the tree.</p>
+<p>What is <em>not</em> settled is a different list, and it is not in this document:
+the questions above are the ones this design set itself, while the places
+where a landed milestone’s shape was decided under that milestone’s pressure
+and wants a second pass are collected in
+<code>specs/per-node-state-machines-remaining.md</code> §“Landed, but wanting another
+iteration” (I1–I5). Read that before acting on the departures recorded in the
+milestone list, which are written as decisions taken.</p>
+<p><strong>Decided: supervision policy rides <code>dynamics</code>, not a new <code>Extension</code> field.</strong>
+<code>dynamics :: [Dynamic]</code> (<code>Builtin/Extension.hs:44</code>) is exactly the channel by
+which a node states something about itself for a later pass to act on — which
+is the argument §“Why a recipe cannot do this itself” already makes for the
+collection rewrite. <code>Package</code> uses it (<code>Nodes/Debian/Package.hs:47</code>) and
+<code>installAllDebsAtOnceWith</code> reads it back with <code>collectDynamics</code>. So:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Supervision</span> <span class="ot">=</span> <span class="dt">Supervision</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> supRestart  ::</span> <span class="op">!</span><span class="dt">Restart</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> supWatchdog ::</span> <span class="op">!</span>(<span class="dt">Maybe</span> <span class="dt">DiffTime</span>)</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="co">-- at the node:</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>actions{ dynamics <span class="ot">=</span> [toDyn (<span class="dt">Supervision</span> <span class="dt">OnFailure</span> (<span class="dt">Just</span> <span class="dv">30</span>))] }</span></code></pre></div></div><p>and the process layer reads it with <code>getDynamics</code>, exactly as the post-fold
+rewrite pass reads <code>Package</code>. Three things this buys:</p>
+<ul>
+<li><strong>No new <code>Extension</code> field</strong>, so nothing changes for the many nodes with no
+opinion about how they are supervised.
+</li>
+<li><strong>The default falls out.</strong> “A node that declares no watchdog is never
+considered wedged” is just <code>getDynamics</code> returning <code>[]</code>, rather than a
+<code>Nothing</code> every node has to write.
+</li>
+<li><strong>It is optional and one line to add</strong>, which was the bar this question set
+itself: a watchdog is only as good as authors’ willingness to set one.
+</li>
+</ul>
+<p>The cost is that it is untyped and unenforced — nothing stops two conflicting
+<code>Supervision</code> dynamics on one node. That is the same weakness <code>Package</code>
+collection already lives with, and it gets the same treatment as a conflicting
+magma representative: take one, report the rest.</p>
+<p>What remains is an ordering question rather than a design one: the shape above
+wants exercising on two or three real long-running nodes before milestone 7
+hardens it. Tracked in <code>todo</code>.</p>
+<h3 id="relationship-to-the-other-specs">Relationship to the other specs</h3>
+<ul>
+<li><code>specs/per-node-state-machines-remaining.md</code> is the companion plan: what is
+left of the milestone list below (8 and 9), plus the residue no milestone
+covers — chiefly that <code>check</code> is implemented by roughly a quarter of nodes,
+which is what currently limits milestone 7 to supervising almost nothing.
+Start there if you are picking this work up rather than reading it.
+</li>
+<li><code>specs/salmon-as-init.md</code> needs this and gets simpler for it: its PID-2
+supervisor is this control loop, its restart policy is the upkeep FSM, and
+its “PID 1 rate-limits, the supervisor decides” split is the same two-level
+supervision as above. The Rust PID 1 is unaffected — that boundary is about
+<code>waitpid(-1)</code>, not scheduling.
+</li>
+<li><code>specs/multi-user-privilege-separation.md</code> composes unchanged: an <code>Invoker</code>
+decorates the <code>CreateProcess</code> a node’s <code>up</code> spawns.
+</li>
+<li><code>specs/advance-querying.md</code> is the open question above.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

@@ -1,0 +1,429 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - GCP Support Plan for Salmon</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-gcloud-support.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: phase 1 (gcloud-first) is implemented through all ten steps of §15:"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - GCP Support Plan for Salmon"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: phase 1 (gcloud-first) is implemented through all ten steps of §15:"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - GCP Support Plan for Salmon"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-gcloud-support.html"><meta property="og:description" content="Status: phase 1 (gcloud-first) is implemented through all ten steps of §15:"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-gcloud-support.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-gcloud-support.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: phase 1 (gcloud-first) is implemented through all ten steps of §15:","headline":"GCP Support Plan for Salmon","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-gcloud-support.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>GCP Support Plan for Salmon</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1291 words, 17 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-advance-querying.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">16/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-salmon-as-init.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/gcloud-support.md"><code>specs/gcloud-support.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="gcp-support-plan-for-salmon">GCP Support Plan for Salmon</h2>
+<p>Status: phase 1 (gcloud-first) is implemented through all ten steps of §15:
+<code>Salmon.Builtin.Nodes.Gcp.{Core,Storage,Compute,SshAccess,Iam,ArtifactRegistry,CloudRun,LoadBalancing}</code>
+(instance-group and serverless-NEG backends), plus modules the plan did not
+list (<code>ResourceManager</code>, <code>Billing</code>, <code>ServiceUsage</code>, <code>SecretManager</code>), the
+recipes <code>SreBox.Gcp.{VmProvision,CloudRunDeploy,PostgrestCloudRun,PreviewEnvironment}</code>,
+<code>salmon-gcp-toy</code> and <code>Test.GcpSpec</code>. Not done: phase 2 (direct REST calls),
+the <code>SreBox.Gcp.WebStack</code> recipe of §2, CloudRun job executions, and a
+configurable <code>gcloud</code> path (both deferred by §17). Kept as the design record.</p>
+<p>This document proposes adding Google Cloud Platform (GCP) resource support to Salmon. The goal is to enable Salmon DAGs that turn up VMs, load balancers, Artifact Registry repositories, Cloud Storage buckets, and CloudRun services, while provisioning the VMs over SSH using an SSH-CA trust model.</p>
+<p>The design stays within Salmon’s existing patterns: resources are modelled as <code>Op</code> nodes, GCP tools are wrapped via <code>Salmon.Builtin.Nodes.Binary</code>, and VM provisioning reuses the existing <code>Self</code>, <code>Ssh</code>, <code>Keys</code>, and <code>Rsync</code> machinery.</p>
+<hr />
+<h3 id="1-strategy-gcloud-first-api-second">1. Strategy: gcloud-first, API-second</h3>
+<p>For the same reason Salmon wraps <code>systemctl</code>, <code>psql</code>, <code>podman</code>, and <code>nft</code> rather than linking their native APIs, the fastest path is to model GCP resources as nodes that shell out to <code>gcloud</code>.</p>
+<table>
+<tr><th>Phase</th><th>Approach</th></tr>
+<tr><td><strong>Phase 1</strong></td><td>Wrap <code>gcloud</code> CLI commands via <code>Binary</code> nodes.</td></tr>
+<tr><td><strong>Phase 2</strong></td><td>Replace hot or latency-sensitive paths (VM status polling, operation waiting) with direct REST calls via <code>http-client</code> if needed.</td></tr>
+<tr><td><strong>Auth</strong></td><td>Use Application Default Credentials (ADC). A single <code>Gcp.Core</code> validation node runs before any resource node.</td></tr>
+</table>
+<p>This gives Salmon’s existing execution model — sequential, concurrent, and supervised (<code>run serve</code>) drivers — for free.</p>
+<hr />
+<h3 id="2-package-layout">2. Package Layout</h3>
+<h4 id="new-modules-under-salmon-opssrcsalmonbuiltinnodesgcp">New modules under <code>salmon-ops/src/Salmon/Builtin/Nodes/Gcp/</code></h4>
+<pre><code class="language-text">salmon-ops/src/Salmon/Builtin/Nodes/Gcp/
+  Core.hs              -- project, zone, region, auth, common CLI wrappers
+  Compute.hs           -- GCE instances, instance groups, templates
+  LoadBalancing.hs     -- backend services, URL maps, forwarding rules, health checks, NEGs
+  ArtifactRegistry.hs  -- repositories, IAM, docker/podman auth
+  Storage.hs           -- GCS buckets, IAM, lifecycle
+  Iam.hs               -- service accounts, role bindings
+  CloudRun.hs          -- CloudRun services and revisions
+  SshAccess.hs         -- OS Login / metadata keys / SSH-CA glue
+</code></pre>
+<h4 id="new-recipes-under-salmon-ops-recipessrcsreboxgcp">New recipes under <code>salmon-ops-recipes/src/SreBox/Gcp/</code></h4>
+<pre><code class="language-text">  WebStack.hs          -- VM + LB + bucket + CloudRun service
+  VmProvision.hs       -- network + vm + ssh access + self-provisioning
+  WebStack.hs          -- VM + LB + bucket + CloudRun job
+</code></pre>
+<hr />
+<h3 id="3-shared-core-gcpcore">3. Shared Core: <code>Gcp.Core</code></h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">module</span> <span class="dt">Salmon.Builtin.Nodes.Gcp.Core</span> <span class="kw">where</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Project</span> <span class="ot">=</span> <span class="dt">Project</span> {<span class="ot"> projectId ::</span> <span class="dt">Text</span> }</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Show</span>)</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Zone</span> <span class="ot">=</span> <span class="dt">Zone</span> {<span class="ot"> zoneName ::</span> <span class="dt">Text</span> }</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Show</span>)</span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Region</span> <span class="ot">=</span> <span class="dt">Region</span> {<span class="ot"> regionName ::</span> <span class="dt">Text</span> }</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Show</span>)</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">GcpError</span> <span class="ot">=</span> <span class="dt">GcpCliError</span> <span class="dt">Text</span> <span class="dt">Int</span> <span class="dt">Text</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Exception</span>, <span class="dt">Show</span>)</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Track for the gcloud binary.</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a><span class="ot">gcloud ::</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;gcloud&quot;</span>)</span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Validates Application Default Credentials.</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a><span class="co">-- Almost every other GCP op depends on this.</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a><span class="ot">applicationDefaultCredentials ::</span> <span class="dt">Op</span></span></code></pre></div></div><p>The ADC node should run <code>gcloud auth application-default print-access-token</code> and succeed only if a token is returned. This catches misconfigured environments before any resource operation.</p>
+<hr />
+<h3 id="4-compute-engine-vms-gcpcompute">4. Compute Engine VMs: <code>Gcp.Compute</code></h3>
+<h4 id="types">Types</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">MachineType</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="dt">E2Medium</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="dt">E2Standard2</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="dt">N2Standard4</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="dt">Custom</span> <span class="dt">Text</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Show</span>)</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">BootDisk</span> <span class="ot">=</span> <span class="dt">BootDisk</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> bootDiskSizeGb ::</span> <span class="dt">Int</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> bootDiskImage  ::</span> <span class="dt">Text</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Show</span>)</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Instance</span> <span class="ot">=</span> <span class="dt">Instance</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> instanceName         ::</span> <span class="dt">Text</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceProject      ::</span> <span class="dt">Project</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceZone         ::</span> <span class="dt">Zone</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceMachineType  ::</span> <span class="dt">MachineType</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceBootDisk     ::</span> <span class="dt">BootDisk</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceNetwork      ::</span> <span class="dt">Text</span></span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceSubnet       ::</span> <span class="dt">Text</span></span>
+<span id="22"><a href="#22" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceServiceAccount ::</span> <span class="dt">Maybe</span> <span class="dt">Text</span></span>
+<span id="23"><a href="#23" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceMetadata     ::</span> <span class="dt">Map</span> <span class="dt">Text</span> <span class="dt">Text</span></span>
+<span id="24"><a href="#24" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> instanceTags         ::</span> [<span class="dt">Text</span>]</span>
+<span id="25"><a href="#25" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="26"><a href="#26" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Show</span>)</span></code></pre></div></div><h4 id="op">Op</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span><span class="ot"> ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;gcloud&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">Instance</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><ul>
+<li><strong><code>up</code></strong>: <code>gcloud compute instances create ...</code>
+</li>
+<li><strong><code>down</code></strong>: <code>gcloud compute instances delete --quiet ...</code>
+</li>
+<li><strong><code>check</code></strong>: <code>gcloud compute instances describe --format='value(status)'</code>
+<ul>
+<li><code>RUNNING</code> → <code>Success</code>
+</li>
+<li><code>TERMINATED</code> or absent → <code>Failure</code>
+</li>
+<li><code>PROVISIONING</code>, <code>STAGING</code>, <code>STOPPING</code> → <code>Unknown</code>
+</li>
+<li><em>SSH readiness is checked separately by <code>Gcp.SshAccess.sshAvailable</code>, not by the VM node itself.</em>
+</li>
+</ul>
+</li>
+</ul>
+<h4 id="external-networking">External networking</h4>
+<p>Keep VMs private by default. If outbound internet is required, depend on an existing Cloud NAT or add a <code>Gcp.Compute.CloudNat</code> node. For provisioning access, use IAP tunneling or the SSH access model described below.</p>
+<h4 id="ssh-availability-check">SSH availability check</h4>
+<p>Because the VM node only reports GCE-level <code>RUNNING</code>, add a separate support node for verifying that SSH is actually reachable. This is especially useful before <code>Self.uploadAndCallSelf</code> runs.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">SshEndpoint</span> <span class="ot">=</span> <span class="dt">SshEndpoint</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> sshHost     ::</span> <span class="dt">Text</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> sshPort     ::</span> <span class="dt">Int</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> sshIdentity ::</span> <span class="dt">FilePath</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="ot">sshAvailable ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">SshEndpoint</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><ul>
+<li><strong><code>up</code></strong>: no-op (or a connect probe)
+</li>
+<li><strong><code>check</code></strong>: <code>ssh -o ConnectTimeout=5 -o BatchMode=yes -i &lt;identity&gt; &lt;host&gt; true</code> exits 0 → <code>Success</code>; else <code>Failure</code>
+</li>
+<li><strong><code>down</code></strong>: no-op
+</li>
+</ul>
+<p>Recipes that provision a VM should depend on <code>sshAvailable</code> before invoking <code>Self.uploadAndCallSelf</code>.</p>
+<hr />
+<h3 id="5-ssh-access-model">5. SSH Access Model</h3>
+<p>The objective is to create a VM and then SSH into it to run a Salmon binary for local provisioning. We prefer SSH-CA over long-lived per-instance keys.</p>
+<h4 id="option-a-os-login-with-ssh-ca-preferred-long-term">Option A: OS Login with SSH-CA (preferred long-term)</h4>
+<ol>
+<li>Enable OS Login at project or organization level.
+</li>
+<li>Upload the SSH CA public key to Google Cloud Identity via the OS Login API.
+</li>
+<li>Salmon signs short-lived user certificates using existing <code>Keys</code> primitives.
+</li>
+<li>Instances get metadata <code>enable-oslogin=TRUE</code>.
+</li>
+<li>Users connect with signed certificates; Google validates the CA.
+</li>
+</ol>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">OsLoginConfig</span> <span class="ot">=</span> <span class="dt">OsLoginConfig</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> osLoginProject     ::</span> <span class="dt">Project</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> osLoginCaPublicKey ::</span> <span class="dt">FilePath</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="ot">enableOsLogin      ::</span> <span class="dt">OsLoginConfig</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="ot">uploadOsLoginCaKey ::</span> <span class="dt">Text</span> <span class="ot">-&gt;</span> <span class="dt">FilePath</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p><strong>Caveat</strong>: uploading a CA to Cloud Identity requires domain-wide delegation or admin credentials. This is cleanest if you control the Google Workspace / Cloud Identity domain.</p>
+<h4 id="option-b-project-metadata-ssh-keys--salmon-ca-recommended-starting-point">Option B: Project metadata SSH keys + Salmon CA (recommended starting point)</h4>
+<ol>
+<li>Salmon generates an SSH CA key pair (<code>Keys.SSHKeyPair</code>).
+</li>
+<li>Salmon injects the CA <strong>public</strong> key into project or instance metadata.
+</li>
+<li>Instances trust that CA.
+</li>
+<li>Salmon signs user/host certificates as needed.
+</li>
+</ol>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">MetadataSshCa</span> <span class="ot">=</span> <span class="dt">MetadataSshCa</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> sshCaProject   ::</span> <span class="dt">Project</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> sshCaPublicKey ::</span> <span class="dt">FilePath</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="ot">installMetadataCaKey ::</span> <span class="dt">MetadataSshCa</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p>This avoids Cloud Identity Admin SDK complexity and is self-contained within a project.</p>
+<h4 id="option-c-os-login-with-google-managed-keys">Option C: OS Login with Google-managed keys</h4>
+<p>Use <code>gcloud compute ssh</code>. This is the simplest but loses the SSH-CA model.</p>
+<h4 id="recommendation">Recommendation</h4>
+<p>Start with <strong>Option B</strong> (metadata SSH-CA) for a self-contained Salmon setup. Migrate to <strong>Option A</strong> once organization-wide trust and Cloud Identity admin automation are in place.</p>
+<hr />
+<h3 id="6-vm-self-provisioning">6. VM Self-Provisioning</h3>
+<p>Once SSH access works, reuse Salmon’s existing remote-provisioning machinery:</p>
+<ul>
+<li><code>Salmon.Builtin.Nodes.Self.uploadAndCallSelf</code>
+</li>
+<li><code>Salmon.Builtin.Nodes.Self.uploadAndCallSelfAsSudo</code>
+</li>
+<li><code>Salmon.Builtin.Nodes.Ssh.preExistingRemoteMachine</code>
+</li>
+<li><code>Salmon.Builtin.Nodes.Rsync.sendFile</code>
+</li>
+</ul>
+<p>A recipe composes the pieces:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">module</span> <span class="dt">SreBox.Gcp.VmProvision</span> <span class="kw">where</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">provisionedVm ::</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Instance</span> <span class="ot">-&gt;</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Self.SelfPath</span> <span class="ot">-&gt;</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Ssh.Remote</span> <span class="ot">-&gt;</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Track&#39;</span> directive <span class="ot">-&gt;</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>  directive <span class="ot">-&gt;</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Op</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>provisionedVm r inst selfpath remote runRemote spec <span class="ot">=</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> vm        <span class="ot">=</span> Gcp.Compute.instance r gcloud inst</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>      sshAccess <span class="ot">=</span> Gcp.SshAccess.metadataCaAccess r gcloud inst</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>      provision <span class="ot">=</span> Self.uploadAndCallSelfAsSudo</span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>                    <span class="op">...</span> selfpath remote Ssh.preExistingRemoteMachine runRemote <span class="dt">CLI.Up</span> spec</span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>    provision</span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>    <span class="ot">`inject`</span> sshAccess</span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>    <span class="ot">`inject`</span> vm</span></code></pre></div></div><p>This mirrors the existing <code>SreBox.PostgresMigrations.remoteMigrateOpaqueSetup</code> pattern.</p>
+<hr />
+<h3 id="7-load-balancers-gcploadbalancing">7. Load Balancers: <code>Gcp.LoadBalancing</code></h3>
+<p>GCP L7 load balancers consist of many small resources. Expose a single high-level recipe rather than forcing users to wire every component manually.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Backend</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="dt">InstanceGroupBackend</span> <span class="dt">InstanceGroup</span> [<span class="dt">Int</span>]        <span class="co">-- ports for named ports</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="dt">CloudRunBackend</span> <span class="dt">Text</span>                            <span class="co">-- CloudRun service name</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Show</span>)</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">ApplicationLoadBalancer</span> <span class="ot">=</span> <span class="dt">ApplicationLoadBalancer</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> albName        ::</span> <span class="dt">Text</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> albProject     ::</span> <span class="dt">Project</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> albRegion      ::</span> <span class="dt">Region</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> albNetwork     ::</span> <span class="dt">Maybe</span> <span class="dt">Text</span>                    <span class="co">-- required for instance groups; optional for serverless</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> albBackends    ::</span> [<span class="dt">Backend</span>]</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> albHealthCheck ::</span> <span class="dt">Maybe</span> <span class="dt">HealthCheck</span>             <span class="co">-- required for instance groups; omitted for CloudRun</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a><span class="ot">applicationLoadBalancer ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">ApplicationLoadBalancer</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p>Internally creates:</p>
+<ol>
+<li>Health check (for instance-group backends only)
+</li>
+<li>Instance group + named ports, <strong>or</strong> serverless NEG for each CloudRun backend
+</li>
+<li>Backend service (one per backend, or a single service with multiple backends)
+</li>
+<li>URL map
+</li>
+<li>HTTP(S) target proxy
+</li>
+<li>SSL certificate (managed or self-provided)
+</li>
+<li>Forwarding rule + external/global IP
+</li>
+</ol>
+<p><strong>Check</strong>: verify every sub-resource exists and the backend service reports healthy backends (for instance groups) or that the NEG points to a deployed CloudRun service.</p>
+<p>The recipe must reject mixing instance-group and CloudRun backends in a single backend service if GCP does not allow it; otherwise create separate backend services and route by URL map path rules.</p>
+<hr />
+<h3 id="8-artifact-registry-gcpartifactregistry">8. Artifact Registry: <code>Gcp.ArtifactRegistry</code></h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">RepoFormat</span> <span class="ot">=</span> <span class="dt">Docker</span> <span class="op">|</span> <span class="dt">Maven</span> <span class="op">|</span> <span class="dt">Npm</span> <span class="op">|</span> <span class="dt">Python</span> <span class="op">|</span> <span class="dt">Apt</span> <span class="op">|</span> <span class="dt">Yum</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">ArtifactRepo</span> <span class="ot">=</span> <span class="dt">ArtifactRepo</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> repoName     ::</span> <span class="dt">Text</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> repoProject  ::</span> <span class="dt">Project</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> repoLocation ::</span> <span class="dt">Region</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> repoFormat   ::</span> <span class="dt">RepoFormat</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a><span class="ot">artifactRepository ::</span> <span class="dt">ArtifactRepo</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><ul>
+<li><strong><code>up</code></strong>: <code>gcloud artifacts repositories create ...</code>
+</li>
+<li><strong><code>check</code></strong>: <code>gcloud artifacts repositories describe ...</code>
+</li>
+<li>IAM nodes grant <code>roles/artifactregistry.reader</code> / <code>writer</code>.
+</li>
+</ul>
+<p>Then reuse existing <code>Salmon.Builtin.Nodes.Podman</code> with image names like:</p>
+<pre><code class="language-text">{region}-docker.pkg.dev/{project}/{repo}/{image}:{tag}
+</code></pre>
+<p>Add a helper to configure local auth:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">configureDockerAuth ::</span> <span class="dt">Project</span> <span class="ot">-&gt;</span> <span class="dt">Region</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="co">-- runs: gcloud auth configure-docker {region}-docker.pkg.dev</span></span></code></pre></div></div><hr />
+<h3 id="9-cloud-storage-gcpstorage">9. Cloud Storage: <code>Gcp.Storage</code></h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Bucket</span> <span class="ot">=</span> <span class="dt">Bucket</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> bucketName   ::</span> <span class="dt">Text</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> bucketProject ::</span> <span class="dt">Project</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> bucketLocation ::</span> <span class="dt">Region</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> bucketUniformBucketLevelAccess ::</span> <span class="dt">Bool</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="ot">bucket ::</span> <span class="dt">Bucket</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><ul>
+<li><strong><code>up</code></strong>: <code>gcloud storage buckets create gs://... --location=...</code>
+</li>
+<li><strong><code>check</code></strong>: <code>gcloud storage buckets describe gs://...</code>
+</li>
+<li>IAM nodes for access grants.
+</li>
+<li>Optional lifecycle and CORS nodes if needed.
+</li>
+</ul>
+<p>Use a pre-check before create to make <code>up</code> idempotent.</p>
+<hr />
+<h3 id="10-iam-gcpiam">10. IAM: <code>Gcp.Iam</code></h3>
+<p>A generic IAM node is useful for creating and attaching principals to resources. It can create service accounts and grant roles on projects or individual resources.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Principal</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="dt">ServiceAccount</span> <span class="dt">Text</span>              <span class="co">-- account ID</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="dt">User</span> <span class="dt">Text</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="dt">Group</span> <span class="dt">Text</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">IamBinding</span> <span class="ot">=</span> <span class="dt">IamBinding</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> iamPrincipal ::</span> <span class="dt">Principal</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> iamRole      ::</span> <span class="dt">Text</span>              <span class="co">-- e.g. &quot;roles/storage.objectViewer&quot;</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> iamResource  ::</span> <span class="dt">Text</span>              <span class="co">-- project ID or resource URI</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="ot">serviceAccount ::</span> <span class="dt">Project</span> <span class="ot">-&gt;</span> <span class="dt">Text</span> <span class="ot">-&gt;</span> <span class="dt">Op</span>       <span class="co">-- create service account</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a><span class="ot">iamBinding     ::</span> <span class="dt">IamBinding</span> <span class="ot">-&gt;</span> <span class="dt">Op</span>            <span class="co">-- grant role on resource</span></span></code></pre></div></div><ul>
+<li><strong><code>serviceAccount up</code></strong>: <code>gcloud iam service-accounts create &lt;id&gt; --project=&lt;project&gt;</code>
+</li>
+<li><strong><code>serviceAccount check</code></strong>: <code>gcloud iam service-accounts describe &lt;id&gt;@&lt;project&gt;.iam.gserviceaccount.com</code>
+</li>
+<li><strong><code>iamBinding up</code></strong>: <code>gcloud &lt;resource-type&gt; add-iam-policy-binding &lt;resource&gt; --member=&lt;member&gt; --role=&lt;role&gt;</code>
+</li>
+<li><strong><code>iamBinding check</code></strong>: <code>gcloud &lt;resource-type&gt; get-iam-policy &lt;resource&gt;</code> and verify the binding exists
+</li>
+<li><strong><code>down</code></strong>: remove the binding or delete the service account
+</li>
+</ul>
+<p>Use this for granting CloudRun service accounts access to buckets, Artifact Registry, and secrets.</p>
+<hr />
+<h3 id="11-cloudrun-services-gcpcloudrun">11. CloudRun Services: <code>Gcp.CloudRun</code></h3>
+<p>For now we model <strong>CloudRun services and revisions</strong>, not job executions. The image comes from the Artifact Registry repository provisioned earlier, so a CloudRun service node depends on both the repository and a pushed image.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">CloudRunService</span> <span class="ot">=</span> <span class="dt">CloudRunService</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> crsName           ::</span> <span class="dt">Text</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsProject        ::</span> <span class="dt">Project</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsRegion         ::</span> <span class="dt">Region</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsImage          ::</span> <span class="dt">Text</span>           <span class="co">-- full Artifact Registry URL</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsEnv            ::</span> <span class="dt">Map</span> <span class="dt">Text</span> <span class="dt">Text</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsServiceAccount ::</span> <span class="dt">Text</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsIngress        ::</span> <span class="dt">IngressSetting</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> crsMaxInstances   ::</span> <span class="dt">Maybe</span> <span class="dt">Int</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">IngressSetting</span> <span class="ot">=</span> <span class="dt">All</span> <span class="op">|</span> <span class="dt">Internal</span> <span class="op">|</span> <span class="dt">InternalAndLoadBalancing</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a><span class="ot">cloudRunService ::</span> <span class="dt">CloudRunService</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><ul>
+<li><strong><code>up</code></strong>: <code>gcloud run deploy &lt;name&gt; --image=&lt;image&gt; --region=&lt;region&gt; ...</code>
+</li>
+<li><strong><code>check</code></strong>: <code>gcloud run services describe &lt;name&gt; --region=&lt;region&gt;</code> and verify the active revision points at <code>crsImage</code>.
+</li>
+<li><strong><code>down</code></strong>: <code>gcloud run services delete &lt;name&gt; --region=&lt;region&gt; --quiet</code>
+</li>
+</ul>
+<p><strong>Image lifecycle</strong>: a CloudRun service node does not build or push images. It depends on an upstream node that pushes a Podman-built image to Artifact Registry. The image URL is part of the service spec, so changing the image triggers a new revision on <code>up</code>.</p>
+<p><strong>Job executions</strong>: deferred to a later phase. When needed, add <code>cloudRunJob</code> and <code>cloudRunJobExec</code> nodes separately.</p>
+<hr />
+<h3 id="12-example-dag-tenant-stack">12. Example DAG: Tenant Stack</h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">tenantStack ::</span> <span class="dt">TenantId</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>tenantStack tenant <span class="ot">=</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> bkt    <span class="ot">=</span> Gcp.Storage.bucket    (tenantBucket tenant)</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>      repo   <span class="ot">=</span> Gcp.ArtifactRegistry.artifactRepository (tenantRepo tenant)</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>      vm     <span class="ot">=</span> Gcp.Compute.instance    <span class="op">...</span> (tenantVm tenant)</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>      sshCa  <span class="ot">=</span> Gcp.SshAccess.metadataCaAccess <span class="op">...</span> tenant</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>      remote <span class="ot">=</span> <span class="dt">Ssh.Remote</span> <span class="st">&quot;salmon&quot;</span>   (vmIp tenant)</span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>      provision <span class="ot">=</span> provisionedVm <span class="op">...</span> vm sshCa remote tenantSpec</span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>  <span class="kw">in</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    provision</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    <span class="ot">`inject`</span> repo</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    <span class="ot">`inject`</span> bkt</span></code></pre></div></div><p>Dependencies ensure the bucket and repository exist before the VM starts, and SSH access is in place before the remote Salmon binary runs.</p>
+<hr />
+<h3 id="13-idempotency-and-check-mapping">13. Idempotency and Check Mapping</h3>
+<table>
+<tr><th>Resource</th><th>Check command</th><th>Result mapping</th></tr>
+<tr><td>ADC</td><td><code>gcloud auth application-default print-access-token</code></td><td>exit 0 → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>VM</td><td><code>gcloud compute instances describe --format=value(status)</code></td><td><code>RUNNING</code> → <code>Success</code>; <code>TERMINATED</code>/absent → <code>Failure</code>; transitional → <code>Unknown</code></td></tr>
+<tr><td>SSH available</td><td><code>ssh -o ConnectTimeout=5 -o BatchMode=yes ... true</code></td><td>exit 0 → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>OS Login CA</td><td>list user's SSH keys and compare CA fingerprint</td><td>match → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>Metadata CA</td><td><code>gcloud compute project-info describe</code> metadata</td><td>key present → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>Load balancer</td><td>describe all sub-resources</td><td>all present and healthy → <code>Success</code>; else <code>Failure</code> or <code>Unknown</code></td></tr>
+<tr><td>Artifact Registry</td><td><code>gcloud artifacts repositories describe</code></td><td>exists → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>GCS bucket</td><td><code>gcloud storage buckets describe gs://...</code></td><td>exists → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>IAM binding</td><td><code>gcloud &lt;resource&gt; get-iam-policy &lt;name&gt;</code></td><td>binding present → <code>Success</code>; else <code>Failure</code></td></tr>
+<tr><td>CloudRun service</td><td><code>gcloud run services describe</code></td><td>exists and active revision matches image → <code>Success</code>; else <code>Failure</code></td></tr>
+</table>
+<p>For resources with an <code>update</code> operation, prefer <code>describe → update-or-create</code> so that <code>up</code> remains idempotent even when parameters change.</p>
+<hr />
+<h3 id="14-secrets-handling">14. Secrets Handling</h3>
+<p>Use existing <code>Salmon.Builtin.Nodes.Secrets</code> for:</p>
+<ul>
+<li>SSH CA private keys.
+</li>
+<li>Service account JSON files, if ADC cannot be used.
+</li>
+</ul>
+<p>Never commit service account keys into directives. Pass them as file paths generated by <code>Secrets.sharedSecretFile</code>.</p>
+<hr />
+<h3 id="15-implementation-order">15. Implementation Order</h3>
+<ol>
+<li><strong><code>Gcp.Core</code></strong> + ADC validation node.
+</li>
+<li><strong><code>Gcp.Storage.bucket</code></strong> — simplest resource; good proving ground.
+</li>
+<li><strong><code>Gcp.Compute.instance</code></strong> + status-based <code>check</code>.
+</li>
+<li><strong><code>Gcp.SshAccess</code></strong> — choose metadata CA or OS Login and implement key injection.
+</li>
+<li><strong><code>Gcp.SshAccess.sshAvailable</code></strong> — verify SSH is reachable before remote provisioning.
+</li>
+<li><strong><code>SreBox.Gcp.VmProvision</code></strong> — VM + SSH + <code>Self.uploadAndCallSelf</code>.
+</li>
+<li><strong><code>Gcp.Iam</code></strong> — service accounts and role bindings.
+</li>
+<li><strong><code>Gcp.ArtifactRegistry</code></strong> repository + docker auth.
+</li>
+<li><strong><code>Gcp.CloudRun</code></strong> services and revisions from pushed images.
+</li>
+<li><strong><code>Gcp.LoadBalancing</code></strong> recipe last, because it has the most moving parts and depends on VM/instance-group or CloudRun nodes.
+</li>
+</ol>
+<hr />
+<h3 id="16-risks-and-mitigations">16. Risks and Mitigations</h3>
+<table>
+<tr><th>Risk</th><th>Mitigation</th></tr>
+<tr><td><strong>Async operations</strong></td><td>Poll inside <code>up</code> for <code>RUNNING</code> / ready state, or model intermediate states as explicit nodes.</td></tr>
+<tr><td><strong>API rate limits</strong></td><td>Salmon's concurrent driver is unbounded; add dependency edges between GCP ops or introduce a rewrite that batches <code>gcloud</code> calls.</td></tr>
+<tr><td><strong>Output fragility</strong></td><td>Prefer <code>--format=value(...)</code> or JSON output parsed with Aeson over human-readable text.</td></tr>
+<tr><td><strong>IAM propagation delay</strong></td><td>Retry on auth failures; do not trust <code>check</code> alone in the first seconds after a grant.</td></tr>
+<tr><td><strong>gcloud not installed</strong></td><td>Add a <code>Binary "gcloud"</code> provider node that fails early with a clear message.</td></tr>
+<tr><td><strong>Network access to private VMs</strong></td><td>Use IAP tunneling, a bastion, or OS Login with Identity-Aware Proxy.</td></tr>
+</table>
+<hr />
+<h3 id="17-decisions">17. Decisions</h3>
+<ol>
+<li><strong>VM <code>check</code></strong>: reports only GCE-level <code>RUNNING</code> status. SSH readiness is verified by a separate <code>Gcp.SshAccess.sshAvailable</code> support node.
+</li>
+<li><strong>Load balancer backends</strong>: support both GCE instance groups and serverless NEGs for CloudRun.
+</li>
+<li><strong>CloudRun</strong>: model services and revisions first, deployed from Podman images pushed to Artifact Registry. Job executions are deferred to a later phase.
+</li>
+<li><strong>IAM</strong>: add a generic <code>Gcp.Iam</code> module for creating service accounts and granting roles on projects or resources.
+</li>
+<li><strong>gcloud binary</strong>: support <code>gcloud</code> on <code>PATH</code> only for now. Configurable binary paths are deferred.
+</li>
+</ol>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

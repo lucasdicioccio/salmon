@@ -1229,7 +1229,7 @@ library — so the three files are readable as they are served.
 
 ## 16. Where to read more
 
-- `docs/howto-ops.md` — writing and testing the `Op`s this doc assumes.
+- `resources/howto-ops.md` — writing and testing the `Op`s this doc assumes.
 - `CLAUDE.md`'s "`salmon-ops` layer" section — the implementation-level
   summary of every module named above (`Actions/Upkeep.hs`,
   `Actions/Serve.hs`, `Op/Supervision.hs`, `Op/Dag.hs`, `Op/Rewrite.hs`),

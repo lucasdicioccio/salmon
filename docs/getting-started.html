@@ -1,0 +1,97 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Getting started with salmon</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/getting-started.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="how-to, getting started, build, cabal, config, run up, run serve"><meta name="description" content="Build the packages, run the tests, and read the two-step protocol every salmon binary speaks."><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Getting started with salmon"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Build the packages, run the tests, and read the two-step protocol every salmon binary speaks."><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Getting started with salmon"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/getting-started.html"><meta property="og:description" content="Build the packages, run the tests, and read the two-step protocol every salmon binary speaks."><meta name="article:published_time" content="2026-09-25T12:00:00Z"><meta name="article:modified_time" content="2026-09-25T12:00:00Z"><meta name="ks:article_json" content="/salmon/json/getting-started.cmark.json"><meta name="ks:article_text" content="/salmon/text/getting-started.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:00:00Z","datePublished":"2026-09-25T12:00:00Z","description":"Build the packages, run the tests, and read the two-step protocol every salmon binary speaks.","headline":"Getting started with salmon","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/getting-started.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="how-to"><meta name="article:tag" content="getting started"><meta name="article:tag" content="build"><meta name="article:tag" content="cabal"><meta name="article:tag" content="config"><meta name="article:tag" content="run up"><meta name="article:tag" content="run serve"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Getting started with salmon</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 707 words, 4 code snippets, 3 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><span class="topic-nav-boundary">|</span></span><a class="topic-link" href="/salmon/topics/how-to.html"><span class="topic-name">how-to</span><span class="topic-count">1/1</span></a><span class="topic-nav topic-next-link"><span class="topic-nav-boundary">|</span></span></div></div></header><div class="main-article"><section class="main-section"><h2 id="getting-started-with-salmon">Getting started with salmon</h2>
+<p>Salmon is a Haskell library and toolkit, not a hosted service: you write a
+small binary over the recipes you need, and that binary provisions things.
+This page gets you from a checkout to a running graph.</p>
+<h3 id="build">Build</h3>
+<pre><code class="language-sh">git clone https://github.com/lucasdicioccio/salmon
+cd salmon
+cabal build all
+cabal build salmon-core salmon-ops salmon-ops-recipes salmon-apps   # individual packages
+cabal build salmon-migrator                                          # a single executable
+</code></pre>
+<p>The project is layered strictly bottom-to-top:</p>
+<pre><code>salmon-core  &lt;-  salmon-ops  &lt;-  salmon-ops-recipes  &lt;-  salmon-apps
+                                        ^
+                                        |
+                          salmon-ops-recipes-experimental
+</code></pre>
+<ul>
+<li><strong><code>salmon-core</code></strong> — the algebraic <code>Graph</code>, and the <code>OpGraph</code>/<code>Track</code>/<code>Eval</code>
+abstractions that let “create a file” and “turn a server up” be the same
+type. No IO-heavy dependencies, kept minimal on purpose.
+</li>
+<li><strong><code>salmon-ops</code></strong> — IO-heavy primitives (files, systemd, Debian packages,
+podman, postgres, wireguard, certificates, ssh, netfilter, cron, rsync,
+qemu, GCP, …), the drivers that execute a graph (one-shot <code>up</code>/<code>down</code>,
+and the long-running <code>serve</code> loop with its supervision, HTTP API, web UI
+and pull mode), and the CLI plumbing every salmon binary shares.
+</li>
+<li><strong><code>salmon-ops-recipes</code></strong> — higher-level, opinionated compositions of the
+builtins, where project conventions get enforced. Has the real test suite.
+</li>
+<li><strong><code>salmon-ops-recipes-experimental</code></strong> — recipes needing heavier or less
+stable dependencies (kitchen-sink site generation, ACME certificates). Not
+in the default package set.
+</li>
+<li><strong><code>salmon-apps</code></strong> — the shipped binaries, each a small <code>Main</code> over a recipe.
+</li>
+</ul>
+<p>Some git dependencies in <code>cabal.project</code> point at the author’s other
+repositories, pinned by commit; they are not on Hackage.</p>
+<h3 id="test">Test</h3>
+<pre><code class="language-sh">cabal test salmon-ops-recipes
+</code></pre>
+<p>Tests are tiered by IO cost and blast radius: cheap in-process assertions on
+graph shape and traversal, up through tests that dogfood the project’s own
+<code>Podman</code> builtins to run real recipes against disposable containers, and a
+few that build qemu VMs. The container and VM tiers need <code>podman</code> or <code>qemu</code>
+on the machine and are skipped loudly otherwise. See
+<a href="/salmon/docs-howto-ops.html">Writing ops, §10</a> for the breakdown.</p>
+<h3 id="using-a-salmon-binary">Using a salmon binary</h3>
+<p>Every salmon binary speaks the same two-step protocol: <code>config</code> turns
+human-facing command-line arguments (a <em>seed</em>) into a JSON <em>directive</em>, and
+<code>run</code> reads that directive on standard input and acts on the graph it
+expands to.</p>
+<pre><code class="language-sh">my-salmon config &lt;seed-args...&gt;                        # seed -&gt; JSON directive on stdout
+my-salmon config &lt;seed-args...&gt; | my-salmon run up     # converge the graph
+my-salmon config &lt;seed-args...&gt; | my-salmon run down   # tear it down
+my-salmon config &lt;seed-args...&gt; | my-salmon run tree   # print the dependency tree (run dag: Graphviz)
+my-salmon config &lt;seed-args...&gt; | my-salmon query show --select '/some/path/**'
+my-salmon run serve                                    # read seed declarations as commands, keep converging
+</code></pre>
+<p>The split keeps the possibly-impure “decide what I want” step separate from
+the hermetic “make it so” step, which is meant to run unattended, often on
+another machine. <code>run up</code>/<code>run down</code>/<code>run serve</code> take <code>--json</code> for one JSON
+object per report. <code>query</code> targets a subset of the graph: <code>query plan --exclude PATTERN</code> writes a plan that <code>run up --plan FILE</code> honours.</p>
+<p><code>run serve</code> is the long-running mode. It reads <code>up</code>/<code>down</code>/<code>only</code>/<code>clear</code>/
+<code>converge</code>/<code>status</code>/… lines, keeps a world of every declared seed,
+converges after each one, and between commands <em>tends</em> the nodes,
+re-applying what goes missing under a per-node supervision policy. The same
+loop can be driven over a unix socket, over HTTP with an event stream and a
+web UI (or TLS and a token over TCP), from a terminal client, or pull its
+declarations from a registry — a directory, git, HTTPS, DNS or a bucket,
+optionally signed — and report back through a status file that
+<code>salmon-fleet status</code> folds. All of that is
+<a href="/salmon/docs-serve-supervision.html"><code>run serve</code>: convergence and supervision</a>.</p>
+<h3 id="the-model-in-one-paragraph">The model, in one paragraph</h3>
+<p>An <code>Op</code> is a graph node centered on itself, with an <em>effectful</em> recipe for
+finding its own predecessors — this is what lets a one-line filesystem op
+and a whole clustered-database-with-replication setup type-check
+identically. Every op carries <code>up</code>/<code>down</code> (bring the effect into being /
+undo it), <code>check</code> (a <code>CheckResult</code> answering “is my effect already in
+place”, which is what makes a node idempotent to re-run), and a <code>Ref</code> that
+gives it a stable identity so the traversal can dedupe a resource reached
+via several graph paths. The drivers collapse the materialized graph into a
+DAG with one node per <code>Ref</code>, walk it in dependency order (or the reverse,
+for teardown), contain real failures (a thrown exception marks a node
+<code>Failed</code> and blocks everything depending on it rather than being swallowed),
+and report exactly what happened, node by node.</p>
+<h3 id="write-your-own-binary">Write your own binary</h3>
+<p>Define a <code>seed</code> type, a <code>directive</code> type (<code>FromJSON</code>/<code>ToJSON</code>), a
+<code>Configure IO seed directive</code>, and a <code>Track' directive</code> that turns a
+directive into an <code>Op</code> by composing builtin nodes and recipes; then hand the
+four to <code>Salmon.Builtin.CommandLine.execCommandOrSeed</code>. The
+<a href="/salmon/docs-howto-ops.html">cookbook</a> walks through each piece with a worked
+example, and <code>salmon-apps/src/Migrator.hs</code> in the repository is a complete
+one.</p>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

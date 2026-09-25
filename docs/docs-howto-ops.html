@@ -1,0 +1,619 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - How to write and test salmon ops</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-howto-ops.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is a cookbook. It is written to be unambiguous rather than elegant: copy the patterns below, adapt the names/fields, and you will produce a valid `Op`. If you want the conceptual model instead (why any of this exists), read [`salmon-co"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - How to write and test salmon ops"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is a cookbook. It is written to be unambiguous rather than elegant: copy the patterns below, adapt the names/fields, and you will produce a valid `Op`. If you want the conceptual model instead (why any of this exists), read [`salmon-co"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - How to write and test salmon ops"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-howto-ops.html"><meta property="og:description" content="This is a cookbook. It is written to be unambiguous rather than elegant: copy the patterns below, adapt the names/fields, and you will produce a valid `Op`. If you want the conceptual model instead (why any of this exists), read [`salmon-co"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/docs-howto-ops.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-howto-ops.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"This is a cookbook. It is written to be unambiguous rather than elegant: copy the patterns below, adapt the names/fields, and you will produce a valid `Op`. If you want the conceptual model instead (why any of this exists), read [`salmon-co","headline":"How to write and test salmon ops","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-howto-ops.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>How to write and test salmon ops</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 4185 words, 24 code snippets, 5 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><span class="topic-nav-boundary">|</span></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">1/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-gcp-toy-validation.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/howto-ops.md"><code>resources/howto-ops.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="how-to-write-and-test-salmon-ops">How to write and test salmon ops</h2>
+<p>This is a cookbook. It is written to be unambiguous rather than elegant: copy the
+patterns below, adapt the names/fields, and you will produce a valid <code>Op</code>. If you
+want the conceptual model instead (why any of this exists), read
+<a href="/salmon/docs-salmon-core.html"><code>salmon-core.md</code></a> first. This document assumes you already know
+Haskell syntax but not necessarily this codebase.</p>
+<p>Every code sample below is a paraphrase of real code in this repository. When in
+doubt, grep for the cited file/function and copy its shape exactly.</p>
+<h3 id="1-the-one-type-you-need-op">1. The one type you need: <code>Op</code></h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> <span class="dt">Op</span> <span class="ot">=</span> <span class="dt">OpGraph</span> <span class="dt">Identity</span> <span class="dt">Actions&#39;</span></span></code></pre></div></div><p>An <code>Op</code> is a single graph node plus everything needed to run it: how to bring it
+up, how to tear it down, how to know if it’s already up, and what it depends on.
+You almost never construct one by hand — you call the <code>op</code> helper.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">op ::</span> <span class="dt">ShortHand</span> <span class="ot">-&gt;</span> <span class="dt">Identity</span> (<span class="dt">Graph</span> <span class="dt">Op</span>) <span class="ot">-&gt;</span> (<span class="dt">Extension</span> <span class="ot">-&gt;</span> <span class="dt">Extension</span>) <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><ul>
+<li><code>ShortHand</code> (a <code>Text</code>) — a short, human-readable kind name, e.g. <code>&quot;directory&quot;</code>,
+<code>&quot;file-contents&quot;</code>, <code>&quot;pg-user&quot;</code>. Used in <code>Ref</code> construction (see below) and in
+<code>Tree</code>/<code>Dot</code> output. Pick something stable — changing it changes the node’s
+identity.
+</li>
+<li><code>Identity (Graph Op)</code> — this node’s dependencies. Almost always built with one
+of the two helpers below, never by hand:
+<ul>
+<li><code>nodeps :: Identity (Graph Op)</code> — no dependencies.
+</li>
+<li><code>deps :: [Op] -&gt; Identity (Graph Op)</code> — depends on (is preceded by) this list
+of ops, all co-occurring at the same level (no ordering is implied <em>between</em>
+them — see §3 for ordering).
+</li>
+</ul>
+</li>
+<li><code>(Extension -&gt; Extension)</code> — a function that fills in the actual behavior on
+top of a blank no-op <code>Extension</code>. You almost always write this as a record
+update on the <code>actions</code> argument: <code>\actions -&gt; actions { help = ..., up = ... }</code>.
+</li>
+</ul>
+<h3 id="2-the-extension-record--what-you-fill-in">2. The <code>Extension</code> record — what you fill in</h3>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Extension</span> <span class="ot">=</span> <span class="dt">Extension</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> help    ::</span> <span class="dt">Text</span>            <span class="co">-- one-line description</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> notes   ::</span> [<span class="dt">Text</span>]          <span class="co">-- longer free-form notes</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> ref     ::</span> <span class="dt">Ref</span>             <span class="co">-- dedup identity (see §2.1)</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> up      ::</span> <span class="dt">IO</span> ()           <span class="co">-- bring this node&#39;s own effect into being</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> managed ::</span> <span class="dt">Maybe</span> (<span class="dt">Output</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">ExitCode</span>)</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>                                 <span class="co">-- ...or *be* the effect, for as long as it runs (see §2.2)</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> check   ::</span> <span class="dt">IO</span> <span class="dt">CheckResult</span>  <span class="co">-- is my effect already in place? (see §4)</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> down    ::</span> <span class="dt">IO</span> ()           <span class="co">-- undo this node&#39;s own effect</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> dynamics ::</span> [<span class="dt">Dynamic</span>]      <span class="co">-- arbitrary typed metadata, see §7</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p>You only ever need to touch <code>help</code>, <code>ref</code>, <code>up</code>, <code>down</code>, and — if the node
+needs idempotency beyond what <code>up</code> itself can guarantee — <code>check</code>. <code>managed</code>
+is <code>Nothing</code> for all but a handful of nodes; see §2.2 if yours is one of
+them.</p>
+<p><code>check</code> answers one question about the node’s own effect, with six possible
+answers: <code>Success</code> (it is in place), <code>Skipped</code> (someone decided to treat it as
+satisfied — only <code>Query.forceSkip</code> produces this), <code>Completed</code> (it ran to
+completion and stopped on purpose), <code>Failure reason</code> (it is not in place —
+the <em>ordinary</em> answer on a first run, not an error report), <code>Unknown</code> (a check
+ran and could not tell), and <code>Immaterial</code> (there is nothing here worth asking
+about — applying the effect costs about what finding out would; this is the
+<strong>default</strong> when you write no <code>check</code>). <code>upTree</code> skips the first three and runs
+<code>up</code> for the last three.</p>
+<p><code>check</code> earns its keep twice, and the second time is easy to miss. In a one-shot
+<code>run up</code> it is an optimisation: it saves an <code>up</code> you didn’t need. Under <code>run serve</code>, which <em>tends</em> its nodes between commands (<code>Salmon.Actions.Upkeep</code>), it
+is the <strong>only</strong> thing that can notice your effect going away — nothing else in
+the model looks. A node with no <code>check</code> answers <code>Immaterial</code>, and the upkeep
+FSM <em>parks</em> it: brought up once, then blocked on its mailbox rather than woken
+on a timer to be told the same thing. (An explicit <code>Unknown</code> is different: the
+FSM keeps asking, and keeps not acting on it — a loop that treated “I could not
+tell” as “so run <code>up</code>” would spin.) So if your node is something that can stop
+being true on its own — a service, a mount, a firewall rule, a file something
+else might clobber — write a <code>check</code>; it is the difference between a node that
+gets <em>applied</em> and a node that gets <em>supervised</em>. <code>Netfilter.rule</code>’s
+<code>skipIfNftRuleExists</code> is the template, <code>Systemd.checkService</code> is the worked
+example of what a real one costs, and <code>Filesystem.checkFileContents</code> is the
+one most node authors will want to copy: it compares the bytes it would write
+with the bytes that are there, which is exact where <code>skipIfFileExists</code> would
+call a file holding the wrong thing satisfied.</p>
+<p>There is one alternative to writing a <code>check</code>, and it is narrow:
+<code>Salmon.Op.Supervision.supReapply</code> opts a parked node into re-running <code>up</code> on
+the loop instead of asking. Only sound when <code>up</code> is both genuinely cheap and
+genuinely idempotent — <code>Filesystem.dir</code> sets it (<code>createDirectoryIfMissing</code>
+costs about what <code>doesDirectoryExist</code> would, so there’s nothing to compare);
+a build, a clone, or anything that talks to the network should write a
+<code>check</code> instead, or leave itself parked.</p>
+<p><code>up</code> and <code>down</code> default to <code>pure ()</code> (a no-op) if you don’t set them — this is
+useful for pure “grouping” nodes (see §3) that only exist to bundle
+dependencies, with no effect of their own.</p>
+<h4 id="21-ref-dedup-identity">2.1 <code>ref</code>: dedup identity</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>ref <span class="ot">=</span> mkRef <span class="st">&quot;directory&quot;</span> path</span></code></pre></div></div><p><code>mkRef :: (Hashable key) =&gt; Text -&gt; key -&gt; Ref</code> builds a <code>Ref</code> from a kind tag
+plus anything <code>Hashable</code> that uniquely identifies <em>this</em> instance of the node
+— usually the primary key of whatever you’re describing (a file path, a
+database name, a <code>(src, tgt)</code> pair for a copy). Two <code>Op</code>s with the same <code>Ref</code>
+are treated as the <em>same node</em> by the graph traversal (<code>upTree</code>/<code>downTree</code>):
+reachable via two different paths or not, it is one node, applied once.
+<strong>Getting <code>ref</code> right is the
+single most important thing when writing a new node</strong> — get it wrong (too
+coarse, e.g. reusing one <code>Ref</code> for two different files) and you silently skip
+work; get it wrong the other way (varying per-call for what should be the same
+resource) and you silently do the work twice. Forgetting <code>ref</code> altogether is the
+first kind: the default is <code>mkRef &quot;noop&quot; shorthand</code>, so every node sharing a
+<code>ShortHand</code> collapses into one.</p>
+<p>Note what the identity key is <em>not</em>: the node’s behaviour. <code>filecontents</code> keys
+on the path alone, so an equal <code>Ref</code> means “the same effect site”, not an equal
+node — two <code>Op</code>s writing different bytes to one path are one node, and only one
+of them wins. Both traversals go through <code>Salmon.Op.Dag</code>, so the rule is the
+same in both directions: the <strong>last</strong> representative wins, and the loser is
+reported as <code>Conflicting</code> so the collision is at least visible.
+Tightening a key (putting a content digest in it, say) is a legitimate per-node
+fix, but think about it per node: it is right for a file and wrong for a
+long-running service, where every config tweak would become a different node.</p>
+<h4 id="22-managed-when-the-node-is-a-running-process">2.2 <code>managed</code>: when the node <em>is</em> a running process</h4>
+<p><code>up :: IO ()</code> describes an effect that persists once it has been made: the
+file stays written, the route stays installed. A long-running process does
+not — nothing keeps it alive but something watching it. That is what
+<code>managed</code> is for:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">managed ::</span> <span class="dt">Maybe</span> (<span class="dt">Output</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">ExitCode</span>)</span></code></pre></div></div><p>It blocks for as long as the node is up and returns the reason it stopped,
+which means the node’s own thread is in scope for the process’s entire
+lifetime and the handle never has to escape. Three things follow that a
+<code>check</code> alone cannot give you: an exit <em>status</em> (so “don’t restart a service
+that exited cleanly” is expressible), promptness (a death is noticed at once
+rather than at the end of a check delay that may be a minute), and identity
+that survives pid reuse.</p>
+<p>Don’t write one from scratch — use <code>Salmon.Builtin.Nodes.Daemon</code>:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>Daemon.daemon reportPrint (Daemon.defaultDaemon <span class="st">&quot;webserver&quot;</span> (proc <span class="st">&quot;nginx&quot;</span> [<span class="st">&quot;-g&quot;</span>, <span class="st">&quot;daemon off;&quot;</span>]))</span></code></pre></div></div><p>or, if your node needs dependencies or a liveness <code>check</code> of its own, build
+it around <code>Daemon.runDaemon</code>, which is the same action without the node
+wrapped round it. Either way you get the teardown: a signal (<code>SIGTERM</code> by
+default, <code>daemon_stop.stop_signal</code> otherwise) to the process <em>group</em>, a grace
+period, then <code>SIGKILL</code>. Writing that yourself is easy to get
+subtly wrong.</p>
+<p>Three things to know before reaching for this:</p>
+<ul>
+<li><strong>only <code>run serve</code> honours it.</strong> <code>run up</code>/<code>run down</code> call <code>up</code>, and a
+one-pass driver has nowhere to put an action that never returns. So a node
+like this should <code>throwIO</code> from <code>up</code> (that’s what <code>Daemon.daemon</code> does)
+rather than no-op into a world that then believes it is up.
+</li>
+<li><strong>prefer systemd where there is systemd.</strong> <code>Systemd.systemdService</code> hands
+the whole problem to an init system that is better at it and survives
+salmon exiting. <code>managed</code> is for where that is not available: a container,
+a test harness, or salmon-as-init itself.
+</li>
+<li><strong>the <code>Output</code> argument is where your process’s own lines go</strong> — into the
+node’s bounded ring, which is what an operator reads when it has failed and
+what tells a watchdog it is still making progress. <code>Daemon.runDaemon</code>
+handles the piping.
+</li>
+</ul>
+<h3 id="3-the-canonical-example-filesystemhs">3. The canonical example: <code>Filesystem.hs</code></h3>
+<p>Read <code>salmon-ops/src/Salmon/Builtin/Nodes/Filesystem.hs</code> end to end — it is the
+smallest complete example of every pattern in this document. Key excerpts:</p>
+<p>A node with no dependencies:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">Directory</span> <span class="ot">=</span> <span class="dt">Directory</span> {<span class="ot">directoryPath ::</span> <span class="dt">FilePath</span>}</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">dir ::</span> <span class="dt">Directory</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>dir directory <span class="ot">=</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    op <span class="st">&quot;directory&quot;</span> nodeps <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        actions</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>            { help <span class="ot">=</span> Text.pack <span class="op">$</span> <span class="st">&quot;ensures &quot;</span> <span class="op">&lt;&gt;</span> path <span class="op">&lt;&gt;</span> <span class="st">&quot; exists, including subdirs&quot;</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>            , ref <span class="ot">=</span> mkRef <span class="st">&quot;directory&quot;</span> path</span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>            , up <span class="ot">=</span> createDirectoryIfMissing <span class="dt">True</span> path</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>            , down <span class="ot">=</span> removeDirectoryIfPresent path</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>            , dynamics <span class="ot">=</span> [supervised defaultSupervision{supReapply <span class="ot">=</span> <span class="dt">True</span>}]</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>            }</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>  <span class="kw">where</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    path <span class="ot">=</span> directory<span class="op">.</span>directoryPath</span></code></pre></div></div><p>A node that depends on another node it builds internally:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">FileContents</span> a <span class="ot">=</span> <span class="dt">FileContents</span> {<span class="ot">filePath ::</span> <span class="dt">FilePath</span>,<span class="ot"> contents ::</span> a}</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">filecontents ::</span> (<span class="dt">EncodeFileContents</span> a) <span class="ot">=&gt;</span> <span class="dt">FileContents</span> a <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>filecontents fcontents <span class="ot">=</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    op <span class="st">&quot;file-contents&quot;</span> (deps [enclosingdir]) <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        actions</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>            { help <span class="ot">=</span> Text.pack <span class="op">$</span> <span class="st">&quot;writes &quot;</span> <span class="op">&lt;&gt;</span> path <span class="op">&lt;&gt;</span> <span class="st">&quot; with some contents&quot;</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>            , ref <span class="ot">=</span> mkRef <span class="st">&quot;file-contents&quot;</span> path</span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>            , check <span class="ot">=</span> checkFileContents fcontents</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>            , up <span class="ot">=</span> <span class="dt">ByteString</span><span class="op">.</span><span class="fu">writeFile</span> path <span class="op">=&lt;&lt;</span> encodeFileContents fcontents<span class="op">.</span>contents</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>            , down <span class="ot">=</span> removeFileIfPresent path</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>            }</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>  <span class="kw">where</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    enclosingdir <span class="ot">=</span> dir (<span class="dt">Directory</span> <span class="op">$</span> takeDirectory path)</span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>    path <span class="ot">=</span> fcontents<span class="op">.</span>filePath</span></code></pre></div></div><p>Note both <code>down</code>s tolerate the effect already being gone
+(<code>removeDirectoryIfPresent</code>/<code>removeFileIfPresent</code>, not <code>removeDirectory</code>/
+<code>removeFile</code>): a <code>down</code> that throws leaves its node “still standing” and
+blocks the teardown of everything under it (§5), so <code>down</code> needs the same
+run-twice safety as <code>up</code>.</p>
+<p>Note the pattern: <code>filecontents</code> doesn’t take a <code>Directory</code> as an argument — it
+<em>derives</em> the directory it needs (<code>takeDirectory path</code>) and constructs that
+dependency itself, inline, in a <code>where</code> clause. This is idiomatic: a node
+should make its own prerequisites, not expect a caller to remember to also
+build them. As long as the derived <code>dir</code> call produces the same <code>Ref</code> every
+time it’s reachable, it dedups correctly no matter how many other nodes also
+depend on “the same” directory.</p>
+<p>A node combining several dependencies with explicit ordering
+(<code>replaceDirectory</code> in the same file):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">replaceDirectory ::</span> <span class="dt">FilePath</span> <span class="ot">-&gt;</span> <span class="dt">FilePath</span> <span class="ot">-&gt;</span> <span class="dt">FilePath</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>replaceDirectory src tgt trash <span class="ot">=</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    op <span class="st">&quot;replace-dir&quot;</span> (deps [delete3 <span class="ot">`inject`</span> move2 <span class="ot">`inject`</span> move1]) <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        actions</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>            { help <span class="ot">=</span> Text.pack <span class="op">$</span> <span class="st">&quot;replace &quot;</span> <span class="op">&lt;&gt;</span> src <span class="op">&lt;&gt;</span> <span class="st">&quot; &quot;</span> <span class="op">&lt;&gt;</span> tgt</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>            , ref <span class="ot">=</span> mkRef <span class="st">&quot;replace-dir&quot;</span> (src, tgt)</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>            }</span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  <span class="kw">where</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    move1 <span class="ot">=</span> moveDirectory tgt trash <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span> actions{check <span class="ot">=</span> skipIfDirectoryIsMissing tgt}</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    move2 <span class="ot">=</span> moveDirectory src tgt <span class="fu">id</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    delete3 <span class="ot">=</span> destroyDirectory trash</span></code></pre></div></div><p>This node has <strong>no <code>up</code>/<code>down</code> of its own</strong> (they default to no-ops) — it’s a
+pure orchestration node whose entire job is wiring three other ops together in
+order. This is a completely normal and common pattern: not every <code>op</code> call
+needs to <em>do</em> anything itself.</p>
+<h4 id="31-deps-vs-inject-vs-overlaid">3.1 <code>deps</code> vs <code>inject</code> vs <code>overlaid</code></h4>
+<ul>
+<li><code>deps [a, b, c]</code> — this node is preceded by <code>a</code>, <code>b</code>, and <code>c</code>, each also
+preceded by whatever <em>they</em> depend on. No ordering is implied among <code>a</code>,
+<code>b</code>, <code>c</code> themselves.
+</li>
+<li><code>a `inject` b</code> (from <code>Salmon.Op.OpGraph</code>) — “<code>b</code> must happen before <code>a</code>”:
+adds <code>b</code> as a predecessor of <code>a</code> via an ordered graph connection. Chain it to
+express a strict sequence: <code>c `inject` b `inject` a</code> means run <code>a</code>, then
+<code>b</code>, then <code>c</code>.
+</li>
+<li><code>a `overlaid` b</code> — “<code>a</code> and <code>b</code> co-occur, no ordering implied between
+them” (the unordered counterpart to <code>inject</code>).
+</li>
+</ul>
+<p>Use <code>deps [...]</code> for the normal “these are my prerequisites” case. Reach for
+<code>inject</code> only when two ops need a specific order that the dependency structure
+alone wouldn’t otherwise guarantee (e.g. “delete the trash dir” must happen
+<em>after</em> “move src into place”, not just alongside it).</p>
+<h3 id="4-idempotency-making-up-safe-to-run-twice">4. Idempotency: making <code>up</code> safe to run twice</h3>
+<p><code>upTree</code> may run the same <code>Op</code> graph repeatedly (that’s the point — it’s meant
+to converge a system to a target state, not run once and be thrown away).
+<strong><code>up</code> must be safe to call when the target state already holds.</strong> In rough
+order of preference:</p>
+<ol>
+<li><strong>Use a <code>replace</code>-shaped command if the tool has one.</strong> E.g. <code>ip route replace</code> instead of <code>ip route add</code> (see <code>Salmon.Builtin.Nodes.Routes</code>), or
+SQL <code>ALTER SYSTEM SET</code> instead of an insert.
+</li>
+<li><strong>Use a <code>CREATE ... IF NOT EXISTS</code> / <code>CREATE OR REPLACE</code> form if it exists</strong>
+for what you’re creating.
+</li>
+<li><strong>Guard a bare <code>CREATE</code> with a conditional inside a <code>DO</code> block</strong>, when the
+tool allows a <code>CREATE</code> with no <code>IF NOT EXISTS</code> form to run inside one — e.g.
+Postgres <code>CREATE ROLE</code> has no <code>IF NOT EXISTS</code>, but can run inside:
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>DO $$</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="cf">BEGIN</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="cf">IF</span> <span class="kw">NOT</span> <span class="kw">EXISTS</span> (<span class="kw">SELECT</span> <span class="kw">FROM</span> pg_roles <span class="kw">WHERE</span> rolname <span class="op">=</span> <span class="st">&#39;myuser&#39;</span>) <span class="cf">THEN</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">CREATE</span> <span class="kw">ROLE</span> myuser;</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  <span class="cf">END</span> <span class="cf">IF</span>;</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="cf">END</span> $$;</span></code></pre></div></div>(see <code>Postgres.CreateUser</code>/<code>CreateGroup</code> in
+<code>salmon-ops/src/Salmon/Builtin/Nodes/Postgres.hs</code>).
+</li>
+<li><strong>Shell-level check-then-act</strong>, when even that isn’t available — e.g.
+Postgres refuses to run <code>CREATE DATABASE</code> inside a transaction/<code>DO</code> block at
+all, so <code>Postgres.CreateDB</code> does:
+<pre><code class="language-sh">psql -tAc &quot;SELECT 1 FROM pg_database WHERE datname = 'mydb'&quot; | grep -q 1 \
+  || psql -c 'CREATE DATABASE mydb'
+</code></pre>
+</li>
+<li><strong>Append-if-missing</strong>, for config file lines with no SQL/CLI equivalent at
+all: <code>grep -qxF '&lt;line&gt;' file || echo '&lt;line&gt;' &gt;&gt; file</code> (see
+<code>Postgres.ensureHbaLineScript</code>, for <code>pg_hba.conf</code>).
+</li>
+<li><strong>A <code>check</code>-based skip check</strong>, when the underlying tool has <em>no</em> idempotent
+verb at all — nothing to <code>replace</code>, no <code>IF NOT EXISTS</code> — so <code>up</code> itself
+cannot be made safe to re-run. Instead, check <em>before</em> running whether the
+effect already exists, and report <code>Success</code> if so:
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">skipIfNftRuleExists ::</span> <span class="dt">Chain</span> <span class="ot">-&gt;</span> <span class="dt">Rule</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">CheckResult</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>skipIfNftRuleExists c rule <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    (code, out, _err) <span class="ot">&lt;-</span> readCreateProcessWithExitCode (proc <span class="st">&quot;nft&quot;</span> [<span class="st">&quot;list&quot;</span>, <span class="st">&quot;chain&quot;</span>, <span class="op">...</span>]) <span class="st">&quot;&quot;</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">pure</span> <span class="op">$</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        <span class="kw">if</span> renderedRuleText rule <span class="ot">`isInfixOf`</span> out</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>            <span class="kw">then</span> <span class="dt">Success</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>            <span class="kw">else</span> <span class="dt">Failure</span> <span class="st">&quot;no such rule in the chain&quot;</span></span></code></pre></div></div><div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>op <span class="st">&quot;netfilter-rule&quot;</span> (deps [<span class="op">...</span>]) <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    actions</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>        { check <span class="ot">=</span> skipIfNftRuleExists chain rule</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        , up <span class="ot">=</span> addRule <span class="op">...</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        , <span class="op">...</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        }</span></code></pre></div></div>This is the same shape as the built-in <code>skipIfFileExists</code>/
+<code>skipIfDirectoryIsMissing</code>/<code>skipIfNetworkExists</code> helpers in
+<code>Salmon.Actions.UpDown</code>/<code>Salmon.Builtin.Nodes.Podman</code> — <strong>when you add a new
+node wrapping a command with no idempotent “set” verb (e.g. <code>nft add rule</code>,
+<code>podman network create</code>), this is the template to copy</strong>: write a
+<code>skipIfXExists :: ... -&gt; IO CheckResult</code> that shells out to a read-only
+“does X exist” check, and wire it into <code>check</code>.
+</li>
+</ol>
+<p><code>check</code> defaults to <code>pure Immaterial</code> — “asking would cost what applying costs”,
+which <code>upTree</code> reads as “run <code>up</code>” — if you don’t set it, so options 1–5 above
+need no <code>check</code> at all; only option 6 does. That default is a claim, not an
+absence, and for options 1–5 it is a true one: the whole reason those nodes are
+idempotent is that re-applying them is cheap. It is <em>false</em> for anything that
+can stop being true on its own, which is why such a node needs option 6. Note also that a <code>check</code> that <em>throws</em> is
+contained: it is read as <code>Failure</code>, so the node is evaluated and the rest of
+the traversal is unaffected.</p>
+<h3 id="5-failure-how-updown-report-errors">5. Failure: how <code>up</code>/<code>down</code> report errors</h3>
+<p><code>up :: IO ()</code> and <code>down :: IO ()</code> have no return value to signal failure — the
+<strong>only</strong> way a failure becomes visible to the graph traversal (<code>upTree</code>/
+<code>downTree</code> in <code>Salmon.Actions.UpDown</code>) is if <code>up</code>/<code>down</code> <strong>throws</strong>. A thrown
+exception is caught by the traversal, the node is reported <code>Failed</code>, and every
+node that (transitively) depends on it is reported <code>Blocked</code> and <em>not</em>
+evaluated (for <code>upTree</code>; <code>downTree</code> blocks the opposite direction — a node’s
+own predecessors — since teardown walks top-to-bottom). Both <code>upTree</code> and
+<code>downTree</code> return <code>IO Bool</code>: <code>True</code> iff nothing was <code>Failed</code>/<code>Blocked</code>.</p>
+<p><strong>Getting this right is mostly automatic</strong> if you build <code>up</code> on top of
+<code>Salmon.Builtin.Nodes.Binary.untrackedExec</code> (which almost every builtin does
+via <code>withBinary</code>) — it already checks the subprocess exit code and throws
+<code>CommandFailed</code> on non-zero, so a normal <code>up = someCommand r' ...</code> needs no
+extra handling.</p>
+<p>Two cases <em>do</em> need you to add explicit handling:</p>
+<ul>
+<li>If your node is built on the lower-level <code>withBinaryIO</code>/<code>CommandIO</code> (used
+when you need to redirect a subprocess’s stdin/stdout yourself, e.g.
+<code>WireGuard.privateKey</code>/<code>publicKey</code>), you get a raw <code>ProcessHandle</code> back
+instead of a checked result — call <code>Binary.checkExitCode label</code> on it
+yourself (it throws <code>CommandFailedSimple</code> on non-zero).
+</li>
+<li>If your node’s <code>up</code> recursively runs its <em>own</em> nested <code>upTree</code> (e.g. to
+drive a remote machine, see <code>PostgresMigrations.remoteMigrateOpaqueSetup</code>),
+you must check the returned <code>Bool</code> yourself and <code>throwIO</code> if it’s <code>False</code> —
+the outer traversal has no other way to learn the nested one failed:
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>up <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    ok <span class="ot">&lt;-</span> upTree r nat nestedGraph</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    unless ok (throwIO (<span class="fu">userError</span> <span class="st">&quot;nested upTree failed&quot;</span>))</span></code></pre></div></div></li>
+</ul>
+<p>Never swallow an exception inside <code>up</code>/<code>down</code> (e.g. via <code>catch</code>/<code>handle</code>) just
+to “keep going” — that defeats <code>Failed</code>/<code>Blocked</code> propagation and makes a real
+failure look like success to the traversal and to anything scripting around
+this binary’s exit code.</p>
+<p>All of the above is the one-shot drivers (<code>run up</code>/<code>run down</code>). Under <code>run serve</code> a node is <em>tended</em> rather than applied once (<code>Salmon.Actions.Upkeep</code>):
+a failing <code>up</code> is retried on a backing-off delay, and a dependant waits for
+its dependency to recover rather than being reported <code>Blocked</code> for good. The
+node’s <code>Supervision</code> (§7) says what to do when it keeps failing; see
+<a href="/salmon/docs-serve-supervision.html"><code>serve-supervision.md</code></a>. The rule for <code>up</code> itself is
+the same either way: throw.</p>
+<h3 id="6-composing-with-tracktracked--when-a-node-needs-a-value-from-elsewhere">6. Composing with <code>Track</code>/<code>Tracked</code> — when a node needs a value from elsewhere</h3>
+<p>Sometimes one node’s construction genuinely needs a <em>value</em> that another part
+of the graph produces or that the caller controls (not just an ordering
+dependency) — e.g. “grant these rights to <em>this</em> database owner role, which
+some other part of the setup created.” That’s what <code>Track</code>/<code>Tracked</code> are for:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">Track</span> m n a <span class="ot">=</span> <span class="dt">Track</span> {<span class="ot"> run ::</span> a <span class="ot">-&gt;</span> <span class="dt">OpGraph</span> m n }</span></code></pre></div></div><p>A <code>Track' a</code> (i.e. <code>Track Identity Actions' a</code>) is “given an <code>a</code>, I know how to
+build the <code>Op</code> that provisions it.” You’ll see this passed around as a
+parameter so callers can plug in different strategies for “how do I get an
+<code>a</code>” without the node itself caring — e.g. <code>Postgres.database</code> takes a
+<code>Track' (Binary &quot;psql&quot;)</code> so callers can point it at a locally-installed
+<code>psql</code> binary or a differently-provisioned one.</p>
+<p><code>ignoreTrack :: Track' a</code> is a real, always-available <code>Track</code> that discards its
+input and produces a no-op <code>Op</code> — use it when you have a value already in hand
+and don’t need the <code>Track</code> machinery to <em>produce</em> anything more, only to
+satisfy a function signature that expects one (this is extremely common; grep
+existing recipes for <code>ignoreTrack</code> to see the pattern used dozens of times).</p>
+<p>You do not need <code>Track</code>/<code>Tracked</code> for the vast majority of new nodes — only
+reach for it when you’re deliberately decoupling “how do I build a value” from
+“what do I do with it,” the same way <code>Postgres.hs</code> and the recipes in
+<code>salmon-ops-recipes/src/SreBox/</code> do it. See <a href="/salmon/docs-salmon-core.html"><code>salmon-core.md</code></a>
+§<code>Track</code> for the type-level reasoning.</p>
+<h3 id="7-dynamics--attaching-arbitrary-metadata-to-a-node">7. <code>dynamics</code> — attaching arbitrary metadata to a node</h3>
+<p><code>dynamics :: [Dynamic]</code> lets you stash arbitrary typed metadata on a node that
+some other part of the codebase can later recover by type, without changing
+<code>Extension</code> itself. A few real uses:</p>
+<ul>
+<li>
+<p><code>placeholder</code> (in <code>Salmon.Builtin.Extension</code>) stashes a <code>PlaceHolder Text</code> so
+dot-graph rendering can show a label without the node needing real <code>up</code>/
+<code>down</code> behavior.</p>
+</li>
+<li>
+<p><code>getDynamics</code>/<code>collectDynamics</code> walk a graph and pull out every <code>Dynamic</code> of
+a chosen type — used e.g. to flatten “which of these ops are actually remote
+calls” out of a graph for special handling.</p>
+</li>
+<li>
+<p><code>Debian.Package.deb</code> stashes a <code>Package</code>, which the <code>batchPackages</code> <strong>rewrite</strong>
+(<code>Salmon.Op.Rewrite</code>) collects across the whole graph into one <code>apt-get</code>
+invocation.</p>
+</li>
+<li>
+<p>A <code>Salmon.Op.Supervision.Supervision</code> states how the node wants to be tended:
+whether to put it back when its <code>check</code> says the effect has gone (<code>Always</code>/
+<code>OnFailure</code>/<code>Never</code>, defaulting to <code>OnFailure</code>), how long its silence may
+last before somebody should worry, and — <code>supStrategy</code> — what its <em>going
+away</em> means for the nodes standing on it. <code>Salmon.Actions.Upkeep</code> reads it
+back with the same <code>getDynamics</code>. One line, and a node with no opinion needs
+none:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>dynamics <span class="ot">=</span> [supervised defaultSupervision{supWatchdog <span class="ot">=</span> <span class="dt">Just</span> (seconds <span class="dv">30</span>)}]</span></code></pre></div></div><p>Amend <code>defaultSupervision</code> rather than spelling out every field: the record
+has grown three times and will again, and a node that only cares about its
+watchdog should not have to have an opinion about giving up.</p>
+<p><code>supStrategy</code> is the one field authored for somebody else’s benefit. The
+default, <code>OneForOne</code>, is that putting this node back is a statement about
+this node and nothing downstream is disturbed. <code>RestForOne</code> sends every
+dependant back to <code>WaitUp</code>, to be brought up again on top of whatever this
+node turns into — Erlang’s strategy of the same name, read along dependency
+edges. A configuration file is the case for it:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- the services reading this file are bounced when it is rewritten</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>dynamics <span class="ot">=</span> [supervised defaultSupervision{supStrategy <span class="ot">=</span> <span class="dt">RestForOne</span>}]</span></code></pre></div></div><p>Note it goes on the config node, not on the services: the file’s author
+knows their content is load-bearing, while each service reading it would
+otherwise have to know, separately, that it might change underneath. Only
+<code>run serve</code> acts on it (a one-shot pass has no “already up” to send back
+from), and it costs nothing at all until a node opts in. The full
+field list (<code>supStableAfter</code>, <code>supGiveUpAfter</code>, <code>supReapply</code>, …) is in
+<a href="/salmon/docs-serve-supervision.html"><code>serve-supervision.md</code></a> §6.</p>
+</li>
+</ul>
+<p>That last one is what the field is really for, and it’s worth understanding
+the shape. A node says <em>“I am a <code>Package</code>”</em> without knowing what will be done
+about it, and a later pass collects the set and acts on it. The later pass is
+the only place that <em>can</em> act: your <code>Track' directive</code> is a function of one
+directive in isolation, so it can’t see the other declarations <code>run serve</code>
+currently holds, or which way each of their nodes is wanted. A <code>Rewrite</code> runs
+after the graph has been folded to a <code>Ref</code>-keyed DAG, where both of those
+exist — so it can batch across declarations and split an install batch from a
+removal batch, neither of which a recipe could express. Register one with
+<code>CommandLine.execCommandOrSeedWithRewrites</code> rather than applying an <code>Op -&gt; Op</code>
+inside your <code>Track'</code>.</p>
+<p>You will rarely need to add a <em>new</em> dynamic type; if you find yourself wanting
+one, search for existing <code>toDyn</code>/<code>fromDynamic</code>/<code>getDynamics</code> usages first. The
+question to ask is whether some <em>later, wider</em> pass needs to know this about
+your node — if the answer is “only this node cares”, it’s a field on your own
+value type, not a dynamic.</p>
+<h3 id="8-writing-a-new-builtin-node--a-worked-template">8. Writing a new builtin node — a worked template</h3>
+<p>Put a new node under <code>salmon-ops/src/Salmon/Builtin/Nodes/&lt;Concern&gt;.hs</code> (one
+module per concern — see the existing list: <code>Filesystem</code>, <code>Systemd</code>,
+<code>Debian.Package</code>, <code>Podman</code>, <code>Postgres</code>, <code>Netfilter</code>, <code>Ssh</code>, <code>WireGuard</code>, etc.).
+Minimal template:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">module</span> <span class="dt">Salmon.Builtin.Nodes.Widget</span> <span class="kw">where</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Data.Text</span> <span class="kw">as</span> <span class="dt">Text</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Salmon.Builtin.Extension</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Salmon.Op.Ref</span> (mkRef)</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Salmon.Reporter</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Whatever this node needs to do its job.</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Report</span> <span class="ot">=</span> <span class="dt">CreatedWidget</span> <span class="op">!</span><span class="dt">WidgetName</span> <span class="op">|</span> <span class="dt">RemovedWidget</span> <span class="op">!</span><span class="dt">WidgetName</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">deriving</span> (<span class="dt">Show</span>)</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">WidgetName</span> <span class="ot">=</span> <span class="dt">WidgetName</span> <span class="dt">Text</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Show</span>)</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a><span class="ot">widget ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">WidgetName</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>widget r name <span class="ot">=</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>    op <span class="st">&quot;widget&quot;</span> nodeps <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>        actions</span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>            { help <span class="ot">=</span> <span class="st">&quot;creates a widget named &quot;</span> <span class="op">&lt;&gt;</span> getWidgetName name</span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>            , ref <span class="ot">=</span> mkRef <span class="st">&quot;widget&quot;</span> name</span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a>            , up <span class="ot">=</span> createWidget name <span class="op">&gt;&gt;</span> runReporter r (<span class="dt">CreatedWidget</span> name)</span>
+<span id="22"><a href="#22" aria-hidden="true" tabindex="-1"></a>            , down <span class="ot">=</span> removeWidget name <span class="op">&gt;&gt;</span> runReporter r (<span class="dt">RemovedWidget</span> name)</span>
+<span id="23"><a href="#23" aria-hidden="true" tabindex="-1"></a>            }</span></code></pre></div></div><p>Points worth calling out explicitly since they’re easy to get subtly wrong:</p>
+<ul>
+<li><strong><code>Reporter r</code></strong> is the standard way a node emits structured events (not
+<code>print</code>/logging directly) — every builtin module defines its own <code>Report</code>
+sum type and takes a <code>Reporter Report</code> as its first argument, then
+<code>contramap</code>s it into sub-calls (<code>contramap SomeConstructor r</code>) when composing
+with other nodes’ reporters. Look at any existing module (e.g. <code>PostgresInit .hs</code>’s <code>Report</code> type, which wraps <code>Postgres.Report</code>/<code>Self.Report</code>/etc.) to
+copy the pattern for a module that composes several builtins.
+</li>
+<li><strong>Don’t forget idempotency</strong> (§4) before calling it done — this is the most
+commonly-missed step for a first-draft node.
+</li>
+<li><strong>Real subprocess calls should go through <code>Salmon.Builtin.Nodes.Binary</code></strong>
+(<code>withBinary</code>/<code>untrackedExec</code>) rather than raw <code>System.Process</code> calls, so
+failure propagation (§5) is automatic.
+</li>
+</ul>
+<h3 id="9-wiring-a-node-into-a-cli-binary-seed--spec--ops">9. Wiring a node into a CLI binary (seed → spec → ops)</h3>
+<p>If you’re building a whole binary (not just adding one node to an existing
+recipe), every salmon binary follows the same two-subcommand shape via
+<code>Salmon.Builtin.CommandLine.execCommandOrSeed</code>:</p>
+<pre><code class="language-sh">my-salmon config &lt;seed-args...&gt;   # seed (CLI-friendly) -&gt; JSON directive on stdout
+my-salmon run up|down|tree|dag    # reads a JSON directive on stdin, executes/prints it
+my-salmon run serve               # reads seed declarations as lines on stdin, converges and tends them
+</code></pre>
+<p>(<code>run serve</code> is the long-running driver; see
+<a href="/salmon/docs-serve-supervision.html"><code>serve-supervision.md</code></a>. There is also a <code>query</code>
+subcommand — <code>query show</code>/<code>query plan</code>/<code>query extract-directive</code> — for
+looking at or excluding part of the graph; see <code>specs/advance-querying.md</code>.)</p>
+<p>You need three things (see <code>salmon-apps/src/Migrator.hs</code> as the worked,
+complete example):</p>
+<ol>
+<li>A <code>Seed</code> type — parsed from CLI args (<code>Options.Generic</code>/<code>optparse-applicative</code>).
+</li>
+<li>A <code>Spec</code> type — <code>FromJSON</code>/<code>ToJSON</code>, the thing that actually gets piped over
+stdin/stdout between <code>config</code> and <code>run</code>.
+</li>
+<li>A <code>Configure IO Seed Spec</code> (<code>Configure { gen :: Seed -&gt; IO Spec }</code>) plus a
+<code>Track' Spec</code> (i.e. <code>program :: Track' Spec</code>, <code>program = Track $ \spec -&gt; ... build an Op from spec ...</code>) that turns the <code>Spec</code> into the actual <code>Op</code> graph.
+</li>
+</ol>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">main ::</span> <span class="dt">IO</span> ()</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>main <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    cmd <span class="ot">&lt;-</span> execParser (info parseRecord <span class="op">...</span>)</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    CLI.execCommandOrSeed reportPrint configure program cmd</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="ot">program ::</span> <span class="dt">Track&#39;</span> <span class="dt">Spec</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>program <span class="ot">=</span> <span class="dt">Track</span> <span class="op">$</span> <span class="op">\</span>spec <span class="ot">-&gt;</span> op <span class="st">&quot;program&quot;</span> (deps [<span class="op">...</span>]) <span class="fu">id</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="ot">configure ::</span> <span class="dt">Configure</span> <span class="dt">IO</span> <span class="dt">Seed</span> <span class="dt">Spec</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>configure <span class="ot">=</span> <span class="dt">Configure</span> <span class="op">$</span> <span class="op">\</span>seed <span class="ot">-&gt;</span> <span class="op">...</span> build a <span class="dt">Spec</span> from seed <span class="op">...</span></span></code></pre></div></div><p><code>Migrator.hs</code> itself calls <code>CLI.execCommandOrSeedWithRewrites</code>, which is the
+same plus a reporter for <code>run serve</code>’s own reports and a list of <code>Rewrite</code>
+phases to run over the graph (§7). Use <code>execCommandOrSeed</code> if you have no
+rewrites.</p>
+<p>This split exists so config generation (impure, human-parametrized, runs on
+the commanding machine) and execution (must be IO/hermetic, meant to run
+unattended, e.g. piped to a remote box over ssh) stay separate, independently
+inspectable steps — the JSON <code>Spec</code> is the contract between them.</p>
+<h3 id="10-testing-ops">10. Testing ops</h3>
+<p>Tests for <code>salmon-ops-recipes</code> live under <code>salmon-ops-recipes/test/Test/</code> and
+run via <code>cabal test salmon-ops-recipes</code>. All the plumbing you need is in
+<code>Test.Harness</code> (<code>salmon-ops-recipes/test/Test/Harness.hs</code>) — <strong>read that file</strong>;
+this section is a guide to it, not a replacement for it.</p>
+<p>Tests are organized into four tiers by IO cost/blast-radius (Layers 0–3; this
+section covers the first three, which are what a new node almost always needs).
+Pick the <em>cheapest</em> tier that actually exercises what you changed.</p>
+<h4 id="layer-0--structural-no-side-effects">Layer 0 — structural, no side effects</h4>
+<p>Assert on the shape of the graph itself, not on any effect. Use
+<code>Salmon.Builtin.Extension.evalDeps :: Op -&gt; Cofree Graph Op</code> to walk the graph
+and check what’s in it (e.g. “does this graph contain a node with this
+<code>Ref</code>”, “how many nodes does it have”). No IO happens at all. Good for
+checking wiring/composition logic (did I actually connect the deps I meant
+to) without needing any real environment.</p>
+<h4 id="layer-1--sandboxed-io-no-external-services">Layer 1 — sandboxed IO, no external services</h4>
+<p>Run the <em>real</em> <code>up</code>/<code>down</code> for real, but only against something throwaway and
+local — a temp directory, an in-process value — nothing that needs a running
+service. Use:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">runUp   ::</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">Bool</span>   <span class="co">-- runs upTree, returns True iff everything succeeded</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="ot">runDown ::</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">Bool</span>   <span class="co">-- runs downTree, same contract</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">withTempDir ::</span> (<span class="dt">FilePath</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> a) <span class="ot">-&gt;</span> <span class="dt">IO</span> a  <span class="co">-- auto-cleaned scratch dir</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="ot">runUpCapturing ::</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> [<span class="dt">UpDown.Report</span> <span class="dt">Extension</span>]  <span class="co">-- full trace, for asserting Skip/Eval/Blocked directly</span></span></code></pre></div></div><p>Example shape (see <code>JWTSigningSpec.hs</code> for a real one):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>testCase <span class="st">&quot;writes the file&quot;</span> <span class="op">$</span> withTempDir <span class="op">$</span> <span class="op">\</span>dir <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> op <span class="ot">=</span> someNodeThatWritesInto dir</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    ok <span class="ot">&lt;-</span> runUp op</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    assertBool <span class="st">&quot;expected up to succeed&quot;</span> ok</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    contents <span class="ot">&lt;-</span> <span class="fu">readFile</span> (dir <span class="op">&lt;/&gt;</span> <span class="st">&quot;expected-file&quot;</span>)</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    contents <span class="op">@?=</span> <span class="st">&quot;expected contents&quot;</span></span></code></pre></div></div><p><strong>Always check the <code>Bool</code> <code>runUp</code>/<code>runDown</code> return</strong> (via <code>assertBool</code>) in
+addition to any postcondition check — a postcondition alone can’t tell you
+whether the traversal itself reported <code>Failed</code>/<code>Blocked</code> somewhere it
+shouldn’t have.</p>
+<h4 id="layer-2--real-system-services-via-disposable-podman-containers">Layer 2 — real system services via disposable podman containers</h4>
+<p>For anything that needs a real service (postgres, a systemd unit, apt) to
+verify against, dogfood the project’s own <code>Podman</code> builtins as the sandbox
+provisioner — do not hand-roll <code>podman run</code>/<code>podman rm</code> shell-outs. Guard the
+whole test with <code>requireExecutable &quot;podman&quot;</code> so CI/dev machines without
+podman skip loudly instead of failing:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>testCase <span class="st">&quot;creates a real database&quot;</span> <span class="op">$</span> requireExecutable <span class="st">&quot;podman&quot;</span> <span class="op">$</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    withContainer (<span class="dt">Podman.Image</span> <span class="st">&quot;debian:bookworm&quot;</span>)</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>                  (<span class="dt">Podman.PortMapping</span> <span class="st">&quot;15432&quot;</span> <span class="st">&quot;5432&quot;</span> <span class="dt">Podman.TCPPort</span>) <span class="op">$</span> <span class="op">\</span>cid <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        <span class="co">-- one-time sandbox prep that isn&#39;t part of the recipe under test:</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        podmanExec_ cid [<span class="st">&quot;apt-get&quot;</span>, <span class="st">&quot;update&quot;</span>, <span class="st">&quot;-qq&quot;</span>]</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>        withShimmedPath cid [<span class="st">&quot;apt-get&quot;</span>, <span class="st">&quot;sudo&quot;</span>, <span class="st">&quot;bash&quot;</span>] <span class="op">$</span> <span class="kw">do</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> op <span class="ot">=</span> MyRecipe.setupSomething <span class="op">...</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>            ok <span class="ot">&lt;-</span> runUp op</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>            assertBool <span class="st">&quot;recipe should fully succeed&quot;</span> ok</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>        <span class="co">-- postcondition: check it for real, inside the container</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>        (code, out, err) <span class="ot">&lt;-</span> podmanExecCapture cid [<span class="st">&quot;sudo&quot;</span>, <span class="st">&quot;-u&quot;</span>, <span class="st">&quot;postgres&quot;</span>, <span class="st">&quot;psql&quot;</span>, <span class="st">&quot;-lqt&quot;</span>]</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>        assertBool (<span class="st">&quot;expected db in: &quot;</span> <span class="op">&lt;&gt;</span> out) (<span class="st">&quot;mydb&quot;</span> <span class="ot">`isInfixOf`</span> out)</span></code></pre></div></div><p>Key pieces, all from <code>Test.Harness</code>:</p>
+<ul>
+<li><code>withContainer :: Podman.Image -&gt; Podman.PortMapping -&gt; (String -&gt; IO a) -&gt; IO a</code>
+— pulls the image, starts a uniquely-named container, hands you its
+container id, and guarantees teardown (via the real <code>Podman</code> <code>down</code> action,
+not a manual <code>podman rm</code>) even on exception.
+</li>
+<li><code>withShimmedPath :: String -&gt; [String] -&gt; IO a -&gt; IO a</code> — for recipes that
+shell out to real binaries by name (<code>apt-get</code>, <code>sudo</code>, <code>psql</code>, …) with no
+indirection to mock: writes lookalike wrapper scripts for each named command
+that forward into the container via <code>podman exec</code>, and prepends them to
+<code>PATH</code> for the duration of the action. This lets you run the recipe’s
+<em>actual, unmodified</em> command construction and graph wiring against the
+sandbox, instead of testing a mocked stand-in. Figure out which commands to
+shim by reading which binaries the recipe under test actually invokes (see
+<code>PostgresInitSpec.hs</code>’s <code>shimmedCommands</code> for a worked example and comment
+explaining the reasoning).
+</li>
+<li><code>podmanExec_ :: String -&gt; [String] -&gt; IO ()</code> — run a setup command inside the
+container, discard output, <code>error</code> on non-zero exit. For sandbox prep only
+(e.g. <code>apt-get install sudo</code>), not for the thing under test.
+</li>
+<li><code>podmanExecCapture :: String -&gt; [String] -&gt; IO (ExitCode, String, String)</code> —
+same, but for postcondition checks: hands back everything instead of
+throwing.
+</li>
+</ul>
+<p>A real bug this pattern caught (documented at the top of
+<code>PostgresInitSpec.hs</code>): a builtin used to hardcode a Postgres cluster version
+that didn’t match the container’s actual installed version, so the recipe
+silently failed to start the cluster — a Layer 0 test would never have caught
+this, because the graph <em>shape</em> was perfectly correct; only running it for
+real against a real (if disposable) Debian container did.</p>
+<h4 id="layer-3--a-whole-machine-via-a-qemu-vm">Layer 3 — a whole machine, via a qemu VM</h4>
+<p>For what a container can’t exercise well (systemd as PID 1, real network
+interfaces), <code>Test.Harness</code> also boots a qemu VM from a debootstrapped rootfs
+(<code>withVm</code>/<code>withVmAt</code>, then <code>sshToVm</code>/<code>scpToVm</code>), dogfooding
+<code>Salmon.Builtin.Nodes.LinuxBridge</code>/<code>Qemu</code> as the provisioner. It needs root or
+the one-time <code>setcap</code> grants described on <code>hasVmPrivileges</code>, and skips loudly
+otherwise; see <code>QemuSmokeSpec.hs</code> for the smallest example and
+<code>specs/qemu-test-vms.md</code> for the design. Layer 2 and 3 specs contend for
+process-global resources (<code>PATH</code> shims, one test bridge), so <code>test/Main.hs</code>
+runs them inside one <code>sequentialTestGroup</code> — add yours there, not to the
+concurrent list.</p>
+<h4 id="choosing-a-layer-a-quick-decision-guide">Choosing a layer: a quick decision guide</h4>
+<ul>
+<li>Changed how ops are wired together (deps/ordering/ref dedup)? → <strong>Layer 0</strong>
+is probably enough.
+</li>
+<li>Changed what a node actually writes/does, but it’s pure filesystem/local
+state? → <strong>Layer 1</strong>.
+</li>
+<li>Changed anything that shells out to a real service’s CLI (<code>psql</code>,
+<code>pg_ctlcluster</code>, <code>nft</code>, <code>systemctl</code>, <code>apt-get</code>, <code>podman</code>, …) or depends on
+that service’s actual behavior? → <strong>Layer 2</strong> — a Layer 0/1 test would pass
+even if the actual command is wrong, wrong-ordered, or the tool’s real
+idempotency behavior doesn’t match what you assumed.
+</li>
+<li>Needs a real init system, real interfaces, or more than one machine? →
+<strong>Layer 3</strong>.
+</li>
+</ul>
+<h4 id="running-the-tests">Running the tests</h4>
+<pre><code class="language-sh">cabal test salmon-ops-recipes
+</code></pre>
+<p>Layer 2 tests are skipped loudly (not failed) if <code>podman</code> isn’t on <code>PATH</code> —
+check the test output for <code>SKIPPED:</code> lines if you expect Layer 2 coverage and
+don’t see it exercised.</p>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

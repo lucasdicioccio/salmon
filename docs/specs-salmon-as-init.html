@@ -1,0 +1,704 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Salmon as PID 1: an init system whose unit graph is a real DAG</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-salmon-as-init.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: the init system itself is not implemented — milestones 1 to 6"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Salmon as PID 1: an init system whose unit graph is a real DAG"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: the init system itself is not implemented — milestones 1 to 6"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Salmon as PID 1: an init system whose unit graph is a real DAG"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-salmon-as-init.html"><meta property="og:description" content="Status: the init system itself is not implemented — milestones 1 to 6"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-salmon-as-init.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-salmon-as-init.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: the init system itself is not implemented — milestones 1 to 6","headline":"Salmon as PID 1: an init system whose unit graph is a real DAG","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-salmon-as-init.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Salmon as PID 1: an init system whose unit graph is a real DAG</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 5433 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-gcloud-support.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">17/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-terraform-integration.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/salmon-as-init.md"><code>specs/salmon-as-init.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="salmon-as-pid-1-an-init-system-whose-unit-graph-is-a-real-dag">Salmon as PID 1: an init system whose unit graph is a real DAG</h2>
+<p>Status: the init system itself is not implemented — milestones 1 to 6
+(the Rust <code>salmon-init</code>, the spawn protocol, a <code>SalmonInit.service</code> node,
+ordered shutdown) have no code. All four prerequisites it consumes have
+shipped: 0a supervision (<code>Nodes/Daemon.hs</code>, <code>Op/Supervision.hs</code>,
+<code>Actions/Upkeep.hs</code>, <code>Actions/Serve.hs</code>’s tending loop), 0b history
+retention, 0c the serve-language socket (<code>run serve --listen</code>,
+<code>Salmon.Actions.Serve.Socket</code>; also <code>--http</code>), and 0d pull mode with a
+cached last document (<code>run serve --follow ... --follow-cache</code>,
+<code>Salmon.Actions.Follow</code>). Sections below were
+re-checked against the tree as of 2026-09-23; where the original text had
+been overtaken it was rewritten rather than annotated. A design sketch to
+react to, not a committed plan.</p>
+<h3 id="what-has-shipped-since-this-was-first-written">What has shipped since this was first written</h3>
+<p>The original draft’s “three things that genuinely are not here” is now one
+thing. The other two moved into <code>run serve</code>, exactly as the draft asked, and
+this spec now <em>consumes</em> them:</p>
+<table>
+<tr><th>Draft asked for</th><th>What the tree has now</th></tr>
+<tr><td>a vocabulary for "keep this running"</td><td><code>Extension.managed :: Maybe (Output -&gt; IO ExitCode)</code> and <code>Nodes/Daemon.hs</code> — a node whose effect <em>is</em> a running process, torn down by cancelling its <code>withAsync</code> (group signal, <code>stop_grace</code>, <code>SIGKILL</code>), output drained into a ring</td></tr>
+<tr><td>restart policy, backoff, give-up latch</td><td><code>Op/Supervision.hs</code> (<code>Restart</code> <code>Always</code>/<code>OnFailure</code>/<code>Never</code>, <code>supStableAfter</code>, <code>supGiveUpAfter</code>, <code>RestForOne</code>, a watchdog) read by <code>Actions/Upkeep.hs</code>'s per-node machine, with its <code>Tally</code> of consecutive failures and adaptive delay</td></tr>
+<tr><td>exit-event-driven convergence</td><td><code>Upkeep</code>'s <code>Up</code> state races the managed action; the <code>ExitCode</code> it yields is what the policy reads, after the node's own <code>check</code> (so a daemonising service that exits 0 is still up)</td></tr>
+<tr><td>a "supervisor table keyed by <code>Ref</code>"</td><td>per-machine state in <code>Upkeep</code>, not in <code>World</code>; <code>Serve.NodeState.nodeStatus</code> snapshots it</td></tr>
+<tr><td><code>prelim</code>-alive / <code>Skippable</code></td><td><code>check :: IO CheckResult</code>; <code>Unknown</code> means "keep looking", <code>Immaterial</code> parks</td></tr>
+<tr><td>a supervisor that survives its own commands</td><td><code>Upkeep.Kept</code>: machines holding a <code>managed</code> effect outlive the supervisor that started them and are adopted by the next (<code>Upkeep.Under</code>)</td></tr>
+<tr><td><code>worldHistory</code> retention</td><td>done (<code>885d9f0</code>)</td></tr>
+<tr><td>a magma keyed by <code>Ref</code></td><td><code>Op/Dag.hs</code>, <code>Op/Ledger.hs</code>, <code>Op/Rewrite.hs</code></td></tr>
+<tr><td>a control socket speaking the <code>serve</code> language</td><td>shipped: <code>run serve --listen PATH</code> (<code>Actions/Serve/Socket.hs</code>, <code>specs/generic-server.md</code> milestone 2)</td></tr>
+<tr><td>reconfiguration by re-reading a file</td><td>shipped as pull mode: <code>run serve --follow</code> and <code>--follow-cache</code> (<code>specs/pull-mode.md</code>)</td></tr>
+</table>
+<p>What is still genuinely missing is <strong>PID 1 itself</strong> — reaping, signals,
+stage-0 mounts, <code>reboot(2)</code> — and the process-topology decision that follows
+from it (next section). Everything else in this document is now a question
+of <em>wiring</em>, not of building.</p>
+<h3 id="problem--goal">Problem / goal</h3>
+<p>An init system that boots a Linux VM, converges an <code>Op</code> graph, and then stays
+up forever supervising whatever that graph declared — reading a small seed from
+<code>/etc/salmon-init.json</code> for the handful of per-machine parameters.</p>
+<p>Scoping this to <strong>VMs rather than physical machines</strong> is what makes it
+tractable, and the repo is already set up for it: <code>Salmon.Builtin.Nodes.Qemu</code>
+direct-boots a kernel with <code>-kernel</code>/<code>-initrd</code>, <code>root=vroot rootfstype=9p</code>,
+<code>net.ifnames=0</code> (<code>Qemu.kernelCmdline</code>), against a
+<code>Debian.Debootstrap.rootTree</code> chroot. Hardware is then <em>known</em>: virtio
+devices, one serial console, no firmware quirks, no disk enumeration race, a
+stock Debian initrd whose only job is to mount the 9p root (the toy and the
+qemu tier already boot this way), no udev rule engine, no network-interface
+naming ambiguity. And
+<code>VmConfig.vm_extra_kernel_args</code> already exists as the place <code>init=/sbin/salmon-init</code>
+would go, which means the qemu test tier from <code>specs/qemu-test-vms.md</code> is
+also the test bed for this. Physical hardware is explicitly out of scope.</p>
+<h4 id="the-build-model-a-cabal-built-init-not-a-generic-one">The build model: a cabal-built init, not a generic one</h4>
+<p>This is the framing decision that simplifies everything downstream. The
+supervisor is <strong>not</strong> a general-purpose init that interprets an arbitrary
+machine description at runtime. It is a binary you <code>cabal build</code> for a
+particular machine role — a seed type, a directive type, and a <code>Track' Spec</code>
+composing builtins and recipes — exactly like <code>salmon-migrator</code> in
+<code>salmon-apps</code>. The boot graph is <em>Haskell code</em>, compiled in and static.</p>
+<p><code>/etc/salmon-init.json</code> then carries only what genuinely varies between two
+machines of the same role: hostname, addresses, paths to key material, a
+service count. Small, and typed by that binary’s own seed type.</p>
+<p>Consequences worth stating up front, because each removes a whole subsystem
+from the design:</p>
+<ul>
+<li><strong>No generic seed language, no plugin/unit-file loading, no runtime recipe
+discovery.</strong> Changing what a machine runs means rebuilding and redeploying
+the binary, which is a deployment story this repo already has
+(<code>Self.uploadSelf</code>, <code>SreBox.CabalBuilding</code>).
+</li>
+<li><strong>The graph is inspectable at build time</strong>, from a laptop, with the very
+same binary: <code>run tree</code> / <code>run dag</code> / <code>query plan</code> against a candidate seed.
+This is the payoff of <code>Configure</code> being a separate hermetic step, and it is
+what lets the “boot order is what I reviewed” test in the Testing section
+exist at all.
+</li>
+<li><strong>Reconfiguration-without-reboot is a parameter change, not a shape
+change.</strong> A machine’s <em>graph</em> changes by getting a new binary; its
+<em>parameters</em> change by a new document arriving — and <code>specs/pull-mode.md</code>
+is now the mechanism for that (below), rather than a SIGHUP re-read of a
+local file.
+</li>
+</ul>
+<p>Being “generally static afterwards” also means the supervisor can be built
+with as few runtime moving parts as possible — ideally statically linked, so
+that PID 1 and the supervisor are the entire userspace trusted base at boot.</p>
+<h3 id="why-this-is-genuinely-attractive-the-pitch">Why this is genuinely attractive (the pitch)</h3>
+<p>Every init system has a dependency graph. systemd’s is <code>After=</code>/<code>Before=</code>/
+<code>Wants=</code>/<code>Requires=</code> scattered across unit files, and there is no good way to
+see it, test it, or reason about it before boot. Salmon’s <code>Op</code> graph <em>is</em> that
+graph, as a first-class value, and salmon already has:</p>
+<ul>
+<li><strong><code>upTree</code></strong> — topological ordering, dedup by <code>Ref</code>, and failure containment
+(a failed node’s dependents are <code>Blocked</code>, not run against an unmet
+precondition). That is precisely correct boot semantics, already implemented.
+</li>
+<li><strong><code>downTree</code></strong> — teardown in reverse dependency order, where a node becomes
+free only once its <em>last</em> dependent is gone. That is precisely correct
+shutdown semantics, already implemented, including the shared-predecessor
+case that a naive walk gets wrong.
+</li>
+<li><strong><code>run tree</code> / <code>run dag</code></strong> — you can print and review the boot order, as a
+tree or as Graphviz, <em>from your laptop</em>, before booting anything.
+</li>
+<li><strong><code>query plan --select/--exclude</code></strong> — boot a subset. “Boot everything except
+the database” becomes a plan file, not a rescue-shell adventure.
+</li>
+<li><strong><code>Serve</code>’s <code>World</code></strong> — a per-node <code>Direction</code> + <code>Convergence</code> state machine
+across a set of active seeds, with retry of <code>Errored</code>/<code>Blocked</code> nodes on the
+next pass. That is a supervisor’s bookkeeping, already written.
+</li>
+<li><strong><code>Upkeep</code></strong> — the tending loop: per-node machines that keep asking whether
+an effect is still there, restart a <code>managed</code> process by its declared
+policy, back off, give up, bounce dependants on <code>RestForOne</code>, and are
+<code>Kept</code> across the supervisor’s own restarts. That is <em>the supervisor</em>,
+already written and tested (<code>Test/UpkeepSpec.hs</code>, <code>Test/DaemonSpec.hs</code>).
+</li>
+</ul>
+<p>So a surprising amount of this spec is not “build an init system” but “notice
+that the init system is mostly already here, and identify the handful of
+things that genuinely are not.”</p>
+<h3 id="what-genuinely-is-not-here">What genuinely is not here</h3>
+<h4 id="1-shipped-keep-this-running-is-managed-and-the-init-node-is-a-second-daemon">1. (Shipped.) “Keep this running” is <code>managed</code>, and the init node is a second <code>Daemon</code></h4>
+<p>The draft’s table of supervision concerns is now a table of shipped code:</p>
+<table>
+<tr><th>Supervision concern</th><th>Where it lives now</th></tr>
+<tr><td>"is this service running?"</td><td>the node's <code>check :: IO CheckResult</code></td></tr>
+<tr><td>"start it"</td><td>its <code>managed</code> action, run under <code>withAsync</code> by <code>Upkeep</code>'s <code>Up</code> state</td></tr>
+<tr><td>"stop it"</td><td>cancelling that async; <code>Daemon.runDaemon</code>'s bracket escalates group-<code>SIGTERM</code> → <code>stop_grace</code> → <code>SIGKILL</code></td></tr>
+<tr><td>"it died, restart it"</td><td>the action yields an <code>ExitCode</code>; <code>supRestart</code> decides</td></tr>
+<tr><td>"don't restart in a tight loop"</td><td><code>Upkeep</code>'s delay ladder + <code>Tally</code>, <code>supStableAfter</code>, <code>supGiveUpAfter</code></td></tr>
+<tr><td>"start things in the right order"</td><td><code>waitStability</code> over dependencies</td></tr>
+<tr><td>"a dependency failed"</td><td>waited out rather than <code>Blocked</code>: the dependency's own machine keeps retrying</td></tr>
+<tr><td>"a dependency went away, take me with it"</td><td><code>supStrategy = RestForOne</code> on the dependency</td></tr>
+</table>
+<p>So the init-system node is not a new mechanism; it is <strong>a sibling of
+<code>Nodes/Daemon.hs</code></strong> whose <code>managed</code> action talks to PID 1 instead of calling
+<code>createProcess</code> itself:</p>
+<pre><code>SalmonInit.service :: Reporter -&gt; Service -&gt; Op
+  check   = Query slot            -&gt; Success | Failure | Unknown (deferred until T)
+  managed = Spawn slot; block on the Exited event for it; return its ExitCode
+            (cancellation =&gt; Signal slot, then wait for Exited)
+  up      = throwIO NeedsSupervisor      -- exactly as Daemon.daemon does
+  down    = pure ()                       -- exactly as Daemon.daemon does
+</code></pre>
+<p><code>managed :: Output -&gt; IO ExitCode</code> is precisely the shape of “ask PID 1 to
+run this and tell me when it stopped”, which is a strong sign the field was
+cut in the right place. <code>Systemd.Service</code> stays the vocabulary
+(<code>service_user</code>/<code>service_group</code>/<code>service_umask</code>/<code>KillMode</code>), rendered into a
+spawn request rather than a unit file. <strong>A recipe ports from systemd to
+salmon-init by swapping one node</strong>, and the policy it carries in
+<code>Supervision</code> needs no translation at all.</p>
+<p>Two things the draft got right that are worth keeping explicit. First, PID 1
+answering <code>Deferred { until }</code> maps onto <code>check</code> returning <strong><code>Unknown</code></strong>, not
+<code>Skipped</code> or <code>Failure</code>: <code>Unknown</code> is the one verdict <code>Upkeep</code> acts on by
+<em>continuing to look</em>, which is what a deferral wants. Second, the process
+handle lives on the node’s own machine, so the Haskell side has no pid table
+— but see the next section, because <em>whose child the process is</em> is now a
+real decision rather than a free one.</p>
+<h4 id="1b-the-one-new-tension-daemons-bracket-versus-services-are-children-of-pid-1">1b. The one new tension: <code>Daemon</code>’s bracket versus “services are children of PID 1”</h4>
+<p><code>Daemon.runDaemon</code> owns its process through a bracket: the process is a
+child of the supervisor, and cancelling the machine kills it. That is the
+whole teardown story under <code>run serve</code> and it needs no pid table. The
+draft’s architecture wants the opposite — services as <strong>children of
+PID 1</strong>, so the supervisor can crash, restart or be replaced without any
+service noticing. Both cannot be true of one node.</p>
+<p>The reconciliation is the split above: <code>SalmonInit.service</code>’s <code>managed</code>
+action holds no process, it holds a <em>subscription</em> to PID 1’s exit event for
+a slot. Cancellation signals through PID 1; a supervisor restart re-attaches
+(its <code>check</code> asks PID 1 and answers <code>Success</code>, so the node starts
+<code>Settled</code>/<code>Standing</code>, and its <code>managed</code> action subscribes to a slot that is
+already running rather than spawning it). The protocol therefore needs an
+<strong>attach</strong> verb beside spawn — “give me the exit event for the pid you are
+already holding in this slot” — which the draft’s <code>Query</code> did not cover.</p>
+<p>What this costs: <code>Upkeep.Kept</code> — machines that survive the supervisor
+stopping — does nothing useful across a <em>process</em> restart of the
+supervisor; it was built for the in-process case (<code>status</code> typed at a
+<code>serve</code> prompt must not restart every service). Under salmon-init the
+equivalent guarantee is provided by PID 1 holding the children, and the
+re-attach path above is what replaces adoption. Under plain <code>run serve</code> on
+a systemd box, <code>Daemon.daemon</code> stays what it is. <strong>Neither node should try
+to be both.</strong></p>
+<h4 id="2-pid-1-has-duties-that-are-not-convergence-at-all">2. PID 1 has duties that are not convergence at all</h4>
+<p>None of these are expressible as <code>Op</code>s, and all are non-negotiable:</p>
+<ul>
+<li><strong>Reaping.</strong> PID 1 inherits every orphan on the machine and must
+<code>waitpid(-1)</code> them or the process table fills with zombies.
+</li>
+<li><strong>Signals.</strong> PID 1 gets <em>no default signal dispositions</em> — the kernel
+discards any signal for which PID 1 has not explicitly installed a handler.
+So it cannot be accidentally killed, but every signal it wants must be
+handled explicitly: SIGTERM/SIGUSR1/SIGUSR2 for the shutdown/reboot
+conventions, SIGINT for ctrl-alt-del (after <code>reboot(RB_DISABLE_CAD)</code>),
+SIGCHLD as the supervision event source, SIGHUP for “re-read the seed”.
+</li>
+<li><strong>Never exiting.</strong> If PID 1 returns, the kernel panics (<code>Attempted to kill init!</code>). For a program on a managed runtime this is a severe constraint: an
+uncaught exception, or heap exhaustion, is a kernel panic. This is the
+constraint that ends up deciding PID 1’s implementation language.
+</li>
+<li><strong>Early boot.</strong> Mounting <code>/proc</code>, <code>/sys</code>, <code>/dev</code> (devtmpfs), <code>/dev/pts</code>,
+<code>/run</code>; <code>hostname</code>; loopback up; entropy seed.
+</li>
+<li><strong>Shutdown.</strong> SIGTERM to everything, grace period, SIGKILL, <code>sync</code>,
+unmount, <code>reboot(2)</code> with the right command.
+</li>
+</ul>
+<h4 id="3-the-bootstrap-paradox">3. The bootstrap paradox</h4>
+<p>A convergence engine cannot converge the preconditions of its own execution.
+Salmon’s engine needs <code>/dev/null</code> (every <code>CreateProcess</code> redirect),
+<code>/proc/self/exe</code> (<code>Self.readSelfPath_linux</code>), and a readable, writable root
+before it can run <code>Configure</code> on <code>/etc/salmon-init.json</code> at all. So there is a
+<strong>stage 0</strong> that is hardcoded imperative code, deliberately <em>not</em> part of the
+graph, and it must be kept as small as possible because nothing in it is
+inspectable with <code>run tree</code>. Drawing that line precisely is a design decision,
+not an implementation detail; the proposal is to keep stage 0 to exactly:
+mounts, <code>RB_DISABLE_CAD</code>, signal handlers, the reaper, and the console.</p>
+<h3 id="the-hard-engineering-problem-waitpid-1-versus-the-ghc-runtime">The hard engineering problem: <code>waitpid(-1)</code> versus the GHC runtime</h3>
+<p>This deserves its own section because it is the thing most likely to sink a
+naive implementation, and it is not obvious.</p>
+<p><code>Binary.untrackedExec</code> — which essentially every builtin’s <code>up</code> goes through —
+uses <code>readCreateProcessWithExitCode</code>, which ends in <code>waitForProcess</code>, which
+calls <code>waitpid</code> on <strong>one specific pid</strong>. Meanwhile PID 1 must run a reaper that
+calls <code>waitpid(-1, …)</code> to collect orphans. If the reaper wins the race and
+reaps a child that <code>waitForProcess</code> is waiting for, the specific-pid <code>waitpid</code>
+returns <code>ECHILD</code> and <code>untrackedExec</code> throws — which <code>upTree</code> faithfully reports
+as a failed node. The result is a provisioning engine that fails randomly under
+load, with an error that points at the wrong thing entirely.</p>
+<p>The alternative — one unified reaper, where every child (services <em>and</em>
+<code>untrackedExec</code> subprocesses) registers in a <code>Map ProcessID (MVar ExitCode)</code>
+and a single thread owns <code>waitpid(-1, WNOHANG)</code> — would require
+<code>Binary.untrackedExec</code> to stop using <code>System.Process</code>’s own waiting, i.e. an
+“exec backend” seam in the most load-bearing module in <code>salmon-ops</code>, existing
+solely to serve PID 1. Rejected.</p>
+<h3 id="architecture-a-rust-pid-1-a-haskell-pid-2">Architecture: a Rust PID 1, a Haskell PID 2</h3>
+<pre><code>PID 1  salmon-init        Rust. Tiny, boring, cannot panic:
+       (Rust, static)     stage-0 mounts, signal handlers, THE reaper,
+                          spawns/kills/setuids service processes,
+                          control socket, reboot(2)
+                            |
+                            | spawn requests / exit events over a socketpair
+                            v
+PID 2  &lt;role&gt;-supervisor   Haskell, cabal-built per machine role: reads the
+       (Haskell, static)   seed, runs Configure, expands the graph, runs the
+                           Serve-style World + supervision state, uses
+                           System.Process normally
+</code></pre>
+<p><strong>Why the split.</strong> It is not primarily about language:</p>
+<ul>
+<li><strong>The waitpid conflict disappears.</strong> PID 1’s children are the supervisor,
+the getty, and the services. The supervisor’s own <code>untrackedExec</code>
+subprocesses are <em>its</em> children, reaped by <code>System.Process</code> as usual. Two
+reapers, disjoint sets, no race.
+</li>
+<li><strong>A crash in the complicated half is no longer a kernel panic.</strong> The
+convergence engine is where all the intricate code lives (JSON, graph
+expansion, subprocess management, arbitrary recipe <code>up</code> actions) and
+therefore where the bugs live. If it dies, PID 1 restarts it.
+</li>
+<li><strong>The supervisor is restartable and upgradable in place.</strong> Because
+<strong>services are children of PID 1, not of the supervisor</strong>, the supervisor can
+crash, be restarted, or be swapped for a new binary without any running
+service being orphaned or killed. This is what makes redeploying a rebuilt
+supervisor a non-event, which matters a lot given the build model above. It
+is also the reason spawning must live in PID 1 rather than in the
+supervisor, even though that is the less obvious place to put it.
+</li>
+</ul>
+<p><strong>Why Rust for PID 1.</strong> The split makes PID 1 so small and so tightly
+constrained — must never exit, must never block indefinitely, must not depend
+on a heap it can exhaust — that a managed runtime buys nothing there and
+costs the two failure modes that matter most: an uncaught exception and heap
+exhaustion are both kernel panics in PID 1. Rust removes both by construction:
+no GC, no runtime to fail to initialize before <code>main</code>, <code>#![deny(panic)]</code>-style
+discipline enforceable in review, and a genuinely static binary
+(<code>x86_64-unknown-linux-musl</code>) with no loader dependency at a point in boot
+where the dynamic loader’s own assumptions are shakiest. C would also work;
+Rust is preferred, and the safety argument is mostly about the reaper and
+signal-handling code — the exact code where C’s classic PID-1 bugs
+(<code>EINTR</code> handling, signal-unsafe calls in handlers, races on the pid table)
+live.</p>
+<p>The Rust half is deliberately <em>not</em> extensible: it knows how to mount, reap,
+spawn with a uid/gid/pgid, signal, rate-limit respawns, and reboot. Every
+decision about <em>what</em> to run and <em>in what order</em> is on the Haskell side. If a
+change requires touching the Rust binary, that is a signal the boundary is in
+the wrong place.</p>
+<p>The one deliberate exception is restart backoff, which lives on <strong>both</strong> sides —
+see the next section, since it is the one place the boundary is crossed on
+purpose and therefore the one place it can go wrong.</p>
+<p><strong>The cost is a protocol</strong> between the two: <code>Spawn</code>/<code>Signal</code>/<code>Query</code> requests
+and <code>Exited pid status</code> events. It is small, it must be stable (a supervisor
+restart must not require a PID 1 restart), and it is worth noting it is <em>the
+same shape</em> as the <code>SalmonInit.service</code> node’s <code>check</code>/<code>managed</code> — so the
+node can talk to the control socket directly and the protocol only has to be
+designed once. Length-prefixed JSON over a <code>SOCK_SEQPACKET</code> socketpair is
+almost certainly enough; the temptation to make it clever should be resisted,
+because every feature in this protocol is a feature the Rust half has to grow.</p>
+<h3 id="restart-backoff-pid-1-rate-limits-the-supervisor-decides">Restart backoff: PID 1 rate-limits, the supervisor decides</h3>
+<p>Backoff lives on both sides, with different jobs. Getting this division wrong
+is how you end up with multiplicative delays and a machine that takes twenty
+minutes to bring a service back, so it is worth being precise:</p>
+<ul>
+<li><strong>PID 1’s backoff is a safety property, not a policy.</strong> It is a per-slot
+minimum interval between respawns of the same thing, applied to <em>everything</em>
+PID 1 spawns. Its purpose is to keep the machine alive and loggable when
+whatever is above it is broken or absent — including the case that has no
+other answer at all: <strong>a crash-looping supervisor</strong>, where there is no
+Haskell side left to consult. It never decides <em>whether</em> something should
+run.
+</li>
+<li><strong>The supervisor’s backoff is policy.</strong> Per-service, dependency-aware, with
+windows and a give-up latch, and expressible in the graph.
+</li>
+</ul>
+<h4 id="how-they-compose-instead-of-fighting">How they compose instead of fighting</h4>
+<p>The rule is that <strong>PID 1 defers, it never refuses</strong>, and the supervisor
+<em>asks</em> rather than duplicating the timer.</p>
+<p>When a spawn request arrives sooner than the slot’s minimum interval allows,
+PID 1 schedules it rather than rejecting it, and answers the request with
+<code>Deferred { until }</code>. A <code>Query</code> on that slot then answers “not running, spawn
+deferred until T” — which maps onto <strong><code>Unknown</code></strong> in the <code>check</code> vocabulary
+(1 above): <code>Upkeep</code> keeps looking on its ladder rather than restarting or
+giving up, and picks the node up once the deferral expires. The two
+backoffs compose into <code>max(pid1_floor, supervisor_policy)</code> rather than
+summing; <code>Upkeep</code>’s own ladder (double on a failing <code>up</code>, halve on a
+vanished effect) is the policy half and already exists.</p>
+<p>Deferring rather than refusing matters: a refusal that a buggy supervisor drops
+on the floor means the service never comes back, whereas a deferral is
+self-healing. The cost is that PID 1 holds a small timer queue — bounded by the
+number of slots, which is bounded by the config file, so it is not an unbounded
+allocation.</p>
+<h4 id="the-supervisor-slot-is-special">The supervisor slot is special</h4>
+<p>If the supervisor itself crash-loops, PID 1 must <strong>cap the backoff, never give
+up</strong>. A give-up latch is right for a service and catastrophic for the
+supervisor — a machine whose supervisor has permanently stopped being restarted
+is a machine with no way back. So: exponential growth up to a ceiling, then a
+steady retry at the ceiling forever, and after N failures in a window PID 1
+writes prominently to the console (the getty is already up from stage 0, so
+there is somewhere to write to). Visible and still trying, never silent and
+stopped.</p>
+<h4 id="the-config-file">The config file</h4>
+<p>PID 1 reads <code>/etc/salmon-init.conf</code> in stage 0. This is a <em>different</em> file from
+<code>/etc/salmon-init.json</code> — the latter is the supervisor’s seed, typed by that
+role’s Haskell seed type; this one is PID 1’s own knobs and is read by the
+Rust half only. Keeping them separate keeps the Rust half from ever needing to
+understand a role’s schema.</p>
+<p>Non-negotiable properties, all of which follow from “PID 1 must always boot”:</p>
+<ul>
+<li><strong>Missing or unparseable is not an error.</strong> Compiled-in defaults apply; a bad
+line is reported to the console and skipped; a bad file is ignored wholesale.
+PID 1 must never fail to boot because of its own config.
+</li>
+<li><strong>The format is boring on purpose.</strong> Flat <code>key = value</code> lines with <code>#</code>
+comments and a <code>[slot.&lt;name&gt;]</code> grouping for per-slot overrides. Not TOML, not
+JSON, not YAML: every parser is panic surface inside the trusted base, and
+this file has maybe a dozen keys. A hand-written line parser is a feature.
+</li>
+<li><strong>Kernel-cmdline override.</strong> PID 1 reads <code>/proc/cmdline</code> and honours e.g.
+<code>salmon_init.backoff=off</code>, so a config that makes the machine effectively
+unbootable (an enormous ceiling, say) can be escaped from the bootloader or
+the qemu <code>-append</code> without editing a filesystem you may not be able to reach.
+Cheap to implement, and the kind of escape hatch you only regret not having
+once.
+</li>
+<li><strong>Re-read on SIGHUP</strong>, keeping the previous values if the new file does not
+parse.
+</li>
+</ul>
+<p>The knob set should stay small — every knob is Rust surface:</p>
+<pre><code># defaults for every slot
+initial_delay   = 100ms
+multiplier      = 2.0
+max_delay       = 30s
+stable_after    = 10s     # ran this long =&gt; reset backoff to initial_delay
+report_after    = 5       # failures in a window before shouting to the console
+
+[slot.supervisor]
+max_delay       = 5s      # come back fast; never give up
+give_up         = never
+</code></pre>
+<p><code>give_up = never</code> being expressible — and being the supervisor’s default —
+is the config-level statement of the previous section’s rule.</p>
+<h4 id="clock">Clock</h4>
+<p>Backoff must use <code>CLOCK_MONOTONIC</code>. At early boot the wall clock is whatever
+the RTC said, and it will jump when time sync happens; a backoff computed
+against wall time can silently become a multi-hour deferral the first time NTP
+corrects a skewed guest clock. This is a small detail with a very confusing
+failure mode, which is why it belongs in the spec rather than in the code
+review.</p>
+<h3 id="repo-consequences">Repo consequences</h3>
+<p>This puts a non-Haskell component in a cabal
+multi-package project. The <code>salmon-init</code> Rust crate does not belong in the
+<code>cabal.project</code> package set; the plausible shape is a sibling directory with
+its own <code>Cargo.toml</code>, built independently, with the Haskell side depending on
+it only at <em>image assembly</em> time (the <code>Debootstrap</code> chroot gets a
+<code>/sbin/salmon-init</code> binary). That keeps <code>cabal build all</code> unaffected — which
+matters, given the project already splits packages specifically to keep build
+times down.</p>
+<h3 id="the-calling-convention">The calling convention</h3>
+<p>The kernel execs init with argv derived from the kernel cmdline; unrecognized
+cmdline words are passed through as argv/env. That is the reason none of this
+can be a fourth <code>Command</code> constructor: <code>execCommandOrSeed</code>’s entire contract is
+argv parsing, and argv is exactly what is unavailable here. These binaries are
+separate-enough things and should not pretend otherwise.</p>
+<ul>
+<li><strong>PID 1 (Rust) takes no arguments and parses none.</strong> It refuses to run unless
+<code>getpid() == 1</code> (behind an explicit <code>--pretend</code> for development), because
+doing this by accident on a workstation would be memorable.
+</li>
+<li><strong>The supervisor (Haskell) has its own entry point</strong>, not
+<code>execCommandOrSeed</code>. It is exec’d by PID 1 with a fixed argv, and reads its
+seed from a path, not from flags.
+</li>
+<li><strong>The same supervisor binary is also the client</strong> when run from a shell:
+<code>&lt;role&gt;ctl status</code>, <code>converge</code>, <code>reboot</code>, <code>up &lt;seed args&gt;</code> — talking to the
+control socket, exactly as <code>systemctl</code> relates to <code>systemd</code>. This is worth
+keeping in one binary because the client is the thing that needs to <em>know the
+graph</em> in order to resolve <code>--select</code> patterns and print sensible node names,
+and that knowledge is compiled in.
+</li>
+<li><strong>Two sockets, not one.</strong> PID 1’s socket speaks only the small mechanical
+protocol (spawn/signal/query/reboot). The <code>serve</code>-language socket is the
+supervisor’s own. Keeping them separate is what allows <code>reboot</code> and
+<code>poweroff</code> to work even when the supervisor is wedged or restarting — which
+is precisely when you need them.
+</li>
+</ul>
+<p>Usefully, the <em>same</em> cabal-built binary still supports the ordinary
+<code>config</code>/<code>run tree</code>/<code>run dag</code>/<code>query plan</code> surface when invoked normally on a
+developer machine — that is how the boot graph gets reviewed before it is ever
+booted. So the binary has three personalities (init supervisor, control client,
+ordinary salmon CLI) but only the first is entered without argv.</p>
+<h4 id="the-control-socket-is-specsgeneric-servermds-socket">The control socket is <code>specs/generic-server.md</code>’s socket</h4>
+<p><code>Serve.parseServeCommand</code> already defines a line-oriented language —
+<code>up</code>/<code>only</code>/<code>down</code>/<code>up-directive</code>/<code>clear</code>/<code>converge</code>/<code>status</code>/<code>history</code>/
+<code>query</code>/<code>load</code>/<code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code>/<code>supervise</code>/<code>autoconverge</code>/
+<code>help</code>/<code>quit</code> — with <code>--select</code>/<code>--exclude</code> on the node-addressing ones. That
+is a remarkably good fit for an init control interface. The draft proposed
+reusing it over a socket of this spec’s own; that socket is now
+<code>specs/generic-server.md</code>’s first milestone (a unix socket carrying the line
+protocol, as a second producer into the loop’s inbox), and this spec should
+<strong>consume it unchanged</strong> — the <code>&lt;role&gt;ctl</code> client is that spec’s terminal
+client, and a <code>/dag</code> view of a booting VM is that spec’s web UI pointed at
+the guest. Additions this spec still needs on top: <code>reboot</code>, <code>poweroff</code>
+(which go to PID 1’s socket, not this one — see “Two sockets”), and <code>quit</code>
+rejected, since quitting is a supervisor restart at best.</p>
+<h3 id="boot-sequence">Boot sequence</h3>
+<pre><code>kernel → exec /sbin/salmon-init (pid 1, Rust)
+  stage 0 (hardcoded, small, cannot panic)
+    reboot(RB_DISABLE_CAD); install signal handlers; start reaper
+    mount /proc /sys /dev(devtmpfs) /dev/pts /run
+    read /etc/salmon-init.conf  ──failure──&gt; compiled-in defaults, carry on
+    read /proc/cmdline for salmon_init.* overrides
+    open /dev/console; lo up
+    spawn a getty on ttyS0            &lt;- unconditional, before anything can fail
+    open the PID-1 control socket
+    fork/exec the supervisor          &lt;- restarted by pid 1, with backoff,
+                                         capped, never giving up
+  supervisor (pid 2, Haskell)
+    read /etc/salmon-init.json  ──failure──&gt; report + leave the getty running
+    Configure IO seed directive ──failure──&gt; report + leave the getty running
+    expand to Op graph, seed the World with it, converge
+    open the serve-language socket
+    then: block on { exit events from pid 1, control socket, timers }
+          → converge again
+</code></pre>
+<p>Note <code>sethostname</code> is <em>not</em> in stage 0: it is a per-machine parameter, so it
+comes from the seed and belongs in the graph. The rule for what stays in stage
+0 is “things the engine needs in order to run at all”, not “things that happen
+early”.</p>
+<p>Two properties worth calling out:</p>
+<ul>
+<li><strong>The getty comes up before anything that can fail.</strong> If the seed is missing,
+malformed, or configures to a graph that fails to converge, the machine must
+still be a machine you can log into. systemd’s <code>emergency.target</code> exists for
+this reason and is worth copying. “Rescue” here is not a mode — it is just
+“the console got spawned in stage 0 and convergence didn’t work”, which
+requires no extra machinery.
+</li>
+<li><strong>Reconfiguration without reboot is pull mode, not SIGHUP.</strong> The draft
+had the supervisor re-read <code>/etc/salmon-init.json</code> on SIGHUP and run
+<code>Serve</code>’s <code>only</code> path. <code>specs/pull-mode.md</code> is the same idea with the
+problems solved: the supervisor is started with <code>--follow &lt;registry&gt; --label &lt;role&gt;</code> and its parameters arrive as a JSON document (the format
+that spec fixes), diffed against the ledger and converged as one pass,
+with change detection so an unchanged poll never stands the machines
+down, a scheduler with backoff so a hundred booting VMs do not hammer the
+registry, and the fetch recorded in <code>history</code> as its own actor. The local
+file becomes the <em>cached last document</em> that spec asks for anyway — the
+thing a VM boots from when the registry is unreachable — and SIGHUP, if
+kept at all, is <code>fetch</code> (force a round now). Given the build model this
+only ever changes <em>parameters</em>; a new graph shape is a new supervisor
+binary, and PID 1 restarting the supervisor is the same code path as PID 1
+restarting a crashed one — which, with 1b’s re-attach, no service notices.
+</li>
+</ul>
+<h3 id="why-the-vm-assumption-buys-so-much">Why the VM assumption buys so much</h3>
+<p>Spelled out, because each of these is a subsystem that does <em>not</em> have to be
+written:</p>
+<table>
+<tr><th>Physical-machine problem</th><th>Why it disappears in the target VM</th></tr>
+<tr><td>initramfs, early module loading</td><td><code>-kernel</code>/<code>-initrd</code> direct boot with virtio built in; <code>Qemu.kernelCmdline</code> already does <code>root=vroot rootfstype=9p rootflags=trans=virtio rw</code></td></tr>
+<tr><td>udev, device naming rules</td><td>devtmpfs gives the kernel-created nodes; the device set is fixed and known</td></tr>
+<tr><td>network interface naming</td><td><code>net.ifnames=0 biosdevname=0</code>, already in <code>kernelCmdline</code></td></tr>
+<tr><td>disk enumeration, fsck, LVM, LUKS, mount ordering</td><td>9p root, no block devices to speak of</td></tr>
+<tr><td>firmware/ACPI quirks, suspend/resume</td><td>not modelled at all</td></tr>
+<tr><td>console detection</td><td>always <code>console=ttyS0</code>, already in <code>kernelCmdline</code></td></tr>
+<tr><td>verifying a reboot actually happened</td><td><code>VmConfig.vm_monitor_socket</code> gives an out-of-band channel to observe and to force-reset a wedged guest</td></tr>
+</table>
+<p>The last row is the one that makes this <em>testable</em> rather than merely
+buildable, and it is why the qemu tier is the natural home for the tests.</p>
+<h3 id="state-that-world-doesnt-have--now-mostly-upkeeps">State that <code>World</code> doesn’t have — now mostly <code>Upkeep</code>’s</h3>
+<p>The draft asked for a supervisor table keyed by <code>Ref</code> with the live pid,
+restart counts, next-eligible time and a give-up latch, kept apart from
+<code>NodeState</code>. That is what shipped, and it shipped apart from <code>World</code> for the
+draft’s own reason: <code>Upkeep</code>’s per-machine <code>Tally</code> (consecutive failures,
+when the node last reached <code>Up</code>) and delay ladder are the counters;
+<code>supGiveUpAfter</code> is the latch (a node that gave up is <em>parked</em>, and <code>Force</code>/
+<code>Recheck</code> starts it over — the draft’s “reported instead of consuming the
+machine”); and <code>Serve.NodeState.nodeStatus</code> is the snapshot <code>status</code> reads.
+The live pid is the one item that is deliberately <em>not</em> stored anywhere on
+the Haskell side: under <code>run serve</code> it lives inside the machine’s async;
+under salmon-init it lives in PID 1’s slot table and the machine holds a
+subscription (1b).</p>
+<p>One thing survives as a genuine gap. <strong><code>World</code> is an <code>IORef</code></strong>: none of this
+persists across a supervisor <em>process</em> restart. The draft’s cure was “PID 1
+holds the services, so a supervisor restart re-adopts”; that still holds
+for the <em>processes</em>, but the ledger, the convergence states and the tallies
+start from zero. Under pull mode the cached last document replays the
+declarations; the rest is <code>Standing</code> guesses from each node’s <code>check</code>. That
+is acceptable for v1 of an init (a rebooted machine starts from zero too)
+and is the same journal item both companion specs already rank ahead of
+their own work.</p>
+<p><code>worldHistory</code>’s unbounded growth, the draft’s other worry, was fixed on its
+own merits (<code>885d9f0</code>): <code>worldEpochs</code> keeps only graphs a pass could still
+walk and <code>worldLog</code> keeps capped per-declaration lines; and with the magma
+keyed by <code>Ref</code> (<code>Op/Dag.hs</code>) there is no per-declaration graph to retain at
+all.</p>
+<h3 id="process-lifecycle-details-worth-deciding-early">Process lifecycle details worth deciding early</h3>
+<ul>
+<li><strong>Process groups.</strong> Each service gets its own session (<code>setsid</code>) so it can be
+killed as a group. This is <code>Systemd.KillMode</code>’s <code>Process</code> vs a
+<code>control-group</code> equivalent; without cgroups, the pgid is the available
+approximation and is good enough for the VM case. cgroup v2 (for real
+containment and for resource limits) is a plausible v2, not a v1.
+</li>
+<li><strong>Dropping privilege at spawn.</strong> <code>Systemd.Service</code> already carries
+<code>service_user</code>/<code>service_group</code>/<code>service_umask</code>. Under salmon-init these stop
+being rendered into a unit file and travel over the spawn protocol, becoming
+actual <code>setgroups</code>/<code>setgid</code>/<code>setuid</code> calls made by PID 1 in the forked child
+before <code>exec</code> — in that order, since dropping the group after the user is a
+classic privilege-escalation bug, as is forgetting supplementary groups.
+This is the same operation <code>specs/multi-user-privilege-separation.md</code>
+proposes as <code>applyRunAs</code>, applied at spawn rather than by wrapping a command.
+The two specs share the <code>RunAs</code> <em>vocabulary</em> on the Haskell side, but not the
+implementation: here the fork-and-setuid that spec cautions against is the
+correct approach, because it is a fresh fork in a non-GC’d runtime whose only
+job is to exec — none of the hazards that make it a bad idea inside the
+Haskell engine apply.
+</li>
+<li><strong>Stdout/stderr.</strong> Services need somewhere to write. v1: a per-service file
+under <code>/run/salmon-init/log/&lt;name&gt;</code>, opened by PID 1 before exec. A journal
+is not v1.
+</li>
+<li><strong>Readiness.</strong> <code>Type=simple</code> only (as <code>Systemd.ServiceType</code> already is):
+“spawned” means “started”. Notify/readiness protocols are a v2 concern, and
+the honest v1 story for ordering against readiness is “the dependent node
+waits on <code>waitStability</code> and its own <code>check</code> until the dependency
+answers” — which <code>Upkeep</code> already does (failure is waited out, not
+contained), and which is arguably more robust than a readiness protocol
+anyway. A <code>RestForOne</code> on the dependency is the opt-in for “and bounce me
+if it goes away”.
+</li>
+<li><strong>Shutdown ordering.</strong> <code>downTree</code> gives correct reverse-dependency teardown,
+but a real shutdown also needs a global deadline: converge-down with a
+timeout, then SIGTERM everything remaining, then SIGKILL, then <code>sync</code> and
+<code>reboot(2)</code>. The deadline cannot live in the graph.
+</li>
+</ul>
+<h3 id="testing">Testing</h3>
+<p>This is unusually testable for something this invasive, because the harness
+already exists:</p>
+<ol>
+<li><code>Debootstrap.rootTree</code> + <code>ensureVm9pBoot</code> produce the chroot; add the Rust
+<code>salmon-init</code> at <code>/sbin/salmon-init</code>, the cabal-built role supervisor, and a
+<code>/etc/salmon-init.json</code>. Image assembly is the one place the two build
+systems meet, so it is worth making it an <code>Op</code> like everything else rather
+than a shell script beside the tests.
+</li>
+<li>Boot it with <code>vm_extra_kernel_args = [&quot;init=/sbin/salmon-init&quot;]</code> — note
+<code>Systemd.render_service</code>’s <code>quoteArg</code> already handles the <code>-append</code> quoting
+trap that bit <code>Qemu</code> once (documented in <code>specs/qemu-test-vms-progress.md</code>).
+</li>
+<li>Assert over the serial console and over SSH: services running, boot order as
+<code>run tree</code> predicted, <code>salmon-init status</code> agrees, a killed service comes
+back, a crash-looping service gives up rather than spinning, SIGHUP with a
+new seed converges the difference, <code>poweroff</code> actually powers off (observable
+on the monitor socket).
+</li>
+</ol>
+<p>The “boot order matches what <code>run tree</code> printed on the developer’s laptop” test
+is the one that justifies the whole design, and it is only possible <em>because</em>
+config generation and execution are already separate hermetic steps.</p>
+<h3 id="non-goals-v1">Non-goals (v1)</h3>
+<p>Physical hardware; initramfs generation; udev; socket/dbus activation; cgroup
+resource control; timers (<code>CronTask</code> exists but needs cron, and a timer
+subsystem is its own spec); a journal; user sessions/logind; SELinux/AppArmor;
+<code>/dev/initctl</code> compatibility; being a drop-in systemd replacement for an
+existing distro’s unit corpus; and — per the build model — any form of runtime
+extensibility: no unit-file directory, no plugin path, no way to add a service
+without rebuilding the supervisor. The target is a machine whose entire
+configuration is one cabal-built binary plus a small parameter file, not a
+machine that also has to run somebody else’s units.</p>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>Is the supervisor’s own restart policy declarable?</strong> Services are declared
+<em>by</em> the graph but supervised by PID 1, which also supervises the supervisor.
+So the one process whose restart behaviour cannot be expressed in the graph
+is the one that owns the graph. Probably fine and unavoidable; worth being
+deliberate rather than discovering it.
+</li>
+<li><strong>How small can stage 0 actually get?</strong> Every line in it is a line that
+<code>run tree</code> cannot show you. Is there a defensible way to express the mounts
+as ops that run under a degraded engine, or is hardcoding them honest?
+</li>
+<li><strong>Seed vs directive on disk</strong> is answered by pull mode’s document format:
+a document entry is either <code>{&quot;seed&quot;: [words]}</code> or <code>{&quot;directive&quot;: {...}}</code>,
+mirroring <code>up</code> vs <code>up-directive</code>. A role can publish directives (hermetic,
+cannot fail <code>Configure</code> at boot) or seeds (flexible); the cached last
+document is what the VM boots from. What remains open is only whether a
+role should <em>refuse</em> seeds and insist on directives for the boot path.
+</li>
+<li><strong>Does the fleet story change the build model?</strong> With labels addressing
+documents in a registry, “one cabal-built binary per role” is still right
+for the <em>graph</em>, but a role’s parameters now come from the registry rather
+than an image-baked file, which means the image is the same for every
+machine of a role and the label is the only per-machine input. That is a
+simplification; it should be stated as the target.
+</li>
+<li><strong>How static is “static”?</strong> A statically-linked GHC binary is achievable but
+not free, and it interacts with what the recipes actually shell out to: a
+supervisor with no dynamic loader still needs <code>psql</code>, <code>ip</code>, <code>nft</code> and friends
+present in the image. Worth deciding whether the goal is a static supervisor
+or a <em>minimal, known</em> image — they are different targets, and the second is
+probably the real one.
+</li>
+<li><strong>Interaction with <code>specs/multi-user-privilege-separation.md</code>.</strong> That spec’s
+L1 (<code>RunAs</code>/<code>Invoker</code>) and this one’s service-spawn privilege drop want to be
+the same vocabulary — except the drop happens in Rust here, so what is shared
+is the <em>type</em> on the Haskell side and its serialization into the spawn
+protocol, not the implementation. Doing that spec first makes this one
+smaller.
+</li>
+</ul>
+<h3 id="suggested-milestones">Suggested milestones</h3>
+<p>Each is independently useful and independently testable, which matters a lot
+for something whose failure mode is “the VM does not boot”.</p>
+<p><strong>In <code>Serve</code>, ahead of any of this:</strong></p>
+<p>0a. <strong>Supervision in <code>run serve</code></strong> — done: <code>managed</code>/<code>Daemon</code>, <code>Supervision</code>,
+<code>Upkeep</code>, tending between commands (<code>80fb410</code>, <code>e9fd9d9</code> and the
+per-node-state-machines series). Milestone 4 below is now wiring.</p>
+<p>0b. <strong><code>worldHistory</code> retention</strong> — done (<code>885d9f0</code>).</p>
+<p>0c. <strong>The serve-language socket</strong> — <code>specs/generic-server.md</code> milestone 2.
+This spec consumes it.</p>
+<p>0d. <strong>Pull mode with a cached last document</strong> — <code>specs/pull-mode.md</code>
+milestones 2–4. This spec consumes it for reconfiguration.</p>
+<p><strong>Then the init system itself:</strong></p>
+<ol>
+<li><strong><code>salmon-init</code> (Rust) as a dumb-init.</strong> Stage 0 + reaper + signals + getty
+<ul>
+<li><code>reboot</code>/<code>poweroff</code>, no convergence at all, boots to a shell in a qemu VM.
+Proves the PID-1 mechanics and the test harness end to end, and establishes
+the Rust build/packaging path into the <code>Debootstrap</code> image.
+</li>
+</ul>
+</li>
+<li><strong>The spawn protocol, <code>/etc/salmon-init.conf</code>, and PID-1 backoff</strong>, with a
+hardcoded service list and the supervisor slot. Proves the process topology
+— “kill the supervisor, services survive, supervisor comes back and
+re-adopts”, which everything else leans on — and, separately, that a binary
+that exits immediately gets rate-limited to the configured ceiling instead
+of spinning, that a missing/corrupt conf still boots on defaults, and that
+<code>salmon_init.backoff=off</code> on the kernel cmdline overrides the file. That
+last set is cheap to test and is exactly the behaviour nobody exercises
+until the day it matters.
+</li>
+<li><strong><code>SalmonInit.service</code> node</strong> as a sibling of <code>Daemon.daemon</code> (1 above):
+<code>check</code> = <code>Query</code>, <code>managed</code> = <code>Spawn</code>/<code>Attach</code> + block on <code>Exited</code>,
+cancellation = <code>Signal</code>. Plus seed/directive reading from the cached
+document and one converge pass. First real boot of a cabal-built role
+supervisor. Test at Layer 1 against a fake PID 1 speaking the protocol
+over a socketpair, before any VM.
+</li>
+<li><strong>Supervision proper</strong>: nothing to build — <code>Upkeep</code> tends the node from
+milestone 3 with its declared <code>Supervision</code>. The test is that killing a
+service under the VM brings it back by policy, and that a crash-looping
+one parks after <code>supGiveUpAfter</code> rather than spinning.
+</li>
+<li><strong>Reconfiguration</strong>: <code>--follow</code> a registry (0d) from inside the VM, and
+supervisor binary replacement without dropping services — which is 1b’s
+re-attach, tested by killing the supervisor and checking <code>status</code> from
+the new one shows every slot <code>Standing</code>.
+</li>
+<li><strong>Ordered shutdown</strong>: <code>downTree</code> with a global deadline, then <code>reboot(2)</code>.
+</li>
+</ol>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

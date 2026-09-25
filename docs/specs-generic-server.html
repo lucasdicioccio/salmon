@@ -1,0 +1,428 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - A generic salmon server: `serve` behind an API, with clients that show the DAG</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-generic-server.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: milestones 1 to 8 below are implemented (`--json` via"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - A generic salmon server: `serve` behind an API, with clients that show the DAG"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: milestones 1 to 8 below are implemented (`--json` via"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - A generic salmon server: `serve` behind an API, with clients that show the DAG"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-generic-server.html"><meta property="og:description" content="Status: milestones 1 to 8 below are implemented (`--json` via"><meta name="article:published_time" content="2026-09-25T12:58:47Z"><meta name="article:modified_time" content="2026-09-25T12:58:47Z"><meta name="ks:article_json" content="/salmon/json/specs-generic-server.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-generic-server.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T12:58:47Z","datePublished":"2026-09-25T12:58:47Z","description":"Status: milestones 1 to 8 below are implemented (`--json` via","headline":"A generic salmon server: `serve` behind an API, with clients that show the DAG","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-generic-server.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>A generic salmon server: `serve` behind an API, with clients that show the DAG</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 3531 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-serve-property-testing.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">13/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-multi-user-privilege-separation.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/generic-server.md"><code>specs/generic-server.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="a-generic-salmon-server-serve-behind-an-api-with-clients-that-show-the-dag">A generic salmon server: <code>serve</code> behind an API, with clients that show the DAG</h2>
+<p>Status: milestones 1 to 8 below are implemented (<code>--json</code> via
+<code>Salmon.Reporter.Tagged</code>; <code>run serve --listen</code> via <code>Salmon.Actions.Serve.Socket</code>;
+<code>run serve --http</code> via <code>Salmon.Actions.Serve.Http</code> with <code>/dag</code>, <code>/status</code>,
+<code>/history</code>, <code>/help/seed</code>, <code>POST /command[?async]</code>; <code>GET /events</code> via
+<code>Salmon.Actions.Serve.Events</code> and <code>--events-ring</code>; <code>mode</code> on <code>status</code>/<code>/dag</code>;
+<code>salmon-tui</code> over <code>Salmon.Client.Http</code>/<code>Salmon.Client.Model</code>; the web UI under
+<code>salmon-ops/ui/</code> served at <code>GET /</code>; and <code>--http-tcp</code> with <code>--tls-cert</code>,
+<code>--tls-key</code>, <code>--token-file</code>), each with its deviations recorded in place in
+the milestone list. Milestone 8’s closing “Not done: the clients” has since
+been done: <code>salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]</code>,
+and a browser signs in at <code>/auth</code> for a session cookie (<code>--session-lifetime</code>,
+<code>--session-idle</code>, sign-out at <code>/auth/logout</code>). Still open: the web UI’s
+“Not yet” items under milestone 7 (a <code>Conflicting</code> pair side by side, batch
+and <code>RemoteOp</code> expansion, <code>history</code> as a timeline), client certificates and
+a read-only token. Kept as the design record. Companion to <code>specs/pull-mode.md</code> (which is about a host
+<em>fetching</em> its declarations); this one is about <em>talking to</em> a running
+<code>serve</code> — a web UI, a terminal UI, tooling — and about finally showing the
+DAG as what it is while it is being converged and tended.</p>
+<h3 id="problem">Problem</h3>
+<p><code>run serve</code>’s entire surface is one <code>Handle</code> in and a text <code>Reporter</code> out
+(<code>salmon-ops/src/Salmon/Actions/Serve.hs</code>, <code>serveWith</code>; the reader thread
+<code>hGetLine</code>s into a <code>TChan</code>, <code>loop</code> reads it). Everything else follows from
+that:</p>
+<ul>
+<li><strong>One operator, one terminal.</strong> No second client can attach, no tool can
+drive a running supervisor, and there is no auth because there is nothing
+to authenticate to.
+</li>
+<li><strong>A remote <code>serve</code> cannot be addressed.</strong> <code>Self.callSelf</code> only ever runs a
+one-shot <code>run up</code> over ssh. <code>ssh host bin run serve</code> works, but the only
+thing that can then speak to it is that ssh session’s stdin.
+</li>
+<li><strong>The DAG is invisible while it runs.</strong> <code>run tree</code>/<code>run dag</code> print a static
+picture <em>before</em> anything happens (<code>Help.printDagTree</code>,
+<code>Dot.printDagCograph</code>); <code>status</code> prints a flat list <em>after</em>. The one thing
+salmon is best at — a graph with per-node state, failure containment and
+<code>Conflicting</code>/<code>Blocked</code> distinctions — is never rendered as a graph while
+a pass or the tending loop is acting on it.
+</li>
+</ul>
+<p>The author of the line protocol is the first to lament it. This sketch is
+the replacement.</p>
+<h3 id="what-already-exists-as-a-value">What already exists as a value</h3>
+<p>None of this needs a new engine; it needs a transport and a read model over
+values the loop already maintains.</p>
+<ul>
+<li><strong><code>World</code></strong> (<code>Serve.hs</code>): the ledger, the magma (one representative per
+<code>Ref</code>), and a <code>NodeState</code> per node — <code>nodeShorthand</code>, <code>nodeHelp</code>,
+<code>nodeDirection</code>, <code>nodeConvergence</code>
+(<code>Pending</code>/<code>Stale</code>/<code>Converged</code>/<code>Errored</code>/<code>Blocked</code>) and, since (R3),
+<code>nodeStatus</code>: the node’s own last <code>CheckResult</code>, when it last did anything
+observable, and its output ring.
+</li>
+<li><strong><code>Dag</code></strong> (<code>Salmon.Op.Dag</code>): <code>dagNodes</code>, <code>dagDependencies</code>,
+<code>dagDependants</code>, <code>dagOrder</code>, <code>dagConflicts</code> — already the collapsed,
+rewrite-applied structure <code>run tree</code>/<code>run dag</code> print, with <code>membersOf</code> for
+a rewrite-introduced node standing in for declared ones.
+</li>
+<li><strong>Three report streams</strong>, all plain sum types: <code>Serve.Report</code>
+(<code>Started</code>, <code>BadCommand</code>, <code>Loading</code>, … the loop’s own events),
+<code>UpDown.Report</code> (<code>Skip</code>/<code>Eval</code>/<code>Done</code>/<code>Failed</code>/<code>Blocked</code>/<code>Conflicting</code>/
+<code>Instructed</code>/…) and <code>Upkeep.Report</code> (<code>Acted</code>, <code>Upkeep</code>/<code>Downkeep</code> state
+changes, <code>NextLook</code>, <code>Wedged</code>/<code>Unwedged</code>, demotions). <code>Reporter</code> is
+contravariant and already has <code>encodeJSON</code>; what is missing is <code>ToJSON</code>
+instances on these types (most carry an <code>Act ext</code>, which needs a
+serializable projection — shorthand, ref, help, notes — not the closures).
+</li>
+<li><strong>Selectors</strong>: <code>parseSelection</code>/<code>resolveWorldSelectors</code> resolve
+<code>--select</code>/<code>--exclude</code> path globs and <code>#ref</code> prefixes against the live
+world; <code>status</code> prints the paths a pattern can match.
+</li>
+<li><strong><code>RemoteOp</code></strong> (<code>CommandLine.hs</code>): the dynamic that lets <code>run dag</code> draw a
+remote call’s subgraph locally (<code>injectRemoteSubgraphs</code>). A live view can
+use the same thing to expand a remote node.
+</li>
+<li><strong>Mailbox instructions</strong> (<code>Salmon.Op.Mailbox.Instruction</code>:
+<code>Force</code>/<code>Satisfy</code>/<code>Recheck</code>/<code>Pause</code>/<code>Resume</code>) and the <code>force</code>/<code>recheck</code>/
+<code>pause</code>/<code>resume</code> commands that queue them.
+</li>
+</ul>
+<h3 id="design">Design</h3>
+<h4 id="the-server-is-generic-because-the-protocol-never-interprets-a-seed">The server is generic because the protocol never interprets a seed</h4>
+<p>Every salmon binary is a different program (<code>ParseRecord seed</code>, its own
+<code>Configure</code>, its own <code>Track' directive</code>), so a server bolted onto <code>serve</code>
+has to be binary-agnostic to be worth writing once. It is, as long as the
+protocol carries seeds as <strong>opaque word lists</strong> — exactly what the line
+parser already takes after <code>up</code>/<code>only</code>/<code>down</code> — and speaks about nodes only
+in terms of <code>Ref</code>, path, shorthand, help, notes and state. A client that
+speaks that drives any salmon binary; it never knows what <code>pgpair primary=db1</code> means.</p>
+<p>The one place this leaks: composing a seed. The server exposes each binary’s
+own <code>--help</code> text for <code>config</code> (it is <code>optparse-generic</code>’s, and already
+exists), and optionally a JSON schema derived from the <code>ParseRecord</code>
+instance, so a UI can offer a form instead of a free-text line. That is the
+only non-generic surface and it is bounded.</p>
+<h4 id="three-surfaces-one-inbox">Three surfaces, one inbox</h4>
+<p>The loop stays as it is: a single consumer reading lines off one <code>TChan</code>,
+calling <code>stopTending</code> before each. The server is another <em>producer</em> into
+that channel (the same generalization <code>specs/pull-mode.md</code> milestone 1
+asks for), plus a <em>reader</em> of <code>World</code> and the report streams. Concretely:</p>
+<ol>
+<li><strong>Commands</strong> — <code>POST /command</code> with <code>{&quot;line&quot;: &quot;up pgpair primary=db1&quot;}</code>
+or a structured form <code>{&quot;verb&quot;:&quot;up&quot;,&quot;seed&quot;:[...]}</code>; the server writes the
+line to the inbox. <strong>Both a sync and an async mode</strong>: sync (the default)
+blocks and returns the reports that command produced, since the loop
+already knows when a command’s reports end (<code>step</code> returns) — what
+<code>curl</code> and a CI step want; <code>?async</code> returns immediately with the
+sequence number at which the command was enqueued, and the client reads
+its reports off <code>/events</code> from there — what a UI wants. The existing
+grammar is the API, unchanged. <code>stdin</code> keeps working alongside.
+</li>
+<li><strong>Reads</strong> — <code>GET /dag</code> returns the computed <code>Dag</code> as JSON: one object per
+<code>Ref</code> with <code>ref</code>, <code>short</code>, <code>shorthand</code>, <code>help</code>, <code>notes</code>, <code>direction</code>,
+<code>convergence</code>, <code>check</code> (last <code>CheckResult</code>), <code>output</code> (tail), <code>paths</code>
+(the declared positions a selector can match), <code>members</code> (for a
+rewrite-introduced node), <code>remote</code> (a nested <code>Dag</code>, from <code>RemoteOp</code>), and
+<code>dependencies</code>/<code>dependants</code> as ref lists. It is built by <strong>reading the
+magma</strong> — <code>worldDag</code> from <code>worldMagma</code> plus the ledger’s precedence,
+exactly as a convergence pass builds its own walkable structure — so it
+exists the moment anything has been <em>declared</em>, whether or not a pass
+has run yet (<code>autoconverge off</code> with declarations recorded is the
+ordinary case: every node <code>Pending</code>, edges in place). Plus <code>GET /status</code>,
+<code>GET /history</code>, <code>GET /help/seed</code>. Reads never touch the inbox and never
+stop tending: they read the <code>IORef World</code> and the tending snapshot.
+</li>
+<li><strong>Events</strong> — <code>GET /events</code>, server-sent events (one connection, text,
+proxies and <code>curl</code> understand it; WebSocket adds nothing here): <strong>one
+stream</strong>, every <code>Serve.Report</code>, <code>UpDown.Report</code> and <code>Upkeep.Report</code> as
+JSON, each tagged with its kind and the <code>Ref</code> it concerns and a monotonic
+sequence number so a client that reconnects can ask <code>?since=N</code>. The
+server is one more <code>Reporter</code> — the codebase’s contravariant reporter
+type (<code>Salmon.Reporter</code>; the <em>tracer</em> word is taken by the ops
+themselves) — composed with <code>reportBoth</code> beside the text reporter the
+binary already has, <code>contramap</code>ped from each report type into one tagged
+sum. Nothing in the loop learns that a server exists; a client filters.
+This is the stream a live DAG view animates from.
+</li>
+</ol>
+<p>Transport, in order: <strong>a unix socket</strong> carrying the <em>line protocol</em> first —
+<code>serveWith</code> already takes any <code>Handle</code>, so this is nearly free, it makes a
+remote <code>serve</code> addressable through <code>ssh -L</code>, and it lets a second client
+attach today; then <strong>HTTP on that socket or a TCP port</strong> with the three
+surfaces above; TLS and auth when it listens on anything but localhost or a
+unix socket (see below).</p>
+<h4 id="reads-and-the-tending-loop">Reads and the tending loop</h4>
+<p><code>stopTending</code> before every command exists because a command is about to
+<em>act</em>. A read is not, so reads bypass the inbox and never stand the machines
+down — which is exactly the property the loop’s (R3) snapshot design was
+built for: <code>nodeStatus</code> is snapshotted by <code>stopTending</code> and re-snapshotted
+on the next, so a read sees a snapshot that is at most one command old. For
+a <em>live</em> view that is not enough; the event stream is what carries the
+between-commands changes (<code>Upkeep.Report</code>s are emitted by the running
+machines, not by the loop). So: <code>GET /dag</code> for the picture, <code>/events</code> for
+the motion, and a client rebuilds the current state as <code>dag ⊕ events since the dag's sequence number</code>. The server records the sequence number at which
+each snapshot was taken and returns it with the snapshot, so the client
+knows where to resume.</p>
+<h4 id="serialization-what-an-act-ext-becomes">Serialization: what an <code>Act ext</code> becomes</h4>
+<p><code>Act ext</code> holds closures (<code>up</code>/<code>check</code>/<code>down</code>/<code>managed</code>) and <code>Dynamic</code>s. The
+wire projection is exactly the fields <code>Dag.sameRepresentative</code> compares —
+<code>shorthand</code>, <code>help</code>, <code>notes</code>, the rendering of <code>dynamics</code> (with
+<code>Supervision</code> by value, as <code>Dag.showDynamic</code> already does) — plus the <code>Ref</code>.
+That is not a coincidence: it is the set of things that <em>are</em> comparable,
+and a UI that shows exactly those is showing what <code>serve</code> itself can see.
+<code>RemoteOp</code> is the one dynamic that gets special treatment (expanded to a
+nested <code>Dag</code>), same as <code>run dag</code> does today.</p>
+<h4 id="modes-so-a-client-knows-which-guarantees-apply">Modes, so a client knows which guarantees apply</h4>
+<p><code>status</code> and <code>/dag</code> report the loop’s mode: <code>replay</code> (a piped script or
+startup replay — every line queued, never supervised, deterministic),
+<code>interactive</code> (tending between commands), and, once pull mode exists,
+<code>following</code> (documents arriving on the scheduler). A web client showing a
+node as “supervised” while the loop is replaying a script would be lying.</p>
+<h4 id="clients">Clients</h4>
+<ul>
+<li><strong>Web UI.</strong> Renders <code>/dag</code> as a graph (a layered DAG layout — <code>dagre</code> or
+ELK — not force-directed; dependency direction <em>is</em> the information),
+colours nodes by <code>convergence</code>, overlays <code>check</code>, animates
+<code>Eval</code>/<code>Done</code>/<code>Failed</code>/<code>Blocked</code> as they arrive on <code>/events</code>, shows a
+<code>Conflicting</code> pair side by side, collapses a rewrite-introduced batch to
+its members on click, expands a <code>RemoteOp</code> node into its subgraph, and
+turns a click on a node into <code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code> with the
+<code>#ref</code> selector the server already accepts. <code>history</code> is a timeline. A
+<code>config</code> form built from <code>/help/seed</code> composes an <code>up</code>. <code>Dot</code> output stays
+as the export.
+</li>
+<li><strong>Terminal UI.</strong> Same API, same read model, for the box with no browser:
+a tree view (the <code>run tree</code> shape) with live state, a report pane tailing
+<code>/events</code>, and a command line that is the existing grammar. This should
+be a <em>client of the socket</em>, not a mode of <code>serve</code>, so it works against
+a remote host over <code>ssh -L</code> unchanged.
+</li>
+<li><strong>Tooling.</strong> <code>curl</code>, <code>jq</code>, a CI step asserting every node is <code>Converged</code>
+before proceeding; a <code>salmon-fleet status</code> that folds <code>/dag</code> from N hosts
+(or from the pull-mode status sink, which should emit the same JSON).
+</li>
+</ul>
+<p>The web UI is a separate package (<code>salmon-web</code>, PureScript is already in
+the tree via <code>Spago</code>/<code>purescript-bridge</code>; the bridge can generate the
+client types from the Haskell ones, which is exactly what it is for). The
+server itself lives in <code>salmon-ops</code> next to <code>Serve.hs</code> if it can stay light
+(a small WAI app), else in its own package so <code>salmon-ops</code> does not grow a
+<code>warp</code> dependency for every binary that never listens.</p>
+<h4 id="security">Security</h4>
+<p>A unix socket inherits filesystem permissions and needs nothing else. For
+TCP: TLS (the <code>Certificates</code> nodes can mint the cert; this is what they are
+for), and a bearer token or client certificate — the tree already has JWT
+signing (<code>SreBox.JWTSigning</code>). Commands and reads are the same privilege in
+v1 (an <code>up</code> is as sensitive as reading the output ring of a node holding a
+pgbouncer userlist); a read-only token is an obvious v2. <strong>Default to
+localhost or a unix socket; never listen on <code>0.0.0.0</code> without TLS and auth
+configured</strong> — a salmon server <em>is</em> root on the box, one <code>up</code> away.</p>
+<p><strong><code>notes</code>, <code>help</code>, output rings and report text are public</strong> — the
+convention already in force, since all of them end up in logs (this is why
+<code>Filesystem.checkFileContents</code> names files and never quotes them, and why
+<code>filecontents</code> puts a <em>fingerprint</em> in <code>notes</code>, never content). The server
+inherits that convention rather than adding a redaction layer: it ships
+exactly what the text reporter would print. A real story for sensitive data
+(what a node may put where, and what a reporter may emit) is needed and is
+<strong>another spec</strong>, not this one; until it exists, node authors should assume
+anything they write into a report or an <code>Extension</code> text field is readable
+by anyone who can read the logs.</p>
+<h3 id="interaction-with-pull-mode">Interaction with pull mode</h3>
+<p>The two sketches meet at the inbox and at the status JSON. Pull mode adds a
+producer (the scheduler) and a consumer of <code>/dag</code>-shaped JSON (the status
+sink). A fleet view is then either a <code>salmon-fleet</code> that folds sink objects
+(no server needed on any host) or a web UI that connects to N hosts’
+<code>/events</code> (a server on every host). Both should work; the former is the
+cheap one and lands first.</p>
+<h3 id="non-goals-v1">Non-goals (v1)</h3>
+<ul>
+<li>Multi-user access control, audit trails, read-only roles.
+</li>
+<li>A server that manages <em>other</em> hosts (that is pull mode plus a fleet
+fold; this server speaks for one <code>World</code>).
+</li>
+<li>Editing seeds or directives <em>in</em> the UI beyond composing an <code>up</code> line.
+</li>
+<li>WebSocket, gRPC, or any second wire format: SSE + JSON.
+</li>
+<li>Rendering the <em>declared</em> graph (the <code>query</code> tree with <code>Connect</code>/<code>Overlay</code>
+colouring); the live view is the computed <code>Dag</code>, the same as <code>run tree</code>/
+<code>run dag</code> since (R4). <code>query</code>’s tree stays a CLI concern.
+</li>
+</ul>
+<h3 id="decisions-taken">Decisions taken</h3>
+<ul>
+<li><strong><code>POST /command</code> has both modes</strong>: sync by default, returning the
+command’s reports; <code>?async</code> returning the enqueue sequence number for a
+client that reads <code>/events</code>.
+</li>
+<li><strong><code>/dag</code> reads the magma.</strong> It is <code>worldDag</code> over <code>worldMagma</code> and the
+ledger, the same structure a pass walks, and exists from the first
+declaration on — no pass required.
+</li>
+<li><strong><code>notes</code> and every other report text are public.</strong> No redaction in this
+server; a sensitive-data story is a separate spec.
+</li>
+<li><strong>One tagged event stream</strong>, produced by composing a server <code>Reporter</code>
+beside the existing text one (<code>Salmon.Reporter</code>’s contravariant
+combinators), <code>contramap</code>ped into one sum. Clients filter.
+</li>
+</ul>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li>Sequence numbers: one counter for the whole loop, or per report kind? One
+(a client resuming wants a single cursor), but <code>Upkeep</code> reports are
+emitted from machine threads while <code>Serve</code>/<code>UpDown</code> reports come from the
+loop, so the counter has to be taken under the same <code>MVar</code> the concurrent
+driver already serialises <code>runReporter</code> through. <em>Answered in milestone 4:</em>
+one counter; the critical section is the numbering reporter’s own STM
+transaction, which the drivers’ (several, local) <code>MVar</code>s compose over.
+</li>
+<li>Whether <code>/dag</code> should include nodes only <em>retiring</em> declarations still
+describe (wanted <code>TurnDown</code>, not yet down). Yes, with <code>direction: down</code> —
+a teardown in progress is the most useful thing to watch — but the UI
+needs to draw them differently from live ones.
+</li>
+</ul>
+<h3 id="suggested-milestones">Suggested milestones</h3>
+<ol>
+<li><strong><code>ToJSON</code> for the three report streams and a <code>--json</code> reporter flag</strong> on
+every shipped binary. No server yet; <code>run up | jq</code> works; every later
+client reuses the encoding. Test: golden JSON for each constructor.
+</li>
+<li><strong>Unix socket carrying the line protocol</strong> (<code>run serve --listen &lt;path&gt;</code>), as a second producer into the inbox, stdin unchanged. Test:
+two clients, interleaved commands, reports go to the client that typed
+them. <strong>Shipped</strong> (<code>Salmon.Actions.Serve.Socket</code>, <code>Test/ServeSocketSpec.hs</code>).
+Two deviations: “stdin unchanged” holds for what stdin <em>accepts</em>, not for
+what its end of input does — under <code>--listen</code> stdin EOF is a hang-up and
+only <code>quit</code> ends the loop, since a server started <code>&lt; /dev/null &amp;</code> must not
+exit at once; and a <code>HungUp</code> report was added to <code>Serve.Report</code>, because
+“every line this client typed has been handled” is a fact only the loop
+knows and the socket needs it to close the connection at the right moment.
+</li>
+<li><strong><code>/dag</code>, <code>/status</code>, <code>/history</code>, <code>/help/seed</code> as JSON</strong> over HTTP on the
+socket. The <code>Act</code> projection lands here. Test: <code>/dag</code> equals what
+<code>Help.printDagTree</code> would print, structurally. <strong>Shipped</strong>
+(<code>Salmon.Actions.Serve.Http</code>, <code>run serve --http PATH</code>,
+<code>Test/ServeHttpSpec.hs</code>), with <code>POST /command</code> in both modes. Two
+deviations: it is a <em>second</em> unix socket beside <code>--listen</code>’s rather than
+HTTP detected on the same one (the line protocol reads through a
+<code>Handle</code> that cannot give peeked bytes back, so sharing meant rewriting
+both over raw sockets plus a warp <code>Internal</code> shim, for the price of one
+flag); and <code>/dag</code> is <code>worldDag</code> unrewritten — no <code>members</code>, no <code>remote</code>,
+no <code>output</code>/<code>paths</code> beyond what <code>status</code> already carries — since the
+loop’s registered <code>Rewrite</code>s run per pass and a rewrite-introduced node
+has no <code>NodeState</code> to project. <code>/history</code> folds <code>history-elided</code>’s count
+in as an <code>elided</code> field rather than answering with two objects.
+</li>
+<li><strong><code>/events</code> (SSE) with sequence numbers and <code>?since=</code>.</strong> Test: a client
+that reconnects mid-pass misses nothing. <strong>Shipped</strong>
+(<code>Salmon.Actions.Serve.Events</code>, <code>GET /events</code> in <code>Salmon.Actions.Serve.Http</code>,
+<code>--events-ring N</code>, <code>Test/ServeEventsSpec.hs</code>). The open question on
+sequence numbers is answered: one counter, and the critical section is
+an STM transaction owned by the numbering reporter (counter, ring and
+broadcast written together), not the concurrent driver’s <code>MVar</code> — there
+is no single such <code>MVar</code> to take (one per walk, one per supervisor), but
+each is held while <code>runReporter</code> runs, so the transaction composes under
+all of them. Three deviations: every <code>POST /command</code> publishes an
+<code>enqueued</code> event numbered from the same counter (so the numbering is
+dense and the <code>?async</code> number is an event a client can see); a <code>Tended</code>
+report is delivered as its inner <code>Upkeep.Report</code> under <code>stream: &quot;upkeep&quot;</code>
+rather than as <code>{&quot;kind&quot;:&quot;tended&quot;}</code>; and <code>?stream=</code>/<code>?origin=</code> filter
+server-side after all, since a terminal client over a slow link wants
+less on the wire. <code>/dag</code> and <code>/status</code> carry <code>seq</code>, read before the
+snapshot so a race replays rather than skips.
+</li>
+<li><strong><code>mode</code> in <code>status</code>/<code>/dag</code>.</strong> <strong>Shipped</strong>: <code>status</code> and <code>/status</code>
+with <code>specs/pull-mode.md</code> milestone 4 (<code>Serve.Mode</code> on <code>StatusReport</code>),
+<code>/dag</code> as a top-level <code>mode</code> on the envelope, read from the server’s
+accessor at the moment of the request; one <code>ToJSON Serve.Mode</code> in
+<code>Salmon.Reporter.Tagged</code> serves both. <code>/help/seed</code> does not carry it.
+</li>
+<li><strong>Terminal client</strong> against the socket. <strong>Shipped</strong> (<code>salmon-tui PATH</code> in
+<code>salmon-apps</code>, over <code>Salmon.Client.Http</code> and the pure <code>Salmon.Client.Model</code>
+in <code>salmon-ops</code>, <code>Test/ClientModelSpec.hs</code>): <code>/dag</code> once, <code>/events</code> from
+its <code>seq</code>, a node table with direction, state, last check and last
+event, <code>enter</code> for a node’s help/notes/output, <code>:</code> for a command sent
+<code>?async</code> with its seq echoed, <code>r</code> to re-read, reconnect with <code>?since=</code>,
+re-read on <code>gap</code>. Three deviations from the “Clients” section. It is a
+<em>table</em> in <code>/dag</code>’s order (the <code>Dag</code>‘s first-seen order, what <code>run tree</code>
+prints), not a tree view: with the edges in both directions on every
+node and a node appearing once whatever number of paths reach it, a tree
+would repeat nodes and a table with an expand does not, so the tree
+waits for the web UI’s layered layout. There is no separate report pane
+tailing <code>/events</code>: the last event is one footer line and each node’s row
+carries the last event about it, which is what a pane tailing the stream
+would mostly be showing; a scrollback of events is a place the client
+would hold state the server does not. And the model drops a replayed
+event <em>per stamp</em> (a node’s own seq, the loop’s own seq) rather than by
+one cursor, because a <code>/dag</code> snapshot carries the nodes’ state and not
+the pass’s, so a re-read after <code>declared</code> would otherwise swallow the
+<code>converge-stop</code> of a pass the client had already shown starting. Two
+things the spec did not say that the client needed: a snapshot must be
+<em>rebased</em> onto a folding model (<code>Model.rebase</code>), and <code>declared</code> must
+trigger a re-read, since an event names nodes by ref and no event
+describes a node the client has never seen.
+</li>
+<li><strong>Web UI</strong>: static graph from <code>/dag</code>, then live from <code>/events</code>, then
+actions, then the seed form. <strong>Shipped, all four steps</strong> (<code>GET /</code> and
+<code>/ui/*</code> in <code>Salmon.Actions.Serve.Http</code>, the files under <code>salmon-ops/ui/</code>
+embedded at build time with <code>file-embed</code>; <code>resources/serve-supervision.md</code>
+§14 “The web UI”). Three deviations from the sketch above. It is not a
+separate <code>salmon-web</code> package and not PureScript: three static files —
+one page, one ES module, one stylesheet, no bundler — served by the
+binary itself, since a UI that ships inside the thing it watches needs
+no deploy step and the read model is small enough that generated client
+types would cost more than they save; the bridge stays an option for the
+seed form. The layered layout is neither <code>dagre</code> nor ELK but a
+longest-path layering with barycentre ordering written in <code>ui.js</code>,
+because vendoring a bundle for a graph of tens of nodes is the wrong
+trade and the layout is a hundred lines. And a browser cannot open a
+unix socket, so the page is reached through a TCP forward (<code>socat</code>,
+<code>ssh -L</code>) until milestone 8, which added <code>--http-tcp</code> and the <code>/auth</code>
+sign-in, so a browser now reaches it directly. The
+actions and the seed form add three more deviations, all on the write
+side. Every write is <code>POST /command?async</code> and never the synchronous
+form — the page reads the outcome off <code>/events</code> by the request’s
+origin, which is what marks the nodes a command touched and fills the
+log under its command line; the sketch’s “what a UI wants” turned out
+to be the whole of it. The seed form is <code>/help/seed</code>’s text in a <code>&lt;pre&gt;</code>
+and a free-text field for the words, not a form derived from the
+<code>ParseRecord</code> — no schema is served, and the bridge stays unused. And
+“retire the seed behind this node” is not a per-node action: a node
+does not know its declaring seed and <code>/history</code> does not list an
+epoch’s nodes, so the panel offers every live declaration’s <code>down</code>
+instead and the operator picks. Also deliberate: no <code>quit</code> on the page
+(the page is served by the process it would stop), and no bearer token
+sent: over <code>--http-tcp</code> the browser signs in at <code>/auth</code> and carries a
+session cookie instead (milestone 8). Not yet: the
+<code>Conflicting</code> pair side by side (as of 2026-09-25 <code>/dag</code> carries it —
+<code>conflict: {kept, replaced}</code> on the node, held while a live declaration
+still wants the losing version — so only the page’s half remains),
+collapsing a batch to its members and expanding a <code>RemoteOp</code> (neither is
+on <code>/dag</code>, see milestone 3’s deviations), and <code>history</code> as a timeline —
+it is a table under the seed form.
+</li>
+<li><strong>TCP + TLS + token</strong>, opt-in, with the loud default described above.
+<strong>Shipped</strong> (<code>run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key FILE --token-file FILE</code>; <code>Http.withHttpServerOn</code>/<code>Http.Bind</code>/
+<code>Http.requireToken</code>, <code>CommandLine.validateTcpOptions</code>,
+<code>Test/ServeTlsSpec.hs</code>, <code>resources/serve-supervision.md</code> §14). The same
+<code>application</code> on a warp-tls listener beside the unix socket, one
+<code>Server</code> for both; a bearer token on every route of the TCP listener,
+compared in constant time; the unix socket unchanged and token-free.
+The loud default is stricter than the text above: not “never on
+<code>0.0.0.0</code> without TLS and auth” but never on <em>any</em> address without
+both — there is no plaintext TCP constructor or flag, <code>--http-tcp</code>
+without all three files exits 1 naming the missing ones, and the host
+is always spelled (<code>:8443</code> is refused, <code>0.0.0.0:8443</code> is how listening
+everywhere is written), so “default to localhost” is not a default but
+a choice the operator types. Four deviations. A bearer token from a
+file, not a JWT: <code>SreBox.JWTSigning</code> signs for <em>other</em> services and a
+verifier here would need a key store, an audience and a clock for what
+a <code>chmod 600</code> file already gives; and no client certificate, which is
+the v2 the text names. The token file must not be readable by others
+and must not be empty — two refusals the text did not ask for. Commands
+typed over TCP are attributed to the client’s <code>ADDR:PORT#n</code>, not to the
+listener, so <code>history</code> says who. And the <code>Certificates</code> nodes <em>can</em>
+mint the certificate, as the text says, with one caveat found on the
+way: <code>selfSign</code>/<code>caSign</code> (<code>openssl x509 -req</code>) write X.509 v1
+certificates, which crypton’s validation rejects (<code>LeafNotV3</code>) while
+OpenSSL-based clients accept; <code>certificateAuthority</code> (<code>req -x509</code>)
+writes v3, and is what the test pins. Not done: the clients —
+<code>salmon-tui</code> and the web UI need a <code>--token</code> and a TCP address to use
+this.
+</li>
+</ol>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

@@ -12,7 +12,7 @@ and almost none of it is addressable from outside.
 **The itch.** `salmon-gcp-toy` tier 2 takes two passes because GCP picks the
 address: the first pass reserves it, the driver reads it back with
 `Compute.readAddress`, and feeds it in as `--vm-ip` for the second
-(`docs/gcp-toy-validation.md`). The same shape recurs whenever `up` learns
+(`resources/gcp-toy-validation.md`). The same shape recurs whenever `up` learns
 something the declaration could not say: a project number, a Cloud Run
 service URL, a bucket's generated name, a generated password's fingerprint, a
 container's assigned port. Today that value lives, at best, in a node's output

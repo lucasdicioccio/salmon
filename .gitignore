@@ -6,10 +6,11 @@ gcp-toy-runs/
 gcp-toy-work/
 .dogfood-robots/
 
-# Kitchen-Sink site build output. website/src/ is source and stays tracked.
+# Kitchen-Sink dev-server output. website/src/ is the source, docs/ the
+# produced site GitHub Pages serves (tracked, see website/scripts/build-site.sh).
 website/www/
 
-# Mirrored pages written by website/scripts/sync-repo-docs.sh from docs/,
+# Mirrored pages written by website/scripts/sync-repo-docs.sh from resources/,
 # specs/ and README.md — mechanical output, not source.
 website/src/docs-*.cmark
 website/src/specs-*.cmark
