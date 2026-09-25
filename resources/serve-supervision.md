@@ -863,6 +863,7 @@ $C http://x/help/seed | jq -r .seed   # this binary's own `config --help`
 $C -X POST -d 'up --name web --file index.html' http://x/command      # sync
 $C -X POST -d 'up --name api' 'http://x/command?async'                # {"seq": n}
 $C -X POST -H 'content-type: application/json' -d '{"line": "status"}' http://x/command
+$C -X POST -H 'content-type: application/json' -d '{"verb": "up", "seed": ["--name", "api"]}' http://x/command   # the same line, as words
 
 curl -sN --unix-socket /run/my-salmon.http http://x/events            # live, forever
 curl -sN --unix-socket /run/my-salmon.http 'http://x/events?since=42' # replay after 42, then live
@@ -931,8 +932,11 @@ What to know:
   envelope's top-level `mode` is §12's (`interactive`, `following`,
   `replay`), read at the moment of the request — the same value `/status`
   opens with, so a client showing nodes as tended knows whether they are.
-- **`POST /command` is one line of §3's language**, `text/plain` or
-  `{"line": "..."}`, and it is handled like any other line: it stands the
+- **`POST /command` is one line of §3's language**, `text/plain`,
+  `{"line": "..."}` or `{"verb": "up", "seed": ["--name", "api"]}` (the words
+  rendered back into that same line, quoted where the line's tokenizer would
+  otherwise split them; `seed` is optional, and giving both forms, neither,
+  or a newline in a word is a `400`), and it is handled like any other line: it stands the
   machines down first and takes its turn in the inbox. Synchronous by
   default, the response is a JSON array of exactly the reports that line
   produced (§11's objects), returned when the loop has finished with it —

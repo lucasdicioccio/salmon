@@ -175,6 +175,9 @@ module Salmon.Actions.Serve.Http (
     serverProducer,
     serverReporters,
 
+    -- * The command body
+    renderStructured,
+
     -- * The read model
     WorldView (..),
     viewWorld,
@@ -190,7 +193,7 @@ import Control.Exception (Exception, bracket, bracket_, finally, fromException, 
 import Control.Monad (forM_, join, unless, void, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Crypto.Random as Random
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.:?), (.=))
 import Data.FileEmbed (embedDir, makeRelativeToProject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -200,6 +203,7 @@ import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isSpace, toLower)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (foldl')
 import Data.Map.Strict (Map)
@@ -908,11 +912,42 @@ dagValue mode v =
 -------------------------------------------------------------------------------
 -- the application
 
--- | The body of @POST \/command@ when it is JSON.
-newtype CommandBody = CommandBody String
+{- | The body of @POST \/command@ when it is JSON: either @{"line": "up a b"}@
+or the structured @{"verb": "up", "seed": ["a", "b"]}@ (@seed@ optional, for
+@clear@, @converge@ and the rest), which is rendered to the very line the first
+form would have carried — so the two are one command on the loop, not two.
+-}
+data CommandBody = CommandBody String
 
 instance FromJSON CommandBody where
-    parseJSON = withObject "command" $ \o -> CommandBody <$> o .: "line"
+    parseJSON = withObject "command" $ \o -> do
+        line <- o .:? "line"
+        verb <- o .:? "verb"
+        seed <- o .:? "seed"
+        case (line, verb) of
+            (Just l, Nothing)
+                | isNothing (seed :: Maybe [String]) -> pure (CommandBody l)
+                | otherwise -> fail "\"seed\" goes with \"verb\", not \"line\""
+            (Nothing, Just v) -> pure (CommandBody (renderStructured v (fromMaybe [] seed)))
+            (Just _, Just _) -> fail "give either \"line\" or \"verb\", not both"
+            (Nothing, Nothing) -> fail "expected {\"line\": ...} or {\"verb\": ..., \"seed\": [...]}"
+
+{- | A verb and its seed words as one input line. A word is quoted only when
+'Salmon.Actions.Serve.tokenize' would otherwise split or reinterpret it
+(whitespace, quotes, a backslash, or being empty), so the common case is the
+line a person would have typed. A newline cannot be carried by a line at all;
+'commandLine' refuses it afterwards like any multi-line body.
+-}
+renderStructured :: String -> [String] -> String
+renderStructured verb seed = unwords (verb : fmap word seed)
+  where
+    word w
+        | not (null w) && all plain w = w
+        | otherwise = "\"" <> concatMap escape w <> "\""
+    plain c = not (isSpace c) && c `notElem` ("\\'\"" :: String)
+    escape c
+        | c `elem` ("\\\"" :: String) = ['\\', c]
+        | otherwise = [c]
 
 application :: Server -> Application
 application server req respond =
@@ -1079,11 +1114,11 @@ eventsQuery req = do
   where
     query = Wai.queryString req
 
--- | One line, from a JSON @{"line": ...}@ body or a text one.
+-- | One line, from a JSON @{"line": ...}@ or @{"verb": ..., "seed": [...]}@ body or a text one.
 commandLine :: Request -> LByteString.ByteString -> Either Text String
 commandLine req body
     | isJson = case Aeson.eitherDecode body of
-        Left err -> Left ("body is not a {\"line\": ...} object: " <> Text.pack err)
+        Left err -> Left ("body is not a {\"line\": ...} or {\"verb\": ..., \"seed\": [...]} object: " <> Text.pack err)
         Right (CommandBody line) -> oneLine line
     | otherwise = case Text.decodeUtf8' (LByteString.toStrict body) of
         Left _ -> Left "body is not UTF-8"
