@@ -754,6 +754,12 @@ convergence pass, after every follow injection, and every
 }
 ```
 
+`host` is the machine's node name (`uname -n`) unless `--status-sink-host
+NAME` says otherwise. Give one when two loops on one machine each write a
+document (the fold shows two rows naming one host otherwise, and does not
+pick), or when the node name means nothing to whoever reads the directory
+(a container's generated hostname).
+
 `status` is the very object `status --json` prints (and `/status` answers);
 `labels` is the document each followed label last applied; `last` holds
 the most recent converge-stop and the most recent follow report, as

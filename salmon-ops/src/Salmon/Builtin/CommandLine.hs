@@ -227,14 +227,19 @@ parseHostPort s =
     stripBrackets ('[' : rest) | not (null rest) && last rest == ']' = Just (init rest)
     stripBrackets _ = Nothing
 
-{- | @--status-sink PATH@ and @--status-sink-interval SECONDS@ (default
-'StatusSink.defaultInterval'): where this host's status document is written,
-and how often between the writes a convergence pass or a follow injection
-triggers on their own. 'Nothing' writes none.
+{- | @--status-sink PATH@, @--status-sink-interval SECONDS@ (default
+'StatusSink.defaultInterval') and @--status-sink-host NAME@: where this
+host's status document is written, how often between the writes a
+convergence pass or a follow injection triggers on their own, and what the
+document's @host@ says — 'StatusSink.hostName' (@uname -n@) when not given.
+Naming it is for two loops on one machine (a fold shows two rows naming one
+host otherwise) and for a container whose node name means nothing to the
+reader. 'Nothing' for the path writes none.
 -}
 data SinkOptions = SinkOptions
     { sinkPath :: !(Maybe FilePath)
     , sinkInterval :: !Int
+    , sinkHost :: !(Maybe Text)
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -483,6 +488,13 @@ runCommandParser =
                     <> Options.Applicative.value (StatusSink.defaultInterval `div` 1000000)
                     <> showDefault
                     <> Options.Applicative.help "Seconds between two status sink writes when nothing triggers one."
+                )
+            <*> optional
+                ( strOption
+                    ( long "status-sink-host"
+                        <> Options.Applicative.metavar "NAME"
+                        <> Options.Applicative.help "What the status document's `host` field says (default: this machine's node name, `uname -n`); give one when two loops on one machine write documents, or the node name means nothing to whoever folds them."
+                    )
                 )
     followOptionsP =
         FollowOptions
@@ -839,7 +851,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             pk <- Scheduler.newPoke
             modeVar <- Follow.newMode
             appliedVar <- Follow.newApplied
-            host <- StatusSink.hostName
+            host <- maybe StatusSink.hostName pure sinkOptions.sinkHost
             let onFetch = Follow.followed pk modeVar appliedVar <$ follow
                 sinkConfig path =
                     StatusSink.Config
