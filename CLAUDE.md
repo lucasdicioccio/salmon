@@ -498,7 +498,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   the log under the command line until the loop's `hung-up` for that origin. No `quit` on the
   page, and the page never handles a token. A browser cannot open a unix socket, so it is
   reached on milestone 8's TCP listener (below), signing in at `/auth`, or through a forward
-  of the unix socket (`ssh -L`); see `docs/serve-supervision.md` §14.
+  of the unix socket (`ssh -L`); see `resources/serve-supervision.md` §14.
   **Milestone 8, the same HTTP over a network**: `run serve --http-tcp HOST:PORT --tls-cert
   FILE --tls-key FILE --token-file FILE` adds a warp-tls listener (`Http.withHttpServerOn`
   over a list of `Bind`s — `BindUnix PATH | BindTls TlsBind`, no plaintext constructor) running
@@ -844,7 +844,7 @@ holds, both over ssh from a **controlling** machine (never a member: the member 
 the one running it). A pair is three kinds of node (`pairOp`): `member`, which makes a machine
 able to be *either* half and says nothing about which — so a switchover edits one declaration,
 the role node's — `bouncerSetup`, and the role node on top. `salmon-pgpair` is the binary,
-`salmon-toy-qemu-pg-ha` the demo, `docs/postgres-pair.md` the guide, `specs/pg-switchover.md` the
+`salmon-toy-qemu-pg-ha` the demo, `resources/postgres-pair.md` the guide, `specs/pg-switchover.md` the
 argument. What follows is the list of things that are load-bearing; each was a defect first.
 
 - **Nothing decides a machine is dead.** Salmon has no consensus, so a failover needs the
@@ -1156,7 +1156,7 @@ Seed args are parsed with the binary's own `ParseRecord seed` — the same words
 `config` — so a seed is identified by the directive it configures to, not by its spelling.
 `--listen PATH` (beside `--max-concurrency`/`--no-autoconverge`/`--json`) accepts the same lines
 on a unix socket from any number of clients, each answered on its own connection as JSON lines;
-see `Actions/Serve/Socket.hs` above and `docs/serve-supervision.md` §13. `--http PATH` serves
+see `Actions/Serve/Socket.hs` above and `resources/serve-supervision.md` §13. `--http PATH` serves
 the same world over HTTP on a second socket — `curl --unix-socket PATH http://x/dag`, and
 `POST /command` with a line as the body — see `Actions/Serve/Http.hs` above and §14.
 `--http-tcp HOST:PORT` puts the same HTTP on a network, and only with `--tls-cert`,

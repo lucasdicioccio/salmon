@@ -1,0 +1,299 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - HA Postgres + bouncer + app-instance + LB control plane</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-ha-control-plane.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented as a whole. Of the phased plan, only the"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - HA Postgres + bouncer + app-instance + LB control plane"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented as a whole. Of the phased plan, only the"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - HA Postgres + bouncer + app-instance + LB control plane"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-ha-control-plane.html"><meta property="og:description" content="Status: draft / not implemented as a whole. Of the phased plan, only the"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-ha-control-plane.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-ha-control-plane.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: draft / not implemented as a whole. Of the phased plan, only the","headline":"HA Postgres + bouncer + app-instance + LB control plane","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-ha-control-plane.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>HA Postgres + bouncer + app-instance + LB control plane</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1398 words, 3 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><span class="topic-nav-boundary">|</span></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">1/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-pg-patroni.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-ha-control-plane.md"><code>specs/pg-ha-control-plane.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="ha-postgres--bouncer--app-instance--lb-control-plane">HA Postgres + bouncer + app-instance + LB control plane</h2>
+<p>Status: draft / not implemented as a whole. Of the phased plan, only the
+first half of phase 1 exists: the operator-driven pair of
+<code>specs/pg-switchover.md</code> (<code>SreBox.PostgresPair</code>, <code>salmon-pgpair</code>); the
+Patroni half is still a sketch, and phases 3–7 (app-instance recipe, LB and
+DNS wiring, <code>ControlPlaneSeed</code>, hardware profiles, monitoring) have no code.
+This is a design sketch to react to, not a committed plan.</p>
+<p>The database tier (§1–2) has moved to <code>pg-switchover.md</code> (operator-driven,
+two nodes) and <code>pg-patroni.md</code> (automatic failover). This spec keeps the
+bouncer/app/LB/DNS/monitoring picture around them.</p>
+<h3 id="problem">Problem</h3>
+<p>We want to host a service (multiple services, eventually) on top of:</p>
+<ul>
+<li>a replicated Postgres pair per logical cluster, WAL-streamed both ways
+across two machines so each machine holds one primary and one standby
+(“diagonal” replication — machine.ab.0 is primary for <code>pg.a</code>/standby for
+<code>pg.b</code>, machine.ab.1 is the mirror image),
+</li>
+<li>pgbouncer in front of each cluster, pointed at whichever side currently
+holds the primary role,
+</li>
+<li>app instances (PostgREST-style, plus the user’s own “internaltool” service) that
+need their own pg users/roles/secrets/CORS/rate-limit settings, sat behind
+the bouncers,
+</li>
+<li>a front load balancer (or a small HA pair of them) fronting the bouncers
+and app instances, with DNS pointed at it,
+</li>
+<li>monitoring/alerting across all of the above,
+</li>
+<li>multiple <em>sizing tiers</em> of this whole shape — shared multi-tenant
+deployments and dedicated ones on different hardware profiles.
+</li>
+</ul>
+<p>Sketch (as given):</p>
+<pre><code> ┌────────────────────┐        ┌────────────────────┐
+ │ pg.a   pg.b         │  wal   │ pg.a   pg.b         │
+ │ (primary) (standby) │◄──────►│ (standby) (primary) │
+ │ machine.ab.0         │        │ machine.ab.1         │
+ └──────────┬──────────┘        └──────────┬──────────┘
+      bouncer.a                       bouncer.b
+            │  (crossed: every app instance can reach either bouncer)
+   internaltool.a.0  internaltool.b.0  internaltool.a.1  internaltool.b.1  postgrest.b  control-plane
+            └──────────────────────┬──────────────────────┘
+                                   LB ── DNS
+</code></pre>
+<p>Sticky note requirement: <strong>control-plane seeds must be unfoldable to</strong>
+machines, pg clusters (certs, users), bouncers, app-instances (pg-users,
+secrets, roles, cors-settings, rate-limit-settings), load-balancers (DNS
+configs), PostgREST configs (secrets, pg-users), and monitoring/alerting
+configs.</p>
+<h3 id="what-already-exists-inventory">What already exists (inventory)</h3>
+<p>Salmon already has most of the <em>leaf</em> building blocks this needs; nothing
+below is new work:</p>
+<table>
+<tr><th>Diagram box</th><th>Existing code</th></tr>
+<tr><td>pg primary/standby, WAL streaming</td><td><code>Salmon.Builtin.Nodes.Postgres</code> (<code>primaryReplicationSetup</code>/<code>standbyReplicationSetup</code>/<code>replicationUser</code>/<code>EnsurePhysicalReplicationSlot</code>) — exercised today only by the hand-run <code>salmon-postgres-replication-fixture</code>, not wired into a real recipe</td></tr>
+<tr><td>bouncer.a / bouncer.b</td><td><code>Salmon.Builtin.Nodes.PgBouncer</code> — takes plain host/port/dbname/user/password, deliberately decoupled from how the upstream cluster was provisioned</td></tr>
+<tr><td>LB</td><td><code>Salmon.Builtin.Nodes.Nginx</code> — vhost list → upstream group, reverse proxy. Nothing HA (keepalived/VRRP) for "load-balancer(s)" plural yet</td></tr>
+<tr><td>DNS</td><td><code>SreBox.MicroDNS</code>, <code>SreBox.DNSRegistration</code></td></tr>
+<tr><td>app instance (internaltool/postgrest shape: pg-user, secret, connstring, systemd unit, pushed to a remote box)</td><td><code>SreBox.Postgrest</code> is the exact template — build the "internaltool" recipe by mirroring its <code>PostgrestSetup</code>/<code>setupPostgrest</code> shape, not by generalizing it prematurely (see <code>[[recipe_key_exchange_agnostic]]</code>-style convention: pass in pre-provisioned secrets, don't invent a transport)</td></tr>
+<tr><td>seed → directive → ops, long-running convergence</td><td><code>Salmon.Builtin.CommandLine.execCommandOrSeed</code>, <code>Salmon.Actions.Serve</code> (<code>World</code>/<code>Epoch</code>/<code>NodeState</code>)</td></tr>
+<tr><td>declaring "which pg cluster/user/db"</td><td><code>SreBox.PostgresInit</code>, <code>Postgres.CreateDB</code>/<code>CreateUser</code>/etc.</td></tr>
+</table>
+<p>What’s genuinely missing:</p>
+<ol>
+<li>A recipe for <strong>a replicated pair and moving its primary</strong>, which is now
+<code>pg-switchover.md</code>, and for <strong>automatic failover</strong>, now <code>pg-patroni.md</code>.
+</li>
+<li>(Was: a seed carrying forward “which side is primary” from one <code>config</code> to
+the next. Neither design needs it; see §1–2.)
+</li>
+<li><strong>Sizing tiers / hardware profiles</strong> (shared vs. dedicated) as a
+first-class concept threaded through machine/cluster seeds.
+</li>
+<li>A <strong>control-plane seed</strong> that unfolds into the sub-seeds for
+machines/clusters/bouncers/app-instances/LB/DNS/monitoring, per the
+sticky note.
+</li>
+<li><strong>Monitoring/alerting nodes</strong> — zero Prometheus/alerting builtins exist
+in the repo today.
+</li>
+<li>An <strong>HA front LB</strong> story — today’s <code>Nginx.hs</code> is a single reverse proxy
+config renderer; “load balancer(s)” plural in the diagram implies either
+DNS-level multi-A-record fanout (already partially available via
+MicroDNS) or a keepalived/VRRP-style active/standby pair, neither of
+which has a builtin yet.
+</li>
+</ol>
+<h3 id="design-goals--non-goals">Design goals / non-goals</h3>
+<p>Goals:</p>
+<ul>
+<li>Reuse every existing builtin/recipe listed above unchanged; new code
+should be composition, not rewrites.
+</li>
+<li>Keep the “recipes are key-exchange/secret-transport agnostic” convention:
+new recipes take pre-provisioned secrets/certs/files, never invent a way
+to move them (matches the existing constraint on <code>salmon-ops-recipes</code>
+modules).
+</li>
+<li>Salmon never decides <em>when</em> to fail over. Either an operator declares
+where the primary is (<code>pg-switchover.md</code>), or Patroni decides and salmon
+never mentions the primary at all (<code>pg-patroni.md</code>). There is no third
+mode where salmon guesses.
+</li>
+<li>Sizing tiers should be data (a profile value in the seed), not a code
+fork — a shared-tier deployment and a dedicated-tier deployment should go
+through the same recipes with different profile values.
+</li>
+</ul>
+<p>Non-goals (v1):</p>
+<ul>
+<li>Automatic failover built into salmon. Salmon has no consensus, so it
+delegates that to Patroni; see <code>pg-patroni.md</code>.
+</li>
+<li>A generic multi-service control plane. Build this for the pg/bouncer/app/
+LB shape in the diagram; generalize later only if a second, differently-
+shaped service shows the abstraction is right.
+</li>
+<li>Monitoring dashboards/alert rules content — v1 is just “the nodes exist to
+install and configure an agent,” not a curated set of alerts.
+</li>
+</ul>
+<h3 id="proposed-architecture">Proposed architecture</h3>
+<h4 id="12-the-database-tier-superseded-by-two-specs">1–2. The database tier: superseded by two specs</h4>
+<p>This section used to sketch a <code>PgClusterPair</code> recipe whose seed carried
+<code>pair_primary_side</code>, and a state-file convention to carry that side forward
+from one <code>config</code> to the next. Both are replaced. Which one applies depends
+on who decides where the primary is:</p>
+<ul>
+<li><strong><code>pg-switchover.md</code></strong>: the operator decides. Two machines, the primary’s
+location is a per-pair field in the directive, and salmon moves it with a
+resumable switchover (or a failover the operator vouches for). No state file
+is needed: without automatic failover, the declaration <em>is</em> the truth. This
+is the tier for test harnesses, disaster scenarios and low-SLA services.
+</li>
+<li><strong><code>pg-patroni.md</code></strong>: Patroni decides, with etcd for consensus. The primary’s
+location must <strong>never</strong> appear in a directive, or the first automatic
+failover makes every <code>run up</code> fight it. Admin nodes and bouncers reach the
+leader through a routed endpoint (HAProxy, a VIP, or libpq multi-host)
+instead.
+</li>
+</ul>
+<p>The cross-replicated two-machine layout (<code>pg.a</code> primary on machine.ab.0,
+<code>pg.b</code> primary on machine.ab.1) works for the first, as a data choice rather
+than a code fork. For the second it needs a third, small machine running only
+etcd, since two machines cannot form a quorum.</p>
+<p><code>bouncerUpstream</code> survives only in the first: under Patroni the bouncers’
+upstream is the routed endpoint, which never changes.</p>
+<p>The general idea of a seed that reads back what it last converged to (stable
+secrets, stable port allocations) is still worth having, but nothing here
+needs it any more. Build it when the first real case appears.</p>
+<h4 id="3-sizing-tiers--hardware-profiles">3. Sizing tiers / hardware profiles</h4>
+<p>A <code>Tier</code> value threaded through the control-plane seed, data not code:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Tier</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Shared</span>     <span class="co">-- multiple logical clusters/instances per machine</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Dedicated</span>  <span class="co">-- one logical deployment owns the machine</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">deriving</span> (<span class="dt">Eq</span>, <span class="dt">Show</span>, <span class="dt">Generic</span>)</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">HardwareProfile</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">HardwareProfile</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> profile_tier ::</span> <span class="dt">Tier</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> profile_pg_shared_buffers ::</span> <span class="dt">Text</span>   <span class="co">-- e.g. postgresql.conf tuning knobs</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> profile_bouncer_max_client_conn ::</span> <span class="dt">Int</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> profile_app_instance_count ::</span> <span class="dt">Int</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- extend as real constraints show up; resist modeling resource limits</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- (cgroups/systemd slices) until a concrete need forces it — nothing in</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- salmon-ops does resource-limiting today</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p><code>Postgres.defaultReplicationTuning</code> and <code>PgBouncer.BouncerConfig</code>’s
+size-shaped fields (<code>bouncer_max_client_conn</code>, <code>bouncer_default_pool_size</code>)
+already exist as plain values a <code>HardwareProfile</code> can feed — no changes
+needed to those modules, just don’t hardcode the numbers in the new
+control-plane recipe.</p>
+<h4 id="4-control-plane-seed-unfolding">4. Control-plane seed unfolding</h4>
+<p>Mirror the existing <code>Migrator.Seed</code> → <code>Migrator.Spec</code> → <code>Migrator.Ops</code>
+three-file split (<code>salmon-apps/src/Migrator/</code>), one level deeper, so the
+control-plane binary follows the same seed→spec→ops shape every other
+salmon binary already uses (per CLAUDE.md’s “seed → spec → ops CLI
+protocol” section) instead of inventing a new pattern:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- ControlPlane/Seed.hs — human/CLI-facing, ParseRecord</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">ControlPlaneSeed</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">ControlPlaneSeed</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> cp_tier ::</span> <span class="dt">Tier</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cp_pair ::</span> <span class="dt">ClusterSeed</span>              <span class="co">-- see pg-switchover.md / pg-patroni.md</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cp_app_instances ::</span> [<span class="dt">AppInstanceSeed</span>]  <span class="co">-- internaltool.a.0, internaltool.b.0, ...</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cp_postgrest ::</span> [<span class="dt">PostgrestSeed</span>]</span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cp_lb ::</span> <span class="dt">LbSeed</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cp_dns ::</span> <span class="dt">DnsSeed</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cp_monitoring ::</span> <span class="dt">MonitoringSeed</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a><span class="co">-- ControlPlane/Spec.hs — FromJSON/ToJSON directive, output of `config`</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">ControlPlaneSpec</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">ControlPlaneSpec</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> cps_pair ::</span> <span class="dt">Pair</span>               <span class="co">-- SreBox.PostgresPair, or a Patroni cluster</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cps_bouncers ::</span> [<span class="dt">PgBouncer.BouncerConfig</span>]</span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cps_app_instances ::</span> [<span class="dt">AppInstanceSetup</span>]     <span class="co">-- mirrors PostgrestSetup</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cps_postgrest ::</span> [<span class="dt">PostgrestSetup</span>]</span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cps_lb ::</span> <span class="dt">Nginx.NginxConfig</span></span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cps_dns ::</span> <span class="op">...</span></span>
+<span id="22"><a href="#22" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> cps_monitoring ::</span> <span class="op">...</span></span>
+<span id="23"><a href="#23" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="24"><a href="#24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="25"><a href="#25" aria-hidden="true" tabindex="-1"></a><span class="co">-- ControlPlane/Ops.hs — Track&#39; ControlPlaneSpec -&gt; Op, composing the above</span></span>
+<span id="26"><a href="#26" aria-hidden="true" tabindex="-1"></a><span class="co">-- recipes exactly as SreBox.Postgrest/SreBox.Initialize already do</span></span></code></pre></div></div><p><code>gen :: ControlPlaneSeed -&gt; IO ControlPlaneSpec</code> is where all the “unfold
+one seed into machines/clusters/bouncers/…” fan-out happens — e.g.
+deriving each <code>internaltool.X.N</code> instance’s pg-user name from <code>X</code>/<code>N</code>
+deterministically, deriving bouncer upstream lists from <code>cps_pair</code> +
+<code>bouncerUpstream</code> above, deriving the LB’s vhost upstream list from the
+concrete app-instance ports. This step is pure fan-out/derivation logic,
+independently testable without touching any <code>Op</code>/IO machinery (same
+argument <code>advance-querying.md</code> makes for why directive-shape is worth
+pinning down separately from execution).</p>
+<p>Whether one <code>ControlPlaneSeed</code> should directly enumerate every app instance
+(as sketched above) or itself be built from a smaller “how many of each
+tier” description is an open question below — start with explicit
+enumeration (simplest, matches how <code>Migrator.Seed</code> already just lists
+fields) and only introduce a generator if the enumeration gets unwieldy.</p>
+<h4 id="5-monitoringalerting--new-builtin-deliberately-thin-in-v1">5. Monitoring/alerting — new builtin, deliberately thin in v1</h4>
+<p>New <code>Salmon.Builtin.Nodes.Monitoring</code> (naming TBD) module, following the
+<code>PgBouncer.hs</code>/<code>Nginx.hs</code> shape exactly (a config value type, a render
+function, <code>justInstall</code> + <code>Systemd.systemdService</code>/<code>restartService</code>). v1
+scope: install and configure a metrics agent (node_exporter-style) per
+machine and a scrape-target list on whatever central collector exists —
+<em>not</em> alert rule content, dashboards, or the collector itself, all of which
+need a stack decision first (see open questions).</p>
+<h4 id="6-ha-front-lb">6. HA front LB</h4>
+<p>Two independently-shippable pieces, not one:</p>
+<ul>
+<li><strong>Multiple LB instances</strong>: <code>Nginx.setup</code> already renders a full config
+from a value — running it on two boxes is just calling it twice with the
+same <code>NginxConfig</code>. No new code.
+</li>
+<li><strong>Active/standby or DNS-fanout in front of them</strong>: either extend
+<code>SreBox.DNSRegistration</code>/<code>MicroDNS</code> to publish multiple A records
+(client-side failover/round-robin, simplest, no new node), or add a new
+<code>Keepalived</code>/VRRP builtin for a floating VIP (real HA, meaningfully more
+work: needs its own idempotency story per CLAUDE.md’s conventions section
+since <code>keepalived.conf</code> has no natural “replace” verb, would likely follow
+the <code>Netfilter.rule</code>-style <code>prelim</code>-based skip). Recommend starting with
+DNS fanout and only building VRRP support if it’s a hard requirement.
+</li>
+</ul>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>Which database tier per deployment tier</strong>: does the shared tier run on
+<code>pg-switchover.md</code> and only the dedicated tier on <code>pg-patroni.md</code>, or does
+everything that serves real traffic go to Patroni?
+</li>
+<li><strong>Monitoring stack</strong>: Prometheus + node_exporter + something for alerts
+(Alertmanager? a hosted service?) — needs a decision before §5 can be
+more than a stub.
+</li>
+<li><strong>“Internaltool” vs. generic app-instance</strong>: is <code>SreBox.Postgrest</code> close enough
+to fork/mirror directly, or does internaltool need meaningfully different
+shape (its own migrations, non-PostgREST HTTP surface, different secret
+set)? Affects whether §4’s <code>AppInstanceSeed</code> is its own new module or a
+thin renaming of <code>PostgrestSeed</code>.
+</li>
+<li><strong>Cross-wiring in the diagram</strong> (every <code>internaltool.X.N</code> reaching <em>both</em>
+bouncers, not just its “own” one): intentional (read replicas via the
+standby-side bouncer, or just redundancy), or a simplification in the
+sketch? Determines whether <code>AppInstanceSetup</code> takes one connstring or a
+primary/replica pair.
+</li>
+<li><strong>Enumeration vs. generator for <code>ControlPlaneSeed</code></strong> (§4): revisit once
+a first real deployment shows how many app instances/tiers actually need
+representing.
+</li>
+</ul>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li>The database tier: <code>pg-switchover.md</code>’s phased plan, then
+<code>pg-patroni.md</code>’s. Each has its own Layer 3 disaster scenarios.
+</li>
+<li>(Was: the previous-seed state convention; dropped, see §1–2.)
+</li>
+<li><code>AppInstanceSeed</code>/internaltool recipe (§4, mirroring <code>SreBox.Postgrest</code>),
+wired to a single pair — no LB/DNS/monitoring yet.
+</li>
+<li>LB + DNS wiring (§6, DNS-fanout option first).
+</li>
+<li><code>ControlPlaneSeed</code> (§4) tying 1–4 together end to end for one tier.
+</li>
+<li><code>HardwareProfile</code>/<code>Tier</code> (§3) threaded through, second tier added.
+</li>
+<li>Monitoring (§5), stub scope.
+</li>
+</ol>
+<h3 id="future-work">Future work</h3>
+<ul>
+<li>VRRP/keepalived-based LB HA (§6), if DNS fanout turns out insufficient.
+</li>
+<li>Generalizing the control-plane seed pattern beyond this one service shape,
+if/when a second differently-shaped service needs the same treatment.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

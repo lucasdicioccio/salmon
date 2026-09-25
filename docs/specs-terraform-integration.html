@@ -1,0 +1,215 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html"><meta property="og:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-terraform-integration.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-terraform-integration.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: draft / not implemented. This is a design sketch to react to, not a","headline":"Terraform integration: consuming (and optionally driving) existing Terraform-managed infra","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1439 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-salmon-as-init.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">18/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines-remaining.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/terraform-integration.md"><code>specs/terraform-integration.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="terraform-integration-consuming-and-optionally-driving-existing-terraform-managed-infra">Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</h2>
+<p>Status: draft / not implemented. This is a design sketch to react to, not a
+committed plan.</p>
+<h3 id="problem">Problem</h3>
+<p>Salmon’s own job stops at “given a machine that already exists, converge it
+to a declared state” — nothing in <code>salmon-core</code>/<code>salmon-ops</code> creates
+compute/network/DNS-zone resources at a cloud provider, and nothing in the
+repo talks to Terraform today (confirmed: no <code>terraform</code>/<code>.tf</code>/HCL
+references anywhere in <code>salmon-*</code>). Meanwhile there may already be
+Terraform state describing the machines/networks/DNS zones this project
+needs to target — the [[pg-ha control plane]] spec’s “Machines” leaf in
+particular (“control-plane seeds must be unfoldable to Machines…”) has to
+come from <em>somewhere</em>, and if that somewhere is already Terraform, salmon
+shouldn’t duplicate or fight it.</p>
+<h3 id="what-integration-could-mean--two-different-things">What “integration” could mean — two different things</h3>
+<p>It’s worth naming these as separate models up front, because they have very
+different blast radii and this spec recommends starting with only one of
+them.</p>
+<p><strong>Model A — read-only consumption.</strong> Terraform (run by hand, by CI, by
+whatever already runs it) is the source of truth for resource existence;
+salmon only ever <em>reads</em> its outputs (machine IPs, DNS zone ids, generated
+credentials Terraform provisioned) to build seeds/directives. Salmon never
+calls <code>terraform apply</code>/<code>destroy</code>.</p>
+<p><strong>Model B — salmon-driven apply.</strong> Salmon shells out to <code>terraform</code> itself,
+treating a Terraform root module as one more <code>Op</code> in the graph (<code>up</code> runs
+<code>apply</code>, <code>down</code> runs <code>destroy</code>), so a single <code>salmon-x run up</code> can bring up
+both the Terraform-managed layer and everything salmon layers on top in one
+traversal.</p>
+<p>Recommendation: <strong>build Model A first, treat Model B as optional/future</strong>.
+Model A composes with “we may have already-existing terraform usage”
+directly — it’s non-invasive by construction, since salmon never mutates
+anything Terraform owns. Model B requires deciding who owns lifecycle
+(salmon <code>down</code> calling <code>terraform destroy</code> against existing hand-managed
+infra is a real footgun — see §3’s caveats) and isn’t needed to unblock the
+pg-ha control-plane work, which only needs machine inventory as an input.</p>
+<h3 id="design-goals--non-goals">Design goals / non-goals</h3>
+<p>Goals:</p>
+<ul>
+<li>No new core (<code>salmon-core</code>) mechanism — reuse the same insight as the
+previous-seed-state design in <code>specs/pg-ha-control-plane.md</code>:
+<code>Configure</code>’s <code>gen :: seed -&gt; m a</code> is already impure, so “read Terraform
+outputs” is just another impure read at seed-to-directive time, exactly
+like reading a previous-state JSON file.
+</li>
+<li>Salmon never becomes a Terraform state owner. It reads <code>terraform output -json</code> (or, for Model B, drives <code>apply</code>/<code>destroy</code> against a root module
+it’s pointed at) — it does not generate, template, or hand-edit <code>.tf</code>
+files. Whoever wrote the existing Terraform config keeps owning it.
+</li>
+<li>Salmon never manages cloud credentials itself. Both models assume
+<code>terraform</code>/its providers are already configured to run ambiently
+(env vars, an assumed role, a configured backend) exactly as if a human
+ran <code>terraform apply</code> at that path — salmon just shells out to the
+<code>terraform</code> binary the same way <code>Binary.withBinary</code> already wraps every
+other external tool in this codebase.
+</li>
+</ul>
+<p>Non-goals (v1):</p>
+<ul>
+<li>Generating/templating Terraform HCL from salmon seeds (the inverse
+direction — “salmon describes infra, emits <code>.tf</code>”). A materially
+different, much larger feature; not needed to consume existing usage.
+</li>
+<li>Remote state backend management (S3 bucket + DynamoDB lock table, TFC
+workspace creation, etc.) — assumed to already exist if it exists at all.
+</li>
+<li>Import of unmanaged resources into Terraform state — out of scope; if
+something needs importing, that’s a one-time <code>terraform import</code> a human
+runs, upstream of anything salmon touches.
+</li>
+</ul>
+<h3 id="proposed-design">Proposed design</h3>
+<h4 id="1-reading-outputs-into-a-seed-model-a">1. Reading outputs into a seed (Model A)</h4>
+<p>A small new module, e.g. <code>SreBox.TerraformState</code> (recipes-level, not
+core — this is derivation logic, not an IO primitive with its own <code>up</code>/
+<code>down</code>):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- shells out to `terraform output -json`, or reads a cached copy of that</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="co">-- JSON from a file (useful for offline/repeatable seed generation, and</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="co">-- avoids requiring the `terraform` binary + provider credentials just to</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="co">-- build a directive)</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a><span class="ot">readOutputs ::</span> <span class="dt">FilePath</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> (<span class="dt">Either</span> <span class="dt">String</span> <span class="dt">Aeson.Value</span>)  <span class="co">-- workdir, or a captured -json file</span></span></code></pre></div></div><p>A seed carries either a working directory (to shell out live) or a path to
+a previously-captured <code>terraform output -json</code> file — same “carry a
+<code>Maybe FilePath</code>” shape the previous-seed-state design already established:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">TerraformSource</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">LiveWorkdir</span> <span class="dt">FilePath</span> (<span class="dt">Maybe</span> <span class="dt">Text</span>)   <span class="co">-- terraform root dir, optional workspace name</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">CapturedOutputs</span> <span class="dt">FilePath</span>             <span class="co">-- a `terraform output -json &gt; file` snapshot</span></span></code></pre></div></div><p><code>gen</code> then parses the specific outputs a given recipe needs (e.g.
+<code>machine_ab_0_ip</code>, <code>machine_ab_1_ip</code>, <code>dns_zone_id</code>) out of the JSON into
+strongly-typed seed fields, the same way any other <code>Configure</code> step turns
+loosely-typed input into a typed directive — failure to find an expected
+output key is a <code>gen</code>-time error (surfaced before any <code>Op</code> runs), not
+something recipes downstream ever need to handle.</p>
+<p>This directly answers the pg-ha control-plane spec’s open question of
+“where do machine addresses come from”: <code>ControlPlaneSeed</code>’s machine
+fields become optional-override-else-read-from-Terraform, i.e. the seed
+carries a <code>TerraformSource</code> and the two <code>pair_machine_a</code>/<code>pair_machine_b</code>
+addresses are populated from it during <code>gen</code>, rather than being typed in by
+hand every time.</p>
+<h4 id="2-recommended-workflow-shape">2. Recommended workflow shape</h4>
+<pre><code class="language-sh"># Terraform, run however it already is (CI, human, whatever) — salmon doesn't touch this
+terraform -chdir=infra/prod apply
+
+# capture outputs once (or every time before a converge, cheap either way)
+terraform -chdir=infra/prod output -json &gt; tf-outputs.json
+
+# salmon reads the capture, same two-phase protocol as everything else
+salmon-x config --terraform-outputs tf-outputs.json ... | salmon-x run up
+</code></pre>
+<p>This keeps the existing hermetic seed→directive→ops boundary completely
+intact (per CLAUDE.md’s description of why that split exists) — Terraform
+becomes just one more impure input <code>gen</code> reads, alongside the previous-
+state file from the pg-ha spec. Nothing about <code>Actions/Serve.hs</code>’s <code>World</code>/
+<code>Epoch</code> model needs to change either: a <code>serve</code> loop re-reads whatever
+<code>tf-outputs.json</code> currently says on every seed declaration, same as it
+would re-read any other input file.</p>
+<h4 id="3-optional-salmonbuiltinnodesterraform-as-an-op-model-b">3. Optional: <code>Salmon.Builtin.Nodes.Terraform</code> as an <code>Op</code> (Model B)</h4>
+<p>If/when salmon-driven apply is actually wanted, it fits the existing node
+shape cleanly — unlike <code>nft</code>/<code>ip link</code>, <code>terraform apply</code> <em>is</em> naturally
+idempotent (a no-op plan applies as a no-op), so this is a “prefer
+replace”-bucket node per CLAUDE.md’s conventions, not a <code>prelim</code>-skip one:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">TerraformRoot</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">TerraformRoot</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> tf_workdir ::</span> <span class="dt">FilePath</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> tf_workspace ::</span> <span class="dt">Maybe</span> <span class="dt">Text</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> tf_var_file ::</span> <span class="dt">Maybe</span> <span class="dt">FilePath</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="ot">apply ::</span> <span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;terraform&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">TerraformRoot</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p><code>up</code>: <code>terraform -chdir=&lt;workdir&gt; [workspace select &lt;ws&gt;] apply -auto-approve [-var-file=&lt;f&gt;]</code>, via the ordinary <code>withBinary</code>/<code>untrackedExec</code> path (which
+already throws on non-zero exit, satisfying CLAUDE.md’s “failure must not
+be swallowed” convention for free — no special handling needed here).</p>
+<p><code>down</code>: <code>terraform -chdir=&lt;workdir&gt; destroy -auto-approve</code> — <strong>deliberately
+not wired to run automatically from a generic <code>downTree</code> walk in v1.</strong>
+<code>destroy</code> against a root module that predates salmon’s involvement, or that
+other tooling/humans also touch, is exactly the kind of hard-to-reverse,
+shared-state action this project’s own operating conventions (see the
+“Executing actions with care” guidance salmon is developed under) say needs
+an explicit, deliberate trigger — not something that happens as a side
+effect of some unrelated node’s teardown pulling in a shared predecessor.
+Concretely: expose <code>apply</code> as an <code>Op</code> usable in <code>up</code>/<code>tree</code>/<code>dag</code>, but ship
+its <code>down</code> as <code>Actionless</code>/no-op by default, with a separate, explicitly-
+named <code>destroy</code> value (not wired into the same <code>Op</code>) that a caller has to
+opt into deliberately if they really want <code>salmon-x run down</code> to reach it.</p>
+<h4 id="4-reading-terraform-generated-secrets">4. Reading Terraform-generated secrets</h4>
+<p>Terraform providers commonly generate credentials (a random DB password, a
+provider-issued API key) as sensitive outputs. Treat these exactly like
+every other secret in this codebase per the existing convention ([[recipe
+key exchange agnostic]]): <code>readOutputs</code> surfaces them as plain values at
+<code>gen</code> time (already local, already trusted — no new transport invented),
+and downstream recipes take them as ordinary pre-provisioned secret values,
+same as they’d take a secret read from any other file today. No new secret-
+handling machinery needed.</p>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>Does “already-existing Terraform usage” mean one root module or
+several</strong> (e.g. separate network/compute/DNS roots, possibly separate
+workspaces per tier/environment)? Determines whether <code>TerraformSource</code>
+needs to be a list (read/merge outputs from multiple roots) rather than
+one workdir — leaning towards supporting a list from the start since
+“one big root module” vs “several small ones” is a common enough split
+not to special-case away.
+</li>
+<li><strong>Output naming contract</strong>: does salmon assume specific output names
+(<code>machine_ab_0_ip</code>, etc.) that the existing <code>.tf</code> files would need to
+expose (possibly requiring someone to add outputs to already-existing
+config), or does <code>gen</code> need a mapping/config layer between “whatever
+outputs already exist” and “what the seed needs”? Depends entirely on
+what the existing Terraform code currently outputs — worth looking at
+before finalizing the parsing shape in §1.
+</li>
+<li><strong>Model B’s <code>destroy</code> exposure</strong>: even as an explicit opt-in value (not
+wired to <code>down</code>), should it require something stronger than “a Haskell
+value the caller chooses to reference” — e.g. a separate CLI subcommand
+gated behind its own confirmation prompt/flag — given the blast radius?
+Leaning yes, but the concrete UX depends on how <code>destroy</code> would actually
+be invoked in practice (interactively vs. from CI).
+</li>
+<li><strong>Version/binary pinning</strong>: does the environment already pin a Terraform
+version (a <code>.terraform-version</code>/<code>required_version</code> in existing config),
+and should the new <code>Track' (Binary &quot;terraform&quot;)</code> check/require it, or
+just shell out to whatever <code>terraform</code> is on <code>PATH</code> like every other
+<code>Binary</code> track in this codebase does today (recommend the latter —
+consistent with existing conventions, and version mismatches surface as
+ordinary <code>terraform</code> errors rather than needing salmon-side detection)?
+</li>
+</ul>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li><code>SreBox.TerraformState.readOutputs</code> (§1) against a captured
+<code>tf-outputs.json</code> file only — no live <code>terraform output</code> shell-out yet,
+no <code>Op</code> involved at all, just JSON parsing into typed values. Cheapest
+possible slice, immediately unblocks the pg-ha control-plane spec’s
+“where do machine addresses come from” question.
+</li>
+<li>Wire a <code>TerraformSource</code> into <code>ControlPlaneSeed</code> (from the pg-ha spec)
+as an alternative to hand-typed machine addresses.
+</li>
+<li>Live shell-out variant (<code>terraform output -json</code>, not just a captured
+file), once the captured-file path has been exercised for real.
+</li>
+<li>Model B (<code>Terraform.apply</code>, §3), only if/when there’s a concrete need
+for salmon to drive <code>apply</code> itself rather than assuming it already ran.
+</li>
+</ol>
+<h3 id="future-work">Future work</h3>
+<ul>
+<li>HCL generation/templating from salmon seeds (the inverse direction),
+if the “already-existing usage” turns out to be small enough that salmon
+owning it outright becomes more attractive than treating it as a fixed
+external input.
+</li>
+<li>A <code>destroy</code>-with-plan confirmation flow analogous to <code>advance-querying.md</code>’s
+<code>Plan</code>/digest mechanism, if Model B’s opt-in destroy needs more ceremony
+than a bare CLI flag.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

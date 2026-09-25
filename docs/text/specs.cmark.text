@@ -1,0 +1,42 @@
+# Specs
+
+The `specs/` directory holds design sketches: opinionated documents to react to, some of which then got built. Each starts with a **Status** line saying what of it has shipped, which is reproduced here. These pages are generated from the [salmon repository](https://github.com/lucasdicioccio/salmon/blob/master/../tree/master/specs ) — the repository is the canonical source, and may be ahead of what is published here.
+
+- [**Advanced querying: targeting `run` at a subset of nodes**](/specs-advance-querying.html ) — _Status:_ implemented. `query show`/`query plan`/`query extract-directive`,
+
+- [**Future work: what a running world knows, and who gets to see it**](/specs-future-work.html ) — _Status:_ ideas, not a plan. Four notes taken after trying `run serve` with the
+
+- [**GCP Support Plan for Salmon**](/specs-gcloud-support.html ) — _Status:_ phase 1 (gcloud-first) is implemented through all ten steps of §15:
+
+- [**A generic salmon server: `serve` behind an API, with clients that show the DAG**](/specs-generic-server.html ) — _Status:_ milestones 1 to 8 below are implemented (`--json` via
+
+- [**Multi-user / privilege separation: running parts of a graph as a lesser identity**](/specs-multi-user-privilege-separation.html ) — _Status:_ draft / not implemented. This is a design sketch to react to, not a
+
+- [**Pinning an application's traffic to a chosen interface via dedicated network namespaces**](/specs-netns-traffic-pinning.html ) — _Status:_ draft / not implemented. This is a design sketch to react to, not a
+
+- [**Per-node state machines: a supervised tree over a folded graph**](/specs-per-node-state-machines.html ) — _Status:_ milestones 1 to 9 below are implemented, each marked _landed_ with
+
+- [**What is left of `specs/per-node-state-machines.md`**](/specs-per-node-state-machines-remaining.html ) — _Status:_ living plan, update as work continues. As of this writing every
+
+- [**HA Postgres + bouncer + app-instance + LB control plane**](/specs-pg-ha-control-plane.html ) — _Status:_ draft / not implemented as a whole. Of the phased plan, only the
+
+- [**Postgres with automatic failover: salmon provisions, Patroni decides**](/specs-pg-patroni.html ) — _Status:_ draft / not implemented. A design sketch to react to, not a committed
+
+- [**Two-node Postgres with salmon-driven switchover and failover**](/specs-pg-switchover.html ) — _Status:_ implemented — phases 1 to 6 of the phased plan and the disaster
+
+- [**Pull mode: a `serve` that fetches its own declarations**](/specs-pull-mode.html ) — _Status:_ milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,
+
+- [**Local qemu VMs + tap/bridge networking for recipe testing**](/specs-qemu-test-vms.html ) — _Status:_ phases 1 to 5 of the phased plan are implemented:
+
+- [**Implementation progress: `specs/qemu-test-vms.md`**](/specs-qemu-test-vms-progress.html ) — _Status:_ living doc, update as work continues. Companion to
+
+- [**Salmon as PID 1: an init system whose unit graph is a real DAG**](/specs-salmon-as-init.html ) — _Status:_ the init system itself is not implemented — milestones 1 to 6
+
+- [**Property-based testing for `run serve`**](/specs-serve-property-testing.html ) — _Status:_ v1 implemented, in `salmon-ops-recipes/test/Test/ServeModelSpec.hs`.
+
+- [**Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail**](/specs-service-sandboxing.html ) — _Status:_ draft / not implemented. This is a design sketch to react to, not a
+
+- [**Terraform integration: consuming (and optionally driving) existing Terraform-managed infra**](/specs-terraform-integration.html ) — _Status:_ draft / not implemented. This is a design sketch to react to, not a
+
+
+

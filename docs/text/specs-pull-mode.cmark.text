@@ -1,0 +1,257 @@
+_Generated from [`specs/pull-mode.md`](https://github.com/lucasdicioccio/salmon/blob/master/specs/pull-mode.md ) — the repository is the canonical source, and may be ahead of this page._
+
+# Pull mode: a `serve` that fetches its own declarations
+
+Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`, `Salmon.Actions.Follow.Scheduler`, `Salmon.Actions.Follow.Registry` and its git/HTTP/DNS backends, `run serve --follow`, `--follow-cache`, `mode` in `status`, `--status-sink`, `salmon-fleet status`, the verify-before-inject hook, and signed documents behind `--follow-key`); the rest is a design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion idea (a generic salmon server with web/terminal clients that render the live `Dag`) is a separate sketch and is only referenced here where the two meet.
+
+## Problem
+
+Today's `run serve` only ever waits to be _pushed at_. Its whole input surface is one `Handle`: `serveWith` forks a reader thread that `hGetLine`s into a `TChan` and the loop reads commands off that channel (`salmon-ops/src/Salmon/Actions/Serve.hs`, `serveWith`/`readInto`/`loop`). The only way a declaration reaches a remote machine is a controller that ssh-es in — and what it runs there is a one-shot `run up` with the directive on stdin (`Salmon.Builtin.Nodes.Self.callSelf`), never a `serve`.
+
+So the shape we have is hub-and-spoke push: a controller holds every declaration, opens a connection per host per change, and learns an exit code back. That has three limits that get worse with every host added:
+
+- **Every host needs an inbound path from the controller** (ssh, a key, a firewall rule), and the controller must be up at the moment a change is wanted.
+
+- **A `serve` on a remote host is unreachable once started.** `ssh host bin run serve` works, but nothing can then talk to it except that one ssh session's stdin.
+
+- **There is no fleet-level state.** Each `serve` is an island; nothing answers "which hosts have converged to which declaration".
+
+
+The missing mode is the inverse: a host that periodically _fetches_ its desired state from somewhere and converges on it — the kubelet / Puppet-agent shape. It is the cheapest route to a fleet because it needs **no control plane and no inbound port on any host**. Nothing in it requires consensus; it requires a place to put documents.
+
+```
+controller ──writes──▶ dumb store (file / git / bucket / HTTP)
+                            │ fetch                 ▲
+              ┌─────────────┼─────────────┐         │ status
+        host A: serve   host B: serve   host C: serve
+          --follow        --follow        --follow
+```
+
+## What the loop already has
+
+Most of a puller's semantics exist; what's missing is the transport and one ordering rule.
+
+- **`load <file>`** runs a file's lines through the command language, nested loads included, depth-capped (`loadFile`, `maxLoadDepth`). A puller is "`load` from somewhere else, on a trigger".
+
+- **`only <seed>`** retires every other seed, **`up`/`down`** add/retire one, and **`clear`** retires all. Re-declaring an unchanged seed is a no-op because the ledger unifies by directive (`Salmon.Op.Ledger`, and `Serve.record`'s `Stale`-vs-unchanged comparison).
+
+- **`autoconverge off` + `converge`** separates _recording_ declarations from _acting_ on them (`Serve.hs`, `AutoConverge`), so a fetched document can be applied as one atomic batch of declarations followed by a single pass, rather than N passes.
+
+- **`up-directive <file>`** declares from a directive JSON rather than seed args, so a document can carry either spelling.
+
+- **The reader is the only thing that assumes stdin.** `serveWith` already takes any `Handle`; the loop reads `Maybe String` off a `TChan`. Generalizing the reader to a _merged_ source of lines is a small change.
+
+
+## Design
+
+### The fetched thing is a declarative document, not a command log
+
+The document is the **desired set**: the seeds this host should have live. It is _not_ a sequence of `up`/`down` commands, and it is **JSON**, not seed lines — JSON is what `up-directive` already speaks, what every tool that might produce or inspect a document (CI, a web UI, `jq`, a controller written in anything) speaks, and what a signature can be computed over unambiguously. Seed-line spelling stays available _inside_ it, as an array of words, so a document can carry either a seed or a fully-configured directive:
+
+```json
+{
+  "salmon": 1,
+  "id": "web-api@2026-09-23T10:41:07Z",
+  "seeds": [
+    { "seed": ["base-packages"] },
+    { "seed": ["app", "--version", "42"] },
+    { "directive": { "...": "a directive JSON, as `up-directive` takes" } }
+  ]
+}
+```
+
+`salmon` is a format version; `id` is opaque, chosen by the publisher, and is what `history` records (below). Anything else at the top level is ignored by v1 so publishers can annotate — except `published`, an optional RFC 3339 timestamp that milestone 4 gave a meaning (see the open questions).
+
+Reason for a document rather than a log: a log needs a cursor, exactly-once delivery, and a story for a host that missed the middle of it. A document is idempotent — safe to re-fetch, safe to fetch twice, safe to fetch after a month offline. The puller diffs the document against the live ledger and emits, on the loop's inbox:
+
+```
+autoconverge off
+up   <seed A>        # in document, not live
+up   <seed B>        # in document, already live -> no-op by the ledger
+down <seed C>        # live, not in document
+autoconverge on      # (restore whatever it was)
+converge
+```
+
+`only` is the tempting one-liner but it is the wrong primitive: it retires everything not named, which conflicts with a host following several labels (each document covers only its own label's seeds) and with an operator who typed something interactively that the document shouldn't know about. The diff is explicit about what it retires; `only` is not.
+
+`force`/`recheck`/`pause`/`resume` are _not_ state and do not belong in the document. They stay on a push channel (stdin today; a socket later) or in a separate, consumed-once side file if there's a real need.
+
+### Labels are addresses into a registry
+
+A **label** is not a selector inside one big fleet file; it is _syntax for addressing the latest document_ in a larger registry. A host started with labels `web-api` and `canary` fetches two documents — "latest for `web-api`", "latest for `canary`" — and its desired set is their union. A registry is anything that can answer "latest document for `<label>`", and the label is spliced into an address by a small template the registry backend owns:
+
+```html
+<table>
+<tr><th>registry backend</th><th>how <code>&lt;label&gt;</code> becomes an address</th><th>latest / change detection</th></tr>
+<tr><td>directory</td><td><code>&lt;dir&gt;/&lt;label&gt;.json</code></td><td>mtime + content hash, or inotify</td></tr>
+<tr><td>git repo</td><td><code>&lt;repo&gt;/&lt;label&gt;/latest.json</code> (a subdirectory per label; history is git's)</td><td>commit id</td></tr>
+<tr><td>HTTP</td><td><code>https://controller.example/seed/latest/&lt;label&gt;</code></td><td>ETag / <code>If-None-Match</code>, else hash</td></tr>
+<tr><td>bucket</td><td><code>gs://&lt;bucket&gt;/&lt;label&gt;/latest.json</code> (<code>Gcp/Storage</code>)</td><td>object generation</td></tr>
+<tr><td>DNS</td><td><code>&lt;label&gt;.&lt;zone&gt;</code>, e.g. <code>web-api.controller.salmon.example</code></td><td>see below</td></tr>
+</table>
+```
+
+The DNS backend is the "hack" worth spelling out because it is cheap to poll and salmon already runs DNS (`SreBox.MicroDNS`, `SreBox.DNSRegistration`), so a controller can _publish_ records with nodes that exist today. Two shapes:
+
+- **Index only.** A `TXT` record at `<label>.<zone>` carrying `v=salmon1 url=<where the JSON is> sha256=<digest>`. The host polls DNS (one UDP round-trip, cached by TTL, no connection to the controller) and fetches the payload only when the digest changes. DNS is the registry's _index_; HTTP/git/bucket is its _storage_. This is the recommended shape.
+
+- **Inline.** For a document small enough, the `TXT` record _is_ the document (base64, chunked at 255 bytes as TXT allows). Fine for a one-seed label; not the general case.
+
+
+Either way the record's TTL is a natural, controller-chosen lower bound on how fast a change propagates, and the zone's serial is a fleet-wide "did anything change" bit for free.
+
+Every backend above is already something salmon can _do_ as an op. That is the point of the second observation: **the agent's inbox can be a node in its own graph** — "the latest document for `<label>` from `<registry>` is at this local path" is a `Filesystem`/`Git`/`Storage`/`Web` node with the usual `check`/`up`/failure reporting, and the puller reads a local file that this node keeps fresh. That gets fetch failures into the same `Report` stream as everything else instead of a separate log.
+
+Labels are given at start (`--follow <registry> --label web-api --label canary`); a label file the host re-reads on each round is a cheap extension so that re-labelling doesn't need a restart, and is not v1.
+
+Two labels whose documents disagree about one effect site are not a registry-level error: both seeds are declared, and the `Dag` reports the collision as `Conflicting` exactly as it would for two interactive `up`s. The registry is not where that is resolved.
+
+A directory registry ships first (it's also the test harness: write a file, watch the world change), git second (the natural "desired state is a repo" workflow), HTTP and DNS-index after, bucket last.
+
+### Change detection happens _before_ injection — the one rule that's easy to get wrong
+
+Every line that arrives on the inbox stops tending: `loop` calls `stopTending` before handling any command, by design (a command is about to act on the nodes). A naive poller that injected on every tick — even "nothing changed" — would therefore **starve the supervisor**: at a 30s poll the machines would never reach their 60s check ceiling, and a `managed` node's watch would be interrupted every tick.
+
+So the fetcher hashes / ETags what it got and injects **only on change**. An unchanged poll must be invisible to the loop. Corollary: the poll interval and the tending loop are independent; polling can be aggressive without costing supervision anything.
+
+### A scheduler owns the rounds: backoff toward the registry, debounce toward the loop
+
+Polling rounds must be decoupled from inbound events, because there will be both: a round is not triggered by a line arriving on stdin or a socket, and a line arriving does not reset the round clock. The scheduler is one thread per followed registry producing "fetch now" ticks, and it has two jobs that point in opposite directions.
+
+**Toward the registry: exponential backoff on failure.** A round that fails (unreachable, 5xx, unparseable, signature bad) schedules the next one at `min(cap, base · factor^n)` with jitter; a round that succeeds resets `n`. Configuration is the usual four numbers (`base`, `factor`, `cap`, `jitter`) with defaults in the tens-of-seconds to minutes range. This protects the registry from a fleet hammering it during its own outage, and the jitter spreads a fleet that all rebooted at once. A successful round that observed _no change_ keeps the base interval; there is no reason to slow down while quiet, and the base interval (plus DNS TTL, for that backend) is already the propagation bound the operator chose.
+
+**Toward the loop: debounce on change.** A change observed in a round does not inject immediately. The scheduler opens a quiet window (`debounce`, default a few seconds, configurable up to minutes) and injects the _latest_ document seen once no further change has been observed for that long, with a `max_wait` after which it injects regardless. This coalesces a publisher that writes three times in a row (a CI job pushing per-label documents one after another, an operator saving a file twice), so the controlled system sees one diff-batch and one convergence pass, not three — and so a half-published state is never applied. It also bounds how often the supervisor is stood down by document traffic, which is the starvation rule above restated as a rate.
+
+Both knobs live on the follow, not on the seed: `--follow <registry> --poll 30s --backoff 5s..10m --debounce 5s`. A `fetch` command on the loop's input language triggers a round out of schedule (an operator who just published and doesn't want to wait), and is the one place inbound events touch the scheduler.
+
+`Upkeep` has a ladder of the same shape (double to a cap, halve to a floor), but it is a per-node question about _checks_; this one is per-registry about _fetches_. They should not share code beyond a small `Backoff` value type.
+
+### Merged input, one inbox
+
+Rather than a second loop, the reader becomes a _set_ of producers into the existing `TChan`:
+
+- stdin (today's behaviour, unchanged, and still what a piped script uses);
+
+- the fetcher, injecting a diff-batch on change;
+
+- later, a socket (the generic-server sketch).
+
+
+The loop does not care which producer a line came from. This preserves the property the loop's own comment defends: a piped script has every line queued before the first pass ends and is never supervised. A fetcher whose first fetch happens _before_ the loop starts (i.e. on startup, synchronously) behaves the same way — deterministic first convergence — and only later changes arrive "live", handled by the tending loop as any interactive command would be. `status` should say which it is (see "what this doesn't solve").
+
+### Groups, canaries and rollouts are registry writes
+
+Because a label addresses a document, host groups, canaries and staged rollouts are **writes to the registry**, with no service tracking membership: publish `app --version 42` under `canary`, watch the status sink, then publish it under `web-api`. A host in both groups gets the union, which for two versions of one app is a `Conflicting` in its `Dag` — visible, and the publisher's mistake to fix, not the registry's. This is also the first meaningful use of a unified `Remote` type (today `Self`, `Ssh` and `Rsync` each define their own `{user, host}` record): a host is a name plus its labels.
+
+### The fetcher is an actor in `history`
+
+Every declaration the fetcher makes is recorded in `history` with its provenance — registry, label, document `id`, digest — as a distinct actor from an operator's typed line or a `load`ed file. `LogEntry` grows an origin (`Typed | Loaded path | Fetched registry label id digest`), and `history` prints it. Cheap, and it is the only way an operator can tell "I typed this" from "the document said so" when a host does something surprising.
+
+### Status flows back the same way
+
+After every pass the host pushes its `status` snapshot — the same JSON the generic-server sketch wants for its `Dag` endpoint — to a sink: a file, an HTTP `POST`, or a bucket object keyed by host. Fleet status is then a **fold over those objects**, computed by whoever reads the store (a script, the web UI, a `salmon-fleet status` subcommand), not by a running service. The store is the only shared dependency and it's a dumb one.
+
+Same rule as fetching: pushing status is itself an op (a `filecontents`, a `Storage` upload), so a sink that's down shows up as a `Failed` node, not a silently stale dashboard.
+
+### Signed documents
+
+Pulling inverts trust: today a host trusts whoever holds an ssh key to it; in pull mode it trusts _the source_. TLS to the store covers transport. For the document itself, the tree already has JWT signing (`SreBox.JWTSigning`), `Keys`, and `Certificates` — a document can carry a detached signature the puller verifies against a key it was started with, before any line is injected. A document that fails verification is reported and ignored; the last good one stays in force. Not in v1, but the hook (verify-before-inject) should be there from the start so it's a function to fill in, not a restructuring.
+
+_Shipped_ (milestone 7 below: `Salmon.Actions.Follow.Signature`, `--follow-key`, `salmon-fleet keygen`/`sign`, `Test.FollowSignatureSpec`), with deviations listed there. The one worth reading here: the key is a **JWK**, not something `Certificates` produces — the tree's JWT signing (`SreBox.JWTSigning`) is HMAC over a shared secret, which a host cannot be handed without also handing it the power to sign, and `Keys.jwkKey` is the one public-key format already written by the tree; the signature is EdDSA over Ed25519 through `jose`, not a JWS.
+
+### Bootstrap is the existing push pattern, once
+
+`Self.uploadSelf`, then `ssh host bin run serve --follow <registry> --label …` under a `Systemd.systemdService` unit (which gives restart-on-crash and survives reboots). After that the controller **only writes documents** and never ssh-es again. The push pattern isn't replaced; it's demoted to "day zero".
+
+## Interaction with the rest of the loop
+
+- **`stopTending` before every command** — honoured unchanged; that's why change detection is load-bearing (above).
+
+- **Persistence.** A host that can't reach the store keeps converging on its last fetched document — the right behaviour — _but only if that document survives a restart_. `World` is an `IORef` today; a puller that forgets on restart is worse than no puller (it comes up empty, tears nothing down, and looks converged). The fetcher should at minimum cache the last verified document on disk and replay it on start; the journal for `World` proper is its own item and should land first or alongside. _The cache shipped in milestone 4_ (`--follow-cache`); the `World` journal has not, and is still its own item.
+
+- **`supervise off`/`autoconverge off` typed interactively** should be respected by the fetcher — it must not silently re-enable either. The diff batch reads the current setting and restores it.
+
+- **Rewrites** (`Salmon.Op.Rewrite`) already run once per convergence pass over the whole ledger; a document-driven batch is exactly one pass, so batching works as it does today with no change.
+
+- **Two operators.** An interactive `up` for a seed the document doesn't mention is left alone by the diff (it only retires seeds it previously declared — the fetcher owns a _contribution_ in the ledger's sense, and retires only its own). This is the ledger's set-not-refcount semantics doing its job.
+
+
+## What this does not solve
+
+- **Liveness / consensus.** Nothing decides a host is dead, same as today and deliberately (see `SreBox.PostgresPair`'s reasoning). A host that has stopped pushing status is _stale in the sink_, which is a visible fact, not a decision.
+
+- **The store's availability** is one shared dependency. That is a storage problem (pick a durable store), not a control-plane problem.
+
+- **Mid-pass arrivals.** A document change that arrives while the loop is idle is handled by the tending loop like any interactive command, not replayed deterministically. Correct, but `status` should report `mode: following` vs `mode: replay` so a test or an operator knows which guarantees apply. _It does, as of milestone 4_, with one shift in what `replay` means: not "the startup round was applied synchronously" (that is always true, and `following` covers it) but "the registry could not be reached at startup and the world is the cached document" — the case an operator actually needs to be told about. `interactive` is the third value, for a loop with no `--follow` at all.
+
+- **Secrets in documents.** The document names seeds; seeds that need secret material should keep using pre-provisioned files (see the recipe key-exchange-agnostic convention), not inline them.
+
+
+## Non-goals (v1)
+
+- A server that _pushes_ to hosts (that's the generic-server sketch, and a socket per host).
+
+- Rollout orchestration (wait for A before B) beyond what labels + registry writes give.
+
+- Any selector or query language: a label is an address, nothing more.
+
+- ~~Signing (hook only).~~ Shipped in milestone 7; still out: rotation and revocation beyond "several `--follow-key` flags", signing inside a registry.
+
+- A label file re-read at runtime (labels are start-time flags in v1).
+
+
+## Decisions taken
+
+- **JSON documents**, not seed lines, for tool support and for something a signature and a digest can be computed over; seed-line spelling survives as a word array inside them.
+
+- **The fetcher is a first-class actor in `history`**, with registry, label, document id and digest.
+
+- **A scheduler decouples rounds from inbound events**, with exponential backoff (base, factor, cap, jitter) toward the registry and a debounce window (plus `max_wait`) toward the loop — the first protects the registry, the second the controlled system.
+
+- **Labels address documents in a registry**; the registry backend owns the template that turns a label into an address (a directory, a git subdirectory, an HTTP path, a bucket prefix, or a DNS name under a zone).
+
+
+## Open questions
+
+- DNS-index record format: one `TXT` with `url=` and `sha256=` as sketched, or a `URI` record plus a `TXT` digest? And whether the inline-document variant is worth having at all. _Settled as sketched_ (milestone 6): one `TXT` at `<label>.<zone>` reading `v=salmon1 url=<https url> sha256=<hex>`, fields in any order after the version, a record longer than one string joined the way `TXT` readers do. Two things decided it. A single record is one lookup and one atomic write for the publisher — a `URI` plus a `TXT` can be observed with one updated and the other not, which is exactly the "index announces what the store does not serve" state the digest check refuses, only now manufactured by the index itself. And the `sha256=` field _is_ the change detection: the record's digest is the stamp, so a round that finds it unchanged makes no HTTP request at all, which a `URI` record would not carry. The `URI` variant was not done; nothing stops a later reader from also accepting it. The inline-document variant was not done either and is not planned: base64 chunked over 255-byte strings for a document that is JSON anyway buys nothing a small HTTP store does not, and the record size would bound the document.
+
+- Does the document `id` need to be ordered (so a host can refuse to move _backwards_ if a registry serves a stale copy from a lagging replica), or is "latest is whatever the registry says" enough? Leaning: an optional `published` timestamp, refuse-older as a flag, off by default. _Settled as the leaning says_ (milestone 4): `id` stays opaque; a document may carry `published` (RFC 3339) at its top level, and under `--follow-refuse-older` a fetched document published before the one already applied _or pending_ for its label is reported `Stale` and not injected. Off by default; without `published` on both sides the latest is whatever the registry says. Two details worth knowing: the comparison is against the pending document when there is one, not only the applied one, since "do not move backwards" has to hold inside a quiet window too; and a `published` that does not parse is a malformed document rather than an ignored annotation, because a flag that silently skipped a mistyped timestamp would not be doing its one job.
+
+- Whether `debounce` should also apply to the _first_ fetch at startup (probably not: startup wants the deterministic synchronous fetch, and there is nothing to coalesce yet). _Settled as the leaning says_: the startup round is synchronous and what it finds is injected at once, before standard input is released; the window applies from the first scheduled round on. A restart therefore applies the registry's current document immediately, even if the publisher is mid-write — which is the same exposure milestone 2 had, and the price of a deterministic first convergence.
+
+
+## Suggested milestones
+
+- .1 **Reader generalization.** `serveWith` takes a list of line producers instead of one `Handle`; stdin is one producer. No behaviour change; `Test.ServeSpec` still passes untouched.
+
+- .1 **Document format + directory registry.** The JSON shape, `--follow
+- .1 ```html
+<dir> --label <l>`, one document per label, union across labels,
+mtime+hash change detection, diff-batch injection, fetcher-owned
+contribution, fetcher origin in `history`. Layer 1 test: write the file,
+assert the world; rewrite identical content, assert *no* command was
+injected (the starvation rule, as a test).
+*Shipped* (`Salmon.Actions.Follow`, `Test.FollowSpec`), with two
+deviations: the batch is one structured `Serve.Batch` inbox entry rather
+than text lines (so the loop, which alone knows the `autoconverge`
+setting, restores it, and no other producer's line can land mid-batch),
+and the "fetcher-owned contribution" is computed in the fetcher as the
+union across its labels — the ledger keys a declaration by its directive,
+so it cannot retire "only its own" copy of a seed an operator also typed.
+Rounds ran on a fixed `--follow-interval` until milestone 3.
+```
+
+
+- .1 **Scheduler.** Backoff with jitter toward the registry, debounce with `max_wait` toward the loop, the `fetch` command. Test: three writes inside the window yield one pass; a failing registry is polled on the ladder, not the base. _Shipped_ (`Salmon.Actions.Follow.Scheduler`, `Test.FollowSchedulerSpec`), with three deviations: the knobs are six flat flags (`--follow-base/-factor/-cap/-jitter/-debounce/-max-wait`, with `--follow-interval` kept as the base's older name) rather than the `--poll 30s --backoff 5s..10m` spelling above; a label with no document is not a failed round (the registry answered), so only a throwing registry or unparseable bytes climb the ladder; and the ladder's first rung is the base itself (`min(cap, base · factor^(n-1))`), so a single failure is retried no later than a success would have been. One consequence for the loop: `Batch` carries an origin per command, since a window can close over several labels at once and `history` must still say which document each declaration came from.
+
+- .1 **Cached last document + `mode` in `status`.** _Shipped_ (`--follow-cache DIR`, `--follow-refuse-older`, `Serve.Mode`, `Test.FollowCacheSpec`), with four deviations. The cache is written after every _injection_ (bytes, sha256 and id per label, a temp file renamed into place), not after a verified convergence — the fetcher does not learn whether the loop's pass succeeded, and "the last document the loop was told about" is the right thing to come back to anyway. A label is replayed when its startup fetch _fails_, which covers the registry throwing and its bytes not parsing (a half-written file at the moment of a restart is the realistic case), but not the registry answering "no document" — the registry answered, and the cache is not deleted either, so it will be replayed the next time the registry is unreachable. `replay` is entered only at startup and turns to `following` at the first later round in which every label answers; a failure after that is `Backoff`, not a mode, since the world is still the registry's last word. And the directory registry now throws when its directory is missing instead of answering "no document", because the cache hinges on telling those apart. The `Followed` record (`Serve.hs`) is the loop's only view of the fetcher — the fetch hook and an `IO Mode` — and `mode` lives on `StatusReport` itself, so the HTTP `/status` gets it from the same encoder.
+
+- .1 **Status sink** (file first), and a `salmon-fleet status` that folds a directory of them. _Shipped_ (`Salmon.Actions.Serve.StatusSink`, `Salmon.Actions.Fleet`, `salmon-fleet` in `salmon-apps`, `Test.StatusSinkSpec`), with four deviations from the sketch above. **The sink is not an op in the host's graph.** "Status flows back" wanted a `filecontents`/`Storage` node so a sink that is down shows as a `Failed` node; but a node is applied _by_ a pass, and the document must be written _after_ the pass it describes, which a node inside that pass cannot do. It is a reporter beside the loop's (watching for `ConvergeStop` and `Follow.Injected`) plus a read-only accessor to the world and a timer, and a failed write is a `Serve.SinkFailed` report — the same information, on the same stream, once per run of failures. **It writes more often than "after every pass":** also after every follow injection and every `--status-sink-interval` seconds (10) with nothing happening, so that a host that has gone quiet is visibly one whose `written` is old. **The fetcher's reports had to become a `--json` stream first** (`stream: "follow"`, the fourth constructor of `Salmon.Reporter.Tagged`); until then `Injected`/`Backoff`/`Replayed` printed as text under `--json` and no sink could carry them — which the sketch did not anticipate because it predates `--json`. And **the host is `uname -n`**, so two loops on one machine write two documents naming one host, and the fold shows two rows rather than picking; `--status-sink-host NAME` is that override, added once (2026-09-25) rather than speculatively. `salmon-fleet status DIR [--label L] [--stale S] [--json]` is the fold: one line per document, host order, converged/errored/total off `status.nodes`, stale past `--stale` (60s) as a flag and never a decision. Only the file sink exists; a bucket object or an HTTP `POST` is the same document handed to a different writer.
+
+- .1 **Git registry**, then HTTP, then the DNS index over HTTP, then bucket. Verify-before-inject hook with a no-op verifier. _Shipped_ (`Salmon.Actions.Follow.Registry` and `Registry.Git`/`.Http`/ `.Dns`, `Follow.followVerify`, `Test.FollowRegistrySpec`), with five deviations from the table under "Labels are addresses into a registry". The git template is `<subdir>/<label>.json` at a branch (`git+URL[#BRANCH[:SUBDIR]]`), not `<repo>/<label>/latest.json` — one file per label beside the others is what a publisher edits, and a subdirectory per label would have made history git's _twice_. The registries are **not nodes in the agent's own graph**: the "inbox as a node" idea above would have put a fetch under `stopTending` (a pass is what runs a node's `up`) and so under the very starvation rule the fetcher exists to respect; a fetch failure reaches the same `Report` stream as `FetchFailed`/`Backoff` instead. The bucket backends are the HTTP one under a URL template (virtual-hosted S3, GCS, or path-style under `--follow-bucket-endpoint`) — public or presigned objects only, no SDK, no object generation as the stamp (the `ETag` serves), and **no authenticated access**, which is its own item if wanted. The DNS resolver is `dig +short` through `Binary` behind a `Resolver` record (nothing in the tree resolved DNS, and one TXT lookup did not justify a resolver library's footprint); the record format is settled under the open questions. And the hook is `followVerify :: Digest -> ByteString -> IO (Either Text ())` on the _raw bytes_, after the digest comparison and before the parser, run on a cache replay as well as on a fetch — a refusal is `Rejected`, a failed round, neither injected nor cached, the last good document staying in force as the "Signed documents" section asks. Three flags joined the `--follow-*` family for the backends' sake: `--follow-timeout`, `--follow-workdir`, `--follow-bucket-endpoint`.
+
+- .1 **Signed documents.** _Shipped_ (`Salmon.Actions.Follow.Signature`, `--follow-key FILE` repeatable, `salmon-fleet keygen --out FILE` and `salmon-fleet sign --key FILE`, `Test.FollowSignatureSpec`), with five deviations from the sketch and the work item's brief. **The envelope wraps the document rather than signing its bytes**: `{"salmon-signed": 1, "document": <the document as fetched>, "signatures": [{"key", "alg", "sig"}]}`, the signature over the canonical bytes of the `document` member — `Data.Aeson.encode` of the parsed value, whose sorted keys and single spelling per scalar are what let a registry re-serialise an envelope without breaking it; both sides parse-then-encode with the same function, and no canonical-JSON library is involved. **The verifier hands the loop the inner document**, so `Verifier` became `Digest -> ByteString -> IO (Either Text ByteString)` (the bytes to parse) rather than `Either Text ()`; `noVerifier` returns its input. **The digest is the envelope's, not the document's**, everywhere the fetcher keeps one (change detection, `Rejected`, `history`, the cache): the cache keeps the bytes as fetched so a replay is verified exactly as a fetch, its integrity check is over those bytes, and `Rejected` for an envelope that does not even parse has no other digest to name; the brief asked for the document's, and that would have meant a second digest per node for the sake of one report field. **The key is a JWK, not PEM**: the brief said "PEM public key" and also "the tree's existing key format", and those disagree — `Keys.jwkKey` writes JWK through `jose`, and nothing in the tree parses PEM, so JWK it is; `--follow-key` reads either the public file or the private one (taking its public half). **Ed25519 via `jose`**, which already sat on `crypton` in the plan; `bestJWSAlg` means an RSA or EC JWK signs too, while `none` and the HMACs are refused before `jose` sees them (its `verify` of `none` against an empty signature answers true). Refusals say which: unsigned under a key, an envelope that does not parse, no signatures, every signature failing (naming the key and whether it was unknown, tampered, or an algorithm a public key cannot verify). A `--follow-key` that does not load exits 1 with the path; the flag without `--follow` is refused as `--label` is. Unsigned mode is the default and the docs say so.
+
+
+

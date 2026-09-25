@@ -1,0 +1,462 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Multi-user / privilege separation: running parts of a graph as a lesser identity</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-multi-user-privilege-separation.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Multi-user / privilege separation: running parts of a graph as a lesser identity"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Multi-user / privilege separation: running parts of a graph as a lesser identity"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-multi-user-privilege-separation.html"><meta property="og:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-multi-user-privilege-separation.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-multi-user-privilege-separation.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: draft / not implemented. This is a design sketch to react to, not a","headline":"Multi-user / privilege separation: running parts of a graph as a lesser identity","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-multi-user-privilege-separation.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Multi-user / privilege separation: running parts of a graph as a lesser identity</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 2950 words, 9 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-generic-server.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">14/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-advance-querying.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/multi-user-privilege-separation.md"><code>specs/multi-user-privilege-separation.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="multi-user--privilege-separation-running-parts-of-a-graph-as-a-lesser-identity">Multi-user / privilege separation: running parts of a graph as a lesser identity</h2>
+<p>Status: draft / not implemented. This is a design sketch to react to, not a
+committed plan.</p>
+<h3 id="problem">Problem</h3>
+<p>One <code>upTree</code>/<code>downTree</code> is one Haskell process, and a process has exactly one
+uid. Today that uid has to be the <em>maximum</em> of every privilege any node in the
+graph needs — in practice root, because somewhere in the graph there is an
+<code>apt-get install</code>, an <code>nft add rule</code>, or a <code>systemctl daemon-reload</code>. Every
+other node in the graph then also runs as root, whether or not it needs to.</p>
+<p>That produces three distinct problems, and it is worth separating them because
+they have different fixes:</p>
+<ol>
+<li>
+<p><strong>No way to drop privilege for a node that doesn’t need it.</strong> A
+<code>Cabal.build</code>, a <code>Git.repo</code> clone, an <code>Npm</code>/<code>Spago</code> build, a
+<code>Web.download</code> — none of these need root, and running them as root means an
+arbitrary <code>build.sh</code>/<code>postinstall</code> script in a third-party dependency runs
+as root. There is no vocabulary in the codebase to say “this node runs as
+<code>builder</code>”.</p>
+</li>
+<li>
+<p><strong>Identity-switching is hardcoded, per node, in the wrong place.</strong>
+<code>Salmon.Builtin.Nodes.Postgres.psqlAdminRun_Sudo</code>
+(<code>salmon-ops/src/Salmon/Builtin/Nodes/Postgres.hs:398</code>) bakes
+<code>sudo -u postgres</code> into the <code>CreateProcess</code> of all twelve of its admin
+commands. That module already carries the todo this spec is answering
+(<code>Postgres.hs:394</code>):</p>
+<blockquote>
+<p>todo: workaround chmod and sudo hack with some calling preference</p>
+<ul>
+<li>we’ll need to request more than a <code>Track' (Binary &quot;psql&quot;)</code> but some more
+complex logic with sudo, the user, and the right binary
+</li>
+</ul>
+</blockquote>
+<p>The consequences of hardcoding are concrete: the choice of mechanism
+(<code>sudo</code> vs <code>runuser</code> vs <code>setpriv</code>) is not a caller’s to make, <code>sudo</code>
+becomes an undeclared dependency (nothing in the graph installs it or
+configures sudoers), and a caller that <em>already runs as</em> <code>postgres</code> still
+pays for a <code>sudo</code> hop.</p>
+</li>
+<li>
+<p><strong>Files created by the root process are unreadable by the lesser identity,
+and the workaround is a security hole.</strong> <code>Filesystem.filecontents</code>
+(<code>Filesystem.hs:51</code>) is <code>ByteString.writeFile</code> under the process umask:
+root-owned, <code>0644</code>. So <code>Postgres.adminScript</code> (<code>Postgres.hs:342</code>) copies the
+migration script into <code>/opt/salmon/postgres/migrations/admin/</code> and then runs
+<code>chmod a+r</code> on it (<code>ChmodAdminScript</code>, <code>Postgres.hs:404</code>) purely so that the
+<code>sudo -u postgres psql -f ...</code> on the next line can read it. That makes
+every admin migration script world-readable on the box. The same shape would
+be far worse applied to <code>Secrets.sharedSecretFile</code> or <code>Keys</code>.</p>
+</li>
+</ol>
+<p>The ask is: what vocabulary should salmon grow — ops, decorators, or something
+else — to express this?</p>
+<h3 id="the-structural-finding-the-decoration-cannot-live-on-op">The structural finding: the decoration cannot live on <code>Op</code></h3>
+<p>The instinctive answer is an <code>Op -&gt; Op</code> decorator:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">runAs ::</span> <span class="dt">User</span> <span class="ot">-&gt;</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">Op</span>          <span class="co">-- does not work</span></span></code></pre></div></div><p>It cannot work, and understanding why determines the whole design.
+<code>Extension.up</code> has type <code>IO ()</code>. By the time you hold an <code>Op</code>, the command has
+already been rendered: <code>withBinary</code> (<code>Binary.hs:80</code>) called <code>prepare</code> to build
+a <code>CreateProcess</code>, closed over it in <code>untrackedExec</code>, and handed the node
+author an opaque <code>Reporter Report -&gt; IO ()</code>. An <code>Op -&gt; Op</code> decorator receives
+that closure and has no way to look inside it, let alone rewrite its <code>cmdspec</code>.
+<code>up</code>’s type erases everything.</p>
+<p>So an <code>Op</code>-level decorator has exactly one implementation available to it:
+wrap the whole <code>IO ()</code> in a <code>forkProcess</code>+<code>setuid</code> (Layer 4 below), which
+brings in the threaded-RTS hazards and semantic cliffs discussed there.</p>
+<p><strong>The privilege decision has to be made upstream of <code>Extension.up</code> — at the
+<code>Command</code>/<code>withBinary</code> boundary, where the <code>CreateProcess</code> still exists as a
+value.</strong> That is the good news: it is exactly one chokepoint, and ~100 of the
+call sites in the repo go through it.</p>
+<h3 id="what-already-exists-to-build-on">What already exists to build on</h3>
+<p>The repo is not starting from nothing here; several pieces are already the
+right shape.</p>
+<table>
+<tr><th>Existing</th><th>What it gives us</th></tr>
+<tr><td><code>Binary.Command { prepare :: arg -&gt; CreateProcess }</code> (<code>Binary.hs:72</code>)</td><td>A pure <code>arg -&gt; CreateProcess</code>, i.e. a value that can be <em>rewritten</em> by a combinator before <code>withBinary</code> closes over it.</td></tr>
+<tr><td><code>Track'</code>/<code>tracking</code>/<code>inject</code></td><td>The mechanism to make "and <code>sudo</code> must be installed, and the user must exist" real graph predecessors rather than ambient assumptions.</td></tr>
+<tr><td><code>User.User</code>/<code>Group</code>/<code>Owner</code>/<code>chown</code> (<code>User.hs</code>)</td><td>The identity vocabulary already exists as typed values, plus a <code>Track' Group</code>/<code>Track' User</code> convention for provisioning them.</td></tr>
+<tr><td><code>Capabilities.grantCapabilities</code> (<code>Capabilities.hs</code>)</td><td>Precedent for "grant a binary less than root instead of running the caller as root" — the fine-grained end of this same spectrum.</td></tr>
+<tr><td><code>Systemd.Service.service_user</code>/<code>service_group</code></td><td>Identity separation already solved for the <em>runtime</em> of a service; this spec is the same idea for the <em>provisioning</em> of it.</td></tr>
+<tr><td><code>Self.callSelfAsSudo</code> (<code>Self.hs:99</code>)</td><td>Precedent for re-invoking the salmon binary itself under a different identity with a JSON directive on stdin — currently only over SSH, but the local case is the same trick.</td></tr>
+<tr><td><code>Query.Plan</code> + <code>run up --plan</code> + <code>Query.forceSkip</code></td><td>Machinery to execute a <em>subset</em> of a graph, digest-pinned to a directive. This is what makes Layer 3's partitioning possible with almost no new code.</td></tr>
+<tr><td><code>Extension.dynamics :: [Dynamic]</code> + <code>collectDynamics</code></td><td>The established way to attach out-of-band typed metadata to a node and recover it by a whole-graph analysis — the natural carrier for a privilege-domain tag.</td></tr>
+<tr><td><code>UpDown.Gate</code></td><td>A caller-supplied per-node "does this traversal want this node" — already the hook a domain-filtered pass would use.</td></tr>
+</table>
+<h3 id="proposed-layering">Proposed layering</h3>
+<p>Four layers, deliberately independent. Each is useful alone; none requires the
+next.</p>
+<table>
+<tr><th>Layer</th><th>What it segments</th><th>New code</th><th>Recommendation</th></tr>
+<tr><td><strong>L0</strong></td><td>Nothing — partition by hand with existing <code>query plan</code> + <code>sudo -u self run up --plan</code></td><td>none</td><td>Document it now; it is available today</td></tr>
+<tr><td><strong>L1</strong></td><td>Individual <strong>binary calls</strong> (<code>RunAs</code> + <code>Invoker</code>)</td><td>small, in <code>Binary.hs</code></td><td><strong>Build this first.</strong> Answers the <code>Postgres.hs:394</code> todo directly</td></tr>
+<tr><td><strong>L2</strong></td><td><strong>File ownership/mode at creation</strong></td><td>small, in <code>Filesystem.hs</code></td><td>Build second. Without it L1 is half a solution</td></tr>
+<tr><td><strong>L3</strong></td><td>Whole <strong>subgraphs</strong>, by declared domain, via re-exec of self</td><td>medium</td><td>Design now, build if L1+L2 prove insufficient</td></tr>
+<tr><td><strong>L4</strong></td><td>Individual <strong>ops</strong>, via <code>forkProcess</code>+<code>setuid</code></td><td>small but hazardous</td><td>Document why not; keep as escape hatch</td></tr>
+</table>
+<p>The user’s framing — “if it’s too complicated to segment ACLs/user around an
+Op, then at least segment the binary calls” — maps onto L4-vs-L1. The
+recommendation is that L1 is not the consolation prize: it is the <em>better</em>
+answer, because it puts the decision where the information still exists,
+whereas L4 puts it where the type has already thrown the information away.</p>
+<hr />
+<h3 id="l0-partition-by-hand-today">L0: partition by hand, today</h3>
+<p>Worth writing down because it needs no code and it validates the L3 model
+before anyone builds L3. The querying work already landed, so:</p>
+<pre><code class="language-sh">my-salmon config ... &gt; directive.json
+
+# everything the unprivileged builder owns
+my-salmon query plan --select '/**/cabal-build/**' --select '/**/git-repo/**' \
+  &lt; directive.json &gt; builder.plan
+# everything else
+my-salmon query plan --exclude '/**/cabal-build/**' --exclude '/**/git-repo/**' \
+  &lt; directive.json &gt; root.plan
+
+sudo -u builder my-salmon run up --plan builder.plan &lt; directive.json
+sudo             my-salmon run up --plan root.plan    &lt; directive.json
+</code></pre>
+<p>The <code>Plan</code>’s directive digest is what keeps this honest: both passes are pinned
+to the same <code>directive.json</code>, so a plan computed against one graph cannot be
+silently applied to another.</p>
+<p>Two real limitations, which are also the argument for L1/L3:</p>
+<ul>
+<li><strong>Ordering across the partition boundary is lost.</strong> Each invocation walks its
+own subset with correct internal ordering, but if a root node must run
+<em>between</em> two builder nodes, no ordering of the two passes expresses that.
+The partition has to be a topological cut, and nothing checks that it is.
+</li>
+<li><strong>Addressing is by path glob</strong>, so a recipe refactor that renames a
+shorthand silently changes which nodes land in which privilege domain.
+Silently mis-partitioning privilege is a bad failure mode. L3 fixes this by
+moving the tag into the recipe.
+</li>
+</ul>
+<hr />
+<h3 id="l1-runas--invoker--segmenting-the-binary-calls">L1: <code>RunAs</code> + <code>Invoker</code> — segmenting the binary calls</h3>
+<h4 id="the-types">The types</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- in Salmon.Builtin.Nodes.Binary (or a new Salmon.Builtin.Nodes.Privilege)</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Whose identity a command runs under.</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">RunAs</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="co">-- | Inherit the salmon process&#39;s own identity. The default; today&#39;s</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- behaviour for every node that doesn&#39;t hardcode sudo.</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    <span class="dt">RunAsSelf</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="co">-- | Drop (or raise) to another account, by a chosen mechanism.</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    <span class="dt">RunAsUser</span> <span class="op">!</span><span class="dt">Mechanism</span> <span class="op">!</span><span class="dt">User.User</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Show</span>, <span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Generic</span>)</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">Hashable</span> <span class="dt">RunAs</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a><span class="co">-- | How the switch is performed. Pluggable on purpose: which one is correct</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a><span class="co">-- depends on what the salmon process already is, and on what the target box</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a><span class="co">-- has configured.</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Mechanism</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="co">-- | @sudo -u \&lt;user\&gt; -- \&lt;cmd\&gt; \&lt;args\&gt;@. Works from a non-root caller,</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- but needs a sudoers rule (and NOPASSWD, since there is no tty).</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>    <span class="dt">ViaSudo</span></span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="co">-- | @runuser -u \&lt;user\&gt; -- \&lt;cmd\&gt; \&lt;args\&gt;@. Needs the caller to already</span></span>
+<span id="22"><a href="#22" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- be root, but needs no sudoers configuration and cannot prompt.</span></span>
+<span id="23"><a href="#23" aria-hidden="true" tabindex="-1"></a>    <span class="dt">ViaRunuser</span></span>
+<span id="24"><a href="#24" aria-hidden="true" tabindex="-1"></a>  <span class="op">|</span> <span class="co">-- | @setpriv --reuid \&lt;uid\&gt; --regid \&lt;gid\&gt; --init-groups -- \&lt;cmd\&gt;@.</span></span>
+<span id="25"><a href="#25" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- Lowest-level; no PAM session at all.</span></span>
+<span id="26"><a href="#26" aria-hidden="true" tabindex="-1"></a>    <span class="dt">ViaSetpriv</span></span>
+<span id="27"><a href="#27" aria-hidden="true" tabindex="-1"></a>  <span class="kw">deriving</span> (<span class="dt">Show</span>, <span class="dt">Eq</span>, <span class="dt">Ord</span>, <span class="dt">Generic</span>)</span></code></pre></div></div><p><strong>Recommended default: <code>ViaRunuser</code>, not <code>ViaSudo</code>.</strong> Salmon’s whole premise is
+that the process starts privileged. From root, <code>runuser</code> is strictly simpler
+than <code>sudo</code>: no sudoers file to provision (which is itself an unmodelled
+dependency today), no PAM password path that could block a headless run
+forever, no <code>env_reset</code> surprises. <code>sudo</code> stays available for the case where
+salmon is <em>not</em> root and needs to go up. <code>setpriv</code> for when even a PAM session
+is unwanted.</p>
+<p>Note the <code>--</code> in every rendering: it terminates option parsing, so a command
+whose first argument happens to start with <code>-</code> cannot be reinterpreted as a
+flag of the wrapper.</p>
+<h4 id="the-rewrite">The rewrite</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Rewrites a rendered command to run under another identity.</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="ot">applyRunAs ::</span> <span class="dt">RunAs</span> <span class="ot">-&gt;</span> <span class="dt">CreateProcess</span> <span class="ot">-&gt;</span> <span class="dt">CreateProcess</span></span></code></pre></div></div><p>It rewrites <code>cmdspec</code> only. <code>RawCommand path args</code> becomes
+<code>RawCommand &quot;runuser&quot; ([&quot;-u&quot;, user, &quot;--&quot;, path] &lt;&gt; args)</code>; a <code>ShellCommand</code>
+becomes the wrapper invoking a shell with <code>-c</code> (and is worth discouraging —
+see “Gotchas”).</p>
+<h4 id="the-carrier-invoker">The carrier: <code>Invoker</code></h4>
+<p>A <code>RunAs</code> alone is not enough, because switching identity has <em>dependencies</em>:
+the wrapper binary must be installed, and the target account must exist. Those
+are graph edges, and salmon already has the vocabulary for graph edges. So the
+thing a node asks for is not a bare <code>Track' (Binary x)</code> but:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Everything needed to invoke a binary: where the binary comes from, whose</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="co">-- identity it runs under, and how that identity is provisioned.</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Invoker</span> (<span class="ot">x ::</span> <span class="dt">Symbol</span>)</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="dt">Invoker</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> invoker_binary ::</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> x)</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> invoker_runAs ::</span> <span class="dt">RunAs</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> invoker_identity ::</span> <span class="dt">Track&#39;</span> <span class="dt">RunAs</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- ^ provisions the wrapper binary + the target account; &#39;ignoreTrack&#39;</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    <span class="co">-- when both are pre-existing.</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Lift today&#39;s signature unchanged: same binary, no identity switch.</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a><span class="ot">asSelf ::</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> x) <span class="ot">-&gt;</span> <span class="dt">Invoker</span> x</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>asSelf t <span class="ot">=</span> <span class="dt">Invoker</span> t <span class="dt">RunAsSelf</span> ignoreTrack</span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a><span class="co">-- | The parallel of &#39;withBinary&#39;, threading the identity through.</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a><span class="ot">withInvoker ::</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Invoker</span> x <span class="ot">-&gt;</span> <span class="dt">Command</span> x arg <span class="ot">-&gt;</span> arg <span class="ot">-&gt;</span> ((<span class="dt">Reporter</span> <span class="dt">Report</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()) <span class="ot">-&gt;</span> <span class="dt">Op</span>) <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p><code>withInvoker</code> is <code>withBinaryStdin</code> with two changes: it applies <code>applyRunAs</code> to
+the <code>CreateProcess</code> before closing over it, and it <code>inject</code>s
+<code>run invoker_identity invoker_runAs</code> alongside the existing binary track. That
+second half is the part that earns its keep — it makes “this op needs <code>sudo</code>
+installed and the <code>postgres</code> account to exist” visible in <code>run tree</code>/<code>run dag</code>
+and orderable by <code>upTree</code>, instead of being an assumption that fails at
+runtime.</p>
+<p><code>invoker_identity</code> being a <code>Track'</code> (rather than a hardcoded
+<code>Debian.sudo</code>) is the same convention as the existing rule that recipes must
+not bake in a secret-transport mechanism: take the provisioning as a parameter,
+let the caller pass <code>ignoreTrack</code> when the account and wrapper are already
+provisioned out of band. A recipe that hardcodes <code>Debian.sudo</code> would be making
+the same mistake <code>psqlAdminRun_Sudo</code> makes today, just one level up.</p>
+<h4 id="two-different-consumers-one-type">Two different consumers, one type</h4>
+<p>It is worth being explicit that L1 serves two cases that look similar and are
+not:</p>
+<ul>
+<li><strong>Node-author-fixed identity.</strong> “psql admin commands run as the <code>postgres</code>
+account” is intrinsic to the node; no caller should override it. Here the
+node keeps constructing its own <code>RunAs</code> internally, and the <em>only</em> thing that
+changes versus today is that the mechanism and the dependencies become
+values rather than a string literal in <code>prepare</code>.
+</li>
+<li><strong>Caller-chosen identity.</strong> “build this cabal target as <code>builder</code>” is a
+deployment choice. Here the smart constructor’s signature has to change from
+<code>Track' (Binary &quot;cabal&quot;)</code> to <code>Invoker &quot;cabal&quot;</code>.
+</li>
+</ul>
+<p>Only the second forces signature churn, and only on the nodes that want it.</p>
+<h4 id="migration">Migration</h4>
+<p>There are ~100 <code>withBinary</code>/<code>withBinaryStdin</code> call sites and ~89
+<code>Track' (Binary …)</code> parameters in <code>salmon-ops</code>. A big-bang migration is neither
+necessary nor desirable:</p>
+<ol>
+<li>Add <code>RunAs</code>/<code>Mechanism</code>/<code>applyRunAs</code>/<code>Invoker</code>/<code>asSelf</code>/<code>withInvoker</code>.
+Nothing changes for anyone; <code>withBinary</code> keeps working unchanged and is
+redefined as <code>withBinary t = withInvoker (asSelf t)</code>.
+</li>
+<li>Fix <code>Postgres</code>: delete <code>psqlAdminRun_Sudo</code>, keep a plain <code>psqlAdminRun</code> that
+renders bare <code>psql</code>, and have the admin nodes build
+<code>Invoker psql (RunAsUser ViaRunuser &quot;postgres&quot;) …</code>. This resolves
+<code>Postgres.hs:394</code> and is a good single-module proof of the design.
+</li>
+<li>Convert nodes to <code>Invoker</code> <strong>only when a caller actually wants to choose</strong> —
+<code>Cabal</code>, <code>Git</code>, <code>Npm</code>, <code>Spago</code>, <code>Web</code>, <code>Tar</code> are the plausible first set
+(the “build stuff” cluster, which is where running as root is least
+defensible). Call sites become <code>asSelf debianCabal</code> mechanically.
+</li>
+</ol>
+<h4 id="ref-identity--a-correctness-requirement-not-a-nicety"><code>Ref</code> identity — a correctness requirement, not a nicety</h4>
+<p>If a node’s identity is caller-chosen, <strong>its <code>mkRef</code> key must include the
+<code>RunAs</code></strong>, otherwise <code>upTree</code>’s dedup collapses “clone this repo as <code>builder</code>”
+and “clone this repo as <code>ci</code>” into one node and silently drops the second. This
+is easy to get wrong because it only bites in graphs that actually use two
+identities for the same command. Rule to state in CLAUDE.md’s “Conventions for
+node authors”: <em>any node taking an <code>Invoker</code> includes its <code>RunAs</code> in the <code>Ref</code>
+key.</em> Cost is zero when the identity is fixed, so there is no reason to make it
+conditional. This is why <code>RunAs</code> needs <code>Hashable</code>.</p>
+<h4 id="commandio-too"><code>CommandIO</code> too</h4>
+<p><code>withBinaryIO</code>/<code>CommandIO</code> (<code>Binary.hs:163</code>, used by <code>WireGuard.privateKey</code>/
+<code>publicKey</code> where stdin/stdout need redirecting) builds its <code>CreateProcess</code> in
+<code>IO</code>. <code>applyRunAs</code> applies just as well there — it is still a
+<code>CreateProcess -&gt; CreateProcess</code> at the end. Worth doing at the same time so
+the two paths don’t diverge, even though no current <code>CommandIO</code> user needs an
+identity switch.</p>
+<hr />
+<h3 id="l2-ownership-and-mode-at-file-creation-time">L2: ownership and mode at file-creation time</h3>
+<p>L1 lets <code>psql</code> run as <code>postgres</code>; it does not let <code>postgres</code> <em>read the script</em>.
+Without L2, every L1 identity switch grows its own <code>chmod a+r</code>, and the repo
+ends up with more instances of the exact hack this spec is trying to remove.</p>
+<p>Today <code>Filesystem.dir</code>/<code>filecontents</code> create paths under the process umask, and
+<code>User.chown</code> (<code>User.hs:185</code>) is a <em>separate</em> op whose own haddock says it “does
+not itself create the path”. Composing them means create-then-chown, which has
+a window where the file exists with the wrong owner and mode. Irrelevant for a
+migration script; not irrelevant for <code>Secrets.sharedSecretFile</code> or <code>Keys</code>.</p>
+<p>Proposal: an optional ownership/mode decoration applied <em>at</em> creation.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Ownership</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="ot">=</span> <span class="dt">Ownership</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  {<span class="ot"> ownership_owner ::</span> <span class="dt">Maybe</span> <span class="dt">User.Owner</span>   <span class="co">-- ^ user:group; needs root</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  ,<span class="ot"> ownership_mode  ::</span> <span class="dt">Maybe</span> <span class="dt">FileMode</span>     <span class="co">-- ^ e.g. 0o640</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="ot">dirWith          ::</span> <span class="dt">Ownership</span> <span class="ot">-&gt;</span> <span class="dt">Directory</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="ot">filecontentsWith ::</span> (<span class="dt">EncodeFileContents</span> a) <span class="ot">=&gt;</span> <span class="dt">Ownership</span> <span class="ot">-&gt;</span> <span class="dt">FileContents</span> a <span class="ot">-&gt;</span> <span class="dt">Op</span></span></code></pre></div></div><p>Implemented in-process with <code>System.Posix.Files</code>
+(<code>setFileMode</code>/<code>setOwnerAndGroup</code>, or <code>openFd</code> with the mode up front) rather
+than by shelling out — no subprocess, no <code>chmod</code>/<code>chown</code> binary dependency, and
+the mode can be correct from the moment the inode exists. <code>dir</code>/<code>filecontents</code>
+stay as they are, defined as the <code>Ownership Nothing Nothing</code> case.</p>
+<p>The <code>Postgres.adminScript</code> fix then reads: write the script <code>0640</code>
+<code>root:postgres</code> into the admin dir, drop <code>ChmodAdminScript</code> from <code>PsqlAdmin</code>
+entirely, and the world-readable window disappears along with it.</p>
+<p>Open question worth deciding early: should <code>Ownership</code> be a <em>field</em> on
+<code>FileContents</code>/<code>Directory</code> rather than a separate <code>…With</code> constructor? A field
+is tidier and forces every call site to consider it; a separate constructor
+keeps the ~40 existing <code>filecontents</code> call sites untouched. Leaning towards the
+separate constructor for the same “additive, no churn” reason as <code>asSelf</code>.</p>
+<hr />
+<h3 id="l3-declared-privilege-domains--partitioned-execution">L3: declared privilege domains + partitioned execution</h3>
+<p>L1 handles “this command runs as X”. It does not handle “this whole subtree —
+including its in-process file writes, its nested <code>upTree</code>, its non-subprocess
+<code>up</code>s — runs as X”. If that turns out to be needed, the answer is not to make
+<code>up</code> polymorphic in identity; it is to run <em>a second salmon process</em> under that
+identity, and salmon already knows how to do that.</p>
+<h4 id="the-tag">The tag</h4>
+<p>Reuse <code>Extension.dynamics</code>, which exists for exactly this kind of out-of-band
+annotation:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">PrivilegeDomain</span> <span class="ot">=</span> <span class="dt">PrivilegeDomain</span> <span class="dt">Text</span>   <span class="co">-- e.g. &quot;builder&quot;, &quot;root&quot;</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="ot">inDomain ::</span> <span class="dt">PrivilegeDomain</span> <span class="ot">-&gt;</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">Op</span>   <span class="co">-- attaches via dynamics</span></span></code></pre></div></div><p>Unlike L0’s path globs, this survives recipe refactors: the tag travels with
+the node, and <code>collectDynamics</code> recovers the partition from an expanded graph.</p>
+<h4 id="the-execution">The execution</h4>
+<p>A <code>--domain</code> selector on <code>query plan</code> resolves the tag to a <code>Ref</code> set, giving
+exactly the <code>Plan</code> files L0 built by hand — but derived from the recipe rather
+than from glob spelling. Then either the operator runs the passes (as in L0),
+or a driver command does it:</p>
+<pre><code>my-salmon run up --partitioned &lt; directive.json
+</code></pre>
+<p>which, for each domain in topological order, re-execs <code>/proc/self/exe run up --plan &lt;domain&gt;.plan</code> under that domain’s <code>RunAs</code>, with the directive on stdin.
+This is <code>Self.callSelfAsSudo</code> (<code>Self.hs:99</code>) with the SSH hop removed — the
+same “serialize a directive, re-invoke myself under another identity, check the
+child’s exit code” pattern that is already load-bearing for remote provisioning.</p>
+<p>The hard part is not the mechanism, it is the <strong>cut</strong>: the partition must be
+topologically consistent, i.e. there must exist an ordering of domains such
+that no node in an earlier domain depends on a node in a later one. This is
+checkable on the expanded graph and <em>must</em> be checked — an unchecked partition
+fails as “provisioning silently ran in the wrong order”, which is much worse
+than a refusal. <code>run up --partitioned</code> should refuse to run an inconsistent
+partition and print the offending edge.</p>
+<p>Note this is strictly more expressive than L1 for the sandboxing question but
+strictly <em>less</em> fine-grained in ordering: within-domain ordering is exact,
+cross-domain ordering is coarse. L1 preserves the exact DAG. That is the real
+tradeoff between the two, and it is why L1 should come first.</p>
+<hr />
+<h3 id="l4-forkprocess--setuid-per-op">L4: <code>forkProcess</code> + <code>setuid</code> per op</h3>
+<p>The literal <code>Op -&gt; Op</code> decorator, for completeness:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">runOpAs ::</span> <span class="dt">RunAs</span> <span class="ot">-&gt;</span> <span class="dt">Op</span> <span class="ot">-&gt;</span> <span class="dt">Op</span>   <span class="co">-- wraps `up`/`down` in fork + setgid/setuid</span></span></code></pre></div></div><p>The child calls <code>setGroups</code>/<code>setGroupID</code>/<code>setUserID</code> (in that order — dropping
+the group after the user is a classic bug, as is forgetting supplementary
+groups), runs the original <code>up</code>, and <code>_exit</code>s; the parent <code>getProcessStatus</code>es
+and rethrows a non-zero status as an exception so <code>upTree</code> sees a <code>Failed</code>.</p>
+<p>Why it should not be the default:</p>
+<ul>
+<li><strong><code>forkProcess</code> under the threaded RTS is hazardous.</strong> Only the calling
+thread survives into the child; any lock held by another capability at fork
+time is held forever in the child. Salmon’s own <code>Reporter</code> machinery and any
+node doing concurrent IO are exactly the things that make this bite. It is
+not “usually fine” so much as “usually fine until a report is being flushed”.
+</li>
+<li><strong>In-memory effects are lost.</strong> <code>up</code>s that mutate an <code>IORef</code>, populate a
+<code>Tracked</code> value, or run a nested <code>upTree</code> (e.g.
+<code>PostgresMigrations.remoteMigrateOpaqueSetup</code>’s continuation) do that work in
+a process that then exits. The parent sees only an exit code.
+</li>
+<li><strong>It is one-way.</strong> The parent must be root; a node cannot regain privilege.
+Fine as a constraint, but it means the ambient uid still has to be the
+maximum over the graph, which is the thing we set out to avoid.
+</li>
+</ul>
+<p>Keep it documented as an escape hatch for a node whose <code>up</code> is genuinely
+in-process and genuinely needs another uid. Do not build recipes on it.</p>
+<hr />
+<h3 id="cross-cutting-concerns">Cross-cutting concerns</h3>
+<p><strong>Teardown.</strong> At L1 this is free: <code>down</code> closes over the same rewritten
+<code>CreateProcess</code>, so a node torn down runs under the identity that brought it
+up. At L0/L3 it is a real gap — <code>run down --plan</code> does not exist, and
+<code>specs/advance-querying.md</code> explicitly listed down-with-plan as a non-goal
+because <code>downTree</code> has no <code>prelim</code>-equivalent. Partitioned teardown therefore
+needs its own design; it is not just “same thing, reversed”, because the
+domain ordering also reverses and the “a failed <code>down</code> blocks its
+predecessors” containment has to survive being split across processes. Another
+reason to prefer L1.</p>
+<p><strong><code>serve</code>.</strong> L1 composes with <code>Serve</code> without any thought: the loop stays one
+root process and the identity switch happens per subprocess. L3 does <em>not</em> —
+<code>serve</code> holds the <code>World</code> in memory across declarations, and a design that
+re-execs a fresh process per domain has nowhere to put that state. If
+partitioned execution and <code>serve</code> are both wanted, that is a genuine open
+design question, not an implementation detail.</p>
+<p><strong>Reporting.</strong> <code>Binary.Report</code>’s <code>CommandStart</code>/<code>CommandStopped</code> carry the
+<code>CreateProcess</code>, so the rewritten (wrapper-prefixed) command shows up in
+reports automatically — which is what we want for auditability: the report
+should say what actually ran. The debuggability cost is that a <code>CommandFailed</code>
+now carries the <em>wrapper’s</em> stderr, so “user not in sudoers” and “psql syntax
+error” arrive through the same channel and look similar. Worth a distinct
+report constructor, or at least making <code>applyRunAs</code> record the original
+<code>cmdspec</code> alongside the rewritten one.</p>
+<p><strong>Environment and working directory.</strong> <code>applyRunAs</code> rewrites <code>cmdspec</code> and
+leaves <code>CreateProcess</code>’s <code>env</code>/<code>cwd</code> alone, but the <em>semantics</em> of both change
+under a wrapper. <code>sudo</code> resets the environment by default (<code>env_reset</code>), so an
+<code>env</code> set by <code>prepare</code> may not survive; <code>runuser -</code> versus <code>runuser</code> differ on
+whether a login shell is set up. Worse, <code>cwd</code> is applied by the parent before
+exec, so a <code>cwd</code> the root process can enter but the target user cannot (the
+<code>Cabal.build</code> case — <code>Cabal.hs</code> sets <code>cwd</code> to the project dir) fails in a
+confusing way. Rule for node authors: <strong>a node that sets <code>cwd</code> and takes an
+<code>Invoker</code> must ensure the directory is reachable by the target identity</strong> —
+which is a direct dependency on L2 landing.</p>
+<p><strong>Testing.</strong> <code>Test.PostgresInitSpec</code> shims <code>[&quot;apt-get&quot;, &quot;sudo&quot;, &quot;bash&quot;, &quot;chmod&quot;]</code> inside its container. Recommending <code>runuser</code> as the default mechanism
+means adding a <code>runuser</code> shim; dropping <code>ChmodAdminScript</code> at L2 means the
+<code>chmod</code> shim can eventually go. Both are cheap, but the shim list is a
+reminder that mechanism choice is observable by the test harness and should be
+settled before the Postgres migration, not after. Beyond that, L1 is unusually
+testable without containers: <code>applyRunAs</code> is a pure
+<code>CreateProcess -&gt; CreateProcess</code>, so its renderings (including the <code>--</code>
+boundary) belong in the cheap in-process test layer.</p>
+<p><strong>Security.</strong> Three things deserve stating rather than assuming:</p>
+<ul>
+<li>The <code>--</code> argument boundary is not optional; without it a command argument
+beginning with <code>-</code> is parsed by the wrapper.
+</li>
+<li><code>ShellCommand</code> composed with an identity switch is a quoting hazard —
+<code>applyRunAs</code> should either refuse <code>ShellCommand</code> or be very explicit about
+what it does with it. <code>Postgres.CreateDB</code>’s existing <code>bash -c</code> string is the
+one place this already matters.
+</li>
+<li>Dropping privilege is only meaningful if the lesser user cannot trivially
+regain it. A <code>builder</code> account that owns a file the root pass later executes,
+or that can write into a directory root reads from, has not actually been
+contained. L2 is what makes L1’s containment real, which is the main argument
+for treating them as one piece of work rather than two.
+</li>
+</ul>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li>Naming: <code>Invoker</code>/<code>RunAs</code>, or something closer to the todo’s own vocabulary
+(“calling preference”)? <code>RunAs</code> reads well at call sites
+(<code>RunAsUser ViaRunuser &quot;postgres&quot;</code>); <code>Invoker</code> is the weaker of the two names.
+</li>
+<li>Should <code>Invoker</code> also carry the <code>cwd</code>/<code>env</code> policy (i.e. “this identity
+always runs with this env”), or is that overloading it?
+</li>
+<li>Is <code>Mechanism</code> per-<code>Invoker</code>, or a single deployment-wide default with
+per-node override? A box configures sudoers once; carrying the choice on
+every invoker may be more knob than anyone wants.
+</li>
+<li>Does the <code>PrivilegeDomain</code> tag (L3) subsume <code>RunAs</code> (L1), i.e. should an
+<code>Invoker</code> name a <em>domain</em> and let a top-level table map domains to
+identities? That would make L1→L3 a smooth progression rather than two
+mechanisms, at the cost of indirection in the common single-identity case.
+</li>
+</ul>
+<h3 id="suggested-order-of-work">Suggested order of work</h3>
+<ol>
+<li><code>RunAs</code>/<code>Mechanism</code>/<code>applyRunAs</code> + pure tests on the rendering. No call site
+changes.
+</li>
+<li><code>Invoker</code>/<code>asSelf</code>/<code>withInvoker</code>; redefine <code>withBinary</code> in terms of it.
+</li>
+<li>L2 <code>Ownership</code> on <code>Filesystem</code>.
+</li>
+<li>Migrate <code>Postgres</code>: plain <code>psqlAdminRun</code> + an <code>Invoker</code>, delete
+<code>ChmodAdminScript</code>, closing <code>Postgres.hs:394</code>. This is the end-to-end proof
+that L1+L2 solve a real case that exists today.
+</li>
+<li>Add the <code>Ref</code>-includes-<code>RunAs</code> rule to CLAUDE.md’s node-author conventions.
+</li>
+<li>Convert the build cluster (<code>Cabal</code>, <code>Git</code>, <code>Npm</code>, <code>Spago</code>) to <code>Invoker</code>, and
+see whether “builds run as <code>builder</code>” is now expressible without L3.
+</li>
+<li>Only then decide on L3.
+</li>
+</ol>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

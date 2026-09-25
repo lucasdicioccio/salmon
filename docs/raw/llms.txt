@@ -1,0 +1,19 @@
+salmon — provisioning, CI/CD and infrastructure operations as DAGs of idempotent operations, with up/down/check semantics and a long-running converge-and-supervise mode.
+
+Overview: https://lucasdicioccio.github.io/salmon/
+Getting started: https://lucasdicioccio.github.io/salmon/getting-started.html
+The model (salmon-core): https://lucasdicioccio.github.io/salmon/docs-salmon-core.html
+Writing and testing ops (cookbook): https://lucasdicioccio.github.io/salmon/docs-howto-ops.html
+run serve, convergence and supervision: https://lucasdicioccio.github.io/salmon/docs-serve-supervision.html
+Builtins, recipes and binaries: https://lucasdicioccio.github.io/salmon/builtins.html
+Guides index: https://lucasdicioccio.github.io/salmon/docs.html
+Specs index (design sketches, each with a Status line): https://lucasdicioccio.github.io/salmon/specs.html
+
+Canonical sources, on GitHub:
+- Repository: https://github.com/lucasdicioccio/salmon
+- Architecture and conventions for people and agents working in the code: https://github.com/lucasdicioccio/salmon/blob/master/CLAUDE.md
+- resources/ (the guides): https://github.com/lucasdicioccio/salmon/tree/master/resources
+- specs/: https://github.com/lucasdicioccio/salmon/tree/master/specs
+
+Every article on this site is also served as plain text, at
+https://lucasdicioccio.github.io/salmon/text/<page>.cmark.text

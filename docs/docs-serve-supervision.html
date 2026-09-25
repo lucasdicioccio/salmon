@@ -1,0 +1,1136 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - `run serve`: convergence and supervision</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-serve-supervision.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc covers how to write one `Op`, this one covers what happens to a whole graph of them once you run them through `run serve` instead of a one-shot `run up`. Read `howto-ops."><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - `run serve`: convergence and supervision"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc covers how to write one `Op`, this one covers what happens to a whole graph of them once you run them through `run serve` instead of a one-shot `run up`. Read `howto-ops."><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - `run serve`: convergence and supervision"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-serve-supervision.html"><meta property="og:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc covers how to write one `Op`, this one covers what happens to a whole graph of them once you run them through `run serve` instead of a one-shot `run up`. Read `howto-ops."><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/docs-serve-supervision.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-serve-supervision.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc covers how to write one `Op`, this one covers what happens to a whole graph of them once you run them through `run serve` instead of a one-shot `run up`. Read `howto-ops.","headline":"`run serve`: convergence and supervision","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-serve-supervision.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>`run serve`: convergence and supervision</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 8714 words, 31 code snippets, 1 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs-postgres-pair.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">4/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/serve-supervision.md"><code>resources/serve-supervision.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="run-serve-convergence-and-supervision"><code>run serve</code>: convergence and supervision</h2>
+<p>This is a companion to <a href="/salmon/docs-howto-ops.html"><code>howto-ops.md</code></a>: where that doc covers
+how to write one <code>Op</code>, this one covers what happens to a whole graph of them
+once you run them through <code>run serve</code> instead of a one-shot <code>run up</code>. Read
+<code>howto-ops.md</code> first if <code>Op</code>, <code>check</code>, <code>Track</code>, or the seed → spec → ops CLI
+protocol are unfamiliar — this doc assumes all of them.</p>
+<p>It’s organized around the question a new user actually has: <em>what do I get
+for nothing, how do I see it happening, and what do I have to write myself to
+get more?</em></p>
+<h3 id="1-the-mental-model-in-three-sentences">1. The mental model in three sentences</h3>
+<p><code>run up</code>/<code>run down</code> are one-shot: they walk a graph once and stop.
+<code>run serve</code> is long-running: it reads seed declarations from stdin (one per
+line — <code>up &lt;seed args&gt;</code>, <code>down &lt;seed args&gt;</code>, <code>only &lt;seed args&gt;</code>, and a
+handful of operator commands), keeps a <code>World</code> of everything it’s been told
+to want, and <strong>converges</strong> that <code>World</code> after every command. Between
+commands, while nothing is waiting on stdin, it also <strong>tends</strong> every node
+it’s converged — a second, independent mechanism that notices drift and
+fixes it (or doesn’t, depending on what the node tells it) without anybody
+typing anything.</p>
+<p>Those are the two halves of “supervision”: a <strong>convergence pass</strong> (driven by
+you, typing or piping commands) and a <strong>tending loop</strong> (driven by idle time).
+Almost everything below is about what each one does for a node that says
+nothing about itself, and what a node can say to get more out of either.</p>
+<h3 id="2-what-you-get-for-free">2. What you get for free</h3>
+<p>Take any existing salmon binary — built the ordinary way, via
+<code>Salmon.Builtin.CommandLine.execCommandOrSeed</code>, with plain <code>Op</code>s that have no
+<code>check</code>, no <code>Supervision</code> dynamic, no <code>managed</code> action — and point it at
+<code>run serve</code> instead of <code>run up</code>. You get, with zero changes to your nodes:</p>
+<ul>
+<li><strong>Convergence bookkeeping across re-declarations.</strong> Nodes unify by <code>Ref</code>
+across every seed that mentions them. Re-declaring an unchanged seed is a
+no-op (nothing pending, nothing re-run). Retiring a seed tears down exactly
+the nodes no other live seed still wants — a directory two files share
+survives until the last file using it is gone, never torn down out from
+under the other.
+</li>
+<li><strong><code>status</code>/<code>history</code>/<code>query</code> introspection.</strong> <code>status</code> lists every node
+this world still cares about, its wanted direction (up/down), and its
+convergence (<code>Pending</code>/<code>Stale</code>/<code>Converged</code>/<code>Errored</code>/<code>Blocked</code>) — plus, if
+the node has ever been tended, its own last <code>check</code> verdict and (for a
+failing node) the tail of its output, and (underneath) every path a
+currently-active seed’s graph reaches it at — the exact text a
+<code>--select</code>/<code>--exclude</code> pattern matches, pasteable straight back in.
+Without this a pattern could only be <em>guessed</em>; <code>status</code> is where it comes
+from. <code>history</code> lists what was declared, when, and by whom — a typed line,
+a <code>load</code>ed file, or (§12) a fetched document. <code>query</code> annotates nodes
+<code>[selected]</code>/<code>[excluded]</code> against a <code>--select</code>/<code>--exclude</code> pattern without
+acting on anything — useful for checking a pattern before you <code>force</code>/
+<code>pause</code> with it for real.
+</li>
+<li><strong>Re-declaring with <em>different</em> content is noticed by the pass itself</strong>,
+not just eventually by a background loop — as long as something about the
+declaration that changed is visible to <code>Salmon.Op.Dag.sameRepresentative</code>
+(shorthand, <code>help</code>, <code>notes</code>, most <code>dynamics</code>). A node goes <code>Stale</code> rather
+than staying silently <code>Converged</code>, and the very next convergence pass
+re-checks it. (§8 below is about making your own content-bearing nodes
+participate in this — the stock <code>Filesystem.filecontents</code> already does.)
+</li>
+<li><strong><code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code></strong>, addressable by <code>--select</code>/<code>--exclude</code>
+path globs, reach any node regardless of whether it has a <code>check</code>:
+<ul>
+<li><code>force</code> re-applies a node even if its own <code>check</code> currently calls it
+satisfied — the only way to tell a healthy-looking node “do it anyway”.
+</li>
+<li><code>recheck</code> makes a tended node look <em>now</em> instead of waiting out its
+current delay.
+</li>
+<li><code>pause</code>/<code>resume</code> stop/restart tending a node without touching whatever
+effect it currently holds.
+</li>
+</ul>
+</li>
+<li><strong>A managed node (one that owns a running process, see §7) is supervised
+with a sane default the moment it exists</strong> — restarted <code>OnFailure</code>,
+<code>OneForOne</code> (demotes nobody else), kept running across every other <code>serve</code>
+command, even with a completely default <code>Supervision</code>. You don’t have to
+opt in to get <em>some</em> policy; you only have to opt in to get a <em>different</em>
+one.
+</li>
+<li><strong>Idle cost is proportional to what a node claims.</strong> A node with no
+<code>check</code> answers <code>Immaterial</code> (“asking would cost what applying costs”) and
+is <em>parked</em> — looked at once, then left alone on its mailbox until
+something (a dependency moving, an operator’s <code>force</code>/<code>recheck</code>) wakes it.
+It is not polled every minute doing nothing useful. This means an
+undecorated graph costs almost nothing to tend, but it also means it is
+not self-healing — see the gap this leaves in §4.
+</li>
+<li><strong>A piped script stays deterministic.</strong> <code>run serve &lt; script.txt</code> queues
+every line before the first pass can even finish, so there is never an
+idle moment for the tending loop to run in — what you get is exactly the
+sequence of convergence passes the script describes, nothing more. This is
+what makes <code>run serve</code> usable for CI/scripted setups, not only interactive
+sessions. Reach for <code>supervise off</code> if you want the same determinism in an
+interactive session, and <code>supervise on</code> (the default) to get it back.
+</li>
+<li><strong>Declaring and converging can be split apart.</strong> By default every <code>up</code>/
+<code>only</code>/<code>down</code>/<code>clear</code> converges immediately, as if <code>converge</code> had been
+typed right after it. <code>autoconverge off</code> turns that off: declarations
+still record and are visible to <code>status</code>/<code>query</code> right away, but nothing
+is applied until you type an explicit <code>converge</code> (optionally restricted
+with <code>--select</code>/<code>--exclude</code>). Useful for stacking up several declarations
+— <code>up a</code>, <code>down b</code>, <code>up c</code> — and reviewing the combined result with
+<code>query</code>/<code>status</code> before anything actually runs. <code>run serve --no-autoconverge</code> starts a session already in that state, for a script
+or session that always wants to review before acting.
+</li>
+</ul>
+<p>None of this requires writing a single <code>check</code> or <code>Supervision</code> dynamic.
+What it does <em>not</em> give you for free: a node whose effect can be perturbed
+from outside salmon (a config file hand-edited, a directory <code>rmdir</code>’d, a
+service that crashes) is not put back unless that node has a <code>check</code> that
+says so, or is a <code>managed</code> process. That’s the next section.</p>
+<h3 id="3-try-it-yourself-five-minutes">3. Try it yourself, five minutes</h3>
+<p>The quickest way to see all of this without writing any code is the
+fixture shipped with the repo, <code>salmon-ops-serve-fixture</code>
+(<code>salmon-ops/fixtures/ServeFixture.hs</code> — read its own module haddock for the
+full tour). But the same shape works on any salmon binary you already have;
+substitute your own seed args for <code>&lt;seed&gt;</code> below.</p>
+<pre><code class="language-sh">$ my-salmon run serve
+up &lt;seed&gt;
+status
+</code></pre>
+<p>You should see <code>serve: mode: interactive</code>, then your nodes listed,
+<code>up</code>/<code>Converged</code>. Now perturb something
+underneath it from another terminal — if any of your nodes is a
+<code>Filesystem.filecontents</code> or a <code>Filesystem.dir</code>, edit or delete the file/
+directory by hand. Then:</p>
+<pre><code class="language-sh">status
+</code></pre>
+<p>If the perturbed node has a <code>check</code> (every <code>filecontents</code> does, and every
+<code>dir</code> re-applies on a timer instead — see §5 and §6), it’s back, without you
+typing anything else in between — the tending loop already noticed and fixed
+it while you were looking the other way. If it’s a plain node with no
+<code>check</code>, it stays broken until you <code>force</code> it:</p>
+<pre><code class="language-sh">force --select '/**'
+</code></pre>
+<p>Now try a re-declaration with different content (if your seed’s args feed
+into something content-bearing):</p>
+<pre><code class="language-sh">only &lt;same seed, different content argument&gt;
+status
+</code></pre>
+<p>Watch for a line showing a node <code>Stale</code> rather than jumping straight back to
+<code>Converged</code> with nothing having happened — that’s the pass itself noticing
+the change (§8), not the tending loop catching it later.</p>
+<p>Finally:</p>
+<pre><code class="language-sh">pause --select '/**'
+# perturb something again — it should stay broken
+resume --select '/**'
+# and now it's fixed again
+quit
+</code></pre>
+<p><code>help</code> at any point prints the full command reference; <code>help TOPIC</code> (e.g.
+<code>help select</code>, <code>help force</code>) prints more about one command. Two commands
+this doc does not otherwise use: <code>load FILE</code> runs a file of these lines, in
+order, as if typed, and <code>up-directive</code>/<code>only-directive</code>/<code>down-directive FILE</code>
+declare straight from a directive JSON file instead of seed args.</p>
+<h3 id="4-whats-free-vs-what-needs-decoration">4. What’s free vs. what needs decoration</h3>
+<table>
+<tr><th>capability</th><th>free, zero decoration</th><th>needs</th></tr>
+<tr><td>convergence bookkeeping, re-declare/retire semantics</td><td>✅</td><td>—</td></tr>
+<tr><td><code>status</code>/<code>history</code>/<code>query</code></td><td>✅</td><td>—</td></tr>
+<tr><td><code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code> reachability</td><td>✅</td><td>—</td></tr>
+<tr><td>discovering a node's <code>--select</code>/<code>--exclude</code> path</td><td>✅ (<code>status</code>/<code>query</code> print it)</td><td>—</td></tr>
+<tr><td>disambiguating two nodes that share one path (identical shorthand)</td><td>✅</td><td>a <code>#ref</code> selector (§9)</td></tr>
+<tr><td><code>Stale</code> on a re-declaration that changes <code>help</code>/<code>notes</code>/most <code>dynamics</code></td><td>✅</td><td>—</td></tr>
+<tr><td><code>Stale</code> on a re-declaration that only changes content baked into <code>up</code></td><td>❌</td><td>a <code>check</code>, or a content-derived <code>notes</code>/<code>dynamics</code> field (§8)</td></tr>
+<tr><td>self-healing when an effect is perturbed from outside</td><td>❌</td><td>a <code>check</code> (§5)</td></tr>
+<tr><td>a process salmon owns, restarted when it exits</td><td>❌ (node must declare it)</td><td><code>managed</code> (§7)</td></tr>
+<tr><td>choosing <em>how</em> a managed node is restarted, or whether its going away bounces dependants</td><td>uses a sane default</td><td>a <code>Supervision</code> dynamic (§6)</td></tr>
+<tr><td>a non-<code>managed</code> node re-applying itself on a timer instead of parking</td><td>❌</td><td><code>supReapply</code> (§6), narrowly</td></tr>
+<tr><td>addressing a batch/rewrite-introduced node that has no declared path</td><td>❌</td><td>a <code>#ref</code> selector (§9)</td></tr>
+<tr><td>bounding how many nodes converge at once</td><td>❌ (unbounded by default)</td><td><code>--max-concurrency N</code> (§10)</td></tr>
+<tr><td>reports a script can parse</td><td>❌ (text by default)</td><td><code>--json</code> (§11)</td></tr>
+<tr><td>fetching declarations from a registry instead of typing them</td><td>❌ (stdin only)</td><td><code>--follow DIR --label L</code> (§12)</td></tr>
+<tr><td>a second operator or a tool attached to a running <code>serve</code></td><td>❌ (stdin only by default)</td><td><code>--listen PATH</code> (§13)</td></tr>
+<tr><td>reads, commands and a live event stream over HTTP, a terminal client, a web page</td><td>❌</td><td><code>--http PATH</code> (§14), <code>--http-tcp HOST:PORT</code> with TLS and a token for a network</td></tr>
+<tr><td>a status document a fleet reader can fold</td><td>❌</td><td><code>--status-sink PATH</code> (§12)</td></tr>
+</table>
+<h3 id="5-decorating-nodes-check">5. Decorating nodes: <code>check</code></h3>
+<p>This is the single highest-leverage thing you can add to a node, and it’s
+covered in full in <code>howto-ops.md</code> §4 for the one-shot angle (idempotency).
+Here’s what each <code>CheckResult</code> means specifically to the tending loop, which
+is a second, independent reader of the same function:</p>
+<ul>
+<li><strong><code>Immaterial</code> (the default, for a node with no <code>check</code> at all) parks the
+node.</strong> It is looked at once on the way up, then left alone — not polled.
+This is right for a node whose <code>up</code> is already idempotent and cheap to ask
+about (<code>mkdir -p</code>, <code>ip route replace</code>) — there is nothing cheaper to put on
+a timer than what applying costs. It is <em>not</em> right for a node whose
+effect can drift without your say-so, because nothing will ever notice.
+</li>
+<li><strong><code>Success</code>/<code>Failure text</code> are what let a node be supervised at all.</strong> A
+check that can tell the effect is gone (<code>Failure</code>) is the only thing that
+can trigger a restart under <code>Supervision</code>’s <code>Restart</code> policy, or notice a
+re-declared node’s new content (§8), or fire a <code>RestForOne</code> demotion (§6).
+Without a real check, a node is brought up once and then genuinely nobody
+is watching.
+</li>
+<li><strong><code>Unknown</code></strong> (a check that ran and genuinely couldn’t tell — e.g. a
+systemd unit mid-restart) never triggers anything under the tending loop;
+treating “I couldn’t look” as evidence of anything would spin a node at
+its delay floor forever. It’s different from <code>Immaterial</code>: <code>Unknown</code> means
+a check exists and sometimes can’t say; <code>Immaterial</code> means there’s no
+check worth having.
+</li>
+<li><strong><code>Completed</code></strong> means the effect ran to completion and stopped on
+purpose — a job, not a service. Converged, not running. Only a <code>Restart = Always</code> policy (§6) re-applies on this.
+</li>
+<li><strong><code>Skipped</code></strong> is not something your <code>check</code> should ever return itself —
+it’s what <code>Query.forceSkip</code>/a <code>run up --plan</code> exclusion rewrites a check
+into, a statement that someone decided this node is satisfied, not a
+statement about the effect.
+</li>
+</ul>
+<p>Worked template, following <code>Filesystem.checkFileContents</code>’s shape (compare
+what’s there against what you’d write, cheaply and without quoting secrets
+into the failure text):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">myCheck ::</span> <span class="dt">MyConfig</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">CheckResult</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>myCheck cfg <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    there <span class="ot">&lt;-</span> probeTheEffect cfg</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">pure</span> <span class="op">$</span> <span class="kw">case</span> there <span class="kw">of</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Nothing</span> <span class="ot">-&gt;</span> <span class="dt">Failure</span> <span class="st">&quot;missing: &lt;identifying text, no secrets&gt;&quot;</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        <span class="dt">Just</span> actual</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>            <span class="op">|</span> actual <span class="op">==</span> expected cfg <span class="ot">-&gt;</span> <span class="dt">Success</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>            <span class="op">|</span> <span class="fu">otherwise</span> <span class="ot">-&gt;</span> <span class="dt">Failure</span> <span class="st">&quot;drifted: &lt;identifying text&gt;&quot;</span></span></code></pre></div></div><h3 id="6-decorating-nodes-supervision">6. Decorating nodes: <code>Supervision</code></h3>
+<p><code>Salmon.Op.Supervision.Supervision</code> is a handful of optional fields, carried
+on a node’s <code>dynamics</code> (the same channel <code>Package</code> uses — see
+<code>howto-ops.md</code> §7 on <code>dynamics</code> if this is unfamiliar):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Salmon.Op.Supervision</span> (defaultSupervision, supervised, <span class="dt">Strategy</span> (<span class="op">..</span>), <span class="dt">Restart</span> (<span class="op">..</span>), seconds)</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>op <span class="st">&quot;my-node&quot;</span> nodeps <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span> actions</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    { dynamics <span class="ot">=</span> [supervised defaultSupervision</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        { supRestart <span class="ot">=</span> <span class="dt">OnFailure</span>       <span class="co">-- Always | OnFailure | Never (default OnFailure)</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        , supStrategy <span class="ot">=</span> <span class="dt">OneForOne</span>      <span class="co">-- OneForOne | RestForOne      (default OneForOne)</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>        , supReapply <span class="ot">=</span> <span class="dt">False</span>           <span class="co">-- re-run `up` on a timer instead of parking (default False)</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>        , supWatchdog <span class="ot">=</span> <span class="dt">Nothing</span>        <span class="co">-- Maybe Micros: report if silent this long (default Nothing)</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>        , supStableAfter <span class="ot">=</span> seconds <span class="dv">10</span>  <span class="co">-- how long up resets the failure tally (default 10s)</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>        , supDemoteEvery <span class="ot">=</span> seconds <span class="dv">10</span>  <span class="co">-- RestForOne rate limit, see below     (default 10s)</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>        , supGiveUpAfter <span class="ot">=</span> <span class="dt">Nothing</span>     <span class="co">-- Maybe Int: stop retrying after N consecutive failures</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>        }]</span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    , <span class="op">...</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p>Prefer amending <code>defaultSupervision</code> field-by-field, as above, rather than
+writing out the constructor positionally — the record has grown several
+times already.</p>
+<p>A node that says nothing here behaves exactly as if none of this existed —
+every field’s default is chosen so an undecorated graph is unaffected.
+What each buys you, beyond the default:</p>
+<ul>
+<li><strong><code>supRestart = Never</code></strong> — for a node whose <code>up</code> is destructive to repeat,
+or whose failure means something worse happened upstream that an operator
+should look at rather than salmon silently retrying.
+</li>
+<li><strong><code>supRestart = Always</code></strong> — the “restart a service that exits cleanly on
+reload” case. Don’t set this on a job that’s meant to run once.
+</li>
+<li><strong><code>supStrategy = RestForOne</code></strong> — <em>this node’s going away should bounce
+whatever depends on it.</em> The case this exists for is a config file: a
+service reading it should be re-verified (not necessarily restarted — see
+below) whenever the file changes underneath it. Authored on the node that
+goes away, not on its dependants, because only the config file’s author
+knows its content is load-bearing.
+<ul>
+<li><strong>The safety condition</strong>: this reframes a <code>RestForOne</code> bounce as “go
+re-verify yourself,” which is cheap <em>only if the dependant’s <code>up</code>/
+<code>check</code> are genuinely idempotent</em> — the same baseline convention every
+node in this tree is already supposed to follow. A dependant whose
+reapplication is genuinely expensive (a slow warmup, an unsafe-to-repeat
+migration) has no way today to resist a <code>RestForOne</code> demotion sent from
+upstream — don’t put <code>RestForOne</code> on a node whose dependants might not
+be able to afford being asked to re-verify on every change.
+</li>
+<li><code>supDemoteEvery</code> is the rate limit: a node is demoted by a dependency at
+most once per this interval, so a flapping dependency can’t rebuild the
+whole cone behind it on every flap. An isolated departure is always
+honoured whenever it comes, however soon.
+</li>
+</ul>
+</li>
+<li><strong><code>supGiveUpAfter = Just n</code></strong>: stop restarting after <code>n</code> <em>consecutive</em>
+failures (a service that crashes once a week never latches off, because
+<code>supStableAfter</code> forgets the streak once it’s run that long between
+crashes). A node that’s given up says so in <code>status</code>/a <code>force</code> starts it
+over; nothing else touches it until you do.
+</li>
+<li><strong><code>supWatchdog = Just (seconds n)</code></strong>: report a node as possibly-wedged if
+it’s gone this long without doing anything observable. Reports only —
+nothing kills a wedged <code>up</code>, since not every node has a bracket to kill it
+through.
+</li>
+<li><strong><code>supReapply = True</code></strong>: for a node with no <code>check</code> at all (answers
+<code>Immaterial</code>), re-run <code>up</code> on the tending loop’s delay ladder instead of
+parking. This is narrow — sound only for an <code>up</code> that is genuinely cheap
+<em>and</em> idempotent (<code>Filesystem.dir</code> is the one builtin that sets it:
+<code>createDirectoryIfMissing</code> costs about what asking first would). Don’t
+reach for this as a substitute for writing a real <code>check</code> on anything
+whose <code>up</code> is a build, a clone, or otherwise not free to repeat.
+</li>
+</ul>
+<h3 id="7-decorating-nodes-owning-a-process-managed">7. Decorating nodes: owning a process (<code>managed</code>)</h3>
+<p>A node whose effect <em>is</em> a running process — not “create a file,” but “keep
+this running” — fills in <code>managed</code> instead of relying on <code>up</code> alone.
+<code>Salmon.Builtin.Nodes.Daemon.daemon</code> is the builtin for this:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Salmon.Builtin.Nodes.Daemon</span> <span class="kw">as</span> <span class="dt">Daemon</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">System.Process</span> (proc)</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="ot">myService ::</span> <span class="dt">Op</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>myService <span class="ot">=</span> Daemon.daemon reporter <span class="op">$</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    Daemon.defaultDaemon <span class="st">&quot;my-service&quot;</span> (proc <span class="st">&quot;/usr/bin/my-service&quot;</span> [<span class="st">&quot;--config&quot;</span>, path])</span></code></pre></div></div><p>Three things that follow from <code>managed</code> existing at all, distinct from
+everything above:</p>
+<ul>
+<li><strong>A one-shot <code>run up</code> cannot bring this node up at all</strong> — its <code>up</code>
+deliberately throws (<code>NeedsSupervisor</code>) rather than silently no-op’ing.
+Only <code>run serve</code> can hold a running action.
+</li>
+<li><strong><code>run serve</code> treats it specially.</strong> It’s invisible to the convergence
+pass in both directions (there’s nothing for a one-shot up/down to do with
+it); instead its machine races the action itself, reads its <code>ExitCode</code>
+against <code>supRestart</code>, and is kept running across every other <code>serve</code>
+command rather than stood down and restarted on every <code>status</code>.
+</li>
+<li><strong>Decorate it with <code>Supervision</code> exactly as any other node</strong> (§6) — the
+defaults already give you <code>OnFailure</code> restart and <code>OneForOne</code> (no
+bouncing of dependants). <code>RestForOne</code> on the <em>config file this process
+reads</em>, not on the process itself, is the combination the fixture’s own
+<code>--daemon</code> walkthrough demonstrates end to end (<code>ServeFixture.hs</code>’s module
+haddock).
+</li>
+</ul>
+<h3 id="8-making-your-own-content-bearing-nodes-stale-aware">8. Making your own content-bearing nodes <code>Stale</code>-aware</h3>
+<p>§2 mentioned that a re-declaration with different content is noticed by the
+pass, <em>if</em> something about it is visible to <code>Dag.sameRepresentative</code>
+(shorthand/<code>help</code>/<code>notes</code>/most <code>dynamics</code> — deliberately not <code>up</code>/<code>check</code>,
+which are functions and not comparable). <code>Filesystem.filecontents</code> already
+does this for you: its <code>EncodeFileContents</code> instances carry a pure
+<code>contentFingerprint</code>, and <code>filecontents</code> puts it into <code>notes</code> when one is
+available. If you’re writing your own content-bearing node — a hand-rolled
+one, or a new <code>EncodeFileContents</code> instance — the same trick is available to
+you:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">myConfigNode ::</span> <span class="dt">MyConfig</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>myConfigNode cfg <span class="ot">=</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    op <span class="st">&quot;my-config&quot;</span> (deps [enclosingDir]) <span class="op">$</span> <span class="op">\</span>actions <span class="ot">-&gt;</span> actions</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        { help <span class="ot">=</span> <span class="st">&quot;writes &quot;</span> <span class="op">&lt;&gt;</span> path</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        , notes <span class="ot">=</span> [<span class="st">&quot;content-hash: &quot;</span> <span class="op">&lt;&gt;</span> hashOf cfg]   <span class="co">-- &lt;-- this line is the whole trick</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        , ref <span class="ot">=</span> mkRef <span class="st">&quot;my-config&quot;</span> path</span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>        , check <span class="ot">=</span> myCheck cfg                         <span class="co">-- still worth having regardless, per §5</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>        , up <span class="ot">=</span> writeTheFile path cfg</span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>        , down <span class="ot">=</span> removeFile path</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>  <span class="kw">where</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    hashOf <span class="ot">=</span> Text.take <span class="dv">12</span> <span class="op">.</span> Text.decodeUtf8 <span class="op">.</span> Base64.URL.encode <span class="op">.</span> SHA256.hash <span class="op">.</span> encode</span></code></pre></div></div><p>Without this, a re-declaration that only changes <code>cfg</code> is indistinguishable
+from one that changes nothing at all — the node stays <code>Converged</code>, and
+you’re relying entirely on <code>check</code> (if you wrote one) running on its own
+timer to notice, which won’t happen at all under a piped script (§2’s last
+bullet) and may take a while even interactively.</p>
+<h3 id="9-addressing-nodes-precisely---select--exclude">9. Addressing nodes precisely: <code>--select</code>/<code>--exclude</code></h3>
+<p>Every command that takes <code>--select PATTERN</code>/<code>--exclude PATTERN</code> (<code>status</code>,
+<code>history</code>, <code>query</code>, <code>converge</code>, <code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code>) resolves
+it as a <code>/</code>-separated glob against each node’s <em>declared tree position</em> —
+<code>*</code> matches exactly one segment, <code>**</code> matches any depth including zero.
+Patterns may repeat (union within each of <code>--select</code>/<code>--exclude</code>); omitting
+<code>--select</code> entirely means everything. A few examples:</p>
+<pre><code>--select '/root/web/**'      everything under the web subtree
+--select '/**' --exclude '/root/db/**'   everything except the db subtree
+</code></pre>
+<p>A path is built from op <em>kinds</em> (<code>shorthand</code>, e.g. <code>directory</code>,
+<code>file-contents</code>), not from any identifying value a recipe passed in — two
+nodes at the same tree position with the same shorthand (say, two files a
+recipe declares in a loop) get the exact same path, and a path pattern
+necessarily selects both together. <code>status</code>’s path line is where you’d
+notice this: two nodes printing the identical path is the tell. When that
+happens, address one of them directly instead with a <code>#</code>-prefixed pattern,
+matching by <code>Ref</code> rather than by path — the same (short or full) hash text
+<code>status</code>/<code>run tree</code>/<code>run dag</code>/<code>query show</code> already print next to it:</p>
+<pre><code>--select '#AbCd1234'    matches by a Ref fragment (short or full)
+</code></pre>
+<p>If your binary registers a <code>Rewrite</code> (e.g. <code>Debian.Package.batchPackages</code>,
+which collapses every declared <code>deb</code> node into one <code>apt-get</code> batch — see
+<code>howto-ops.md</code>/<code>CLAUDE.md</code>’s <code>Op/Rewrite.hs</code> section if this is new to you),
+the rewrite-introduced node (the batch itself) was never declared and so has
+no tree position — and no <code>status</code> line — of its own either; a <code>#</code>-match
+against it expands to every declared node it stands in for, but only for
+<code>run up</code>/<code>run down</code>/<code>query show</code>/<code>query plan</code>, which see the <em>computed</em>,
+post-rewrite graph. <code>serve</code>’s own <code>status</code>/<code>query</code>/<code>converge --select</code> (this
+section, otherwise) resolve against the <em>declared</em> graph and so cannot name
+a batch this way at all — restrict by the declared nodes that feed it
+instead.</p>
+<h3 id="10-bounding-concurrency">10. Bounding concurrency</h3>
+<p><code>run serve --max-concurrency N</code> caps how many nodes are inside their own
+<code>check</code>/<code>up</code>/<code>down</code> at once, across one convergence pass. Useful on a
+machine where unbounded <em>width</em> itself is the problem (CPU/IO contention, an
+outbound connection limit) rather than two specific nodes fighting over one
+resource — that case is still an edge (a dependency) or a collection’s job,
+not this flag’s. Omit it for the old, unbounded behavior (the default).</p>
+<h3 id="11-machine-readable-reports---json">11. Machine-readable reports: <code>--json</code></h3>
+<p>Everything above prints text: <code>serve:</code>-prefixed lines for the loop itself,
+<code>Show</code>n <code>UpDown.Report</code>s for what each node did. <code>run serve --json</code> (and
+<code>run up --json</code>/<code>run down --json</code>, the same flag) replaces all of that with
+<strong>one JSON object per line on stdout</strong>, flushed as each report happens, so
+<code>my-salmon run up --json | jq</code> streams and a script can watch a <code>serve</code> for
+<code>converge-stop</code> without parsing prose. The text output is unchanged when the
+flag is absent.</p>
+<p>Every object has a <code>kind</code> (the report’s constructor, kebab-cased:
+<code>declared</code>, <code>converge-start</code>, <code>done</code>, <code>failed</code>, <code>wedged</code>, …), a <code>stream</code>
+(<code>serve</code> for the loop’s own reports, <code>updown</code> for what a node did, <code>follow</code>
+for the fetcher’s under <code>--follow</code> (§12); the tending loop’s reports arrive
+nested inside <code>serve</code>’s <code>tended</code>), a <code>ref</code>
+whenever the report is about one node (<code>{&quot;short&quot;: ..., &quot;full&quot;: ...}</code>, the
+same short tag <code>status</code>/<code>query show</code> print after <code>#</code>, so it pastes back in as
+a selector), and the node’s <code>shorthand</code>/<code>help</code>/<code>notes</code> under <code>node</code>. Report
+text is public: <code>notes</code>, failure messages and a <code>status</code>’s output ring go
+out verbatim, so keep secrets out of them (see the <code>filecontents</code> failure
+text for the convention). <code>Salmon.Reporter.Tagged</code> is the encoding, and
+<code>Test/ReportJsonSpec.hs</code> holds a golden object per constructor. Sequence
+numbers exist only on <code>--http</code>’s <code>/events</code> (§14), where the same objects go
+out with a <code>seq</code> added.</p>
+<p>Two things the flag does not cover. A node’s <em>own</em> subprocess output — the
+<code>Binary.Report</code>s a node’s builder was handed a <code>reportPrint</code> for — is not one
+of the four streams and still prints as text, so a binary whose nodes were
+built with <code>reportPrint</code> (all of <code>salmon-apps</code> today) interleaves those lines
+with the JSON ones; a consumer should skip lines that are not JSON. And
+<code>run tree</code>/<code>run dag</code>/<code>query</code> are renderings of their own, not reports, and
+are untouched.</p>
+<h3 id="12-pull-mode---follow">12. Pull mode: <code>--follow</code></h3>
+<p><code>run serve --follow REGISTRY --label L [--label L]... [--follow-base S] ...</code>
+makes the loop fetch its own declarations instead of only waiting to be
+typed at. A <em>registry</em> is anything that answers “the latest document for
+this label”; the simplest is a directory with one JSON document per label at
+<code>DIR/&lt;label&gt;.json</code> (the others are below), each the <strong>desired set</strong> of seeds
+for that label — not a log of commands:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;salmon&quot;</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;web-api@2026-09-23T10:41:07Z&quot;</span><span class="fu">,</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;seeds&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span> <span class="dt">&quot;seed&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;--dir&quot;</span><span class="ot">,</span> <span class="st">&quot;/tmp/play&quot;</span><span class="ot">,</span> <span class="st">&quot;--name&quot;</span><span class="ot">,</span> <span class="st">&quot;web&quot;</span><span class="ot">,</span> <span class="st">&quot;--file&quot;</span><span class="ot">,</span> <span class="st">&quot;index.html&quot;</span><span class="ot">]</span> <span class="fu">}</span><span class="ot">,</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span> <span class="dt">&quot;directive&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;...&quot;</span><span class="fu">:</span> <span class="st">&quot;a directive JSON, as `up-directive` takes&quot;</span> <span class="fu">}</span> <span class="fu">}</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div></div><p><code>salmon</code> is the format version (only <code>1</code>), <code>id</code> is whatever the publisher
+calls this revision, and anything else at the top level is ignored. A host
+following several labels wants the union of their documents.</p>
+<p>What happens on a change: the fetcher diffs the document against the one it
+last applied <em>for that label</em> and injects one batch — <code>up</code> for each seed
+newly present, <code>down</code> for each seed no longer present and not carried by any
+other followed label either — which the loop runs with <code>autoconverge</code> held
+off, restores, and converges once. Seeds you typed interactively are never in
+that diff (unless you typed the exact seed a document then drops: the ledger
+identifies a seed by its directive, not by who declared it).</p>
+<p>What happens when nothing changed: <strong>nothing</strong>. The registry’s mtime and size
+say whether to read the file at all, the sha256 of the bytes says whether
+anything changed, and an unchanged round is invisible to the loop. That rule
+is load-bearing: every line reaching the loop stands the tending machines
+down (§1), so a fetcher that injected on every poll would keep the supervisor
+from ever reaching a steady state. Poll as often as you like.</p>
+<p><code>history</code> tells the fetcher’s declarations from yours:</p>
+<pre><code>serve: seeds:
+  #0 up       [active] --dir /tmp/play --name web --file index.html [fetched /srv/reg label=web-api id=web-api@2026-09-23T10:41:07Z sha256=32ea59311d97]
+  #1 up       [active] --dir /tmp/play --name api --file openapi.json [fetched /srv/reg label=web-api id=web-api@2026-09-23T10:41:07Z sha256=32ea59311d97]
+  #2 up       [active] --dir /tmp/play --name scratch --file notes
+</code></pre>
+<p>(<code>#2</code> was typed; a line run from <code>load &lt;file&gt;</code> says <code>[loaded &lt;file&gt;]</code>.)</p>
+<p>The first fetch runs before standard input is read, so the first convergence
+is deterministic — what the registry said at startup — and later changes
+arrive live, handled like any typed command. A document that fails to parse,
+a seed the binary cannot parse, or a seed whose <code>config</code> step throws, is
+reported and skipped; the loop keeps serving and the last good document stays
+in force.</p>
+<h4 id="when-rounds-run-and-when-a-change-is-applied">When rounds run, and when a change is applied</h4>
+<p>Two schedules, pointing in opposite directions, both on the <code>--follow-*</code>
+flags (seconds unless said otherwise):</p>
+<table>
+<tr><th>flag</th><th>default</th><th>what it is</th></tr>
+<tr><td><code>--follow-base</code></td><td>30</td><td>seconds between rounds while they succeed (<code>--follow-interval</code> is the older name for the same thing)</td></tr>
+<tr><td><code>--follow-factor</code></td><td>2</td><td>how much slower each consecutive <em>failed</em> round makes the next one</td></tr>
+<tr><td><code>--follow-cap</code></td><td>600</td><td>the longest a failing registry is left alone</td></tr>
+<tr><td><code>--follow-jitter</code></td><td>0.2</td><td>every delay is scaled by a draw from <code>[1-j, 1+j]</code>, so a fleet does not poll in step</td></tr>
+<tr><td><code>--follow-debounce</code></td><td>5</td><td>how long the registry must be quiet after a change before the change is applied; <code>0</code> applies at the round that saw it</td></tr>
+<tr><td><code>--follow-max-wait</code></td><td>60</td><td>the longest a change waits while the registry keeps changing</td></tr>
+<tr><td><code>--follow-cache</code></td><td>none</td><td>a directory to keep each label's last applied document in, replayed at startup if the registry cannot be reached (below)</td></tr>
+<tr><td><code>--follow-refuse-older</code></td><td>off</td><td>refuse a document whose <code>published</code> is older than the one already applied for its label (below)</td></tr>
+<tr><td><code>--follow-timeout</code></td><td>30</td><td>the longest one HTTP fetch may take (the <code>http(s)://</code>, <code>dns:</code> and bucket registries)</td></tr>
+<tr><td><code>--follow-workdir</code></td><td>see below</td><td>where a <code>git+</code> registry is checked out</td></tr>
+<tr><td><code>--follow-bucket-endpoint</code></td><td>none</td><td>an S3-compatible endpoint for an <code>s3://</code> registry, path-style</td></tr>
+</table>
+<p><strong>Toward the registry</strong>: a round that succeeds — changed or not — schedules
+the next one one base away; a round that fails (the registry threw, or the
+bytes do not parse; a label with no document is <em>not</em> a failure, the
+registry answered) climbs a ladder, <code>min(cap, base · factor^(n-1))</code> after
+<code>n</code> failures in a row, and the first success steps off it. <code>follow: 3 failed round(s) in a row; next in 120s</code> is what that looks like.</p>
+<p><strong>Toward the loop</strong>: a changed document is not applied at once. It is set
+aside (<code>follow: web id=web@2 ...: changed, waiting for the registry to go quiet</code>) and applied once no round has seen a further change for <code>debounce</code>,
+or <code>max_wait</code> after the first pending one, whichever comes first — and what
+is applied is the diff from the document the loop <em>last heard about</em> to the
+<em>latest</em> one, so a publisher writing three times in a row is one batch and
+one pass, and a half-published state is never applied. Several labels
+changing inside one window are one batch too. The startup round is the
+exception and applies at once: nothing to coalesce yet.</p>
+<p><strong><code>fetch</code></strong> cuts both short: a round now, the ladder forgotten, and whatever
+is pending afterwards applied without waiting out the window — for the
+operator who just published and does not want to wait. Without <code>--follow</code>
+it only says nothing is being followed.</p>
+<h4 id="across-a-restart---follow-cache">Across a restart: <code>--follow-cache</code></h4>
+<p>The world is in memory. Without more, a host restarted while its registry is
+unreachable comes up empty, tears nothing down, and looks converged — worse
+than no puller at all. <code>--follow-cache DIR</code> closes that: after every batch
+the fetcher writes each label’s just-applied document to
+<code>DIR/&lt;label&gt;.applied.json</code> (bytes, sha256 and id; written to a temp file and
+renamed, so a crash mid-write leaves the previous entry), and at startup a
+label whose fetch <em>fails</em> — the registry directory is missing, or the file
+does not parse — is replayed from there:</p>
+<pre><code>follow: fetching web failed: user error (registry directory does not exist: /srv/reg)
+follow: web: registry unreachable; replaying the cached document id=web@1 sha256=8a8e1c180390
+follow: web id=web@1 sha256=8a8e1c180390: 1 seed(s) up, 0 down
+serve: epoch #0 up (4 nodes, 1 active seed(s))
+</code></pre>
+<p>A replayed document is treated exactly as a fetched one from then on — same
+diff, same batch, same <code>[fetched ...]</code> in <code>history</code> — and its digest is what
+the registry’s answer is later compared against, so a registry that comes
+back with the same bytes injects <strong>nothing</strong> (the starvation rule holds
+across restarts) and one that comes back with a different document is
+diffed against the replayed one, not applied from scratch. A label the
+registry answers “no document” for is <em>not</em> replayed: the registry answered.
+A cache entry that cannot be read is reported once and ignored, one that
+cannot be written is reported and the batch goes in regardless; the cache
+never takes the loop down. Without the flag nothing is cached, and a restart
+against an unreachable registry declares nothing, as before.</p>
+<h4 id="which-mode-is-this">Which mode is this?</h4>
+<p><code>status</code> now starts with which guarantees apply to the world:</p>
+<pre><code>serve: mode: replay
+serve: nodes:
+  ...
+</code></pre>
+<ul>
+<li><code>interactive</code> — nothing is followed; every declaration was typed, loaded
+or sent by a client.
+</li>
+<li><code>following</code> — a fetcher is running and the world is what the registry
+last said.
+</li>
+<li><code>replay</code> — the registry could not be reached at startup and at least one
+label’s world is its cached document: the last thing this host knew, not
+necessarily what the registry says now.
+</li>
+</ul>
+<p><code>replay</code> turns into <code>following</code> at the first round in which every label
+answers, changed or not. It is only ever <em>entered</em> at startup: after a
+successful round the world already is the registry’s last word, a round
+failing later changes nothing about it (the last good document stays in
+force), and <code>follow: N failed round(s) in a row</code> is what says the registry
+is gone. Under <code>--json</code> the status object carries <code>&quot;mode&quot;</code>; the HTTP
+surface’s <code>/status</code> is the same object, and <code>/dag</code>’s envelope carries the
+same field.</p>
+<h4 id="refusing-to-move-backwards---follow-refuse-older">Refusing to move backwards: <code>--follow-refuse-older</code></h4>
+<p>A document may carry a <code>published</code> timestamp (RFC 3339) at its top level.
+Nothing reads it unless <code>--follow-refuse-older</code> is given, under which a
+fetched document published <em>before</em> the one already applied (or pending)
+for its label is reported and left alone:</p>
+<pre><code>follow: web id=web@0: published before the document already applied; refused (--follow-refuse-older)
+</code></pre>
+<p>That is what a registry serving from a lagging replica would otherwise do to
+a host. Off by default; a document without <code>published</code>, on either side, is
+never refused. A <code>published</code> that does not parse is a malformed document,
+not an ignored annotation.</p>
+<h4 id="the-registries-what---follow-can-name">The registries: what <code>--follow</code> can name</h4>
+<p>The backend is chosen by the shape of the address, and each one owns the
+rule that turns a label into an address and the cheap “has it moved?” test
+that keeps an unchanged round from reading anything:</p>
+<table>
+<tr><th><code>--follow</code></th><th>the document for <code>&lt;label&gt;</code></th><th>unchanged when</th><th>notes</th></tr>
+<tr><td><code>/srv/reg</code></td><td><code>/srv/reg/&lt;label&gt;.json</code></td><td>mtime and size match</td><td>the directory missing is a failed round, not "no document"</td></tr>
+<tr><td><code>git+URL[#BRANCH[:SUBDIR]]</code></td><td><code>SUBDIR/&lt;label&gt;.json</code> at <code>origin/BRANCH</code> (the remote's default branch without <code>BRANCH</code>)</td><td>the branch points at the same commit</td><td>cloned once into <code>--follow-workdir</code> (default <code>checkout</code> under <code>--follow-cache</code>, else a temp directory named by the repository), then <code>git fetch</code> + <code>git reset --hard</code> every round; the subdirectory comes <em>after</em> the branch because URLs have colons of their own (<code>git+ssh://h:22/r#main:hosts</code>, <code>git+https://h/r#:hosts</code>); credential prompts are off, so a private repository fails rather than hangs</td></tr>
+<tr><td><code>http://…</code> / <code>https://…</code></td><td><code>&lt;base&gt;/&lt;label&gt;.json</code>, or the URL with <code>{label}</code> replaced (<code>https://h/seed/latest/{label}</code>)</td><td><code>304</code> to <code>If-None-Match</code> (<code>ETag</code>) or <code>If-Modified-Since</code> (<code>Last-Modified</code>)</td><td><code>404</code> is "no document"; <code>5xx</code>, <code>403</code>, a refused connection or <code>--follow-timeout</code> running out is a failed round</td></tr>
+<tr><td><code>dns:ZONE</code></td><td>a <code>TXT</code> record at <code>&lt;label&gt;.ZONE</code> reading <code>v=salmon1 url=&lt;https url&gt; sha256=&lt;hex&gt;</code>, then that URL</td><td>the record's <code>sha256</code> is the one last seen — one lookup, no HTTP at all</td><td>a body that does not hash to what the record announces is refused with that reason (a failed round, never applied); no record is "no document"; the lookup is <code>dig +short</code>, so <code>dig</code> must be installed</td></tr>
+<tr><td><code>s3://BUCKET/PREFIX</code> / <code>gs://BUCKET/PREFIX</code></td><td><code>https://BUCKET.s3.amazonaws.com/PREFIX/&lt;label&gt;.json</code>, <code>https://storage.googleapis.com/BUCKET/PREFIX/&lt;label&gt;.json</code>, or <code>ENDPOINT/BUCKET/PREFIX/&lt;label&gt;.json</code> under <code>--follow-bucket-endpoint</code></td><td>as HTTP</td><td>the HTTP backend under a template: <strong>public or presigned objects only</strong> — no SDK, no credentials, and a private bucket's <code>403</code> is a failed round that says so</td></tr>
+</table>
+<p>Three things hold for every backend. The stamp above decides whether to
+<em>read</em>, the sha256 of the bytes decides whether anything <em>changed</em>, and only
+a changed document reaches the loop — so a <code>git commit --allow-empty</code>, a
+re-uploaded identical object or a rewritten identical file injects nothing.
+<code>history</code> names the registry as you gave it (<code>[fetched git+https://h/r#main:hosts label=web ...]</code>). And a fetch that throws leaves
+the last good document in force and climbs the ladder, whatever threw.</p>
+<p>The DNS shape is the cheap one for a fleet: a host’s round is one UDP
+lookup answered from the resolver’s cache until the record’s TTL runs out,
+and the controller <em>publishes</em> by writing a record — which salmon can
+already do as a node (<code>SreBox.MicroDNS</code>, <code>SreBox.DNSRegistration</code>). Publish
+the document first and the record second, since a record announcing a
+digest the store does not yet serve is refused until it does.</p>
+<h4 id="before-anything-is-applied-the-verifier">Before anything is applied: the verifier</h4>
+<p>Every document — from any registry, and a cached one on replay, since a
+cache file is as writable as a registry file — goes through
+<code>Follow.followVerify</code> on its raw bytes <em>before</em> it is parsed. A refusal is
+reported and is a failed round:</p>
+<pre><code>follow: refusing the document for web (sha256=1f0d2c9a7b3e):
+unsigned document: a signing key is configured (--follow-key) and this document carries no signed envelope
+</code></pre>
+<p>The bytes are neither injected nor cached; the last good document stays in
+force. <strong>Without <code>--follow-key</code> the verifier accepts everything</strong>
+(<code>Follow.noVerifier</code>): unsigned mode is the default, and a document is taken
+as the registry serves it.</p>
+<h4 id="signed-documents---follow-key">Signed documents: <code>--follow-key</code></h4>
+<p>With <code>--follow-key FILE</code> (repeatable) the host requires every document —
+fetched from any registry, and a cached one on replay — to be a <em>signed
+envelope</em> carrying a signature by one of those keys; any one suffices. The
+round trip needs no tool but <code>salmon-fleet</code>:</p>
+<pre><code>$ salmon-fleet keygen --out fleet.key
+salmon-fleet: wrote fleet.key (private, 0600) and fleet.key.pub (public); key id 51d3c2152fb2…
+$ cat fleet.key.pub
+{&quot;crv&quot;:&quot;Ed25519&quot;,&quot;kty&quot;:&quot;OKP&quot;,&quot;x&quot;:&quot;Esc7UxOvyQCXne0_TqOseUq2e5CHmdFhjsr4wglADHk&quot;}
+$ salmon-fleet sign --key fleet.key &lt; web.json &gt; /srv/reg/web.json
+$ cat /srv/reg/web.json
+{&quot;document&quot;:{&quot;id&quot;:&quot;web@1&quot;,&quot;salmon&quot;:1,&quot;seeds&quot;:[{&quot;seed&quot;:[&quot;--dir&quot;,&quot;/tmp/play&quot;,&quot;--name&quot;,&quot;web&quot;,&quot;--file&quot;,&quot;index.html&quot;]}]},
+ &quot;salmon-signed&quot;:1,
+ &quot;signatures&quot;:[{&quot;alg&quot;:&quot;EdDSA&quot;,&quot;key&quot;:&quot;51d3c2152fb2…&quot;,&quot;sig&quot;:&quot;+rS1PN29nf1o…&quot;}]}
+$ my-salmon run serve --follow /srv/reg --label web --follow-key fleet.key.pub
+follow: /srv/reg for web every 30s (...)
+follow: web id=web@1 sha256=b2014a4513e7: 1 seed(s) up, 0 down
+</code></pre>
+<p>The document rides inside the envelope as you wrote it (annotations and
+all); the signature is over its <em>canonical</em> bytes — aeson’s own encoding of
+the parsed value, keys sorted — so a registry or a proxy that re-serialises
+the envelope (other key order, other whitespace) leaves the signature valid,
+and only a change of content breaks it. What the loop parses is the document
+inside; the <code>sha256</code> in reports, <code>history</code> and the cache is that of the bytes
+as fetched, the envelope’s. Keys are JWK files (the format <code>Keys.jwkKey</code>
+already writes), Ed25519, and a key’s id is its RFC 7638 thumbprint.</p>
+<p>Hand-edit the file inside its envelope, and the host says why:</p>
+<pre><code>follow: refusing the document for web (sha256=6fd186d7f55f):
+no signature verifies against any of the 1 configured key(s): signature by 51d3c2152fb2 does not verify: the document was altered after signing, or signed by another key
+</code></pre>
+<p>Serve a plain document to a host started with a key:</p>
+<pre><code>follow: refusing the document for web (sha256=4ed68ba04fd8):
+unsigned document: a signing key is configured (--follow-key) and this document carries no signed envelope
+</code></pre>
+<p>An envelope that does not parse, one with no signatures, or one signed by a
+key the host does not hold are refused the same way, each naming its cause;
+and a <code>--follow-key</code> file that does not load is an exit 1 with the path
+before any loop starts — a host that then refused everything, or accepted
+everything, would be worse than none. To rotate a key, run hosts with both
+the old and the new <code>--follow-key</code> while documents are re-signed, then drop
+the old one; nothing more than that exists (no revocation, no key in the
+document).</p>
+<p>Not there yet (<code>specs/pull-mode.md</code>): other sinks (a bucket object, an HTTP
+<code>POST</code>), and authenticated bucket access.</p>
+<h4 id="status-flows-back---status-sink">Status flows back: <code>--status-sink</code></h4>
+<p>A host in pull mode converges with nobody watching. <code>--status-sink PATH</code>
+makes it write down what came of it — a JSON document, to a temp file
+renamed over <code>PATH</code> so a reader never sees half of one — after every
+convergence pass, after every follow injection, and every
+<code>--status-sink-interval</code> seconds (default 10) otherwise:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;salmon-status&quot;</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;host&quot;</span><span class="fu">:</span> <span class="st">&quot;web-3&quot;</span><span class="fu">,</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;written&quot;</span><span class="fu">:</span> <span class="st">&quot;2026-09-24T10:41:07.12Z&quot;</span><span class="fu">,</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;mode&quot;</span><span class="fu">:</span> <span class="st">&quot;following&quot;</span><span class="fu">,</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;labels&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="fu">{</span><span class="dt">&quot;label&quot;</span><span class="fu">:</span> <span class="st">&quot;web&quot;</span><span class="fu">,</span> <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;web@42&quot;</span><span class="fu">,</span> <span class="dt">&quot;sha256&quot;</span><span class="fu">:</span> <span class="st">&quot;…&quot;</span><span class="fu">,</span> <span class="dt">&quot;applied&quot;</span><span class="fu">:</span> <span class="st">&quot;2026-09-24T10:40:58.51Z&quot;</span><span class="fu">}</span><span class="ot">]</span><span class="fu">,</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;status&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;kind&quot;</span><span class="fu">:</span> <span class="st">&quot;status&quot;</span><span class="fu">,</span> <span class="dt">&quot;mode&quot;</span><span class="fu">:</span> <span class="st">&quot;following&quot;</span><span class="fu">,</span> <span class="dt">&quot;nodes&quot;</span><span class="fu">:</span> <span class="ot">[</span> <span class="er">...</span> <span class="ot">]</span> <span class="fu">},</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;last&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;converge&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;stream&quot;</span><span class="fu">:</span> <span class="st">&quot;serve&quot;</span><span class="fu">,</span> <span class="dt">&quot;kind&quot;</span><span class="fu">:</span> <span class="st">&quot;converge-stop&quot;</span><span class="fu">,</span> <span class="dt">&quot;ok&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span> <span class="dt">&quot;remaining&quot;</span><span class="fu">:</span> <span class="dv">0</span> <span class="fu">},</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;follow&quot;</span><span class="fu">:</span>   <span class="fu">{</span> <span class="dt">&quot;stream&quot;</span><span class="fu">:</span> <span class="st">&quot;follow&quot;</span><span class="fu">,</span> <span class="dt">&quot;kind&quot;</span><span class="fu">:</span> <span class="st">&quot;injected&quot;</span><span class="fu">,</span> <span class="dt">&quot;label&quot;</span><span class="fu">:</span> <span class="st">&quot;web&quot;</span><span class="fu">,</span> <span class="dt">&quot;document&quot;</span><span class="fu">:</span> <span class="st">&quot;web@42&quot;</span><span class="fu">,</span> <span class="er">...</span> <span class="fu">}</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">}</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div></div><p><code>host</code> is the machine’s node name (<code>uname -n</code>) unless <code>--status-sink-host NAME</code> says otherwise. Give one when two loops on one machine each write a
+document (the fold shows two rows naming one host otherwise, and does not
+pick), or when the node name means nothing to whoever reads the directory
+(a container’s generated hostname).</p>
+<p><code>status</code> is the very object <code>status --json</code> prints (and <code>/status</code> answers);
+<code>labels</code> is the document each followed label last applied; <code>last</code> holds
+the most recent converge-stop and the most recent follow report, as
+<code>--json</code> prints them. The fetcher’s own reports (<code>injected</code>, <code>backoff</code>,
+<code>replayed</code>, …) are a <code>--json</code> stream in their own right now — <code>&quot;stream&quot;: &quot;follow&quot;</code> — which is what lets the sink carry them.</p>
+<p>The sink never touches the loop: it is a reporter watching the loop’s
+stream for its triggers and a reader of the world through the same accessor
+<code>/status</code> uses, so a write stands no tending machine down. A path that
+cannot be written is reported once (<code>serve: status sink PATH could not be written:</code>), and again only after a write has succeeded in between; the loop
+keeps serving. A host gone quiet therefore shows as a document whose
+<code>written</code> is old — not as one that says all is well.</p>
+<p>Fleet status is a fold over a directory of these, computed by whoever reads
+it. <code>salmon-fleet status DIR</code> is that reader, one line per host:</p>
+<pre><code>$ salmon-fleet status /srv/status
+host      mode       labels                      converged  errored  age   flags
+web-1     following  web=web@42@32ea59311d97     4/4        0        3s
+web-2     following  web=web@42@32ea59311d97     3/4        1        5s
+db-1      replay     db=db@7@d00ef24caea4        3/3        0        94s   stale
+</code></pre>
+<p><code>--label L</code> keeps only hosts whose applied documents include <code>L</code>,
+<code>--stale SECONDS</code> (default 60) sets when a host is flagged, <code>--json</code> emits
+the rows as one array. It only reads; a stale host is a visible fact, not a
+decision, and nothing here decides a host is dead. Two documents naming one
+host (two loops on one machine, as in the tests) are two rows.</p>
+<h3 id="13-a-second-way-in---listen">13. A second way in: <code>--listen</code></h3>
+<p><code>run serve --listen PATH</code> binds a unix socket at <code>PATH</code> and accepts the
+<em>same line protocol</em> on it — <code>up</code>, <code>status</code>, <code>force --select ...</code>, <code>quit</code>,
+every command §3 typed on stdin — from any number of clients at once, while
+stdin keeps working alongside. Milestone 2 of <code>specs/generic-server.md</code>;
+<code>Salmon.Actions.Serve.Socket</code> is the implementation.</p>
+<pre><code class="language-sh">my-salmon run serve --listen /run/my-salmon.sock &lt; /dev/null &amp;
+printf 'status\n' | socat - UNIX-CONNECT:/run/my-salmon.sock
+ssh -L /tmp/remote.sock:/run/my-salmon.sock host   # then the same, locally
+</code></pre>
+<p>Four things to know:</p>
+<ul>
+<li><strong>Each client reads exactly the reports for its own lines</strong>, as JSON
+lines in the §11 encoding, whatever the loop’s own stdout is set to
+(text by default, JSON under <code>--json</code>; it sees everything either way).
+What another client typed, and what the tending loop says between
+commands, never reaches a client — the loop stamps every report with who
+typed the command it belongs to, and the socket only echoes the ones
+stamped for it. There is no per-client text mode.
+</li>
+<li><strong>A client hanging up is not <code>quit</code>.</strong> It is reported on the loop’s stdout
+(<code>serve: PATH#N hung up</code>) once every line that client typed has been
+handled, and the connection is closed then — so <code>printf 'status\n' | socat ...</code> gets its answer even though it half-closes immediately. <code>quit</code>
+from a client ends the loop exactly as it does from stdin.
+</li>
+<li><strong>Under <code>--listen</code>, stdin’s end of input does not end the loop either.</strong>
+With a socket to talk to, the process is expected to outlive whatever
+started it (<code>&lt; /dev/null &amp;</code>, a unit file), so stdin is one more source
+whose hang-up is reported and read past; only <code>quit</code> — typed anywhere —
+or a signal ends it. The same holds under <code>--http</code>/<code>--http-tcp</code> (§14).
+Without any of them, stdin closing ends the loop as it always has.
+</li>
+<li><strong>The socket is owner-only (mode 0600) and the path is checked before it
+is taken.</strong> A stale socket file (its <code>serve</code> died without removing it) is
+replaced; one something still answers on is refused (<code>AlreadyListening</code>),
+as is a path holding something that is not a socket. Permissions are the
+whole access story: there is no authentication, and no TCP — see the
+spec’s security section for why a salmon server must never listen on a
+network without both (<code>--http-tcp</code>, §14, is the one listener that does,
+and it has both).
+</li>
+</ul>
+<p>The commands are still one inbox: a line from a client stands the tending
+machines down before it runs, same as a line from stdin, and two clients’
+lines interleave at line granularity in arrival order.</p>
+<h3 id="14-http-on-a-socket---http">14. HTTP on a socket: <code>--http</code></h3>
+<p><code>run serve --http PATH</code> binds a <em>second</em> unix socket and serves HTTP on it
+— reads of the live world as JSON, and the same command language as
+<code>POST</code>. Milestone 3 of <code>specs/generic-server.md</code>;
+<code>Salmon.Actions.Serve.Http</code> is the implementation. It is its own path
+rather than HTTP detected on <code>--listen</code>’s socket, so use both flags if you
+want both; the socket file has the same owner-only mode and the same
+live/stale checks as §13’s.</p>
+<pre><code class="language-sh">my-salmon run serve --http /run/my-salmon.http &lt; /dev/null &amp;
+C='curl -s --unix-socket /run/my-salmon.http'
+
+$C http://x/dag | jq '.nodes[] | {shorthand, ref: .ref.short, direction, convergence,
+                                  deps: [.dependencies[].short]}'
+$C http://x/status | jq .        # the object `status` prints under --json
+$C http://x/history | jq .       # likewise `history`, plus an `elided` count
+$C http://x/help/seed | jq -r .seed   # this binary's own `config --help`
+
+$C -X POST -d 'up --name web --file index.html' http://x/command      # sync
+$C -X POST -d 'up --name api' 'http://x/command?async'                # {&quot;seq&quot;: n}
+$C -X POST -H 'content-type: application/json' -d '{&quot;line&quot;: &quot;status&quot;}' http://x/command
+
+curl -sN --unix-socket /run/my-salmon.http http://x/events            # live, forever
+curl -sN --unix-socket /run/my-salmon.http 'http://x/events?since=42' # replay after 42, then live
+curl -sN --unix-socket /run/my-salmon.http 'http://x/events?stream=upkeep,updown&amp;origin=stdin'
+</code></pre>
+<p>What the <code>-N</code> client sees while another posts an <code>up</code> (the fixture binary,
+<code>salmon-ops-serve-fixture run serve --json --http /tmp/x.http --events-ring 64</code>,
+abridged):</p>
+<pre><code>id: 3
+data: {&quot;kind&quot;:&quot;enqueued&quot;,&quot;line&quot;:&quot;up --dir /tmp/play --name web --file index.html&quot;,&quot;origin&quot;:{&quot;kind&quot;:&quot;other&quot;,&quot;name&quot;:&quot;/tmp/x.http#0&quot;},&quot;seq&quot;:3,&quot;stream&quot;:&quot;server&quot;}
+
+id: 4
+data: {&quot;active_seeds&quot;:1,&quot;direction&quot;:&quot;up&quot;,&quot;epoch&quot;:0,&quot;kind&quot;:&quot;declared&quot;,&quot;nodes&quot;:3,&quot;origin&quot;:{...},&quot;seq&quot;:4,&quot;stream&quot;:&quot;serve&quot;}
+
+id: 6
+data: {&quot;kind&quot;:&quot;eval&quot;,&quot;node&quot;:{&quot;shorthand&quot;:&quot;directory&quot;,...},&quot;origin&quot;:{...},&quot;ref&quot;:{...},&quot;seq&quot;:6,&quot;stream&quot;:&quot;updown&quot;}
+...
+id: 12
+data: {&quot;kind&quot;:&quot;converge-stop&quot;,&quot;ok&quot;:true,&quot;origin&quot;:{...},&quot;remaining&quot;:0,&quot;seq&quot;:12,&quot;stream&quot;:&quot;serve&quot;}
+
+id: 13
+data: {&quot;from&quot;:&quot;/tmp/x.http#0&quot;,&quot;kind&quot;:&quot;hung-up&quot;,&quot;seq&quot;:13,&quot;stream&quot;:&quot;serve&quot;}
+
+id: 14
+data: {&quot;down&quot;:0,&quot;kind&quot;:&quot;supervising&quot;,&quot;seq&quot;:14,&quot;stream&quot;:&quot;upkeep&quot;,&quot;up&quot;:3}
+
+id: 16
+data: {&quot;delay_us&quot;:2000000,&quot;kind&quot;:&quot;reapplying&quot;,&quot;node&quot;:{&quot;shorthand&quot;:&quot;directory&quot;,...},&quot;ref&quot;:{...},&quot;seq&quot;:16,&quot;stream&quot;:&quot;upkeep&quot;}
+</code></pre>
+<p>The <code>?async</code> answer was <code>{&quot;seq&quot;:3}</code>: everything numbered above 3 with that
+origin is that command; from 14 on, with no origin, it is the machines
+tending between commands — which a sync <code>POST</code> never shows, since tending
+happens exactly when no command is being handled.</p>
+<p>What to know:</p>
+<ul>
+<li>
+<p><strong>Reads never touch the inbox.</strong> <code>/dag</code>, <code>/status</code>, <code>/history</code> and
+<code>/help/seed</code> read the loop’s own <code>World</code> directly — they do not stand the
+tending machines down, do not wait behind a command, and answer while a
+node’s <code>up</code> is still running. The price is that a read is at most one
+command old: each node’s <code>status</code> is the snapshot the last command took
+(§11’s <code>status</code> field, <code>null</code> for a node never tended). Motion between
+commands is on <code>/events</code>, below, and <code>/status</code> and <code>/dag</code> carry a <code>seq</code>
+— the last event number at the moment of the read — so that
+<code>/events?since=&lt;that seq&gt;</code> starts exactly where the snapshot left off.</p>
+</li>
+<li>
+<p><strong><code>/dag</code> is the graph a pass walks</strong>, not the declared tree: one object
+per <code>Ref</code>, with <code>dependencies</code> and <code>dependants</code> as ref lists both ways,
+the node’s <code>shorthand</code>/<code>help</code>/<code>notes</code>/<code>dynamics</code> (the fields §8’s
+<code>Stale</code> detection compares), and its <code>direction</code>/<code>convergence</code>/<code>status</code>/
+<code>paths</code> as <code>status</code> lists them. It is populated the moment something is
+declared — under <code>autoconverge off</code> every node reads <code>pending</code> with its
+edges already in place — and a retired seed’s nodes stay in it with
+<code>direction: &quot;down&quot;</code> until their teardown is done. A node whose current
+representative won a collision — two seeds describing one <code>Ref</code>
+differently, or one graph reaching it from two differently-described
+nodes — carries a <code>conflict</code> with the <code>kept</code> and <code>replaced</code>
+representatives (the same four fields) for as long as some live
+declaration still wants the losing version, so a client that did not
+catch the pass’s <code>conflicting</code> event can still show the pair. A batch a
+<code>Rewrite</code> would introduce is not shown; the nodes it would stand in for
+are. The
+envelope’s top-level <code>mode</code> is §12’s (<code>interactive</code>, <code>following</code>,
+<code>replay</code>), read at the moment of the request — the same value <code>/status</code>
+opens with, so a client showing nodes as tended knows whether they are.</p>
+</li>
+<li>
+<p><strong><code>POST /command</code> is one line of §3’s language</strong>, <code>text/plain</code> or
+<code>{&quot;line&quot;: &quot;...&quot;}</code>, and it is handled like any other line: it stands the
+machines down first and takes its turn in the inbox. Synchronous by
+default, the response is a JSON array of exactly the reports that line
+produced (§11’s objects), returned when the loop has finished with it —
+what a script or a CI step wants. <code>?async</code> returns <code>202 {&quot;seq&quot;: n}</code> the
+moment the line is queued; <code>n</code> is the number of the <code>enqueued</code> event on
+<code>/events</code>, and that command’s reports are the events above <code>n</code> carrying
+its <code>origin</code>. <code>quit</code> works from here too and answers <code>[]</code>.</p>
+</li>
+<li>
+<p><strong><code>/events</code> is one stream, numbered, replayable.</strong> <code>text/event-stream</code>:
+each event is <code>id: &lt;seq&gt;</code> and one <code>data:</code> line holding the §11 object with
+<code>seq</code> added, plus <code>origin</code> (the object <code>history</code> entries use) when the
+report was produced for a command. Three streams and the server’s own:
+<code>serve</code>, <code>updown</code>, <code>upkeep</code> (the tending machines’ reports, which reach a
+client here and nowhere else) and <code>server</code> (<code>enqueued</code>, and <code>gap</code>). One
+counter numbers everything — enqueues and reports, from the loop and from
+machine threads — so one cursor is enough. <code>?since=N</code> replays what the
+ring still holds after <code>N</code>, then continues live; the ring keeps the last
+<code>--events-ring N</code> events (default 2048), and a client further behind than
+that is sent <code>{&quot;kind&quot;:&quot;gap&quot;,&quot;from&quot;:&lt;oldest&gt;,&quot;stream&quot;:&quot;server&quot;}</code> first
+(no <code>id</code>), never a silent skip. <code>?stream=a,b</code> and <code>?origin=NAME</code> filter on
+the server. An idle stream carries a comment line every 15 seconds so
+proxies and read timeouts keep it open; hanging up is all a client has to
+do to unsubscribe. <code>curl -N</code> or any <code>EventSource</code> reads it.</p>
+</li>
+<li>
+<p><strong><code>salmon-tui PATH</code> is a terminal over all of the above</strong> (milestone 6;
+<code>salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]</code> for a
+<code>--http-tcp</code> listener, see “Reaching it over the network”;
+<code>salmon-apps</code>, over <code>Salmon.Client.Http</code> and the pure <code>Salmon.Client.Model</code>).
+It reads <code>/dag</code> once, follows <code>/events</code> from that snapshot’s <code>seq</code>, and
+draws a header (socket, mode, seq, converged/errored/total, the current
+pass, <code>supervising</code>/<code>not supervising</code>, <code>stream=live|reconnecting</code>), the node table in <code>/dag</code>’s order —
+ref, shorthand, direction, state, last check, last event — and a footer.
+<code>j</code>/<code>k</code> (or the arrows) move, <code>g</code>/<code>G</code> jump to the first/last row, <code>enter</code> expands the selected node (help, notes, paths, edges,
+check reason, error, the output ring of the last snapshot), <code>r</code> re-reads
+<code>/dag</code>, <code>q</code> quits leaving the server as it was, and <code>:</code> opens a command
+line: the line is sent as <code>POST /command?async</code> and the footer echoes the
+seq it was queued at. <strong>That line is the only thing on the screen that
+stands the tending machines down</strong> — every read bypasses the loop, so
+the TUI can stay open on a box without perturbing it, and the footer
+says so. It holds no state the server does not: a <code>declared</code> or a <code>gap</code>
+makes it re-read <code>/dag</code> (rebased onto what it was showing), and a lost
+stream is retried with <code>?since=</code> the last number it saw. Works unchanged
+over <code>ssh -L /tmp/remote.http:/run/my-salmon.http host</code> — it is a client
+of the socket, not a mode of <code>serve</code>. What the fixture looks like right
+after <code>:up --dir /tmp/play --name web --file index.html --file style.css</code>:</p>
+<pre><code>/tmp/x.http mode=interactive seq=17 converged=4 errored=0 total=4 converged  stream=live
+  ref        shorthand              dir  state     check        last event
+&gt; MTE5MDg2   file-contents          up   converged -            done &amp;#35;8
+  ODQwMTE0   directory              up   converged -            reapplying &amp;#35;16
+  bjU3MjUz   serve-fixture-bundle   up   converged -            parked &amp;#35;17
+  bjczNjY4   file-contents          up   converged -            done &amp;#35;10
+&amp;#35;17 upkeep parked bjU3MjUz serve-fixture-bundle
+j/k move  enter expand  : command (async; stands the machines down)  r re-read /dag  q quit
+</code></pre>
+</li>
+<li>
+<p><strong>Permissions are the whole access story on the socket.</strong> No token is
+asked for on it; <code>notes</code>, <code>help</code> and report text are as public as the
+logs they already go to. Do not put this socket where an untrusted user
+can open it. Reaching the same server over a network is the next
+paragraph, and it is TLS with a token or nothing.</p>
+</li>
+</ul>
+<h4 id="reaching-it-over-the-network---http-tcp">Reaching it over the network: <code>--http-tcp</code></h4>
+<p>Milestone 8 of <code>specs/generic-server.md</code>. The same HTTP — every route
+above, <code>/events</code> included — can also listen on a TCP address, and the only
+way to spell that is with all three of a certificate, its key and a token
+file:</p>
+<pre><code class="language-sh">my-salmon run serve --http /run/my-salmon.http \
+    --http-tcp 0.0.0.0:8443 --tls-cert /etc/my-salmon/server.pem \
+    --tls-key /etc/my-salmon/server.key --token-file /etc/my-salmon/token &lt; /dev/null &amp;
+# stderr, once: serve: exposing HTTP on 0.0.0.0:8443 with TLS, token from /etc/my-salmon/token
+
+T=&quot;Authorization: Bearer $(cat /etc/my-salmon/token)&quot;
+curl -s --cacert ca.pem -H &quot;$T&quot; https://host:8443/status | jq .
+curl -s --cacert ca.pem -H &quot;$T&quot; -X POST -d 'up --name web --file index.html' https://host:8443/command
+curl -sN --cacert ca.pem -H &quot;$T&quot; 'https://host:8443/events?since=0'
+</code></pre>
+<p>What the fixture binary does with each way of getting it wrong (the
+refusals are <code>exit 1</code> before anything is bound or read; the option check
+itself is a pure function, <code>CommandLine.validateTcpOptions</code>):</p>
+<pre><code>$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443
+--http-tcp needs --tls-cert, --tls-key, --token-file: a salmon server never listens on a network without TLS and a token
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443 --tls-cert tls/server.pem
+--http-tcp needs --tls-key, --token-file: a salmon server never listens on a network without TLS and a token
+$ salmon-ops-serve-fixture run serve --token-file token
+--token-file need --http-tcp HOST:PORT to apply to; there is no network listener without it
+$ ls -l token
+-rw-r--r-- token
+$ salmon-ops-serve-fixture run serve --http-tcp 127.0.0.1:8443 --tls-cert tls/server.pem --tls-key tls/server.key --token-file token
+--token-file token is readable by others; a token anyone on the box can read is not one (chmod 600 it)
+$ salmon-ops-serve-fixture run serve --http-tcp :8443 --tls-cert tls/server.pem --tls-key tls/server.key --token-file token
+--http-tcp: no host in &quot;:8443&quot;; spell the address, 0.0.0.0 included
+</code></pre>
+<p>and, once it is up (<code>chmod 600 token</code> first), what a client sees:</p>
+<pre><code>$ curl -s --cacert tls/server.pem https://localhost:8443/status
+{&quot;error&quot;:&quot;a bearer token is required&quot;}                       # 401, WWW-Authenticate: Bearer
+$ curl -s --cacert tls/server.pem -H &quot;Authorization: Bearer $(cat token)&quot; https://localhost:8443/status
+{&quot;kind&quot;:&quot;status&quot;,&quot;mode&quot;:&quot;interactive&quot;,&quot;nodes&quot;:[],&quot;seq&quot;:2,&quot;stream&quot;:&quot;serve&quot;}
+$ curl -s --cacert tls/server.pem -H &quot;Authorization: Bearer wrong&quot; https://localhost:8443/dag
+{&quot;error&quot;:&quot;a bearer token is required&quot;}
+$ curl -si http://localhost:8443/status                      # plain HTTP on the TLS port
+HTTP/1.1 426 Upgrade Required
+$ curl -s --unix-socket /run/my-salmon.http http://x/history | jq -c '.seeds[] | .origin'
+{&quot;kind&quot;:&quot;other&quot;,&quot;name&quot;:&quot;127.0.0.1:51510#0&quot;}                  # the unix socket: no token, and who typed the line
+</code></pre>
+<p>Eight things to know:</p>
+<ul>
+<li><strong>There is no plaintext option, behind any flag.</strong> <code>Http.Bind</code> has a
+unix constructor and a TLS constructor and nothing else; <code>--http-tcp</code>
+without all three files is refused with every missing one named, and the
+three files without <code>--http-tcp</code> are refused too, since silently unused
+is how a listener ends up open by accident. <code>HOST</code> is spelled, always:
+<code>:8443</code> is refused, <code>0.0.0.0:8443</code> is how listening on every address is
+written, <code>[::1]:8443</code> for IPv6. A salmon server is root on the box, one
+<code>up</code> away — the spec’s security section is binding on this.
+</li>
+<li><strong>The token is on every route of the TCP listener</strong>, <code>Authorization: Bearer &lt;token&gt;</code>, compared in constant time against the file’s content
+with surrounding whitespace removed (so <code>echo secret &gt; token</code> is fine).
+Reads and <code>/events</code> are not exempt: a node’s output ring is as sensitive
+as a command. <code>401</code> with <code>{&quot;error&quot;: ...}</code> otherwise, and a refused
+command is never queued. The token file must not be readable by others
+(<code>chmod 600</code>), and must not be empty. Checking it queues nothing — a read
+is still a read.
+</li>
+<li><strong>A browser signs in at <code>/auth</code></strong>, because nothing lets a page put a
+header on a navigation or an <code>EventSource</code>. <code>GET /</code> with no credential
+is a <code>303</code> to <code>/auth</code>, a form asking for the token; posting the right one
+answers <code>303</code> back to <code>/</code> with a <code>__Host-salmon-session</code> cookie
+(<code>HttpOnly</code>, <code>Secure</code>, <code>SameSite=Strict</code>), which the TCP listener then
+accepts wherever it accepts the bearer header. The cookie is not the
+token — 32 random bytes minted per sign-in and known only to the running
+process — so the token is never stored in a browser, and restarting the
+server signs every browser out. A wrong token is a <code>401</code> and the form
+again. On the unix socket <code>/auth</code> has nothing to do and redirects to <code>/</code>.
+</li>
+<li><strong>Signing out is the page’s <em>sign out</em> button</strong>, a plain form posting
+to <code>/auth/logout</code>: the session is revoked, the cookie expired, and the
+browser sent back to <code>/auth</code>. Every tab of that browser shared the
+session, so each is signed out with it — an <code>/events</code> stream the session
+opened is cut at once, and a page that then gets a <code>401</code> goes to <code>/auth</code>
+on its own. A <code>GET</code> of <code>/auth/logout</code> is refused, so a link or a
+prefetch cannot sign anybody out. The button shows only when
+<code>GET /auth/session</code> says the page holds a session, so never on the unix
+socket.
+</li>
+<li><strong>A session also ends on its own.</strong> <code>--session-lifetime S</code> (default
+43200, 12h) counts from sign-in and ends a session however busy it is,
+cutting its open event stream on time; <code>--session-idle S</code> (default 3600,
+1h) ends one nothing has used, where an open event stream <em>is</em> use, so a
+page left open to watch does not idle out. <code>0</code> turns either off. The
+cookie carries the lifetime as <code>Max-Age</code>, a page whose session ended
+lands on <code>/auth?ended</code> (“Your session ended; sign in again”), and ended
+sessions are dropped at every sign-in — so the server holds at most the
+sign-ins of one lifetime, however long it runs.
+</li>
+<li><strong>The unix socket is unchanged</strong>, token-free, and the <em>same server</em>: one
+event ring, one <code>seq</code> counter, one inbox, whichever listener a request
+came in on. What differs is the origin a command is typed under:
+<code>PATH#n</code> on the socket, the client’s own <code>ADDR:PORT#n</code> over TCP, so
+<code>history</code> says who typed a line from the network.
+</li>
+<li><strong>Plain HTTP on the TLS port is refused by warp-tls</strong> with <code>426 Upgrade Required</code> before any route is reached; a client with a wrong CA sees a
+failed handshake. Both are the listener working, and neither is traced on
+stderr — the startup line is deliberately the only thing written there.
+</li>
+<li><strong>Mint the certificate however you like; the tree can do it.</strong>
+<code>Certificates.certificateAuthority</code> writes a v3 self-signed certificate
+a client can pin with <code>--cacert</code>; a CA-issued one works the same. Note
+that <code>Certificates.selfSign</code> and <code>caSign</code> write X.509 <em>v1</em> certificates
+(<code>openssl x509 -req</code> without extensions), which OpenSSL-based clients
+accept and crypton-based Haskell clients reject (<code>LeafNotV3</code>).
+</li>
+</ul>
+<p><code>salmon-tui</code> reaches it too, given the URL, the token file and — for a
+self-signed certificate — the certificate to pin:</p>
+<pre><code class="language-sh">salmon-tui https://host:8443 --token-file token --cacert server.pem
+</code></pre>
+<p>Without <code>--cacert</code> the system’s trust store decides, and a self-signed
+certificate fails the handshake before the token is sent; there is no flag
+that turns verification off. An <code>http://</code> address is refused outright, and
+so is a token file others can read, as the server refuses its own. The web
+UI reaches it through <code>/auth</code> above. Mutual TLS and a read-only token are
+the spec’s own v2.</p>
+<h4 id="the-web-ui-get-">The web UI: <code>GET /</code></h4>
+<p>The same socket serves a page at <code>/</code> (its script and stylesheet under
+<code>/ui/</code>, compiled into the binary, so there is nothing to install beside it)
+that draws the world as the graph it is and drives it. Milestone 7 of
+<code>specs/generic-server.md</code>: the static picture, the live one, the actions
+and the seed form. It is a client of the routes above and nothing more — it fetches
+<code>/dag</code>, lays the nodes out in layers with dependencies above dependants and
+an edge per <code>dependencies</code> entry, one box per node (short ref, shorthand,
+<code>direction · convergence</code>, the last event and check verdict), coloured by
+convergence and dashed for a node wanted <code>down</code>; then it subscribes to
+<code>/events?since=&lt;the snapshot's seq&gt;</code> and applies what arrives: <code>eval</code>/
+<code>done</code>/<code>failed</code> pulse the box and move its colour, <code>next-look</code> updates the
+check verdict, <code>converge-start</code>/<code>converge-stop</code> and the counts go in the
+header. It keeps no state the server does not: a <code>declared</code>, a <code>cleared</code>, a
+<code>converge-stop</code>, a <code>gap</code> or a dropped stream all mean “fetch <code>/dag</code> again and
+resubscribe from its <code>seq</code>”, and the reload button is that by hand. Clicking
+a node opens a panel with its help, notes, dynamics, paths, dependencies and
+dependants (each a link), the last check and its reason, and the output
+ring. Below 700px wide the graph gives way to a list.</p>
+<p>Everything the page <em>does</em> is one <code>POST /command?async</code> and then the event
+stream: the answer is the <code>seq</code> the line was queued at and the origin it was
+queued under (a toast shows both), and the events above that <code>seq</code> carrying
+that origin are what the command did — they outline the nodes it touched
+(the amber “touched” outline in the legend, until the loop’s <code>hung-up</code> for
+that origin says the line has been handled), and they go into the log under
+the command line. The page never uses the synchronous form: a sync <code>up</code>
+holds the request for the whole pass, and the page is the thing that would
+be waiting. Four places send a line:</p>
+<ul>
+<li><strong>The node panel</strong> has <code>force</code>, <code>recheck</code>, <code>pause</code> and <code>resume</code> for the
+selected node, sent as <code>&lt;verb&gt; --select #&lt;short ref&gt;</code> — the <code>#</code> selector
+from §9, so what the box prints is what the command names. A node does
+not know which seed declared it and <code>/history</code> does not say which nodes
+an epoch declared, so retiring “the seed behind this node” is the
+operator’s choice: the panel lists every live declaration under <em>retire a
+seed</em>, each with its <code>down</code>.
+</li>
+<li><strong>The header</strong> has the world’s commands: <code>converge</code>, <code>supervise on|off</code>,
+<code>autoconverge on|off</code>, <code>fetch</code> (which the loop answers “nothing is being
+followed” without <code>--follow</code>) and <code>clear</code>, which asks first since it
+retires every seed. <code>quit</code> is deliberately not there: the page is served
+by the process it would be stopping, and leaving the loop is the one
+thing that should take a terminal.
+</li>
+<li><strong>The seed form</strong> (the <code>seeds</code> button) shows <code>/help/seed</code> — this binary’s
+own <code>config --help</code>, and the loop’s command reference under it — a text
+field for the seed words, and <code>up</code>/<code>only</code>/<code>down</code>, sending <code>&lt;verb&gt; &lt;words&gt;</code>
+as typed. <code>/history</code> is listed under it, one row per declaration with its
+epoch, verb, words, origin and whether it is still active, a <code>down</code> on
+each active row, and the words clickable to put them back in the field.
+The list is fetched again on every <code>declared</code> and <code>cleared</code>.
+</li>
+<li><strong>The command line</strong> at the bottom (<code>:</code> focuses it, as in <code>vi</code> and <code>less</code>;
+Esc leaves it) sends any line of §3’s language as typed — <code>status</code>
+and <code>help</code> included, whose reports land in the log rather than on the
+page.
+</li>
+</ul>
+<p>The page itself never handles a token. A browser cannot open a unix
+socket, so open the page on the TCP listener and sign in once at <code>/auth</code>
+(see “Reaching it over the network”); the session cookie the browser keeps
+then carries every <code>fetch</code> and the <code>EventSource</code> until <em>sign out</em>:</p>
+<pre><code class="language-sh">my-salmon run serve --http /run/my-salmon.http \
+    --http-tcp 127.0.0.1:8443 --tls-cert server.pem --tls-key server.key \
+    --token-file token &lt; /dev/null &amp;
+xdg-open https://localhost:8443/        # redirected to /auth; paste the token
+</code></pre>
+<p>A self-signed certificate is a browser warning to click through (or add
+it to the browser’s trust store). Without a TCP listener, a forward of the
+unix socket still works — <code>ssh -L 8080:/run/my-salmon.http host</code> from
+another machine, or <code>socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/my-salmon.http</code> locally — but bind it to <code>127.0.0.1</code>:
+the port inherits none of the socket’s file permissions, and whoever
+reaches it has the socket. The layout is a
+small longest-path layering with barycentre ordering written in
+<code>salmon-ops/ui/ui.js</code> itself — no bundler, no framework, no vendored
+library — so the three files are readable as they are served.</p>
+<h3 id="15-gotchas">15. Gotchas</h3>
+<ul>
+<li><strong>A piped script is never supervised.</strong> If you’re testing self-healing and
+piping a script in, you won’t see it — there’s no idle moment for the
+tending loop to occupy. Type interactively, or drive the loop from a fifo,
+to actually observe §3’s perturb-and-watch-it-heal behaviour.
+</li>
+<li><strong><code>Immaterial</code> means parked, not polled.</strong> A node with no <code>check</code> looks
+exactly as “up” in <code>status</code> whether or not anything is actually watching
+it — the absence of supervision is deliberate and silent by design (the
+alternative, polling to ask a question with no useful answer, would cost
+something for nothing). If you want self-healing, write a <code>check</code>.
+</li>
+<li><strong><code>sameRepresentative</code>’s blind spot is <code>up</code>/<code>check</code>/<code>down</code>.</strong> Two
+declarations that differ only inside those functions compare <em>equal</em> for
+<code>Stale</code>-detection purposes (§8) — put something comparable in <code>notes</code> if
+you need a content-only change to register through the pass itself rather
+than the tending loop.
+</li>
+<li><strong>There are two different <code>query</code>s.</strong> <code>my-salmon query show|plan|...</code> is a
+<em>top-level, one-shot</em> CLI command that inspects a directive on stdin
+before any <code>run up</code>/<code>run serve</code> even starts. <code>serve</code>’s own in-loop <code>query [--select]...</code> command inspects the live, already-converging <code>World</code>.
+They share selector syntax but operate on different things.
+</li>
+<li><strong>A node’s <code>check</code> is the only thing that can notice it going away, and
+therefore the only thing that can fire a <code>RestForOne</code> demotion.</strong> A config
+node with no <code>check</code> never notices its own file changing, and nothing
+standing on it is ever bounced, however that node is decorated otherwise.
+</li>
+</ul>
+<h3 id="16-where-to-read-more">16. Where to read more</h3>
+<ul>
+<li><code>resources/howto-ops.md</code> — writing and testing the <code>Op</code>s this doc assumes.
+</li>
+<li><code>CLAUDE.md</code>’s “<code>salmon-ops</code> layer” section — the implementation-level
+summary of every module named above (<code>Actions/Upkeep.hs</code>,
+<code>Actions/Serve.hs</code>, <code>Op/Supervision.hs</code>, <code>Op/Dag.hs</code>, <code>Op/Rewrite.hs</code>),
+written for whoever is modifying salmon itself rather than using it.
+</li>
+<li><code>specs/per-node-state-machines.md</code> and
+<code>specs/per-node-state-machines-remaining.md</code> — the original design and its
+running status; read these for the <em>why</em> behind a given tradeoff, or to
+see what’s still explicitly left as “taste, not yet decided” (<code>supStrategy</code>
+living on the dependency rather than the dependant; the <code>RestForOne</code>
+cascade requiring opt-in at every hop).
+</li>
+<li><code>salmon-ops/fixtures/ServeFixture.hs</code> — a runnable, hands-on tour of
+everything in §3, §6 and §7, including the <code>--daemon</code>/<code>--stale-check</code>
+flags that demonstrate <code>RestForOne</code> and what a health check is and isn’t
+allowed to say about a process salmon just tore down.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

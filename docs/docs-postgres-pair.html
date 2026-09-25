@@ -1,0 +1,179 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - A Postgres pair whose primary is declared, not discovered</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-postgres-pair.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="Two machines, one Postgres cluster, and a sentence that says which machine is the primary today. Changing that sentence moves the primary; nothing else does. This is `SreBox.PostgresPair`, the `salmon-pgpair` binary, and `salmon-toy-qemu-pg"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - A Postgres pair whose primary is declared, not discovered"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Two machines, one Postgres cluster, and a sentence that says which machine is the primary today. Changing that sentence moves the primary; nothing else does. This is `SreBox.PostgresPair`, the `salmon-pgpair` binary, and `salmon-toy-qemu-pg"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - A Postgres pair whose primary is declared, not discovered"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-postgres-pair.html"><meta property="og:description" content="Two machines, one Postgres cluster, and a sentence that says which machine is the primary today. Changing that sentence moves the primary; nothing else does. This is `SreBox.PostgresPair`, the `salmon-pgpair` binary, and `salmon-toy-qemu-pg"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/docs-postgres-pair.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-postgres-pair.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Two machines, one Postgres cluster, and a sentence that says which machine is the primary today. Changing that sentence moves the primary; nothing else does. This is `SreBox.PostgresPair`, the `salmon-pgpair` binary, and `salmon-toy-qemu-pg","headline":"A Postgres pair whose primary is declared, not discovered","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-postgres-pair.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>A Postgres pair whose primary is declared, not discovered</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1211 words, 6 code snippets, 3 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs-gcp-toy-validation.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">3/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-serve-supervision.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/postgres-pair.md"><code>resources/postgres-pair.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="a-postgres-pair-whose-primary-is-declared-not-discovered">A Postgres pair whose primary is declared, not discovered</h2>
+<p>Two machines, one Postgres cluster, and a sentence that says which machine is
+the primary today. Changing that sentence moves the primary; nothing else
+does. This is <code>SreBox.PostgresPair</code>, the <code>salmon-pgpair</code> binary, and
+<code>salmon-toy-qemu-pg-ha</code>, a demo that builds its own machines to show it.</p>
+<p>If you want the design argument rather than the instructions, read
+<a href="/salmon/specs-pg-switchover.html"><code>specs/pg-switchover.md</code></a>; this file is about
+using what it describes.</p>
+<h3 id="what-it-is-for-and-what-it-is-not">What it is for, and what it is not</h3>
+<p><strong>It is for</strong> a planned switchover (maintenance, a machine you want to drain)
+and an <em>operator-decided</em> failover, on two machines, where a few minutes of
+somebody’s attention is an acceptable price for the machine you did not buy.
+It is also, deliberately, a thing to break on purpose: every failure mode
+below is something the test suite causes and then asserts about.</p>
+<p><strong>It is not</strong> automatic failover. Deciding that a machine is dead needs
+consensus, consensus needs three voters, and salmon has neither — so this
+recipe never promotes on a hunch. When it cannot prove a promotion is safe it
+<em>refuses</em>, and the operator’s answer to a refusal is the one field that
+accepts a loss by name:</p>
+<pre><code>--may-discard A     &quot;I accept losing the writes on A that B does not have&quot;
+</code></pre>
+<p>For the unattended-at-3am version, <a href="/salmon/specs-pg-patroni.html"><code>specs/pg-patroni.md</code></a>
+sketches the Patroni-backed shape, where salmon provisions and supervises and
+Patroni decides.</p>
+<h3 id="the-shape">The shape</h3>
+<p>Three kinds of node, and only one of them mentions a role:</p>
+<table>
+<tr><th>Node</th><th>Says</th></tr>
+<tr><td><code>member</code> (one per machine)</td><td>how to be <em>either</em> half of the pair: replication settings, <code>pg_hba</code> lines for the peer, the replication and rewind roles. Nothing about which half it is.</td></tr>
+<tr><td><code>bouncerSetup</code> (one per bouncer)</td><td>pgbouncer's own configuration, and a routing file it includes but does not own</td></tr>
+<tr><td><code>pairRole</code></td><td><em>"this pair's primary is on B"</em> — the only declaration an operator edits</td></tr>
+</table>
+<p>That split is the whole ergonomic claim: a switchover changes one node’s
+declaration, so under <code>run serve</code> the machines underneath are not marked
+stale by it, and an operator reading a diff sees one word.</p>
+<p><code>pairRole</code>’s <code>check</code> asks both machines and every bouncer what they are; its
+<code>up</code> takes one step at a time until the declaration holds. <strong>The state is
+re-derived every pass</strong> — observe, decide, act, observe again — so an <code>up</code>
+killed half-way through a switchover is finished by the next one. There is no
+progress file that could disagree with the machines.</p>
+<h3 id="using-it">Using it</h3>
+<pre><code>salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --bouncer 10.0.0.4 --seed B \
+  | salmon-pgpair run up
+
+salmon-pgpair config --primary B --a 10.0.0.2 --b 10.0.0.3 --bouncer 10.0.0.4 \
+  | salmon-pgpair run up          # the switchover
+</code></pre>
+<p><code>run tree</code> prints what the first of those declares before anything runs:</p>
+<pre><code>pg-pair-role (n2504805732311083189) primary of app is on A
+  &lt;- pg-pair-bouncer
+  &lt;- pg-pair-seed
+  &lt;- pg-pair-member
+  &lt;- pg-pair-member
+pg-pair-bouncer (n671955809932212377) pgbouncer 10.0.0.4 in front of app
+pg-pair-seed (7089073737010868211) seeds 10.0.0.3 from 10.0.0.2
+  &lt;- pg-pair-member
+  &lt;- pg-pair-member
+pg-pair-member (n6118828710077022853) member of app on 10.0.0.3
+pg-pair-member (2659614637461449593) member of app on 10.0.0.2
+</code></pre>
+<p>What it assumes was done before it ever ran, because a recipe that ships
+secrets has chosen a transport for everyone who uses it: both machines have a
+Postgres cluster and the two <code>.pgpass</code> files the pair names, and the bouncer
+has pgbouncer, a <code>userlist.txt</code> and the <code>.pgpass</code> for its admin console. The recipe is given paths.</p>
+<p><code>--seed B</code> is the first clone of a pair’s life, and the only way back from a
+standby that has fallen too far behind (see the slot budget below). It is safe
+to leave declared — the clone does nothing once the two sides share a system
+identifier, and refuses a machine holding a cluster it does not recognise.</p>
+<h3 id="what-a-switchover-actually-does">What a switchover actually does</h3>
+<pre><code>PauseBouncers -&gt; StopMember A -&gt; Promote B -&gt; RepointBouncers B -&gt; Rejoin A -&gt; Done
+</code></pre>
+<ul>
+<li><strong>PauseBouncers</strong> holds the clients rather than dropping them. With
+<code>pool_mode = transaction</code>, <code>PAUSE</code> waits for transactions in flight and
+queues what comes after, so a client sees latency where it would otherwise
+see an error.
+</li>
+<li><strong>StopMember</strong> is a <em>clean</em> stop, which hands the standby everything it has
+not got, including the shutdown checkpoint the promotion waits for. It also
+pins <code>wal_keep_size</code> first, because a clean shutdown ends in a checkpoint
+and a checkpoint recycles the WAL a later rewind reads.
+</li>
+<li><strong>Promote</strong> waits for the server to say it promoted.
+</li>
+<li><strong>RepointBouncers</strong> rewrites the routing file, <code>RELOAD</code>s, and <code>RESUME</code>s.
+Never a restart: a restart drops every client the bouncer is there to hold.
+</li>
+<li><strong>Rejoin</strong> brings the old primary back as a standby through <code>pg_rewind</code>,
+onto the new primary’s history — same machine, same data, only the records
+that diverged replaced. Not a re-clone.
+</li>
+</ul>
+<p>Traffic moves through pgbouncer’s admin console, and the routing lives in its
+own file pulled in with <code>%include</code>. That is a seam between two writers:
+<code>bouncerSetup</code> owns the ini, so a change there is applied by a restart; the
+role node owns the routing file (<code>bouncerSetup</code> writes it only when it is
+missing), and applies a change gently. One file with two writers is how a switchover becomes
+an outage.</p>
+<h3 id="when-it-refuses-and-why">When it refuses, and why</h3>
+<p>A refusal is the recipe saying it cannot prove the next step is safe:</p>
+<table>
+<tr><th>It says</th><th>Because</th></tr>
+<tr><td>the two machines hold different clusters</td><td>their system identifiers differ, so every step below would be applied to somebody else's data. Checked before anything else, and <code>--may-discard</code> does not override it</td></tr>
+<tr><td>both machines are primaries</td><td>resolving a split brain means rewinding one onto the other, which is a loss. Name the side</td></tr>
+<tr><td>the peer did not stop cleanly</td><td>a crashed cluster's <code>pg_controldata</code> records its last <em>checkpoint</em>, not the end of its WAL: the standby may be missing anything written after it</td></tr>
+<tr><td>cannot confirm the peer has stopped</td><td>it is unreachable, and promoting without fencing is how two primaries happen</td></tr>
+<tr><td>the peer standby is ahead</td><td>promoting the declared side would lose the difference</td></tr>
+</table>
+<p>And two verdicts that are <em>not</em> failures, and act on nothing:</p>
+<ul>
+<li><strong><code>AwaitStreaming</code></strong> — the peer is pointed here and not connected: a
+partition, or a standby that came back a second ago. Waiting is right;
+rewinding at it would stop it and then fail, because whatever keeps it from
+streaming keeps <code>pg_rewind</code> from reading too.
+</li>
+<li><strong><code>Degraded</code></strong> — the declaration holds but the pair is one machine short.
+Reported as <code>Unknown</code>, the one verdict <code>run serve</code> acts on by continuing to
+look.
+</li>
+</ul>
+<h3 id="the-slot-budget">The slot budget</h3>
+<p>Each member streams with a replication slot the pair names, created by the
+member that rejoins. A slot is a promise to keep WAL until the standby has it,
+and an unbounded promise is how a machine that is merely <em>down</em> takes the
+machine that is <em>up</em> with it — so <code>max_slot_wal_keep_size</code> caps it. Past the
+cap the slot is invalidated, the WAL is recycled, and the standby can never
+catch up.</p>
+<p>That is a good trade and a terrible surprise, so the pair says it out loud:
+the check reports the lost slot by name and <strong>does nothing</strong>. <code>pg_rewind</code>
+would succeed and change nothing; the only way back is a re-seed, and wiping a
+machine is an operator’s decision, declared with <code>--seed</code>.</p>
+<h3 id="watching-it-happen">Watching it happen</h3>
+<p><code>salmon-toy-qemu-pg-ha</code> builds three qemu guests, puts the pair on two of them
+and pgbouncer on the third, and writes through the bouncer while the primary
+moves:</p>
+<pre><code>t=$(cabal list-bin salmon-toy-qemu-pg-ha)
+
+sudo $t config prereqs             | sudo $t run up   # once: three rootfses
+$t config up --primary A --seed B  | $t run up        # once: the pair
+$t config client --seconds 120     | $t run up &amp;      # a client, writing
+$t config up --primary B           | $t run up        # the demo
+</code></pre>
+<p>The client prints three numbers when it stops. On the machine this was written
+on:</p>
+<pre><code>  inserts acknowledged through the bouncer: 460
+  inserts that came back an error:          0
+  acknowledged rows missing afterwards:     0
+</code></pre>
+<p><code>prereqs</code> is the only part that needs root — debootstrapping a root
+filesystem, regenerating an initrd that can mount a 9p root, and handing
+<code>/etc/ssh</code> to whoever runs the rest. Everything after it is an unprivileged
+user with two capabilities granted once (<code>capsh</code> needs <code>cap_net_admin</code>, qemu
+needs <code>cap_dac_override,cap_chown,cap_fowner</code>; see
+<a href="/salmon/specs-qemu-test-vms-progress.html"><code>specs/qemu-test-vms-progress.md</code></a>).</p>
+<p>After the demo B is the primary: pause machine B’s guest, declare
+<code>up --primary A</code>, and it refuses; add <code>--may-discard B</code> and the refusal turns
+into a failover.</p>
+<h3 id="what-is-tested-and-what-that-is-worth">What is tested, and what that is worth</h3>
+<p><code>Test.PostgresPairSpec</code> covers the decision table at Layer 0 — every state two
+machines can be found in, including every refusal — without a database.</p>
+<p><code>Test.PostgresSwitchoverSpec</code> and <code>Test.PgPairDemoSpec</code> cause the failures on
+real machines:</p>
+<table>
+<tr><th></th><th></th></tr>
+<tr><td>S1</td><td>switch A→B→A with a client attached: every acknowledged insert present, zero client errors</td></tr>
+<tr><td>S2</td><td>the controller killed after each step in turn: a plain rerun finishes it</td></tr>
+<tr><td>S3</td><td>the primary crashed with un-replicated writes: refused without the flag, rewound with it</td></tr>
+<tr><td>S4</td><td>the two machines partitioned: the check is <code>Unknown</code>, and the standby is not touched</td></tr>
+<tr><td>S5</td><td>a failover across a partition that hides the primary from the controller too: two primaries, then the loser rewound</td></tr>
+<tr><td>S6</td><td>a standby that falls off the slot budget: said, not silently re-seeded</td></tr>
+<tr><td>S7</td><td>both machines stopped, in either order, and the stale one declared primary</td></tr>
+<tr><td>S8</td><td>a stranger's cluster where a member should be: refused, nothing deleted</td></tr>
+</table>
+<p>Between them these cost the recipe twelve defects, and not one was on the
+happy path: S1 and S8 found nothing, and every other defect needed a machine
+that stopped, or was cut off, without being asked to. That is the argument for
+writing the list as <em>causes</em> rather than as features.</p>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

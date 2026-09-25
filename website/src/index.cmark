@@ -1,0 +1,76 @@
+=base:build-info.json
+{"layout":"index"
+,"publicationStatus":"Public"
+}
+
+=base:preamble.json
+{"author": "Lucas DiCioccio"
+,"date": "2026-09-25T12:00:00Z"
+,"title": "salmon"
+}
+
+=base:main-content.cmark
+
+<p align="center">
+  <img src="/images/logo001.png" alt="salmon" width="220">
+</p>
+
+# salmon
+
+Yet another approach to xyz-dependencies: express provisioning, CI/CD and
+general infrastructure operations as DAGs of idempotent operations ("ops"),
+with uniform `up`/`down`/`check` semantics whether a node is as small as
+"create a file" or as large as "turn a server up". Run a graph once, or keep
+it converged and supervised with a long-running `run serve`.
+
+```sh
+my-salmon config <seed-args...> | my-salmon run up      # converge the graph
+my-salmon config <seed-args...> | my-salmon run down    # tear it down
+my-salmon config <seed-args...> | my-salmon run tree    # print the dependency tree
+my-salmon run serve --http /run/salmon.sock             # keep converging, tend the nodes, serve a web UI
+```
+
+Provisioning tooling tends to force a choice between one-off scripts (highly
+tunable, don't compose) and do-everything tools (powerful, but their behaviour
+and their configuration become inseparable). Salmon's bet: both are the same
+problem at different scales if operations are represented as an inspectable
+dependency graph rather than a flat ordered script — with the graph itself
+given real up/down/check semantics, so it converges to a target state (and
+back) instead of just running once.
+
+The code is on GitHub at
+[`lucasdicioccio/salmon`](https://github.com/lucasdicioccio/salmon). It is a
+Haskell cabal multi-package project: `salmon-core` (the graph model, no IO),
+`salmon-ops` (the builtin nodes and the drivers, one-shot and `serve`),
+`salmon-ops-recipes` (opinionated compositions) and `salmon-apps` (the
+binaries).
+
+## Explore
+
+- [**Getting started**](/getting-started.html) — build it, run the tests,
+  and the seed → directive → ops protocol every salmon binary speaks.
+- [**The model**](/docs-salmon-core.html) — `Graph`, `OpGraph`, `Track`,
+  `Eval`: why "create a file" and "turn a server up" are one type.
+- [**Writing ops**](/docs-howto-ops.html) — the cookbook for declaring and
+  testing nodes, and the [patterns](/docs-salmon-ops-patterns.html) that
+  recur across recipes.
+- [**`run serve`**](/docs-serve-supervision.html) — convergence,
+  supervision, the HTTP API, the web UI, pull mode and the status sink.
+- [**A Postgres pair**](/docs-postgres-pair.html) — a primary that is a
+  declaration, not a discovery: switchover, refused failovers, rejoins.
+- [**Builtins, recipes and binaries**](/builtins.html) — every node module,
+  recipe and shipped binary, one line each.
+- [**Guides**](/docs.html) and [**Specs**](/specs.html) — the documentation
+  and the design sketches, each spec headed by what of it has shipped.
+
+<script src="js/topicgraph.js"></script>
+
+=base:main-css.tramaj-json
+{ "format": "css"
+, "contents":
+  [ "@import \"`$ctx.pathPrefix`/css/colors.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/navigation.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/articles-listing.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/index.css\";"
+  ]
+}

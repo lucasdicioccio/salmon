@@ -34,7 +34,6 @@ This gives Salmon's existing execution model — sequential, concurrent, and sup
 ### New modules under `salmon-ops/src/Salmon/Builtin/Nodes/Gcp/`
 
 ```text
-```text
 salmon-ops/src/Salmon/Builtin/Nodes/Gcp/
   Core.hs              -- project, zone, region, auth, common CLI wrappers
   Compute.hs           -- GCE instances, instance groups, templates

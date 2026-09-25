@@ -1,0 +1,240 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Postgres with automatic failover: salmon provisions, Patroni decides</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><meta property="og:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-patroni.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-patroni.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: draft / not implemented. A design sketch to react to, not a committed","headline":"Postgres with automatic failover: salmon provisions, Patroni decides","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Postgres with automatic failover: salmon provisions, Patroni decides</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1266 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-ha-control-plane.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">2/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-patroni.md"><code>specs/pg-patroni.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="postgres-with-automatic-failover-salmon-provisions-patroni-decides">Postgres with automatic failover: salmon provisions, Patroni decides</h2>
+<p>Status: draft / not implemented. A design sketch to react to, not a committed
+plan.</p>
+<p>Companion: <code>pg-switchover.md</code> is the two-node, operator-driven design for
+test harnesses and low SLAs. This one is for when nobody should have to be
+awake for a failover.</p>
+<h3 id="position">Position</h3>
+<p><strong>Salmon does not decide when to fail over, and does not know who the
+primary is.</strong> Safe automatic failover needs consensus, so that a split
+network cannot elect two primaries, and a leader that demotes itself when it
+loses the quorum, which is Patroni’s form of fencing. <code>run serve</code> is one
+process per machine with no coordination between them. Building consensus
+into salmon would mean writing a worse etcd.</p>
+<p>So the split of work is:</p>
+<table>
+<tr><th>Salmon</th><th>Patroni</th></tr>
+<tr><td>installs and configures etcd, Patroni, routing</td><td>runs Postgres: initdb, start, stop, restart, promote, demote</td></tr>
+<tr><td>supervises the Patroni and etcd systemd units</td><td>supervises Postgres</td></tr>
+<tr><td>states the cluster-wide config it wants</td><td>applies it, restarting members when a setting needs it</td></tr>
+<tr><td>creates databases, roles, templates, clones, runs migrations, <strong>through the leader</strong></td><td>holds the leader key in etcd, i.e. the only answer to "who is primary"</td></tr>
+<tr><td>backups and archiving</td><td>uses the archive to rebuild replicas</td></tr>
+</table>
+<p>The chain of ownership is salmon → systemd → Patroni → Postgres. Salmon’s
+supervision (<code>Actions/Upkeep.hs</code>) must stop at the Patroni unit: a salmon
+node that restarts Postgres is fighting its owner.</p>
+<h3 id="the-consequence-for-everything-that-exists">The consequence for everything that exists</h3>
+<p><strong>The primary’s location never appears in a directive, a <code>ref</code>, <code>help</code> or
+<code>notes</code>.</strong> This is the opposite of <code>pg-switchover.md</code>, where the operator’s
+declaration <em>is</em> the truth. Here, a declared primary would be stale after the
+first automatic failover, and the next <code>run up</code> would try to “correct” it.</p>
+<p>Existing builtins that must <strong>not</strong> run on a Patroni member:</p>
+<table>
+<tr><th>Builtin</th><th>Replaced by</th></tr>
+<tr><td><code>createCluster</code>, <code>pgLocalCluster</code> (initdb, start)</td><td>Patroni's bootstrap on the first member, and its replica creation on the others. Debian's <code>postgresql@</code> units must be disabled or masked, or two supervisors race for the data directory.</td></tr>
+<tr><td><code>startCluster</code> / <code>stopCluster</code> / <code>restartCluster</code> / <code>promoteCluster</code></td><td>nothing; <code>patronictl</code> if an operator must</td></tr>
+<tr><td><code>alterSystemSet</code>, <code>reloadConf</code></td><td>the DCS config node (below). <code>ALTER SYSTEM</code> still "works", but Patroni can overwrite what it sets and it does not reach the other members</td></tr>
+<tr><td><code>hbaLine</code>, <code>allowReplicationFrom</code>, <code>allowClientCertFrom</code></td><td><code>postgresql.pg_hba</code> in <code>patroni.yml</code>, or the DCS config</td></tr>
+<tr><td><code>primaryReplicationSetup</code>, <code>standbyReplicationSetup</code>, <code>replicationSlot</code></td><td>Patroni: it creates replicas and manages physical slots for members</td></tr>
+</table>
+<p>Builtins that still apply, <strong>as long as they reach the leader:</strong> <code>database</code>,
+<code>user</code>, <code>group</code>, <code>grant</code>, <code>adminScript</code>, templates and clones,
+<code>SreBox.PostgresMigrations</code>. Every one of them runs
+<code>sudo -u postgres psql -p &lt;port&gt;</code> on the local machine today. On a replica,
+<code>CREATE DATABASE</code> fails with “cannot execute … in a read-only transaction”.
+See “Reaching the leader”.</p>
+<h3 id="new-builtins">New builtins</h3>
+<h4 id="etcd"><code>Etcd</code></h4>
+<ul>
+<li>Renders the config and a systemd unit; the <code>check</code> is
+<code>etcdctl endpoint health</code> against the member itself.
+</li>
+<li><strong>The trap is bootstrap.</strong> <code>initial-cluster-state</code> is <code>new</code> exactly once in
+a cluster’s life. After that, a new member is added by a runtime call
+(<code>etcdctl member add</code>) followed by starting it with <code>existing</code>, and it
+cannot be expressed as config alone. A node for “etcd cluster of these
+three” therefore has a seed phase (all start with <code>new</code> when no member
+answers) and a join phase (member add, then start). Its <code>check</code> compares
+the member list, and does not look at a config file.
+</li>
+<li>TLS: peer and client certificates come in pre-provisioned, per the recipes’
+secret-transport rule. <code>Certificates</code> can mint them in a recipe that owns
+that choice; the builtin only takes paths.
+</li>
+<li>Several Patroni clusters can share one etcd (each has its own <code>scope</code>
+and <code>namespace</code>). This is how <code>pg-ha-control-plane.md</code>’s cross-replicated
+pair becomes safe: two Postgres machines plus a small third one running
+only etcd, with three votes between them.
+</li>
+</ul>
+<h4 id="patroni"><code>Patroni</code></h4>
+<ul>
+<li>Renders <code>patroni.yml</code> (an <code>EncodeFileContents</code> value, so its content
+fingerprint reaches <code>notes</code> and a re-declaration is <code>Stale</code> under
+<code>run serve</code>), plus a systemd unit.
+</li>
+<li>The <code>check</code> reads the local REST API on port 8008:
+<ul>
+<li><code>GET /health</code>: is Postgres running under Patroni;
+</li>
+<li><code>GET /patroni</code>: state, role, <code>pending_restart</code>, and whether the member is
+in the cluster at all.
+</li>
+<li>Role is reported, never judged: a replica is as healthy as a leader.
+</li>
+</ul>
+</li>
+<li>Debian’s <code>patroni</code> package ships its own integration with the
+<code>postgresql-common</code> layout (<code>pg_createconfig_patroni</code> and a per-cluster
+<code>patroni@</code> unit). Whether to build on it or render our own is an open
+question below.
+</li>
+</ul>
+<h4 id="the-cluster-wide-config-node">The cluster-wide config node</h4>
+<p>This is <code>ALTER SYSTEM</code>’s replacement. Patroni keeps
+<code>postgresql.parameters</code> and friends in etcd, applied on every member.</p>
+<ul>
+<li><code>check</code>: <code>GET /config</code>, comparing only the keys this node declares, so that
+other declarations or operators can own other keys.
+</li>
+<li><code>up</code>: <code>PATCH /config</code> with those keys.
+</li>
+<li>A second <code>check</code> condition, the same move as <code>checkService</code> reading
+<code>NeedDaemonReload</code>: after a restart-only setting changes, <code>/patroni</code> on each
+member says <code>pending_restart</code>. The node is not <code>Success</code> until nothing is
+pending, and its <code>up</code> can trigger <code>patronictl restart --pending</code>, which
+restarts replicas before the leader. Whether salmon should restart members
+at all, or only report, is an open question.
+</li>
+</ul>
+<h4 id="routing-to-the-leader">Routing to the leader</h4>
+<p>Three options, from least to most machinery. The recipe should offer the
+first and one of the others:</p>
+<ol>
+<li><strong>libpq multi-host connection strings:</strong>
+<code>host=a,b,c target_session_attrs=read-write</code>. No new process; works only
+for libpq clients and only at connect time.
+</li>
+<li><strong><code>vip-manager</code>:</strong> a floating IP that follows the leader key in etcd.
+Needs one L2 segment.
+</li>
+<li><strong>HAProxy</strong> with <code>option httpchk</code> on <code>GET /primary</code> (port 8008): the
+standard Patroni setup. One port for the leader, one for replicas
+(<code>GET /replica</code>). It sits in front of, or replaces the upstream of, the
+existing <code>PgBouncer</code>.
+</li>
+</ol>
+<p>A <code>Haproxy</code> builtin would have the same shape as <code>Nginx</code>: a config value, a
+renderer, and a systemd unit. Unlike pgbouncer, HAProxy needs no reload on
+failover: its health checks move the traffic.</p>
+<h3 id="reaching-the-leader">Reaching the leader</h3>
+<p>Admin nodes need a way to reach whichever member is the leader right now,
+which is not known when the directive is written.</p>
+<p>The recommendation is to <strong>address the leader by its routed endpoint</strong> (the
+HAProxy primary port, or the VIP) with a connection string, not by
+<code>sudo -u postgres</code> on a machine. That means connection-string variants of the
+admin builtins. <code>SreBox.PostgresMigrations.remoteMigrateOpaqueSetup</code> already
+works this way; <code>database</code>, <code>user</code>, templates and clones do not. This is the
+largest single piece of work in this spec, and it is independently useful:
+anything managed (Cloud SQL, see <code>Gcp/PostgrestCloudRun</code>) has the same “no
+local superuser” shape.</p>
+<p>The alternative, running the admin nodes on every member with a <code>check</code> that
+answers <code>Skipped</code> when this member is not the leader, is smaller but racy:</p>
+<ul>
+<li>the leader can change between the check and the <code>up</code>;
+</li>
+<li>templates would be built by whichever member was the leader at the time.
+</li>
+</ul>
+<p>Refused.</p>
+<h3 id="nodes-that-must-run-on-exactly-one-member">Nodes that must run on exactly one member</h3>
+<p>Backups (from a replica, by preference) and scheduled jobs (<code>CronTask</code>)
+would otherwise run on every member.</p>
+<ul>
+<li><strong>Backups:</strong> a Patroni tag such as <code>nofailover</code> or a custom one marks the
+member dedicated to them. The scheduled command gates itself with
+<code>curl -sf localhost:8008/replica</code>, skipping when the member is not a
+replica.
+</li>
+<li><strong>PITR:</strong> <code>SreBox.PostgresBackup</code> is <code>pg_dump</code>, which has no point-in-time
+recovery and no use to Patroni. A continuous archive (pgBackRest or WAL-G,
+both packaged by Debian) earns its place twice: as the disaster recovery
+story, and as Patroni’s <code>create_replica_methods</code>, which rebuilds a replica
+from the archive instead of loading the leader with a base backup.
+</li>
+</ul>
+<h3 id="switchover-under-patroni">Switchover, under Patroni</h3>
+<p><code>pg-switchover.md</code>’s role node has a counterpart here, and it is opt-in: a
+<strong>preferred leader</strong>.</p>
+<ul>
+<li><code>check</code>: <code>GET /leader</code> names the preferred member.
+</li>
+<li><code>up</code>: <code>POST /switchover</code>.
+</li>
+</ul>
+<p>The default is <em>no preference</em>. With a preference declared and supervision
+on, salmon would move the leader back after every automatic failover, as
+soon as the preferred member is healthy. That is sometimes what is wanted
+(a preferred site or a bigger machine) and sometimes a flap. It must be a
+choice, never the default.</p>
+<h3 id="disaster-scenarios">Disaster scenarios</h3>
+<p>These reuse <code>pg-switchover.md</code>’s scenario catalogue where the cause is the
+same, with different expected outcomes, plus the ones only consensus makes
+meaningful.</p>
+<p><strong>Machines:</strong> three VMs, each with <code>postgresql</code>, <code>patroni</code>, <code>etcd-server</code> and
+<code>haproxy</code> in the rootfs (the guests cannot reach the network past boot,
+see <code>Test.PostgresReplicationSpec</code>). The addresses are
+<code>testVmAddr</code>/<code>testVmAddr2</code>/<code>testVmAddr3</code>. HAProxy and the client loop run on
+one of them, or on a fourth VM.</p>
+<table>
+<tr><th>#</th><th>Scenario</th><th>Assert</th></tr>
+<tr><td>T1</td><td>Kill the leader's machine</td><td>a new leader within the TTL (about 30s by default); writes through HAProxy resume; the old leader rejoins as a replica when it comes back</td></tr>
+<tr><td>T2</td><td>Partition the leader from the other two</td><td>the old leader <strong>demotes itself</strong> once its lease expires; at no moment do two members accept writes (the client loop writes through each member's own port and records which accepted)</td></tr>
+<tr><td>T3</td><td><strong>After T1, rerun <code>run up</code> on every member and on the controller</strong></td><td><strong>nothing changes</strong>: no restart, no config write, no role change. This is the salmon-specific assertion: salmon does not fight Patroni</td></tr>
+<tr><td>T4</td><td>Change a restart-only parameter through the config node</td><td>members restart replicas first; <code>pending_restart</code> clears; the node's check reaches <code>Success</code></td></tr>
+<tr><td>T5</td><td>Lose etcd quorum (stop two of three)</td><td>with <code>failsafe_mode</code> off, the leader goes read-only; with it on, the leader keeps writing while it can reach all members. Pins down which mode the recipe defaults to</td></tr>
+<tr><td>T6</td><td>Create a database and a clone through the routed endpoint, fail over, repeat</td><td>both work on each leader; no admin node ever ran against a replica</td></tr>
+<tr><td>T7</td><td>Add a fourth member</td><td>etcd's join phase runs, not a bootstrap; Patroni builds the replica from the archive if one is configured</td></tr>
+</table>
+<p>T3 is the test the whole design rests on, and the reason “the primary never
+appears in a directive” is a rule rather than a guideline.</p>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li><strong>Connection-string admin builtins</strong> (<code>database</code>, <code>user</code>, grants,
+templates, clones). Useful today for managed Postgres, and required here.
+</li>
+<li><strong><code>Etcd</code>,</strong> with the seed and join phases; Layer 3, three VMs, including
+a restart of one member.
+</li>
+<li><strong><code>Patroni</code></strong> plus the cluster-wide config node; T1, T3, T4.
+</li>
+<li><strong>Routing:</strong> multi-host connection strings first, then HAProxy; T2, T6.
+</li>
+<li><strong>Archive and PITR</strong> (pgBackRest or WAL-G), and backups on one member; T7.
+</li>
+<li><strong>The opt-in preferred leader.</strong>
+</li>
+</ol>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>Debian’s <code>pg_createconfig_patroni</code> and <code>patroni@</code> units, or our own?</strong>
+Theirs fits <code>postgresql-common</code>’s layout, which the rest of <code>Postgres.hs</code>
+assumes (<code>pg_lsclusters</code>, <code>/var/lib/postgresql/$version/$cluster</code>). Ours is
+simpler to reason about, and portable to non-Debian hosts.
+</li>
+<li><strong>Should the config node restart members</strong> (<code>patronictl restart --pending</code>), or report <code>pending_restart</code> and leave the restart to an
+operator? Restarting is what <code>run up</code> means everywhere else. A restart of
+the leader under load is also a small outage.
+</li>
+<li><strong><code>failsafe_mode</code> default</strong> (see T5).
+</li>
+<li><strong>REST API authentication:</strong> Patroni’s unsafe endpoints (<code>/switchover</code>,
+<code>PATCH /config</code>, <code>/restart</code>) need <code>restapi.authentication</code>. The
+credentials come in as a pre-provisioned file.
+</li>
+<li><strong>Which etcd API:</strong> Patroni’s <code>etcd3:</code> section, the v3 API, is the only
+sensible one with current etcd. Say so in the builtin and do not offer v2.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

@@ -352,7 +352,7 @@ cheap one and lands first.
 7. **Web UI**: static graph from `/dag`, then live from `/events`, then
    actions, then the seed form. **Shipped, all four steps** (`GET /` and
    `/ui/*` in `Salmon.Actions.Serve.Http`, the files under `salmon-ops/ui/`
-   embedded at build time with `file-embed`; `docs/serve-supervision.md`
+   embedded at build time with `file-embed`; `resources/serve-supervision.md`
    §14 "The web UI"). Three deviations from the sketch above. It is not a
    separate `salmon-web` package and not PureScript: three static files —
    one page, one ES module, one stylesheet, no bundler — served by the
@@ -391,7 +391,7 @@ cheap one and lands first.
    **Shipped** (`run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key
    FILE --token-file FILE`; `Http.withHttpServerOn`/`Http.Bind`/
    `Http.requireToken`, `CommandLine.validateTcpOptions`,
-   `Test/ServeTlsSpec.hs`, `docs/serve-supervision.md` §14). The same
+   `Test/ServeTlsSpec.hs`, `resources/serve-supervision.md` §14). The same
    `application` on a warp-tls listener beside the unix socket, one
    `Server` for both; a bearer token on every route of the TCP listener,
    compared in constant time; the unix socket unchanged and token-free.

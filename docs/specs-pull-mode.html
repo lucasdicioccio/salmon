@@ -1,0 +1,562 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Pull mode: a `serve` that fetches its own declarations</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pull-mode.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Pull mode: a `serve` that fetches its own declarations"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Pull mode: a `serve` that fetches its own declarations"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pull-mode.html"><meta property="og:description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-pull-mode.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pull-mode.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,","headline":"Pull mode: a `serve` that fetches its own declarations","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pull-mode.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Pull mode: a `serve` that fetches its own declarations</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 4505 words, 3 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-future-work.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">10/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-qemu-test-vms-progress.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pull-mode.md"><code>specs/pull-mode.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="pull-mode-a-serve-that-fetches-its-own-declarations">Pull mode: a <code>serve</code> that fetches its own declarations</h2>
+<p>Status: milestones 1 to 7 below are implemented (<code>Salmon.Actions.Follow</code>,
+<code>Salmon.Actions.Follow.Scheduler</code>, <code>Salmon.Actions.Follow.Registry</code> and its
+git/HTTP/DNS backends, <code>run serve --follow</code>, <code>--follow-cache</code>, <code>mode</code> in
+<code>status</code>, <code>--status-sink</code>, <code>salmon-fleet status</code>, the verify-before-inject
+hook, and signed documents behind <code>--follow-key</code>); the rest is a
+design sketch to react to, not a committed plan. It grew out of a fleet-management assessment; the companion
+idea (a generic salmon server with web/terminal clients that render the live
+<code>Dag</code>) is a separate sketch and is only referenced here where the two meet.</p>
+<h3 id="problem">Problem</h3>
+<p>Today’s <code>run serve</code> only ever waits to be <em>pushed at</em>. Its whole input surface
+is one <code>Handle</code>: <code>serveWith</code> forks a reader thread that <code>hGetLine</code>s into a
+<code>TChan</code> and the loop reads commands off that channel
+(<code>salmon-ops/src/Salmon/Actions/Serve.hs</code>, <code>serveWith</code>/<code>readInto</code>/<code>loop</code>).
+The only way a declaration reaches a remote machine is a controller that
+ssh-es in — and what it runs there is a one-shot <code>run up</code> with the directive
+on stdin (<code>Salmon.Builtin.Nodes.Self.callSelf</code>), never a <code>serve</code>.</p>
+<p>So the shape we have is hub-and-spoke push: a controller holds every
+declaration, opens a connection per host per change, and learns an exit code
+back. That has three limits that get worse with every host added:</p>
+<ul>
+<li><strong>Every host needs an inbound path from the controller</strong> (ssh, a key, a
+firewall rule), and the controller must be up at the moment a change is
+wanted.
+</li>
+<li><strong>A <code>serve</code> on a remote host is unreachable once started.</strong> <code>ssh host bin run serve</code> works, but nothing can then talk to it except that one ssh
+session’s stdin.
+</li>
+<li><strong>There is no fleet-level state.</strong> Each <code>serve</code> is an island; nothing
+answers “which hosts have converged to which declaration”.
+</li>
+</ul>
+<p>The missing mode is the inverse: a host that periodically <em>fetches</em> its
+desired state from somewhere and converges on it — the kubelet / Puppet-agent
+shape. It is the cheapest route to a fleet because it needs <strong>no control
+plane and no inbound port on any host</strong>. Nothing in it requires consensus;
+it requires a place to put documents.</p>
+<pre><code>controller ──writes──▶ dumb store (file / git / bucket / HTTP)
+                            │ fetch                 ▲
+              ┌─────────────┼─────────────┐         │ status
+        host A: serve   host B: serve   host C: serve
+          --follow        --follow        --follow
+</code></pre>
+<h3 id="what-the-loop-already-has">What the loop already has</h3>
+<p>Most of a puller’s semantics exist; what’s missing is the transport and one
+ordering rule.</p>
+<ul>
+<li><strong><code>load &lt;file&gt;</code></strong> runs a file’s lines through the command language, nested
+loads included, depth-capped (<code>loadFile</code>, <code>maxLoadDepth</code>). A puller is
+“<code>load</code> from somewhere else, on a trigger”.
+</li>
+<li><strong><code>only &lt;seed&gt;</code></strong> retires every other seed, <strong><code>up</code>/<code>down</code></strong> add/retire one,
+and <strong><code>clear</code></strong> retires all. Re-declaring an unchanged seed is a no-op
+because the ledger unifies by directive (<code>Salmon.Op.Ledger</code>, and
+<code>Serve.record</code>’s <code>Stale</code>-vs-unchanged comparison).
+</li>
+<li><strong><code>autoconverge off</code> + <code>converge</code></strong> separates <em>recording</em> declarations
+from <em>acting</em> on them (<code>Serve.hs</code>, <code>AutoConverge</code>), so a fetched document
+can be applied as one atomic batch of declarations followed by a single
+pass, rather than N passes.
+</li>
+<li><strong><code>up-directive &lt;file&gt;</code></strong> declares from a directive JSON rather than seed
+args, so a document can carry either spelling.
+</li>
+<li><strong>The reader is the only thing that assumes stdin.</strong> <code>serveWith</code> already
+takes any <code>Handle</code>; the loop reads <code>Maybe String</code> off a <code>TChan</code>. Generalizing
+the reader to a <em>merged</em> source of lines is a small change.
+</li>
+</ul>
+<h3 id="design">Design</h3>
+<h4 id="the-fetched-thing-is-a-declarative-document-not-a-command-log">The fetched thing is a declarative document, not a command log</h4>
+<p>The document is the <strong>desired set</strong>: the seeds this host should have live.
+It is <em>not</em> a sequence of <code>up</code>/<code>down</code> commands, and it is <strong>JSON</strong>, not seed
+lines — JSON is what <code>up-directive</code> already speaks, what every tool that
+might produce or inspect a document (CI, a web UI, <code>jq</code>, a controller written
+in anything) speaks, and what a signature can be computed over
+unambiguously. Seed-line spelling stays available <em>inside</em> it, as an array of
+words, so a document can carry either a seed or a fully-configured directive:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;salmon&quot;</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;web-api@2026-09-23T10:41:07Z&quot;</span><span class="fu">,</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;seeds&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span> <span class="dt">&quot;seed&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;base-packages&quot;</span><span class="ot">]</span> <span class="fu">}</span><span class="ot">,</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span> <span class="dt">&quot;seed&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;app&quot;</span><span class="ot">,</span> <span class="st">&quot;--version&quot;</span><span class="ot">,</span> <span class="st">&quot;42&quot;</span><span class="ot">]</span> <span class="fu">}</span><span class="ot">,</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span> <span class="dt">&quot;directive&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;...&quot;</span><span class="fu">:</span> <span class="st">&quot;a directive JSON, as `up-directive` takes&quot;</span> <span class="fu">}</span> <span class="fu">}</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div></div><p><code>salmon</code> is a format version; <code>id</code> is opaque, chosen by the publisher, and is
+what <code>history</code> records (below). Anything else at the top level is ignored by
+v1 so publishers can annotate — except <code>published</code>, an optional RFC 3339
+timestamp that milestone 4 gave a meaning (see the open questions).</p>
+<p>Reason for a document rather than a log: a log needs a cursor, exactly-once
+delivery, and a story for a host that missed the middle of it. A document is
+idempotent — safe to re-fetch, safe to fetch twice, safe to fetch after a
+month offline. The puller diffs the document against the live ledger and
+emits, on the loop’s inbox:</p>
+<pre><code>autoconverge off
+up   &lt;seed A&gt;        # in document, not live
+up   &lt;seed B&gt;        # in document, already live -&gt; no-op by the ledger
+down &lt;seed C&gt;        # live, not in document
+autoconverge on      # (restore whatever it was)
+converge
+</code></pre>
+<p><code>only</code> is the tempting one-liner but it is the wrong primitive: it retires
+everything not named, which conflicts with a host following several labels
+(each document covers only its own label’s seeds) and with an operator who
+typed something interactively that the document shouldn’t know about. The diff is explicit about what it
+retires; <code>only</code> is not.</p>
+<p><code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code> are <em>not</em> state and do not belong in the
+document. They stay on a push channel (stdin today; a socket later) or in a
+separate, consumed-once side file if there’s a real need.</p>
+<h4 id="labels-are-addresses-into-a-registry">Labels are addresses into a registry</h4>
+<p>A <strong>label</strong> is not a selector inside one big fleet file; it is <em>syntax for
+addressing the latest document</em> in a larger registry. A host started with
+labels <code>web-api</code> and <code>canary</code> fetches two documents — “latest for <code>web-api</code>”,
+“latest for <code>canary</code>” — and its desired set is their union. A registry is
+anything that can answer “latest document for <code>&lt;label&gt;</code>”, and the label is
+spliced into an address by a small template the registry backend owns:</p>
+<table>
+<tr><th>registry backend</th><th>how <code>&lt;label&gt;</code> becomes an address</th><th>latest / change detection</th></tr>
+<tr><td>directory</td><td><code>&lt;dir&gt;/&lt;label&gt;.json</code></td><td>mtime + content hash, or inotify</td></tr>
+<tr><td>git repo</td><td><code>&lt;repo&gt;/&lt;label&gt;/latest.json</code> (a subdirectory per label; history is git's)</td><td>commit id</td></tr>
+<tr><td>HTTP</td><td><code>https://controller.example/seed/latest/&lt;label&gt;</code></td><td>ETag / <code>If-None-Match</code>, else hash</td></tr>
+<tr><td>bucket</td><td><code>gs://&lt;bucket&gt;/&lt;label&gt;/latest.json</code> (<code>Gcp/Storage</code>)</td><td>object generation</td></tr>
+<tr><td>DNS</td><td><code>&lt;label&gt;.&lt;zone&gt;</code>, e.g. <code>web-api.controller.salmon.example</code></td><td>see below</td></tr>
+</table>
+<p>The DNS backend is the “hack” worth spelling out because it is cheap to poll
+and salmon already runs DNS (<code>SreBox.MicroDNS</code>, <code>SreBox.DNSRegistration</code>), so
+a controller can <em>publish</em> records with nodes that exist today. Two shapes:</p>
+<ul>
+<li><strong>Index only.</strong> A <code>TXT</code> record at <code>&lt;label&gt;.&lt;zone&gt;</code> carrying
+<code>v=salmon1 url=&lt;where the JSON is&gt; sha256=&lt;digest&gt;</code>. The host polls DNS
+(one UDP round-trip, cached by TTL, no connection to the controller) and
+fetches the payload only when the digest changes. DNS is the registry’s
+<em>index</em>; HTTP/git/bucket is its <em>storage</em>. This is the recommended shape.
+</li>
+<li><strong>Inline.</strong> For a document small enough, the <code>TXT</code> record <em>is</em> the
+document (base64, chunked at 255 bytes as TXT allows). Fine for a
+one-seed label; not the general case.
+</li>
+</ul>
+<p>Either way the record’s TTL is a natural, controller-chosen lower bound on
+how fast a change propagates, and the zone’s serial is a fleet-wide “did
+anything change” bit for free.</p>
+<p>Every backend above is already something salmon can <em>do</em> as an op. That is
+the point of the second observation: <strong>the agent’s inbox can be a node in its
+own graph</strong> — “the latest document for <code>&lt;label&gt;</code> from <code>&lt;registry&gt;</code> is at this
+local path” is a <code>Filesystem</code>/<code>Git</code>/<code>Storage</code>/<code>Web</code> node with the usual
+<code>check</code>/<code>up</code>/failure reporting, and the puller reads a local file that this
+node keeps fresh. That gets fetch failures into the same <code>Report</code> stream as
+everything else instead of a separate log.</p>
+<p>Labels are given at start (<code>--follow &lt;registry&gt; --label web-api --label canary</code>); a label file the host re-reads on each round is a cheap extension
+so that re-labelling doesn’t need a restart, and is not v1.</p>
+<p>Two labels whose documents disagree about one effect site are not a
+registry-level error: both seeds are declared, and the <code>Dag</code> reports the
+collision as <code>Conflicting</code> exactly as it would for two interactive <code>up</code>s. The
+registry is not where that is resolved.</p>
+<p>A directory registry ships first (it’s also the test harness: write a file,
+watch the world change), git second (the natural “desired state is a repo”
+workflow), HTTP and DNS-index after, bucket last.</p>
+<h4 id="change-detection-happens-before-injection--the-one-rule-thats-easy-to-get-wrong">Change detection happens <em>before</em> injection — the one rule that’s easy to get wrong</h4>
+<p>Every line that arrives on the inbox stops tending: <code>loop</code> calls
+<code>stopTending</code> before handling any command, by design (a command is about to
+act on the nodes). A naive poller that injected on every tick — even “nothing
+changed” — would therefore <strong>starve the supervisor</strong>: at a 30s poll the
+machines would never reach their 60s check ceiling, and a <code>managed</code> node’s
+watch would be interrupted every tick.</p>
+<p>So the fetcher hashes / ETags what it got and injects <strong>only on change</strong>. An
+unchanged poll must be invisible to the loop. Corollary: the poll interval
+and the tending loop are independent; polling can be aggressive without
+costing supervision anything.</p>
+<h4 id="a-scheduler-owns-the-rounds-backoff-toward-the-registry-debounce-toward-the-loop">A scheduler owns the rounds: backoff toward the registry, debounce toward the loop</h4>
+<p>Polling rounds must be decoupled from inbound events, because there will be
+both: a round is not triggered by a line arriving on stdin or a socket, and a
+line arriving does not reset the round clock. The scheduler is one thread per
+followed registry producing “fetch now” ticks, and it has two jobs that point
+in opposite directions.</p>
+<p><strong>Toward the registry: exponential backoff on failure.</strong> A round that fails
+(unreachable, 5xx, unparseable, signature bad) schedules the next one at
+<code>min(cap, base · factor^n)</code> with jitter; a round that succeeds resets <code>n</code>.
+Configuration is the usual four numbers (<code>base</code>, <code>factor</code>, <code>cap</code>, <code>jitter</code>)
+with defaults in the tens-of-seconds to minutes range. This protects the
+registry from a fleet hammering it during its own outage, and the jitter
+spreads a fleet that all rebooted at once. A successful round that observed
+<em>no change</em> keeps the base interval; there is no reason to slow down while
+quiet, and the base interval (plus DNS TTL, for that backend) is already the
+propagation bound the operator chose.</p>
+<p><strong>Toward the loop: debounce on change.</strong> A change observed in a round does
+not inject immediately. The scheduler opens a quiet window (<code>debounce</code>,
+default a few seconds, configurable up to minutes) and injects the <em>latest</em>
+document seen once no further change has been observed for that long, with
+a <code>max_wait</code> after which it injects regardless. This coalesces a publisher
+that writes three times in a row (a CI job pushing per-label documents one
+after another, an operator saving a file twice), so the controlled system
+sees one diff-batch and one convergence pass, not three — and so a
+half-published state is never applied. It also bounds how often the
+supervisor is stood down by document traffic, which is the starvation rule
+above restated as a rate.</p>
+<p>Both knobs live on the follow, not on the seed: <code>--follow &lt;registry&gt; --poll 30s --backoff 5s..10m --debounce 5s</code>. A <code>fetch</code> command on the loop’s
+input language triggers a round out of schedule (an operator who just
+published and doesn’t want to wait), and is the one place inbound events
+touch the scheduler.</p>
+<p><code>Upkeep</code> has a ladder of the same shape (double to a cap, halve to a floor),
+but it is a per-node question about <em>checks</em>; this one is per-registry about
+<em>fetches</em>. They should not share code beyond a small <code>Backoff</code> value type.</p>
+<h4 id="merged-input-one-inbox">Merged input, one inbox</h4>
+<p>Rather than a second loop, the reader becomes a <em>set</em> of producers into the
+existing <code>TChan</code>:</p>
+<ul>
+<li>stdin (today’s behaviour, unchanged, and still what a piped script uses);
+</li>
+<li>the fetcher, injecting a diff-batch on change;
+</li>
+<li>later, a socket (the generic-server sketch).
+</li>
+</ul>
+<p>The loop does not care which producer a line came from. This preserves the
+property the loop’s own comment defends: a piped script has every line queued
+before the first pass ends and is never supervised. A fetcher whose first
+fetch happens <em>before</em> the loop starts (i.e. on startup, synchronously)
+behaves the same way — deterministic first convergence — and only later
+changes arrive “live”, handled by the tending loop as any interactive command
+would be. <code>status</code> should say which it is (see “what this doesn’t solve”).</p>
+<h4 id="groups-canaries-and-rollouts-are-registry-writes">Groups, canaries and rollouts are registry writes</h4>
+<p>Because a label addresses a document, host groups, canaries and staged
+rollouts are <strong>writes to the registry</strong>, with no service tracking
+membership: publish <code>app --version 42</code> under <code>canary</code>, watch the status sink,
+then publish it under <code>web-api</code>. A host in both groups gets the union, which
+for two versions of one app is a <code>Conflicting</code> in its <code>Dag</code> — visible, and
+the publisher’s mistake to fix, not the registry’s. This is also the first
+meaningful use of a unified <code>Remote</code> type (today <code>Self</code>, <code>Ssh</code> and <code>Rsync</code>
+each define their own <code>{user, host}</code> record): a host is a name plus its
+labels.</p>
+<h4 id="the-fetcher-is-an-actor-in-history">The fetcher is an actor in <code>history</code></h4>
+<p>Every declaration the fetcher makes is recorded in <code>history</code> with its
+provenance — registry, label, document <code>id</code>, digest — as a distinct actor
+from an operator’s typed line or a <code>load</code>ed file. <code>LogEntry</code> grows an origin
+(<code>Typed | Loaded path | Fetched registry label id digest</code>), and <code>history</code>
+prints it. Cheap, and it is the only way an operator can tell “I typed this”
+from “the document said so” when a host does something surprising.</p>
+<h4 id="status-flows-back-the-same-way">Status flows back the same way</h4>
+<p>After every pass the host pushes its <code>status</code> snapshot — the same JSON the
+generic-server sketch wants for its <code>Dag</code> endpoint — to a sink: a file, an
+HTTP <code>POST</code>, or a bucket object keyed by host. Fleet status is then a <strong>fold
+over those objects</strong>, computed by whoever reads the store (a script, the
+web UI, a <code>salmon-fleet status</code> subcommand), not by a running service. The
+store is the only shared dependency and it’s a dumb one.</p>
+<p>Same rule as fetching: pushing status is itself an op (a <code>filecontents</code>, a
+<code>Storage</code> upload), so a sink that’s down shows up as a <code>Failed</code> node, not a
+silently stale dashboard.</p>
+<h4 id="signed-documents">Signed documents</h4>
+<p>Pulling inverts trust: today a host trusts whoever holds an ssh key to it;
+in pull mode it trusts <em>the source</em>. TLS to the store covers transport. For
+the document itself, the tree already has JWT signing (<code>SreBox.JWTSigning</code>),
+<code>Keys</code>, and <code>Certificates</code> — a document can carry a detached signature the
+puller verifies against a key it was started with, before any line is
+injected. A document that fails verification is reported and ignored; the
+last good one stays in force. Not in v1, but the hook (verify-before-inject)
+should be there from the start so it’s a function to fill in, not a
+restructuring.</p>
+<p><em>Shipped</em> (milestone 7 below: <code>Salmon.Actions.Follow.Signature</code>,
+<code>--follow-key</code>, <code>salmon-fleet keygen</code>/<code>sign</code>, <code>Test.FollowSignatureSpec</code>),
+with deviations listed there. The one worth reading here: the key is a
+<strong>JWK</strong>, not something <code>Certificates</code> produces — the tree’s JWT signing
+(<code>SreBox.JWTSigning</code>) is HMAC over a shared secret, which a host cannot be
+handed without also handing it the power to sign, and <code>Keys.jwkKey</code> is the
+one public-key format already written by the tree; the signature is EdDSA
+over Ed25519 through <code>jose</code>, not a JWS.</p>
+<h4 id="bootstrap-is-the-existing-push-pattern-once">Bootstrap is the existing push pattern, once</h4>
+<p><code>Self.uploadSelf</code>, then <code>ssh host bin run serve --follow &lt;registry&gt; --label …</code>
+under a <code>Systemd.systemdService</code> unit (which gives restart-on-crash and
+survives reboots). After that the controller <strong>only writes documents</strong> and
+never ssh-es again. The push pattern isn’t replaced; it’s demoted to “day
+zero”.</p>
+<h3 id="interaction-with-the-rest-of-the-loop">Interaction with the rest of the loop</h3>
+<ul>
+<li><strong><code>stopTending</code> before every command</strong> — honoured unchanged; that’s why
+change detection is load-bearing (above).
+</li>
+<li><strong>Persistence.</strong> A host that can’t reach the store keeps converging on its
+last fetched document — the right behaviour — <em>but only if that document
+survives a restart</em>. <code>World</code> is an <code>IORef</code> today; a puller that forgets on
+restart is worse than no puller (it comes up empty, tears nothing down,
+and looks converged). The fetcher should at minimum cache the last verified
+document on disk and replay it on start; the journal for <code>World</code> proper is
+its own item and should land first or alongside.
+<em>The cache shipped in milestone 4</em> (<code>--follow-cache</code>); the <code>World</code> journal
+has not, and is still its own item.
+</li>
+<li><strong><code>supervise off</code>/<code>autoconverge off</code> typed interactively</strong> should be
+respected by the fetcher — it must not silently re-enable either. The diff
+batch reads the current setting and restores it.
+</li>
+<li><strong>Rewrites</strong> (<code>Salmon.Op.Rewrite</code>) already run once per convergence pass
+over the whole ledger; a document-driven batch is exactly one pass, so
+batching works as it does today with no change.
+</li>
+<li><strong>Two operators.</strong> An interactive <code>up</code> for a seed the document doesn’t
+mention is left alone by the diff (it only retires seeds it previously
+declared — the fetcher owns a <em>contribution</em> in the ledger’s sense, and
+retires only its own). This is the ledger’s set-not-refcount semantics
+doing its job.
+</li>
+</ul>
+<h3 id="what-this-does-not-solve">What this does not solve</h3>
+<ul>
+<li><strong>Liveness / consensus.</strong> Nothing decides a host is dead, same as today
+and deliberately (see <code>SreBox.PostgresPair</code>’s reasoning). A host that has
+stopped pushing status is <em>stale in the sink</em>, which is a visible fact, not
+a decision.
+</li>
+<li><strong>The store’s availability</strong> is one shared dependency. That is a storage
+problem (pick a durable store), not a control-plane problem.
+</li>
+<li><strong>Mid-pass arrivals.</strong> A document change that arrives while the loop is
+idle is handled by the tending loop like any interactive command, not
+replayed deterministically. Correct, but <code>status</code> should report <code>mode: following</code> vs <code>mode: replay</code> so a test or an operator knows which
+guarantees apply. <em>It does, as of milestone 4</em>, with one shift in what
+<code>replay</code> means: not “the startup round was applied synchronously” (that is
+always true, and <code>following</code> covers it) but “the registry could not be
+reached at startup and the world is the cached document” — the case an
+operator actually needs to be told about. <code>interactive</code> is the third
+value, for a loop with no <code>--follow</code> at all.
+</li>
+<li><strong>Secrets in documents.</strong> The document names seeds; seeds that need secret
+material should keep using pre-provisioned files (see the recipe
+key-exchange-agnostic convention), not inline them.
+</li>
+</ul>
+<h3 id="non-goals-v1">Non-goals (v1)</h3>
+<ul>
+<li>A server that <em>pushes</em> to hosts (that’s the generic-server sketch, and a
+socket per host).
+</li>
+<li>Rollout orchestration (wait for A before B) beyond what labels + registry
+writes give.
+</li>
+<li>Any selector or query language: a label is an address, nothing more.
+</li>
+<li>~~Signing (hook only).~~ Shipped in milestone 7; still out: rotation and
+revocation beyond “several <code>--follow-key</code> flags”, signing inside a
+registry.
+</li>
+<li>A label file re-read at runtime (labels are start-time flags in v1).
+</li>
+</ul>
+<h3 id="decisions-taken">Decisions taken</h3>
+<ul>
+<li><strong>JSON documents</strong>, not seed lines, for tool support and for something a
+signature and a digest can be computed over; seed-line spelling survives
+as a word array inside them.
+</li>
+<li><strong>The fetcher is a first-class actor in <code>history</code></strong>, with registry, label,
+document id and digest.
+</li>
+<li><strong>A scheduler decouples rounds from inbound events</strong>, with exponential
+backoff (base, factor, cap, jitter) toward the registry and a debounce
+window (plus <code>max_wait</code>) toward the loop — the first protects the
+registry, the second the controlled system.
+</li>
+<li><strong>Labels address documents in a registry</strong>; the registry backend owns the
+template that turns a label into an address (a directory, a git
+subdirectory, an HTTP path, a bucket prefix, or a DNS name under a zone).
+</li>
+</ul>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li>DNS-index record format: one <code>TXT</code> with <code>url=</code> and <code>sha256=</code> as sketched,
+or a <code>URI</code> record plus a <code>TXT</code> digest? And whether the inline-document
+variant is worth having at all.
+<em>Settled as sketched</em> (milestone 6): one <code>TXT</code> at <code>&lt;label&gt;.&lt;zone&gt;</code> reading
+<code>v=salmon1 url=&lt;https url&gt; sha256=&lt;hex&gt;</code>, fields in any order after the
+version, a record longer than one string joined the way <code>TXT</code> readers do.
+Two things decided it. A single record is one lookup and one atomic
+write for the publisher — a <code>URI</code> plus a <code>TXT</code> can be observed with one
+updated and the other not, which is exactly the “index announces what the
+store does not serve” state the digest check refuses, only now
+manufactured by the index itself. And the <code>sha256=</code> field <em>is</em> the change
+detection: the record’s digest is the stamp, so a round that finds it
+unchanged makes no HTTP request at all, which a <code>URI</code> record would not
+carry. The <code>URI</code> variant was not done; nothing stops a later reader from
+also accepting it. The inline-document variant was not done either and
+is not planned: base64 chunked over 255-byte strings for a document that
+is JSON anyway buys nothing a small HTTP store does not, and the record
+size would bound the document.
+</li>
+<li>Does the document <code>id</code> need to be ordered (so a host can refuse to move
+<em>backwards</em> if a registry serves a stale copy from a lagging replica), or
+is “latest is whatever the registry says” enough? Leaning: an optional
+<code>published</code> timestamp, refuse-older as a flag, off by default.
+<em>Settled as the leaning says</em> (milestone 4): <code>id</code> stays opaque; a document
+may carry <code>published</code> (RFC 3339) at its top level, and under
+<code>--follow-refuse-older</code> a fetched document published before the one
+already applied <em>or pending</em> for its label is reported <code>Stale</code> and not
+injected. Off by default; without <code>published</code> on both sides the latest is
+whatever the registry says. Two details worth knowing: the comparison is
+against the pending document when there is one, not only the applied one,
+since “do not move backwards” has to hold inside a quiet window too; and a
+<code>published</code> that does not parse is a malformed document rather than an
+ignored annotation, because a flag that silently skipped a mistyped
+timestamp would not be doing its one job.
+</li>
+<li>Whether <code>debounce</code> should also apply to the <em>first</em> fetch at startup
+(probably not: startup wants the deterministic synchronous fetch, and
+there is nothing to coalesce yet).
+<em>Settled as the leaning says</em>: the startup round is synchronous and what
+it finds is injected at once, before standard input is released; the
+window applies from the first scheduled round on. A restart therefore
+applies the registry’s current document immediately, even if the
+publisher is mid-write — which is the same exposure milestone 2 had, and
+the price of a deterministic first convergence.
+</li>
+</ul>
+<h3 id="suggested-milestones">Suggested milestones</h3>
+<ol>
+<li><strong>Reader generalization.</strong> <code>serveWith</code> takes a list of line producers
+instead of one <code>Handle</code>; stdin is one producer. No behaviour change;
+<code>Test.ServeSpec</code> still passes untouched.
+</li>
+<li><strong>Document format + directory registry.</strong> The JSON shape, `–follow
+<dir> --label <l>`, one document per label, union across labels,
+mtime+hash change detection, diff-batch injection, fetcher-owned
+contribution, fetcher origin in `history`. Layer 1 test: write the file,
+assert the world; rewrite identical content, assert *no* command was
+injected (the starvation rule, as a test).
+*Shipped* (`Salmon.Actions.Follow`, `Test.FollowSpec`), with two
+deviations: the batch is one structured `Serve.Batch` inbox entry rather
+than text lines (so the loop, which alone knows the `autoconverge`
+setting, restores it, and no other producer's line can land mid-batch),
+and the "fetcher-owned contribution" is computed in the fetcher as the
+union across its labels — the ledger keys a declaration by its directive,
+so it cannot retire "only its own" copy of a seed an operator also typed.
+Rounds ran on a fixed `--follow-interval` until milestone 3.
+</li>
+<li><strong>Scheduler.</strong> Backoff with jitter toward the registry, debounce with
+<code>max_wait</code> toward the loop, the <code>fetch</code> command. Test: three writes
+inside the window yield one pass; a failing registry is polled on the
+ladder, not the base.
+<em>Shipped</em> (<code>Salmon.Actions.Follow.Scheduler</code>, <code>Test.FollowSchedulerSpec</code>),
+with three deviations: the knobs are six flat flags
+(<code>--follow-base/-factor/-cap/-jitter/-debounce/-max-wait</code>, with
+<code>--follow-interval</code> kept as the base’s older name) rather than the
+<code>--poll 30s --backoff 5s..10m</code> spelling above; a label with no document
+is not a failed round (the registry answered), so only a throwing
+registry or unparseable bytes climb the ladder; and the ladder’s first
+rung is the base itself (<code>min(cap, base · factor^(n-1))</code>), so a single
+failure is retried no later than a success would have been. One
+consequence for the loop: <code>Batch</code> carries an origin per command, since
+a window can close over several labels at once and <code>history</code> must still
+say which document each declaration came from.
+</li>
+<li><strong>Cached last document + <code>mode</code> in <code>status</code>.</strong>
+<em>Shipped</em> (<code>--follow-cache DIR</code>, <code>--follow-refuse-older</code>, <code>Serve.Mode</code>,
+<code>Test.FollowCacheSpec</code>), with four deviations. The cache is written
+after every <em>injection</em> (bytes, sha256 and id per label, a temp file
+renamed into place), not after a verified convergence — the fetcher
+does not learn whether the loop’s pass succeeded, and “the last document
+the loop was told about” is the right thing to come back to anyway. A
+label is replayed when its startup fetch <em>fails</em>, which covers the
+registry throwing and its bytes not parsing (a half-written file at the
+moment of a restart is the realistic case), but not the registry
+answering “no document” — the registry answered, and the cache is not
+deleted either, so it will be replayed the next time the registry is
+unreachable. <code>replay</code> is entered only at startup and turns to
+<code>following</code> at the first later round in which every label answers; a
+failure after that is <code>Backoff</code>, not a mode, since the world is still
+the registry’s last word. And the directory registry now throws when
+its directory is missing instead of answering “no document”, because
+the cache hinges on telling those apart. The <code>Followed</code> record
+(<code>Serve.hs</code>) is the loop’s only view of the fetcher — the fetch hook
+and an <code>IO Mode</code> — and <code>mode</code> lives on <code>StatusReport</code> itself, so the
+HTTP <code>/status</code> gets it from the same encoder.
+</li>
+<li><strong>Status sink</strong> (file first), and a <code>salmon-fleet status</code> that folds a
+directory of them.
+<em>Shipped</em> (<code>Salmon.Actions.Serve.StatusSink</code>, <code>Salmon.Actions.Fleet</code>,
+<code>salmon-fleet</code> in <code>salmon-apps</code>, <code>Test.StatusSinkSpec</code>), with four
+deviations from the sketch above. <strong>The sink is not an op in the host’s
+graph.</strong> “Status flows back” wanted a <code>filecontents</code>/<code>Storage</code> node so a
+sink that is down shows as a <code>Failed</code> node; but a node is applied <em>by</em> a
+pass, and the document must be written <em>after</em> the pass it describes,
+which a node inside that pass cannot do. It is a reporter beside the
+loop’s (watching for <code>ConvergeStop</code> and <code>Follow.Injected</code>) plus a
+read-only accessor to the world and a timer, and a failed write is a
+<code>Serve.SinkFailed</code> report — the same information, on the same stream,
+once per run of failures. <strong>It writes more often than “after every
+pass”:</strong> also after every follow injection and every
+<code>--status-sink-interval</code> seconds (10) with nothing happening, so that a
+host that has gone quiet is visibly one whose <code>written</code> is old. <strong>The
+fetcher’s reports had to become a <code>--json</code> stream first</strong> (<code>stream: &quot;follow&quot;</code>, the fourth constructor of <code>Salmon.Reporter.Tagged</code>); until
+then <code>Injected</code>/<code>Backoff</code>/<code>Replayed</code> printed as text under <code>--json</code> and
+no sink could carry them — which the sketch did not anticipate because
+it predates <code>--json</code>. And <strong>the host is <code>uname -n</code></strong>, so two loops on one
+machine write two documents naming one host, and the fold shows two rows
+rather than picking; <code>--status-sink-host NAME</code> is that override, added
+once (2026-09-25) rather than speculatively. <code>salmon-fleet status DIR [--label L] [--stale S] [--json]</code> is the fold: one line per document, host order,
+converged/errored/total off <code>status.nodes</code>, stale past <code>--stale</code> (60s) as
+a flag and never a decision. Only the file sink exists; a bucket object
+or an HTTP <code>POST</code> is the same document handed to a different writer.
+</li>
+<li><strong>Git registry</strong>, then HTTP, then the DNS index over HTTP, then bucket.
+Verify-before-inject hook with a no-op verifier.
+<em>Shipped</em> (<code>Salmon.Actions.Follow.Registry</code> and <code>Registry.Git</code>/<code>.Http</code>/
+<code>.Dns</code>, <code>Follow.followVerify</code>, <code>Test.FollowRegistrySpec</code>), with five
+deviations from the table under “Labels are addresses into a registry”.
+The git template is <code>&lt;subdir&gt;/&lt;label&gt;.json</code> at a branch
+(<code>git+URL[#BRANCH[:SUBDIR]]</code>), not <code>&lt;repo&gt;/&lt;label&gt;/latest.json</code> — one
+file per label beside the others is what a publisher edits, and a
+subdirectory per label would have made history git’s <em>twice</em>. The
+registries are <strong>not nodes in the agent’s own graph</strong>: the “inbox as a
+node” idea above would have put a fetch under <code>stopTending</code> (a pass is
+what runs a node’s <code>up</code>) and so under the very starvation rule the
+fetcher exists to respect; a fetch failure reaches the same <code>Report</code>
+stream as <code>FetchFailed</code>/<code>Backoff</code> instead. The bucket backends are the
+HTTP one under a URL template (virtual-hosted S3, GCS, or path-style
+under <code>--follow-bucket-endpoint</code>) — public or presigned objects only,
+no SDK, no object generation as the stamp (the <code>ETag</code> serves), and
+<strong>no authenticated access</strong>, which is its own item if wanted. The DNS
+resolver is <code>dig +short</code> through <code>Binary</code> behind a <code>Resolver</code> record
+(nothing in the tree resolved DNS, and one TXT lookup did not justify a
+resolver library’s footprint); the record format is settled under the
+open questions. And the hook is <code>followVerify :: Digest -&gt; ByteString -&gt; IO (Either Text ())</code> on the <em>raw bytes</em>, after the digest comparison and
+before the parser, run on a cache replay as well as on a fetch — a
+refusal is <code>Rejected</code>, a failed round, neither injected nor cached, the
+last good document staying in force as the “Signed documents” section
+asks. Three flags joined the <code>--follow-*</code> family for the backends’
+sake: <code>--follow-timeout</code>, <code>--follow-workdir</code>, <code>--follow-bucket-endpoint</code>.
+</li>
+<li><strong>Signed documents.</strong> <em>Shipped</em> (<code>Salmon.Actions.Follow.Signature</code>,
+<code>--follow-key FILE</code> repeatable, <code>salmon-fleet keygen --out FILE</code> and
+<code>salmon-fleet sign --key FILE</code>, <code>Test.FollowSignatureSpec</code>), with five
+deviations from the sketch and the work item’s brief. <strong>The envelope
+wraps the document rather than signing its bytes</strong>: <code>{&quot;salmon-signed&quot;: 1, &quot;document&quot;: &lt;the document as fetched&gt;, &quot;signatures&quot;: [{&quot;key&quot;, &quot;alg&quot;, &quot;sig&quot;}]}</code>, the signature over the canonical bytes of the <code>document</code>
+member — <code>Data.Aeson.encode</code> of the parsed value, whose sorted keys and
+single spelling per scalar are what let a registry re-serialise an
+envelope without breaking it; both sides parse-then-encode with the same
+function, and no canonical-JSON library is involved. <strong>The verifier
+hands the loop the inner document</strong>, so <code>Verifier</code> became <code>Digest -&gt; ByteString -&gt; IO (Either Text ByteString)</code> (the bytes to parse) rather
+than <code>Either Text ()</code>; <code>noVerifier</code> returns its input. <strong>The digest is
+the envelope’s, not the document’s</strong>, everywhere the fetcher keeps one
+(change detection, <code>Rejected</code>, <code>history</code>, the cache): the cache keeps the
+bytes as fetched so a replay is verified exactly as a fetch, its
+integrity check is over those bytes, and <code>Rejected</code> for an envelope that
+does not even parse has no other digest to name; the brief asked for the
+document’s, and that would have meant a second digest per node for the
+sake of one report field. <strong>The key is a JWK, not PEM</strong>: the brief said
+“PEM public key” and also “the tree’s existing key format”, and those
+disagree — <code>Keys.jwkKey</code> writes JWK through <code>jose</code>, and nothing in the
+tree parses PEM, so JWK it is; <code>--follow-key</code> reads either the public
+file or the private one (taking its public half). <strong>Ed25519 via <code>jose</code></strong>,
+which already sat on <code>crypton</code> in the plan; <code>bestJWSAlg</code> means an RSA or
+EC JWK signs too, while <code>none</code> and the HMACs are refused before <code>jose</code>
+sees them (its <code>verify</code> of <code>none</code> against an empty signature answers
+true). Refusals say which: unsigned under a key, an envelope that does
+not parse, no signatures, every signature failing (naming the key and
+whether it was unknown, tampered, or an algorithm a public key cannot
+verify). A <code>--follow-key</code> that does not load exits 1 with the path; the
+flag without <code>--follow</code> is refused as <code>--label</code> is. Unsigned mode is the
+default and the docs say so.
+</li>
+</ol>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

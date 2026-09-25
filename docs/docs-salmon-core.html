@@ -1,0 +1,238 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - The salmon model</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-salmon-core.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This document describes the general, domain-independent model that lives in `salmon-core` — the algebraic graph, the `OpGraph`/`Track` abstractions, and the traversal semantics. Everything infra-specific (files, systemd, postgres, podman,"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - The salmon model"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This document describes the general, domain-independent model that lives in `salmon-core` — the algebraic graph, the `OpGraph`/`Track` abstractions, and the traversal semantics. Everything infra-specific (files, systemd, postgres, podman,"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - The salmon model"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-salmon-core.html"><meta property="og:description" content="This document describes the general, domain-independent model that lives in `salmon-core` — the algebraic graph, the `OpGraph`/`Track` abstractions, and the traversal semantics. Everything infra-specific (files, systemd, postgres, podman,"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/docs-salmon-core.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-salmon-core.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"This document describes the general, domain-independent model that lives in `salmon-core` — the algebraic graph, the `OpGraph`/`Track` abstractions, and the traversal semantics. Everything infra-specific (files, systemd, postgres, podman,","headline":"The salmon model","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-salmon-core.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>The salmon model</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1705 words, 5 code snippets, 5 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs-salmon-ops-patterns.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">7/7</span></a><span class="topic-nav topic-next-link"><span class="topic-nav-boundary">|</span></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/salmon-core.md"><code>resources/salmon-core.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="the-salmon-model">The salmon model</h2>
+<p>This document describes the general, domain-independent model that lives in
+<code>salmon-core</code> — the algebraic graph, the <code>OpGraph</code>/<code>Track</code> abstractions, and
+the traversal semantics. Everything infra-specific (files, systemd, postgres,
+podman, …) is built <em>on top of</em> this model in <code>salmon-ops</code> and above; none of
+it is baked into <code>salmon-core</code> itself. If you want copy-pasteable recipes for
+writing infra ops, see <a href="/salmon/docs-howto-ops.html"><code>howto-ops.md</code></a> instead — this document
+is about the shape underneath, and where else that shape could be pointed.</p>
+<h3 id="the-problem-this-is-solving">The problem this is solving</h3>
+<p>There’s a recurring tension in provisioning/CI-CD/ops tooling:</p>
+<ul>
+<li><strong>One-off tools</strong> that do one narrow thing (apply these DB migrations, sync
+this one directory) are highly tunable but don’t compose with each other.
+</li>
+<li><strong>Do-everything tools</strong> (turn up my whole dev environment, push to prod) are
+powerful but their behavior becomes inseparable from their configuration —
+changing “generate a secret then ssh in” to “ssh in then generate a secret”
+means editing the tool, not just its config.
+</li>
+</ul>
+<p>Salmon’s bet is that both needs are really the same problem at different
+scales, <em>if</em> you have one representation that’s equally comfortable expressing
+“create a file” and “turn a server up” — because a “turn a server up” op is,
+underneath, nothing but a big DAG of smaller “create a file”/“start a
+service”/… ops. Get that representation right, and a one-off tool and a
+do-everything tool are the same kind of object, just different-sized graphs.</p>
+<h3 id="the-four-core-pieces">The four core pieces</h3>
+<h4 id="graph--the-algebraic-graph"><code>Graph</code> — the algebraic graph</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Graph</span> a <span class="ot">=</span> <span class="dt">Vertices</span> [a] <span class="op">|</span> <span class="dt">Connect</span> (<span class="dt">Graph</span> a) (<span class="dt">Graph</span> a) <span class="op">|</span> <span class="dt">Overlay</span> (<span class="dt">Graph</span> a) (<span class="dt">Graph</span> a)</span></code></pre></div></div><p>An algebraic graph in the style of the
+<a href="https://dl.acm.org/doi/10.1145/3122955.3122956">Alga paper</a>, simplified to a
+single <code>Vertices [a]</code> constructor instead of separate <code>empty</code>/<code>vertex</code>/
+<code>overlay</code>. <code>Connect g1 g2</code> means “g1’s nodes each precede g2’s nodes” (an
+ordering relationship); <code>Overlay g1 g2</code> means “these two subgraphs co-occur,
+with no ordering implied between them.” This is the substrate; everything else
+in <code>salmon-core</code> is built on top of it.</p>
+<h4 id="opgraph--a-self-centered-node-with-an-effectful-neighbor-finder"><code>OpGraph</code> — a self-centered node with an effectful neighbor-finder</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">OpGraph</span> m node <span class="ot">=</span> <span class="dt">OpGraph</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> predecessors ::</span> m (<span class="dt">Graph</span> (<span class="dt">OpGraph</span> m node))</span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> node ::</span> node</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p>This is the key trick that makes “create a file” and “turn a server up” the
+<em>same type</em> despite wildly different dependency depth: an <code>OpGraph</code> doesn’t
+carry its whole dependency tree up front — it carries a <em>recipe</em>
+(<code>predecessors</code>, itself effectful in <code>m</code>) for producing its immediate
+predecessors, on demand. “Create a file” and “turn a server up” both typecheck
+as <code>OpGraph m node</code>; they just differ in how deep and effectful their
+<code>predecessors</code> recipe turns out to be when it’s actually run.</p>
+<p>Two ways to compose two <code>OpGraph</code>s (from <code>Salmon.Op.OpGraph</code>):</p>
+<ul>
+<li><code>x `inject` y</code> — add <code>y</code> as a <code>Connect</code>-ed predecessor of <code>x</code> (“<code>y</code> must
+happen before <code>x</code>”).
+</li>
+<li><code>x `overlaid` y</code> — add <code>y</code> as an <code>Overlay</code>-ed predecessor of <code>x</code>
+(“co-occurring with <code>x</code>’s existing predecessors, no ordering implied”).
+</li>
+</ul>
+<h4 id="track--given-an-a-i-know-how-to-build-the-graph-for-it"><code>Track</code> — “given an <code>a</code>, I know how to build the graph for it”</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">Track</span> m n a <span class="ot">=</span> <span class="dt">Track</span> {<span class="ot"> run ::</span> a <span class="ot">-&gt;</span> <span class="dt">OpGraph</span> m n }</span></code></pre></div></div><p>A <code>Track</code> is a <em>contravariant, divisible functor</em> — a promise, parametrized by
+input type, to produce an <code>OpGraph</code>. Concretely: “if you hand me a database
+spec, I have a way to turn it into the ops that provision that database.” This
+is the composition mechanism for builders: it lets a piece of code that
+<em>needs</em> something (a database, a signed certificate, a running binary) depend
+on an abstract “here’s how to get one” rather than a concrete provisioning
+strategy — the caller supplies the <code>Track</code>, so the same consuming code can be
+pointed at “provision it locally” vs. “assume it’s already there”
+(<code>ignoreTrack</code>) vs. “fetch it from elsewhere” without changing.</p>
+<p><code>Tracked</code> pairs a <code>Track</code> with an already-realized value, so <em>dependent</em>
+values can be built compositionally: <code>mapTracked</code>/<code>apTracked</code>/<code>bindTracked</code>
+give it quasi-Functor/Applicative/Monad shapes (each one recording the
+accumulated dependency graph as it goes), and <code>using</code>/<code>using2</code>/<code>using3</code> let you
+“open” one or more <code>Tracked</code> values to build a downstream <code>OpGraph</code> while
+automatically wiring in everything they depended on.</p>
+<h4 id="evalexpand--materializing-the-graph"><code>Eval.expand</code> — materializing the graph</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">expand ::</span> (<span class="dt">Monad</span> m) <span class="ot">=&gt;</span> <span class="dt">OpGraph</span> m node <span class="ot">-&gt;</span> m (<span class="dt">Cofree</span> <span class="dt">Graph</span> (<span class="dt">OpGraph</span> m node))</span></code></pre></div></div><p>Walks the effectful <code>predecessors</code> recipes all the way down and produces a
+fully materialized <code>Cofree Graph</code> — the actual, concrete dependency tree,
+ready to be folded over (by a traversal like <code>upTree</code>/<code>downTree</code>, or by
+anything else you want to write against a <code>Cofree Graph</code>). This is the one
+place where “recipe for finding neighbors” becomes “the neighbors.”</p>
+<h3 id="why-a-graph-not-a-plain-sequence-of-steps">Why a graph, not a plain sequence of steps</h3>
+<p>A flat ordered script conflates two different things: “must happen before”
+and “happens to be listed first.” A DAG keeps them separate — two independent
+branches of provisioning can be <em>expressed</em> as unordered (<code>Overlay</code>) and a
+traversal is free to run them concurrently (<code>run serve</code> does, one thread per
+node — <code>Salmon.Actions.Concurrent</code>), retry just one, or report exactly which
+one failed, without the script author having had to think about interleaving
+at authoring time. The DAG shape is also what makes <strong>dedup</strong>
+possible: because nodes carry an explicit identity (<code>Ref</code>, at the <code>salmon-ops</code>
+layer — see <a href="/salmon/docs-howto-ops.html"><code>howto-ops.md</code></a> §2.1), the same logical resource
+reached via two different paths through the graph is recognized as one node,
+not provisioned twice.</p>
+<h3 id="actionsactactionless--the-generic-bag-of-named-effects"><code>Actions</code>/<code>Act</code>/<code>Actionless</code> — the generic “bag of named effects”</h3>
+<p><code>salmon-core</code>’s <code>Salmon.Op.Actions</code> module defines the generic wrapper that
+turns a plain <code>node</code> payload into something a traversal can act on
+uniformly:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Act</span> ext <span class="ot">=</span> <span class="dt">Act</span> {<span class="ot"> shorthand ::</span> <span class="dt">ShortHand</span>,<span class="ot"> extension ::</span> ext }</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Actions</span> ext <span class="ot">=</span> <span class="dt">Actionless</span> <span class="op">|</span> <span class="dt">Actions</span> (<span class="dt">Act</span> ext)</span></code></pre></div></div><p><code>Actionless</code> is the monoidal identity — a node that exists purely for its
+position in the graph (grouping/ordering) with genuinely nothing to run.
+<code>salmon-core</code> itself is agnostic about what <code>ext</code> actually <em>is</em> — it’s a type
+parameter. <code>salmon-ops</code>’s <code>Extension</code> (see <code>howto-ops.md</code>) is one particular
+choice of <code>ext</code>, tailored to shell-command-driven infrastructure provisioning
+(<code>up</code>/<code>down</code>, both <code>IO ()</code>-shaped, plus a <code>check :: IO CheckResult</code>). Nothing about
+<code>OpGraph</code>/<code>Track</code>/<code>Eval</code> requires that choice.</p>
+<h3 id="generalizing-beyond-infrastructure">Generalizing beyond infrastructure</h3>
+<p>Everything above is agnostic to what an “op” actually does. The concrete
+<code>salmon-ops</code> layer picks <code>IO ()</code>-shaped shell-command effects because that’s
+what provisioning needs, but the same <code>Graph</code>/<code>OpGraph</code>/<code>Track</code>/<code>Eval</code> core
+would support a differently-shaped <code>ext</code>, as long as:</p>
+<ul>
+<li>individual units of work can be given a stable identity (a <code>Ref</code>-equivalent,
+for dedup),
+</li>
+<li>“did this succeed” can be observed (an exception, a return value, whatever
+fits the domain),
+and
+</li>
+<li>“what must happen before this” can be expressed as a graph rather than a
+flat list.
+</li>
+</ul>
+<p>Concretely, this points at use cases beyond “provision a server,” building on
+the same up/down/check shape:</p>
+<ul>
+<li><strong>CI/CD pipelines</strong> — the existing use case in this repo (see
+<code>SreBox.CabalBuilding</code>, <code>SreBox.GeneratedSite</code>): a build/test/publish
+pipeline is itself a DAG of idempotent steps, and “did this artifact already
+get published” is exactly the kind of <code>check</code>-skippable question the model was
+built around.
+</li>
+<li><strong>Multi-machine/fleet orchestration</strong> — <code>SreBox.PostgresMigrations</code>’s
+“upload self and re-invoke as a nested <code>upTree</code> on the remote machine”
+pattern (see <code>howto-ops.md</code> §5) is already a working instance of “a node’s
+<code>up</code> is itself a whole graph traversal happening somewhere else”; the same
+shape generalizes to fleet-wide convergence (each machine’s target state
+expressed as a graph, driven from a control machine).
+</li>
+<li><strong>Data pipelines</strong> — a pipeline stage (“did this table/partition get
+computed for this date”) is structurally the same triad as “did this file
+get written”: a <code>Ref</code> keyed on (dataset, partition), an <code>up</code> that computes
+and writes it, a <code>check</code> that skips recomputation if the output already
+exists and its inputs haven’t changed (the same shape as
+<code>skipIfFileExists</code>/<code>skipIfNftRuleExists</code> — see <code>howto-ops.md</code> §4), and a
+dependency graph that’s <em>naturally</em> a DAG already (this aggregate depends on
+those upstream tables). Where salmon would differ from a typical DAG
+scheduler (Airflow-style) is that here the dependency graph can be computed
+effectfully at expansion time (<code>predecessors :: m (Graph ...)</code>) rather than
+only declared statically ahead of a run — useful when which upstream
+partitions a stage depends on isn’t known until you’ve inspected what’s
+actually available.
+</li>
+<li><strong>Business process modeling / process mining</strong> — a business process (an
+order-fulfilment workflow, an approval chain, an onboarding sequence) is
+itself a graph of steps with real “must happen before” edges, “already
+done, skip it” idempotency (has this approval already been recorded?), and
+a genuine need to know when a step failed vs. was blocked by an upstream
+failure — exactly <code>upTree</code>’s <code>Failed</code>/<code>Blocked</code> distinction. Modeling a
+process this way rather than as an implicit control-flow graph buried in
+code has a second benefit specific to <em>process mining</em>: because the graph
+is a first-class, inspectable value (the same <code>Tree</code>/<code>Dot</code> rendering used
+for infra graphs — see <code>howto-ops.md</code> §9) rather than something that only
+exists as the emergent behavior of a program, the <em>reported</em> trace of a
+traversal (which nodes were <code>Eval</code>ed, <code>Skip</code>ped, <code>Failed</code>,
+<code>Blocked</code>, and in what order — see <code>Salmon.Actions.UpDown.Report</code>) is
+already the kind of event log process-mining tooling wants to reconstruct
+a real process model from, without needing separate instrumentation
+bolted on after the fact.
+</li>
+<li><strong>Database/schema migrations as a DAG rather than a linear chain</strong> — most
+migration tools force a strict total order; expressing migrations as an
+<code>OpGraph</code> would allow independent migrations (different schemas/tables) to
+be legitimately unordered relative to each other while still enforcing real
+dependencies (this migration needs that table to exist first) explicitly,
+and would get idempotent-rerun and partial-failure reporting for free from
+<code>upTree</code>.
+</li>
+<li><strong>Declarative, convergent configuration management generally</strong> (the
+Puppet/Ansible/Terraform space) — the <code>up</code>-is-idempotent,
+<code>check</code>-skips-if-already-satisfied, <code>down</code>-tears-back-down shape is exactly
+a “declare desired state, converge to it, converge back” model; what salmon
+adds relative to most tools in that space is that the DAG is a first-class,
+inspectable value (<code>Tree</code>/<code>Dot</code> output — see <code>howto-ops.md</code> §9) rather than
+a topological order baked into engine internals, and that a node’s
+dependencies can be <em>computed</em> (the <code>predecessors</code> recipe is effectful) as
+well as declared statically.
+</li>
+<li><strong>Anything with a “does this already exist” / “make it exist” / “tear it
+back down” triad and a real dependency structure between the things being
+managed</strong> — the infra domain is simply the first and most fully-built-out
+instance of that triad in this codebase, not an assumption baked into
+<code>salmon-core</code>.
+</li>
+</ul>
+<p>None of the above beyond CI/CD and fleet orchestration are implemented in this
+repository today — they’re recorded here as directions the core model
+supports, not as existing code to go read.</p>
+<h3 id="vocabulary-from-the-original-salmon-core-readme">Vocabulary (from the original salmon-core README)</h3>
+<p>These terms recur throughout the codebase and its documentation:</p>
+<ul>
+<li><strong>builtins</strong> — mostly atomic nodes, DAGs with small diameter (<code>salmon-ops</code>’s
+<code>Nodes/</code> modules: <code>Filesystem</code>, <code>Systemd</code>, <code>Postgres</code>, <code>Podman</code>, etc.).
+</li>
+<li><strong>recipes</strong>/<strong>apps</strong> — combinations of builtins; many equivalent graphs may
+be valid for the same end state (<code>salmon-ops-recipes</code>’s <code>SreBox/</code> modules).
+</li>
+<li><strong>configs</strong> — user-provided choices, evaluated on the commanding machine
+(the <code>seed</code>/<code>Configure</code> side of the CLI protocol — see <code>howto-ops.md</code> §9).
+</li>
+<li><strong>setup</strong> — machine-rationalized state, evaluated on the local/target
+machine (the <code>Spec</code>/<code>Op</code> side of the same protocol).
+</li>
+<li><strong>prefs</strong> — conventions parametrized by domain or service (e.g. “migrations
+always ship and run locally” vs. “via a remote connstring” — a convention
+<code>salmon-ops-recipes</code> deliberately enforces, per its own package description).
+</li>
+</ul>
+<h3 id="where-to-go-next">Where to go next</h3>
+<ul>
+<li><a href="/salmon/docs-howto-ops.html"><code>howto-ops.md</code></a> — concrete, copy-pasteable patterns for
+writing and testing <code>salmon-ops</code> nodes on top of this model.
+</li>
+<li><code>salmon-core/src/Salmon/Op/{Graph,OpGraph,Track,Eval}.hs</code> — the actual
+source, all four modules short enough to read end to end in one sitting.
+<code>Salmon.Op.GraphFold</code> and <code>Salmon.FoldBranch</code> are the two generic folds
+over an expanded <code>Cofree Graph</code> (context carried from ancestor to
+descendant; root-to-node paths, which <code>run tree</code> and <code>query</code> print).
+</li>
+<li><code>salmon-ops/src/Salmon/Op/Dag.hs</code> — how an expanded graph is collapsed into
+a DAG with one node per <code>Ref</code>, and edges both ways; every driver walks that
+rather than the tree.
+</li>
+<li><code>salmon-ops/src/Salmon/Actions/UpDown.hs</code> — the reference traversal
+(<code>upTree</code>/<code>downTree</code>) built on <code>Eval.expand</code> and <code>Dag</code>; the closest thing to
+a “how do I fold over one of these graphs for real” example.
+<code>Salmon.Actions.Concurrent</code> and <code>Salmon.Actions.Upkeep</code> are the concurrent
+and continuously-supervising versions <code>run serve</code> uses — see
+<a href="/salmon/docs-serve-supervision.html"><code>serve-supervision.md</code></a>.
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

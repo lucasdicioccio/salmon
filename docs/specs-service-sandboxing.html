@@ -1,0 +1,350 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-service-sandboxing.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-service-sandboxing.html"><meta property="og:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-service-sandboxing.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-service-sandboxing.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: draft / not implemented. This is a design sketch to react to, not a","headline":"Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-service-sandboxing.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1896 words, 3 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">4/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-netns-traffic-pinning.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/service-sandboxing.md"><code>specs/service-sandboxing.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="lighter-weight-process-isolation-for-services-systemd-hardening-bubblewrap-firejail">Lighter-weight process isolation for services: systemd hardening, bubblewrap, firejail</h2>
+<p>Status: draft / not implemented. This is a design sketch to react to, not a
+committed plan.</p>
+<h3 id="problem">Problem</h3>
+<p>Every service recipe in this repo today (<code>PgBouncer.setup</code>, <code>Nginx.setup</code>,
+<code>SreBox.Postgrest.setupPostgrest</code>, and the “internaltool”-style app instances
+sketched in <code>specs/pg-ha-control-plane.md</code>) runs as a plain
+<code>Systemd.systemdService</code> unit: a <code>[Service]</code> stanza with <code>User</code>/<code>Group</code>/
+<code>WorkingDirectory</code>/<code>ExecStart</code> and nothing else — <code>Systemd.Service</code>
+(<code>Salmon.Builtin.Nodes.Systemd</code>) has no isolation directives at all today.
+The only <em>heavier</em> isolation option this project has is
+<code>Salmon.Builtin.Nodes.Podman</code> — a full container (own image, own network
+namespace by default, its own lifecycle/pull/build machinery).</p>
+<p>That leaves a wide gap on the isolation spectrum for exactly the case the
+[[pg-ha control plane]] spec’s app-instances (<code>internaltool.a.0</code>, <code>postgrest.b</code>,
+…) sit in: several independent, mutually-untrusting-ish app instances
+sharing a machine (the “shared tier” from that spec), each with its own
+pg-user/secret/connstring, where “plain systemd service, wide open to the
+whole filesystem” is more privilege than any of them need, but “full podman
+container per instance” is real overhead (image management, a container
+network to wire into the bouncer/LB story, slower iteration) for something
+that’s really just one Haskell/whatever binary reading one config file and
+talking to one upstream port.</p>
+<h3 id="what-containerization-mode-actually-means-here--three-tiers-not-one">What “containerization mode” actually means here — three tiers, not one</h3>
+<p>Firejail and bubblewrap are both namespace-based sandboxing tools, but
+they’re worth evaluating against a third option that isn’t a separate tool
+at all: <strong>systemd’s own per-unit sandboxing directives</strong>, which every
+recipe in this repo already goes through <code>Systemd.systemdService</code> for.</p>
+<table>
+<tr><th>Tier</th><th>Mechanism</th><th>New binary needed?</th><th>Isolation granularity</th></tr>
+<tr><td>A. systemd hardening</td><td><code>[Service]</code> directives (<code>ProtectSystem</code>, <code>PrivateTmp</code>, <code>NoNewPrivileges</code>, <code>CapabilityBoundingSet</code>, ...)</td><td>No — systemd already runs every service</td><td>Coarse-to-medium: named policy levels + path allow-lists, no arbitrary bind-mount graph</td></tr>
+<tr><td>B. bubblewrap (<code>bwrap</code>)</td><td>Unprivileged (user namespaces), wraps the command in an argv of explicit <code>--bind</code>/<code>--ro-bind</code>/<code>--unshare-*</code> flags</td><td>Yes, <code>bubblewrap</code></td><td>Fine-grained: explicit bind-mount list, explicit namespace unshares, nothing implicit</td></tr>
+<tr><td>C. firejail</td><td>Wraps the command via a setuid-root helper, driven by profile files (built-in per-app profiles or custom <code>.profile</code>s)</td><td>Yes, <code>firejail</code></td><td>Coarse (profile-driven) unless a custom profile is authored</td></tr>
+</table>
+<p>Recommendation: <strong>build A first, B second, treat C as documented-but-not-
+default</strong>. Reasoning:</p>
+<ul>
+<li><strong>A costs nothing new.</strong> Every existing service recipe already routes
+through <code>Systemd.systemdService</code> — adding hardening fields to
+<code>Systemd.Service</code> benefits <code>Nginx</code>/<code>PgBouncer</code>/<code>Postgrest</code>/internaltool
+immediately, with no new dependency to install, detect, or version-pin.
+For a same-machine “shared tier” deployment where the main worry is one
+app instance reading another’s secret file or binding another’s port,
+<code>ProtectSystem=strict</code> + <code>ProtectHome=yes</code> + a <code>ReadWritePaths=</code>
+allow-list + <code>NoNewPrivileges=yes</code> already closes most of that gap.
+</li>
+<li><strong>B is the natural next step when A’s directive vocabulary isn’t
+expressive enough</strong> — e.g. a precise, arbitrary bind-mount graph (not
+just “read-only except these paths”), or wanting the same sandboxing
+outside a systemd context at all (ad hoc test tooling, the qemu test
+harness in <code>specs/qemu-test-vms.md</code>). <code>bwrap</code> has no daemon, no setuid
+binary (modern kernels: unprivileged user namespaces), no profile files
+to keep in sync with a recipe’s actual needs — every flag is explicit on
+the command line, which matches this project’s “everything explicit,
+typed” philosophy better than firejail’s profile-file model.
+</li>
+<li><strong>C (firejail) is real but has a worse security-model fit and a worse
+fit for this codebase’s conventions</strong>: it’s a setuid-root binary with a
+meaningful CVE history specifically in that setuid helper (privilege-
+escalation bugs recur because the design <em>requires</em> root to set up the
+sandbox before dropping it) — a bigger trust footprint than bwrap’s
+unprivileged-by-default model for a project that otherwise runs
+everything as an explicit, auditable command. Its profile-file model
+(<code>/etc/firejail/*.profile</code>, whitelist/blacklist directives in their own
+DSL) also doesn’t compose with typed Haskell values the way this
+project’s other builtins do — a <code>Firejail</code> node would either shell out to
+an existing hand-authored <code>.profile</code> (opaque to salmon, un-typed) or
+reimplement enough of firejail’s DSL as Haskell types to be worth it,
+neither of which is attractive. Worth supporting <em>if</em> there’s a concrete
+reason (an existing firejail profile someone already relies on, a
+specific feature bwrap lacks), but not the default recommendation.
+</li>
+</ul>
+<h3 id="kernel-namespaces-in-play">Kernel namespaces in play</h3>
+<p>Both bwrap and systemd’s hardening directives are front-ends over the same
+underlying kernel mechanism (<code>unshare(2)</code>/<code>clone(2)</code> with <code>CLONE_NEW*</code>
+flags) — worth being explicit about each namespace on its own, since “turn
+on sandboxing” is really several independent, separately-costed decisions,
+not one knob. <code>ip netns</code>/<code>Salmon.Builtin.Nodes.LinuxBridge</code> (the qemu spec)
+is the same network-namespace machinery again, one more data point that
+this project already relies on namespaces elsewhere.</p>
+<table>
+<tr><th>Namespace</th><th>Isolates</th><th>bwrap flag</th><th>systemd directive</th><th>Relevant to an app instance here?</th></tr>
+<tr><td>Mount (<code>CLONE_NEWNS</code>)</td><td>The process's view of the filesystem tree</td><td>Implicit — bwrap's whole <code>--bind</code>/<code>--ro-bind</code> model <em>is</em> a mount namespace; there's no "don't use one"</td><td><code>ProtectSystem=</code>, <code>ProtectHome=</code>, <code>PrivateTmp=</code>, <code>ReadWritePaths=</code>/<code>ReadOnlyPaths=</code>/<code>InaccessiblePaths=</code> (all mount-ns-backed)</td><td><strong>Yes, the main one.</strong> This is what stops one app instance from reading another's secret file — the whole point of §Tier A/B.</td></tr>
+<tr><td>PID (<code>CLONE_NEWPID</code>)</td><td>Process ID space; can't see or signal processes outside the namespace</td><td><code>--unshare-pid</code></td><td><code>RestrictNamespaces=</code>+<code>PrivatePIDs=</code> isn't a real systemd directive — systemd doesn't PID-namespace a unit's main process by default and has no single directive that does; would need pairing with bwrap or a raw <code>unshare --pid</code> wrapper</td><td>Mild value (can't <code>kill -9</code> a sibling instance, can't read its <code>/proc/&lt;pid&gt;/environ</code>), but <strong>note the systemd interaction</strong>: systemd's own process supervision (knowing whether the service is still alive, restart-on-failure) tracks the unit via <strong>cgroups</strong>, not PID visibility, so PID-namespacing a systemd-managed process doesn't break <code>systemctl status</code>/restart semantics the way it might naively seem to. Still, this is a place where Tier A alone can't reach — a reason Tier B exists.</td></tr>
+<tr><td>Network (<code>CLONE_NEWNET</code>)</td><td>Network interfaces, routing table, port bind space</td><td><code>--unshare-net</code></td><td><code>PrivateNetwork=yes</code></td><td><strong>The one with a real tradeoff here</strong> — see below.</td></tr>
+<tr><td>UTS (<code>CLONE_NEWUTS</code>)</td><td>Hostname/domainname</td><td><code>--unshare-uts</code> (pair with <code>--hostname</code>)</td><td><code>ProtectHostname=yes</code></td><td>Cosmetic mostly; low priority, cheap to turn on (no functional downside for a service that doesn't self-report its hostname anywhere meaningful).</td></tr>
+<tr><td>IPC (<code>CLONE_NEWIPC</code>)</td><td>System V IPC objects, POSIX message queues</td><td><code>--unshare-ipc</code></td><td><code>PrivateIPC=yes</code> (systemd ≥247)</td><td>Low relevance for a TCP-speaking app instance; cheap to turn on, no known downside for the recipes in scope.</td></tr>
+<tr><td>User (<code>CLONE_NEWUSER</code>)</td><td>UID/GID mapping — what makes <em>unprivileged</em> bwrap possible at all (root inside the namespace maps to an unprivileged UID outside)</td><td><code>--unshare-user</code> (bwrap uses this internally by default on modern kernels even without the flag spelled out, to be able to do the rest unprivileged)</td><td><code>PrivateUsers=yes</code> (systemd ≥232+, with caveats around filesystem UID mapping)</td><td>This is the mechanism, not really an independent policy choice for Tier B — it's <em>why</em> bwrap doesn't need setuid. Worth calling out precisely because it's the structural reason Tier B was recommended over Tier C (§ above): firejail's setuid helper does its privilege drop a different, riskier way.</td></tr>
+<tr><td>Cgroup (<code>CLONE_NEWCGROUP</code>)</td><td>View of the cgroup hierarchy</td><td><code>--unshare-cgroup</code></td><td>Not directly; <code>ProtectControlGroups=yes</code> covers the read-only-ness of <code>/sys/fs/cgroup</code> via the mount namespace instead</td><td>Minor hardening (hides host cgroup layout); low priority.</td></tr>
+<tr><td>Time (<code>CLONE_NEWTIME</code>, Linux ≥5.6)</td><td>Per-namespace offsets for <code>CLOCK_MONOTONIC</code>/<code>CLOCK_BOOTTIME</code></td><td><code>--unshare-all</code> pulls it in on new-enough bwrap; no dedicated flag on most bwrap versions in the wild yet</td><td>No dedicated directive</td><td>Essentially never relevant to anything in this repo (it exists for container-migration/checkpoint use cases). Not worth spending design effort on.</td></tr>
+</table>
+<h4 id="the-network-namespace-tradeoff-specifically">The network-namespace tradeoff, specifically</h4>
+<p>This is the one namespace decision that actually changes behavior for the
+app-instance use case, so it’s worth its own paragraph rather than just a
+table row. <code>--unshare-net</code>/<code>PrivateNetwork=yes</code> gives the sandboxed process
+<em>only</em> a loopback interface with no route out — no connectivity to the
+bouncer, the LB, or anything else, until something explicitly re-provides
+it:</p>
+<ul>
+<li><strong>Don’t unshare the network at all</strong> (this spec’s leaning, restated from
+the open question below): rely on Tier A’s <code>RestrictAddressFamilies=</code>
+(still lets a process talk <code>AF_INET</code>/<code>AF_INET6</code>/<code>AF_UNIX</code> freely, just
+can’t open e.g. <code>AF_PACKET</code> raw sockets) plus ordinary firewall rules
+(<code>Salmon.Builtin.Nodes.Netfilter</code>) if per-instance port-level restriction
+is wanted. Simplest, and correct for the diagram’s shape — every app
+instance’s only real network need is “reach my bouncer’s port” — but it
+means app instances share the host’s network namespace and can, in
+principle, reach each other or anything else the host can reach; the
+actual boundary is the mount namespace (can’t read each other’s secrets)
+plus whatever the bouncer/Postgres side enforces via its own
+authentication.
+</li>
+<li><strong>Do unshare the network per instance</strong>: real isolation (an instance
+literally cannot open a socket to anything but what’s explicitly wired
+in), but needs one of: a veth pair into a bridge per instance (the same
+<code>LinuxBridge</code> primitives the qemu spec introduces, reused for a very
+different purpose — process sandboxes instead of VMs), or <code>slirp4netns</code>-
+style userspace NAT (another new dependency). Meaningfully more
+plumbing, and — the concrete cost — DNS resolution and any outbound
+calls an app instance makes beyond its bouncer (a JWKS fetch, an
+external webhook) would need that plumbing to actually work, not just
+the bouncer connection.
+</li>
+</ul>
+<p>No change to the recommendation already in the open questions section
+below: start without network namespacing, revisit only if a concrete case
+needs it (e.g. a genuinely hostile/untrusted app instance sharing a
+“shared tier” box with others, where “can’t even attempt to reach a
+neighbor’s port” becomes a real requirement rather than defense in depth).</p>
+<h3 id="design-goals--non-goals">Design goals / non-goals</h3>
+<p>Goals:</p>
+<ul>
+<li>Tier A available to every existing <code>Systemd.systemdService</code>-based recipe
+by construction, not as an opt-in rewrite each recipe author has to
+remember.
+</li>
+<li>Tier B (<code>Bwrap</code>) usable both as a <code>Systemd.Start</code>-wrapper (for services)
+and standalone (for ad hoc sandboxed command execution, e.g. from test
+tooling), since bwrap’s value isn’t systemd-specific.
+</li>
+<li>Every new field/type has a safe, explicit default — no recipe’s behavior
+changes just from this landing; hardening is opt-in per recipe/service,
+matching CLAUDE.md’s “don’t add validation/hardening for scenarios that
+can’t happen” spirit turned the other way: don’t force isolation
+decisions onto recipes that haven’t asked for them yet.
+</li>
+</ul>
+<p>Non-goals (v1):</p>
+<ul>
+<li>A firejail builtin (§ above — documented as an option, not built, unless
+a concrete need shows up).
+</li>
+<li>Rootless bubblewrap <strong>without</strong> unprivileged user namespaces available
+(some hardened kernels disable <code>CLONE_NEWUSER</code> for unprivileged
+processes) — detecting and falling back is a real concern but not solved
+here; see open questions.
+</li>
+<li>Seccomp/syscall-filter authoring (<code>SystemCallFilter=</code> in tier A,
+<code>--seccomp</code> in bwrap) — both mechanisms support it, but hand-authoring a
+correct filter per service is its own project or template pipeline;
+starting with namespace/filesystem/capability isolation only.
+</li>
+<li>A per-recipe “which tier” policy/decision engine — the tier a given
+service uses is picked by whoever writes the seed/recipe wiring, not
+inferred from a <code>Tier</code>/<code>HardwareProfile</code> value automatically (though see
+the pg-ha spec’s open questions — this may become relevant there later).
+</li>
+</ul>
+<h3 id="proposed-design">Proposed design</h3>
+<h4 id="tier-a-systemdservice-hardening-fields">Tier A: <code>Systemd.Service</code> hardening fields</h4>
+<p>Extend <code>Salmon.Builtin.Nodes.Systemd</code>’s <code>Service</code>/<code>render_service</code> (the
+only change needed to an existing module — everything else here is new
+modules):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Hardening</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Hardening</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> harden_protect_system ::</span> <span class="dt">Maybe</span> <span class="dt">ProtectSystemLevel</span>  <span class="co">-- ProtectSystem=</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_protect_home ::</span> <span class="dt">Bool</span>                         <span class="co">-- ProtectHome=yes|no</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_private_tmp ::</span> <span class="dt">Bool</span>                           <span class="co">-- PrivateTmp=</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_no_new_privileges ::</span> <span class="dt">Bool</span>                     <span class="co">-- NoNewPrivileges=</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_read_write_paths ::</span> [<span class="dt">FilePath</span>]                <span class="co">-- ReadWritePaths=</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_capability_bounding_set ::</span> [<span class="dt">Text</span>]              <span class="co">-- CapabilityBoundingSet= (empty list = &quot;&quot; = drop all)</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_restrict_address_families ::</span> [<span class="dt">Text</span>]            <span class="co">-- RestrictAddressFamilies=, e.g. [&quot;AF_INET&quot;, &quot;AF_UNIX&quot;]</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_protect_hostname ::</span> <span class="dt">Bool</span>                        <span class="co">-- ProtectHostname= (UTS namespace; cheap, see &quot;Kernel namespaces in play&quot;)</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_private_ipc ::</span> <span class="dt">Bool</span>                              <span class="co">-- PrivateIPC= (systemd &gt;=247; IPC namespace)</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> harden_private_network ::</span> <span class="dt">Bool</span>                          <span class="co">-- PrivateNetwork= (network namespace) -- see the network-namespace tradeoff discussion; False by default for every recipe in scope today</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">ProtectSystemLevel</span> <span class="ot">=</span> <span class="dt">ProtectStrict</span> <span class="op">|</span> <span class="dt">ProtectFull</span> <span class="op">|</span> <span class="dt">ProtectReadOnly</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a><span class="ot">noHardening ::</span> <span class="dt">Hardening</span>   <span class="co">-- every field off/empty; today&#39;s exact behavior</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Service</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Service</span></span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a>    { <span class="co">-- ...existing fields unchanged...</span></span>
+<span id="22"><a href="#22" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> service_hardening ::</span> <span class="dt">Hardening</span>   <span class="co">-- new field, defaults to &#39;noHardening&#39; everywhere existing code constructs a &#39;Service&#39;</span></span>
+<span id="23"><a href="#23" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p><code>render_service</code> grows the corresponding <code>[Service]</code> lines only for
+non-default <code>Hardening</code> fields (e.g. omit <code>ReadWritePaths=</code> entirely if the
+list is empty, rather than emitting an empty directive). Because <code>Service</code>
+already has every field spelled out positionally at each of its four
+current call sites (<code>Nginx.setup</code>, <code>PgBouncer.setup</code>,
+<code>SreBox.Postgrest</code>’s systemd wiring), this is a real, mechanical edit to
+each — not a source-breaking change hidden behind a default, since Haskell
+records don’t have optional-with-default construction without deriving
+extra machinery this codebase doesn’t currently use. Worth doing as its
+own small PR (touch the 3–4 call sites, thread <code>noHardening</code> through)
+before building anything Tier-A-consuming on top.</p>
+<p>A concrete “shared tier app instance” profile, for the pg-ha spec’s
+internaltool-instance recipe to use once it exists:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="ot">appInstanceHardening ::</span> <span class="dt">Hardening</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>appInstanceHardening <span class="ot">=</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    noHardening</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        { harden_protect_system <span class="ot">=</span> <span class="dt">Just</span> <span class="dt">ProtectStrict</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        , harden_protect_home <span class="ot">=</span> <span class="dt">True</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        , harden_private_tmp <span class="ot">=</span> <span class="dt">True</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>        , harden_no_new_privileges <span class="ot">=</span> <span class="dt">True</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>        , harden_read_write_paths <span class="ot">=</span> []  <span class="co">-- nothing; app instances are stateless besides their own connstring/secret, both read-only</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>        , harden_capability_bounding_set <span class="ot">=</span> []  <span class="co">-- drop all</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>        , harden_restrict_address_families <span class="ot">=</span> [<span class="st">&quot;AF_INET&quot;</span>, <span class="st">&quot;AF_INET6&quot;</span>]  <span class="co">-- talks to its bouncer over TCP, nothing else</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>        }</span></code></pre></div></div><h4 id="tier-b-salmonbuiltinnodesbwrap">Tier B: <code>Salmon.Builtin.Nodes.Bwrap</code></h4>
+<p>A new builtin, in the same shape as <code>Salmon.Builtin.Nodes.Netfilter</code>/
+<code>Salmon.Builtin.Nodes.LinuxBridge</code> (renders an explicit argv, no persistent
+state of its own to be idempotent about beyond “the wrapped process is
+running” — which is exactly what wrapping a <code>Systemd.Start</code> already handles
+for free):</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">BindMount</span> <span class="ot">=</span> <span class="dt">BindMount</span> {<span class="ot"> bindHostPath ::</span> <span class="dt">FilePath</span>,<span class="ot"> bindGuestPath ::</span> <span class="dt">FilePath</span>,<span class="ot"> bindReadOnly ::</span> <span class="dt">Bool</span> }</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">BwrapConfig</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">BwrapConfig</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> bwrap_binds ::</span> [<span class="dt">BindMount</span>]           <span class="co">-- explicit allow-list; --ro-bind or --bind per entry</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_unshare_net ::</span> <span class="dt">Bool</span>             <span class="co">-- --unshare-net; see &quot;the network-namespace tradeoff&quot; -- False by default</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_unshare_pid ::</span> <span class="dt">Bool</span>             <span class="co">-- --unshare-pid</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_unshare_uts ::</span> <span class="dt">Bool</span>              <span class="co">-- --unshare-uts</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_unshare_ipc ::</span> <span class="dt">Bool</span>              <span class="co">-- --unshare-ipc</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_unshare_cgroup ::</span> <span class="dt">Bool</span>           <span class="co">-- --unshare-cgroup</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_die_with_parent ::</span> <span class="dt">Bool</span>         <span class="co">-- --die-with-parent (avoid orphaned sandboxed processes)</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_new_session ::</span> <span class="dt">Bool</span>             <span class="co">-- --new-session</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> bwrap_hostname ::</span> <span class="dt">Maybe</span> <span class="dt">Text</span>          <span class="co">-- --hostname, only meaningful if bwrap_unshare_uts is set</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a><span class="co">-- Mount and user namespaces aren&#39;t separate boolean fields here: mount-</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a><span class="co">-- namespacing is inherent to bwrap&#39;s whole bind-mount model, and user-</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a><span class="co">-- namespacing is the privilege-drop mechanism bwrap always relies on to run</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a><span class="co">-- unprivileged in the first place -- see &quot;Kernel namespaces in play&quot; for why</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a><span class="co">-- these two aren&#39;t optional the way the others are.</span></span>
+<span id="21"><a href="#21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="22"><a href="#22" aria-hidden="true" tabindex="-1"></a><span class="co">-- | Wraps a systemd Start&#39;s command+args in a bwrap invocation.</span></span>
+<span id="23"><a href="#23" aria-hidden="true" tabindex="-1"></a><span class="ot">wrapStart ::</span> <span class="dt">Track&#39;</span> (<span class="dt">Binary</span> <span class="st">&quot;bwrap&quot;</span>) <span class="ot">-&gt;</span> <span class="dt">BwrapConfig</span> <span class="ot">-&gt;</span> <span class="dt">Systemd.Start</span> <span class="ot">-&gt;</span> <span class="dt">Systemd.Start</span></span>
+<span id="24"><a href="#24" aria-hidden="true" tabindex="-1"></a>wrapStart bin cfg (<span class="dt">Systemd.Start</span> path args) <span class="ot">=</span></span>
+<span id="25"><a href="#25" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Systemd.Start</span> <span class="st">&quot;/usr/bin/bwrap&quot;</span> (bwrapArgs cfg <span class="op">&lt;&gt;</span> [Text.pack path] <span class="op">&lt;&gt;</span> args)</span></code></pre></div></div><p>Every <code>bwrap</code> invocation needs <code>/</code> itself bound (typically <code>--ro-bind / /</code>
+as the base, then the explicit allow-list layers read-write exceptions on
+top) — <code>bwrapArgs</code> renders that base plus one <code>--ro-bind</code>/<code>--bind</code> pair per
+<code>BindMount</code>, <code>--unshare-net</code>/<code>--unshare-pid</code> if requested, <code>--proc /proc --dev /dev</code> (bwrap needs these explicitly, unlike a full container
+runtime’s defaults). This is the part that most benefits from hand-testing
+against a real service before finalizing exact flags — sketched here at
+the “what fields does the type need” level, not “the exact argv,” per this
+project’s practice of validating shell-invocation shapes for real (see how
+<code>specs/qemu-test-vms.md</code>’s phased plan puts a hand-validated boot before
+wrapping in a node — same discipline applies here).</p>
+<p><code>wrapStart</code> composes with <code>Systemd.systemdService</code> (or <code>Qemu</code>-style bare
+process execution — see <code>specs/qemu-test-vms.md</code>) — <code>PgBouncer.setup</code>/
+<code>Nginx.setup</code>/<code>Postgrest</code>’s systemd wiring would build their <code>Start</code> as
+today, then apply <code>wrapStart bwrapBin appInstanceBwrapConfig</code> before
+handing it to <code>Systemd.Config</code>. No change needed to <code>Systemd.hs</code> itself for
+this tier, unlike Tier A.</p>
+<p>Also usable standalone (not just for services) — e.g.
+<code>Bwrap.runSandboxed :: Track' (Binary &quot;bwrap&quot;) -&gt; BwrapConfig -&gt; Command sym arg -&gt; Command sym arg</code> as a <code>Command</code>-level wrapper, for anywhere else in
+this codebase that shells out to something that could benefit from the same
+treatment without going through <code>Systemd</code> at all.</p>
+<h4 id="tier-c-firejail-documented-not-built">Tier C: firejail (documented, not built)</h4>
+<p>If a concrete need shows up: a <code>Firejail</code> builtin would look like <code>Bwrap</code>’s
+<code>wrapStart</code> (prefix the command with <code>firejail --profile=&lt;path&gt; --</code> or an
+explicit <code>--noprofile</code> + flag list), but this project’s convention is typed
+values driving rendered config, not shelling out to an externally-authored
+profile file salmon can’t inspect — so if this ever gets built, prefer
+rendering an explicit firejail flag list (mirroring <code>BwrapConfig</code>’s shape)
+over accepting a <code>.profile</code> path, keeping the same “everything explicit”
+property Tier B has. Not scheduled; revisit only if Tier A+B turn out
+insufficient for some concrete case.</p>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong>Network isolation vs. the bouncer</strong>: see “the network-namespace
+tradeoff” above — leaning towards <em>not</em> unsharing net by default, only
+revisited if a concrete “shared tier” case needs stronger-than-mount-
+namespace isolation between instances.
+</li>
+<li><strong>Capability set specifics per existing recipe</strong>: <code>Nginx</code>/<code>PgBouncer</code> may
+need to bind low ports (<code>CAP_NET_BIND_SERVICE</code>) if configured to listen
+below 1024 — <code>appInstanceHardening</code>’s “drop all capabilities” sketch
+above needs per-recipe review, not a single one-size-fits-all profile.
+</li>
+<li><strong>Detecting bwrap availability / unprivileged userns support</strong>: some
+hardened kernels (grsecurity-influenced sysctls, some container hosts)
+disable unprivileged <code>CLONE_NEWUSER</code>. Should <code>Bwrap</code>’s <code>Op</code> have a
+<code>prelim</code> that checks this and reports something actionable, or is “let
+<code>bwrap</code> itself fail loudly and let <code>Binary.untrackedExec</code>’s existing
+non-zero-exit-throws behavior surface it” (CLAUDE.md’s existing
+“failure must not be swallowed” convention) good enough? Leaning towards
+the latter — consistent with how every other builtin in this codebase
+handles a missing precondition, no new mechanism needed.
+</li>
+<li><strong>Does Tier A’s <code>Hardening</code> threading break existing test fixtures</strong>?
+<code>Test.PostgresInitSpec</code>/<code>Test.PodmanSpec</code> construct <code>Systemd.Service</code>
+values directly in a few places (worth grep-confirming before landing
+the <code>service_hardening</code> field) — a mechanical <code>noHardening</code> addition at
+each existing call site, but worth doing carefully in one pass rather
+than piecemeal to avoid a half-migrated <code>Service</code> type.
+</li>
+</ul>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li>Tier A: add <code>Hardening</code>/<code>ProtectSystemLevel</code>/<code>noHardening</code> to
+<code>Systemd.hs</code>, thread <code>service_hardening</code> through <code>Service</code>’s existing
+4-ish call sites with <code>noHardening</code> (behavior-preserving), confirm
+<code>cabal build</code>+existing tests still pass.
+</li>
+<li>Write <code>appInstanceHardening</code> (or similar) and apply it by hand to one
+real service (e.g. <code>PgBouncer.setup</code>’s call site, or once it exists, the
+internaltool-instance recipe from <code>specs/pg-ha-control-plane.md</code>) — hand-test
+that the service still starts and does its job with <code>ProtectSystem= strict</code>/<code>ReadWritePaths=</code>/etc. actually applied, not just that it
+compiles.
+</li>
+<li><code>Salmon.Builtin.Nodes.Bwrap</code> (Tier B): <code>BwrapConfig</code>, <code>wrapStart</code>,
+<code>bwrapArgs</code>. Hand-validate the rendered argv against a trivial command
+first (<code>bwrap --ro-bind / / --unshare-net -- echo hi</code>-shaped), the same
+“hand-validate before wrapping in a node” discipline as the qemu spec.
+</li>
+<li>Apply <code>wrapStart</code> to one real service, confirm it still works under the
+combination of Tier A <em>and</em> Tier B (they’re not mutually exclusive —
+systemd’s own directives plus a bwrap-wrapped <code>ExecStart</code> compose, since
+systemd applies its sandboxing to whatever process <code>ExecStart</code> names,
+which by then is <code>bwrap</code> itself wrapping the real binary).
+</li>
+<li>Firejail (Tier C), only if a concrete need shows up.
+</li>
+</ol>
+<h3 id="future-work">Future work</h3>
+<ul>
+<li>Seccomp filter authoring/templates (both tiers support the underlying
+mechanism; authoring correct filters is future work).
+</li>
+<li>A <code>Tier</code>/<code>HardwareProfile</code>-driven policy (from <code>specs/pg-ha-control-plane.md</code>)
+that picks a sandboxing tier automatically based on shared-vs-dedicated
+deployment, once real usage shows what the right default actually is.
+</li>
+<li>Rootless-bwrap-unavailable fallback (detect, degrade to Tier A only, warn).
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

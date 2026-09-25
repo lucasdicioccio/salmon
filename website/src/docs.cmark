@@ -1,0 +1,79 @@
+=base:build-info.json
+{"layout":"article"
+,"publicationStatus":"Public"
+}
+
+=base:preamble.json
+{"author": "Lucas DiCioccio"
+,"date": "2026-09-25T12:00:00Z"
+,"title": "Guides"
+}
+
+=base:topic.json
+{"topics":["docs"]
+,"keywords":["documentation", "guide", "model", "cookbook", "serve", "postgres"]
+}
+
+=base:social.json
+{"twitter": "lucasdicioccio"
+,"linkedin": "lucasdicioccio"
+,"github": "lucasdicioccio"
+,"mastodon": "https://fosstodon.org/@lucasdicioccio"
+}
+
+=base:summary.cmark
+The guides, mirrored from the repository's resources/ directory: the model, the cookbook, run serve, the Postgres pair, the GCP playbook.
+
+=base:main-content.cmark
+
+# Guides
+
+These pages are generated straight from the `resources/` directory of the
+[salmon repository](https://github.com/lucasdicioccio/salmon/tree/master/resources)
+— the repository is always the canonical source, and may be ahead of what is
+published here.
+
+- [**The salmon model**](/docs-salmon-core.html) — the general,
+  domain-independent model that lives in `salmon-core` (`Graph`, `OpGraph`,
+  `Track`, `Eval`), why it is shaped this way, and where else it could be
+  pointed. Start here for the *why*.
+- [**How to write and test salmon ops**](/docs-howto-ops.html) — the
+  cookbook: copy the patterns, adapt the names, and you produce a valid `Op`.
+  Written to be usable as a reference even by less-context-heavy tooling.
+  Start here for the *how*.
+- [**Salmon ops patterns**](/docs-salmon-ops-patterns.html) — recurring
+  shapes worth reusing across recipes, such as a one-time privileged
+  bootstrap.
+- [**`run serve`: convergence and supervision**](/docs-serve-supervision.html)
+  — what the long-running mode gives you for free (convergence,
+  `status`/`force`/`pause`, self-healing on re-declaration), how to try it,
+  the line protocol, the HTTP API and event stream, the web UI, TLS over
+  TCP, pull mode and the status sink, and what to decorate a node with
+  (`check`, `Supervision`, `managed`) to get more out of it.
+- [**A Postgres pair whose primary is declared, not discovered**](/docs-postgres-pair.html)
+  — what a switchover does step by step, when the recipe refuses and why,
+  and how to watch a client keep writing across one with the
+  `salmon-toy-qemu-pg-ha` demo.
+- [**Validating the GCP builtins against a real project**](/docs-gcp-toy-validation.html)
+  — the playbook for exercising the `Gcp.*` builtins in a sandbox you are
+  willing to destroy, with the `salmon-gcp-toy` binary.
+
+Two more documents exist only in the repository:
+
+- [`CLAUDE.md`](https://github.com/lucasdicioccio/salmon/blob/master/CLAUDE.md)
+  — the architecture module by module and the repository-level conventions
+  (package layering, idempotency, failure propagation), for anyone, human or
+  AI, working in the codebase.
+- [`CHANGELOG.md`](https://github.com/lucasdicioccio/salmon/blob/master/CHANGELOG.md)
+  — release history.
+
+=base:main-css.tramaj-json
+{ "format": "css"
+, "contents":
+  [ ""
+  , "@import \"`$ctx.pathPrefix`/css/dev.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/colors.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/article.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/navigation.css\";"
+  ]
+}

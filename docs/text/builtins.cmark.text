@@ -1,0 +1,99 @@
+_Generated from [`README.md`](https://github.com/lucasdicioccio/salmon/blob/master/README.md ) — the repository is the canonical source, and may be ahead of this page._
+
+# Builtins, recipes and binaries
+
+## Builtin nodes
+
+`salmon-ops/src/Salmon/Builtin/Nodes/` — mostly atomic, small-diameter ops, one module per concern:
+
+```html
+<table>
+<tr><th>Module</th><th>Covers</th></tr>
+<tr><td><code>Bash</code></td><td>ad-hoc shell script ops</td></tr>
+<tr><td><code>Binary</code></td><td>the shared subprocess-running plumbing (<code>untrackedExec</code>, exit-code-checked exec) every other builtin is built on</td></tr>
+<tr><td><code>Cabal</code></td><td>building Haskell projects with cabal</td></tr>
+<tr><td><code>Capabilities</code></td><td>Linux file capabilities (<code>setcap</code>/<code>getcap</code>), so a binary can do one privileged thing unprivileged</td></tr>
+<tr><td><code>Certificates</code></td><td>TLS certificate generation/signing</td></tr>
+<tr><td><code>Continuation</code></td><td>chaining/sequencing op continuations</td></tr>
+<tr><td><code>CronTask</code></td><td>cron job management</td></tr>
+<tr><td><code>Daemon</code></td><td>a process salmon owns and keeps running — the one builtin with a <code>managed</code> action, for where there is no systemd (see <code>resources/serve-supervision.md</code>)</td></tr>
+<tr><td><code>Demo</code></td><td>a toy graph (<code>collatz</code>) for trying the drivers on</td></tr>
+<tr><td><code>Debian.Debootstrap</code>, <code>Debian.Package</code>, <code>Debian.OS</code></td><td>Debian package installs and base-system setup</td></tr>
+<tr><td><code>Filesystem</code></td><td>directories, file contents, copy/move/replace-directory (the canonical small example — see <code>resources/howto-ops.md</code>)</td></tr>
+<tr><td><code>Gcp.*</code></td><td>Google Cloud: projects and billing (<code>ResourceManager</code>, <code>Billing</code>, <code>ServiceUsage</code>), <code>Iam</code>, <code>Storage</code>, <code>ArtifactRegistry</code>, <code>CloudRun</code>, <code>Compute</code>, <code>LoadBalancing</code>, <code>SecretManager</code>, <code>SshAccess</code>, <code>Monitoring</code> (notification channels and Cloud Run alert policies) — driven through <code>gcloud</code>; see <code>resources/gcp-toy-validation.md</code></td></tr>
+<tr><td><code>Git</code></td><td>git repository operations</td></tr>
+<tr><td><code>Keys</code></td><td>key material management</td></tr>
+<tr><td><code>LinuxBridge</code></td><td>Linux bridge and tap devices, a real L2 network for qemu VMs to sit on</td></tr>
+<tr><td><code>Netfilter</code></td><td><code>nft</code> firewall rules (with <code>check</code>-based idempotency, since <code>nft add rule</code> itself isn't idempotent)</td></tr>
+<tr><td><code>Nginx</code></td><td>nginx site/config management</td></tr>
+<tr><td><code>Npm</code></td><td>npm package operations</td></tr>
+<tr><td><code>PgBouncer</code></td><td>PgBouncer connection-pooler configuration</td></tr>
+<tr><td><code>Podman</code></td><td>container image/volume/network/env lifecycle</td></tr>
+<tr><td><code>Postgres</code></td><td>cluster creation, users/groups/grants, WAL streaming replication, <code>pg_hba.conf</code> management</td></tr>
+<tr><td><code>Qemu</code></td><td>a qemu VM as a systemd unit, booted from a debootstrap chroot over 9p (<code>specs/qemu-test-vms.md</code>)</td></tr>
+<tr><td><code>Routes</code></td><td>IP routing table entries</td></tr>
+<tr><td><code>Rsync</code></td><td>file/secret transport over rsync</td></tr>
+<tr><td><code>Secrets</code></td><td>secret material placement</td></tr>
+<tr><td><code>Self</code></td><td>uploading and re-invoking this binary on a remote machine</td></tr>
+<tr><td><code>Spago</code></td><td>PureScript/Spago builds</td></tr>
+<tr><td><code>Ssh</code></td><td>SSH remote-machine plumbing</td></tr>
+<tr><td><code>Sysctl</code></td><td>kernel parameter tuning</td></tr>
+<tr><td><code>Systemd</code></td><td>systemd unit management</td></tr>
+<tr><td><code>Tar</code></td><td>archive creation/extraction</td></tr>
+<tr><td><code>Upx</code></td><td>binary compression</td></tr>
+<tr><td><code>User</code></td><td>OS user/group accounts</td></tr>
+<tr><td><code>Web</code></td><td>HTTP-facing ops</td></tr>
+<tr><td><code>WireGuard</code></td><td>WireGuard VPN interfaces, keys, and routing</td></tr>
+</table>
+```
+
+## Recipes
+
+`salmon-ops-recipes/src/SreBox/` — opinionated compositions of the builtins above, where this project's own conventions get enforced:
+
+```html
+<table>
+<tr><th>Module</th><th>Covers</th></tr>
+<tr><td><code>CabalBuilding</code></td><td>building and publishing cabal-based binaries</td></tr>
+<tr><td><code>DNSRegistration</code></td><td>DNS record registration</td></tr>
+<tr><td><code>Environment</code></td><td>environment/machine bootstrapping</td></tr>
+<tr><td><code>Initialize</code></td><td>initial setup sequencing</td></tr>
+<tr><td><code>JWTSigning</code></td><td>JWT signing key management</td></tr>
+<tr><td><code>MicroDNS</code></td><td>a minimal DNS server setup</td></tr>
+<tr><td><code>PostgresInit</code></td><td>database/user/group/grant setup for a Postgres cluster (locally or driven onto a remote machine via <code>Self</code>)</td></tr>
+<tr><td><code>PostgresMigrations</code></td><td>shipping and running migrations, local or remote-connstring</td></tr>
+<tr><td><code>PostgresBackup</code></td><td>periodic <code>pg_dump</code> backups: the script, the schedule, and a node that notices when no recent dump exists</td></tr>
+<tr><td><code>PostgresPair</code></td><td>two machines, one Postgres cluster, and a <em>declared</em> primary: switchover, operator-decided failover, <code>pg_rewind</code> rejoins, and pgbouncer routing that follows — see [<code>resources/postgres-pair.md</code>](/docs-postgres-pair.html)</td></tr>
+<tr><td><code>PostgresTemplate</code></td><td>template databases: build once, lock, hand out clones (<code>salmon-migrator config template</code>/<code>clone</code>)</td></tr>
+<tr><td><code>PostgresTls</code></td><td>Postgres authenticating clients by certificate, and the material that makes it possible</td></tr>
+<tr><td><code>Postgrest</code></td><td>PostgREST service configuration</td></tr>
+<tr><td><code>WireGuardVpn</code></td><td>a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange</td></tr>
+<tr><td><code>Gcp.CloudRunDeploy</code></td><td>build a podman image, push it to Artifact Registry, deploy it to Cloud Run</td></tr>
+<tr><td><code>Gcp.CloudRunAlerts</code></td><td>the standard Cloud Monitoring alerts for a Cloud Run service (5xx ratio, p99 latency, memory, instances at max) to one email</td></tr>
+<tr><td><code>Gcp.PostgrestCloudRun</code></td><td>PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate</td></tr>
+<tr><td><code>Gcp.PreviewEnvironment</code></td><td>several Cloud Run deploys composed into one named node: a preview environment</td></tr>
+<tr><td><code>Gcp.VmProvision</code></td><td>turn up a GCE instance, then run a salmon binary on it over SSH via <code>Self</code></td></tr>
+</table>
+```
+
+`salmon-ops-recipes-experimental` (not part of the default package set — see [Build](#build )) holds `SreBox.CertSigning` (certificate signing workflows), `SreBox.KitchenSinkBlog`, `SreBox.KitchenSinkMultiSites`, `SreBox.GeneratedSite`, and the `Salmon.Builtin.Nodes.Acme` builtin (ACME/Let's Encrypt certificate issuance).
+
+## Binaries
+
+`salmon-apps/` — each one is a small `Main` over a recipe:
+
+```html
+<table>
+<tr><th>Binary</th><th>Does</th></tr>
+<tr><td><code>salmon-migrator</code></td><td>Postgres migrations, template databases and clones (<code>config template</code>/<code>clone</code>)</td></tr>
+<tr><td><code>salmon-pgpair</code></td><td>a Postgres primary/standby pair whose primary is a declaration — see [<code>resources/postgres-pair.md</code>](/docs-postgres-pair.html)</td></tr>
+<tr><td><code>salmon-pg-backup</code></td><td>take a Postgres dump now, or install the cron job that keeps taking one, here or on another machine</td></tr>
+<tr><td><code>salmon-init-locally</code></td><td>the local-machine salmon setup (sudoers, the salmon user and group)</td></tr>
+<tr><td><code>salmon-gcp-toy</code></td><td>a tiered, throwaway exercise of the GCP builtins against a real project — see [<code>resources/gcp-toy-validation.md</code>](/docs-gcp-toy-validation.html)</td></tr>
+<tr><td><code>salmon-toy-qemu-pg-ha</code></td><td>the <code>salmon-pgpair</code> demo on three qemu guests, with a client that keeps writing while the primary moves</td></tr>
+<tr><td><code>salmon-fleet</code></td><td>the controller's side of pull mode: <code>status DIR</code> folds the hosts' status documents into one line per host; <code>keygen</code>/<code>sign</code> make signed documents</td></tr>
+<tr><td><code>salmon-tui</code></td><td>a terminal client for <code>run serve --http</code> (or <code>--http-tcp</code>)</td></tr>
+</table>
+```
+
+

@@ -1,0 +1,1121 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - What is left of `specs/per-node-state-machines.md`</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-per-node-state-machines-remaining.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: living plan, update as work continues. As of this writing every"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - What is left of `specs/per-node-state-machines.md`"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: living plan, update as work continues. As of this writing every"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - What is left of `specs/per-node-state-machines.md`"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-per-node-state-machines-remaining.html"><meta property="og:description" content="Status: living plan, update as work continues. As of this writing every"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-per-node-state-machines-remaining.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-per-node-state-machines-remaining.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: living plan, update as work continues. As of this writing every","headline":"What is left of `specs/per-node-state-machines.md`","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-per-node-state-machines-remaining.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>What is left of `specs/per-node-state-machines.md`</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 9772 words, 3 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-terraform-integration.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">19/19</span></a><span class="topic-nav topic-next-link"><span class="topic-nav-boundary">|</span></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/per-node-state-machines-remaining.md"><code>specs/per-node-state-machines-remaining.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="what-is-left-of-specsper-node-state-machinesmd">What is left of <code>specs/per-node-state-machines.md</code></h2>
+<p>Status: living plan, update as work continues. As of this writing every
+(R) item (R1–R9) and I1, I3, I5, I6 are done — e.g. <code>supReapply</code>,
+<code>supDemoteEvery</code> (<code>Op/Supervision.hs</code>), <code>ConcurrencyLimit</code> behind <code>run serve --max-concurrency</code> (<code>Op/Concurrency.hs</code>), <code>Serve.Stale</code> with <code>filecontents</code>’
+<code>contentFingerprint</code>, <code>Query.resolveRewrittenSelectors</code> — and only I2 and I4
+(both matters of taste) remain. The commit hashes in “Where this stands”
+predate the merge into master. Companion to
+<code>specs/per-node-state-machines.md</code> (the design, whose milestone list is the
+source of truth for 1–9) — this file is what remains, why each remaining
+piece is worth doing, and what order I would do it in. Read the design first
+if you need the “why” of the model; read this if you want to know where
+things stand or what to pick up next.</p>
+<hr />
+<h3 id="where-this-stands">Where this stands</h3>
+<p>Everything below was built on branch <code>serve-supervision</code> (on top of <code>0bc3ed4</code>) and
+has since merged to <code>master</code>. The commit hashes are that branch’s, and some did
+not survive into <code>master</code>’s history as-is: find the change by its milestone in
+<code>git log</code> rather than by hash.</p>
+<h4 id="shipped">Shipped</h4>
+<table>
+<tr><th>#</th><th>milestone</th><th>commit</th></tr>
+<tr><td>1</td><td><code>check :: IO CheckResult</code> — <code>prelim</code> absorbed, <code>Check.hs</code>/<code>Notify.hs</code> deleted</td><td><code>52ab4f8</code></td></tr>
+<tr><td>2</td><td><code>Salmon.Op.Dag</code> — the <code>Cofree</code> collapse, pure, both directions, conflicts reported</td><td><code>042297e</code></td></tr>
+<tr><td>3</td><td><code>Salmon.Op.Ledger</code> — per-declaration contributions, nodes <em>and</em> edges, retiring</td><td><code>323f626</code></td></tr>
+<tr><td>4</td><td>both synchronous drivers over the magma and ledger; the cycle hole closed</td><td><code>c12c32b</code></td></tr>
+<tr><td>5</td><td><code>Salmon.Op.Rewrite</code> — cross-declaration knowledge as a registered post-fold phase</td><td><code>39d773d</code></td></tr>
+<tr><td>6</td><td><code>Op/Status</code> + <code>Op/Mailbox</code> + <code>Actions/Concurrent</code> — one thread per node</td><td><code>14259cc</code></td></tr>
+<tr><td>7</td><td><code>Actions/Upkeep</code> + <code>Op/Supervision</code> — nodes are <em>tended</em>, not applied once</td><td><code>41f181f</code></td></tr>
+<tr><td>8</td><td><code>Extension.managed</code> + <code>Nodes/Daemon</code> — a node can own its process</td><td><code>ff3faaf</code></td></tr>
+<tr><td>9</td><td><code>supStrategy</code> — a node's going away sends its dependants back to <code>WaitUp</code></td><td><code>f03afc2</code></td></tr>
+</table>
+<p>And three things that are not milestones:</p>
+<table>
+<tr><th>what</th><th>commit</th></tr>
+<tr><td>(R1), first of three nodes: <code>Systemd.systemdService</code> has a <code>check</code></td><td><code>f7aec15</code></td></tr>
+<tr><td>(I1) fixed: a bounce is believed over a stale check</td><td><code>f7aec15</code></td></tr>
+<tr><td><code>salmon-ops-serve-fixture --daemon</code>, so 8 and 9 can be seen by hand</td><td><code>12fb625</code></td></tr>
+<tr><td>(R1), the other half: <code>CheckResult.Immaterial</code>, and a node that answers it parks</td><td><code>1a53d95</code></td></tr>
+<tr><td>(R1), second of three nodes: <code>Filesystem.filecontents</code> has a <code>check</code></td><td><code>126e0d4</code></td></tr>
+<tr><td>(R9): <code>supReapply</code>, and <code>Filesystem.dir</code> sets it — settles (R1)'s third node too</td><td><code>72e1d55</code></td></tr>
+<tr><td>(R7): dropped <code>postOrderM</code> (dead since milestone 4), deleted unused <code>historyLines</code></td><td><code>69692a9</code>/<code>8a3dc9e</code></td></tr>
+<tr><td>(R3): <code>stopTending</code> snapshots every machine's <code>Status</code> onto its node; <code>status</code>\/<code>query</code> show it</td><td><code>8a3dc9e</code></td></tr>
+<tr><td>(R2): <code>force</code>\/<code>recheck</code>\/<code>pause</code>\/<code>resume [--select P]...</code> reach the mailbox</td><td><code>484c738</code></td></tr>
+<tr><td>(R4), half of it: <code>run tree</code>\/<code>run dag</code> print the <em>computed</em> <code>Dag</code>, not the declared graph</td><td><code>d57f2a5</code></td></tr>
+</table>
+<p>159 tests pass, Layer 3 included. <code>cabal test salmon-ops-recipes --test-option=-j1</code>.
+Each milestone is marked <em>landed</em> in the design, with its deviations recorded
+in place there; this table is the index, not the record.</p>
+<p>The honest summary of where this leaves things: <strong>the execution model is
+finished, and the nodes have started catching up with it, but only three
+have.</strong> Nine milestones built a per-node state machine, a ledger, a rewrite
+phase, two concurrent drivers and a supervisor that can own a process and
+bounce what stands on it — all of which ask each node one question, “is your
+effect still in place, or is it cheap enough to just make sure?”, that only
+<code>systemdService</code>, <code>filecontents</code> and <code>dir</code> answer today, out of roughly
+ninety builtins. That is (R1) properly closed rather than (R1) proven
+worthwhile: the mechanism now visibly <em>works</em> on a real graph — the fixture
+self-heals a removed directory with nobody typing anything — but most of
+this repository’s nodes still have no opinion about their own effect going
+away, and giving them one remains exactly the per-node work it always was.</p>
+<h4 id="left">Left</h4>
+<p>Nothing is blocking anything else. (R1) is done — every builtin that most
+recipes actually declare (<code>systemdService</code>, <code>filecontents</code>, <code>dir</code>) now has
+an opinion about its own effect going away, one way or another; (R3) is
+done — a node’s last word about itself, and a failing one’s last output, are
+now visible in <code>status</code>/<code>query</code> rather than write-only; (R2) is done —
+<code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code> reach a node from the <code>serve</code> input
+language; and (I6) is done — a re-declaration that changes a node’s content
+is now noticed by the convergence pass itself, not only, eventually, by the
+tending loop. What remains is <strong>I2</strong> and <strong>I4</strong>, both “taste” — not urgent,
+not bugs, better decided after real use than speculatively now.</p>
+<table>
+<tr><th>id</th><th>what</th><th>size</th><th>note</th></tr>
+<tr><td>~~<strong>R1</strong>~~</td><td>~~all three nodes done~~: <code>systemdService</code>, <code>filecontents</code> have a <code>check</code>; <code>dir</code> has <code>supReapply</code> instead</td><td>—</td><td>done; §R1</td></tr>
+<tr><td>~~R9~~</td><td>~~a <code>Supervision</code> opt-in for "re-apply me on the loop, it is cheaper than asking"~~</td><td>—</td><td>done; §R9</td></tr>
+<tr><td>~~R3~~</td><td>~~<code>statusOutput</code> has no reader~~ — snapshotted onto <code>NodeState</code>, shown in <code>status</code>\/<code>query</code></td><td>—</td><td>done; §R3</td></tr>
+<tr><td>~~R7~~</td><td>~~two dead bindings~~ (<code>postOrderM</code>, <code>historyLines</code>) — dropped and deleted</td><td>—</td><td>done; §R7</td></tr>
+<tr><td>~~R2~~</td><td>~~no operator command addresses a node~~ — <code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume</code> do now</td><td>—</td><td>done; §R2</td></tr>
+<tr><td>~~I6~~</td><td>~~a re-declaration that changes a node's <em>content</em> does not re-apply it~~ — the pass itself now notices, via a new <code>Stale</code> state and <code>filecontents</code>' content fingerprint</td><td>—</td><td>done; §I6</td></tr>
+<tr><td>~~R4~~</td><td>~~<code>query</code> prints the declared graph, not the rewritten one~~ (<code>tree</code>/<code>dag</code> done; <code>query</code>'s selection is now rewrite-aware via a <code>#ref</code> fallback)</td><td>—</td><td>done; §R4; = <code>specs/advance-querying.md</code></td></tr>
+<tr><td>~~R5~~</td><td>~~supervisor-level restart is half wired~~ — a crashing machine now restarts in place</td><td>—</td><td>done; §R5</td></tr>
+<tr><td>~~R6~~</td><td>~~no concurrency-bounding primitive~~ — a global, optional cap now exists</td><td>—</td><td>done; §R6</td></tr>
+<tr><td>~~R8~~</td><td>~~<code>Restart</code> means two different things~~ (<code>Systemd</code> vs <code>Supervision</code>)</td><td>—</td><td>done; §R8</td></tr>
+<tr><td>I2</td><td><code>supStrategy</code> is authored on the dependency, not the dependant</td><td>—</td><td>taste; §I2</td></tr>
+<tr><td>~~I3~~</td><td>~~<code>supStableAfter</code> carries two unrelated meanings~~ — split into <code>supDemoteEvery</code></td><td>—</td><td>done; §I3</td></tr>
+<tr><td>I4</td><td>the <code>RestForOne</code> cascade needs opting in at every hop</td><td>—</td><td>taste; §I4</td></tr>
+<tr><td>~~I5~~</td><td>~~adoption refreshes a machine's supervisor but not its policy~~ — a changed policy is now a differing representative, so it is not adopted at all</td><td>—</td><td>done; §I5</td></tr>
+</table>
+<h4 id="the-tradeoffs-in-one-place">The tradeoffs, in one place</h4>
+<p>Every milestone departed from the design somewhere; those are recorded in the
+design’s own milestone list, in place, so they are read next to what they
+changed. The ones that are still <em>live decisions</em> — where a different answer
+is defensible and reversing it is a real option — are the (I) items above and
+in §“Landed, but wanting another iteration”. The three worth knowing without
+reading further:</p>
+<ul>
+<li><strong><code>run up</code> no longer restarts a healthy systemd unit</strong> (<code>f7aec15</code>). That is
+what giving a node a <code>check</code> costs, and it is the intended improvement, but
+it is a behaviour change on existing infra.
+</li>
+<li><strong>Supervision only runs while <code>serve</code> is idle</strong> (milestone 7). A piped
+script is therefore never supervised, which keeps <code>serve &lt; script</code>
+deterministic and makes the feature invisible to any scripted test.
+</li>
+<li><strong><code>Unknown</code> never restarts anything</strong> (milestone 7). Right, given nearly no
+node has a <code>check</code> — and the reason (R1) is worth more than any remaining
+milestone was.
+</li>
+<li><strong>A node with no <code>check</code> is no longer watched at all</strong>, it is <em>parked</em>
+(<code>Immaterial</code>). Strictly speaking this removes something: before, such a
+node was woken once a minute. What it was woken to do was call <code>pure Unknown</code> and go back to sleep, so nothing is lost except the illusion that
+it was being looked after — which is the point. It makes the (R1) gap
+legible instead of hiding it behind a busy-looking loop.
+</li>
+<li><strong>One builtin, <code>Filesystem.dir</code>, now re-applies on a timer under
+supervision rather than sitting parked</strong> (R9, <code>supReapply</code>). It is opt-in,
+narrow (an author-declared claim that <code>up</code> is cheap and idempotent), and
+read nowhere but <code>Actions/Upkeep</code>, so nothing about <code>run up</code>/<code>run down</code>
+changed to land it — but it is a real behaviour change under <code>run serve</code>:
+a <code>dir</code> node that used to sit silent between commands now calls
+<code>createDirectoryIfMissing</code> again every time its delay elapses, for as
+long as the effect is stable that is at most once a minute, never zero.
+</li>
+</ul>
+<hr />
+<h3 id="landed-but-wanting-another-iteration">Landed, but wanting another iteration</h3>
+<p>These are not open work items in the sense (R1)–(R8) are: each one is
+implemented and shipped, and — (I1) excepted — the code does something
+coherent today. They are the places where the <em>shape</em> was decided under a single milestone’s
+pressure and a different answer was defensible — so they want a second pass
+with the whole thing built, rather than a bug report. (I1) turned out to be a
+bug and is fixed; (I6), the one that was not a matter of taste, is also
+fixed. What’s left here (I2, I4) genuinely is taste.</p>
+<p>(I1) is fixed — it lost a running process outright, which was not a matter of
+taste. (I6) said something uncomfortable about what a convergence pass
+currently does, and is fixed too — see below.</p>
+<h4 id="i1-a-demoted-node-consults-its-own-check--fixed">I1. A demoted node consults its own <code>check</code> — <em>fixed</em></h4>
+<p><strong>This was a bug rather than a fork, and it is fixed; what follows is the
+record.</strong> <code>salmon-ops-serve-fixture --daemon --stale-check</code> gives a daemon
+node a plausible health check (“my log file exists”); before the fix,
+driving the loop and changing the config it stood on produced:</p>
+<pre><code>Signalling &quot;web&quot; 15
+Reaped &quot;web&quot;
+serve: daemon sent back to wait: ... stopped being up
+</code></pre>
+<p>…and nothing after it. The process was torn down and never restarted, and
+the node settled into <code>Up</code> claiming its effect was in place.</p>
+<p><code>demoting</code> sends a node to <code>waitUp</code>, which comes back through
+<code>attempt ... Consult</code> — and <code>Consult</code> asks the node’s own <code>check</code> first. A
+node whose check says <code>Success</code> therefore reports <code>Skip</code> and settles straight
+back into <code>Up</code> without re-running anything (<code>Actions/Upkeep.hs</code>, <code>attempt</code>).
+For a one-shot node that is merely a missed bounce; the effect really is
+still there, and the check is right. For a <code>managed</code> node it is a lie the
+supervisor tells about itself: the machine cancelled the action on its way
+out of <code>watch</code>, so the process is <em>certainly</em> gone, and any check that says
+otherwise is stale by construction.</p>
+<p>So <code>RestForOne</code> fires only for dependants that <em>cannot</em> tell whether they are
+up. Today that is nearly every node, which is why the milestone’s tests pass
+and why it looks like it works. It is exactly backwards from where the tree
+is going: the whole of (R1) is teaching nodes to answer that question, and
+every node that learns to stops being bounceable. The flagship case is the
+casualty — a service with a working health probe reads “still up” and ignores
+the configuration that changed underneath it, which is the one thing this
+milestone was for.</p>
+<p><strong>The fork.</strong> Either a demotion means <em>re-apply</em> — <code>attempt</code> entered with
+<code>Regardless</code> rather than <code>Consult</code>, the way a restart from <code>look</code> already is
+— or it means <em>re-evaluate</em>, which is what it means now. The case for the
+current behaviour is that a spurious demotion then costs one check rather
+than one <code>up</code>, and that a node’s check is meant to be the authority on
+whether work is needed. The case against is that it makes the feature
+self-cancelling: the better a node’s check, the less <code>RestForOne</code> can do to
+it.</p>
+<p><strong>The middle answer was the one taken</strong>, and writing it sharpened the rule
+one step further: the discriminator is not “this node has a <code>managed</code>
+action” but <strong>“this machine was holding the effect when it was sent back”</strong>.
+A demotion out of <code>watch</code> re-applies (<code>Regardless</code>); a demotion out of
+<code>resting</code> consults. The difference matters for exactly one shape — a managed
+node whose action forked and exited, which <code>afterExit</code> then watches from
+<code>resting</code> as an unowned effect. Re-applying <em>that</em> would start a second copy
+of something already running, which is the case milestone 8 went out of its
+way to avoid.</p>
+<p>So the genuinely contestable half — whether a <em>one-shot</em> node’s demotion
+means re-apply or re-evaluate — is untouched and still open, decided on its
+own merits rather than under the pressure of a bug. <code>Test/UpkeepSpec.hs</code>
+pins both halves, and the first of the pair fails by timing out if the
+<code>Regardless</code> is reverted.</p>
+<p>Milestone 8’s own ordering rule is the precedent and points the same way: it
+consults the check before the policy because “a process that exits 0 because
+it daemonised is still up, and the check is the only thing that can say so”.
+The demotion case is the exact opposite — <em>we</em> stopped the process, so the
+check is the only thing that cannot say anything useful.</p>
+<h4 id="i2-the-strategy-is-authored-on-the-dependency-not-on-the-dependant">I2. The strategy is authored on the dependency, not on the dependant</h4>
+<p>§9.2 says the strategy is a per-node knob without saying which end of the
+edge it hangs off, and Erlang — where it is a property of the <em>supervisor</em> —
+does not settle it either, because there is no supervisor here to put it on.
+It went on the node that goes away: the config file declares that its going
+away matters, and the services reading it say nothing.</p>
+<p>The argument for that is real and is in the design doc: the file’s author
+knows the content is load-bearing, while six services would each have to know
+separately that it might change. The argument against is equally real and is
+not written down anywhere — <strong>a node’s own restarts are its own business</strong>,
+and this is the one policy in <code>Supervision</code> that lets one node’s author
+decide something about another node’s behaviour. A <code>RestForOne</code> on a widely
+shared node is a lever with a very long arm, and nothing warns the nodes on
+the other end of it.</p>
+<p><strong>The fork.</strong> Keep it on the dependency; move it to the dependant (“bounce me
+when anything I stand on moves”); or have both and require them to agree,
+which is the conservative option and the expensive one.</p>
+<p><strong>A reframing that dissolves most of the “long lever” worry.</strong> The argument
+against assumed a bounce is a cost the dependant’s author didn’t sign up for.
+But the tree already asks every node’s <code>up</code> to be idempotent — safe to run
+twice — as a base convention (see “Conventions for node authors” in
+CLAUDE.md). Read <code>RestForOne</code> as <em>“go recheck yourself”</em> rather than
+<em>“you are being torn down and rebuilt whether you like it or not”</em>, and an
+unwanted bounce on a well-written node is just a wasted no-op <code>check</code>, not a
+disruption. That reframes the shared-resource case in the worked example
+above (§I2’s <code>tlsCert</code>/A/B/C): service C being bounced unnecessarily is a
+cheap re-verification, not an incident, <em>provided</em> C’s own <code>up</code>/<code>check</code> are
+actually idempotent — which is already the convention every node is supposed
+to follow regardless of <code>RestForOne</code>.</p>
+<p>What this does <strong>not</strong> cover: a node whose reapplication is genuinely
+expensive or unsafe to repeat — slow warmup, an expensive connection pool
+rebuild, a migration that isn’t safely re-runnable. Such a node has no way
+today to resist a demotion sent by an upstream <code>RestForOne</code>; <code>supStrategy</code>
+only speaks from the dependency’s side, there is no dependant-side veto.</p>
+<p><strong>Conclusion for now: no implementation change to I2.</strong> The current
+dependency-side authoring is fine as long as the idempotency convention
+holds. The real gap is a <em>future</em>, separate piece of flexibility: a
+dependant-side mechanism for a node to declare “don’t force-reapply me from
+a <code>RestForOne</code> demotion” (or otherwise resist/absorb it), for the nodes that
+are the exception rather than the rule. That belongs in <code>Extension</code>
+alongside <code>up</code>/<code>check</code>/<code>down</code> — a per-node capability the node author
+supplies, the same way <code>check</code> itself is — rather than as another top-level
+field bolted onto <code>Supervision</code>. Not scoped further than that; noted here so
+it isn’t lost, not because it’s next.</p>
+<h4 id="i3-supstableafter-carried-two-unrelated-meanings--done">I3. <code>supStableAfter</code> carried two unrelated meanings — <em>done</em></h4>
+<p>It was “having been up this long forgets the earlier failures”, read by
+<code>countFailure</code>. Milestone 9 also made it “do not demote this node twice
+inside this interval”, read by <code>tooSoon</code>. One field, two jobs, and no
+particular reason an author would want the same number for both: how long a
+service has to run before a crash counts as a new crash rather than a
+continuing one is a different question from how often its dependants may be
+rebuilt behind it.</p>
+<p>This happened because §9.3 named <code>supStableAfter</code> as the mitigation and
+adding a field looked like exceeding the brief. It was the wrong instinct:
+the record is <em>meant</em> to grow, <code>defaultSupervision</code> makes growing it free for
+every node that does not care, and this is precisely the situation the “amend
+<code>defaultSupervision</code>” convention exists to make cheap.</p>
+<p>Landed as the fork’s first option: <code>Salmon.Op.Supervision.supDemoteEvery :: Micros</code> is a new field read only by <code>tooSoon</code>; <code>countFailure</code> keeps reading
+<code>supStableAfter</code>. <code>defaultSupervision</code> sets both to <code>seconds 10</code>, so nothing
+changes for a node that has not thought about it — every existing
+<code>defaultSupervision{...}</code> record update is untouched, since the constructor
+call sites that needed updating were only <code>defaultSupervision</code> itself
+(positional <code>Supervision</code> construction has no other caller in the tree).</p>
+<h4 id="i4-the-cascade-needs-opting-in-at-every-hop">I4. The cascade needs opting in at every hop</h4>
+<p>A demoted node unsettles, so a dependant of <em>it</em> that also declared
+<code>RestForOne</code> sees the same thing and goes back too. That is the whole
+mechanism, and it means the cascade stops at the first node in the chain that
+did not opt in: a <code>RestForOne</code> config, a plain service, and something
+downstream of the service leaves the downstream node alone.</p>
+<p>Erlang’s <code>rest_for_one</code> restarts everything started after the failed child
+regardless of what those children think. Ours is strictly more conservative,
+which is the right default for a mechanism landing late — but it means the
+name promises more than the behaviour, and an author reading “and everything
+after it” will be surprised.</p>
+<p><strong>The fork.</strong> Leave it (and rename, or at least document the difference
+loudly); or make the cascade transitive from the declaring node, which means
+a demotion carries an “originating ref” out to the whole transitive cone
+rather than only to the immediate dependants that opted in.</p>
+<h4 id="i5-adoption-refreshes-a-machines-supervisor-but-not-its-policy--done">I5. Adoption refreshes a machine’s supervisor, but not its policy — <em>done</em></h4>
+<p><code>startUpkeep</code> writes a new <code>Under</code> into every machine it adopts, so an
+adopted machine follows its current supervisor’s statuses, failure set,
+neighbour lists and halt flag. It does not rewrite <code>ctxPolicy</code>
+(<code>Actions/Upkeep.hs</code>), so a <code>managed</code> node whose <code>Supervision</code> changes keeps
+the old one for as long as it stays adopted — which under <code>serve</code> is
+indefinitely.</p>
+<p>Nor was the change detectable: <code>Dag.sameRepresentative</code> compared the
+<em>rendering</em> of <code>dynamics</code>, and a <code>Dynamic</code> renders as its type alone by
+default, so a node whose policy changed and whose ref did not was
+“unchanged” and got adopted rather than replaced. This predates milestone 9
+— but milestone 9 put a second thing in <code>Supervision</code> that matters to other
+nodes, so a stale policy has reach beyond its own node.</p>
+<p><strong>The fork was resolved with the second option</strong>: <code>sameRepresentative</code> now
+sees a changed policy. <code>Dag.showDynamic</code> special-cases
+<code>Salmon.Op.Supervision.Supervision</code> to render by value (via its own <code>Show</code>
+instance) rather than by the <code>Dynamic</code> default of its type name alone; every
+other <code>Dynamic</code> payload (<code>Package</code> and the rest) is untouched. A node
+re-declared with a changed <code>Supervision</code> is therefore a genuine
+<code>Representative</code> change: <code>startUpkeep</code>’s adoption test
+(<code>Dag.sameRepresentative (machineAct m) act</code>) fails for it, so the old
+machine is <code>Released</code> (its action cancelled through its bracket, tearing
+down whatever it held) rather than adopted, and a fresh machine starts under
+the new policy — no separate “refresh the policy in place” step was needed,
+because a fresh machine already starts with the right one. A node
+re-declared with an <em>unchanged</em> policy still compares equal and is adopted
+exactly as before, which is the overwhelmingly common case this must not
+regress.</p>
+<p>This was the “more honest fix” the fork called out: the same comparison
+feeds <code>dagConflicts</code>/<code>UpDown.Conflicting</code>, so a policy-only disagreement
+between two live declarations sharing a <code>Ref</code> is now reported there too, not
+just silently resolved by adoption’s own logic.</p>
+<p>Pinned two ways. <code>Test.DagSpec</code> (<code>changedSupervisionIsAConflict</code> /
+<code>sameSupervisionIsNotAConflict</code>) checks the pure comparison directly: two
+declarations of one <code>Ref</code> differing only in <code>supStrategy</code> are a
+<code>dagConflicts</code> entry; two declarations with identical <code>Supervision</code> are not.
+<code>Test.UpkeepSpec</code> (<code>changedPolicyIsNotAdopted</code> / <code>unchangedPolicyIsAdopted</code>,
+group “adoption sees a changed Supervision policy (I5)”) checks it end to
+end through the real mechanism: a managed node’s action never returns on its
+own, so <code>startUpkeep</code> called a second time either releases it and starts a
+fresh one — observed as a second spawn of the action — or adopts it and
+does not, depending only on whether the policy differs between the two
+calls. Verified the first of those two actually depends on the fix by
+reverting <code>Dag.showDynamic</code> and confirming <code>changedPolicyIsNotAdopted</code> times
+out (the stale machine is adopted and never re-runs).</p>
+<h4 id="i6-a-re-declaration-that-changes-what-a-node-is-does-not-re-apply-it--done">I6. A re-declaration that changes what a node <em>is</em> does not re-apply it — done</h4>
+<p>Not a milestone-9 decision at all — it predates it, and milestone 9 is only
+how it came to light. <code>Serve</code> records convergence per <code>Ref</code>, and a
+re-declaration that changes a node’s <em>content</em> leaves its <code>Ref</code> alone: the
+magma’s last-writer-wins swaps in the new representative, but the node stays
+<code>Converged</code> and the gate skips it. The pass says <code>converging (0 down, 0 up)</code>
+and does nothing at all.</p>
+<p>Watchable in the fixture: <code>only --name web --daemon --greeting goodbye</code> after
+an <code>up ... --greeting hello</code> produces an empty pass, and the new content only
+lands afterwards, when the config node’s own machine looks and finds the file
+saying something other than what it should. <strong>A node with no <code>check</code> — which
+is very nearly all of them — keeps the old content indefinitely.</strong> So today
+<code>filecontents</code> with changed content is a no-op on re-declaration, and the
+operator has no way to tell.</p>
+<p>This is (R1) wearing a different hat, and it is the strongest argument for
+(R1) so far: the checks are not only how drift is noticed, they are currently
+the only way a <em>deliberate</em> change is applied at all.</p>
+<p><strong>Mostly closed since, by (R1)’s second node.</strong> <code>filecontents</code> now compares
+its bytes, so a re-declaration that changes a config file’s content <em>is</em>
+picked up — by the tending machine rather than by the pass, which is the
+second of the two paths described below and the one this document said to
+lean on. Two things that leaves. The pass still reports <code>converging (0 down, 0 up)</code>, so an operator watching the pass still cannot tell that anything
+changed; the change lands quietly, a moment later, when the machine looks.
+And it still only works for a node with a <code>check</code> — <code>dir</code> is the remaining
+one that has none, though for <code>dir</code> there is nothing content-bearing to
+re-declare, so the residual case is narrow.</p>
+<p><strong>The fork was resolved with the first option</strong>: reset a node’s convergence
+when its representative changes. <code>Serve.Convergence</code> gained a <code>Stale</code>
+constructor — read exactly like <code>Pending</code> by <code>gateFor</code> (anything but
+<code>Converged</code> gets the pass’s attention; the node’s own <code>check</code> decides Skip
+vs Eval+<code>up</code> from there, same as ever), but kept distinct so <code>status</code> can
+tell “never touched” from “was up, now re-verifying”. <code>Serve.record</code>
+compares each incoming declaration’s <code>Ref</code> against whatever <code>worldMagma</code>
+already had for it via <code>Dag.sameRepresentative</code> — the same comparison
+<code>foldDag</code> uses to decide a conflict — and demotes a currently-<code>Converged</code>
+node to <code>Stale</code> when they differ.</p>
+<p>That much closes every case <code>sameRepresentative</code> can already see (a changed
+<code>help</code>/<code>notes</code>/non-<code>Supervision</code> <code>dynamics</code> on a plain node — a <code>Supervision</code>
+change on a <code>managed</code> node is (I5)‘s territory instead, since <code>gateFor</code>
+skips every <code>managed</code> node regardless of convergence state). It does <strong>not</strong>
+close the flagship <code>filecontents</code> case on its own: <code>sameRepresentative</code>
+deliberately excludes <code>up</code>/<code>check</code>/<code>down</code> (functions, incomparable), and
+that is exactly where <code>filecontents</code>’ content lives — its <code>help</code> is the
+static <code>&quot;writes &lt;path&gt; with some contents&quot;</code> regardless of what bytes it
+writes, so two declarations differing only in content compared <em>equal</em>.</p>
+<p><strong>So the second half was needed too</strong>: <code>EncodeFileContents</code> gained
+<code>contentFingerprint :: a -&gt; Maybe Text</code>, a pure, stable hash of the content
+an instance would write (<code>Nothing</code> by default; the <code>EncodeFileContents (IO a)</code> instance keeps the default deliberately, since its whole point —
+already documented as a hazard on <code>checkFileContents</code> — is that the content
+isn’t known until the encoder actually runs, so nothing pure is available).
+<code>Text</code>/<code>ByteString</code>/<code>String</code>/<code>Aeson.Value</code> all provide one (SHA256 of the
+encoded bytes, truncated the same way <code>Query.shortRef</code> truncates a <code>Ref</code>’s
+hash). <code>filecontents</code> appends <code>&quot;content-hash: &quot; &lt;&gt; h</code> to its <code>notes</code> when
+its instance has one — which is what makes a content-only re-declaration a
+genuine <code>Representative</code> change, closing the flagship case: <code>daemon.conf</code>
+going from <code>&quot;greeting = hello&quot;</code> to <code>&quot;greeting = goodbye&quot;</code> is now <code>Stale</code> the
+moment it is re-declared, not just eventually noticed by the tending
+machine.</p>
+<p>Verified two ways. <code>Test.ServeSpec</code>’s <code>reDeclareWithChangedContentIsAppliedByThePass</code>
+is deliberately run through a <strong>piped script</strong> — under
+<code>Salmon.Actions.Serve</code>’s own idle-only tending model that is the case with
+<em>zero</em> chance for a tending machine to ever run, so it is the sharpest
+possible demonstration: before this landed, the exact same test left the
+file saying its first content forever, proven by reverting the <code>Serve.hs</code>
+half of the change and watching the assertion fail with <code>expected: &quot;goodbye&quot; but got: &quot;hello&quot;</code>. <code>Test.DagSpec</code>/<code>Test.UpkeepSpec</code>’s (I5) cases already
+pin <code>sameRepresentative</code>’s general behaviour; no separate pure test was
+needed for the <code>Stale</code>-vs-<code>Pending</code> gating itself, since <code>gateFor</code>’s
+<code>/= Converged</code> check already treats every non-<code>Converged</code> constructor
+alike.</p>
+<p>What’s left, narrow and pre-existing rather than new: a node whose content
+lives purely inside <code>up</code>’s closure and whose <code>EncodeFileContents</code> instance
+(if it even goes through <code>filecontents</code> at all) has no <code>contentFingerprint</code>
+— the <code>IO a</code> case, and any hand-rolled node that writes content without
+going through <code>filecontents</code>/<code>checkFileContents</code> at all (the fixture’s own
+<code>configOp</code>, kept hand-rolled because it also needs <code>RestForOne</code>, sidesteps
+this by putting the greeting directly into its own <code>help</code> text instead).
+Such a node still relies entirely on its own <code>check</code>, running later on the
+tending loop, exactly as before this landed — which is <code>Serve.record</code>’s own
+documented limit: it can only demote what it can see, and a node author who
+wants a re-declaration’s content change to register through the pass itself
+either needs a content-derived <code>Representative</code> field (as <code>filecontents</code>
+now has) or a <code>check</code>, per the convention (R1) already established.</p>
+<hr />
+<h3 id="not-in-any-milestone">Not in any milestone</h3>
+<p>The design’s milestone list is about the <em>execution model</em>. These are things
+the model now wants from the rest of the tree, plus the loose ends seven
+milestones left behind. (R1) is the one that matters.</p>
+<h4 id="r1-nodes-have-no-check-so-almost-nothing-is-actually-supervised">R1. Nodes have no <code>check</code>, so almost nothing is actually supervised</h4>
+<p><strong>The single highest-value item in this document, milestones 8 and 9
+included. One of the three candidates below is now done, and the framing has
+changed underneath the other two — see “What <code>Immaterial</code> settled” below.</strong></p>
+<p><code>check</code> is the only thing in the model that can notice an effect going away.
+Counting assignments across <code>salmon-ops/src/Salmon/Builtin/Nodes/</code> and
+<code>salmon-ops-recipes/src/</code>: 21 sites in 12 files, against ~91 <code>op</code> nodes in
+the builtins alone. And the misses are the <em>common</em> nodes —
+<code>Filesystem.filecontents</code> and <code>Filesystem.dir</code> had none — the module’s two
+checks were <code>replaceDirectory</code>’s inner move and <code>destroyDirectory</code>, both
+<code>skipIfDirectoryIsMissing</code> — nor does <code>Bash.run</code>, nor did
+<code>Systemd.systemdService</code>. Two of those are now done; <code>dir</code> and <code>Bash.run</code>
+are not. A node with no <code>check</code> answers <code>Immaterial</code> (it
+answered <code>Unknown</code> until this change), which the upkeep FSM parks, so it is
+brought up once and thereafter watched by nothing. The engine is real and
+tested; on a real graph today it does nearly nothing.</p>
+<p>This was already logged as an ordering question in §“Open questions”
+(“wants exercising on two or three real long-running nodes before milestone 7
+hardens it. Tracked in <code>todo</code>”). Milestone 7 landing sharpens it: the
+question is no longer “does this shape work” but “which nodes get a <code>check</code>”.</p>
+<p>Three candidates, in the order I would do them:</p>
+<ol>
+<li>
+<p><strong><code>Systemd.systemdService</code></strong> — <em>done</em>. <code>Systemd.checkService</code> shells out
+once to <code>systemctl show --property=ActiveState --property=UnitFileState --property=NeedDaemonReload</code>, and <code>Systemd.interpretShow</code> (pure, tested in
+<code>Test/SystemdSpec.hs</code>) draws the verdict. Three departures from the
+one-line sketch above, each found by writing it:</p>
+<ul>
+<li><strong><code>is-active</code> alone is not enough, because this node’s own dependency
+rewrites the unit file before the check ever runs.</strong> Comparing the bytes
+on disk against what we would write can therefore only ever say “they
+match”, and a changed unit would be rewritten and never restarted.
+<code>NeedDaemonReload</code> is systemd’s own record of “the file changed since I
+loaded it” and is the only thing that still remembers.
+</li>
+<li><strong>A transitional state is <code>Unknown</code>, not <code>Failure</code>.</strong> <code>activating</code>,
+<code>deactivating</code> and <code>reloading</code> mean the service has not gone away, and
+treating them as gone is how a slow starter becomes a restart loop.
+This is the first place in the tree where <code>Unknown</code> is the <em>right</em>
+answer rather than the absence of one.
+</li>
+<li><strong><code>UnitFileState</code> earns its place</strong> on its own: a unit somebody
+<code>systemctl disable</code>d is still running, so <code>ActiveState</code> says everything
+is fine right up until the next reboot.
+</li>
+</ul>
+<p>The behaviour change is the expected one and is documented on the
+function: a unit that is installed, enabled, loaded and running is now
+<em>skipped</em> by <code>run up</code> rather than reloaded-enabled-restarted every time.</p>
+<p>(R8) did <strong>not</strong> come due here, contrary to the prediction below: the
+collision only bites a module that needs both <code>Restart</code>s in scope, and
+this one never imports <code>Salmon.Op.Supervision</code> — the supervision policy
+for a systemd unit belongs on the caller’s nodes, not on this one. The
+interaction still to get right when someone does write one: a unit with
+its own <code>Restart=</code> is already supervised by systemd, so salmon’s
+<code>Supervision</code> for it should be <code>OnFailure</code> or <code>Never</code> and never <code>Always</code>
+— two supervisors fighting over one service is worse than one.</p>
+</li>
+<li>
+<p><strong><code>Filesystem.filecontents</code></strong> — <em>done</em>. <code>Filesystem.checkFileContents</code>
+compares the bytes on disk with the bytes the node would write. Correct
+rather than approximate (<code>skipIfFileExists</code> would say <code>Success</code> for a file
+with the wrong bytes), and cheap in the only sense that matters here: the
+node’s content is <em>already</em> in hand, since <code>up</code> is about to encode it
+anyway. Comparing bytes rather than decoded text also sidesteps the
+invalid-UTF-8 question the sketch worried about, and covers the
+<code>ByteString</code>/<code>Aeson.Value</code> instances for free. Four things found in the
+writing:</p>
+<ul>
+<li><strong>The size is compared first</strong>, and a mismatch answers without reading.
+One <code>stat</code>, and it bounds what a node holding a few hundred bytes reads
+if something else has clobbered its path with something enormous.
+</li>
+<li><strong>The reason must not quote the contents.</strong> Failure text goes into
+reports, and this node writes <code>pgbouncer</code> userlists and <code>postgrest</code>
+configurations with signing keys in them. <code>Test/FilesystemSpec.hs</code> pins
+that.
+</li>
+<li><strong>This is what made (R1)’s <em>first</em> node actually work.</strong> <code>systemdService</code>
+writes its unit file through <code>filecontents</code> and then asks systemd
+whether the unit needs reloading — and systemd answers that from the
+file’s mtime. Rewriting byte-identical contents on every pass therefore
+set <code>NeedDaemonReload=yes</code> on every pass, so <code>checkService</code> said
+<code>Failure</code> on every pass and reloaded-and-restarted a healthy service.
+The claim in <code>f7aec15</code> that a healthy unit is now <em>skipped</em> was true of
+<code>checkService</code> in isolation and false of the graph it sits in, until
+this landed. Verified against a real <code>systemctl --user</code> unit: rewriting
+identical bytes flips <code>NeedDaemonReload</code> to <code>yes</code>.
+</li>
+<li><strong>The <code>EncodeFileContents (IO a)</code> instance is a hazard</strong>, and the only
+one. The check runs the encoder, so a side-effecting generator runs once
+more per look and a non-deterministic one (a timestamp) makes the node
+rewrite its file on every pass. Safe direction, but documented on the
+function; such a node wants a stable encoder or a <code>check</code> of its own.
+Nothing in the tree uses that instance today.
+</li>
+</ul>
+</li>
+<li>
+<p><strong><code>Filesystem.dir</code></strong> — <em>settled, and not with a <code>check</code></em>. (R9) landed
+and <code>dir</code> is what it was written for: it declares <code>supReapply</code> rather
+than comparing <code>doesDirectoryExist</code>, so under <code>run serve</code> it re-runs
+<code>createDirectoryIfMissing</code> on the tending loop instead of asking a
+question that would have cost the same <code>stat</code> for no extra information —
+<code>doesDirectoryExist</code> and <code>createDirectoryIfMissing</code> are within noise of
+each other, so there was nothing to buy by asking first. Nothing changes
+under a one-shot <code>run up</code>/<code>run down</code>: the field is read only by
+<code>Actions/Upkeep</code>, and <code>dir</code>’s check still answers <code>Immaterial</code> either
+way. See (R9) for the mechanism and <code>Test/UpkeepSpec.hs</code>’s
+<code>dirSelfHeals</code> for the end-to-end case — a real <code>dir</code> node, a real
+<code>rmdir</code> behind salmon’s back, put back with nobody re-declaring
+anything.</p>
+</li>
+</ol>
+<p>Milestone 8 narrows this in one respect and widens it in another. A node that
+owns its process needs no <code>check</code> at all to be supervised — the action’s exit
+is the authority, which is most of what ownership was for — so
+<code>Nodes/Daemon.hs</code> works today with nothing added. It made the gap sharper for
+everything salmon does <em>not</em> own, which is every service already under
+systemd, and that is the gap the first candidate above has now closed: a unit
+that stops behind salmon’s back is noticed and restarted, and one whose file
+changed is reloaded.</p>
+<p>Doing it also produced the first evidence that this list is in the right
+order. Giving a real node a real check is what turned (I1) from a fork into a
+demonstrated bug — a service node <em>has</em> a check, so it walked straight into
+being torn down and left down — and the two landed together for that reason.</p>
+<h5 id="what-immaterial-settled">What <code>Immaterial</code> settled</h5>
+<p>The complaint above bundled two things that turn out to be separable, and
+separating them is most of what this item needed.</p>
+<p>The first is <strong>coverage</strong>: a node that can stop being true on its own, with
+nothing in the model able to notice. That is unchanged, and it is what the
+two remaining candidates fix.</p>
+<p>The second was <strong>a category error in the default</strong>. “This node has no check”
+and “this node’s check ran and could not tell” were the same answer,
+<code>Unknown</code>, and the FSM had to treat them the same way — which meant polling
+78 of 100 builtins once a minute to call <code>pure Unknown</code>. <code>CheckResult</code> now
+has a sixth constructor for the first case. <code>Immaterial</code> means <em>there is
+nothing here worth asking about</em>: applying the effect costs about what
+finding out would, which is exactly the property that makes those nodes
+idempotent in the first place (<code>mkdir -p</code>, <code>ip route replace</code>, <code>ALTER SYSTEM SET</code>, an append-if-missing). It is the default, so no node author writes it;
+the one-shot drivers map it to <code>Required</code> and cannot tell it from <code>Unknown</code>,
+so <code>run up</code> is byte-for-byte unchanged; and under <code>Actions/Upkeep</code> a node
+that answers it <strong>parks</strong> — blocked on its mailbox, its demoting
+dependencies and its own action, with no delay ladder — instead of polling.</p>
+<p>Three things that buys, none of them the obvious one:</p>
+<ul>
+<li><strong><code>Unknown</code> now means only what it says.</strong> It was carrying two meanings,
+and every rule about it had to be written for the weaker one. The systemd
+check’s transitional states are the case that wants the real <code>Unknown</code>,
+and they now have it to themselves.
+</li>
+<li><strong>The gap is legible.</strong> A parked node is visibly not being watched.
+Before, a node nobody could supervise looked identical, from the outside,
+to one being supervised successfully — same <code>NextLook</code> line every 60s.
+Making the engine stop pretending is what turns (R1) from a note in a
+document into something an operator can see in <code>status</code>.
+</li>
+<li><strong>The cost of the default is now proportional to what it claims.</strong> A node
+that says “don’t ask, just apply me when something would have applied me”
+is asked exactly once, learns that, and stops. It costs one check per
+supervisor rather than one per minute.
+</li>
+</ul>
+<p>What it does <em>not</em> do is make those nodes self-healing: a parked <code>dir</code> whose
+directory somebody removed stays parked. Doing something about that is (R9),
+and it was deliberately not part of this change — it is a second, independent
+decision about whether re-applying on a loop is acceptable, and it belongs to
+the node author rather than to <code>CheckResult</code>. (R9) has since landed and
+<code>Filesystem.dir</code> now makes that decision; see §R9.</p>
+<h5 id="the-behaviour-change-the-remaining-two-carry">The behaviour change the remaining two carry</h5>
+<p><strong>Each of these changes what <code>run up</code> does for every existing caller</strong>: a
+node whose check says <code>Success</code> stops being re-applied. That is an
+improvement (it is what the <code>check</code> convention is <em>for</em>, and CLAUDE.md’s
+idempotency section already asks for it) but it is a behaviour change on the
+author’s own infra, which is why milestone 7 deliberately did not smuggle any
+of them in. Land them one at a time, each with its own commit and its own
+Layer-1 test, so a regression is attributable.</p>
+<h4 id="r2-an-operator-cannot-address-a-node-so-the-mailbox-is-unreachable--done">R2. An operator cannot address a node, so the mailbox is unreachable — <em>done</em></h4>
+<p><code>Salmon.Op.Mailbox</code> was built, <code>Upkeep.instruct</code> was built and tested, and
+<code>Force</code>/<code>Satisfy</code>/<code>Recheck</code>/<code>Pause</code>/<code>Resume</code> all meant something to the FSM —
+but nothing in the <code>serve</code> input language could name a node, so none of it
+was reachable except from Haskell. Four commands close that:</p>
+<pre><code>force   [--select P]... [--exclude P]...
+recheck [--select P]... [--exclude P]...
+pause   [--select P]... [--exclude P]...
+resume  [--select P]... [--exclude P]...
+</code></pre>
+<p>(<code>Satisfy</code> gets no command, matching this section’s own “the four instruction
+commands” — it is <code>Query.forceSkip</code>’s territory, decided at declare time, not
+an operator’s run-time say.) They reuse <code>parseSelection</code> /
+<code>resolveWorldSelectors</code> exactly as sketched — the same <code>Set Ref</code> <code>status</code>/
+<code>query</code>/<code>converge --select</code> already compute — and an empty selection means
+every node, same as those three.</p>
+<p>The caveat this section flagged landed as the smaller option it named: <strong>the
+instruction is queued, not posted.</strong> <code>Tending</code> gained <code>tendingPending :: IORef (Map Ref [Instruction])</code>; the command handler resolves the selection and
+queues onto it (oldest first per node, so a <code>pause</code> then a <code>resume</code> is
+delivered in that order) and immediately reports how many nodes matched
+(<code>Instructed</code>). Nothing is posted into a mailbox at that moment — <code>loop</code>
+already runs <code>stopTending</code> before every command, <code>status</code> included, so there
+is never a live one to post into regardless of whether the target is a
+one-shot or a holding machine. <code>startTending</code> drains the whole queue into
+<code>Upkeep.instruct</code> the moment the next supervisor’s machine table exists —
+after adoption, so both a freshly-started machine and an adopted one see it —
+and clears it. This is exactly “force this node next time you look at it”,
+and needed no change to <code>Upkeep.startUpkeep</code>’s signature: the queue is
+delivered from the caller’s side, after the call returns, not threaded
+through it.</p>
+<p>A selected node that no live machine ever answers to (excluded from every
+active epoch, retired, or simply never reached by tending) silently drops the
+instruction at delivery time, same as <code>Upkeep.instruct</code> already does for any
+unknown <code>Ref</code> — there was nothing to queue it <em>for</em> once its target never
+showed up. <code>Instructed</code>’s count is therefore a statement about the selection,
+not a delivery receipt; the two can differ and that is not a bug.</p>
+<p>Milestone 8’s promise is now real: <code>pause</code> on a node that owns a process
+stops tending it without touching the running service, and <code>force</code> on one is
+how to restart something that is healthy and currently has no other way to
+be told to. See <code>Test.ServeSpec</code>’s <code>forceOverridesASatisfiedCheck</code> (a second
+<code>up</code> with the check never once unsatisfied — the only thing that can explain
+it is <code>force</code> itself) and <code>pauseThenResume</code> (an effect allowed to vanish
+while paused, and confirmed <em>not</em> put back until <code>resume</code>).</p>
+<h4 id="r3-statusoutput-has-no-reader--done">R3. <code>statusOutput</code> has no reader — <em>done</em></h4>
+<p>The bounded per-node ring is written (the machine narrates its transitions,
+and milestone 8 gives it real process output) and nothing read it. <code>status</code>
+couldn’t: the supervisor is stopped while any command is handled, so the
+<code>TVar</code>s were gone by the time it ran.</p>
+<p>Landed as the first of the two options sketched here: <code>stopTending</code>
+snapshots every machine’s <code>Status</code> — read from the <code>Upkeep.Supervisor</code> via
+<code>Upkeep.supervisorStatuses</code>, before <code>Upkeep.stopUpkeep</code> partitions it into
+stopped and kept — onto a new <code>nodeStatus :: Maybe Status</code> field on
+<code>NodeState</code>. <code>status</code>/<code>query</code> render it: a <code>[CheckResult]</code> on every node’s
+summary line, and — the thing milestone 8 made worth more than it was, since
+the ring now carries a managed process’s actual stdout/stderr — the tail of
+a failing node’s output ring underneath, capped at ten lines so one wedged
+node cannot bury the rest of the listing.</p>
+<p>Freshness needed no new mechanism: every command already runs <code>stopTending</code>
+before it is handled (see <code>loop</code>), so a snapshot is never more than one
+command old, and a holding machine is re-adopted (and so re-snapshotted)
+into the next supervisor the next time tending starts — which happens
+before every command too. The second option sketched here (read a holding
+machine’s <code>TVar</code> live rather than snapshotting it) turned out to buy nothing
+extra given that rhythm, so it was not built.</p>
+<p>Pinned by <code>Test.ServeSpec.statusShowsAFailingNodesOutput</code>: a node whose <code>up</code>
+never stops throwing is declared, fails synchronously once, and is then
+picked up by the idle tending loop (it is <code>Unsettled</code>, not yet <code>Converged</code>)
+— which is what actually produces the <code>Failure</code> this test reads back
+through <code>status</code>, not the declaring pass. Verified by hand too: chmod a
+directory read-only, declare a <code>dir</code> under it, and <code>status</code> shows
+<code>[Failure &quot;...: permission denied&quot;]</code> with the repeated <code>up</code> / error lines
+underneath.</p>
+<h4 id="r4-queryrun-treerun-dag-still-print-the-declared-graph--done">R4. <code>query</code>/<code>run tree</code>/<code>run dag</code> still print the <em>declared</em> graph — done</h4>
+<p>Known and recorded at milestone 5. Registered <code>Rewrite</code>s apply to <code>run up</code>/<code>run down</code>/<code>run serve</code> but not to the three commands that <em>describe</em> a
+graph, so <code>query</code> shows twenty <code>deb</code> nodes where <code>run up</code> will run one
+<code>apt-get</code>. The obstacle is structural rather than an oversight: a rewritten
+<code>Dag</code> has <code>Ref</code>s and edges and no <strong>paths</strong>, and <code>--select</code> matches path
+globs (<code>Query.resolveSelectors</code> walks a <code>Cofree</code>). Printing the computed
+graph needs either a renderer that does not exist or ref-addressed patterns.</p>
+<p>Landed for the half of this that has no <code>--select</code> to reconcile with paths in
+the first place: <code>run tree</code>/<code>run dag</code> take no selection at all, so nothing
+about them needed the fork above resolved before writing the renderer.
+<code>CommandLine.hs</code>’s <code>Run RunTree</code>/<code>Run RunDAG</code> now fold and rewrite the graph
+the same way <code>runUp</code>/<code>runDown</code> do (<code>computedTreeDag</code>, sharing
+<code>Rewrite.wholeGraph</code>’s “everything desired, nothing ignored” <code>Phase</code>) and
+print the resulting <code>Dag</code> through two new renderers: <code>Help.printDagTree</code> and
+<code>Dot.printDagCograph</code>. Both are one line per <code>Ref</code> rather than one per path
+— a node reached from several declarations is printed once, the way it is
+walked once — with dependencies listed underneath (<code>printDagTree</code>) or as
+plain edges (<code>printDagCograph</code>, which necessarily drops the
+red/orange/gray <code>Connect</code>/<code>Overlay</code> distinction <code>Dot.printCograph</code> draws
+from <code>Shape</code>, since a <code>Dag</code> has already collapsed both into “depends on”).
+With no rewrites registered this is the same nodes and edges as before,
+just collapsed to one line/node instead of one per tree position — verified
+by hand against the <code>salmon-ops-serve-fixture</code> binary (no rewrites
+registered): <code>run tree</code>/<code>run dag</code> on a plain bundle directive show the same
+four nodes either way, just without the duplicate positions a shared node
+used to get.</p>
+<p><code>query</code> was the holdout, and the part that actually needed the fork this
+section opened with resolved — it is the one of the three whose whole job is
+resolving a <code>--select</code>/<code>--exclude</code> pattern, which only paths could do.</p>
+<p><strong>Resolved with option (2)</strong>: resolve a pattern against the declared graph
+as before, and translate the result through <code>membersOf</code>. Landed as
+<code>Query.resolveRewrittenSelectors</code> (<code>Salmon.Actions.Query</code>), a drop-in for
+<code>resolveSelectors</code> that <code>CommandLine.hs</code>’s <code>QueryShow</code>/<code>QueryPlan</code> handlers
+now call, passing the same whole-graph <code>Rewritten</code> <code>run tree</code>/<code>run dag</code>
+already compute (<code>computedTreeDag</code> factored into <code>computedRewritten</code>, so the
+<code>Rewritten</code> — not just its <code>computedDag</code> — is available to <code>query</code> too).
+Ordinary path-glob patterns are untouched — <code>resolveRewrittenSelectors</code>
+degrades exactly to <code>resolveSelectors</code>’s behaviour when no <code>#</code>-pattern is
+given, checked by test.</p>
+<p><strong>The fallback lookup</strong>, added alongside rather than instead of (2): a
+declared path genuinely cannot address a rewrite-introduced node (a
+package-install batch, say) at all — such a node has no position in the
+declared tree, since it was never declared, only ever produced after the
+fold. So a pattern beginning with <code>#</code> matches by <code>Ref</code> instead of by path: a
+prefix of either <code>shortRef</code> or the full ref text, checked against every
+declared node <em>and</em> every computed (rewrite-introduced) node, with a
+computed match expanded through <code>membersOf</code> back to the declared nodes it
+stands in for. This deliberately mirrors <code>renderAnnotated</code>’s own <code>&quot; #&quot; &lt;&gt; shortRef ref</code> disambiguation suffix (already printed today next to a
+colliding path, and — since <code>run tree</code>/<code>run dag</code> moved to <code>Dag</code>-based
+renderers — the same short-ref text that would identify a batch node there)
+so that text a render prints can be pasted straight back in as a selector,
+symmetric with how <code>git</code> short hashes work.</p>
+<p>Both kinds of pattern union rather than override each other within one
+<code>--select</code>/<code>--exclude</code>, and an empty <code>--select</code> list still means
+“everything” when checked against the <em>combined</em> pattern list (not just its
+path half) — the bug the first draft had, caught by
+<code>rewrittenEmptySelectStillMeansEverything</code> before it shipped: an
+exclude-only <code>--exclude '#...'</code> with no <code>--select</code> at all must still select
+everything else, not silently narrow to nothing.</p>
+<p>Every result is still a set of <em>declared</em> refs, deliberately: <code>query plan</code>’s <code>phaseIgnored</code> and a rewrite’s own <code>collectDynamic</code> are both keyed
+on declared refs (<code>runUp</code>’s <code>Phase</code> is built and consumed before any
+rewrite’s batching decision), so this needed no change to what <code>run up</code>
+consumes — addressing a batch by its ref and excluding it is exactly
+equivalent to excluding every declared package that went into it, which is
+the only coherent meaning available to a plan computed before any rewrite
+runs. <code>query show</code>’s rendering is unchanged too (still the annotated
+<em>declared</em> tree via <code>printAnnotated</code>) — only what a <code>--select</code>/<code>--exclude</code>
+pattern can <em>match</em> changed; nothing needed the tree it annotates to become
+the computed one, since the declared identities are still the more useful
+thing to show next to <code>[selected]</code>/<code>[excluded]</code>.</p>
+<p>See <code>Test/QuerySpec.hs</code>’s <code>resolveRewrittenSelectors</code>-prefixed cases, which
+cover: plain path patterns unchanged; a <code>#ref</code> pattern addressing a plain
+declared node directly; one addressing a batch and expanding to its
+declared members; a path and a <code>#ref</code> pattern combining within one
+selection; and the empty-select-still-means-everything edge case above.</p>
+<h4 id="r5-supervisor-level-restart--done">R5. Supervisor-level restart — <em>done</em></h4>
+<p>§“The supervision tree” wants two levels: the upkeep FSM handles <em>the managed
+effect stopped</em>, and a supervisor handles <em>the machine managing it died</em>.
+Milestone 7 had the monitoring (<code>stopUpkeep</code> does <code>waitCatch</code> on every
+machine and reports <code>Escaped</code>) and not the restart — a machine that threw was
+reported and gone until the next idle period rebuilt every machine anyway.
+That was a tolerable accident of “supervisors are rebuilt per idle period”
+and stopped being tolerable the moment one outlives a command (see R2).</p>
+<p>Landed as milestone 9 made it smaller: restarting a machine in place needs
+nothing beyond handing the replacement its supervisor’s current state, and
+<code>Upkeep.Under</code> — a <code>TVar</code> a machine re-reads on every wait rather than
+closing over — already <em>is</em> that, since it exists precisely so an adopted
+machine sees a live supervisor rather than a dead one’s maps. <code>startUpkeep</code>
+now runs every machine through a new wrapper, <code>restarting</code>, instead of
+<code>machine</code> directly: a crash is reported (<code>Escaped</code>, on every attempt — “the
+honest fix is to keep it loud” turned out to mean <em>report each restart
+loudly</em>, not <em>decline to restart</em>) and the machine restarts in place,
+re-entering as <code>Unsettled</code> rather than wherever the dead one’s closure
+remembered. <code>Unsettled</code> is what makes the very next step a fresh <code>Consult</code>
+rather than a blind <code>up</code> — nothing survived the crash, not even the
+assumption that the effect is still there. A fixed <code>delayFloor</code> pause (not
+the adaptive ladder, which is a policy about the node, not about this
+module’s own bugs) separates one restart attempt from the next, so a bug
+that fires on every entry cannot spin a core.</p>
+<p>One hazard found in the writing, not anticipated by the sketch above: the
+restart wrapper’s <code>try @SomeException</code> must not catch an <em>asynchronous</em>
+exception. <code>releaseKept</code> tears a holding machine down by <code>cancel</code>ling its
+thread — throwing <code>AsyncCancelled</code> into it — specifically because such a
+machine ignores the halt flag and has no other way to be stopped; a wrapper
+that treated that as a crash and restarted the machine would defeat the
+teardown <code>releaseKept</code>’s caller is waiting on. <code>SomeAsyncException</code> is
+matched via <code>fromException</code> and re-thrown untouched instead.</p>
+<p>Named <code>restarting</code> rather than <code>supervised</code>, which was the obvious name and
+already taken — <code>Salmon.Op.Supervision.supervised :: Supervision -&gt; Dynamic</code>
+is the smart constructor that attaches a policy to a node’s <code>dynamics</code>, an
+unrelated thing. Recorded so a future reader does not reach for the same
+name a second time; see (R8) for the collision this project already has of
+this shape.</p>
+<h4 id="r6-bounding-concurrency--done">R6. Bounding concurrency — <em>done</em></h4>
+<p>§“Bounding concurrency” decided in two parts and shipped the first
+(collections, milestone 5). The second — a bounding primitive for the case a
+collection cannot express, e.g. two batches fighting over the dpkg lock
+across <em>different</em> rewrites — was explicitly deferred and still is: <strong>no
+per-resource primitive is added here</strong>, deliberately. Two nodes contending
+for one specific thing is still an edge or a collection’s job, and nothing
+in this item changes that.</p>
+<p>What landed is the smaller, orthogonal thing this section used to only note:
+a single global knob capping how many nodes are inside their own
+<code>check</code>/<code>up</code>/<code>down</code> at once across one pass, for machines where unbounded
+<em>width</em> itself is the problem (CPU/IO contention, an outbound connection
+limit, file descriptors) rather than any particular pair of nodes fighting
+over a particular resource. <code>Salmon.Op.Concurrency.ConcurrencyLimit</code> is a
+thin wrapper over a <code>QSem</code>; <code>newConcurrencyLimit</code> builds one from a positive
+<code>Int</code> (<code>error</code>s on <code>&lt;= 0</code>, since a limit of zero would deadlock every gated
+action rather than mean “run nothing” — that is what excluding every node
+from the pass already says) and <code>withConcurrencyLimit</code> holds one slot for
+the duration of an <code>IO</code> action, a no-op for <code>Nothing</code>.</p>
+<p><code>Salmon.Actions.Concurrent.upDagConcurrent</code>/<code>downDagConcurrent</code> (and the
+<code>walkConcurrent</code> both share) take a <code>Maybe ConcurrencyLimit</code>; <code>Nothing</code>
+reproduces every caller’s behaviour from before this landed. The slot is
+held only around <code>walkConcurrent</code>‘s <code>apply</code> call — a node’s own
+<code>check</code>/<code>up</code>/<code>down</code> — never around the <code>STM</code> wait on its neighbours’
+<code>waitStability</code>, which is what makes this safe to reason about without a
+deadlock analysis: a node cannot even attempt to acquire a slot until every
+node it depends on has settled and released its own, so two nodes never
+hold a slot each while blocked on one another through this mechanism — the
+only thing a wait through it can ever be for is a free slot, never another
+node’s turn.</p>
+<p><code>Salmon.Actions.Serve.serveWith</code> takes the same <code>Maybe ConcurrencyLimit</code> and
+passes it to <em>both</em> halves of a convergence pass — the teardown walk and the
+bring-up walk share one limit rather than getting one each, which is correct
+because <code>converge</code> already awaits the first before starting the second, so
+the two never contend for it at the same time. <code>serve</code> (no rewrites, for
+callers that don’t need them) passes <code>Nothing</code>, matching its signature
+before this landed for anyone not opting in.</p>
+<p><code>run serve --max-concurrency N</code> is the CLI surface: <code>RunServe</code> gained a
+<code>Maybe Int</code> (parsed with <code>optional (option auto (long &quot;max-concurrency&quot; ...))</code>, so omitting the flag is <code>Nothing</code>), and
+<code>execCommandOrSeedWithRewrites</code> builds the <code>ConcurrencyLimit</code> from it right
+before calling <code>serveWith</code>. <code>run up</code>/<code>run down</code> are untouched — they run
+through the <em>sequential</em> drivers (<code>UpDown.upDag</code>/<code>downDag</code>), which are
+already bounded to one node at a time by construction, so there was nothing
+for this knob to do there.</p>
+<p>One thing worth being explicit about: this bounds a <strong>pass</strong>, not the
+tending loop <code>Actions/Upkeep.hs</code> runs between commands. A wide <code>serve</code>
+declaration can still start as many supervised machines as it has nodes;
+each one is normally idle (parked, or waiting out its own delay ladder)
+rather than doing work, so the unbounded-width problem this item was written
+for is specific to a convergence pass actually <em>doing</em> many things at once,
+which is exactly what <code>--max-concurrency</code> now caps. Bounding the tending
+loop itself was not asked for and is a different, larger question — the
+loop’s own steady-state cost is designed to be near zero per idle node
+(see <code>Actions/Upkeep.hs</code>’s summary), so there is little evidence yet that it
+needs one.</p>
+<h4 id="r8-restart-means-two-different-things--done">R8. <code>Restart</code> means two different things — <em>done</em></h4>
+<p><code>Salmon.Builtin.Nodes.Systemd.Restart</code> (rendered into a unit file’s
+<code>Restart=</code> directive; one constructor, <code>OnFailure</code>) and
+<code>Salmon.Op.Supervision.Restart</code> (<code>Always</code>/<code>OnFailure</code>/<code>Never</code>) shared both a
+name and a constructor. Nothing imported both, so nothing was broken — but
+this was the fourth collision of this kind in this work (<code>CheckResult</code>’s
+<code>Success</code>/<code>Failure</code> vs optparse’s <code>ParserResult</code>, <code>Mailbox.Skip</code> vs
+<code>Report.Skip</code>, and two <code>Direction</code>s, the last resolved by <em>merging</em> them,
+which was not available here).</p>
+<p>The two are genuinely different things: one is a string salmon writes into a
+file for systemd to read, the other is a decision salmon makes itself.
+Renamed <code>Systemd.Restart</code> to <code>Systemd.RestartDirective</code> (constructor
+<code>OnFailure</code> untouched, only the type name moved) rather than waiting for a
+caller that needs both in scope, since the section’s own prediction — a
+systemd node with a <code>check</code> (R1) is exactly the node that would want a
+<code>Supervision</code> too — is exactly the situation (R1) already created for
+<code>systemdService</code>. Nothing outside <code>Systemd.hs</code> named the old type (checked
+across both <code>cabal.project</code> and <code>cabal.perso.project</code>’s package sets), so
+this was a same-module rename with no call-site fallout.</p>
+<h4 id="r7-two-dead-bindings--done">R7. Two dead bindings — <em>done</em></h4>
+<ul>
+<li><code>Salmon.Op.GraphFold.postOrderM</code> (<code>salmon-core</code>) had no in-repo caller
+since milestone 4 moved both drivers onto <code>Dag</code>, and its own module doc
+still named <code>upTree</code> as the caller it was written for — stale as well as
+dead. Dropped rather than kept speculative (it was untested, and this
+document’s own “used or dropped” framing asked for a decision); recover it
+from history if a caller needs it again. <code>foldWithContext</code>, the module’s
+other export, is not dead — <code>Actions/Dot.hs</code> uses it — and is untouched.
+</li>
+<li><code>Salmon.Actions.Serve.historyLines</code> was unused and not even in the
+module’s export list (<code>historyLinesMatching (const True)</code>; <code>history</code> goes
+through the <code>Matching</code> version directly). Deleted.
+</li>
+</ul>
+<hr />
+<h4 id="r9-re-apply-me-on-the-loop-it-is-cheaper-than-asking--done">R9. “Re-apply me on the loop; it is cheaper than asking” — <em>done</em></h4>
+<p>The second half of the <code>Immaterial</code> design, deliberately not landed with the
+first. <code>Immaterial</code> says <em>don’t poll me</em>; it said nothing about what a
+supervisor should do for a node whose effect is cheap to re-apply and can
+still go away — <code>Filesystem.dir</code> was the whole argument. A <code>dir</code> that
+somebody <code>rmdir</code>s was not noticed before <code>Immaterial</code>, was not noticed after
+it either, and would not have been noticed by (R1) candidate 3 as a <code>check</code>
+would have — at the cost of a <code>doesDirectoryExist</code> per node per minute,
+which is the trade <code>Immaterial</code> exists to avoid making silently.</p>
+<p>The shape landed as sketched: <code>Salmon.Op.Supervision.supReapply</code>, a <code>Bool</code>
+field on <code>Supervision</code>, opt-in on the node, meaning “on the tending loop,
+just run <code>up</code> again rather than asking”. The node keeps the delay ladder it
+would otherwise have parked out of, and the ladder’s meaning inverts — it is
+now a rate limit on re-application rather than on looking. <code>Filesystem.dir</code>
+sets it; nothing else in the tree does.</p>
+<p>The three things flagged as needing to be got right, and how each landed:</p>
+<ul>
+<li><strong>It re-runs <code>up</code> on a schedule, forever.</strong> Still true, still not the
+default, still narrow: <code>supReapply</code> defaults to <code>False</code>, <code>defaultSupervision</code>
+sets it <code>False</code>, and it is documented on the field as sound only for an
+<code>up</code> that is genuinely cheap <em>and</em> genuinely idempotent. <code>Bash.run</code>,
+<code>cabal-build</code>, <code>git-repo</code>’s <code>clone &gt;&gt; pull</code> and <code>rsync:send-dir</code> remain
+<code>Immaterial</code> and none of them set it.
+</li>
+<li><strong>It interacts with <code>RestForOne</code>.</strong> Landed by <em>not</em> going through
+<code>unsettle</code>/<code>Upping</code> at all: a successful reapply calls neither, so
+<code>statusEpoch</code> never moves and a <code>RestForOne</code> watcher sees nothing — which
+is correct, since the node never stopped being up from a dependant’s point
+of view. A reapply that <em>fails</em> still reaches a watching dependant, but
+through the existing <code>markFailed</code>/failed-set path <code>crossing</code> already
+reads, not through the epoch — so no new mechanism was needed for the one
+case that does need to be seen. Pinned by
+<code>reapplyDoesNotDemoteDependants</code> (success, several times, nobody sent
+back) and <code>failingReapplyGivesUp</code> (failure, folded into the ordinary
+<code>supGiveUpAfter</code>/backoff machinery via the same <code>failed</code> function a
+one-shot <code>up</code> failure uses).
+</li>
+<li><strong>The reporting has to distinguish it from a restart.</strong> A new <code>Reapplying</code>
+report takes <code>NextLook</code>’s place for such a node — filtered from <code>serve</code>’s
+output the same way <code>Parked</code> is, visible in <code>status</code>. Distinguishing it
+from a real restart turned out to need no extra signal beyond that: a
+restart passes back through <code>Upkeep act Upping</code>, and a reapply never does
+— pinned by <code>reapplyStaysInUp</code>, which asserts <code>Upping</code> is reported exactly
+once (the original arrival) across several successful reapplies.
+</li>
+</ul>
+<p>One thing not anticipated when this was written: a node holding a running
+action (<code>managed</code>) had to be excluded explicitly. Such a node’s <code>up</code> throws
+by convention (see <code>Nodes/Daemon.hs</code>), so <code>supReapply</code> is read only by
+<code>resting</code> (the non-holding loop); <code>watch</code> (the holding one) treats anything
+other than <code>Poll</code> as <code>Park</code>, regardless of the field. Pinned by
+<code>managedIgnoresSupReapply</code>.</p>
+<p><code>filecontents</code> was the evidence for the other half of the original argument:
+it wanted a real check, because comparing bytes is <em>better</em> than
+re-applying — it is exact, it is one <code>stat</code> in the common case, and
+re-applying would have churned the mtime that <code>systemdService</code> reads. <code>dir</code>
+has none of those properties: there is nothing to compare beyond existence,
+and <code>createDirectoryIfMissing</code> costs about what <code>doesDirectoryExist</code> costs.
+So <code>dir</code> got this field rather than a check, and nothing else in the tree
+has both properties at once — the two R1 nodes and this one between them
+cover the shapes that exist today; a fourth node wanting either treatment
+should re-read this section’s argument rather than copy whichever one is
+closer.</p>
+<h3 id="the-order-i-would-do-it-in">The order I would do it in</h3>
+<p>(R1), (R9) and (R3) are done. What is left is reach and a handful of
+independent small items, not coverage or visibility.</p>
+<ol start="0">
+<li>
+<p>~~<strong>I1</strong>~~, ~~<strong>R1</strong>’s first node~~ and ~~<strong>R1</strong>’s default~~ — done.
+The first two together, because the node with a real check is what proved
+the bounce-over-stale-check question was a bug rather than a preference.
+Then <code>CheckResult.Immaterial</code>: the half of (R1) that is one decision
+rather than per-node work, and that makes the rest of it visible — a node
+nobody can supervise now says so instead of emitting a <code>NextLook</code> a minute.</p>
+</li>
+<li>
+<p>~~<strong><code>filecontents</code></strong>~~ — done, and it turned out to be the node that made
+(R1)’s first one work: <code>systemdService</code>’s unit file goes through it, and
+rewriting identical bytes was setting <code>NeedDaemonReload</code> on every pass.
+It let the fixture’s config node drop its hand-rolled check for
+<code>checkFileContents</code>, and later (see (I6) below) grew a <code>contentFingerprint</code>
+that closes the rest of what <code>filecontents</code> alone left open.</p>
+</li>
+<li>
+<p>~~<strong>R9, and with it <code>dir</code></strong>~~ — done. <code>supReapply</code> landed as sketched: a
+<code>Bool</code> on <code>Supervision</code>, read only by the non-holding loop, deliberately
+outside <code>unsettle</code>/<code>Upping</code> so a successful reapply cannot fire
+<code>RestForOne</code>, folded back into the ordinary failure machinery when it
+throws. <code>Filesystem.dir</code> sets it and is now the third (R1) node — closed
+without a check, which is the answer §R1 candidate 3 was undecided about.</p>
+</li>
+<li>
+<p>~~<strong>R3</strong>~~ — done. <code>stopTending</code> snapshots every machine’s <code>Status</code> onto
+its <code>NodeState</code> before the <code>Upkeep.Supervisor</code> holding the live <code>TVar</code> is
+dropped; a holding machine gets a fresh snapshot too, since it is
+re-adopted before every command. <code>status</code>/<code>query</code> show a <code>[CheckResult]</code>
+per node and a failing one’s last output lines underneath — milestone 8’s
+ring finally has a reader.</p>
+</li>
+<li>
+<p>~~<strong>R7</strong>~~ — done in passing: <code>postOrderM</code> dropped (dead since milestone
+4), <code>historyLines</code> deleted (dead since it was written). Both trivial,
+both cost nothing to do the moment they were noticed rather than later.</p>
+</li>
+<li>
+<p>~~<strong>R2</strong>~~ — done. <code>force</code>/<code>recheck</code>/<code>pause</code>/<code>resume [--select P]... [--exclude P]...</code> parse the same way <code>status</code>/<code>query</code>/<code>converge --select</code>
+already do, and land in a <code>Tending</code>-owned queue rather than a mailbox: the
+supervisor is always stopped by the time a command is handled, so there is
+never one to post into at parse time. <code>startTending</code> drains the queue into
+the next supervisor’s machines — freshly started or adopted — the moment
+they exist.</p>
+</li>
+<li>
+<p>~~<strong>R5</strong>~~ — done. <code>startUpkeep</code> now runs every machine through
+<code>restarting</code> rather than <code>machine</code> directly: milestone 9’s <code>Under</code> refresh
+turned out to be most of what a supervisor-level restart needed to hand a
+replacement machine, so the remaining work was the restart loop itself
+(re-entering <code>Unsettled</code>, reporting <code>Escaped</code> on every attempt) and making
+sure it lets an asynchronous exception — <code>releaseKept</code>’s <code>cancel</code> above
+all — through untouched rather than treating it as a crash.</p>
+</li>
+<li>
+<p>~~<strong>R4</strong>~~ — done. <code>run tree</code>/<code>run dag</code> print the computed <code>Dag</code>;
+<code>query</code>’s selection is now rewrite-aware too, via
+<code>Query.resolveRewrittenSelectors</code> (declared-path patterns, translated
+through <code>membersOf</code>, plus a <code>#ref</code> fallback for addressing a
+rewrite-introduced node directly). ~~<strong>R6</strong>~~ is done — a global, optional
+<code>ConcurrencyLimit</code> bounds a convergence pass’s width, reachable as <code>run serve --max-concurrency N</code>; the per-resource primitive it was explicitly
+<em>not</em> about is still nothing more than an edge or a collection.
+~~<strong>R8</strong>~~ is done — the rename cost nothing to do ahead of a caller
+needing both, once checked.</p>
+</li>
+<li>
+<p><strong>I2</strong> and <strong>I4</strong> whenever there is an opinion to apply. Neither is
+urgent and neither is a bug — both are questions about what the feature
+<em>means</em> that are better answered after somebody has used it on a real
+graph. ~~(I3)~~, ~~(I5)~~ and ~~(I6)~~ are done.</p>
+</li>
+</ol>
+<p>~~(I6) has no place in that order~~ — it is done now: <code>Serve.Convergence</code>
+gained <code>Stale</code>, <code>Serve.record</code> demotes a <code>Ref</code> off <code>Converged</code> when its
+representative changes, and <code>filecontents</code> gives <code>sameRepresentative</code> a
+content-derived field to see in the flagship case that comparison alone
+could not. See §I6 for the two-part fix and how each half was verified.</p>
+<h3 id="how-milestones-8-and-9-actually-went">How milestones 8 and 9 actually went</h3>
+<p>Kept because both departed from the design in ways worth knowing before
+touching that code, and because §9.1 and §9.3 below are the reasoning the
+milestone-9 departures are corrections <em>to</em>.</p>
+<h4 id="milestone-8-managed-nodes">Milestone 8: <code>Managed</code> nodes</h4>
+<p>Landed as planned, with six departures recorded in place in
+<code>specs/per-node-state-machines.md</code>. Three are worth knowing here because they
+change what the remaining work looks like:</p>
+<ul>
+<li><strong><code>Lifecycle</code> is a field, not a sum</strong> (<code>managed</code> beside <code>up</code>), as this plan
+recommended. If a third lifecycle ever appears, that is when to pay for the
+sum.
+</li>
+<li><strong>A machine holding a process is <code>Kept</code> across commands.</strong> This was not in
+the plan and is the largest thing milestone 8 added: <code>serve</code> stands its
+machines down before every command, so a supervisor that wound its
+processes down with it would restart every service on every <code>status</code>.
+Holding machines survive and the next supervisor adopts them, on exactly
+the condition §“<code>Ref</code> is location-addressed” named — still wanted up, and
+its representative unchanged.
+</li>
+<li><strong>The restart policy got <code>supStableAfter</code>/<code>supGiveUpAfter</code></strong>, folded in
+rather than deferred, as recommended. Which also means milestone 9’s
+flapping hazard (§9.3) already has its mitigation available.
+</li>
+</ul>
+<p>The <code>Restart</code> name collision the plan flagged is <strong>still latent</strong> — see (R8).</p>
+<h4 id="milestone-9-rest_for_one">Milestone 9: <code>rest_for_one</code></h4>
+<p>Landed with five departures, recorded in place in
+<code>specs/per-node-state-machines.md</code>. Two of them are corrections to the
+sketch below rather than choices, and both are worth knowing before touching
+this code:</p>
+<ul>
+<li><strong>§9.1’s “watch the dependencies’ statuses” cannot work as written.</strong> A
+level read of <code>Stability</code> misses every departure it is for — a dependency
+that fell over and recovered between two of a dependant’s waits looks
+identical to one that never moved, and a rewritten config file is exactly
+that shape. <code>Status.statusEpoch</code> (monotonic, bumped when a settled node
+unsettles) is what the dependant compares against instead.
+</li>
+<li><strong>§9.3’s use of <code>supStableAfter</code> as a settling delay would swallow the case
+the feature is for</strong>, for the same reason: the config is back within
+milliseconds. It is a rate limit on <em>repeat</em> demotions instead — an
+isolated departure is always honoured, a second one inside the interval is
+dropped.
+</li>
+</ul>
+<p>Two things the sketch got right and one it did not anticipate: the strategy
+is per-node and authored on the node that goes away (§9.2), the cascade
+needed no code, and the thundering herd (§9.1) does not arise at all, because
+a machine with no opted-in dependency subscribes to nothing. What it did not
+anticipate is that an adopted machine had to be <em>handed</em> its new supervisor’s
+state — see the design’s fourth departure, and (R5) below, which this made
+smaller.</p>
+<p>The original analysis follows, for the reasoning behind the shape.</p>
+<h5 id="91-the-exact-gap-as-the-code-stands">9.1 The exact gap, as the code stands</h5>
+<p><code>Salmon.Actions.Upkeep.look</code> does half of this already. When a check says the
+effect is gone it marks the node failed in the supervisor’s
+<code>TVar (Set Ref)</code> — so a dependant <strong>still in <code>WaitUp</code></strong> holds off, which is
+the one-shot drivers’ <code>Blocked</code> containment expressed as a wait. What it does
+not do is touch a dependant that has <strong>already reached <code>Up</code></strong>: that node is
+napping in <code>resting</code> and never looks at its dependencies again.</p>
+<p>So the missing piece is small and precisely locatable: when a node leaves
+<code>Up</code>, its dependants’ machines have to go back to <code>WaitUp</code>.
+<code>Salmon.Op.Status.unsettle</code> is already the function for that. What is missing
+is a machine that <em>observes</em> it — <code>resting</code>‘s STM choice would gain a branch
+watching its own dependencies’ statuses, which is <code>waitStability</code> inverted
+(“wake me when one of these stops being <code>Stable</code>/<code>TurnUp</code>”).</p>
+<p>That branch is also why this is last. Every node in a supervised <code>serve</code>
+would then hold a live STM subscription to its dependencies for as long as it
+is up, and a flapping leaf wakes its whole transitive cone. On a wide graph
+that is the one part of this design with a plausible thundering-herd
+behaviour, and it should land where it can be measured rather than early
+where it cannot.</p>
+<h5 id="92-it-has-to-be-a-per-node-choice">9.2 It has to be a per-node choice</h5>
+<p>Erlang’s <code>one_for_one</code> is “restart just this node”; <code>rest_for_one</code> is “this
+node and everything after it”. §“The supervision tree” is right that the
+strategy is a natural per-node knob — a config-file node probably wants
+<code>rest_for_one</code> (a service reading a config that changed should be bounced), a
+log shipper probably wants <code>one_for_one</code> (nothing downstream cares).</p>
+<p>That is a third field on <code>Supervision</code>, which is already the per-node policy
+channel and already optional:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Strategy</span> <span class="ot">=</span> <span class="dt">OneForOne</span> <span class="op">|</span> <span class="dt">RestForOne</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="ot">supStrategy ::</span> <span class="op">!</span><span class="dt">Strategy</span>   <span class="co">-- default OneForOne</span></span></code></pre></div></div><p><strong>Default <code>OneForOne</code></strong>, which is today’s behaviour exactly — so this
+milestone changes nothing until a node opts in, which is the property that
+makes it safe to land at all. Note this is the opposite default from
+<code>supRestart</code>’s (<code>OnFailure</code>, the active choice), and deliberately: restarting
+a node that fell over is a statement about that node, while bouncing its
+dependants is a statement about <em>other people’s</em> nodes.</p>
+<h5 id="93-the-hazard-to-design-against">9.3 The hazard to design against</h5>
+<p>A node that flaps — check fails, check succeeds, check fails — with
+<code>RestForOne</code> dependants demotes and re-runs its whole cone on every flap.
+<code>supStableAfter</code> is the mitigation and it exists now (milestone 8): demote
+dependants only once the node has been down long enough to count against the
+tally, not on the first failed check. Milestone 9’s job is to <em>use</em> it, not
+to add it.</p>
+<h5 id="94-what-to-test">9.4 What to test</h5>
+<ul>
+<li>a dependant already <code>Up</code> is demoted when its dependency leaves <code>Up</code>, and
+comes back after it does;
+</li>
+<li>with <code>OneForOne</code> (the default) it is not demoted at all;
+</li>
+<li>a demoted dependant does not run <code>up</code> until the dependency is <code>Stable</code>
+again — i.e. the demotion goes through <code>WaitUp</code> and not straight to
+<code>Upping</code>;
+</li>
+<li>a node with no dependants demotes nothing and costs nothing.
+</li>
+</ul>
+<h3 id="relationship-to-the-other-specs">Relationship to the other specs</h3>
+<p><code>specs/salmon-as-init.md</code> is <strong>no longer gated on this work</strong>. Its PID-2
+supervisor is the upkeep FSM and its restart policy is <code>Supervision</code>, both
+landed; a node that owns a process is <code>Nodes/Daemon.hs</code>, and “restart this
+service and everything after it” is <code>supStrategy</code>. What it still needs from
+here is (R1), for anything it does not own. The Rust PID 1 remains unaffected: that boundary is about
+<code>waitpid(-1)</code>, and everything here waits on specific children — deliberately,
+which is why the polling <code>getProcessExitCode</code> reaper the removed
+<code>Supervised</code> module used was not recovered along with its teardown.</p>
+<p><code>specs/advance-querying.md</code> is R4. <code>specs/multi-user-privilege-separation.md</code>
+still composes unchanged — an <code>Invoker</code> decorates the <code>CreateProcess</code> a node
+spawns, which is as true of a <code>Managed</code> node’s process as of a <code>OneShot</code>’s.</p>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

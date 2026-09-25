@@ -1,7 +1,7 @@
 # Salmon
 
 Early design notes, kept as written. For the model as it stands see
-[`docs/salmon-core.md`](../docs/salmon-core.md); for the project, the
+[`resources/salmon-core.md`](../resources/salmon-core.md); for the project, the
 [top-level README](../README.md).
 
 # Idea

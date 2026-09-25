@@ -1,0 +1,135 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Future work: what a running world knows, and who gets to see it</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-future-work.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: ideas, not a plan. Four notes taken after trying `run serve` with the"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Future work: what a running world knows, and who gets to see it"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: ideas, not a plan. Four notes taken after trying `run serve` with the"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Future work: what a running world knows, and who gets to see it"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-future-work.html"><meta property="og:description" content="Status: ideas, not a plan. Four notes taken after trying `run serve` with the"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-future-work.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-future-work.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: ideas, not a plan. Four notes taken after trying `run serve` with the","headline":"Future work: what a running world knows, and who gets to see it","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-future-work.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Future work: what a running world knows, and who gets to see it</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1233 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-qemu-test-vms.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">9/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-pull-mode.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/future-work.md"><code>specs/future-work.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="future-work-what-a-running-world-knows-and-who-gets-to-see-it">Future work: what a running world knows, and who gets to see it</h2>
+<p>Status: ideas, not a plan. Four notes taken after trying <code>run serve</code> with the
+HTTP surface, the web UI and <code>salmon-tui</code> on <code>salmon-gcp-toy</code> (PR #8, #9),
+each elaborated to the point where the next spec could start. They share one
+theme: the loop now <em>has</em> a lot of knowledge about each node — what it found,
+what it last said, where its effect lives, what a remote copy of it is doing —
+and almost none of it is addressable from outside.</p>
+<h3 id="1-facts-a-node-discovers">1. Facts a node discovers</h3>
+<p><strong>The itch.</strong> <code>salmon-gcp-toy</code> tier 2 takes two passes because GCP picks the
+address: the first pass reserves it, the driver reads it back with
+<code>Compute.readAddress</code>, and feeds it in as <code>--vm-ip</code> for the second
+(<code>resources/gcp-toy-validation.md</code>). The same shape recurs whenever <code>up</code> learns
+something the declaration could not say: a project number, a Cloud Run
+service URL, a bucket’s generated name, a generated password’s fingerprint, a
+container’s assigned port. Today that value lives, at best, in a node’s output
+ring (<code>NodeState.nodeStatus</code>, snapshotted by <code>stopTending</code>) or in prose in
+<code>notes</code>, and the operator re-derives it with <code>gcloud</code>.</p>
+<p><strong>The shape.</strong> A node publishes <em>facts</em>: a small <code>Map Text Value</code> it is
+willing to state after <code>up</code> or <code>check</code>. Two ways to get them out, and the
+cheap one first:</p>
+<ul>
+<li><strong>As reports.</strong> A <code>Fact !(Act ext) !Text !Value</code> constructor on
+<code>UpDown.Report</code> (or its own small stream in <code>Tagged</code>), emitted by <code>up</code> and
+<code>check</code> through the reporter a node already has. It then reaches everything
+for free: <code>--json</code>, the socket clients, <code>/events</code>, the status sink, the
+UI’s per-node panel. Nothing changes in <code>Extension</code>; a node opts in by
+calling a helper.
+</li>
+<li><strong>As state.</strong> <code>NodeState</code> gains <code>nodeFacts</code>, folded from those reports by
+the loop (last writer wins per key), so <code>/dag</code> and <code>status</code> show a node’s
+current facts without replaying events, and a fleet fold can compare
+them across hosts (<code>salmon-fleet status --fact project-number</code>).
+</li>
+</ul>
+<p><strong>Where it bites.</strong> Feeding a fact <em>back into a declaration</em> — the
+<code>--vm-ip</code> case — is the actual two-pass problem, and it is not solved by
+either of the above. Options, roughly in order of ambition: a pull-mode
+document that names a fact (<code>{&quot;seed&quot;: [..., &quot;--vm-ip&quot;, {&quot;fact&quot;: &quot;#addr/ip&quot;}]}</code>,
+resolved by the fetcher against the world before injection, so the second
+pass is a document the controller can write generically); a <code>Rewrite</code> phase
+that substitutes facts into dependants at expand time (closest to
+<code>Rewrite.hs</code>’s “cross-declaration knowledge lives here” rule, but a
+declaration whose words depend on a fact has a <code>Ref</code> that changes when the
+fact does, which <code>Serve.record</code> would read as a re-declaration — perhaps
+correctly). Start with facts-as-reports; the feedback loop is its own spec.</p>
+<h3 id="2-structured-clickable-notes">2. Structured, clickable notes</h3>
+<p><strong>The itch.</strong> <code>notes :: [Text]</code> is prose. A GCP node’s most useful note is a
+console URL; a Cloud Run service’s is its endpoint; a Postgres node’s is a
+connection string one should <em>not</em> paste into a log. The web UI renders notes
+as text (<code>textContent</code>, deliberately: notes are untrusted), the TUI prints
+them, and neither can offer a link.</p>
+<p><strong>The shape.</strong> Beside <code>notes</code>, an <code>Extension.links :: [Link]</code> with
+<code>Link { linkLabel :: Text, linkKind :: LinkKind, linkHref :: Text }</code> and
+<code>LinkKind = Console | Endpoint | Logs | Doc | Other Text</code>. Structured rather
+than “notes that look like URLs” so the UI can render an anchor with a label,
+the TUI can print <code>[console] https://...</code>, <code>/dag</code> can carry them typed, and a
+fleet fold can list every host’s endpoints. The builtins that know a URL
+attach it: <code>Gcp.*</code> (console pages per resource kind), <code>CloudRun</code> (service
+URL), <code>Storage</code> (bucket URL), <code>Systemd</code> (<code>journalctl -u</code> as a <code>Logs</code> link the
+TUI can run), <code>Qemu</code> (the serial console socket).</p>
+<p><strong>Where it bites.</strong> <code>sameRepresentative</code> compares <code>notes</code>; whether <code>links</code>
+count as identity (a changed console URL is not a changed effect) needs a
+decision — probably not compared, like <code>dynamics</code> payloads other than
+<code>Supervision</code>. And links are where secrets creep in (a presigned URL, a
+connstring with a password): the sensitive-data story the generic-server
+spec defers is a prerequisite for <code>Endpoint</code> links at least, or links must be
+declared public by construction like notes are today.</p>
+<h3 id="3-a-nodes-latest-messages">3. A node’s latest messages</h3>
+<p><strong>The itch.</strong> After an <code>up</code>, the UI panel and the TUI say “never tended” or
+show a stale check, because <code>/dag</code>’s per-node <code>status</code> is the snapshot
+<code>stopTending</code> last filed (R3 in <code>Actions/Serve.hs</code>), and the tending machine’s
+live output ring is behind a <code>TVar</code> nobody outside <code>Upkeep</code> can reach. The
+events ring has everything a node ever said, but only as one stream to scan.</p>
+<p><strong>The shape.</strong> Two reads, both cheap because the data already exists:</p>
+<ul>
+<li><code>GET /node/&lt;ref&gt;</code>: the node’s <code>/dag</code> projection plus its last <em>n</em> events
+from <code>Events</code>’s ring filtered by <code>ref</code> (the ring is a <code>Data.Sequence</code> of
+tagged objects; an index <code>Map Ref (Seq seq)</code> maintained at <code>publish</code> makes
+this O(n) in the answer, not the ring). <code>?since=</code> for a client that wants
+only what is new. The UI panel and the TUI’s <code>enter</code> view get their “last
+events” from here instead of from what they happened to see live.
+</li>
+<li><strong>Live output ring.</strong> <code>Upkeep.Supervisor</code> exposes a read of each machine’s
+current <code>Status</code> (check verdict, reason, output ring, <code>statusEpoch</code>) and
+<code>serveObserved</code>’s accessor includes it, so <code>/node/&lt;ref&gt;</code> and <code>/dag</code> report
+the machine’s <em>current</em> status when one is running and the snapshot only
+when none is. That is the freshness gap D1 and D2 both hit (“check reads
+<code>-</code> until a <code>next-look</code> arrives”).
+</li>
+</ul>
+<p><code>salmon-tui</code> and the web UI are the consumers; <code>status --select</code> on the
+socket could print the same thing in text.</p>
+<h3 id="4-remote-ops-as-a-dag-with-live-events">4. Remote ops as a DAG with live events</h3>
+<p><strong>The itch.</strong> <code>Self.callSelf</code> runs <code>ssh host bin run up</code> with a directive on
+stdin and streams the remote’s <em>text</em> output into the local node’s output
+ring. <code>run dag</code> can draw a remote subgraph through <code>injectRemoteSubgraphs</code>
+and the <code>RemoteOp</code> dynamic, but <code>/dag</code> cannot (B3’s finding: the magma has
+no path to a remote subgraph), and a remote node’s <code>eval</code>/<code>done</code>/<code>failed</code>
+never become local events. So the UI shows one box, <code>remote-call</code>, going
+from pending to converged after minutes, with everything interesting hidden
+inside it.</p>
+<p><strong>The shape</strong>, in three steps that each stand alone:</p>
+<ol>
+<li><strong>Parse what comes back.</strong> <code>callSelf</code> invokes <code>run up --json</code> and decodes
+each line with the <code>Tagged</code> encoding (the wire format that item A1 made a
+contract), re-emitting every remote report through the local reporter with
+a <code>host</code> stamp — a <code>Remote host inner</code> constructor on <code>Tagged</code>, or a <code>host</code>
+field beside <code>stream</code>. Text stays available for a remote binary too old to
+speak JSON. The remote’s <code>Fact</code>s (section 1) ride along unchanged.
+</li>
+<li><strong>Draw the remote subgraph in the magma.</strong> At expand time, a <code>RemoteOp</code>’s
+subgraph is folded into the <code>Dag</code> under its remote-call node with refs
+prefixed by host (so two hosts running the same recipe do not collide on
+one <code>Ref</code>, which <code>mkRef</code>’s location-addressing would otherwise make
+happen), marked <code>remote: host</code> in the <code>/dag</code> projection. The UI draws it
+as a nested box; the events from step 1 land on those nodes by ref.
+<code>Concurrent</code>’s failure containment is unaffected: the remote-call node is
+still the one that fails locally.
+</li>
+<li><strong>The fleet DAG.</strong> Once a remote host runs its own <code>serve --follow</code> (pull
+mode), the controller no longer <em>calls</em> it; it reads the host’s <code>/dag</code>
+and <code>/events</code> (E1’s TLS listener, <code>Salmon.Client.Http</code> from D1) and
+composes them into one view keyed by host — the aggregation <code>salmon-fleet status</code> lacks (C4’s finding: nothing summarises by label or document id).
+That is the “fleet control” picture from the capabilities assessment, and
+it needs nothing more from the loop: it is a client.
+</li>
+</ol>
+<p>Step 1 is small and immediately visible; step 2 is the one that changes
+<code>Dag.hs</code>; step 3 is the one that makes pull mode and the server meet.</p>
+<h3 id="not-here">Not here</h3>
+<p>Consensus, and any decision that a host is dead; those stay out on purpose
+(<code>specs/pg-switchover.md</code>’s argument). The sensitive-data story deferred by
+<code>specs/generic-server.md</code>, which sections 2 and 4 both lean on.</p>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

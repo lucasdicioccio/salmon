@@ -1,0 +1,571 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Two-node Postgres with salmon-driven switchover and failover</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-switchover.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: implemented — phases 1 to 6 of the phased plan and the disaster"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Two-node Postgres with salmon-driven switchover and failover"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: implemented — phases 1 to 6 of the phased plan and the disaster"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Two-node Postgres with salmon-driven switchover and failover"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-switchover.html"><meta property="og:description" content="Status: implemented — phases 1 to 6 of the phased plan and the disaster"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-switchover.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-switchover.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"Status: implemented — phases 1 to 6 of the phased plan and the disaster","headline":"Two-node Postgres with salmon-driven switchover and failover","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-switchover.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Two-node Postgres with salmon-driven switchover and failover</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 4058 words, 2 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">7/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-qemu-test-vms.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-switchover.md"><code>specs/pg-switchover.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="two-node-postgres-with-salmon-driven-switchover-and-failover">Two-node Postgres with salmon-driven switchover and failover</h2>
+<p>Status: implemented — phases 1 to 6 of the phased plan and the disaster
+catalogue S1–S8, in <code>SreBox.PostgresPair</code> (<code>member</code>, <code>seedMember</code> via
+<code>pair_seed</code>, <code>bouncerSetup</code>, <code>pairRole</code>, <code>pairOp</code>), <code>salmon-pgpair</code> and
+<code>salmon-toy-qemu-pg-ha</code>, tested by <code>Test.PostgresPairSpec</code>,
+<code>Test.PostgresSwitchoverSpec</code> and <code>Test.PgPairDemoSpec</code>. The paragraphs
+below record how it got there; where an earlier one says something is not
+done (the re-seeding half of phase 6), a later one says it since was.
+Still open: the questions at the end (<code>pair_synchronous</code> is not offered;
+the old <code>primaryReplicationSetup</code>/<code>standbyReplicationSetup</code> still exist
+beside the symmetric members). Kept as the design record.</p>
+<p>Done: the prerequisites P1-P5; the state table and the probe
+(<code>SreBox.PostgresPair</code>, phase 2), covered at Layer 0 including every
+refusal; the role node over ssh (phase 3) and <code>pair_may_discard</code>’s failover
+and split-brain paths (phase 5), covered by Layer 3 tests that move a real
+primary between two VMs and back (S1, minus the client assertions), stop a
+controller after each step in turn and let an ordinary pass finish it (S2),
+kill a primary outright and fail over onto its standby (S3), cut the two
+machines off from each other and change nothing (S4), and fail over across a
+partition that hides the old primary from the controller too, then heal it
+and rewind the loser (S5).</p>
+<p>Also done: the slot budget (phase 6), in that each member streams with a slot
+the pair names and the rejoin creates, and a slot that falls off the budget
+is reported rather than rewound at (S6). The <em>re-seeding</em> half of phase 6 is
+not: there is no seeding node, so “re-seed it” is still something an operator
+does by hand – which is why the check can only name the problem.</p>
+<p>The disaster catalogue S1-S8 is written, and running it is what most of the
+design above was decided by.</p>
+<p>Phases 3 and 4 are now whole: <code>member</code> configures a machine to be either half
+of the pair without naming a side, <code>bouncerSetup</code> stands a pgbouncer up in
+front, <code>pairOp</code> is the three of them as one declaration, and
+<code>salmon-pgpair</code> is a binary an operator can type at. <code>PauseBouncers</code> and
+<code>RepointBouncers</code> have commands behind them, and <code>decide</code> asks the bouncers
+rather than assuming there are none.</p>
+<p>Also done: the seeding clone (<code>seedMember</code>, declared through <code>pair_seed</code>),
+and S1’s client assertions – 460 inserts through pgbouncer across a
+switchover, no errors, nothing lost.</p>
+<p>There are two ways to watch it. <code>Test.PgPairDemoSpec</code> asserts it on three
+VMs the harness boots. <code>salmon-toy-qemu-pg-ha</code> is the same thing as a
+binary that makes its own guests, where moving the primary is a command you
+type – and where the three steps that used to be a README (debootstrap,
+<code>ensureVm9pBoot</code>, handing <code>/etc/ssh</code> to the unprivileged user) are a <code>prereqs</code>
+seed that declares them.</p>
+<p>Not done: nothing in this spec, though <code>pg-patroni.md</code> is still a sketch.</p>
+<p>Companion: <code>pg-patroni.md</code> covers the other end of the range, with automatic
+failover and three voters. <code>pg-ha-control-plane.md</code> is the wider
+bouncer/app/LB picture that either one plugs into.</p>
+<h3 id="what-this-is-for">What this is for</h3>
+<p>A primary and a streaming standby on two machines. Salmon moves the primary
+between them when an operator changes a declaration. Nothing decides on its
+own that a machine is dead.</p>
+<p>Two audiences:</p>
+<ol>
+<li><strong>Disaster tests in the harness.</strong> The declared primary is a knob a test
+turns. The same node that runs a switchover can also bring a scenario
+back to a known state, and every failure mode below is something a
+Layer 3 test should be able to cause on purpose and then assert about.
+See “Disaster scenarios”, which is as much the point of this spec as the
+recipe itself.
+</li>
+<li><strong>Services with a low SLA,</strong> where a few minutes of downtime and a human
+deciding “fail over now” are acceptable, and two machines are what the
+budget allows.
+</li>
+</ol>
+<p>It is <strong>not</strong> for anything that needs to survive an unattended failure at
+3am. That takes consensus, and consensus takes three voters. See
+<code>pg-patroni.md</code>.</p>
+<p>What it promises:</p>
+<table>
+<tr><th>Event</th><th>Data lost</th><th>Time to recover</th></tr>
+<tr><td>Planned switchover</td><td>none: the old primary is stopped cleanly and the standby is checked to have its last record before promotion</td><td>seconds; with pgbouncer <code>PAUSE</code>, clients see a delay rather than errors</td></tr>
+<tr><td>Unplanned failover (the primary died)</td><td>whatever had not reached the standby, i.e. the replication lag at the moment of death</td><td>however long the operator takes to decide, plus seconds</td></tr>
+<tr><td>Network partition, no operator action</td><td>nothing: salmon refuses to act</td><td>none: the primary stays up and the standby falls behind</td></tr>
+</table>
+<p>An optional <code>pair_synchronous</code> could take the unplanned row’s data loss to
+zero, at the usual two-node price: when the standby is down, every commit
+blocks. See “Open questions”.</p>
+<h3 id="where-the-layout-question-landed">Where the layout question landed</h3>
+<p>Two machines are fine for this design, and bad for automatic failover. The
+costs of the cross-replicated shape (each machine primary for one cluster
+and standby for the other):</p>
+<ul>
+<li>each machine must be sized to carry both primaries, since that is what
+happens when one dies; spreading them buys headroom, not smaller boxes;
+</li>
+<li>losing one machine takes away the redundancy of both clusters at once;
+</li>
+<li>maintaining a machine means switching both clusters over first.
+</li>
+</ul>
+<p><strong>The primary’s location is a per-pair field in the directive</strong>, so “A is
+primary for everything” and the cross-replicated shape are the same recipe
+with different values. Start with the former. Nothing below depends on the
+choice.</p>
+<h3 id="prerequisites-fixes-to-what-exists-each-worth-doing-on-its-own">Prerequisites: fixes to what exists, each worth doing on its own</h3>
+<p>These are defects in <code>Salmon.Builtin.Nodes.Postgres</code> and <code>PgBouncer</code> as they
+stand. The rest of the design assumes they are fixed.</p>
+<p><strong>P1. <code>standbyReplicationSetup</code> can wipe a promoted standby.</strong>
+<code>cloneFromPrimaryScript</code>’s guard is “does <code>standby.signal</code> exist”. Promotion
+deletes that file, so the next <code>run up</code> with an unchanged directive runs
+<code>rm -rf &quot;$datadir&quot;</code> and clones from the old primary again. If the old primary
+is down, which is the usual reason for promoting, the clone fails <em>after</em> the
+delete. The guard should compare system identifiers instead: the local
+<code>pg_controldata</code>’s “Database system identifier” against the primary’s
+<code>SELECT system_identifier FROM pg_control_system()</code>.</p>
+<ul>
+<li><strong>Equal:</strong> this data directory already belongs to the cluster, as a
+standby or as a promoted one. Never touch it.
+</li>
+<li><strong>Different:</strong> it is foreign. Clone only if it holds nothing but what
+<code>pg_createcluster</code> made (no databases beyond <code>postgres</code>/<code>template0</code>/
+<code>template1</code>), and otherwise refuse with the reason.
+</li>
+</ul>
+<p><strong>P2. <code>pg_rewind</code> is impossible on these clusters today.</strong> It needs
+<code>wal_log_hints = on</code> or data checksums, and nothing in <code>salmon-ops/src</code> sets
+either. Without it, rejoining an old primary means cloning it again from
+scratch. Add <code>wal_log_hints = on</code> to <code>primaryReplicationSetup</code>’s settings. It
+is restart-only, so it has to be in place before there is data worth
+protecting. Add <code>max_slot_wal_keep_size</code> too (see scenario S6): without a
+cap, a standby that is down for long enough fills the primary’s disk through
+its slot.</p>
+<p><strong>P3. <code>primaryReplicationSetup</code> restarts the primary on every <code>run up</code></strong>,
+because <code>restartCluster</code> (via <code>clusterCtl</code>) has no <code>check</code>. The natural check
+for a restart node is “is any setting waiting for one”:
+<code>SELECT count(*) FROM pg_settings WHERE pending_restart</code>. That is <code>Success</code>
+at zero, which is the same move as <code>checkService</code> reading
+<code>NeedDaemonReload</code>. <code>startCluster</code>’s named-cluster path has the same
+non-idempotent start that <code>detectVersionAndStartMainCluster</code> had before the
+templates PR.</p>
+<p><strong>P4. A changed <code>pgbouncer.ini</code> is never applied by <code>run up</code>.</strong>
+<code>PgBouncer.setup</code> goes through <code>Systemd.systemdService</code>, whose <code>checkService</code>
+says <code>Success</code> for an active, enabled unit whose <em>unit file</em> has not changed.
+<code>configFiles</code> rewrites the ini as a dependency, but nothing reads the ini’s
+change, so the service is skipped. Routing a switchover through pgbouncer
+needs a <code>RELOAD</code>. Do it over the admin console rather than with a restart,
+which would drop every client connection. That also needs an admin user in
+<code>BouncerConfig</code>.</p>
+<p><strong>P5. The replication password travels inside a <code>bash -c</code> string.</strong>
+<code>cloneFromPrimaryScript</code> builds <code>PGPASSWORD=... pg_basebackup</code> in the script
+text. Use a passfile pre-provisioned on the machine, per the recipes’
+secret-transport rule.</p>
+<h3 id="shape-of-the-recipe">Shape of the recipe</h3>
+<p>A new <code>SreBox.PostgresPair</code>, three kinds of node.</p>
+<h4 id="1-members-are-symmetric">1. Members are symmetric</h4>
+<p>Built, as <code>member</code> / <code>memberScript</code>. It runs over ssh from the controller
+like everything else here, which is why it renders SQL rather than reusing
+the nodes in <code>Nodes/Postgres.hs</code>: those are ops that run <em>on</em> the machine
+they configure, and nothing in this recipe does. What it does reuse is that
+module’s opinion about which settings replication needs
+(<code>replicationSettings</code>), so one place decides. Role passwords are read on the
+member out of the <code>.pgpass</code> files the pair already names, and fed to <code>psql</code>
+on standard input — never in the script, never on a command line, never in a
+report.</p>
+<p>Both machines get the same configuration, whichever is primary today:</p>
+<ul>
+<li><code>wal_level</code>, <code>max_wal_senders</code>, <code>max_replication_slots</code>, <code>hot_standby</code>,
+<code>wal_log_hints</code>, <code>max_slot_wal_keep_size</code>;
+</li>
+<li><code>pg_hba</code> lines for replication <em>from the peer</em>, and for the rewind role
+(below) from the peer;
+</li>
+<li>the replication role and the rewind role. Roles live in the catalog, so
+they are created on whichever member is primary and replicate to the other.
+</li>
+</ul>
+<p><strong>No member node mentions a role in its <code>ref</code>, <code>help</code> or <code>notes</code>.</strong> A
+switchover then changes exactly one node’s declaration, the role node’s, and
+under <code>run serve</code> (I6) the members are not marked <code>Stale</code> by it. This replaces
+the <code>primaryReplicationSetup</code>/<code>standbyReplicationSetup</code> asymmetry for this
+recipe. Those two stay for the existing fixture and
+<code>Test.PostgresReplicationSpec</code>.</p>
+<p>The rewind role needs a plain login, not a replication one, with <code>EXECUTE</code> on
+<code>pg_ls_dir(text, boolean, boolean)</code>, <code>pg_stat_file(text, boolean)</code>,
+<code>pg_read_binary_file(text)</code> and <code>pg_read_binary_file(text, bigint, bigint, boolean)</code>. That is the documented minimum for <code>pg_rewind --source-server</code>
+without a superuser.</p>
+<h4 id="2-seeding-the-standby-is-a-one-time-clone">2. Seeding the standby is a one-time clone</h4>
+<p>This is the <code>pg_basebackup</code> step, with P1’s guard. It runs once in a pair’s
+life, and again only if a standby is lost beyond repair (S6). It is
+deliberately <strong>not</strong> how an old primary rejoins after a switchover; that is
+<code>pg_rewind</code>, inside the role node.</p>
+<p>Not built yet, and S6 is what says how it should behave when it is: a lost
+slot leaves the pair in a state only a re-seed fixes, and the role node
+deliberately does not fix it. Wiping a machine’s data directory is a decision
+about losing whatever is on it, which is the same class of decision as
+<code>pair_may_discard</code> and belongs to the same place — an operator saying so —
+rather than to a pass that runs unattended. So the seeding node should be
+<em>separately declared</em>, and the role node’s job is to name the problem
+precisely enough that the operator knows which machine to declare it for.</p>
+<h4 id="3-the-role-node-this-pairs-primary-is-on-b">3. The role node: “this pair’s primary is on B”</h4>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Side</span> <span class="ot">=</span> <span class="dt">A</span> <span class="op">|</span> <span class="dt">B</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Member</span> <span class="ot">=</span> <span class="dt">Member</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> member_remote ::</span> <span class="dt">Ssh.Remote</span>       <span class="co">-- how the controller reaches it</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> member_host ::</span> <span class="dt">Postgres.Host</span>      <span class="co">-- how the peer and the bouncers reach it</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> member_cluster ::</span> <span class="dt">Postgres.ClusterName</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> member_port ::</span> <span class="dt">Postgres.Port</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Pair</span> <span class="ot">=</span> <span class="dt">Pair</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    {<span class="ot"> pair_name ::</span> <span class="dt">Text</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    , pair_a,<span class="ot"> pair_b ::</span> <span class="dt">Member</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> pair_primary ::</span> <span class="dt">Side</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> pair_may_discard ::</span> <span class="dt">Maybe</span> <span class="dt">Side</span>   <span class="co">-- see &quot;Failover and split brain&quot;</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>    , pair_repl_role,<span class="ot"> pair_rewind_role ::</span> <span class="dt">Postgres.RoleName</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> pair_passfile ::</span> <span class="dt">FilePath</span>        <span class="co">-- on each member, pre-provisioned</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> pair_bouncers ::</span> [<span class="dt">Bouncer</span>]       <span class="co">-- admin-console endpoints to PAUSE/RELOAD/RESUME</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>    ,<span class="ot"> pair_step_timeout ::</span> <span class="dt">Int</span>         <span class="co">-- seconds to wait for the standby to catch up</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div></div><p><code>ref = mkRef &quot;pg-pair-role&quot; pair_name</code>: keyed on the pair, never on who is
+primary, so switching primaries changes that one node rather than creating
+another. <code>notes</code> carry the declared primary and <code>pair_may_discard</code>, so a
+re-declaration is a visible change (I6).</p>
+<p>The node runs on a <strong>controlling machine</strong> and reaches both members over
+<code>Ssh.callWith</code> (or <code>Nodes/Self.hs</code>’s <code>callSelf</code> for anything bigger than a
+script). It cannot run on a member: the member that dies might be the one
+running it.</p>
+<h5 id="observation-then-a-pure-verdict">Observation, then a pure verdict</h5>
+<p>One ssh round trip per member returns a small <code>key=value</code> report:</p>
+<ul>
+<li>cluster status from <code>pg_lsclusters</code>;
+</li>
+<li>if it is running: <code>pg_is_in_recovery()</code>, the timeline, the current or
+replay/receive LSN, the upstream host from <code>pg_stat_wal_receiver</code>, the
+<em>configured</em> upstream from <code>primary_conninfo</code>, and <code>system_identifier</code>;
+</li>
+<li>if it is stopped: <code>pg_controldata</code>’s cluster state, latest checkpoint
+location, minimum recovery point, timeline and system identifier;
+</li>
+<li>if it is running: the replication slots it holds and each one’s
+<code>wal_status</code>, which is the only place the fate of the <em>other</em> member’s
+catching-up is written down;
+</li>
+<li>from the bouncers, whether each one is paused (<code>SHOW DATABASES</code> has a
+<code>paused</code> column).
+</li>
+</ul>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Observed</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Unreachable</span> <span class="dt">Text</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Stopped</span> {<span class="ot"> o_sysid ::</span> <span class="dt">Word64</span>,<span class="ot"> o_timeline ::</span> <span class="dt">Int</span>,<span class="ot"> o_checkpoint ::</span> <span class="dt">Lsn</span>,<span class="ot"> o_clean ::</span> <span class="dt">Bool</span> }</span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Primary</span> {<span class="ot"> o_sysid ::</span> <span class="dt">Word64</span>,<span class="ot"> o_timeline ::</span> <span class="dt">Int</span>,<span class="ot"> o_lsn ::</span> <span class="dt">Lsn</span>,<span class="ot"> o_slots ::</span> [(<span class="dt">Text</span>, <span class="dt">Text</span>)] }</span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Standby</span> {<span class="ot"> o_sysid ::</span> <span class="dt">Word64</span>,<span class="ot"> o_timeline ::</span> <span class="dt">Int</span>, o_upstream,<span class="ot"> o_configured ::</span> <span class="dt">Maybe</span> <span class="dt">Text</span>, o_received,<span class="ot"> o_replayed ::</span> <span class="dt">Lsn</span> }</span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Step</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>    <span class="ot">=</span> <span class="dt">Done</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Degraded</span> <span class="dt">Text</span>           <span class="co">-- the declaration holds, but the pair is not redundant</span></span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">PauseBouncers</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">StopMember</span> <span class="dt">Side</span>          <span class="co">-- a clean, fast shutdown</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">AwaitCatchUp</span> <span class="dt">Side</span> <span class="dt">Lsn</span>    <span class="co">-- the standby must have received past this</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">AwaitStreaming</span> <span class="dt">Side</span>      <span class="co">-- pointed here, not connected: wait, do not rewind</span></span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Promote</span> <span class="dt">Side</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Rejoin</span> <span class="dt">Side</span>              <span class="co">-- pg_rewind -R against the primary, then start</span></span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">StartMember</span> <span class="dt">Side</span></span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">RepointBouncers</span> <span class="dt">Side</span>     <span class="co">-- rewrite ini, RELOAD, RESUME</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>    <span class="op">|</span> <span class="dt">Refuse</span> <span class="dt">Text</span></span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a><span class="ot">nextStep ::</span> <span class="dt">Pair</span> <span class="ot">-&gt;</span> <span class="dt">Observed</span> <span class="ot">-&gt;</span> <span class="dt">Observed</span> <span class="ot">-&gt;</span> [<span class="dt">BouncerState</span>] <span class="ot">-&gt;</span> <span class="dt">Step</span></span></code></pre></div></div><p><code>parseObserved</code> and <code>nextStep</code> are pure, in the <code>Systemd.interpretShow</code> /
+<code>Postgres.interpretTemplateRow</code> pattern. Layer 0 can then cover the whole
+table below, including every refusal, without a database.</p>
+<p>A standby is asked two questions about its upstream, and the difference
+between them is what keeps a partition from becoming an outage. <code>o_upstream</code>
+is where it <em>is</em> streaming from, which is empty the instant the connection
+drops; <code>o_configured</code> is where <code>primary_conninfo</code> <em>tells</em> it to stream from,
+which it keeps through a partition. Reading only the first, a standby that
+cannot reach its primary is indistinguishable from a standby that belongs to
+somebody else – and the answer to the second of those is <code>Rejoin</code>, which
+stops the standby and then fails, because whatever keeps it from streaming
+keeps <code>pg_rewind</code> from reading too. A partition would take the standby down.
+Reading both, the answer is <code>AwaitStreaming</code>: wait, and if the waiting runs
+out say so as <code>Unknown</code> rather than as a failure, because “it came back a
+second ago” and “it has been cut off for an hour” are the same observation.</p>
+<p>Two of those positions are not the field whose name they carry, and writing
+S3 is what found it. A <strong>stopped</strong> cluster’s position is
+<code>max(latest checkpoint, minimum recovery point)</code>: a standby that was stopped
+replayed past its last checkpoint, and only the second field says so. A
+<strong>standby’s</strong> is <code>max(received, replayed)</code>, because
+<code>pg_last_wal_receive_lsn()</code> is <code>NULL</code> — not a position — in a server that has
+received nothing since it started, which is the state of every standby whose
+primary has just died, i.e. exactly when a failover needs the number.</p>
+<ul>
+<li><strong><code>check</code></strong> is <code>observe &gt;&gt;= nextStep</code>: <code>Done</code> is <code>Success</code>, <code>Degraded</code> is
+<code>Unknown</code>, and anything else is a <code>Failure</code> naming the step.
+</li>
+<li><strong><code>up</code></strong> loops: observe, compute the step, perform it, and repeat until the
+step is <code>Done</code> or <code>Degraded</code>, throwing on <code>Refuse</code>. There is a bound on
+iterations so that a fault in the table cannot spin forever.
+</li>
+</ul>
+<p>Because the state is re-derived from observation on every turn, <strong><code>up</code> can
+resume from any point.</strong> A controller killed between “stop A” and
+“promote B” leaves a pair the next run recognises and finishes. There is no
+progress file to lose or to disagree with reality.</p>
+<p><code>Degraded</code> maps to <code>Unknown</code> on purpose. Under <code>run serve</code>, <code>Unknown</code>
+“restarts nothing” (see <code>Actions/Upkeep.hs</code>). “The primary is where it should
+be, and the peer is unreachable” is exactly a case where supervision should
+keep looking and must not act.</p>
+<h5 id="the-table-declared-primary-b-peer-a">The table (declared primary: B, peer: A)</h5>
+<p>Checked in order, first match wins:</p>
+<table>
+<tr><th>Observed A</th><th>Observed B</th><th>Step</th></tr>
+<tr><td>any sysid ≠ B's sysid</td><td></td><td><code>Refuse "not the same cluster"</code></td></tr>
+<tr><td>Standby streaming from B</td><td>Primary</td><td>bouncers point at B and are unpaused? <code>Done</code> : <code>RepointBouncers B</code></td></tr>
+<tr><td>Standby or Stopped, and B's slot for A is <code>lost</code></td><td>Primary</td><td><code>Degraded "the slot is lost"</code>: the WAL it needs has been recycled, so waiting produces nothing and a rewind changes nothing. Only a re-seed helps, and that is an operator's call</td></tr>
+<tr><td>Standby, pointed at B, not streaming</td><td>Primary</td><td><code>AwaitStreaming A</code>, and <code>Unknown</code> once the waiting runs out</td></tr>
+<tr><td>Standby, pointed anywhere else</td><td>Primary</td><td><code>Rejoin A</code> (the rewind is a no-op if nothing diverged)</td></tr>
+<tr><td>Stopped</td><td>Primary</td><td><code>Rejoin A</code></td></tr>
+<tr><td>Unreachable</td><td>Primary</td><td><code>RepointBouncers B</code> if needed, else <code>Degraded</code></td></tr>
+<tr><td>Primary, not <code>may_discard</code></td><td>Primary</td><td><code>Refuse "two primaries"</code></td></tr>
+<tr><td>Primary, <code>may_discard = A</code></td><td>Primary</td><td><code>StopMember A</code>, then <code>Rejoin A</code>: A's divergent writes are lost, as declared</td></tr>
+<tr><td>Primary</td><td>Standby of A, streaming</td><td><code>PauseBouncers</code>, then <code>StopMember A</code></td></tr>
+<tr><td>Primary</td><td>Standby of A, not streaming</td><td><code>AwaitStreaming B</code>: a clean stop hands the tail over through that connection, so stopping A without one strands whatever B has not got</td></tr>
+<tr><td>Stopped, <code>may_discard = A</code></td><td>Standby</td><td><code>Promote B</code>: the loss is already accepted, and waiting on a machine that will send nothing more is a slower way to the same place</td></tr>
+<tr><td>Stopped, crashed</td><td>Standby</td><td><code>Refuse "A did not stop cleanly"</code></td></tr>
+<tr><td>Stopped cleanly at c</td><td>Standby, received &lt; c, still streaming</td><td><code>AwaitCatchUp B c</code>: the tail is in flight</td></tr>
+<tr><td>Stopped cleanly at c</td><td>Standby, received &lt; c, not streaming</td><td><code>StartMember A</code>: nothing will arrive from a stopped machine, so start the one that holds the records and let B catch up from it</td></tr>
+<tr><td>Stopped cleanly at c</td><td>Standby, received ≥ c</td><td><code>Promote B</code></td></tr>
+<tr><td>Unreachable, not <code>may_discard</code></td><td>Standby</td><td><code>Refuse "cannot confirm A is stopped"</code></td></tr>
+<tr><td>Unreachable, <code>may_discard = A</code></td><td>Standby</td><td><code>PauseBouncers</code>, then <code>Promote B</code></td></tr>
+<tr><td>Standby</td><td>Standby</td><td>promote B only if B has received at least as much as A, else <code>Refuse</code></td></tr>
+<tr><td>Stopped</td><td>Stopped</td><td><code>StartMember B</code></td></tr>
+</table>
+<p>Paused bouncers are a state of their own. If <code>up</code> dies with them paused,
+every client is stuck, so any bouncer found paused makes the check fail, and
+every terminal step, <code>Refuse</code> included, resumes the bouncers salmon paused.</p>
+<p><code>Rejoin</code> is <code>pg_rewind -R --source-server=&lt;B&gt;</code> as the rewind role, then a
+start — with three things around it that the bare command does not do, each
+of which was a failure before it was a line of script.</p>
+<p><strong>The recovery configuration is written here, not by <code>-R</code>.</strong> <code>pg_rewind</code> is
+entitled to decide no rewind was needed at all, which is the ordinary case
+after a clean switchover, and what it then does about <code>-R</code> is not worth
+betting a second primary on. So <code>primary_conninfo</code> is rewritten every time.
+So is <code>primary_slot_name</code> — <em>deleted</em>, and for a sharper reason: slots are
+not replicated, so a member that comes back naming the slot it used to stream
+with names it on a machine that has never heard of it, and a standby whose
+slot is missing does not fall back to streaming without one. It retries
+forever (<code>replication slot &quot;...&quot; does not exist</code>) while looking, to every
+other query, like a healthy standby: <code>pg_is_in_recovery()</code> is true, the
+timeline is right, only <code>pg_stat_wal_receiver</code> is empty. Streaming with no
+slot costs WAL retention, which is what phase 6’s slot budget is for.
+Streaming with a slot that is not there costs everything.</p>
+<p><strong>A crashed target is recovered before the rewind, by us.</strong> <code>pg_rewind</code>
+refuses a target that was not shut down cleanly, and since 13 it fixes that
+itself by running <code>postgres --single -D &lt;datadir&gt;</code> — which takes the
+configuration to be <em>in</em> the data directory. On Debian it is in
+<code>/etc/postgresql</code>, so that step fails, and it fails in exactly the case a
+failover is about: the machine that died. The rejoin therefore reads
+<code>pg_controldata</code>’s cluster state and, for anything but a clean stop, runs the
+single-user recovery itself with <code>-c config_file=</code>. Single-user, never a
+start: a server that listens is a second primary, and this one still believes
+it is the primary.</p>
+<p><strong>Neither that recovery nor the stop before it may throw away what the
+rewind is for.</strong> A clean shutdown ends in a checkpoint, and a checkpoint
+recycles the WAL before it — which is the WAL <code>pg_rewind</code> then reads, walking
+back to the last checkpoint the two machines share. So both <code>StopMember</code> and
+the recovery pin <code>wal_keep_size</code> to what <code>pg_wal</code> already holds, and the
+rejoin takes the pin off again once it has been used. Without it the rewind
+fails with <code>could not open file .../pg_wal/...</code> immediately after the step
+that was supposed to enable it. In an ordinary switchover nothing older than
+the shutdown checkpoint is ever wanted, so this never shows; after a split
+brain the histories parted long before, and stopping the loser is precisely
+what destroys the record of how.</p>
+<p><strong>And the slot it will stream with is made here too.</strong> <code>-R</code> does not create
+one, and slots are not replicated, so a rejoining member creates its own on
+the machine it is about to stream from — over the replication connection,
+which is the one path the pair already requires — and then <em>checks that it is
+there</em>, because a standby naming a slot the primary does not have retries
+forever while looking healthy to every query but <code>pg_stat_wal_receiver</code>. The
+name is derived from the pair and the side (<code>salmon_pair_&lt;name&gt;_&lt;side&gt;</code>,
+lower-cased, anything else an underscore, 63 characters) rather than declared,
+so that a member computes the same name the member it rejoins would and a slot
+nobody can name is not a slot nobody can drop. The same step drops the slot
+this member held for its <em>peer</em> back when it was the primary: nothing consumes
+it here, and a slot nobody consumes goes on pinning every segment behind it.</p>
+<h3 id="failover-and-split-brain-pair_may_discard">Failover and split brain: <code>pair_may_discard</code></h3>
+<p>The operator’s escape hatch is one field, and its name states what it costs:
+“I accept losing writes on this side that the other side does not have.”</p>
+<p>The same flag covers two cases:</p>
+<ul>
+<li><strong>Failover:</strong> A is unreachable and B is promoted without proof that A has
+stopped.
+</li>
+<li><strong>Split-brain resolution:</strong> both sides are primaries and A is rewound onto
+B’s history.
+</li>
+</ul>
+<p>At <code>configure</code> time it must name the side that is <em>not</em> the declared
+primary; any other value is rejected there.</p>
+<h4 id="what-a-stopped-peer-proves">What a stopped peer proves</h4>
+<p>A peer that is not running is read off <code>pg_controldata</code>, and what that file
+is worth depends on how it stopped:</p>
+<ul>
+<li><strong>Shut down cleanly.</strong> The last record written is a shutdown checkpoint, so
+the checkpoint location <em>is</em> the end of its WAL: a standby that has reached
+it has everything. This is the ordinary switchover, and it needs no
+declaration from anybody.
+</li>
+<li><strong>Crashed.</strong> The checkpoint location is wherever the last periodic
+checkpoint happened to land, and any amount of acknowledged WAL may follow
+it, with nothing on disk to say how much. Comparing the standby against
+that number would read as “the standby has everything” precisely when it is
+least likely to be true.
+</li>
+</ul>
+<p>So a crashed peer is a refusal until <code>pair_may_discard</code> names the side. It is
+the same rule as the unreachable peer’s, arrived at by a different road: in
+both, promoting means losing writes nobody can count. <code>Database cluster state</code> is the field that tells them apart, and anything other than
+<code>shut down</code> / <code>shut down in recovery</code> — including a value this parser does
+not recognise — counts as a crash, which is the direction that refuses.</p>
+<p>Salmon cannot fence a machine it cannot reach. What makes promoting B safe
+enough for a low SLA is <strong>routing</strong>, not fencing: if <code>pg_hba</code> only admits
+application traffic from the bouncers’ hosts, then repointing the bouncers is
+the fence. A reachable A that comes back as a primary is stopped and rewound
+by the next pass. Its writes in the gap are the loss the flag already
+declared. The recipe should say this plainly in its haddock and in the check’s
+<code>Failure</code> text, instead of implying a fence it does not have.</p>
+<h3 id="routing">Routing</h3>
+<p>Implemented; what follows is what was built and why.</p>
+<p>The bouncers’ upstream is always the <em>declared</em> primary. Admin nodes that
+must run on the primary (<code>database</code>, <code>user</code>, templates, clones, migrations)
+also target the declared primary, so the <code>Track' Postgres.Server</code> they take
+is simply B’s. This is where the design is simpler than Patroni’s, where the
+primary has to be discovered at run time.</p>
+<p>A switchover is <code>PAUSE</code> on every bouncer, the Postgres steps, a rewritten
+routing file, <code>RELOAD</code>, then <code>RESUME</code>. With <code>pool_mode = transaction</code>,
+<code>PAUSE</code> waits for transactions in flight, so clients see latency rather than
+errors. That makes scenario S1’s “no client errors” a real assertion.</p>
+<p><strong>The routing lives in its own file, not in the ini</strong>, pulled in with
+<code>%include</code>. That is the seam between two nodes that would otherwise fight
+over one file. <code>PgBouncer.setup</code> owns the ini and <em>watches</em> it, so a change
+there is noticed and applied — by a restart, which drops every client the
+bouncer exists to hold. The role node owns the routing file, which is not
+watched, and applies a change the gentle way. Each file has one writer, and
+the one that moves traffic never restarts anything.</p>
+<p><code>bouncerSetup</code> writes the routing file only when it is <strong>missing</strong>, for the
+same reason: after that it is the role node’s, and a pass that rewrote it
+would move clients without pausing them first.</p>
+<p>Reading a bouncer is <code>SHOW DATABASES</code> on the admin console, by column
+<em>name</em> — the columns have changed between pgbouncer versions, and counting
+them is a way to read the wrong one. A bouncer that cannot be reached reads
+as sending clients nowhere, which is not <code>Done</code>: a pair whose clients are
+going somewhere unknown has not arrived.</p>
+<h3 id="disaster-scenarios">Disaster scenarios</h3>
+<p>A catalogue of what to cause and what to assert, meant to run as Layer 3
+tests. Each is a scenario description plus the assertions it must pass; if the
+Patroni spec reuses them against its own backend, the expected outcomes differ
+and the causes do not.</p>
+<p><strong>Machines:</strong> three VMs:</p>
+<ul>
+<li><code>pg-primary</code> and <code>pg-standby</code> (rootfses that already exist, plus
+<code>pgbouncer</code>);
+</li>
+<li>a third VM for the bouncer and a client loop.
+</li>
+</ul>
+<p>The controller is the test process, reaching the guests with the harness’s
+SSH CA key, which should map onto <code>Ssh.ClientOpts</code>’ identity and
+known-hosts fields.</p>
+<p><strong>Ways to cause trouble</strong>, all things the tree already has. Two of the three
+are written, in <code>Test.PostgresVms</code> and <code>SreBox.PostgresPair</code>:</p>
+<ul>
+<li><strong>a crash:</strong> <code>crashCluster</code> — <code>systemctl kill -s KILL postgresql@...</code> for the
+unit’s whole cgroup, then a wait for the cluster to actually be gone;
+</li>
+<li><strong>a controller killed part-way:</strong> <code>convergeUpTo</code>, a step budget, which from
+the machines’ side is indistinguishable from the controller dying after
+step <em>k</em>;
+</li>
+<li><strong>a partition:</strong> <code>partitionFrom</code> / <code>partitionFromEverythingFor</code>, <code>nft</code>
+rules built out of <code>Netfilter</code>’s own <code>Table</code>/<code>Chain</code>/<code>Rule</code> vocabulary and
+rendered by its own command, so the rule text is the tree’s; only the
+<em>running</em> of it differs, since the guests have no salmon on them and the
+argv goes over ssh. A partition that hides a machine from the controller
+cannot be lifted by the controller — the command would have to travel the
+path it cut — so that one is handed to the machine as cut, wait, heal, and
+left to run detached.
+</li>
+</ul>
+<p>Alongside them, what a scenario asserts <em>with</em>: <code>dataDirectoryIdentity</code> (the
+inodes a rewind keeps and a re-clone cannot), <code>assertPrimaryIs</code> /
+<code>assertInRecovery</code>, and <code>waitFor</code>, since every one of these waits is on a
+machine doing something in its own time.</p>
+<table>
+<tr><th>#</th><th>Scenario</th><th>Assert</th></tr>
+<tr><td>S1</td><td>Switch A→B, then B→A, with a client inserting through the bouncer the whole time</td><td>every acknowledged insert is present; the client saw zero errors; a rerun of <code>run up</code> changes nothing</td></tr>
+<tr><td>S2</td><td>S1, with the controller killed after each step <em>k</em> in turn</td><td>a plain rerun finishes; no bouncer is left paused; the result is the same as S1</td></tr>
+<tr><td>S3</td><td>Crash A while it holds writes the standby never got; declare B, first without <code>may_discard</code> and then with it</td><td>the first pass refuses, and promotes nothing; the second promotes B, which serves writes; A rejoins as B's standby through <code>pg_rewind</code>, not a re-clone (its data directory is never unlinked); the replicated rows survive and the un-replicated ones are gone, which is what the flag said</td></tr>
+<tr><td>S4</td><td>Partition A from B, with no change to the declaration</td><td>the check is <code>Unknown</code>; nothing is promoted, and in particular the standby is not stopped or rewound; after the partition heals, B catches up on its own and the pair is <code>Done</code></td></tr>
+<tr><td>S5</td><td>Partition A from B <em>and from the controller</em>, fail over to B with <code>may_discard = A</code> while A still holds writes B never got, then let it heal</td><td>without the flag the pass refuses, twice: once while A cannot be reached, and again once both machines call themselves primaries; with it, B is promoted, then A is stopped and rewound onto B's history; A's writes behind the partition are gone, as declared</td></tr>
+<tr><td>S6</td><td>Stop the standby; write past <code>max_slot_wal_keep_size</code> on the primary</td><td>the primary's <code>pg_wal</code> is bounded rather than following the standby down; the slot reports <code>wal_status = 'lost'</code>; the check is <code>Unknown</code> with the slot named in it; a pass does nothing at all, and in particular the standby's data directory is not unlinked — re-seeding is an operator's decision about throwing data away, not a step</td></tr>
+<tr><td>S7</td><td>Stop both, in either order, and declare the side that stopped <em>first</em></td><td>the pair converges on the declaration without losing what the other machine wrote after it: B starts, and if it is behind, A is started again so B can catch up from it before the ordinary switchover runs</td></tr>
+<tr><td>S8</td><td>A stranger's cluster (fresh <code>initdb</code>) where a member should be: same address, same cluster name, same port</td><td><code>Refuse</code>, in both directions and with <code>may_discard</code> naming either side — the flag says whose <em>writes</em> may go, which presumes one cluster, and is not a licence to wipe a machine that was never in the pair. Neither data directory is touched, and the stranger's own databases are still there</td></tr>
+</table>
+<p>S2 and S8 matter most. S2 proves resumability, which is the design’s main
+claim. S8 proves the refusal that P1 is about, one level up: P1 guards the
+clone against cloning over a stranger, and S8 guards every <em>step</em> against
+being applied to one.</p>
+<p>All eight are written, in <code>Test.PostgresSwitchoverSpec</code>, and between them
+they cost the recipe twelve defects. Where those came from is the argument
+for writing a catalogue of <em>causes</em> rather than of features: not one of the
+twelve is on the happy path. S1, the scenario in which nothing goes wrong,
+found nothing, and so did S8, whose guard was written first and stayed right.
+Every other defect needed a machine that stopped, or was cut off, without
+being asked to.</p>
+<p>Writing S3 alone
+turned up six defects: the two positions that were not what their names said
+(see “Observation, then a pure verdict”), the crashed peer treated as a clean
+one, and the three things the rejoin now does around <code>pg_rewind</code>. None of them
+is reachable from the happy path, because every one needs a machine that
+stopped without being asked to – which is the argument for the rest of this
+catalogue, and the reason the scenarios are written as a list of <em>causes</em>
+rather than of features.</p>
+<p>S4 and S5 turned up three more, in the same spirit. A partitioned standby
+read as somebody else’s standby and would have been stopped and rewound, so a
+broken link between the two machines would have taken the standby down with
+it. Deciding that a member is unreachable took minutes, because nothing
+bounded ssh’s own retrying — on the one failure this recipe exists for. And
+the clean stop of a divergent primary recycled the WAL the rewind of it then
+needed.</p>
+<p>S6 turned up the state the pair had no answer for at all: once slots are in
+use, a standby that falls off the budget can never catch up, and every
+earlier version of the table would have gone on rewinding at it. S7 turned up
+the two worst, both of them one declaration away – stopping a primary while
+the standby was not connected to receive its tail, and then waiting out a
+budget for records a stopped machine was never going to send. Between them
+they could take a healthy pair to one machine stopped and the other
+unpromotable.</p>
+<h3 id="phased-plan">Phased plan</h3>
+<ol>
+<li><strong>P1–P5,</strong> each with its own test. P1 gets a Layer 3 case in
+<code>PostgresReplicationSpec</code>: promote the standby, rerun <code>run up</code>, and assert
+the data survives.
+</li>
+<li><strong><code>Observed</code>, <code>parseObserved</code>, <code>nextStep</code>,</strong> and Layer 0 tests over the
+whole table.
+</li>
+<li><strong>Symmetric members, the seed clone and the role node,</strong> without bouncers;
+S1 (minus the client assertions), S2, S7, S8.
+</li>
+<li><strong>Bouncer routing,</strong> PAUSE/RELOAD/RESUME; the rest of S1.
+</li>
+<li><strong><code>pair_may_discard</code>,</strong> failover and split brain; S3, S4, S5.
+</li>
+<li><strong>The slot budget and re-seeding;</strong> S6.
+</li>
+</ol>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li><strong><code>pair_synchronous</code>.</strong> Synchronous replication gives zero loss on
+failover, but with two nodes it blocks every commit while the standby is
+down. If it is offered, <code>Promote</code> must also clear <code>synchronous_standby_names</code>
+on the new primary, or the survivor blocks waiting for the dead member.
+Leaning towards leaving it out of v1.
+</li>
+<li><strong>Minimum Postgres version: 13.</strong> It brings <code>max_slot_wal_keep_size</code>,
+<code>wal_status</code>, <code>pg_rewind -R</code> and its automatic crash recovery, and a
+reloadable <code>primary_conninfo</code>. The templates already need 13 for
+<code>DROP DATABASE ... WITH (FORCE)</code>.
+</li>
+<li><strong>Should the symmetric members replace <code>primaryReplicationSetup</code> /
+<code>standbyReplicationSetup</code>,</strong> once the fixture and
+<code>PostgresReplicationSpec</code> are ported? They are strictly less capable, and
+they are where P1 and P3 live.
+</li>
+<li><strong>Controller placement for real deployments.</strong> In the harness it is the test
+process. For a low-SLA service it is whatever machine runs <code>run up</code> or
+<code>run serve</code> for the pair. Is it worth also stating that it must not be one
+of the two members?
+</li>
+</ul>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

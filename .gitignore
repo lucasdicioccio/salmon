@@ -4,3 +4,18 @@ cabal.perso.project.local
 salmon-personal-apps/
 gcp-toy-runs/
 gcp-toy-work/
+.dogfood-robots/
+
+# Kitchen-Sink dev-server output. website/src/ is the source, docs/ the
+# produced site GitHub Pages serves (tracked, see website/scripts/build-site.sh).
+website/www/
+
+# Mirrored pages written by website/scripts/sync-repo-docs.sh from resources/,
+# specs/ and README.md — mechanical output, not source.
+website/src/docs-*.cmark
+website/src/specs-*.cmark
+website/src/specs.cmark
+website/src/builtins.cmark
+
+# python bytecode from website/scripts
+__pycache__/

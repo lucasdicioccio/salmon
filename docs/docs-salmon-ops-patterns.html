@@ -1,0 +1,69 @@
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Salmon ops patterns</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Salmon ops patterns"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Salmon ops patterns"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html"><meta property="og:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="article:published_time" content="2026-09-25T13:05:32Z"><meta name="article:modified_time" content="2026-09-25T13:05:32Z"><meta name="ks:article_json" content="/salmon/json/docs-salmon-ops-patterns.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-salmon-ops-patterns.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T13:05:32Z","datePublished":"2026-09-25T13:05:32Z","description":"This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine","headline":"Salmon ops patterns","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Salmon ops patterns</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 519 words, 1 code snippets, 1 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">6/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-salmon-core.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/salmon-ops-patterns.md"><code>resources/salmon-ops-patterns.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<h2 id="salmon-ops-patterns">Salmon ops patterns</h2>
+<p>This is a companion to <a href="/salmon/docs-howto-ops.html"><code>howto-ops.md</code></a>: where that doc is a
+per-primitive cookbook (how to write one node, one <code>Op</code>, one CLI binary),
+this one collects recurring <em>shapes</em> worth reusing across recipes — patterns
+that combine several of those primitives to solve a problem that comes up
+more than once. Read <code>howto-ops.md</code> first if a term here (<code>Op</code>, <code>Track</code>,
+<code>seed</code>/<code>Spec</code>, <code>check</code>) is unfamiliar.</p>
+<h3 id="pattern-one-time-privileged-bootstrap-then-unprivileged-forever-after">Pattern: one-time privileged bootstrap, then unprivileged forever after</h3>
+<p><strong>Problem.</strong> A recipe needs some action that only root can perform —
+granting a Linux capability (<code>setcap</code>), installing an OS package, <code>chown</code>-ing
+a path to a different user — but you don’t want every <em>routine</em> invocation
+of the binary to require root just because <em>one</em> op deep in its graph does.
+Requiring <code>sudo</code> for everything is both a security smell (broader blast
+radius than needed) and an ergonomics problem (can’t run unattended as a
+normal user, breaks non-interactive/CI invocations).</p>
+<p><strong>Shape.</strong> Split the privileged, one-time setup from the routine, repeated
+work as two different seeds of the <em>same</em> binary, using the existing
+seed → spec → ops CLI protocol (<code>howto-ops.md</code> §9):</p>
+<pre><code class="language-sh">sudo my-salmon config bootstrap | sudo my-salmon run up   # once per machine
+my-salmon config &lt;routine-seed&gt; | my-salmon run up        # every other time, no sudo
+</code></pre>
+<ul>
+<li>The <code>bootstrap</code> seed’s <code>Op</code> graph contains <em>only</em> the privileged,
+machine-wide setup: capability grants, package installs, ownership fixes.
+Nothing routine (booting a VM, writing a recipe’s actual state) belongs in
+it.
+</li>
+<li>Every other seed’s graph assumes that setup already happened and never
+needs privilege itself.
+</li>
+<li><strong>This only works if every op in the bootstrap graph is genuinely
+idempotent</strong> (<code>howto-ops.md</code> §4) — re-running <code>bootstrap</code> under <code>sudo</code>
+later (e.g. after a package upgrade wipes a capability) must be a safe,
+cheap no-op via <code>check</code>, not a hazard. If you can’t make the bootstrap
+step idempotent, this pattern isn’t safe to recommend to users as “run it
+whenever” — treat it as a real migration instead.
+</li>
+<li>The bootstrap seed usually needs to know <em>which</em> unprivileged user/group
+future invocations will run as (to <code>chown</code>/grant-to the right identity) —
+take that as an explicit seed argument rather than inferring it from
+<code>$SUDO_USER</code>/similar, so <code>sudo my-salmon config bootstrap --for alice</code> is
+unambiguous about who it’s provisioning for.
+</li>
+</ul>
+<p><strong>Worked example.</strong> <code>Salmon.Builtin.Nodes.Capabilities.grantCapabilities</code>
+(<code>salmon-ops/src/Salmon/Builtin/Nodes/Capabilities.hs</code>) is exactly this
+kind of bootstrap-only op: it needs <code>CAP_SETFCAP</code> (in practice, root) to
+run, but its <code>check</code> (<code>getcap</code>-based) makes every subsequent run a
+no-op — see its haddock. The qemu test tier
+(<code>specs/qemu-test-vms-progress.md</code> §0.2) combines it with
+<code>Salmon.Builtin.Nodes.User.chown</code> into one bootstrap graph, currently
+exposed as a standalone fixture binary
+(<code>salmon-ops/fixtures/QemuHostSetupFixture.hs</code>) rather than a real
+<code>bootstrap</code> seed on a unified CLI binary — folding it into the latter
+shape (a proper <code>Seed = Bootstrap User | BootVm VmSpec | ...</code>) is the
+natural next step if/when this tier grows a real production binary instead
+of remaining test-only support code. <code>salmon-toy-qemu-pg-ha</code>
+(<code>salmon-apps/src/QemuPgHaToy.hs</code>) already has the two-seed shape — a
+<code>prereqs</code> seed run once under <code>sudo</code> (root filesystems, and <code>/etc/ssh</code>
+handed to the unprivileged user), then <code>up</code>/<code>client</code> without it — though
+its two capability grants are still a documented manual <code>setcap</code>, not a
+node in <code>prereqs</code>.</p>
+<p><strong>Related, but not this pattern:</strong> if the privileged step <em>isn’t</em> safely
+re-runnable (e.g. a real schema migration, a one-shot data backfill), don’t
+reach for “bootstrap seed” — that’s ordinary migration territory
+(<code>Salmon.Builtin.Migrations</code>), which has its own once-ever semantics instead
+of <code>check</code>-based idempotency.</p>
+</section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>
