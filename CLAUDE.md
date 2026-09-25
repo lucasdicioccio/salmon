@@ -458,7 +458,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   walks, *unrewritten*), one object per `Ref` in `dagOrder` with `dependencies`/`dependants`
   both ways and the `Act` projection — exactly the fields `Dag.sameRepresentative` compares
   (`shorthand`/`help`/`notes`/rendered `dynamics`, via `Dag.representative`) plus the loop's
-  `direction`/`convergence`/`status` through `Tagged.nodeStatePairs`, one encoding not two. It
+  `direction`/`convergence`/`status` through `Tagged.nodeStatePairs`, one encoding not two. A
+  node whose representative won a still-standing collision carries `conflict: {kept, replaced}`
+  (`Tagged.representativeValue` of each side) — `Serve.Collision`, filled by `Serve.record` from
+  both the fold's own `dagConflicts` and a differing representative that another *live*
+  declaration still wants (which the loop now also reports `Conflicting` at declare time), kept
+  while a holder of the losing side is live, dropped by `prune` otherwise. It
   exists from the first declaration on (every node `pending` under `autoconverge off`), and a
   retiring node is in it with `direction: down` until `prune` drops it. `/status` and
   `/history` are the objects `--json` prints for the commands (`history` folds the elided count

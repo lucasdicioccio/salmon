@@ -53,6 +53,7 @@ module Salmon.Reporter.Tagged (
     actPairs,
     checkResultValue,
     nodeStatePairs,
+    representativeValue,
     nodeStateValue,
     epochValue,
     originValue,
@@ -79,6 +80,7 @@ import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Extension (..))
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Mailbox as Mailbox
+import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ref (Ref, shortRef, unRef)
 import qualified Salmon.Op.Status as Status
 import Salmon.Op.Supervision (Micros (..), Restart (..), Strategy (..), Supervision (..))
@@ -173,6 +175,21 @@ nodeValue act =
         , "help" .= act.extension.help
         , "notes" .= act.extension.notes
         ]
+
+{- | The 'Dag.representative' projection of a node — exactly the fields
+'Dag.sameRepresentative' compares — as one object. What @\/dag@ shows for
+each side of a 'Serve.Collision'.
+-}
+representativeValue :: Act Extension -> Value
+representativeValue act =
+    object
+        [ "shorthand" .= rep.repShorthand
+        , "help" .= rep.repHelp
+        , "notes" .= rep.repNotes
+        , "dynamics" .= rep.repDynamics
+        ]
+  where
+    rep = Dag.representative act
 
 kind :: Text -> (Key, Value)
 kind k = "kind" .= k
