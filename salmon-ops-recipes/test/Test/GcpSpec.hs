@@ -9,7 +9,15 @@ what makes it testable without a real GCP project.
 -}
 module Test.GcpSpec (tests) where
 
-import Data.List (isInfixOf, isSubsequenceOf)
+import Data.Aeson (Value (..), encode)
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LByteString
+import Data.Char (isAsciiLower, isDigit)
+import Data.List (isInfixOf, isSubsequenceOf, nub)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import Data.Foldable (toList)
 import qualified Data.Map as Map
 import GHC.IO.Exception (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -26,12 +34,14 @@ import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
 import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
+import qualified Salmon.Builtin.Nodes.Gcp.Monitoring as Monitoring
 import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.SecretManager as SecretManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
+import qualified SreBox.Gcp.CloudRunAlerts as CloudRunAlerts
 
 tests :: TestTree
 tests =
@@ -52,6 +62,8 @@ tests =
         , testGroup "SecretManager" secretTests
         , testGroup "CloudRun options" cloudRunOptionTests
         , testGroup "Ssh.ClientOpts" clientOptsTests
+        , testGroup "Monitoring" monitoringTests
+        , testGroup "SreBox.Gcp.CloudRunAlerts" cloudRunAlertsTests
         ]
 
 -- | Extracts the argument list of a prepared gcloud 'CreateProcess', for
@@ -651,3 +663,163 @@ clientOptsTests =
     ]
   where
     opts = Ssh.ClientOpts (Just "/w/ssh/toy-client") (Just "/w/ssh/known_hosts")
+
+-------------------------------------------------------------------------------
+
+monitoringTests :: [TestTree]
+monitoringTests =
+    [ testCase "an email channel is created with its type and address as channel labels" $ do
+        let args = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsCreate channel))
+        assertBool (show args) (["beta", "monitoring", "channels", "create"] `isSubsequenceOf` args)
+        assertBool (show args) (["--type", "email"] `isSubsequenceOf` args)
+        assertBool (show args) (["--channel-labels", "email_address=ops@example.org"] `isSubsequenceOf` args)
+        assertBool (show args) (["--display-name", "ops mail"] `isSubsequenceOf` args)
+        assertBool (show args) (["--project", "p"] `isSubsequenceOf` args)
+    , testCase "channels and policies are looked up by display name, as JSON" $ do
+        let cargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsList channel))
+            pargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesList policy))
+        assertBool (show cargs) (["--filter", "display_name=\"ops mail\"", "--format", "json"] `isSubsequenceOf` cargs)
+        assertBool (show pargs) (["--filter", "display_name=\"svc: 5xx ratio\"", "--format", "json"] `isSubsequenceOf` pargs)
+    , testCase "channel lookup: failed, absent, present matching, present with another address" $ do
+        assertEqual "" (Monitoring.LookupFailed "exit 1: boom") (Monitoring.lookupChannel channel (ExitFailure 1) "" "boom\n")
+        assertEqual "" Monitoring.Absent (Monitoring.lookupChannel channel ExitSuccess "[]" "")
+        assertEqual
+            ""
+            (Monitoring.Present (Monitoring.FoundChannel "projects/p/notificationChannels/1" True))
+            (Monitoring.lookupChannel channel ExitSuccess (channelJson "ops@example.org") "")
+        assertEqual
+            ""
+            (Monitoring.Present (Monitoring.FoundChannel "projects/p/notificationChannels/1" False))
+            (Monitoring.lookupChannel channel ExitSuccess (channelJson "other@example.org") "")
+        -- and as a check: only the matching one is satisfied
+        assertEqual "" Success (Monitoring.interpretChannelList channel (ExitSuccess, channelJson "ops@example.org", ""))
+        assertBool "" (isFailure (Monitoring.interpretChannelList channel (ExitSuccess, channelJson "other@example.org", "")))
+        assertBool "" (isFailure (Monitoring.interpretChannelList channel (ExitSuccess, "[]", "")))
+        assertBool "" (isFailure (Monitoring.interpretChannelList channel (ExitFailure 1, "", "")))
+    , testCase "the 5xx condition is a ratio: numerator on the 5xx class, denominator on every request, same service" $ do
+        let v = Monitoring.renderCondition target (Monitoring.ServerErrorRatio 0.05 300)
+            threshold = fieldAt ["conditionThreshold"] v
+            filt = textAt ["conditionThreshold", "filter"] v
+            denom = textAt ["conditionThreshold", "denominatorFilter"] v
+        assertBool (show filt) (maybe False ("metric.labels.response_code_class=\"5xx\"" `Text.isInfixOf`) filt)
+        assertBool (show filt) (maybe False ("resource.labels.service_name=\"svc\"" `Text.isInfixOf`) filt)
+        assertBool (show filt) (maybe False ("resource.labels.location=\"europe-west1\"" `Text.isInfixOf`) filt)
+        assertBool (show denom) (maybe False (\d -> "request_count" `Text.isInfixOf` d && not ("5xx" `Text.isInfixOf` d)) denom)
+        assertEqual "" (Just "300s") (textAt ["conditionThreshold", "duration"] v)
+        assertBool (show threshold) (threshold /= Nothing)
+    , testCase "latency and memory read the 99th percentile; instance count sums active instances" $ do
+        let lat = Monitoring.renderCondition target (Monitoring.RequestLatencyP99 2000 300)
+            mem = Monitoring.renderCondition target (Monitoring.MemoryUtilization 0.9 300)
+            cnt = Monitoring.renderCondition target (Monitoring.InstanceCount 3 300)
+        assertEqual "" (Just "ALIGN_PERCENTILE_99") (textAt ["conditionThreshold", "aggregations", "0", "perSeriesAligner"] lat)
+        assertBool "" (maybe False ("request_latencies" `Text.isInfixOf`) (textAt ["conditionThreshold", "filter"] lat))
+        assertEqual "" (Just "ALIGN_PERCENTILE_99") (textAt ["conditionThreshold", "aggregations", "0", "perSeriesAligner"] mem)
+        assertBool "" (maybe False ("memory/utilizations" `Text.isInfixOf`) (textAt ["conditionThreshold", "filter"] mem))
+        assertEqual "" (Just "REDUCE_SUM") (textAt ["conditionThreshold", "aggregations", "0", "crossSeriesReducer"] cnt)
+        assertBool "" (maybe False ("metric.labels.state=\"active\"" `Text.isInfixOf`) (textAt ["conditionThreshold", "filter"] cnt))
+    , testCase "the rendered policy names its channels and carries the fingerprint as a user label" $ do
+        let names = ["projects/p/notificationChannels/1"]
+            v = Monitoring.renderPolicy policy names
+        assertEqual "" (Just "svc: 5xx ratio") (textAt ["displayName"] v)
+        assertEqual "" (Just "OR") (textAt ["combiner"] v)
+        assertEqual "" (Just "projects/p/notificationChannels/1") (textAt ["notificationChannels", "0"] v)
+        assertEqual "" (Just (Monitoring.policyFingerprint policy names)) (textAt ["userLabels", Monitoring.fingerprintLabel] v)
+        -- and it is what --policy carries, inline
+        let args = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesCreate policy names))
+        assertBool (show args) (["alpha", "monitoring", "policies", "create", "--policy"] `isSubsequenceOf` args)
+        assertBool (show args) (Text.unpack (Text.decodeUtf8 (LByteString.toStrict (encode v))) `elem` args)
+    , testCase "the fingerprint is label-safe, and moves with a threshold or a channel id" $ do
+        let names = ["projects/p/notificationChannels/1"]
+            fp = Monitoring.policyFingerprint policy names
+        assertEqual (show fp) 16 (Text.length fp)
+        assertBool (show fp) (Text.all (\c -> isAsciiLower c || isDigit c) fp)
+        assertBool "same declaration, same fingerprint" (fp == Monitoring.policyFingerprint policy names)
+        assertBool "threshold" (fp /= Monitoring.policyFingerprint policy{Monitoring.apConditions = [Monitoring.ServerErrorRatio 0.1 300]} names)
+        assertBool "channel id" (fp /= Monitoring.policyFingerprint policy ["projects/p/notificationChannels/2"])
+        assertBool "documentation" (fp /= Monitoring.policyFingerprint policy{Monitoring.apDocumentation = "other"} names)
+    , testCase "policy lookup: a matching fingerprint is satisfied, anything else is not" $ do
+        let names = ["projects/p/notificationChannels/1"]
+            fp = Monitoring.policyFingerprint policy names
+        assertEqual "" Success (Monitoring.interpretPolicyList policy names (ExitSuccess, policyJson (Just fp), ""))
+        assertBool "edited or older" (isFailure (Monitoring.interpretPolicyList policy names (ExitSuccess, policyJson (Just "0000000000000000"), "")))
+        assertBool "no label" (isFailure (Monitoring.interpretPolicyList policy names (ExitSuccess, policyJson Nothing, "")))
+        assertBool "absent" (isFailure (Monitoring.interpretPolicyList policy names (ExitSuccess, "[]", "")))
+        assertBool "unreachable" (isFailure (Monitoring.interpretPolicyList policy names (ExitFailure 1, "", "")))
+        assertEqual
+            ""
+            (Monitoring.Present (Monitoring.FoundPolicy "projects/p/alertPolicies/9" (Just fp)))
+            (Monitoring.lookupPolicy policy ExitSuccess (policyJson (Just fp)) "")
+    , testCase "an update names the policy found, a delete the resource, both under the project" $ do
+        let up = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesUpdate "projects/p/alertPolicies/9" policy []))
+            del = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesDelete (Core.Project "p") "projects/p/alertPolicies/9"))
+            cdel = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsDelete (Core.Project "p") "projects/p/notificationChannels/1"))
+        assertBool (show up) (["policies", "update", "projects/p/alertPolicies/9", "--policy"] `isSubsequenceOf` up)
+        assertBool (show del) (["policies", "delete", "projects/p/alertPolicies/9", "--quiet", "--project", "p"] `isSubsequenceOf` del)
+        assertBool (show cdel) (["channels", "delete", "projects/p/notificationChannels/1", "--quiet"] `isSubsequenceOf` cdel)
+    ]
+  where
+    channel = Monitoring.NotificationChannel (Core.Project "p") "ops mail" (Monitoring.Email "ops@example.org")
+    target = Monitoring.CloudRunTarget (Core.Project "p") (Core.Region "europe-west1") "svc"
+    policy =
+        Monitoring.AlertPolicy
+            { Monitoring.apProject = Core.Project "p"
+            , Monitoring.apDisplayName = "svc: 5xx ratio"
+            , Monitoring.apTarget = target
+            , Monitoring.apConditions = [Monitoring.ServerErrorRatio 0.05 300]
+            , Monitoring.apChannels = [channel]
+            , Monitoring.apDocumentation = "doc"
+            }
+    channelJson address =
+        "[{\"name\": \"projects/p/notificationChannels/1\", \"type\": \"email\", \"displayName\": \"ops mail\", \"labels\": {\"email_address\": \"" <> Text.encodeUtf8 address <> "\"}, \"enabled\": true}]"
+    policyJson mfp =
+        "[{\"name\": \"projects/p/alertPolicies/9\", \"displayName\": \"svc: 5xx ratio\", \"combiner\": \"OR\""
+            <> maybe "" (\fp -> ", \"userLabels\": {\"salmon-fingerprint\": \"" <> Text.encodeUtf8 fp <> "\"}") mfp
+            <> "}]"
+
+-- | A field of a JSON value by path; an array index is spelled as a number.
+fieldAt :: [Text.Text] -> Value -> Maybe Value
+fieldAt [] v = Just v
+fieldAt (k : ks) (Object o) = KeyMap.lookup (Key.fromText k) o >>= fieldAt ks
+fieldAt (k : ks) (Array xs) = case reads (Text.unpack k) of
+    [(i, "")] | i >= 0, i < length xs -> fieldAt ks (toList xs !! i)
+    _ -> Nothing
+fieldAt _ _ = Nothing
+
+textAt :: [Text.Text] -> Value -> Maybe Text.Text
+textAt ks v = case fieldAt ks v of
+    Just (String t) -> Just t
+    _ -> Nothing
+
+cloudRunAlertsTests :: [TestTree]
+cloudRunAlertsTests =
+    [ testCase "three policies without a maximum, four with; one channel shared by all" $ do
+        let without = CloudRunAlerts.standardPolicies cfg{CloudRunAlerts.cra_maxInstances = Nothing}
+            with = CloudRunAlerts.standardPolicies cfg
+        assertEqual "" 3 (length without)
+        assertEqual "" 4 (length with)
+        assertEqual "" 1 (length (nub (concatMap (.apChannels) with)))
+        assertBool "" (any (\p -> p.apConditions == [Monitoring.InstanceCount 2 300]) with)
+    , testCase "display names are distinct per service, so two services' alerts are distinct resources" $ do
+        let a = map (.apDisplayName) (CloudRunAlerts.standardPolicies cfg)
+            b = map (.apDisplayName) (CloudRunAlerts.standardPolicies cfg{CloudRunAlerts.cra_service = "other"})
+        assertEqual "" 4 (length (nub a))
+        assertBool (show (a, b)) (null (filter (`elem` b) a))
+        assertBool "" (all ("svc: " `Text.isPrefixOf`) a)
+    , testCase "the defaults are the documented ones" $ do
+        let t = CloudRunAlerts.defaultAlertThresholds
+        assertEqual "" 0.05 t.at_errorRatio
+        assertEqual "" 2000 t.at_latencyP99Ms
+        assertEqual "" 0.9 t.at_memoryUtilization
+        assertEqual "" 300 t.at_duration
+    ]
+  where
+    cfg =
+        CloudRunAlerts.CloudRunAlertsConfig
+            { CloudRunAlerts.cra_project = Core.Project "p"
+            , CloudRunAlerts.cra_region = Core.Region "europe-west1"
+            , CloudRunAlerts.cra_service = "svc"
+            , CloudRunAlerts.cra_email = "ops@example.org"
+            , CloudRunAlerts.cra_channelName = "ops mail"
+            , CloudRunAlerts.cra_maxInstances = Just 2
+            , CloudRunAlerts.cra_thresholds = CloudRunAlerts.defaultAlertThresholds
+            }
