@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 {- | Runs a qemu VM as a systemd unit — see @specs/qemu-test-vms.md@ (§2) for
 the design this implements.
 
@@ -43,12 +45,14 @@ host's point of view, exactly like 'Salmon.Builtin.Nodes.Nginx.setup' or
 'Salmon.Builtin.Nodes.PgBouncer.setup' delegate to it, so 'up'\/'down' reuse
 that module's process-supervision instead of this module inventing its own.
 
-Caveat carried over from the spec, not yet addressed: stopping the unit
-sends the guest a bare SIGTERM (qemu's default: quits immediately), not a
-graceful ACPI shutdown via the qemu monitor socket. Acceptable for v1's
-disposable-test-VM use case (nothing in the guest is precious), called out
-explicitly rather than silently accepted — see @specs/qemu-test-vms.md@ §2
-for the graceful-shutdown follow-up this would need.
+Stopping is graceful first: 'setup''s @down@ asks the guest for an ACPI
+shutdown through the monitor socket (@system_powerdown@, see 'shutdown'),
+waits up to 'defaultShutdownGrace' seconds for qemu to exit (a guest that
+ignores ACPI, or is not running, is the fallback's case), and only then runs
+the unit's @systemctl stop@, whose SIGTERM makes qemu quit immediately. A
+qemu that exits by itself with status 0 is not restarted by the unit's
+@Restart=on-failure@, so the two stops do not fight. See
+@specs/qemu-test-vms.md@ §2.
 -}
 module Salmon.Builtin.Nodes.Qemu where
 
@@ -56,18 +60,24 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, justInstall)
 import qualified Salmon.Builtin.Nodes.LinuxBridge as LinuxBridge
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
-import Salmon.Op.OpGraph (inject)
+import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Track
 import Salmon.Reporter
 
-import Control.Exception (throwIO)
-import Control.Monad (filterM)
+import Control.Concurrent (threadDelay)
+import Control.Exception (SomeException, bracket, throwIO, try)
+import Control.Monad (filterM, void)
+import qualified Data.ByteString as BS
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Network.Socket as Socket
+import qualified Network.Socket.ByteString as SocketBS
 
 import System.Directory (doesFileExist, listDirectory)
 import System.FilePath ((</>))
+import System.Timeout (timeout)
 
 -------------------------------------------------------------------------------
 
@@ -138,12 +148,20 @@ resolveKernelInitrd rootfs = do
 
 {- | Installs qemu, brings up the VM's tap device (see
 "Salmon.Builtin.Nodes.LinuxBridge"), and runs the VM as a systemd unit.
+Its @down@ is a graceful 'shutdown' first, with 'defaultShutdownGrace'.
 -}
 setup :: Reporter Systemd.Report -> Reporter LinuxBridge.Report -> Track' (Binary "systemctl") -> Track' (Binary "qemu-system-x86_64") -> Track' (Binary "ip") -> VmConfig -> Op
-setup r rTap systemctl qemuBin ip cfg =
-    Systemd.systemdService r systemctl trackConfig systemdCfg
+setup = setupWithGrace defaultShutdownGrace
+
+-- | 'setup' with the number of seconds 'shutdown' waits for the guest before the unit is stopped hard.
+setupWithGrace :: Int -> Reporter Systemd.Report -> Reporter LinuxBridge.Report -> Track' (Binary "systemctl") -> Track' (Binary "qemu-system-x86_64") -> Track' (Binary "ip") -> VmConfig -> Op
+setupWithGrace grace r rTap systemctl qemuBin ip cfg =
+    graceful (Systemd.systemdService r systemctl trackConfig systemdCfg)
         `inject` LinuxBridge.tap rTap ip cfg.vm_tap
   where
+    -- the unit's own @down@ (systemctl stop) still runs, after the guest had its chance
+    graceful o = o{node = fmap (\e -> e{down = void (shutdown grace cfg.vm_monitor_socket) >> e.down}) o.node}
+
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \_ -> op "qemu-setup" (deps [justInstall qemuBin]) id
 
@@ -235,3 +253,69 @@ kernelCmdline cfg =
                 ]
             , cfg.vm_extra_kernel_args
             ]
+
+-------------------------------------------------------------------------------
+
+-- | Seconds 'setup' gives a guest to power itself off before the unit is stopped hard.
+defaultShutdownGrace :: Int
+defaultShutdownGrace = 30
+
+{- | Asks the guest for an ACPI power-off through the monitor socket and waits
+for qemu to go away, up to @grace@ seconds. 'True' when the VM is gone (also
+when it was never running: nothing is sent to a socket nobody listens on),
+'False' when it was still there at the deadline — the caller's cue to stop it
+hard. Never throws: a monitor that cannot be talked to is a 'False', since the
+answer the caller needs is "is it safe to skip the hard stop", and it is not.
+-}
+shutdown :: Int -> MonitorSocket -> IO Bool
+shutdown grace sock = do
+    up <- listening sock
+    if not up
+        then pure True
+        else do
+            _ <- monitorCommand sock "system_powerdown"
+            waitGone (grace * 10)
+  where
+    waitGone :: Int -> IO Bool
+    waitGone n = do
+        up <- listening sock
+        if not up
+            then pure True
+            else
+                if n <= 0
+                    then pure False
+                    else threadDelay 100000 >> waitGone (n - 1)
+
+-- | A hard guest reset through the monitor socket (@system_reset@), for tests of what survives one. 'False' if the monitor could not be talked to.
+reset :: MonitorSocket -> IO Bool
+reset sock = monitorCommand sock "system_reset"
+
+{- | Sends one command line to a qemu monitor and waits for qemu to have read
+it: the write side is closed and the connection drained until qemu hangs up
+(or two seconds pass), because a client that disconnects at once can leave
+the command unread. Never throws.
+-}
+monitorCommand :: MonitorSocket -> Text -> IO Bool
+monitorCommand sock cmd = withMonitor sock $ \s -> do
+    SocketBS.sendAll s (Text.encodeUtf8 (cmd <> "\n"))
+    Socket.shutdown s Socket.ShutdownSend
+    _ <- timeout 2000000 (drain s)
+    pure ()
+  where
+    drain s = do
+        bs <- SocketBS.recv s 4096
+        if BS.null bs then pure () else drain s
+
+-- | Is something accepting connections on the monitor socket?
+listening :: MonitorSocket -> IO Bool
+listening sock = withMonitor sock (\_ -> pure ())
+
+-- | Connects, runs the action, closes; 'False' if any of it threw.
+withMonitor :: MonitorSocket -> (Socket.Socket -> IO ()) -> IO Bool
+withMonitor sock act = do
+    r <-
+        try $
+            bracket (Socket.socket Socket.AF_UNIX Socket.Stream Socket.defaultProtocol) Socket.close $ \s -> do
+                Socket.connect s (Socket.SockAddrUnix sock)
+                act s
+    pure (either (\(_ :: SomeException) -> False) (const True) r)

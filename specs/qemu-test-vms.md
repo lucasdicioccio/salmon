@@ -128,7 +128,7 @@ qemu-system-x86_64 -name <vm_name> -m <memory_mb> -smp <smp>
   -enable-kvm   -- if /dev/kvm exists; fall back to TCG otherwise (slow but portable, worth keeping as a fallback for CI boxes without nested virt)
 ```
 
-Graceful shutdown on `down` ideally goes through the monitor socket
+**Implemented** (`Qemu.shutdown`/`Qemu.reset`, wired as `Qemu.setup`'s `down`: `system_powerdown`, wait 30s by default via `setupWithGrace`, then the unit's `systemctl stop`; `Test.QemuShutdownSpec` runs it against a fake monitor — not yet against a real qemu guest). Original sketch: graceful shutdown on `down` ideally goes through the monitor socket
 (`system_powerdown`) rather than `systemctl stop` sending SIGTERM straight
 to qemu — worth a small `Qemu.shutdown` helper that writes to the monitor
 socket and polls for the process to exit before falling back to a hard
