@@ -66,5 +66,10 @@ node in `prereqs`.
 **Related, but not this pattern:** if the privileged step *isn't* safely
 re-runnable (e.g. a real schema migration, a one-shot data backfill), don't
 reach for "bootstrap seed" — that's ordinary migration territory
-(`Salmon.Builtin.Migrations`), which has its own once-ever semantics instead
-of `check`-based idempotency.
+(`Salmon.Builtin.Migrations` reads migration files into a graph;
+`SreBox.PostgresMigrations.migrate` runs each as a psql script). Be aware
+that salmon records nothing about which migrations were applied: there is no
+once-ever guarantee, and every `run up` runs every migration again. So write
+each migration to be idempotent (`CREATE ... IF NOT EXISTS`, `ADD COLUMN IF
+NOT EXISTS`, a guarded `DO $$ ... $$` block, a backfill with a `WHERE` that
+selects only unfinished rows), like any other `up`.
