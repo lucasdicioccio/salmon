@@ -38,7 +38,7 @@ Tiers are cumulative, ordered by cost. Pick one with `--tier`.
 | `Gcp.Core.applicationDefaultCredentials` | validates ADC before anything else runs |
 | `Gcp.ResourceManager.project` | the project itself (skipped with `--existing-project`) |
 | `Gcp.Billing.linkBillingAccount` | links the billing account |
-| `Gcp.ServiceUsage.enableService` | `storage`, `iam`, `artifactregistry` (and `run` at tier 1) |
+| `Gcp.ServiceUsage.enableService` | `storage`, `iam`, `artifactregistry` (and `run` at tier 1, `monitoring` with `--alert-email`) |
 | `Gcp.Storage.bucket` | `<project>-<prefix>` , uniform bucket-level access |
 | `Gcp.Iam.serviceAccount` | `<prefix>-sa@<project>.iam.gserviceaccount.com` |
 | `Gcp.ArtifactRegistry.artifactRepository` | `<prefix>-repo`, docker format |
@@ -56,6 +56,20 @@ directory as the podman build context. Whatever you deploy must serve HTTP on
 `$PORT` and be linux/amd64, or the revision never becomes ready. The service is
 deployed *without* `--allow-unauthenticated`: the toy asserts the deploy
 happened and runs the expected image, it never issues an HTTP request to it.
+
+With `--alert-email ADDRESS`, tier 1 also declares
+`SreBox.Gcp.CloudRunAlerts.standardAlerts` on the service: one
+`Gcp.Monitoring.notificationChannel` (`<prefix> alerts`, an email channel to
+that address) and four `Gcp.Monitoring.alertPolicy` nodes — `<prefix>-hello:
+5xx ratio`, `p99 latency`, `memory` and, since the service has
+`--max-instances 1`, `instances at max`. Both resources are addressed by
+display name (Cloud Monitoring assigns the ids), and a policy carries a
+`salmon-fingerprint` user label of what it was rendered from: a second pass
+skips the four, editing one in the console makes the next pass update it
+back, and `run down` deletes what a lookup by name finds. Alerting is free;
+what this tier exercises is create, skip, update and delete against the real
+API, which the Layer 0 tests on the rendered `gcloud` argv and policy JSON
+cannot.
 
 **Tier 2** (an `e2-micro`'s hourly rate, plus a reserved IP) is
 `specs/gcloud-support.md` §6's "objective": a VM salmon boots, trusts and
