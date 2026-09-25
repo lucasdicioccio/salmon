@@ -325,6 +325,7 @@ thePair root =
         , Pair.pair_catch_up_seconds = 60
         , Pair.pair_seed = Nothing
         , Pair.pair_may_discard = Nothing
+        , Pair.pair_reseed = Nothing
         , Pair.pair_bouncers = [theBouncer root]
         }
   where

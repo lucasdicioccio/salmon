@@ -58,6 +58,7 @@ data Seed
     , seedPrimary :: Side
     , seedMayDiscard :: Maybe Side
     , seedSeed :: Maybe Side
+    , seedReseed :: Maybe Side
     , seedHostA :: Text
     , seedHostB :: Text
     , seedBouncer :: Maybe Text
@@ -98,7 +99,14 @@ instance ParseRecord Seed where
                     ( option
                         auto
                         ( long "seed"
-                            <> help "build this side's cluster from the other one: the first clone of a pair's life, and the only way back from a standby that has fallen too far behind"
+                            <> help "build this side's cluster from the other one: the first clone of a pair's life (does nothing once the two share a cluster; see --reseed for a standby that has fallen too far behind)"
+                        )
+                    )
+                <*> optional
+                    ( option
+                        auto
+                        ( long "reseed"
+                            <> help "this side's data may be thrown away and cloned again from the other, if (and only if) the primary reports its replication slot lost; it must name the side that is not --primary"
                         )
                     )
                 <*> strOption (long "a" <> help "machine A")
@@ -132,6 +140,7 @@ toPair seed =
           Pair.pair_seed = fmap unSide seed.seedSeed
         , Pair.pair_bouncers = foldMap (pure . bouncer) seed.seedBouncer
         , Pair.pair_may_discard = fmap unSide seed.seedMayDiscard
+        , Pair.pair_reseed = fmap unSide seed.seedReseed
         }
   where
     machine identity host =

@@ -225,6 +225,22 @@ data Pair
     -- two primaries onto the other's history (a split brain). It must name
     -- the side that is /not/ 'pair_primary'; a directive saying otherwise is
     -- contradictory and is rejected where it is built.
+    , pair_reseed :: Maybe Side
+    -- ^ "this side's data may be thrown away and rebuilt from the other".
+    --
+    -- The re-seeding half of @specs\/pg-switchover.md@ S6: a standby whose
+    -- slot on the primary is @lost@ can never catch up, the pair reports
+    -- that and does nothing (the wipe is a decision about a machine's data,
+    -- not a step), and this is the operator making that decision. It is a
+    -- declaration in the same class as 'pair_may_discard' and, like it,
+    -- names a side: the one that is /not/ 'pair_primary' (naming the
+    -- primary does nothing).
+    --
+    -- Safe to leave declared, more so than 'pair_may_discard': it acts only
+    -- on the one diagnosed condition, the named side's slot being lost, and
+    -- a pair that is healthy, or merely lagging, never has anything wiped.
+    -- 'pair_seed' cannot do this job -- it is the /first/ clone, and its
+    -- guard leaves a data directory of the primary's own cluster alone.
     }
     deriving (Eq, Show, Generic)
 
@@ -552,6 +568,9 @@ data Step
     | -- | @pg_rewind@ onto the primary's history, then start, as a standby
       Rejoin Side
     | StartMember Side
+    | -- | throw this side's data away and clone it again from the primary,
+      -- because its slot is lost and the operator has said it may be
+      Reseed Side
     | -- | rewrite each bouncer's upstream, reload, and let clients go
       RepointBouncers Side
     | -- | nothing safe to do from here; the text says why
@@ -586,6 +605,7 @@ nextStep pair obsA obsB bouncers
             -- over: a lost slot is WAL that has been recycled, so there is
             -- nothing left for this standby to stream and no amount of
             -- patience produces it.
+            | reseeding -> Reseed peerSide
             | peerSlotLost -> Degraded lostSlotWhy
             | conf == Just primary.member_host -> AwaitStreaming peerSide
             | otherwise -> Rejoin peerSide
@@ -594,10 +614,18 @@ nextStep pair obsA obsB bouncers
             -- lost succeeds and changes nothing, since what it then needs to
             -- replay is gone. Re-seeding is the only way back, and it is an
             -- operator's decision, not a step.
+            | reseeding -> Reseed peerSide
             | peerSlotLost -> Degraded lostSlotWhy
             | otherwise -> Rejoin peerSide
-        (Primary{}, Absent) -> Degraded "the peer has no cluster: seed it before it can stream"
-        (Primary{}, Unreachable why) -> Degraded ("the peer is unreachable: " <> why)
+        -- the two below are also what a re-seed looks like half-way through:
+        -- the data directory gone, the slot (dropped only after the clone) not
+        -- yet. Declared and still lost is enough to say "carry on".
+        (Primary{}, Absent)
+            | reseeding -> Reseed peerSide
+            | otherwise -> Degraded "the peer has no cluster: seed it before it can stream"
+        (Primary{}, Unreachable why)
+            | reseeding -> Reseed peerSide
+            | otherwise -> Degraded ("the peer is unreachable: " <> why)
         (Primary{}, Primary{})
             | discardable peerSide -> StopMember peerSide
             | otherwise -> Refuse "both machines are primaries; say which side's writes may be discarded"
@@ -668,10 +696,16 @@ nextStep pair obsA obsB bouncers
         Primary _ _ _ slots -> lookup (slotNameFor pair peerSide) slots == Just "lost"
         _ -> False
 
+    -- the operator has said this machine may be rebuilt, and the primary says
+    -- the standby it has is beyond catching up: both, or nothing.
+    reseeding = peerSlotLost && pair.pair_reseed == Just peerSide
+
     lostSlotWhy =
         "the peer's replication slot ("
             <> slotNameFor pair peerSide
-            <> ") is lost: it fell further behind than the slot budget allows, so the WAL it needs is gone and only a re-seed brings it back"
+            <> ") is lost: it fell further behind than the slot budget allows, so the WAL it needs is gone and only a re-seed brings it back; declare that machine "
+            <> Text.pack (show peerSide)
+            <> " in pair_reseed if its data may be thrown away"
 
     -- every bouncer sending clients to the declared primary, and none of
     -- them holding those clients: a bouncer left paused is an outage, so it
@@ -714,6 +748,7 @@ stepCommand pair = go
     go (Promote side) =
         onMember side (psql side "SELECT CASE WHEN pg_promote(true, 60) THEN 'promoted' ELSE 'promotion timed out' END")
     go (Rejoin side) = onMember side (rejoinScript side)
+    go (Reseed side) = onMember side (reseedScript pair side)
     go Done = Left "nothing to do"
     go (Degraded why) = Left why
     go (Refuse why) = Left why
@@ -1074,7 +1109,14 @@ seedMember r pair side =
 
 -- | The script 'seedMember' runs.
 seedScript :: Pair -> Side -> String
-seedScript pair side =
+seedScript = seedScriptWith []
+
+{- | 'seedScript', with lines to run between the clone and the standby
+configuration -- once there is a fresh data directory, and before the slot
+this member streams with is made on the primary.
+-}
+seedScriptWith :: [String] -> Pair -> Side -> String
+seedScriptWith between pair side =
     unlines $
         [ Postgres.cloneFromPrimaryScript setup
         , -- the clone leaves it running and streaming with whatever
@@ -1083,6 +1125,7 @@ seedScript pair side =
           "version=$(pg_lsclusters --no-header | awk -v c=" <> shQuote (Text.unpack m.member_cluster) <> " '$2==c {print $1}' | head -n1)"
         , "datadir=/var/lib/postgresql/$version/" <> Text.unpack m.member_cluster
         ]
+            <> between
             <> standbyTail pair side
             <> [ unwords ["pg_ctlcluster", "\"$version\"", Text.unpack m.member_cluster, "restart"]
                ]
@@ -1101,6 +1144,66 @@ seedScript pair side =
               -- for.
               Postgres.standby_slot = Nothing
             }
+
+{- | Wipes a standby whose slot is lost and builds it again from the primary.
+
+The one place a node here @rm -rf@s a data directory that belongs to the
+pair, so what runs it is 'nextStep' and only when the primary says the slot
+is lost /and/ the operator named this side in 'pair_reseed'. What guards the
+directory itself is unchanged and is 'Postgres.cloneFromPrimaryScript''s:
+
+* the same system identifier as the primary's, or no cluster at all, is the
+  pair's own data (or nothing): removed here so the clone below runs;
+* anything else is left exactly where it is, and the clone refuses it by
+  name unless it is pristine. A machine that turns out to hold somebody
+  else's cluster is never wiped by a declaration about this pair's slot.
+
+The order is what makes an interrupted pass resumable, since the machines
+are re-asked every turn and there is no note to lose. The slot is dropped
+/after/ the clone: until then it still reads @lost@, so a pass killed
+between the wipe and the clone finds the same diagnosis, the same
+declaration, and starts again. Dropped before the member's own is made,
+because a standby streaming with an invalidated slot of the right name
+looks healthy to everything but @pg_stat_wal_receiver@ ('standbyTail''s
+check counts slots by name, and this one would still be counted).
+-}
+reseedScript :: Pair -> Side -> String
+reseedScript pair side =
+    unlines $
+        [ "set -e"
+        , "version=$(pg_lsclusters --no-header | awk -v c=" <> shQuote cluster <> " '$2==c {print $1}' | head -n1)"
+        , "datadir=/var/lib/postgresql/$version/" <> cluster
+        , "pg_controldata=/usr/lib/postgresql/$version/bin/pg_controldata"
+        , "[ -x \"$pg_controldata\" ] || pg_controldata=pg_controldata"
+        , "primary_sysid=$(PGPASSFILE=" <> shQuote pair.pair_repl_passfile <> " psql -tAX -d " <> shQuote (replicationConn pair peerSide)
+            <> " -c 'IDENTIFY_SYSTEM' | head -n1 | cut -d'|' -f1)"
+        , "if [ -z \"$primary_sysid\" ]; then echo 'cannot read the primary system identifier' >&2; exit 1; fi"
+        , "local_sysid=''"
+        , "if [ -e \"$datadir/global/pg_control\" ]; then"
+        , "  local_sysid=$(\"$pg_controldata\" -D \"$datadir\" | sed -n 's/^Database system identifier: *//p')"
+        , "fi"
+        , "if [ \"$local_sysid\" = \"$primary_sysid\" ] || [ ! -e \"$datadir/global/pg_control\" ]; then"
+        , "  pg_ctlcluster \"$version\" " <> cluster <> " stop -m immediate || true"
+        , "  rm -rf \"$datadir\""
+        , "fi"
+        ]
+            <> [seedScriptWith [dropLostSlot] pair side]
+  where
+    cluster = Text.unpack m.member_cluster
+    m = memberOn pair side
+    peerSide = other side
+    slot = Text.unpack (slotNameFor pair side)
+    -- the lost slot, on the primary, over the connection the pair already
+    -- needs; and then checked, because a slot that survives this is one
+    -- 'standbyTail' would take for its own.
+    dropLostSlot =
+        unlines
+            [ "sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_repl_passfile <> " psql -tAX -d " <> shQuote (replicationConn pair peerSide)
+                <> " -c " <> shQuote ("DROP_REPLICATION_SLOT " <> slot) <> " >/dev/null 2>&1 || true"
+            , "left=$(sudo -u postgres env PGPASSFILE=" <> shQuote pair.pair_rewind_passfile <> " psql -tAX -d " <> shQuote (sourceServer pair peerSide)
+                <> " -c " <> shQuote ("SELECT count(*) FROM pg_replication_slots WHERE slot_name = '" <> slot <> "'") <> ")"
+            , "[ \"$left\" = 0 ] || { echo " <> shQuote ("could not drop the lost slot " <> slot <> " on " <> Text.unpack (memberOn pair peerSide).member_host) <> " >&2; exit 1; }"
+            ]
 
 {- | Stands a bouncer up in front of the pair: its @pgbouncer.ini@, and the
 routing file the ini includes.
@@ -1265,6 +1368,7 @@ pairRole r pair =
             , notes =
                 [ "primary declared on " <> Text.pack (show pair.pair_primary)
                 , maybe "no side's writes may be discarded" (\s -> "writes may be discarded on " <> Text.pack (show s)) pair.pair_may_discard
+                , maybe "no side may be re-seeded" (\s -> "may be re-seeded, if its slot is lost: " <> Text.pack (show s)) pair.pair_reseed
                 ]
             , check = verdict <$> decide pair
             , up = converge r pair

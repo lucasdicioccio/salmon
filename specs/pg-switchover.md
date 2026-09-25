@@ -25,8 +25,15 @@ and rewind the loser (S5).
 Also done: the slot budget (phase 6), in that each member streams with a slot
 the pair names and the rejoin creates, and a slot that falls off the budget
 is reported rather than rewound at (S6). The *re-seeding* half of phase 6 is
-not: there is no seeding node, so "re-seed it" is still something an operator
-does by hand -- which is why the check can only name the problem.
+now written too, as the declaration `pair_reseed` (`--reseed SIDE`) and the
+step `Reseed`: when the primary says that side's slot is `lost` *and* the
+operator has named the side, the role node's pass wipes the data directory of
+that side (only if it is this cluster's own, or empty -- a stranger's is still
+refused by the clone's guard), clones it again, drops the lost slot after the
+clone (so a pass killed half-way still sees the same diagnosis and resumes)
+and lets the member make its own. Without the declaration the check still
+only names the problem. Layer 0 in `Test.PostgresPairSpec`; the Layer 3 case
+(S6 continued) is in `Test.PostgresSwitchoverSpec` and has not been run yet.
 
 The disaster catalogue S1-S8 is written, and running it is what most of the
 design above was decided by.

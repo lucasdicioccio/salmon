@@ -900,6 +900,15 @@ argument. What follows is the list of things that are load-bearing; each was a d
   off `max_slot_wal_keep_size` is the one observation saying a standby can never catch up: that is
   `Degraded` naming the slot, not a `Rejoin`, since `pg_rewind` would succeed and change nothing,
   and re-seeding means wiping a machine — an operator's decision, like `pair_may_discard`.
+- **A lost slot is diagnosed always and acted on only when declared.** The role node reports a
+  standby whose slot is `lost` as `Degraded` and does nothing; `pair_reseed` (`--reseed SIDE`) is
+  the operator saying that side may be rebuilt, and only then does `nextStep` say `Reseed`. The
+  wipe is behind the same system-identifier guard as the seed clone (the pair's own cluster or an
+  empty directory; a stranger's is refused), and the lost slot is dropped *after* the clone, so a
+  pass killed half-way still reads "lost, declared" and resumes. `pair_seed` cannot do this — it
+  is the first clone and leaves a same-cluster directory alone. The Layer 3 case for it is
+  written (`Test.PostgresSwitchoverSpec`, S6 continued) and has not been run.
+
 - **Traffic moves through pgbouncer's admin console**: `PAUSE`, rewrite, `RELOAD`, `RESUME`, never
   a restart, since a restart drops the clients the bouncer is there to hold. That is why the
   routing lives in its own file pulled in by `%include` and deliberately *not* among
