@@ -31,6 +31,7 @@ import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.Timeout (timeout)
+import qualified Options.Applicative as Opt
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
@@ -42,6 +43,7 @@ import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (AppliedDocument (..), Convergence (..), Direction (..), Line (..), NodeState (..), Origin (..), Producer (..), World (..))
 import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 import qualified Salmon.Actions.UpDown as UpDown
+import qualified Salmon.Builtin.CommandLine as CommandLine
 import Salmon.Builtin.Extension (Extension, Op, Track', deps, op, ref)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
@@ -59,7 +61,30 @@ tests =
         [ testCase "two loops, one registry, one sink directory: each document names its own host, label, id and mode; rewritten after a typed convergence and after an injection; the fold shows both" twoHostsOneDirectory
         , testCase "an unwritable sink path is reported once and the loop keeps serving" unwritableSink
         , testCase "the fold: both hosts, the label filter, the stale flag, the node counts" pureFold
+        , testCase "--status-sink-host names the document's host; without it the node name is used" sinkHostFlag
         ]
+
+-------------------------------------------------------------------------------
+-- the flag: what `run serve` parses into 'CommandLine.SinkOptions'
+
+sinkHostFlag :: IO ()
+sinkHostFlag = do
+    parsed ["serve", "--status-sink", "/tmp/s.json"] >>= \o -> do
+        assertEqual "path" (Just "/tmp/s.json") o.sinkPath
+        assertEqual "no host given: uname -n at run time" Nothing o.sinkHost
+    parsed ["serve", "--status-sink", "/tmp/s.json", "--status-sink-host", "web-3"] >>= \o ->
+        assertEqual "host given" (Just "web-3") o.sinkHost
+    -- the flag is accepted on its own: naming a host is not what makes a document
+    parsed ["serve", "--status-sink-host", "web-3"] >>= \o -> do
+        assertEqual "no path" Nothing o.sinkPath
+        assertEqual "host kept" (Just "web-3") o.sinkHost
+  where
+    parsed args =
+        case Opt.execParserPure Opt.defaultPrefs (Opt.info CommandLine.runCommandParser mempty) args of
+            Opt.Success (CommandLine.RunServe _ _ _ _ _ _ _ _ _ sink _) -> pure sink
+            Opt.Success other -> assertFailure ("not a serve command: " <> show other)
+            Opt.Failure f -> assertFailure ("parse failed: " <> fst (Opt.renderFailure f "salmon"))
+            Opt.CompletionInvoked _ -> assertFailure "completion"
 
 -------------------------------------------------------------------------------
 -- the served thing: "make these files exist", as Test.FollowSpec

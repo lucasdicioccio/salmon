@@ -509,8 +509,8 @@ zero".
    no sink could carry them — which the sketch did not anticipate because
    it predates `--json`. And **the host is `uname -n`**, so two loops on one
    machine write two documents naming one host, and the fold shows two rows
-   rather than picking; a `--status-sink-host` override is the obvious next
-   flag and was not added speculatively. `salmon-fleet status DIR [--label
+   rather than picking; `--status-sink-host NAME` is that override, added
+   once (2026-09-25) rather than speculatively. `salmon-fleet status DIR [--label
    L] [--stale S] [--json]` is the fold: one line per document, host order,
    converged/errored/total off `status.nodes`, stale past `--stale` (60s) as
    a flag and never a decision. Only the file sink exists; a bucket object

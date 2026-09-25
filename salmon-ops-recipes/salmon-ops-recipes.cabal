@@ -152,6 +152,7 @@ test-suite salmon-ops-recipes-test
                     , http-types
                     , mtl
                     , network
+                    , optparse-applicative
                     , process
                     , process-extras
                     , stm

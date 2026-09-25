@@ -568,8 +568,8 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   showed up as a loop whose stdin never hit EOF and a hung-up client whose socket stayed open;
   the spec marks its own fds.
   **`Actions/Serve/StatusSink.hs`** is milestone 5 of `specs/pull-mode.md`: `run serve
-  --status-sink PATH [--status-sink-interval S]` writes a JSON document about this host —
-  `salmon-status: 1`, `host` (`uname -n`), `written`, `mode`, `labels` (the document applied per
+  --status-sink PATH [--status-sink-interval S] [--status-sink-host NAME]` writes a JSON document
+  about this host — `salmon-status: 1`, `host` (`--status-sink-host`, else `uname -n`), `written`, `mode`, `labels` (the document applied per
   followed label: id, sha256, when), `status` (the very object `status --json` prints) and `last`
   (the last `converge-stop` and the last follow-stream object, tagged, as `--json` prints them) —
   to a temp file renamed over `PATH`, so a reader never sees half of one. It is **a reporter and
@@ -1086,9 +1086,10 @@ my-salmon run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key FILE --token-
                                          # `Authorization: Bearer <token>`; all three files or it refuses;
                                          # a browser signs in at /auth for a session lasting
                                          # --session-lifetime S (12h) / --session-idle S (1h, an open stream is use)
-my-salmon run serve --status-sink PATH [--status-sink-interval S]
+my-salmon run serve --status-sink PATH [--status-sink-interval S] [--status-sink-host NAME]
                                          # the same, also writing this host's status document to PATH
-                                         # (atomically) after every pass and injection, and every S seconds
+                                         # (atomically) after every pass and injection, and every S seconds;
+                                         # `host` is NAME, else `uname -n`
 salmon-fleet status DIR [--label L] [--stale S] [--json]
                                          # one line per host from a directory of such documents; reads only
 salmon-tui PATH                          # a terminal over --http PATH: /dag once, /events live, `:` to type a command
