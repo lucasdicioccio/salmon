@@ -1187,5 +1187,5 @@ The working directory contains many *untracked* directories (`git-repos/`, `imag
 are scratch space, cloned dependency repos, or credential material for the author's personal
 infra — not part of the `salmon` project itself. `git ls-files` is the source of truth for what's
 actually part of this repository (currently just the four packages above plus root-level
-`README.md`/`CHANGELOG.md`/`cabal.project*`). Don't read from or write into those directories
+`README.md`/`cabal.project*`). Don't read from or write into those directories
 unless a task explicitly concerns them.

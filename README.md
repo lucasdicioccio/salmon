@@ -251,7 +251,6 @@ above, where this project's own conventions get enforced:
   repository-level conventions (package layering,
   idempotency conventions, failure-propagation rules) for anyone (human or
   AI) working in this codebase.
-- [`CHANGELOG.md`](CHANGELOG.md) — release history.
 
 ## Website
 

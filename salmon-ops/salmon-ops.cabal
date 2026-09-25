@@ -19,7 +19,7 @@ maintainer:         lucas@dicioccio.fr
 -- A copyright notice.
 -- copyright:
 -- category:
-extra-source-files: CHANGELOG.md
+extra-source-files:
                     ui/index.html
                     ui/ui.js
                     ui/ui.css
