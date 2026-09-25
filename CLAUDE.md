@@ -574,11 +574,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   showed up as a loop whose stdin never hit EOF and a hung-up client whose socket stayed open;
   the spec marks its own fds.
   **`Actions/Serve/StatusSink.hs`** is milestone 5 of `specs/pull-mode.md`: `run serve
-  --status-sink PATH [--status-sink-interval S] [--status-sink-host NAME]` writes a JSON document
+  --status-sink PATH|URL [--status-sink-interval S] [--status-sink-host NAME]` writes a JSON document
   about this host — `salmon-status: 1`, `host` (`--status-sink-host`, else `uname -n`), `written`, `mode`, `labels` (the document applied per
   followed label: id, sha256, when), `status` (the very object `status --json` prints) and `last`
   (the last `converge-stop` and the last follow-stream object, tagged, as `--json` prints them) —
-  to a temp file renamed over `PATH`, so a reader never sees half of one. It is **a reporter and
+  to a temp file renamed over `PATH`, so a reader never sees half of one — or, when the address
+  has the shape of an `http(s)://` URL (`StatusSink.isUrl`), `POST`ed there as `application/json`
+  (`postDocument`; non-2xx, a refused connection or a 10s timeout throw, so they are `SinkFailed`
+  like an unwritable path; no auth beyond the URL). It is **a reporter and
   a timer, not a producer**: `sinkReporter` is composed beside the loop's `Reporter Tagged` with
   `reportBoth` and wakes the writer on `ConvergeStop` and `Follow.Injected`; `sinkObserver` is
   handed to `serveObserved` (sequenced after the HTTP server's) and reads the world through the
@@ -1102,7 +1105,7 @@ my-salmon run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key FILE --token-
                                          # `Authorization: Bearer <token>`; all three files or it refuses;
                                          # a browser signs in at /auth for a session lasting
                                          # --session-lifetime S (12h) / --session-idle S (1h, an open stream is use)
-my-salmon run serve --status-sink PATH [--status-sink-interval S] [--status-sink-host NAME]
+my-salmon run serve --status-sink PATH|URL [--status-sink-interval S] [--status-sink-host NAME]
                                          # the same, also writing this host's status document to PATH
                                          # (atomically) after every pass and injection, and every S seconds;
                                          # `host` is NAME, else `uname -n`

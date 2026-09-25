@@ -20,6 +20,10 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
 import Control.Concurrent.STM (TChan, atomically, newTChanIO, readTChan, writeTChan)
 import Control.Exception (SomeException, throwIO, try)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import qualified Network.HTTP.Types as HTTP
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Handler.Warp as Warp
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LByteString
@@ -61,6 +65,9 @@ tests =
         [ testCase "two loops, one registry, one sink directory: each document names its own host, label, id and mode; rewritten after a typed convergence and after an injection; the fold shows both" twoHostsOneDirectory
         , testCase "an unwritable sink path is reported once and the loop keeps serving" unwritableSink
         , testCase "the fold: both hosts, the label filter, the stale flag, the node counts" pureFold
+        , testCase "a URL sink POSTs the same document to a server, after each trigger and on the interval" postedSink
+        , testCase "a URL sink that is refused is reported once, the loop keeps serving, and a later answer of 2xx resumes it" refusedPostSink
+        , testCase "the address's shape chooses the writer" sinkShape
         , testCase "--status-sink-host names the document's host; without it the node name is used" sinkHostFlag
         ]
 
@@ -353,6 +360,83 @@ unwritableSink =
             any (Text.isInfixOf (Text.pack blocked)) (concat [Serve.renderReport rep | rep@Serve.SinkFailed{} <- reports])
         exists <- doesFileExist (blocked </> "gamma.json")
         assertBool "nothing was written" (not exists)
+
+-- | What a local server has been posted: content type and body, newest last; and the status it answers with.
+data Receiver = Receiver
+    { received :: IORef [(Maybe LByteString.ByteString, LByteString.ByteString)]
+    , answers :: IORef HTTP.Status
+    }
+
+withReceiver :: HTTP.Status -> (String -> Receiver -> IO a) -> IO a
+withReceiver status act = do
+    got <- newIORef []
+    ans <- newIORef status
+    let app req respond = do
+            body <- Wai.strictRequestBody req
+            let ctype = fmap (LByteString.fromStrict) (lookup HTTP.hContentType (Wai.requestHeaders req))
+            if Wai.requestMethod req == "POST"
+                then do
+                    modifyIORef' got (++ [(ctype, body)])
+                    st <- readIORef ans
+                    respond (Wai.responseLBS st [] "")
+                else respond (Wai.responseLBS HTTP.status405 [] "")
+    Warp.testWithApplication (pure app) $ \port -> act ("http://127.0.0.1:" <> show port <> "/status") (Receiver got ans)
+
+postedDocs :: Receiver -> IO [StatusSink.Document]
+postedDocs r = do
+    xs <- readIORef r.received
+    pure [d | (_, b) <- xs, Right d <- [eitherDecode b]]
+
+{- | The same loop as the file sink's, its documents going to a server: the
+first after the first pass, more after a typed convergence and an injection,
+and the interval keeps them coming. Each is the document a file would hold. -}
+postedSink :: IO ()
+postedSink =
+    withTempDir $ \root -> withReceiver HTTP.status200 $ \url recv -> do
+        let web = label "web"
+        publish root web "web@1" [["a"]]
+        (w, _, _, ()) <- withHost root "delta" url [web] $ \d -> do
+            waitFor "the first post" ((> 0) . length <$> postedDocs recv)
+            d.typeLine "up b"
+            waitFor "a post naming the typed node converged" $ do
+                docs <- postedDocs recv
+                pure (any (\doc -> "delta" == doc.docHost && Text.isInfixOf "converged" (Text.pack (show (encode doc.docStatus)))) docs)
+            publish root web "web@2" [["a"], ["c"]]
+            waitFor "a post after the injection names its document" $ do
+                docs <- postedDocs recv
+                pure (any (\doc -> any (\l -> l.appliedDocId == "web@2") doc.docLabels) docs)
+            n <- length <$> postedDocs recv
+            waitFor "the interval to post again with nothing else happening" ((> n) . length <$> postedDocs recv)
+        assertBool "the world converged" (allConvergedUp w)
+        xs <- readIORef recv.received
+        assertBool "every post is application/json" (all (\(c, _) -> fmap (LByteString.take 16) c == Just "application/json") xs)
+        assertBool "every body parses as a status document" (length xs == length [() | (_, b) <- xs, Right (_ :: StatusSink.Document) <- [eitherDecode b]])
+
+{- | A server that answers 500 is a sink that cannot be written: said once
+for the URL however many triggers follow, the loop untouched, and the first
+2xx afterwards is a document again. -}
+refusedPostSink :: IO ()
+refusedPostSink =
+    withTempDir $ \root -> withReceiver HTTP.status500 $ \url recv -> do
+        let web = label "web"
+        publish root web "web@1" [["a"]]
+        (w, reports, _, ()) <- withHost root "epsilon" url [web] $ \d -> do
+            waitFor "the failure to be reported" (not . null <$> (\rs -> [() | Serve.SinkFailed{} <- rs]) <$> d.serveReports)
+            d.typeLine "up b"
+            waitFor "the typed file" (hostFile root "epsilon" "b" True)
+            threadDelay (2 * 1000000 + 200000)
+            failures <- (\rs -> [u | Serve.SinkFailed u _ <- rs]) <$> d.serveReports
+            assertEqual "reported once, for the URL" [url] failures
+            writeIORef recv.answers HTTP.status204
+            waitFor "a document to be accepted once the server answers 2xx" ((\ds -> any (\doc -> doc.docHost == "epsilon") ds) <$> postedDocs recv)
+        assertBool "the world converged regardless" (allConvergedUp w)
+        let rendered = Text.unlines (concat [Serve.renderReport rep | rep@Serve.SinkFailed{} <- reports])
+        assertBool "the render names the URL" (Text.isInfixOf (Text.pack url) rendered)
+        assertBool "the render says what the server answered" (Text.isInfixOf "500" rendered)
+
+sinkShape :: IO ()
+sinkShape = do
+    assertEqual "" [True, True, False, False, False] (fmap StatusSink.isUrl ["http://h/x", "https://h:8443/status", "/var/lib/salmon/status.json", "relative/status.json", "httpx://not"])
 
 {- | The fold on documents built by hand: no loop, no clock but the one
 given. -}
