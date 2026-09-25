@@ -608,7 +608,8 @@ unpromotable.
   `standbyReplicationSetup`,** once the fixture and
   `PostgresReplicationSpec` are ported? They are strictly less capable, and
   they are where P1 and P3 live.
-- **Controller placement for real deployments.** In the harness it is the test
-  process. For a low-SLA service it is whatever machine runs `run up` or
-  `run serve` for the pair. Is it worth also stating that it must not be one
-  of the two members?
+- **Controller placement for real deployments.** *Answered:* in the harness it
+  is the test process; for a low-SLA service it is whatever machine runs
+  `run up` or `run serve` for the pair, and it must not be one of the two
+  members. That is now stated as a deployment rule in the guide ("Where to
+  run it") and in the `SreBox.PostgresPair` haddock.

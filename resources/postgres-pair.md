@@ -88,6 +88,27 @@ refuses a machine holding a cluster it does not recognise. It is *not* the way
 back from a standby that has fallen too far behind (see the slot budget
 below): that is `--reseed`.
 
+## Where to run it
+
+On **a machine that is not one of the pair's two members**: whatever runs
+`salmon-pgpair run up` (or `run serve`, for a pair that is also watched) —
+a CI runner, an admin box, a small third machine. Never on a member. Every
+step reaches the members over ssh (a member that cannot be reached is
+decided in seconds, not minutes), and the members are exactly the machines
+that stop, restart, get partitioned and die: a controller on the old primary
+is killed by the step that stops it, and one on a member that a partition
+cuts off is cut off with it, from the very machine it needs to decide about.
+Running it elsewhere is what makes "the member that dies" a case the
+controller can observe rather than one it is inside of.
+
+The controller does not have to be always up or unique-by-design: it keeps no
+state (the section above), so a pass killed mid-switchover is finished by whichever
+controller runs next (S2). What it does need is ssh to both members and to
+every bouncer, as the users the declaration names, and `salmon-pgpair` itself
+— the passwords stay on the machines in the `.pgpass` files the pair names,
+never on the controller. In the qemu demo the controller is the process on
+the host, outside all three guests, for the same reason.
+
 ## What a switchover actually does
 
 ```

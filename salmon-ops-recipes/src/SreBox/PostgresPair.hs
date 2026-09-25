@@ -20,6 +20,16 @@ converges to it -- which is a /switchover/ when both machines are there, and
 a failover only when the operator also says, through 'pair_may_discard',
 which side's un-replicated writes they accept losing.
 
+= Where the controller runs
+
+Not on a member. The pass reaches both machines over ssh and its steps stop,
+restart and rewind them, so a controller on the old primary is killed by
+the step that stops it, and one on a member a partition cuts off is cut off
+with it -- from the machine it has to decide about. Run it from a third
+machine (an admin box, a CI runner). It keeps no state, so which one, and
+whether it is always up, does not matter: see below, and S2 in
+@specs\/pg-switchover.md@.
+
 = Why the state is re-derived, never remembered
 
 'nextStep' takes what the machines are /now/ and returns one step. Its
