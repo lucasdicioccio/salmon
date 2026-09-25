@@ -58,14 +58,12 @@ published here.
   — the playbook for exercising the `Gcp.*` builtins in a sandbox you are
   willing to destroy, with the `salmon-gcp-toy` binary.
 
-Two more documents exist only in the repository:
+One more document exists only in the repository:
 
 - [`CLAUDE.md`](https://github.com/lucasdicioccio/salmon/blob/master/CLAUDE.md)
   — the architecture module by module and the repository-level conventions
   (package layering, idempotency, failure propagation), for anyone, human or
   AI, working in the codebase.
-- [`CHANGELOG.md`](https://github.com/lucasdicioccio/salmon/blob/master/CHANGELOG.md)
-  — release history.
 
 =base:main-css.tramaj-json
 { "format": "css"
