@@ -73,6 +73,12 @@ declarations from a registry — a directory, git, HTTPS, DNS or a bucket,
 optionally signed — and report back through a status file that
 &lt;code&gt;salmon-fleet status&lt;/code&gt; folds. All of that is
 &lt;a href="/salmon/docs-serve-supervision.html"&gt;&lt;code&gt;run serve&lt;/code&gt;: convergence and supervision&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;With &lt;code&gt;--http PATH&lt;/code&gt; the same process also serves a web page (and a JSON API,
+and an event stream) on a second socket, which &lt;code&gt;salmon-tui&lt;/code&gt; and a browser
+can attach to. The repository’s fixture binary, &lt;code&gt;salmon-ops-serve-fixture&lt;/code&gt;,
+is the quickest way to see it: &lt;code&gt;run serve --http /tmp/x.http&lt;/code&gt;, declare a seed
+or two, and open the page:&lt;/p&gt;
+&lt;p&gt;&lt;img src="/salmon/images/serve-web-ui-dag.png" alt="The serve web UI on the fixture binary’s graph" /&gt;&lt;/p&gt;
 &lt;h3 id="the-model-in-one-paragraph"&gt;The model, in one paragraph&lt;/h3&gt;
 &lt;p&gt;An &lt;code&gt;Op&lt;/code&gt; is a graph node centered on itself, with an &lt;em&gt;effectful&lt;/em&gt; recipe for
 finding its own predecessors — this is what lets a one-line filesystem op

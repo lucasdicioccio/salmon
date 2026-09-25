@@ -115,6 +115,14 @@ optionally signed — and report back through a status file that
 `salmon-fleet status` folds. All of that is
 [`run serve`: convergence and supervision](/docs-serve-supervision.html).
 
+With `--http PATH` the same process also serves a web page (and a JSON API,
+and an event stream) on a second socket, which `salmon-tui` and a browser
+can attach to. The repository's fixture binary, `salmon-ops-serve-fixture`,
+is the quickest way to see it: `run serve --http /tmp/x.http`, declare a seed
+or two, and open the page:
+
+![The serve web UI on the fixture binary's graph](/images/serve-web-ui-dag.png)
+
 ## The model, in one paragraph
 
 An `Op` is a graph node centered on itself, with an *effectful* recipe for
