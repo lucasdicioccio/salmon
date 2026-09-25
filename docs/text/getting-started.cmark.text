@@ -59,6 +59,10 @@ The split keeps the possibly-impure "decide what I want" step separate from the 
 
 `run serve` is the long-running mode. It reads `up`/`down`/`only`/`clear`/ `converge`/`status`/... lines, keeps a world of every declared seed, converges after each one, and between commands _tends_ the nodes, re-applying what goes missing under a per-node supervision policy. The same loop can be driven over a unix socket, over HTTP with an event stream and a web UI (or TLS and a token over TCP), from a terminal client, or pull its declarations from a registry — a directory, git, HTTPS, DNS or a bucket, optionally signed — and report back through a status file that `salmon-fleet status` folds. All of that is [`run serve`: convergence and supervision](/docs-serve-supervision.html ).
 
+With `--http PATH` the same process also serves a web page (and a JSON API, and an event stream) on a second socket, which `salmon-tui` and a browser can attach to. The repository's fixture binary, `salmon-ops-serve-fixture`, is the quickest way to see it: `run serve --http /tmp/x.http`, declare a seed or two, and open the page:
+
+![The serve web UI on the fixture binary's graph](/images/serve-web-ui-dag.png )
+
 ## The model, in one paragraph
 
 An `Op` is a graph node centered on itself, with an _effectful_ recipe for finding its own predecessors — this is what lets a one-line filesystem op and a whole clustered-database-with-replication setup type-check identically. Every op carries `up`/`down` (bring the effect into being / undo it), `check` (a `CheckResult` answering "is my effect already in place", which is what makes a node idempotent to re-run), and a `Ref` that gives it a stable identity so the traversal can dedupe a resource reached via several graph paths. The drivers collapse the materialized graph into a DAG with one node per `Ref`, walk it in dependency order (or the reverse, for teardown), contain real failures (a thrown exception marks a node `Failed` and blocks everything depending on it rather than being swallowed), and report exactly what happened, node by node.

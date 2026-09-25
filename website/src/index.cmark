@@ -45,6 +45,22 @@ Haskell cabal multi-package project: `salmon-core` (the graph model, no IO),
 `salmon-ops-recipes` (opinionated compositions) and `salmon-apps` (the
 binaries).
 
+## What it looks like
+
+`run serve --http` serves a web page over the same socket as its API: the
+live graph, one box per node with its wanted direction, convergence and
+last check, and a command line at the bottom that speaks the same input
+language as the terminal. This is the repository's own fixture binary,
+`salmon-ops-serve-fixture`, with three seeds declared up:
+
+![The serve web UI: the dag of a running graph, every node converged](/images/serve-web-ui-dag.png)
+
+Clicking a node opens its panel: help, paths, dependencies and dependants,
+the last check, the node's own output ring (here a managed process that was
+just spawned), and the actions the input language offers on it:
+
+![The serve web UI: a node's panel, with its last check and output](/images/serve-web-ui-node.png)
+
 ## Explore
 
 - [**Getting started**](/getting-started.html) — build it, run the tests,
