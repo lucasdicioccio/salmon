@@ -75,6 +75,7 @@ import qualified Salmon.Builtin.Nodes.Gcp.Billing as Billing
 import qualified Salmon.Builtin.Nodes.Gcp.CloudRun as CloudRun
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
+import qualified Salmon.Builtin.Nodes.Gcp.Monitoring as Monitoring
 import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
@@ -93,6 +94,7 @@ import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (reportPrint)
 
+import qualified SreBox.Gcp.CloudRunAlerts as CloudRunAlerts
 import qualified SreBox.Gcp.CloudRunDeploy as CloudRunDeploy
 import qualified SreBox.Gcp.VmProvision as VmProvision
 
@@ -127,6 +129,7 @@ data Seed = Seed
     , seedVmIp :: Maybe Text
     , seedLbProxyRange :: Text
     , seedLbPort :: Int
+    , seedAlertEmail :: Maybe Text
     }
     deriving (Eq, Show)
 
@@ -158,6 +161,7 @@ instance ParseRecord Seed where
                 -- including for regions that do not exist yet.
                 <*> strOption (long "lb-proxy-range" <> value "192.168.100.0/24" <> Opt.showDefault <> Opt.help "tier 3 proxy-only subnet range (/26 or larger, must not overlap 10.128.0.0/9)")
                 <*> option auto (long "lb-port" <> value (8080 :: Int) <> Opt.showDefault <> Opt.help "tier 3 port the VM serves on, behind the balancer")
+                <*> optional (strOption (long "alert-email" <> metavar "ADDRESS" <> Opt.help "tier 1: also declare the standard Cloud Monitoring alerts on the service, to this email (SreBox.Gcp.CloudRunAlerts)"))
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -252,6 +256,8 @@ data Spec = Spec
     , workDir :: FilePath
     , vmConfig :: Maybe VmConfig
     , lbConfig :: Maybe LbConfig
+    , alertEmail :: Maybe Text
+    -- ^ tier 1: the standard alerts on the service go here, if anywhere
     }
     deriving (Eq, Show, Generic)
 
@@ -321,6 +327,7 @@ configure = Configure $ \seed -> do
             , workDir = dir
             , vmConfig = vm
             , lbConfig = lb
+            , alertEmail = if seed.seedTier >= 1 then seed.seedAlertEmail else Nothing
             }
   where
     validProjectId t =
@@ -533,6 +540,21 @@ tier1 spec =
         `inject` repository spec
         `inject` serviceAccount spec
     ]
+        <> [ CloudRunAlerts.standardAlerts
+            reportPrint
+            Core.gcloud
+            CloudRunAlerts.CloudRunAlertsConfig
+                { CloudRunAlerts.cra_project = projectOf spec
+                , CloudRunAlerts.cra_region = regionOf spec
+                , CloudRunAlerts.cra_service = spec.prefix <> "-hello"
+                , CloudRunAlerts.cra_email = email
+                , CloudRunAlerts.cra_channelName = spec.prefix <> " alerts"
+                , CloudRunAlerts.cra_maxInstances = Just 1
+                , CloudRunAlerts.cra_thresholds = CloudRunAlerts.defaultAlertThresholds
+                }
+            `inject` api spec Monitoring.monitoringApi
+           | Just email <- [spec.alertEmail]
+           ]
   where
     image =
         Text.concat [spec.region, "-docker.pkg.dev/", spec.project, "/", (repo spec).repoName, "/hello:", spec.imageTag]

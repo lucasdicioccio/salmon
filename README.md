@@ -148,7 +148,7 @@ one module per concern:
 | `Demo` | a toy graph (`collatz`) for trying the drivers on |
 | `Debian.Debootstrap`, `Debian.Package`, `Debian.OS` | Debian package installs and base-system setup |
 | `Filesystem` | directories, file contents, copy/move/replace-directory (the canonical small example — see `resources/howto-ops.md`) |
-| `Gcp.*` | Google Cloud: projects and billing (`ResourceManager`, `Billing`, `ServiceUsage`), `Iam`, `Storage`, `ArtifactRegistry`, `CloudRun`, `Compute`, `LoadBalancing`, `SecretManager`, `SshAccess` — driven through `gcloud`; see `resources/gcp-toy-validation.md` |
+| `Gcp.*` | Google Cloud: projects and billing (`ResourceManager`, `Billing`, `ServiceUsage`), `Iam`, `Storage`, `ArtifactRegistry`, `CloudRun`, `Compute`, `LoadBalancing`, `SecretManager`, `SshAccess`, `Monitoring` (notification channels and Cloud Run alert policies) — driven through `gcloud`; see `resources/gcp-toy-validation.md` |
 | `Git` | git repository operations |
 | `Keys` | key material management |
 | `LinuxBridge` | Linux bridge and tap devices, a real L2 network for qemu VMs to sit on |
@@ -195,6 +195,7 @@ above, where this project's own conventions get enforced:
 | `Postgrest` | PostgREST service configuration |
 | `WireGuardVpn` | a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange |
 | `Gcp.CloudRunDeploy` | build a podman image, push it to Artifact Registry, deploy it to Cloud Run |
+| `Gcp.CloudRunAlerts` | the standard Cloud Monitoring alerts for a Cloud Run service (5xx ratio, p99 latency, memory, instances at max) to one email |
 | `Gcp.PostgrestCloudRun` | PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate |
 | `Gcp.PreviewEnvironment` | several Cloud Run deploys composed into one named node: a preview environment |
 | `Gcp.VmProvision` | turn up a GCE instance, then run a salmon binary on it over SSH via `Self` |
