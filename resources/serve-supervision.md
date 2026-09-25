@@ -728,14 +728,18 @@ the old and the new `--follow-key` while documents are re-signed, then drop
 the old one; nothing more than that exists (no revocation, no key in the
 document).
 
-Not there yet (`specs/pull-mode.md`): other sinks (a bucket object, an HTTP
-`POST`), and authenticated bucket access.
+Not there yet (`specs/pull-mode.md`): a bucket-object sink, and authenticated
+bucket access or an authenticated `POST`.
 
 ### Status flows back: `--status-sink`
 
 A host in pull mode converges with nobody watching. `--status-sink PATH`
 makes it write down what came of it — a JSON document, to a temp file
-renamed over `PATH` so a reader never sees half of one — after every
+renamed over `PATH` so a reader never sees half of one — or, when the
+address is an `http://` or `https://` URL, `POST`ed there as
+`application/json` (any non-2xx answer, a refused connection or a 10s
+timeout is a failed write; no credentials beyond what the URL carries) —
+after every
 convergence pass, after every follow injection, and every
 `--status-sink-interval` seconds (default 10) otherwise:
 
@@ -769,7 +773,7 @@ the most recent converge-stop and the most recent follow report, as
 
 The sink never touches the loop: it is a reporter watching the loop's
 stream for its triggers and a reader of the world through the same accessor
-`/status` uses, so a write stands no tending machine down. A path that
+`/status` uses, so a write stands no tending machine down. A path or URL that
 cannot be written is reported once (`serve: status sink PATH could not be
 written:`), and again only after a write has succeeded in between; the loop
 keeps serving. A host gone quiet therefore shows as a document whose

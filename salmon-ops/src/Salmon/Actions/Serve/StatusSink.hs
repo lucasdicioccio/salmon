@@ -28,7 +28,15 @@ whatever the world looks like now, which is what makes a host that has gone
 quiet visible as one whose @written@ is old rather than one whose file
 says everything is fine.
 
-__Every write is atomic__: the document goes to a temporary file beside the
+__Where it goes is chosen by the address's shape__, as the pull side's
+registries are: @http://…@ or @https://…@ is @POST@ed as @application/json@
+(any non-2xx answer, a refused connection or a timeout is a failed write,
+reported like any other), anything else is a file path. It is the same
+document either way, written by a different writer; the reporter, the timer
+and the once-per-run failure report do not know which. There is no
+authentication beyond what the URL itself carries.
+
+__Every file write is atomic__: the document goes to a temporary file beside the
 path and is renamed over it, so a fold that reads the directory mid-write
 sees the previous document whole, never half of this one.
 
@@ -72,6 +80,8 @@ module Salmon.Actions.Serve.StatusSink (
     Document (..),
     formatVersion,
     writeAtomically,
+    isUrl,
+    postDocument,
 ) where
 
 import Control.Concurrent.Async (withAsync)
@@ -81,11 +91,16 @@ import Control.Exception (SomeException, try)
 import Control.Monad (forever, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LByteString
+import Data.List (isPrefixOf)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
+import Network.HTTP.Client (Manager, RequestBody (..), httpLbs, method, parseRequest, requestBody, requestHeaders, responseStatus, responseTimeoutMicro)
+import qualified Network.HTTP.Client as HTTP
+import Network.HTTP.Client.TLS (newTlsManagerWith, tlsManagerSettings)
+import Network.HTTP.Types (hContentType, statusCode)
 import System.Directory (createDirectoryIfMissing, renameFile)
 import System.FilePath (takeDirectory, (<.>))
 import System.Posix.Unistd (getSystemID, nodeName)
@@ -100,7 +115,9 @@ import Salmon.Reporter.Tagged (Tagged (..))
 
 data Config = Config
     { configPath :: FilePath
-    -- ^ where the document is written; its directory is created if missing
+    -- ^ where the document is written: a file (its directory is created if
+    -- missing) or, when it has the shape of one ('isUrl'), a URL it is
+    -- @POST@ed to
     , configInterval :: Int
     -- ^ microseconds between two writes with no trigger in between
     , configHost :: Text
@@ -184,6 +201,8 @@ data Sink = Sink
     -- ^ a trigger happened: write as soon as possible
     , sinkComplained :: IORef Bool
     -- ^ the current run of failures has been reported
+    , sinkManager :: Maybe Manager
+    -- ^ for a URL target; 'Nothing' for a file
     }
 
 {- | Run a sink for the body's lifetime. The writer thread is cancelled
@@ -192,12 +211,17 @@ casualty, never the document.
 -}
 withSink :: Config -> Maybe Followed -> Reporter Tagged -> (Sink -> IO a) -> IO a
 withSink cfg followed own body = do
+    manager <-
+        if isUrl cfg.configPath
+            then Just <$> newTlsManagerWith tlsManagerSettings{HTTP.managerResponseTimeout = responseTimeoutMicro postTimeout}
+            else pure Nothing
     sink <-
         Sink cfg followed own
             <$> newIORef Nothing
             <*> newIORef (Nothing, Nothing)
             <*> newTVarIO False
             <*> newIORef False
+            <*> pure manager
     withAsync (writer sink) $ \_ -> body sink
   where
     writer sink = forever $ do
@@ -267,7 +291,9 @@ writeNow sink = do
                             , docLastConverge = lastConverge
                             , docLastFollow = lastFollow
                             }
-                writeAtomically sink.sinkConfig.configPath (encode doc)
+                case sink.sinkManager of
+                    Just manager -> postDocument manager sink.sinkConfig.configPath (encode doc)
+                    Nothing -> writeAtomically sink.sinkConfig.configPath (encode doc)
             case attempt of
                 Right () -> writeIORef sink.sinkComplained False
                 Left (ex :: SomeException) -> do
@@ -286,3 +312,24 @@ writeAtomically path bytes = do
     let tmp = path <.> "tmp"
     LByteString.writeFile tmp bytes
     renameFile tmp path
+
+-- | Does this address have the shape of a URL to post to, rather than a path?
+isUrl :: String -> Bool
+isUrl target = any (`isPrefixOf` target) ["http://", "https://"]
+
+-- | Ten seconds, in microseconds: how long a post may take before it is a failed write.
+postTimeout :: Int
+postTimeout = 10000000
+
+{- | @POST@ the document as @application/json@. Anything but a 2xx answer
+throws, with the status in the message; so does a connection that cannot be
+made or a post that outlasts 'postTimeout'.
+-}
+postDocument :: Manager -> String -> LByteString.ByteString -> IO ()
+postDocument manager url bytes = do
+    req0 <- parseRequest url
+    let req = req0{method = "POST", requestHeaders = [(hContentType, "application/json")], requestBody = RequestBodyLBS bytes}
+    resp <- httpLbs req manager
+    let code = statusCode (responseStatus resp)
+    unless (code >= 200 && code < 300) $
+        ioError (userError ("the sink answered " <> show code))

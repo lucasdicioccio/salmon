@@ -227,7 +227,7 @@ parseHostPort s =
     stripBrackets ('[' : rest) | not (null rest) && last rest == ']' = Just (init rest)
     stripBrackets _ = Nothing
 
-{- | @--status-sink PATH@, @--status-sink-interval SECONDS@ (default
+{- | @--status-sink PATH|URL@, @--status-sink-interval SECONDS@ (default
 'StatusSink.defaultInterval') and @--status-sink-host NAME@: where this
 host's status document is written, how often between the writes a
 convergence pass or a follow injection triggers on their own, and what the
@@ -477,8 +477,8 @@ runCommandParser =
             <$> optional
                 ( strOption
                     ( long "status-sink"
-                        <> Options.Applicative.metavar "PATH"
-                        <> Options.Applicative.help "Write this host's status document (JSON: host, mode, applied documents per label, the `status` object, the last converge and follow reports) to PATH, atomically, after every convergence pass and follow injection and on a timer; `salmon-fleet status DIR` folds a directory of them."
+                        <> Options.Applicative.metavar "PATH|URL"
+                        <> Options.Applicative.help "Write this host's status document (JSON: host, mode, applied documents per label, the `status` object, the last converge and follow reports) to PATH, atomically, or POST it to an http(s):// URL, after every convergence pass and follow injection and on a timer; `salmon-fleet status DIR` folds a directory of the files."
                     )
                 )
             <*> Options.Applicative.option
