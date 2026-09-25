@@ -548,7 +548,9 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   them: within a driver, report order and sequence order agree; across drivers and machine
   threads, atomicity alone gives one total order. `Http.serverReporters` feeds it with
   `Events.eventsReporter` beside the loop's own reporter (stdout and `--listen` clients are
-  unchanged), and unwraps `Serve.Tended` to the `upkeep` stream it came from. **The event
+  unchanged), and unwraps `Serve.Tended` to the `upkeep` stream it came from. The `follow` stream is the pull-mode fetcher's reports (`Http.serverFollowReporter`, composed
+  beside the fetcher's own reporter in `CommandLine`; no `origin`, never collected by a sync `POST`).
+  **The event
   stream is the only place a client sees the tending machines at work** — a sync `POST` answers
   with the reports stamped for its command, and tending happens exactly when no command is
   being handled. Numbering is dense: every `POST /command` publishes an `enqueued` event
@@ -558,7 +560,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   event landing between the two reads is replayed rather than skipped. `?since=N` replays what
   the ring still holds above `N` then continues live; if `N+1` has fallen off, the first event
   is a synthetic `{"kind":"gap","from":<oldest>,"stream":"server"}` with no `id`, never a
-  silent skip. `?stream=serve,updown,upkeep,server` and `?origin=NAME` filter server-side
+  silent skip. `?stream=serve,updown,upkeep,follow,server` and `?origin=NAME` filter server-side
   (the spec's "clients filter" is right about who decides, wrong about who pays). A comment
   line every `configKeepAlive` (15s) of silence keeps proxies and read timeouts from dropping
   an idle stream; a client hanging up is a failed write, which ends the stream and its

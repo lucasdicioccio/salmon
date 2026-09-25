@@ -874,10 +874,10 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                   stdinP = case (listen, binds) of
                       (Nothing, []) -> Serve.stdinProducer stdin
                       _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
-                  producersWith more =
+                  producersWith followR more =
                       case follow of
                           Nothing -> stdinP : more
-                          Just f -> Follow.follower (Tagged.followStream tagged) pk modeVar appliedVar f (putMVar gate ()) : Follow.gated gate stdinP : more
+                          Just f -> Follow.follower followR pk modeVar appliedVar f (putMVar gate ()) : Follow.gated gate stdinP : more
               -- the listener's reporters answer each socket client on its own
               -- connection, the HTTP server's answer each request with its
               -- own reports, and both hand everything on to the loop's own,
@@ -909,7 +909,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                             genBase
                             traceBase
                             onFetch
-                            (producersWith more)
+                            -- the fetcher's reports also go to /events, as its own stream
+                            (producersWith (maybe id (\srv r -> reportBoth r (Http.serverFollowReporter srv)) mserver (Tagged.followStream tagged)) more)
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)
