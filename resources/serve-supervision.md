@@ -951,9 +951,12 @@ What to know:
 - **`/events` is one stream, numbered, replayable.** `text/event-stream`:
   each event is `id: <seq>` and one `data:` line holding the §11 object with
   `seq` added, plus `origin` (the object `history` entries use) when the
-  report was produced for a command. Three streams and the server's own:
+  report was produced for a command. Four streams and the server's own:
   `serve`, `updown`, `upkeep` (the tending machines' reports, which reach a
-  client here and nowhere else) and `server` (`enqueued`, and `gap`). One
+  client here and nowhere else), `follow` (with `--follow`: the fetcher's
+  rounds, injections and failures; nobody typed them, so no `origin`, and a
+  synchronous `POST /command` never collects them) and `server` (`enqueued`,
+  and `gap`). One
   counter numbers everything — enqueues and reports, from the loop and from
   machine threads — so one cursor is enough. `?since=N` replays what the
   ring still holds after `N`, then continues live; the ring keeps the last

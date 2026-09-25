@@ -293,6 +293,7 @@ streamOf body = case body of
     Reported (FromServe _) -> "serve"
     Reported (FromUpDown _) -> "updown"
     Reported (FromUpkeep _) -> "upkeep"
+    Reported (FromFollow _) -> "follow"
     Enqueued _ -> "server"
 
 -------------------------------------------------------------------------------

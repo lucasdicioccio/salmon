@@ -174,6 +174,7 @@ module Salmon.Actions.Serve.Http (
     serverObserver,
     serverProducer,
     serverReporters,
+    serverFollowReporter,
 
     -- * The command body
     renderStructured,
@@ -237,6 +238,7 @@ import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ref (Ref)
 import Salmon.Op.Status (Direction (..))
+import qualified Salmon.Actions.Follow as Follow
 import Salmon.Reporter
 import Salmon.Reporter.Tagged (Tagged (..), nodeStatePairs, refValue, representativeValue)
 
@@ -830,6 +832,20 @@ serverReporters server (serveR, updownR) = (serveR', updownR')
         forM_ (Map.lookup origin pending) $ \c -> do
             writeTVar (collectorDone c) True
             writeTVar (serverPending server) (Map.delete origin pending)
+
+{- | The pull-mode fetcher's reports on @\/events@, as the @follow@ stream.
+
+Its own function rather than a third member of 'serverReporters''s pair,
+since the fetcher is a producer with a reporter of its own
+('Follow.follower') and nothing about it is stamped for a request: it is
+nobody's command, so its events carry no @origin@ and no synchronous
+@POST /command@ collects them. Compose it beside the reporter the fetcher
+already has.
+-}
+serverFollowReporter :: Server -> Reporter Follow.Report
+serverFollowReporter server =
+    ReporterM $ \rep ->
+        runReporter (Events.eventsReporter (serverEvents server)) (Attributed Nothing (FromFollow rep))
 
 -------------------------------------------------------------------------------
 -- the read model

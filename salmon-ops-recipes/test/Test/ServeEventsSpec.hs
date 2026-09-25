@@ -58,6 +58,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 import Text.Read (readMaybe)
 
+import qualified Salmon.Actions.Follow as Follow
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), World)
 import qualified Salmon.Actions.Serve.Events as Events
@@ -91,6 +92,7 @@ tests =
             , testCase "?async then ?since= sees that command's reports" asyncThenSince
             , testCase "/status and /dag carry seq, and ?since= that seq misses nothing after" snapshotSeq
             , testCase "?stream= and ?origin= narrow the stream" filters
+            , testCase "the pull-mode fetcher's reports are the follow stream: numbered with the rest, no origin, filterable" followStream
             , testCase "an idle stream is kept alive, and a client hanging up drops its subscription" keepAliveAndCleanup
             ]
         ]
@@ -635,6 +637,32 @@ filters =
         req <- HTTP.parseRequest "http://salmon/events?since=soon"
         resp <- HTTP.httpLbs req (runningManager running)
         assertEqual "since must be a number" 400 (HTTP.statusCode (HTTP.responseStatus resp))
+
+{- | The fetcher is a producer with a reporter of its own, so what puts its
+reports on the ring is a reporter composed beside that one
+('Http.serverFollowReporter'). They are numbered from the same counter as
+everything else, carry no @origin@ (nobody typed them), and are a stream a
+client can ask for or leave out. -}
+followStream :: IO ()
+followStream =
+    withRunning $ \running -> do
+        _ <- sync running "supervise off"
+        let lbl = either (error . Text.unpack) id (Follow.mkLabel "web")
+            say = runReporter (Http.serverFollowReporter (runningServer running))
+        say (Follow.Missing lbl)
+        say (Follow.Backoff 2 4000000)
+        (_, marker) <- async running "history"
+        everything <- withEvents running "?since=0" (readUntil (hungUpFrom marker))
+        let followed = [e | e <- everything, streamOf e == Just "follow"]
+        assertEqual "the two reports, in the order they were said" ["missing", "backoff"] (fmap (kindOf . sseData) followed)
+        assertBool "nobody typed them: no origin" (all ((== Nothing) . originOf) followed)
+        assertNumbered "one counter across the follow stream and the rest" everything
+        -- asked for, and left out
+        only <- withEvents running "?since=0&stream=follow" (readUntil ((== "backoff") . kindOf . sseData))
+        assertEqual "only the follow stream" [Just "follow", Just "follow"] (fmap streamOf only)
+        without <- withEvents running "?since=0&stream=serve,updown,upkeep,server" (readUntil (hungUpFrom marker))
+        assertBool "and not there when not asked for" (all ((/= Just "follow") . streamOf) without)
+        assertBool "the rest is" (not (null without))
 
 keepAliveAndCleanup :: IO ()
 keepAliveAndCleanup =
