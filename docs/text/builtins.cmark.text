@@ -20,7 +20,7 @@ _Generated from [`README.md`](https://github.com/lucasdicioccio/salmon/blob/mast
 <tr><td><code>Demo</code></td><td>a toy graph (<code>collatz</code>) for trying the drivers on</td></tr>
 <tr><td><code>Debian.Debootstrap</code>, <code>Debian.Package</code>, <code>Debian.OS</code></td><td>Debian package installs and base-system setup</td></tr>
 <tr><td><code>Filesystem</code></td><td>directories, file contents, copy/move/replace-directory (the canonical small example — see <code>resources/howto-ops.md</code>)</td></tr>
-<tr><td><code>Gcp.*</code></td><td>Google Cloud: projects and billing (<code>ResourceManager</code>, <code>Billing</code>, <code>ServiceUsage</code>), <code>Iam</code>, <code>Storage</code>, <code>ArtifactRegistry</code>, <code>CloudRun</code>, <code>Compute</code>, <code>LoadBalancing</code>, <code>SecretManager</code>, <code>SshAccess</code> — driven through <code>gcloud</code>; see <code>resources/gcp-toy-validation.md</code></td></tr>
+<tr><td><code>Gcp.*</code></td><td>Google Cloud: projects and billing (<code>ResourceManager</code>, <code>Billing</code>, <code>ServiceUsage</code>), <code>Iam</code>, <code>Storage</code>, <code>ArtifactRegistry</code>, <code>CloudRun</code>, <code>Compute</code>, <code>LoadBalancing</code>, <code>SecretManager</code>, <code>SshAccess</code>, <code>Monitoring</code> (notification channels and Cloud Run alert policies) — driven through <code>gcloud</code>; see <code>resources/gcp-toy-validation.md</code></td></tr>
 <tr><td><code>Git</code></td><td>git repository operations</td></tr>
 <tr><td><code>Keys</code></td><td>key material management</td></tr>
 <tr><td><code>LinuxBridge</code></td><td>Linux bridge and tap devices, a real L2 network for qemu VMs to sit on</td></tr>
@@ -69,6 +69,7 @@ _Generated from [`README.md`](https://github.com/lucasdicioccio/salmon/blob/mast
 <tr><td><code>Postgrest</code></td><td>PostgREST service configuration</td></tr>
 <tr><td><code>WireGuardVpn</code></td><td>a full static-server/dynamic-client WireGuard VPN, transport-agnostic on key exchange</td></tr>
 <tr><td><code>Gcp.CloudRunDeploy</code></td><td>build a podman image, push it to Artifact Registry, deploy it to Cloud Run</td></tr>
+<tr><td><code>Gcp.CloudRunAlerts</code></td><td>the standard Cloud Monitoring alerts for a Cloud Run service (5xx ratio, p99 latency, memory, instances at max) to one email</td></tr>
 <tr><td><code>Gcp.PostgrestCloudRun</code></td><td>PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate</td></tr>
 <tr><td><code>Gcp.PreviewEnvironment</code></td><td>several Cloud Run deploys composed into one named node: a preview environment</td></tr>
 <tr><td><code>Gcp.VmProvision</code></td><td>turn up a GCE instance, then run a salmon binary on it over SSH via <code>Self</code></td></tr>

@@ -27,7 +27,7 @@ Tiers are cumulative, ordered by cost. Pick one with `--tier`.
 <tr><td><code>Gcp.Core.applicationDefaultCredentials</code></td><td>validates ADC before anything else runs</td></tr>
 <tr><td><code>Gcp.ResourceManager.project</code></td><td>the project itself (skipped with <code>--existing-project</code>)</td></tr>
 <tr><td><code>Gcp.Billing.linkBillingAccount</code></td><td>links the billing account</td></tr>
-<tr><td><code>Gcp.ServiceUsage.enableService</code></td><td><code>storage</code>, <code>iam</code>, <code>artifactregistry</code> (and <code>run</code> at tier 1)</td></tr>
+<tr><td><code>Gcp.ServiceUsage.enableService</code></td><td><code>storage</code>, <code>iam</code>, <code>artifactregistry</code> (and <code>run</code> at tier 1, <code>monitoring</code> with <code>--alert-email</code>)</td></tr>
 <tr><td><code>Gcp.Storage.bucket</code></td><td><code>&lt;project&gt;-&lt;prefix&gt;</code> , uniform bucket-level access</td></tr>
 <tr><td><code>Gcp.Iam.serviceAccount</code></td><td><code>&lt;prefix&gt;-sa@&lt;project&gt;.iam.gserviceaccount.com</code></td></tr>
 <tr><td><code>Gcp.ArtifactRegistry.artifactRepository</code></td><td><code>&lt;prefix&gt;-repo</code>, docker format</td></tr>
@@ -38,6 +38,8 @@ Tiers are cumulative, ordered by cost. Pick one with `--tier`.
 **Tier 1** (cents) adds `SreBox.Gcp.CloudRunDeploy.buildPushDeploy`: podman builds an image, logs in to `<region>-docker.pkg.dev` with an isolated authfile, pushes, and `Gcp.CloudRun.cloudRunService` deploys it as `<prefix>-hello` running as the tier-0 service account, `--max-instances 1`.
 
 The image is either `FROM --base-image` (Google's `cloudrun/container/hello` sample by default, plus a label carrying `--image-tag` so each tag really is a distinct image) or your own `--containerfile PATH`, built with that file's directory as the podman build context. Whatever you deploy must serve HTTP on `$PORT` and be linux/amd64, or the revision never becomes ready. The service is deployed _without_ `--allow-unauthenticated`: the toy asserts the deploy happened and runs the expected image, it never issues an HTTP request to it.
+
+With `--alert-email ADDRESS`, tier 1 also declares `SreBox.Gcp.CloudRunAlerts.standardAlerts` on the service: one `Gcp.Monitoring.notificationChannel` (`<prefix> alerts`, an email channel to that address) and four `Gcp.Monitoring.alertPolicy` nodes — `<prefix>-hello: 5xx ratio`, `p99 latency`, `memory` and, since the service has `--max-instances 1`, `instances at max`. Both resources are addressed by display name (Cloud Monitoring assigns the ids), and a policy carries a `salmon-fingerprint` user label of what it was rendered from: a second pass skips the four, editing one in the console makes the next pass update it back, and `run down` deletes what a lookup by name finds. Alerting is free; what this tier exercises is create, skip, update and delete against the real API, which the Layer 0 tests on the rendered `gcloud` argv and policy JSON cannot.
 
 **Tier 2** (an `e2-micro`'s hourly rate, plus a reserved IP) is `specs/gcloud-support.md` §6's "objective": a VM salmon boots, trusts and then provisions with _this same binary_.
 
