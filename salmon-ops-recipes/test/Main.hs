@@ -33,6 +33,7 @@ import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
+import qualified Test.QemuShutdownSpec as QemuShutdownSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
@@ -114,6 +115,7 @@ main =
             , PostgresTlsSpec.tests
             , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests
+            , QemuShutdownSpec.tests
             , QuerySpec.tests
             , ReportJsonSpec.tests
             , RewriteSpec.tests

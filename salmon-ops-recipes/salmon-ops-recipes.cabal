@@ -121,6 +121,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresTlsSpec
                     , Test.PostgrestCloudRunSpec
                     , Test.QemuResolveKernelSpec
+                    , Test.QemuShutdownSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
                     , Test.ReportJsonSpec
