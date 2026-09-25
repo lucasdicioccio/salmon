@@ -9,7 +9,7 @@ what makes it testable without a real GCP project.
 -}
 module Test.GcpSpec (tests) where
 
-import Data.Aeson (Value (..), encode)
+import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LByteString
@@ -185,22 +185,89 @@ repoTests =
 
 cloudRunTests :: [TestTree]
 cloudRunTests =
-    [ testCase "describe succeeding with the right image is satisfied" $
-        assertEqual
-            ""
-            Success
-            (CloudRun.interpretServiceDescribe "us-docker.pkg.dev/p/r/img:1" ExitSuccess "image: us-docker.pkg.dev/p/r/img:1\n")
-    , testCase "describe succeeding with a stale image is not satisfied" $
-        assertBool
-            "wrong revision deployed"
-            (isFailure (CloudRun.interpretServiceDescribe "us-docker.pkg.dev/p/r/img:2" ExitSuccess "image: us-docker.pkg.dev/p/r/img:1\n"))
+    [ testCase "describe succeeding with what was declared is satisfied" $
+        assertEqual "" Success (verdict declared (describeJson "us-docker.pkg.dev/p/r/img:1" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1", secret "S"]))
+    , testCase "a stale image is not satisfied, and the reason names both" $
+        case verdict declared (describeJson "us-docker.pkg.dev/p/r/img:0" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1"]) of
+            Failure why -> do
+                assertBool (Text.unpack why) ("img:0" `Text.isInfixOf` why)
+                assertBool (Text.unpack why) ("img:1" `Text.isInfixOf` why)
+            other -> assertBool (show other) False
+    , -- the substring match this replaces called these the same
+      testCase "img:1 is not img:10" $ do
+        assertBool "" (isFailure (verdict declared (describeJson "us-docker.pkg.dev/p/r/img:10" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1"])))
+        assertBool "" (isFailure (verdict declared{CloudRun.crsImage = "us-docker.pkg.dev/p/r/img:10"} (describeJson "us-docker.pkg.dev/p/r/img:1" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1"])))
+    , testCase "an image that merely appears elsewhere in the output is not the image" $
+        assertBool "" (isFailure (verdict declared (Text.replace "\"containers\"" "\"note\": \"us-docker.pkg.dev/p/r/img:1\", \"containers\"" (describeJson "other:2" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1"]))))
+    , testCase "a changed service account is drift" $
+        assertBool "" (isFailure (verdict declared (describeJson "us-docker.pkg.dev/p/r/img:1" (Just "someone-else@p.iam.gserviceaccount.com") [plain "A" "1"])))
+    , testCase "a service with no service account at all is drift" $
+        assertBool "" (isFailure (verdict declared (describeJson "us-docker.pkg.dev/p/r/img:1" Nothing [plain "A" "1"])))
+    , testCase "a changed, missing and extra environment variable are each drift, named and never quoted" $ do
+        let why env = case verdict declared (describeJson "us-docker.pkg.dev/p/r/img:1" (Just "sa@p.iam.gserviceaccount.com") env) of
+                Failure w -> w
+                other -> Text.pack (show other)
+        assertBool "" ("A" `Text.isInfixOf` why [plain "A" "changed-value-9"])
+        assertBool "the value is not in the reason" (not ("changed-value-9" `Text.isInfixOf` why [plain "A" "changed-value-9"]))
+        assertBool "" ("environment variable A is missing" `Text.isInfixOf` why [])
+        assertBool "" ("environment variable EXTRA is set but not declared" `Text.isInfixOf` why [plain "A" "1", plain "EXTRA" "x"])
+    , testCase "a secret-bound variable is not a plain one: extra secrets are not env drift" $
+        assertEqual "" Success (verdict declared (describeJson "us-docker.pkg.dev/p/r/img:1" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1", secret "PGRST_JWT_SECRET"]))
+    , testCase "output that is not the expected JSON is Unknown, not a redeploy" $ do
+        assertEqual "" Unknown (verdict declared "image: us-docker.pkg.dev/p/r/img:1\n")
+        assertEqual "" Unknown (verdict declared "{\"spec\": {}}")
     , testCase "describe failing means the service is absent" $
-        assertBool "" (isFailure (CloudRun.interpretServiceDescribe "img:1" (ExitFailure 1) ""))
+        assertBool "" (isFailure (CloudRun.interpretServiceDescribe declared (ExitFailure 1) ""))
+    , testCase "the describe asks for JSON" $
+        assertBool "" ("--format=json" `elem` processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDescribe declared)))
     , testCase "for down, a service on a stale image is still present" $ do
         -- down deletes what exists; the image only matters for up.
         assertEqual "" Success (CloudRun.interpretServicePresence ExitSuccess "image: us-docker.pkg.dev/p/r/img:1\n")
         assertBool "" (isFailure (CloudRun.interpretServicePresence (ExitFailure 1) ""))
     ]
+
+declared :: CloudRun.CloudRunService
+declared =
+    CloudRun.CloudRunService
+        { CloudRun.crsName = "svc"
+        , CloudRun.crsProject = Core.Project "p"
+        , CloudRun.crsRegion = Core.Region "europe-west1"
+        , CloudRun.crsImage = "us-docker.pkg.dev/p/r/img:1"
+        , CloudRun.crsEnv = Map.fromList [("A", "1")]
+        , CloudRun.crsServiceAccount = "sa@p.iam.gserviceaccount.com"
+        , CloudRun.crsIngress = CloudRun.All
+        , CloudRun.crsMaxInstances = Nothing
+        , CloudRun.crsOptions = CloudRun.defaultCloudRunOptions
+        }
+
+verdict :: CloudRun.CloudRunService -> Text.Text -> CheckResult
+verdict svc = CloudRun.interpretServiceDescribe svc ExitSuccess
+
+plain :: Text.Text -> Text.Text -> Value
+plain k v = object ["name" .= k, "value" .= v]
+
+secret :: Text.Text -> Value
+secret k = object ["name" .= k, "valueFrom" .= object ["secretKeyRef" .= object ["name" .= ("s" :: Text.Text), "key" .= ("latest" :: Text.Text)]]]
+
+-- | The parts of @gcloud run services describe --format=json@ the check reads.
+describeJson :: Text.Text -> Maybe Text.Text -> [Value] -> Text.Text
+describeJson image sa env =
+    Text.decodeUtf8 . LByteString.toStrict . encode $
+        object
+            [ "spec"
+                .= object
+                    [ "template"
+                        .= object
+                            [ "spec"
+                                .= object
+                                    ( [ "containers" .= [object ["image" .= image, "env" .= env]]
+                                      ]
+                                        <> maybe [] (\a -> ["serviceAccountName" .= a]) sa
+                                    )
+                            ]
+                    ]
+            , "status" .= object ["latestReadyRevisionName" .= ("svc-00001" :: Text.Text)]
+            ]
 
 -------------------------------------------------------------------------------
 

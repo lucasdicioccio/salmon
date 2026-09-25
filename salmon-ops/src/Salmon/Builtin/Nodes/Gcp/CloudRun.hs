@@ -15,8 +15,13 @@ module Salmon.Builtin.Nodes.Gcp.CloudRun (
     cloudRunCommand,
 ) where
 
+import Data.Aeson (Value (..), eitherDecodeStrict)
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Foldable (toList)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -167,17 +172,96 @@ cloudRunService r gcloudTrack svc =
         pure (code, Text.decodeUtf8 out)
 
     checkService :: IO CheckResult
-    checkService = uncurry (interpretServiceDescribe svc.crsImage) <$> describeService
+    checkService = uncurry (interpretServiceDescribe svc) <$> describeService
 
--- | The verdict drawn from @gcloud run services describe@'s exit code and
--- output, split out for testability.
-interpretServiceDescribe :: Text -> ExitCode -> Text -> CheckResult
-interpretServiceDescribe _image (ExitFailure n) _outText =
+{- | The verdict drawn from @gcloud run services describe --format=json@'s
+exit code and output, split out for testability.
+
+The service is satisfied only when what it runs is what was declared, in
+three respects, each compared /exactly/ against the service's template (the
+revision a deploy would create):
+
+* __the image__, by equality: @img:1@ is not @img:10@, which a substring
+  match called the same;
+* __the service account__;
+* __the plain environment variables__, as a set. @gcloud run deploy
+  --set-env-vars@ /replaces/ the service's variables, so a variable the
+  service has and the declaration does not is drift too, as is one that has
+  a different value or is missing. Variables bound from Secret Manager
+  ('croSecrets') have no @value@ and are the secrets' business, not
+  compared here.
+
+Every drift is named in the 'Failure', which is what makes @run up@ deploy
+again. The reason gives names, never an environment variable's value: those
+go into reports. Output that is not the JSON this expects is 'Unknown' — the
+check ran and could not tell — rather than a 'Failure' that would redeploy
+every pass.
+-}
+interpretServiceDescribe :: CloudRunService -> ExitCode -> Text -> CheckResult
+interpretServiceDescribe _ (ExitFailure n) _ =
     Failure ("CloudRun service not found (exit " <> Text.pack (show n) <> ")")
-interpretServiceDescribe image ExitSuccess outText =
-    if image `Text.isInfixOf` outText
-        then Success
-        else Failure ("CloudRun service found but image does not match " <> image)
+interpretServiceDescribe svc ExitSuccess outText =
+    case eitherDecodeStrict (Text.encodeUtf8 outText) of
+        Left _ -> Unknown
+        Right v -> case templateOf v of
+            Nothing -> Unknown
+            Just tmpl -> case drifts svc tmpl of
+                [] -> Success
+                ds -> Failure ("CloudRun service found but differs from what is declared: " <> Text.intercalate "; " ds)
+
+-- | The revision template's @spec@: its first container and its service account.
+data Template = Template
+    { tmplImage :: Maybe Text
+    , tmplServiceAccount :: Maybe Text
+    , tmplEnv :: Map Text Text
+    -- ^ the plain variables only
+    }
+
+templateOf :: Value -> Maybe Template
+templateOf v = do
+    spec <- field "spec" v >>= field "template" >>= field "spec"
+    let container = case field "containers" spec of
+            Just (Array cs) | (c : _) <- toList cs -> Just c
+            _ -> Nothing
+        envEntries = case container >>= field "env" of
+            Just (Array es) -> toList es
+            _ -> []
+        plain e = case (field "name" e, field "valueFrom" e) of
+            (Just (String n), Nothing) -> Just (n, maybe "" id (textOf =<< field "value" e))
+            _ -> Nothing
+    pure
+        Template
+            { tmplImage = textOf =<< (container >>= field "image")
+            , tmplServiceAccount = textOf =<< field "serviceAccountName" spec
+            , tmplEnv = Map.fromList (mapMaybe plain envEntries)
+            }
+  where
+    field k (Object o) = KeyMap.lookup (Key.fromText k) o
+    field _ _ = Nothing
+    textOf (String t) = Just t
+    textOf _ = Nothing
+
+drifts :: CloudRunService -> Template -> [Text]
+drifts svc t =
+    concat
+        [ [ "image is " <> shown got <> ", not " <> svc.crsImage
+          | got <- [t.tmplImage]
+          , got /= Just svc.crsImage
+          ]
+        , [ "service account is " <> shown got <> ", not " <> svc.crsServiceAccount
+          | got <- [t.tmplServiceAccount]
+          , got /= Just svc.crsServiceAccount
+          ]
+        , [ "environment variable " <> k <> " is " <> why
+          | (k, why) <- envDrift
+          ]
+        ]
+  where
+    shown = maybe "unset" id
+    envDrift =
+        [(k, "missing") | k <- Map.keys svc.crsEnv, not (Map.member k t.tmplEnv)]
+            <> [(k, "not the declared value") | (k, v) <- Map.toList svc.crsEnv, Just got <- [Map.lookup k t.tmplEnv], got /= v]
+            <> [(k, "set but not declared") | k <- Map.keys t.tmplEnv, not (Map.member k svc.crsEnv)]
 
 -- | Whether the service exists at all, whatever it runs: what @down@ asks.
 interpretServicePresence :: ExitCode -> Text -> CheckResult
@@ -241,6 +325,7 @@ cloudRunCommand = Command $ \cmd -> case cmd of
                     , "services"
                     , "describe"
                     , Text.unpack svc.crsName
+                    , "--format=json"
                     ]
                 )
     RunDelete svc ->
