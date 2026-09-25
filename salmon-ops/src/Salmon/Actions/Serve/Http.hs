@@ -234,7 +234,7 @@ import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ref (Ref)
 import Salmon.Op.Status (Direction (..))
 import Salmon.Reporter
-import Salmon.Reporter.Tagged (Tagged (..), nodeStatePairs, refValue)
+import Salmon.Reporter.Tagged (Tagged (..), nodeStatePairs, refValue, representativeValue)
 
 -------------------------------------------------------------------------------
 
@@ -835,6 +835,7 @@ computed at the moment of the read from the loop's own cell.
 -}
 data WorldView = WorldView
     { viewDag :: Dag Extension
+    , viewConflicts :: Map Ref Serve.Collision
     , viewNodes :: Map Ref NodeState
     , viewPaths :: Map Ref [Text]
     , viewHistory :: [(EpochId, Declaration, Bool, Origin, [String])]
@@ -845,6 +846,7 @@ viewWorld :: World seed directive -> WorldView
 viewWorld w =
     WorldView
         { viewDag = Serve.worldDag w
+        , viewConflicts = w.worldConflicts
         , viewNodes = w.worldNodes
         , viewPaths = Serve.worldPaths w
         , viewHistory = Serve.historyLinesMatching (const True) w
@@ -854,7 +856,11 @@ viewWorld w =
 {- | @\/dag@: the nodes in 'Dag.dagOrder', each the 'Act' projection — the
 fields 'Dag.sameRepresentative' compares (shorthand, help, notes, the
 rendering of dynamics) and the loop's state for the node, as @status@
-lists it — plus its dependencies and dependants as refs. Structurally what
+lists it — plus its dependencies and dependants as refs, and, for a node
+whose representative won a collision that is still standing
+('Serve.Collision'), a @conflict@ with the @kept@ and @replaced@
+representatives, so a client can show the pair without having caught the
+pass's @conflicting@ event. Structurally what
 'Salmon.Actions.Help.printDagTree' prints for the same 'Dag', with the
 state added. The envelope carries the loop's 'Serve.Mode' at the moment of
 the read, the same value @\/status@ opens with, so a client knows which
@@ -881,6 +887,10 @@ dagValue mode v =
                    , "dynamics" .= rep.repDynamics
                    , "dependencies" .= fmap refValue (Dag.dependenciesOf dag r)
                    , "dependants" .= fmap refValue (Dag.dependantsOf dag r)
+                   ]
+                ++ [ "conflict" .= object ["kept" .= representativeValue c.conflictKept, "replaced" .= representativeValue c.conflictReplaced]
+                   | Just col <- [Map.lookup r (viewConflicts v)]
+                   , let c = col.collisionConflict
                    ]
       where
         rep = Dag.representative act

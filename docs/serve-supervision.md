@@ -919,8 +919,15 @@ What to know:
   `paths` as `status` lists them. It is populated the moment something is
   declared — under `autoconverge off` every node reads `pending` with its
   edges already in place — and a retired seed's nodes stay in it with
-  `direction: "down"` until their teardown is done. A batch a `Rewrite`
-  would introduce is not shown; the nodes it would stand in for are. The
+  `direction: "down"` until their teardown is done. A node whose current
+  representative won a collision — two seeds describing one `Ref`
+  differently, or one graph reaching it from two differently-described
+  nodes — carries a `conflict` with the `kept` and `replaced`
+  representatives (the same four fields) for as long as some live
+  declaration still wants the losing version, so a client that did not
+  catch the pass's `conflicting` event can still show the pair. A batch a
+  `Rewrite` would introduce is not shown; the nodes it would stand in for
+  are. The
   envelope's top-level `mode` is §12's (`interactive`, `following`,
   `replay`), read at the moment of the request — the same value `/status`
   opens with, so a client showing nodes as tended knows whether they are.

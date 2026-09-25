@@ -77,6 +77,7 @@ tests =
         , testCase "/help/seed, /history and the error responses" theOtherReads
         , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
         , testCase "GET / is the web UI's page, /ui/* its files, and a missing one is 404" theWebUi
+        , testCase "two seeds colliding on one ref: /dag carries the kept and replaced pair while both are wanted" conflictingPairOnDag
         ]
 
 -------------------------------------------------------------------------------
@@ -108,10 +109,13 @@ spyProgram slow upsRef downsRef = Track $ \spec ->
     op "http-root" (deps (fmap nodeOp spec.specNames)) $ \actions ->
         actions{ref = mkRef "http-root" spec.specNames, help = "the root of " <> Text.pack (unwords spec.specNames)}
   where
+    -- @NAME:VARIANT@ is the same node (ref keyed on @NAME@) described
+    -- differently (help carries the whole word): two seeds colliding on
+    -- one ref, for the /dag conflict case
     nodeOp name =
         op "http-node" nodeps $ \actions ->
             actions
-                { ref = mkRef "http-node" name
+                { ref = mkRef "http-node" (takeWhile (/= ':') name)
                 , help = "node " <> Text.pack name
                 , up =
                     if name == slowName
@@ -345,6 +349,46 @@ dagMatchesPrintDagTree =
             assertBool "status present (null: never tended)" (field "status" n /= Nothing)
   where
     orMissing = maybe "<missing>" id
+
+{- | @up n1:a@ then @up n1:b@ describe one ref two ways. The second
+declaration is reported @conflicting@ and, from then on, @\/dag@\'s node for
+it carries the pair — @kept@ being what the magma holds, @replaced@ what it
+beat — where every other node carries none. Re-declaring the winner keeps the
+pair (the loser is still wanted); retiring the loser and converging clears
+it, since nothing wants that version any more.
+-}
+conflictingPairOnDag :: IO ()
+conflictingPairOnDag =
+    withRunning $ \running -> do
+        _ <- sync running "supervise off"
+        _ <- sync running "autoconverge off"
+        first <- sync running "up n1:a n2"
+        assertBool ("no conflict on a first declaration: " <> show first) ("conflicting" `notElem` first)
+        second <- sync running "up n1:b"
+        assertBool ("the collision is reported: " <> show second) ("conflicting" `elem` second)
+        (_, v) <- get running "/dag"
+        nodes <- dagNodes v
+        let n1 = filter (\n -> textAt ["help"] n == Just "node n1:b") nodes
+        assertEqual "the magma holds the last writer" 1 (length n1)
+        forM_ n1 $ \n -> do
+            assertEqual "kept is the winner" (Just "node n1:b") (textAt ["conflict", "kept", "help"] n)
+            assertEqual "replaced is the loser" (Just "node n1:a") (textAt ["conflict", "replaced", "help"] n)
+            assertEqual "kept carries the shorthand" (Just "http-node") (textAt ["conflict", "kept", "shorthand"] n)
+        forM_ (filter (\n -> textAt ["help"] n /= Just "node n1:b") nodes) $ \n ->
+            assertEqual ("no conflict on " <> show (textAt ["help"] n)) Nothing (field "conflict" n)
+        -- the winner re-declared: nothing changed, the loser is still wanted
+        again <- sync running "up n1:b"
+        assertBool ("an unchanged re-declaration is not a new collision: " <> show again) ("conflicting" `notElem` again)
+        (_, v') <- get running "/dag"
+        nodes' <- dagNodes v'
+        assertEqual "the pair stands" [Just "node n1:a"] [textAt ["conflict", "replaced", "help"] n | n <- nodes', textAt ["help"] n == Just "node n1:b"]
+        -- the loser retired and gone: nobody wants its version, the pair goes
+        _ <- sync running "down n1:a n2"
+        _ <- sync running "converge"
+        _ <- sync running "up n1:b"
+        (_, v'') <- get running "/dag"
+        nodes'' <- dagNodes v''
+        forM_ nodes'' $ \n -> assertEqual ("no conflict left on " <> show (textAt ["help"] n)) Nothing (field "conflict" n)
 
 dagBeforeAnyPass :: IO ()
 dagBeforeAnyPass =

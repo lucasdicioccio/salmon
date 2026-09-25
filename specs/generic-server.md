@@ -381,10 +381,12 @@ cheap one and lands first.
    (the page is served by the process it would stop), and no bearer token
    sent: over `--http-tcp` the browser signs in at `/auth` and carries a
    session cookie instead (milestone 8). Not yet: the
-   `Conflicting` pair side by side, collapsing a batch to its members and
-   expanding a `RemoteOp` (neither is on `/dag`, see milestone 3's
-   deviations), and `history` as a timeline — it is a table under the
-   seed form.
+   `Conflicting` pair side by side (as of 2026-09-25 `/dag` carries it —
+   `conflict: {kept, replaced}` on the node, held while a live declaration
+   still wants the losing version — so only the page's half remains),
+   collapsing a batch to its members and expanding a `RemoteOp` (neither is
+   on `/dag`, see milestone 3's deviations), and `history` as a timeline —
+   it is a table under the seed form.
 8. **TCP + TLS + token**, opt-in, with the loud default described above.
    **Shipped** (`run serve --http-tcp HOST:PORT --tls-cert FILE --tls-key
    FILE --token-file FILE`; `Http.withHttpServerOn`/`Http.Bind`/

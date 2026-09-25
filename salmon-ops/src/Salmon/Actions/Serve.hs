@@ -159,6 +159,7 @@ module Salmon.Actions.Serve (
 
     -- * World state
     World (..),
+    Collision (..),
     emptyWorld,
     Epoch (..),
     EpochId (..),
@@ -373,6 +374,11 @@ data World seed directive = World
       -- where it has got to. Never an 'Op': that would retain the whole
       -- expanded closure and bound nothing.
       worldMagma :: !(Map Ref (Act Extension))
+    , -- | the nodes whose current representative won a collision that is
+      -- still standing: what @\/dag@ shows beside such a node so a client
+      -- that did not catch the pass's 'UpDown.Conflicting' can still show
+      -- the pair. See 'Collision' for when an entry appears and goes.
+      worldConflicts :: !(Map Ref Collision)
     , -- | every node still being managed or still to be torn down, unified
       -- by 'Ref'. A node that has converged 'TurnDown' is finished and is
       -- dropped, so a fully retired world settles empty.
@@ -417,8 +423,36 @@ data Tending = Tending
     -- just so it has a mailbox to post into.
     }
 
+{- | A representative that lost to the magma's current one, kept for as
+long as somebody still wants the loser's version.
+
+Two kinds of collision land here, through 'record'. One is inside a single
+declaration: the graph reaches one 'Ref' from two differently-described
+nodes, which is 'Dag.dagConflicts' and has always been reported
+'UpDown.Conflicting' at declare time. The other is /across/ declarations:
+this declaration describes a 'Ref' differently from what the magma holds,
+and another live declaration still wants that 'Ref' — two seeds colliding
+on one node, which last-writer-wins resolves silently otherwise (the same
+key re-declared with a change is not a collision but (I6)'s 'Stale').
+
+'collisionHolders' is who was standing on the losing side — the other live
+declarations for the cross kind, the declaration itself for the inside kind
+— and is what keeps the entry honest without keeping every declaration's
+representative around: a re-declaration that leaves the magma's
+representative as it is keeps the entry while a holder is still live, a
+re-declaration that changes it recomputes, and 'prune' drops an entry whose
+holders have all retired or whose node has left the magma.
+-}
+data Collision = Collision
+    { collisionConflict :: !(Dag.Conflict Extension)
+    -- ^ 'Dag.conflictKept' is the magma's representative at the time of
+    -- the write, 'Dag.conflictReplaced' the one it beat
+    , collisionHolders :: !(Set ByteString)
+    -- ^ 'epochKey's of the declarations on the losing side
+    }
+
 emptyWorld :: World seed directive
-emptyWorld = World 0 [] [] 0 Ledger.emptyLedger Map.empty Map.empty
+emptyWorld = World 0 [] [] 0 Ledger.emptyLedger Map.empty Map.empty Map.empty
 
 -------------------------------------------------------------------------------
 
@@ -2228,7 +2262,12 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
         -- only place left that can say so.
         forM_ (reverse (Dag.dagConflicts dag)) $ \c ->
             runReporter nodeReporter (UpDown.Conflicting c.conflictRef c.conflictKept c.conflictReplaced)
-        let w1 = resettle (record decl ep dag w0)
+        let (recorded, crossed) = recordWith decl ep dag w0
+        -- ... and a collision with another live declaration is only
+        -- visible once the ledger says who else wants the node.
+        forM_ crossed $ \c ->
+            runReporter nodeReporter (UpDown.Conflicting c.conflictRef c.conflictKept c.conflictReplaced)
+        let w1 = resettle recorded
         writeIORef world w1
         runReporter r $
             Declared
@@ -2395,8 +2434,16 @@ also why the ledger entry is replaced rather than accumulated — the same key
 declared twice is one declaration, so one @down@ retracts it.
 -}
 record :: Declaration -> Epoch seed directive -> Dag Extension -> World seed directive -> World seed directive
-record decl ep dag w =
-    w
+record decl ep dag w = fst (recordWith decl ep dag w)
+
+{- | 'record', also handing back the collisions this declaration has with
+/other/ live declarations (one per 'Ref', kept-and-replaced), which the loop
+reports 'UpDown.Conflicting' beside the ones the fold found inside the
+declaration itself. See 'Collision' for the rule.
+-}
+recordWith :: Declaration -> Epoch seed directive -> Dag Extension -> World seed directive -> (World seed directive, [Dag.Conflict Extension])
+recordWith decl ep dag w =
+    ( w
         { worldNextId = w.worldNextId + 1
         , worldEpochs = ep : w.worldEpochs
         , worldLog = kept
@@ -2404,19 +2451,69 @@ record decl ep dag w =
         , -- left-biased: this declaration's representatives win, which is
           -- 'Salmon.Op.Dag''s last-writer-wins across declarations.
           worldMagma = Map.union (Dag.dagNodes dag) w.worldMagma
-        , worldLedger = retraction (Ledger.declare ep.epochKey contrib w.worldLedger)
+        , worldLedger = ledger'
+        , worldConflicts = Map.union collisions (Map.withoutKeys w.worldConflicts described)
         , -- (I6): a 'Ref' this declaration redescribes goes 'Stale' rather
           -- than staying silently 'Converged' under a representative it was
           -- never actually applied against.
           worldNodes = foldr demoteIfChanged w.worldNodes (Set.toList changed)
         }
+    , crossed
+    )
   where
     contrib = Ledger.contribution dag
+    described = Map.keysSet (Dag.dagNodes dag)
 
     retraction = case decl of
         Add -> id
         Replace -> Ledger.retractOthers ep.epochKey
         Remove -> Ledger.retract ep.epochKey
+
+    ledger' = retraction (Ledger.declare ep.epochKey contrib w.worldLedger)
+
+    -- the other live declarations still wanting a node — read off the
+    -- ledger /after/ the retraction, so an @only@ does not collide with the
+    -- very seeds it is retiring
+    othersHolding :: Ref -> Set ByteString
+    othersHolding rf =
+        Map.keysSet (Map.filterWithKey (\k c -> k /= ep.epochKey && c.contribLive && Set.member rf c.contribRefs) ledger')
+
+    -- the fold's own collisions, oldest first so the newest wins the map
+    inside :: Map Ref (Dag.Conflict Extension)
+    inside = Map.fromList [(c.conflictRef, c) | c <- reverse (Dag.dagConflicts dag)]
+
+    -- the collisions this declaration is the last writer of: a node it
+    -- describes differently from the magma while another live declaration
+    -- still wants it. Reported, as the fold's own are.
+    crossed :: [Dag.Conflict Extension]
+    crossed =
+        [ Dag.Conflict rf newAct oldAct
+        | (rf, newAct) <- Map.toList (Dag.dagNodes dag)
+        , Set.member rf changed
+        , Just oldAct <- [Map.lookup rf w.worldMagma]
+        , not (Set.null (othersHolding rf))
+        ]
+
+    crossedByRef :: Map Ref (Dag.Conflict Extension)
+    crossedByRef = Map.fromList [(c.conflictRef, c) | c <- crossed]
+
+    -- one entry per 'Ref' this declaration describes, or none
+    collisions :: Map Ref Collision
+    collisions = Map.mapMaybe id (Map.mapWithKey collisionOf (Dag.dagNodes dag))
+
+    collisionOf :: Ref -> Act Extension -> Maybe Collision
+    collisionOf rf _
+        | Just c <- Map.lookup rf crossedByRef =
+            Just (Collision c (othersHolding rf))
+        | Just c <- Map.lookup rf inside =
+            Just (Collision c (Set.singleton ep.epochKey))
+        | not (Set.member rf changed)
+        , Just standing <- Map.lookup rf w.worldConflicts
+        , any (`Ledger.isLive` ledger') (Set.toList standing.collisionHolders) =
+            Just standing
+        | otherwise = Nothing
+      where
+        others = othersHolding rf
 
     {- | Every 'Ref' this declaration describes differently than whatever is
     already in the magma — the same 'Dag.sameRepresentative' comparison
@@ -2525,10 +2622,15 @@ prune w =
         { worldEpochs = keptEpochs
         , worldLedger = ledger
         , worldMagma = Map.restrictKeys w.worldMagma (Map.keysSet retained)
+        , worldConflicts = Map.filter standing (Map.restrictKeys w.worldConflicts (Map.keysSet retained))
         , worldNodes = retained
         }
   where
     nodes = Map.filter (not . finished) w.worldNodes
+
+    -- a collision stands while somebody on its losing side is still live
+    standing :: Collision -> Bool
+    standing c = any (`Ledger.isLive` ledger) (Set.toList c.collisionHolders)
     retained = Map.restrictKeys nodes (Ledger.knownRefs ledger)
 
     -- these locals are annotated because a record-dot binding without a
