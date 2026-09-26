@@ -393,6 +393,19 @@ applies it. The same swap works against the cache, whose entries are read back
 through the same verifier. An older signed document can also be replayed unless
 `--follow-refuse-older` is on and both documents carry `published`.
 
+The swap, as a sequence:
+
+```
+writer (can write, cannot sign)   registry            host following `prod`
+        |  copy signed canary doc     |                        |
+        |  to prod's address -------->|                        |
+        |                             |<--- fetch prod --------|
+        |                             |---- canary doc ------->|
+        |                             |      verify: signature valid (same key set),
+        |                             |      nothing compares the document to `prod`
+        |                             |                        |-- applies canary's seeds
+```
+
 The fix has two parts:
 
 - **Bind the label.** A signed `label` in the document, checked by the verifier
@@ -451,6 +464,28 @@ so never a default.
 - **Document expiry.** An `expires` timestamp so a host reports
   `document-expired` (a visible fact, not a decision) if the registry has been
   unreachable past it. It fits "nothing decides a host is dead".
+
+### Review notes (owner, on PR #41)
+
+Directions, not decisions; each answers one paragraph above.
+
+- **Atomic transitions without a diff primitive.** Dominator diffs a filesystem
+  against an image. Here that is not needed. What can be added is an operation
+  whose file contents arrive through an atomic link or atomic move, so a file is
+  never half-written. A *staged* operation is also possible: a first op computes
+  a decision, the next dependent op reads it and skips its turn-up work when the
+  decision says nothing changed.
+- **Known labels at compile time.** Add types so the set of labels is fixed when
+  the binary is built (item 1), rather than an arbitrary string checked at run
+  time.
+- **Time gates by graph rewriting.** For the stagger and hold (item 2), a node
+  that checks a point in time has passed and otherwise waits. To keep delay logic
+  out of every operation's author, introduce these gates by graph rewriting (the
+  `Op/Rewrite.hs` mechanism), not in each recipe.
+- **Atomic flips.** For a revert (item 4) the best available is to atomically
+  flip the wanted and unwanted seeds in one go, not to undo a half-applied pass.
+- **Staged depth is a seed parameter.** How deep a rollout is staged (item 5,
+  preload) is a different, parameterized seed, not a new mechanism.
 
 ### Not for us
 
