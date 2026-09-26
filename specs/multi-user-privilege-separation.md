@@ -504,11 +504,15 @@ boundary) belong in the cheap in-process test layer.
 - Naming: `Invoker`/`RunAs`, or something closer to the todo's own vocabulary
   ("calling preference")? `RunAs` reads well at call sites
   (`RunAsUser ViaRunuser "postgres"`); `Invoker` is the weaker of the two names.
+  **Decided (owner, 2026-09-26):** `RunAs`.
 - Should `Invoker` also carry the `cwd`/`env` policy (i.e. "this identity
   always runs with this env"), or is that overloading it?
+  **Decided (owner, 2026-09-26):** no `cwd`/`env` policy on the `Invoker` in v1.
 - Is `Mechanism` per-`Invoker`, or a single deployment-wide default with
   per-node override? A box configures sudoers once; carrying the choice on
   every invoker may be more knob than anyone wants.
+  **Decided (owner, 2026-09-26):** a deployment-wide default that an `Invoker`
+  may override. The default mechanism is `runuser`.
 - Does the `PrivilegeDomain` tag (L3) subsume `RunAs` (L1), i.e. should an
   `Invoker` name a *domain* and let a top-level table map domains to
   identities? That would make L1→L3 a smooth progression rather than two
@@ -526,4 +530,5 @@ boundary) belong in the cheap in-process test layer.
 5. Add the `Ref`-includes-`RunAs` rule to CLAUDE.md's node-author conventions.
 6. Convert the build cluster (`Cabal`, `Git`, `Npm`, `Spago`) to `Invoker`, and
    see whether "builds run as `builder`" is now expressible without L3.
-7. Only then decide on L3.
+7. Only then decide on L3. **Decided (owner, 2026-09-26):** deferred; revisit
+   after step 6.
