@@ -144,6 +144,10 @@ instance ToJSON Tagged where
         case tagged of
             FromServe rep -> withOrigin "serve" (toJSON rep)
             FromUpDown rep -> withOrigin "updown" (toJSON rep)
+            -- a node's output lines are their own stream, so that
+            -- `?stream=output` is a live tail and a client not following one
+            -- never has to read them
+            FromUpkeep rep@(Upkeep.Output _ _) -> withOrigin "output" (toJSON rep)
             FromUpkeep rep -> withOrigin "upkeep" (toJSON rep)
             FromFollow rep -> withOrigin "follow" (toJSON rep)
       where
@@ -288,6 +292,7 @@ instance ToJSON (Upkeep.Report Extension) where
                 kind "next-look" : actPairs act ++ ["check" .= checkResultValue cr, "delay_us" .= microsValue delay]
             Upkeep.Wedged act silent -> kind "wedged" : actPairs act ++ ["silent_us" .= microsValue silent]
             Upkeep.Unwedged act -> kind "unwedged" : actPairs act
+            Upkeep.Output act line -> kind "output" : actPairs act ++ ["line" .= line]
             Upkeep.Demoted act dep -> kind "demoted" : actPairs act ++ ["dependency" .= refValue dep]
             Upkeep.Parked act -> kind "parked" : actPairs act
             Upkeep.Reapplying act delay -> kind "reapplying" : actPairs act ++ ["delay_us" .= microsValue delay]

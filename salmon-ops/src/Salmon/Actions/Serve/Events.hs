@@ -115,6 +115,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
 
+import qualified Salmon.Actions.Upkeep as Upkeep
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Origin)
 import Salmon.Reporter
@@ -292,6 +293,7 @@ streamOf :: Body -> Text
 streamOf body = case body of
     Reported (FromServe _) -> "serve"
     Reported (FromUpDown _) -> "updown"
+    Reported (FromUpkeep (Upkeep.Output _ _)) -> "output"
     Reported (FromUpkeep _) -> "upkeep"
     Reported (FromFollow _) -> "follow"
     Enqueued _ -> "server"

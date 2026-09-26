@@ -41,7 +41,14 @@ const state = {
   unclaimed: [], // events with an origin no request has claimed yet
   history: null, // last /history: {seeds: [...], elided}
   seedHelpLoaded: false,
+  tails: new Map(), // full ref -> {lines, paused, held, pre} for each pinned live tail
 };
+
+// The dock holds a few windows, not one per node: a tail is for the node
+// being watched right now.
+const TAIL_MAX_WINDOWS = 4;
+const TAIL_MAX_LINES = 500;
+const TAIL_STORE = "salmon-tails";
 
 // How long a node stays marked as touched once the command that touched it
 // has been handled.
@@ -84,6 +91,7 @@ async function loadDag() {
     state.order.push(n.ref.full);
   }
   if (state.selected && !state.nodes.has(state.selected)) state.selected = null;
+  reconcileTails();
   render();
   subscribe(dag.seq);
 }
@@ -151,8 +159,142 @@ function applyEvent(e) {
     case "upkeep":
       applyUpkeep(e);
       return;
+    case "output":
+      applyOutput(e);
+      return;
     default:
       return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// live tails: a dock of pinned mini terminals, one per node
+
+function storedPins() {
+  try {
+    const v = JSON.parse(localStorage.getItem(TAIL_STORE) || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function storePins() {
+  try {
+    localStorage.setItem(TAIL_STORE, JSON.stringify([...state.tails.keys()]));
+  } catch {
+    // page storage may be unavailable; windows just do not survive a reload
+  }
+}
+
+// After every /dag: a window for a node that is no longer there closes (the
+// node was retired and pruned), and the pins remembered from a previous page
+// load are opened for the nodes that are. The ring the snapshot carries is
+// the backlog a window is seeded from, but only when it has nothing yet:
+// lines that arrived live since are newer than that snapshot.
+function reconcileTails() {
+  for (const ref of storedPins()) {
+    if (state.nodes.has(ref) && !state.tails.has(ref) && state.tails.size < TAIL_MAX_WINDOWS) {
+      state.tails.set(ref, { lines: [], paused: false, held: [], pre: null });
+    }
+  }
+  for (const ref of [...state.tails.keys()]) {
+    const n = state.nodes.get(ref);
+    if (!n) {
+      state.tails.delete(ref);
+      continue;
+    }
+    const t = state.tails.get(ref);
+    if (t.lines.length === 0 && n.status && Array.isArray(n.status.output)) {
+      t.lines = n.status.output.slice(-TAIL_MAX_LINES);
+    }
+  }
+  storePins();
+  renderDock();
+}
+
+function toggleTail(ref) {
+  if (state.tails.has(ref)) {
+    state.tails.delete(ref);
+  } else {
+    // the oldest pin makes room
+    if (state.tails.size >= TAIL_MAX_WINDOWS) state.tails.delete(state.tails.keys().next().value);
+    const n = state.nodes.get(ref);
+    const seed = n && n.status && Array.isArray(n.status.output) ? n.status.output.slice(-TAIL_MAX_LINES) : [];
+    state.tails.set(ref, { lines: seed, paused: false, held: [], pre: null });
+  }
+  storePins();
+  renderDock();
+  renderPanel();
+}
+
+function applyOutput(e) {
+  const t = e.ref && state.tails.get(e.ref.full);
+  if (!t || typeof e.line !== "string") return;
+  // paused holds the view still; what arrives meanwhile is kept for resume
+  const into = t.paused ? t.held : t.lines;
+  into.push(e.line);
+  if (into.length > TAIL_MAX_LINES) into.splice(0, into.length - TAIL_MAX_LINES);
+  if (!t.paused) paintTail(t);
+}
+
+function paintTail(t) {
+  if (!t.pre) return;
+  const stick = t.pre.scrollTop + t.pre.clientHeight >= t.pre.scrollHeight - 4;
+  t.pre.textContent = t.lines.join("\n");
+  if (stick) t.pre.scrollTop = t.pre.scrollHeight;
+}
+
+function renderDock() {
+  const dock = $("dock");
+  dock.replaceChildren();
+  dock.hidden = state.tails.size === 0;
+  for (const [ref, t] of state.tails) {
+    const n = state.nodes.get(ref);
+    const win = document.createElement("section");
+    win.className = "tail";
+    const bar = document.createElement("header");
+    const title = document.createElement("span");
+    title.className = "tail-title";
+    title.textContent = n ? n.shorthand : ref.slice(0, 8);
+    const st = document.createElement("span");
+    st.className = `badge ${n ? stateClass(n) : ""}`;
+    st.textContent = n ? n.convergence : "gone";
+    bar.append(title, " ", st);
+    const button = (label, hint, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = hint;
+      b.addEventListener("click", fn);
+      return b;
+    };
+    const pause = button(t.paused ? "resume" : "pause", "hold the window still; lines keep arriving", () => {
+      t.paused = !t.paused;
+      if (!t.paused) {
+        t.lines.push(...t.held);
+        t.held = [];
+        if (t.lines.length > TAIL_MAX_LINES) t.lines.splice(0, t.lines.length - TAIL_MAX_LINES);
+        paintTail(t);
+      }
+      pause.textContent = t.paused ? "resume" : "pause";
+    });
+    bar.append(
+      pause,
+      button("clear", "empty this window (the node's own ring is untouched)", () => {
+        t.lines = [];
+        t.held = [];
+        paintTail(t);
+      }),
+      button("unpin", "close this window", () => toggleTail(ref)),
+    );
+    const pre = document.createElement("pre");
+    pre.className = "tail-body";
+    t.pre = pre;
+    win.append(bar, pre);
+    dock.appendChild(win);
+    pre.textContent = t.lines.join("\n");
+    pre.scrollTop = pre.scrollHeight;
   }
 }
 
@@ -553,6 +695,12 @@ function renderPanel() {
     b.addEventListener("click", () => post(`${verb} --select ${quote("#" + n.ref.short)}`));
     actions.appendChild(b);
   }
+  const tail = document.createElement("button");
+  tail.type = "button";
+  tail.textContent = state.tails.has(n.ref.full) ? "untail" : "tail";
+  tail.title = "pin a live window of this node's output at the bottom of the page";
+  tail.addEventListener("click", () => toggleTail(n.ref.full));
+  actions.appendChild(tail);
   body.appendChild(actions);
 
   section(body, "help", n.help);

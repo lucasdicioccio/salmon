@@ -415,3 +415,38 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
   #actions { margin-left: 0; }
   #history th:nth-child(4), #history td:nth-child(4) { display: none; }
 }
+
+/* live tails: a strip of small terminals above the command line */
+#dock {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  overflow-x: auto;
+}
+#dock[hidden] { display: none; }
+.tail {
+  flex: 1 1 22em;
+  min-width: 16em;
+  max-width: 40em;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.tail > header { padding: 3px 6px; border-bottom: 1px solid var(--line); font-size: 0.85em; }
+.tail > header button { margin-left: 4px; font-size: 0.85em; }
+.tail-title { font-weight: 600; }
+.tail-body {
+  margin: 0;
+  padding: 4px 6px;
+  height: 9em;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg);
+  color: var(--fg);
+}

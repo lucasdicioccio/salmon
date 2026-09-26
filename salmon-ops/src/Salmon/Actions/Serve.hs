@@ -919,6 +919,9 @@ renderTended t =
             ]
         Upkeep.Holding n -> ["serve: " <> tshow n <> " node(s) still holding an effect up"]
         Upkeep.Unwedged act -> ["serve: " <> act.shorthand <> " is moving again"]
+        -- not rendered: a live tail is for a client of `/events`; on a
+        -- terminal it would interleave every daemon's stdout with the reports.
+        Upkeep.Output _ _ -> []
         Upkeep.GaveUp act n ->
             [ "serve: "
                 <> act.shorthand
