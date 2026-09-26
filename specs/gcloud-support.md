@@ -394,6 +394,7 @@ cloudRunService :: CloudRunService -> Op
 
 - **`up`**: `gcloud run deploy <name> --image=<image> --region=<region> ...`
 - **`check`**: `gcloud run services describe <name> --region=<region>` and verify the active revision points at `crsImage`.
+  *Built as:* `describe --format=json`, and the service's revision template compared exactly (not as a substring: `img:1` is not `img:10`) for the image, the service account and the plain environment variables as a set (`--set-env-vars` replaces the set, so an extra variable is drift). Secret-bound variables are not compared; every drift is named in the failure, never an env value; output that is not the expected JSON is `Unknown`. Layer 0 in `Test.GcpSpec`; the JSON shape follows Cloud Run's Knative-style service resource and has not been checked against a live `describe`.
 - **`down`**: `gcloud run services delete <name> --region=<region> --quiet`
 
 **Image lifecycle**: a CloudRun service node does not build or push images. It depends on an upstream node that pushes a Podman-built image to Artifact Registry. The image URL is part of the service spec, so changing the image triggers a new revision on `up`.
