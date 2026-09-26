@@ -118,6 +118,8 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresClusterSpec
                     , Test.PgBouncerSpec
                     , Test.PgPairDemoSpec
+                    , Test.PatroniHarnessSpec
+                    , Test.PatroniVms
                     , Test.PostgresPairSpec
                     , Test.PostgresSwitchoverSpec
                     , Test.PostgresVms

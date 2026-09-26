@@ -30,6 +30,7 @@ import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
+import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
 import qualified Test.PostgresSwitchoverSpec as PostgresSwitchoverSpec
@@ -92,6 +93,7 @@ main =
                 , PostgresSwitchoverSpec.tests
                 , PgBackupSpec.tests
                 , PgPairDemoSpec.tests
+                , PatroniHarnessSpec.tests
                 ]
             , CheckSpec.tests
             , ClientModelSpec.tests
