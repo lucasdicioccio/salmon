@@ -88,6 +88,7 @@ library
                    , Salmon.Builtin.Nodes.Npm
                    , Salmon.Builtin.Nodes.PgBouncer
                    , Salmon.Builtin.Nodes.Postgres
+                   , Salmon.Builtin.Nodes.LlamaServer
                    , Salmon.Builtin.Nodes.PgVector
                    , Salmon.Builtin.Nodes.Plakar
                    , Salmon.Builtin.Nodes.Podman
