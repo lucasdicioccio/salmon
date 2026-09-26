@@ -90,6 +90,7 @@ test-suite salmon-ops-recipes-test
                     , Test.CheckSpec
                     , Test.ClientModelSpec
                     , Test.DebianPackageSpec
+                    , Test.WireGuardSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
                     , Test.DaemonSpec
