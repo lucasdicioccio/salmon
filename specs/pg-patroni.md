@@ -217,6 +217,9 @@ appears in a directive" is a rule rather than a guideline.
   --pending`), or report `pending_restart` and leave the restart to an
   operator? Restarting is what `run up` means everywhere else. A restart of
   the leader under load is also a small outage.
+  **Decided (owner, 2026-09-26):** restart the members that have
+  `pending_restart` set, replicas first, and the leader behind a
+  maintenance-window gate (what the Zalando operator does).
 - **`failsafe_mode` default** (see T5).
 - **REST API authentication:** Patroni's unsafe endpoints (`/switchover`,
   `PATCH /config`, `/restart`) need `restapi.authentication`. The
