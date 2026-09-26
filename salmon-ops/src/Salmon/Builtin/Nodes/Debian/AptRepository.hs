@@ -49,6 +49,7 @@ module Salmon.Builtin.Nodes.Debian.AptRepository (
     KeyFingerprintMismatch (..),
     aptRepository,
     aptRepositoryTrack,
+    viaRepository,
     pgdg,
 
     -- * Pieces, exposed for tests
@@ -158,6 +159,12 @@ pgdg keyFile fingerprint =
 -- author decided to take the risk of the external repository.
 aptRepositoryTrack :: Track' AptRepository
 aptRepositoryTrack = Track aptRepository
+
+-- | For a builtin that takes its package source as a @'Track'' ()@: provision
+-- this repository first. Its counterpart for \"the package is already
+-- installable\" is 'Salmon.Builtin.Extension.ignoreTrack'.
+viaRepository :: AptRepository -> Track' ()
+viaRepository = Track . const . aptRepository
 
 -- | Thrown before a key is installed when none of its primary-key
 -- fingerprints is the declared one.

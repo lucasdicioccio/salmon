@@ -49,6 +49,7 @@ data Report
     | PGTemplate !DatabaseName !Binary.Report
     | PGCloneDatabase !Clone !Binary.Report
     | PGDropClone !DatabaseName !Binary.Report
+    | PGExtension !PgExtension !Binary.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -1213,10 +1214,14 @@ a failed statement and exits @0@, so without it a refused drop would be
 followed by the @CREATE@ it was guarding, and the node would report success.
 -}
 psqlBatchRun_Sudo :: Port -> Command "psql" PsqlBatch
-psqlBatchRun_Sudo port = Command go
+psqlBatchRun_Sudo port = psqlBatchIn_Sudo port "postgres"
+
+-- | 'psqlBatchRun_Sudo' connected to a named database (an extension lives in one).
+psqlBatchIn_Sudo :: Port -> DatabaseName -> Command "psql" PsqlBatch
+psqlBatchIn_Sudo port db = Command go
   where
     go PsqlBatch =
-        proc "sudo" ["-u", "postgres", "psql", "-p", show port, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", "postgres"]
+        proc "sudo" ["-u", "postgres", "psql", "-p", show port, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", Text.unpack db]
 
 -- | Aborts the batch unless @name@ is absent or its comment starts with @marker@.
 refuseUnmarked :: Text -> Text -> DatabaseName -> Text
@@ -1421,11 +1426,104 @@ disposableClone r psql port mktemplate = cloneDatabase r psql port mktemplate Di
 checks above read as 'Unknown' rather than as the effect being absent.
 -}
 psqlQuery_Sudo :: Port -> Text -> IO (Either Text Text)
-psqlQuery_Sudo port sql = do
+psqlQuery_Sudo port = psqlQueryIn_Sudo port "postgres"
+
+-- | 'psqlQuery_Sudo' connected to a named database.
+psqlQueryIn_Sudo :: Port -> DatabaseName -> Text -> IO (Either Text Text)
+psqlQueryIn_Sudo port db sql = do
     (code, out, err) <-
         readCreateProcessWithExitCode
-            (proc "sudo" ["-u", "postgres", "psql", "-p", show port, "-X", "-tA", "-F", "|", "-d", "postgres", "-c", Text.unpack sql])
+            (proc "sudo" ["-u", "postgres", "psql", "-p", show port, "-X", "-tA", "-F", "|", "-d", Text.unpack db, "-c", Text.unpack sql])
             ""
     pure $ case code of
         ExitSuccess -> Right (Text.decodeUtf8With TextError.lenientDecode out)
         ExitFailure _ -> Left (Text.decodeUtf8With TextError.lenientDecode err)
+
+-------------------------------------------------------------------------------
+
+{- | A @CREATE EXTENSION@ in one database.
+
+The tree had no such node before pgvector wanted one; it is here rather than
+in "Salmon.Builtin.Nodes.PgVector" because every extension (pg_textsearch,
+pg_turret) needs the same three things.
+-}
+data PgExtension = PgExtension
+    { extName :: Text
+    , extDatabase :: DatabaseName
+    , extMinServerVersion :: Maybe Int
+    -- ^ @server_version_num@ floor (@130000@ for PostgreSQL 13). Refused at
+    -- @up@ with the running version in the message, since a package built
+    -- for an older server is not something @CREATE EXTENSION@ can explain.
+    , extUpgrade :: Bool
+    -- ^ Whether the node also runs @ALTER EXTENSION ... UPDATE@ when the
+    -- installed version is older than the package's default. Off by
+    -- default: an extension upgrade can rewrite catalog entries of the
+    -- indexes built on it, which is an operator's decision, not a side
+    -- effect of converging.
+    }
+    deriving (Eq, Show)
+
+-- | @CREATE EXTENSION IF NOT EXISTS@ (and, if asked, the upgrade), after the version floor.
+createExtensionSql :: PgExtension -> Text
+createExtensionSql e =
+    Text.unlines $
+        maybe [] (\n -> [floorCheck n]) e.extMinServerVersion
+            <> ["CREATE EXTENSION IF NOT EXISTS " <> quoteIdent e.extName <> ";"]
+            <> ["ALTER EXTENSION " <> quoteIdent e.extName <> " UPDATE;" | e.extUpgrade]
+  where
+    floorCheck n =
+        "DO "
+            <> dollarQuote
+                ( "BEGIN IF current_setting('server_version_num')::int < "
+                    <> Text.pack (show n)
+                    <> " THEN RAISE EXCEPTION '%', "
+                    <> quoteLiteral ("refusing to create extension " <> e.extName <> ": it needs server_version_num >= " <> Text.pack (show n) <> ", this server is ")
+                    <> " || current_setting('server_version'); END IF; END"
+                )
+            <> ";"
+
+-- | No @CASCADE@: an extension whose types are in use is refused, which is the answer a teardown should hear.
+dropExtensionSql :: PgExtension -> Text
+dropExtensionSql e = "DROP EXTENSION IF EXISTS " <> quoteIdent e.extName <> ";\n"
+
+-- | Empty when the extension is not installed; otherwise @installed|default@.
+inspectExtensionSql :: PgExtension -> Text
+inspectExtensionSql e =
+    "SELECT e.extversion || '|' || coalesce(a.default_version, '') FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname WHERE e.extname = "
+        <> quoteLiteral e.extName
+
+{- | The verdict from 'inspectExtensionSql''s output. Present is 'Success'
+unless 'extUpgrade' is on and the installed version is older than the
+package's default, in which case it is a 'Failure' naming both.
+-}
+interpretExtensionRow :: PgExtension -> Text -> CheckResult
+interpretExtensionRow e out =
+    case Text.lines (Text.strip out) of
+        [] -> Failure ("extension " <> e.extName <> " is not installed in " <> e.extDatabase)
+        (row : _) -> case Text.splitOn "|" row of
+            [installed, available]
+                | e.extUpgrade
+                , not (Text.null available)
+                , versionKey installed < versionKey available ->
+                    Failure ("extension " <> e.extName <> " is at " <> installed <> ", the package has " <> available)
+            _ -> Success
+
+-- | @"0.8.6"@ as @[0, 8, 6]@; a part that is not a number counts as 0.
+versionKey :: Text -> [Int]
+versionKey = fmap (\p -> case Text.unpack p of ds | not (null ds), all (`elem` ['0' .. '9']) ds -> read ds; _ -> 0) . Text.splitOn "."
+
+extension :: Reporter Report -> Track' (Binary "psql") -> Port -> Track' DatabaseName -> PgExtension -> Op
+extension r psql port mkdb e =
+    withBinaryStdin psql (psqlBatchIn_Sudo port e.extDatabase) PsqlBatch (Text.encodeUtf8 (createExtensionSql e)) $ \create ->
+        withBinaryStdin psql (psqlBatchIn_Sudo port e.extDatabase) PsqlBatch (Text.encodeUtf8 (dropExtensionSql e)) $ \dropIt ->
+            op "pg-extension" (deps [run mkdb e.extDatabase]) $ \actions ->
+                actions
+                    { ref = mkRef "pg-extension" (port, e.extDatabase, e.extName)
+                    , help = Text.unwords ["extension", e.extName, "in", e.extDatabase]
+                    , notes =
+                        ["upgrades the extension when the package is newer" | e.extUpgrade]
+                            <> ["needs server_version_num >= " <> Text.pack (show n) | Just n <- [e.extMinServerVersion]]
+                    , check = either (const Unknown) (interpretExtensionRow e) <$> psqlQueryIn_Sudo port e.extDatabase (inspectExtensionSql e)
+                    , up = create (contramap (PGExtension e) r)
+                    , down = dropIt (contramap (PGExtension e) r)
+                    }
