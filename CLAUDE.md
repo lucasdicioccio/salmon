@@ -171,6 +171,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `Skip`. `upTree`/`downTree` are those with a gate that wants everything; the only real user is
   `Actions/Serve.hs` (below), which walks the union of several seeds' nodes and must leave other
   seeds' alone.
+- **`Op/Window.hs`** is the maintenance-window `Gate`: a pure `Window` value (`[Day:]HH:MM-HH:MM[@+HH:MM]`,
+  crossing midnight allowed, fixed UTC offset since there is no tz database) and `windowGate`, which
+  `Skippable`s every node marked `disruptive` (a `Dynamic` marker, like `Supervision`) outside all windows
+  and tells a callback when the next opens. The window belongs to the *invocation*, the opt-in to the node.
+  Wired into `run up` only (`--maintenance-window`, repeatable; `--override-window`); a held node is a `Skip`,
+  not a failure, so it does not block dependants. Not yet consulted by `run serve`/`Upkeep`, nor shown in `status`.
 - **`Actions/Concurrent.hs`** is the same two walks with one thread per node. Each node gets a
   `TVar Status` (`Op/Status.hs`) and blocks on `waitStability` over its neighbours — dependencies
   going up, dependants coming down — so STM's `retry` does the scheduling: no counters, no

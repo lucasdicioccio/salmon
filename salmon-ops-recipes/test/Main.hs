@@ -54,6 +54,7 @@ import qualified Test.StatusSinkSpec as StatusSinkSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
+import qualified Test.WindowSpec as WindowSpec
 
 import Test.Tasty (DependencyType (..), TestTree, defaultMain, sequentialTestGroup, testGroup)
 
@@ -141,4 +142,5 @@ main =
             , SystemdSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests
+            , WindowSpec.tests
             ]
