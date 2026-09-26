@@ -329,6 +329,10 @@ zero".
   its own item and should land first or alongside.
   *The cache shipped in milestone 4* (`--follow-cache`); the `World` journal
   has not, and is still its own item.
+  **Decided (owner, 2026-09-26):** the `World` journal records the *declarations*
+  only (which seeds are live), appended before each pass. Convergence states and
+  `Upkeep` tallies are not journaled: each node's `check` re-derives them on the
+  first pass after a restart. `--follow-cache` stays for fetched documents.
 - **`supervise off`/`autoconverge off` typed interactively** should be
   respected by the fetcher — it must not silently re-enable either. The diff
   batch reads the current setting and restores it.
