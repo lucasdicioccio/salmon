@@ -7,6 +7,7 @@ import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
+import qualified Test.PlakarSpec as PlakarSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
@@ -98,6 +99,7 @@ main =
             , DagSpec.tests
             , AptRepositorySpec.tests
             , DebianPackageSpec.tests
+            , PlakarSpec.tests
             , WireGuardSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
