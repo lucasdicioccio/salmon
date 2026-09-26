@@ -13,6 +13,7 @@ import qualified Data.ByteString.Lazy as LBysteString
 import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Either (rights)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -51,6 +52,7 @@ import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 -- matches on. Nothing here needs a 'CheckResult'.
 import Salmon.Actions.UpDown as UpDown hiding (Failure, Success)
 import Salmon.Builtin.Extension
+import qualified Salmon.Op.Window as Window
 import Salmon.Reporter
 import qualified Salmon.Reporter.Tagged as Tagged
 
@@ -85,7 +87,9 @@ argForBaseCommand = \case
 -- @--plan@/@--force-stale-plan@ pair.
 data RunCommand
     = -- | @run up@, optionally honoring a @query plan@-emitted 'Query.Plan' file.
-      RunUp !(Maybe FilePath) !Bool !ReportFormat
+      -- The windows (@--maintenance-window@) outside which 'Window.disruptive'
+      -- nodes are held, and whether to ignore them (@--override-window@).
+      RunUp !(Maybe FilePath) !Bool !ReportFormat ![Text] !Bool
     | RunDown !ReportFormat
     | RunTree
     | RunDAG
@@ -618,6 +622,18 @@ runCommandParser =
                     <> Options.Applicative.help "Proceed even if the plan's directive digest doesn't match stdin."
                 )
             <*> reportFormatP
+            <*> many
+                ( option
+                    (eitherReader (\t -> either (Left . Text.unpack) (const (Right (Text.pack t))) (Window.parseWindow (Text.pack t))))
+                    ( long "maintenance-window"
+                        <> Options.Applicative.metavar "[DAY:]HH:MM-HH:MM[@UTC|@+HH:MM]"
+                        <> Options.Applicative.help "Nodes marked disruptive run only inside these windows (repeatable); outside them they are skipped and reported on stderr. DAY is Mon..Sun; a start later than the end crosses midnight; the zone is a fixed offset, UTC by default."
+                    )
+                )
+            <*> switch
+                ( long "override-window"
+                    <> Options.Applicative.help "Run disruptive nodes whatever the maintenance windows say."
+                )
     reportFormatP =
         Options.Applicative.flag
             ReportText
@@ -731,10 +747,10 @@ execCommandOrSeedWithRewrites ::
     IO ()
 execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     case cmd of
-        (Run (RunUp Nothing _ fmt)) -> do
-            result <- withGraph (runUp (updownFor fmt) Set.empty)
+        (Run (RunUp Nothing _ fmt wins override)) -> do
+            result <- withGraph (runUp (updownFor fmt) (windowsFor wins override) Set.empty)
             when (result == Just False) exitFailure
-        (Run (RunUp (Just planPath) forceStale fmt)) -> do
+        (Run (RunUp (Just planPath) forceStale fmt wins override)) -> do
             result <- withGraphAndBytes $ \dirBytes op -> do
                 planBytes <- LBysteString.readFile planPath
                 case eitherDecode planBytes of
@@ -745,7 +761,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         let actual = Query.digestBytes dirBytes
                         let expected = Query.planDirectiveDigest plan
                         if actual == expected
-                            then runUp (updownFor fmt) (Set.fromList (Query.planExcludedRefs plan)) op
+                            then runUp (updownFor fmt) (windowsFor wins override) (Set.fromList (Query.planExcludedRefs plan)) op
                             else
                                 if forceStale
                                     then do
@@ -755,7 +771,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                                 <> ", this directive hashes to "
                                                 <> Text.unpack actual
                                                 <> "); proceeding due to --force-stale-plan"
-                                        runUp (updownFor fmt) (Set.fromList (Query.planExcludedRefs plan)) op
+                                        runUp (updownFor fmt) (windowsFor wins override) (Set.fromList (Query.planExcludedRefs plan)) op
                                     else do
                                         putStrLn $
                                             "refusing to run stale plan: plan expects digest "
@@ -986,11 +1002,11 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     composes with collections — a batch is worth running iff some member of
     it is, which is the same 'Rewrite.membersOf' translation @serve@'s gate
     does. The report stream is identical either way: both produce a 'Skip'. -}
-    runUp :: Reporter (UpDown.Report Extension) -> Set Ref -> Op -> IO Bool
-    runUp r' excluded op = do
+    runUp :: Reporter (UpDown.Report Extension) -> UpDown.Gate Extension -> Set Ref -> Op -> IO Bool
+    runUp r' windowGate excluded op = do
         dag <- UpDown.expandDag r' nat op
         let computed = Rewrite.rewrite rewrites (Phase (Set.fromList (Dag.dagOrder dag)) excluded) dag
-        UpDown.upDag (excluding computed excluded) r' (Rewrite.computedDag computed)
+        UpDown.upDag (bothGates windowGate (excluding computed excluded)) r' (Rewrite.computedDag computed)
 
     {- | @run down@: nothing is wanted up, which is what makes a
     direction-aware rewrite emit a teardown batch here and an install batch
@@ -1016,6 +1032,24 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
 
     computedTreeDag :: Op -> IO (Dag.Dag Extension)
     computedTreeDag op = Rewrite.computedDag <$> computedRewritten op
+
+    -- | Held by the maintenance windows (reported on stderr) or excluded: skipped.
+    windowsFor :: [Text] -> Bool -> UpDown.Gate Extension
+    windowsFor wins override
+        | override = UpDown.alwaysRequired
+        | otherwise = Window.windowGate (rights (map Window.parseWindow wins)) $ \act next ->
+            hPutStrLn stderr $
+                "held by maintenance window until "
+                    <> maybe "(never)" show next
+                    <> ": "
+                    <> show act.shorthand
+
+    bothGates :: UpDown.Gate Extension -> UpDown.Gate Extension -> UpDown.Gate Extension
+    bothGates g1 g2 act = do
+        a <- g1 act
+        case a of
+            UpDown.Skippable -> pure UpDown.Skippable
+            _ -> g2 act
 
     excluding :: Rewritten Extension -> Set Ref -> UpDown.Gate Extension
     excluding computed excluded

@@ -112,6 +112,7 @@ library
                    , Salmon.Op.Rewrite
                    , Salmon.Op.Status
                    , Salmon.Op.Supervision
+                   , Salmon.Op.Window
                    , Salmon.Op.Configure
                    , Salmon.Op.Ref
                    , Salmon.Reporter
