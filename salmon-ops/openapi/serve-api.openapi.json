@@ -1,0 +1,3810 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "salmon run serve",
+    "version": "1",
+    "summary": "The HTTP surface of `run serve --http PATH` and `--http-tcp HOST:PORT`",
+    "description": "Served on a unix socket (owner-only, no token) by `--http PATH`, and over TLS on a network by `--http-tcp` (every route needs `Authorization: Bearer <token>` or a session cookie from `/auth`). Both serve this same application on the same loop.\n\nReads (`/dag`, `/status`, `/history`, `/help/seed`) never enter the loop's input. Writes are `POST /command`. Motion between commands is visible only on `/events`.\n\nThe seed words in a command are binary-specific: their grammar is `GET /help/seed`, not something this document can enumerate.\n\nA client that wants to refuse a server it does not understand can read `info.version` here; the responses themselves carry no version yet."
+  },
+  "servers": [
+    {
+      "url": "http://localhost",
+      "description": "unix socket (`curl --unix-socket PATH http://x/dag`)"
+    },
+    {
+      "url": "https://{host}:{port}",
+      "variables": {
+        "host": {
+          "default": "localhost"
+        },
+        "port": {
+          "default": "8443"
+        }
+      },
+      "description": "`--http-tcp`"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "sessionCookie": []
+    }
+  ],
+  "paths": {
+    "/dag": {
+      "get": {
+        "operationId": "getDag",
+        "summary": "The computed DAG with each node's state",
+        "description": "Bypasses the loop's input: a read never stands a machine down and answers while a node's `up` is running. At most one command old.",
+        "responses": {
+          "200": {
+            "description": "the DAG",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DagResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the loop has not started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "operationId": "getStatus",
+        "summary": "Per-node state, as `status --json`",
+        "responses": {
+          "200": {
+            "description": "the status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the loop has not started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/history": {
+      "get": {
+        "operationId": "getHistory",
+        "summary": "The seed and graph history, as `history --json`",
+        "responses": {
+          "200": {
+            "description": "the history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the loop has not started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/help/seed": {
+      "get": {
+        "operationId": "getHelpSeed",
+        "summary": "The seed grammar and the command reference",
+        "responses": {
+          "200": {
+            "description": "the help",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HelpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/command": {
+      "post": {
+        "operationId": "postCommand",
+        "summary": "One line of the input language",
+        "description": "The line joins the loop's inbox with an origin minted per request (`PATH#n` on the unix socket, `ADDR:PORT#n` over TCP). Synchronous by default: answers, when the loop has handled the line, with every report stamped with that origin. `?async` answers at once with the number of the `enqueued` event. A synchronous `up` holds the request for the whole pass, so a UI should use `?async` and read the outcome off `/events`.",
+        "parameters": [
+          {
+            "name": "async",
+            "in": "query",
+            "required": false,
+            "allowEmptyValue": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Presence selects the asynchronous form."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              },
+              "description": "the line, one trailing newline tolerated"
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "synchronous: the reports the line produced, in order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Report"
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "asynchronous: queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AsyncAnswer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "the body is not one line, not UTF-8, or not a command object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the loop is not taking commands",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "getEvents",
+        "summary": "Every report, numbered and replayable, as server-sent events",
+        "description": "Each event is `id: N` and `data: <EventData JSON>`. `?since=N` replays what the ring still holds above N and continues live; if N+1 has fallen off, the first event is a GapEvent with no `id`. A comment line `: keep-alive` every 15s of silence. The stream ends when the loop does. Description of the four `stream`s and of `server` is on EventData.",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "serve",
+                  "updown",
+                  "upkeep",
+                  "follow",
+                  "server"
+                ]
+              }
+            },
+            "description": "repeatable or comma-separated"
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "description": "repeatable; only events of commands typed under this origin"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "a malformed `since`, `stream` or `origin`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "operationId": "getUi",
+        "summary": "The web UI",
+        "responses": {
+          "200": {
+            "description": "the page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "over TCP without a credential: to /auth"
+          }
+        }
+      }
+    },
+    "/ui/{file}": {
+      "get": {
+        "operationId": "getUiFile",
+        "summary": "A file of the web UI",
+        "parameters": [
+          {
+            "name": "file",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the file (`text/html`, `text/javascript` or `text/css`)"
+          },
+          "404": {
+            "description": "not in the embedded set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "summary": "This document",
+        "description": "Embedded in the binary, so it is the description of the server answering.",
+        "responses": {
+          "200": {
+            "description": "this document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth": {
+      "get": {
+        "operationId": "getAuth",
+        "summary": "The sign-in form (TCP listener); a redirect to / on the unix socket",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "the form",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "to /"
+          }
+        }
+      },
+      "post": {
+        "operationId": "postAuth",
+        "x-tcp-only": true,
+        "summary": "Sign in with the token",
+        "description": "TCP listener only. A form post of the token; answers 303 with a `__Host-salmon-session` cookie (HttpOnly; Secure; SameSite=Strict) that is then accepted wherever the bearer token is.",
+        "security": [],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "token"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "signed in (cookie set), or back to the form"
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "postLogout",
+        "summary": "Revoke the session",
+        "description": "Expires the cookie and cuts any `/events` stream opened with it.",
+        "responses": {
+          "303": {
+            "description": "to /auth"
+          }
+        }
+      }
+    },
+    "/auth/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Whether this request carries a session",
+        "responses": {
+          "200": {
+            "description": "the answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAnswer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "TCP listener only; none on the unix socket."
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-salmon-session",
+        "description": "From POST /auth; TCP listener only."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "Every error status answers this: 400 (a body or query the route refuses), 401 (TCP only: no or wrong credential), 404, 405 (with an Allow header), 503 (the loop has not started)."
+      },
+      "Ref": {
+        "type": "object",
+        "properties": {
+          "short": {
+            "type": "string"
+          },
+          "full": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "short",
+          "full"
+        ],
+        "description": "A node's identity: the short tag a selector can use as `#<short>`, and the full text."
+      },
+      "Mode": {
+        "type": "string",
+        "enum": [
+          "interactive",
+          "following",
+          "replay"
+        ],
+        "description": "What the world is: typed at a keyboard, following a registry, or replaying the last applied document after a failed start."
+      },
+      "Direction": {
+        "type": "string",
+        "enum": [
+          "up",
+          "down"
+        ]
+      },
+      "Convergence": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "stale",
+          "converged",
+          "errored",
+          "blocked"
+        ]
+      },
+      "CheckResult": {
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "success",
+              "skipped",
+              "completed",
+              "failure",
+              "unknown",
+              "immaterial"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict"
+        ],
+        "description": "`reason` is present for `failure` only."
+      },
+      "MachineStatus": {
+        "type": "object",
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "stability": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "transient"
+            ]
+          },
+          "epoch": {
+            "type": "integer"
+          },
+          "output": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "check",
+          "direction",
+          "stability",
+          "epoch",
+          "output"
+        ],
+        "description": "The last snapshot of a node's machine (its last check, its output ring). `null` on a node no machine has looked at."
+      },
+      "NodeState": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "shorthand": {
+            "type": "string"
+          },
+          "help": {
+            "type": "string"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "convergence": {
+            "$ref": "#/components/schemas/Convergence"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MachineStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "excluded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ref",
+          "shorthand",
+          "help",
+          "direction",
+          "convergence",
+          "status",
+          "paths"
+        ],
+        "description": "A node as `status` lists it. `selected` and `excluded` are present in a `query` report only."
+      },
+      "Representative": {
+        "type": "object",
+        "properties": {
+          "shorthand": {
+            "type": "string"
+          },
+          "help": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dynamics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "shorthand",
+          "help",
+          "notes",
+          "dynamics"
+        ],
+        "description": "The fields the loop compares to decide two declarations of one ref are the same node."
+      },
+      "DagNode": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "shorthand": {
+            "type": "string"
+          },
+          "help": {
+            "type": "string"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "convergence": {
+            "$ref": "#/components/schemas/Convergence"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MachineStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dynamics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Ref"
+            }
+          },
+          "dependants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Ref"
+            }
+          },
+          "conflict": {
+            "type": "object",
+            "properties": {
+              "kept": {
+                "$ref": "#/components/schemas/Representative"
+              },
+              "replaced": {
+                "$ref": "#/components/schemas/Representative"
+              }
+            },
+            "required": [
+              "kept",
+              "replaced"
+            ]
+          }
+        },
+        "required": [
+          "ref",
+          "shorthand",
+          "help",
+          "direction",
+          "convergence",
+          "status",
+          "paths",
+          "notes",
+          "dynamics",
+          "dependencies",
+          "dependants"
+        ],
+        "description": "One node of the computed DAG. `conflict` is present while two live declarations disagree about the node."
+      },
+      "NodeDescription": {
+        "type": "object",
+        "properties": {
+          "shorthand": {
+            "type": "string"
+          },
+          "help": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "shorthand",
+          "help",
+          "notes"
+        ]
+      },
+      "Supervision": {
+        "type": "object",
+        "properties": {
+          "restart": {
+            "type": "string",
+            "enum": [
+              "always",
+              "on-failure",
+              "never"
+            ]
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "one-for-one",
+              "rest-for-one"
+            ]
+          },
+          "reapply": {
+            "type": "boolean"
+          },
+          "watchdog_us": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stable_after_us": {
+            "type": "integer"
+          },
+          "demote_every_us": {
+            "type": "integer"
+          },
+          "give_up_after": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "restart",
+          "strategy",
+          "reapply",
+          "watchdog_us",
+          "stable_after_us",
+          "demote_every_us",
+          "give_up_after"
+        ]
+      },
+      "Instruction": {
+        "type": "string",
+        "enum": [
+          "force",
+          "satisfy",
+          "recheck",
+          "pause",
+          "resume"
+        ]
+      },
+      "Origin": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "stdin"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "other"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "loaded"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "fetched"
+              },
+              "registry": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "document": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "registry",
+              "label",
+              "document",
+              "sha256"
+            ]
+          }
+        ],
+        "description": "Who typed a line or made a declaration."
+      },
+      "UpDown_skip": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "skip"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDownUntagged_skip": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "skip"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDown_eval": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "eval"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDownUntagged_eval": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "eval"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDown_done": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "done"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDownUntagged_done": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "done"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDown_blocked": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "blocked"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDownUntagged_blocked": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "blocked"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDown_failed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "failed"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "error"
+        ]
+      },
+      "UpDownUntagged_failed": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "failed"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "error"
+        ]
+      },
+      "UpDown_conflicting": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "conflicting"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "kept": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "replaced": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "kept",
+          "replaced"
+        ]
+      },
+      "UpDownUntagged_conflicting": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "conflicting"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "kept": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "replaced": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "kept",
+          "replaced"
+        ]
+      },
+      "UpDown_instructed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "instructed"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "instruction": {
+            "$ref": "#/components/schemas/Instruction"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "instruction"
+        ]
+      },
+      "UpDownUntagged_instructed": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "instructed"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "instruction": {
+            "$ref": "#/components/schemas/Instruction"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "instruction"
+        ]
+      },
+      "UpDown_dropped-instructions": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "dropped-instructions"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "dropped": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "dropped"
+        ]
+      },
+      "UpDownUntagged_dropped-instructions": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "dropped-instructions"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "dropped": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "dropped"
+        ]
+      },
+      "Upkeep_acted": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "acted"
+          },
+          "report": {
+            "$ref": "#/components/schemas/UpDownReportUntagged"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "report"
+        ]
+      },
+      "UpkeepUntagged_acted": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "acted"
+          },
+          "report": {
+            "$ref": "#/components/schemas/UpDownReportUntagged"
+          }
+        },
+        "required": [
+          "kind",
+          "report"
+        ]
+      },
+      "Upkeep_upkeep": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "upkeep"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "wait-up",
+              "upping",
+              "up"
+            ]
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "state"
+        ]
+      },
+      "UpkeepUntagged_upkeep": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "upkeep"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "wait-up",
+              "upping",
+              "up"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "state"
+        ]
+      },
+      "Upkeep_downkeep": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "downkeep"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "wait-down",
+              "downing",
+              "down"
+            ]
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "state"
+        ]
+      },
+      "UpkeepUntagged_downkeep": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "downkeep"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "wait-down",
+              "downing",
+              "down"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "state"
+        ]
+      },
+      "Upkeep_next-look": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "next-look"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "check": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "delay_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "check",
+          "delay_us"
+        ]
+      },
+      "UpkeepUntagged_next-look": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "next-look"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "check": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "delay_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "check",
+          "delay_us"
+        ]
+      },
+      "Upkeep_wedged": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "wedged"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "silent_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "silent_us"
+        ]
+      },
+      "UpkeepUntagged_wedged": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "wedged"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "silent_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "silent_us"
+        ]
+      },
+      "Upkeep_unwedged": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "unwedged"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_unwedged": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "unwedged"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_demoted": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "demoted"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "dependency": {
+            "$ref": "#/components/schemas/Ref"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "dependency"
+        ]
+      },
+      "UpkeepUntagged_demoted": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "demoted"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "dependency": {
+            "$ref": "#/components/schemas/Ref"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "dependency"
+        ]
+      },
+      "Upkeep_parked": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "parked"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_parked": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "parked"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_reapplying": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "reapplying"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "delay_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "delay_us"
+        ]
+      },
+      "UpkeepUntagged_reapplying": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "reapplying"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "delay_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "delay_us"
+        ]
+      },
+      "Upkeep_paused": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "paused"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_paused": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "paused"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_resumed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "resumed"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_resumed": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "resumed"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_gave-up": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "gave-up"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "failures": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "failures"
+        ]
+      },
+      "UpkeepUntagged_gave-up": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "gave-up"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "failures": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "failures"
+        ]
+      },
+      "Upkeep_adopted": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "adopted"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_adopted": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "adopted"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_released": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "released"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_released": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "released"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_policy": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "policy"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "supervision": {
+            "$ref": "#/components/schemas/Supervision"
+          },
+          "ignored": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Supervision"
+            }
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "supervision",
+          "ignored"
+        ]
+      },
+      "UpkeepUntagged_policy": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "policy"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "supervision": {
+            "$ref": "#/components/schemas/Supervision"
+          },
+          "ignored": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Supervision"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "supervision",
+          "ignored"
+        ]
+      },
+      "Upkeep_untended": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "untended"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpkeepUntagged_untended": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "untended"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "Upkeep_escaped": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "escaped"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "error"
+        ]
+      },
+      "UpkeepUntagged_escaped": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "escaped"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "error"
+        ]
+      },
+      "Upkeep_supervising": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "supervising"
+          },
+          "up": {
+            "type": "integer"
+          },
+          "down": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "up",
+          "down"
+        ]
+      },
+      "UpkeepUntagged_supervising": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "supervising"
+          },
+          "up": {
+            "type": "integer"
+          },
+          "down": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "up",
+          "down"
+        ]
+      },
+      "Upkeep_retired": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "retired"
+          },
+          "machines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "machines"
+        ]
+      },
+      "UpkeepUntagged_retired": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "retired"
+          },
+          "machines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "machines"
+        ]
+      },
+      "Upkeep_holding": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "holding"
+          },
+          "machines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "machines"
+        ]
+      },
+      "UpkeepUntagged_holding": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "holding"
+          },
+          "machines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "machines"
+        ]
+      },
+      "Serve_started": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "started"
+          }
+        },
+        "required": [
+          "stream",
+          "kind"
+        ]
+      },
+      "Serve_stopped": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "stopped"
+          }
+        },
+        "required": [
+          "stream",
+          "kind"
+        ]
+      },
+      "Serve_hung-up": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "hung-up"
+          },
+          "from": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "from"
+        ]
+      },
+      "Serve_bad-command": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "bad-command"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "error"
+        ]
+      },
+      "Serve_bad-seed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "bad-seed"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "error"
+        ]
+      },
+      "Serve_bad-directive": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "bad-directive"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "error"
+        ]
+      },
+      "Serve_bad-load": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "bad-load"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "error"
+        ]
+      },
+      "Serve_loading": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "loading"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "path"
+        ]
+      },
+      "Serve_load-done": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "load-done"
+          },
+          "path": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "path",
+          "lines"
+        ]
+      },
+      "Serve_declared": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "declared"
+          },
+          "epoch": {
+            "type": "integer"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "nodes": {
+            "type": "integer"
+          },
+          "active_seeds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "epoch",
+          "direction",
+          "nodes",
+          "active_seeds"
+        ]
+      },
+      "Serve_cleared": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "cleared"
+          },
+          "retired": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "retired"
+        ]
+      },
+      "Serve_supervised": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "supervised"
+          },
+          "on": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "on"
+        ]
+      },
+      "Serve_auto-converged": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "auto-converged"
+          },
+          "on": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "on"
+        ]
+      },
+      "Serve_instructed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "instructed"
+          },
+          "instruction": {
+            "$ref": "#/components/schemas/Instruction"
+          },
+          "nodes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "instruction",
+          "nodes"
+        ]
+      },
+      "Serve_fetch-requested": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "fetch-requested"
+          },
+          "following": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "following"
+        ]
+      },
+      "Serve_tended": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "tended"
+          },
+          "report": {
+            "$ref": "#/components/schemas/UpkeepReportUntagged"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "report"
+        ]
+      },
+      "Serve_converge-start": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "converge-start"
+          },
+          "down": {
+            "type": "integer"
+          },
+          "up": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "down",
+          "up"
+        ]
+      },
+      "Serve_converge-stop": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "converge-stop"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "remaining": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ok",
+          "remaining"
+        ]
+      },
+      "Serve_status": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "status"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeState"
+            }
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "mode",
+          "nodes"
+        ]
+      },
+      "Serve_history": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "history"
+          },
+          "seeds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntry"
+            }
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "seeds"
+        ]
+      },
+      "Serve_history-elided": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "history-elided"
+          },
+          "elided": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "elided"
+        ]
+      },
+      "Serve_query": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "query"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeState"
+            }
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "nodes"
+        ]
+      },
+      "Serve_help": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "help"
+          },
+          "topic": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "topic",
+          "lines"
+        ]
+      },
+      "Serve_sink-failed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "sink-failed"
+          },
+          "path": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "path",
+          "error"
+        ]
+      },
+      "Follow_following": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "following"
+          },
+          "registry": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "schedule": {
+            "type": "object",
+            "properties": {
+              "base_us": {
+                "type": "integer"
+              },
+              "factor": {
+                "type": "number"
+              },
+              "cap_us": {
+                "type": "integer"
+              },
+              "jitter": {
+                "type": "number"
+              },
+              "debounce_us": {
+                "type": "integer"
+              },
+              "max_wait_us": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "base_us",
+              "factor",
+              "cap_us",
+              "jitter",
+              "debounce_us",
+              "max_wait_us"
+            ]
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "registry",
+          "labels",
+          "schedule"
+        ]
+      },
+      "Follow_injected": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "injected"
+          },
+          "label": {
+            "type": "string"
+          },
+          "document": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "up": {
+            "type": "integer"
+          },
+          "down": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "document",
+          "sha256",
+          "up",
+          "down"
+        ]
+      },
+      "Follow_no-diff": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "no-diff"
+          },
+          "label": {
+            "type": "string"
+          },
+          "document": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "document",
+          "sha256"
+        ]
+      },
+      "Follow_deferred": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "deferred"
+          },
+          "label": {
+            "type": "string"
+          },
+          "document": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "document",
+          "sha256"
+        ]
+      },
+      "Follow_replayed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "replayed"
+          },
+          "label": {
+            "type": "string"
+          },
+          "document": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "document",
+          "sha256"
+        ]
+      },
+      "Follow_backoff": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "backoff"
+          },
+          "failures": {
+            "type": "integer"
+          },
+          "next_us": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "failures",
+          "next_us"
+        ]
+      },
+      "Follow_missing": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "missing"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label"
+        ]
+      },
+      "Follow_vanished": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "vanished"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label"
+        ]
+      },
+      "Follow_malformed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "malformed"
+          },
+          "label": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "sha256",
+          "error"
+        ]
+      },
+      "Follow_fetch-failed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "fetch-failed"
+          },
+          "label": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "error"
+        ]
+      },
+      "Follow_stale": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "stale"
+          },
+          "label": {
+            "type": "string"
+          },
+          "document": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "document"
+        ]
+      },
+      "Follow_bad-cache": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "bad-cache"
+          },
+          "label": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "error"
+        ]
+      },
+      "Follow_rejected": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "rejected"
+          },
+          "label": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "sha256",
+          "reason"
+        ]
+      },
+      "Follow_cache-failed": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "follow"
+          },
+          "kind": {
+            "const": "cache-failed"
+          },
+          "label": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "label",
+          "error"
+        ]
+      },
+      "UpDownReport": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UpDown_skip"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_eval"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_done"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_blocked"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_failed"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_conflicting"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_instructed"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_dropped-instructions"
+          }
+        ],
+        "description": "`stream` is added when the report travels tagged; nested inside `acted` it is absent."
+      },
+      "UpkeepReport": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Upkeep_acted"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_upkeep"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_downkeep"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_next-look"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_wedged"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_unwedged"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_demoted"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_parked"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_reapplying"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_paused"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_resumed"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_gave-up"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_adopted"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_released"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_policy"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_untended"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_escaped"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_supervising"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_retired"
+          },
+          {
+            "$ref": "#/components/schemas/Upkeep_holding"
+          }
+        ],
+        "description": ""
+      },
+      "UpDownReportUntagged": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_skip"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_eval"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_done"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_blocked"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_failed"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_conflicting"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_instructed"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_dropped-instructions"
+          }
+        ],
+        "description": "An UpDown report nested inside another (no `stream`: only the outermost object is tagged)."
+      },
+      "UpkeepReportUntagged": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_acted"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_upkeep"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_downkeep"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_next-look"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_wedged"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_unwedged"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_demoted"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_parked"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_reapplying"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_paused"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_resumed"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_gave-up"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_adopted"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_released"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_policy"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_untended"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_escaped"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_supervising"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_retired"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_holding"
+          }
+        ],
+        "description": "An Upkeep report nested inside `tended` (no `stream`)."
+      },
+      "ServeReport": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Serve_started"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_stopped"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_hung-up"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_bad-command"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_bad-seed"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_bad-directive"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_bad-load"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_loading"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_load-done"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_declared"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_cleared"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_supervised"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_auto-converged"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_instructed"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_fetch-requested"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_tended"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_converge-start"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_converge-stop"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_status"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_history"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_history-elided"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_query"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_help"
+          },
+          {
+            "$ref": "#/components/schemas/Serve_sink-failed"
+          }
+        ],
+        "description": ""
+      },
+      "FollowReport": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Follow_following"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_injected"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_no-diff"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_deferred"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_replayed"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_backoff"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_missing"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_vanished"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_malformed"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_fetch-failed"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_stale"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_bad-cache"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_rejected"
+          },
+          {
+            "$ref": "#/components/schemas/Follow_cache-failed"
+          }
+        ],
+        "description": ""
+      },
+      "Report": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ServeReport"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownReport"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepReport"
+          },
+          {
+            "$ref": "#/components/schemas/FollowReport"
+          }
+        ],
+        "description": "One report, tagged by `stream` (who reported: `serve` the loop, `updown` a convergence pass, `upkeep` a tending machine, `follow` the pull-mode fetcher) and `kind` (the constructor, kebab-cased). Exactly what `--json` prints, one object per line. Report text is public and carried verbatim.",
+        "discriminator": {
+          "propertyName": "stream"
+        }
+      },
+      "HistoryEntry": {
+        "type": "object",
+        "properties": {
+          "epoch": {
+            "type": "integer"
+          },
+          "declaration": {
+            "type": "string",
+            "enum": [
+              "up",
+              "only",
+              "down"
+            ]
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/Origin"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "epoch",
+          "declaration",
+          "active",
+          "origin",
+          "args"
+        ]
+      },
+      "DagResponse": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DagNode"
+            }
+          },
+          "seq": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mode",
+          "nodes",
+          "seq"
+        ],
+        "description": "The computed DAG (the structure a pass walks, before any registered rewrite): one object per ref, dependencies first. `seq` is the last event number handed out, read before the world, so `GET /events?since=<seq>` replays anything that landed in between."
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "status"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeState"
+            }
+          },
+          "seq": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "mode",
+          "nodes",
+          "seq"
+        ],
+        "description": "What `status --json` prints, plus `seq` (see DagResponse)."
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "serve"
+          },
+          "kind": {
+            "const": "history"
+          },
+          "seeds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntry"
+            }
+          },
+          "elided": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "seeds",
+          "elided"
+        ],
+        "description": "What `history --json` prints, with the elided count folded in as a field."
+      },
+      "HelpResponse": {
+        "type": "object",
+        "properties": {
+          "seed": {
+            "type": "string"
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "seed",
+          "commands"
+        ],
+        "description": "`seed` is the seed parser's own `--help` text: the grammar of the words after `up`/`only`/`down`, which is binary-specific. `commands` is the input language's reference."
+      },
+      "CommandBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "line": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "verb": {
+                "type": "string"
+              },
+              "seed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "verb"
+            ]
+          }
+        ],
+        "description": "One line of the input language, or a verb and its seed words rendered to the very line the first form would have carried. A newline anywhere is refused: one command per request."
+      },
+      "AsyncAnswer": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "origin": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "origin"
+        ],
+        "description": "`seq` is the number of the `enqueued` event for the command; its reports are the events numbered above it whose `origin.name` is `origin`."
+      },
+      "EnqueuedEvent": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "server"
+          },
+          "kind": {
+            "const": "enqueued"
+          },
+          "line": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/Origin"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "line",
+          "seq",
+          "origin"
+        ]
+      },
+      "GapEvent": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "server"
+          },
+          "kind": {
+            "const": "gap"
+          },
+          "from": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "from"
+        ],
+        "description": "Sent first, with no `id:`, to a client whose `?since` fell off the ring: `from` is the oldest number the replay starts at."
+      },
+      "EventData": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "type": "string",
+            "enum": [
+              "serve",
+              "updown",
+              "upkeep",
+              "follow",
+              "server"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/Origin"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "seq"
+        ],
+        "description": "The `data:` of one server-sent event: the Report object of that stream and kind (or EnqueuedEvent) with `seq` added, and `origin` when the event belongs to a command. `seq` is also the SSE `id:`. See Report, EnqueuedEvent and GapEvent for the fields by kind.",
+        "additionalProperties": true
+      },
+      "SessionAnswer": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session"
+        ]
+      },
+      "StatusObject": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "status"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeState"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "mode",
+          "nodes"
+        ],
+        "description": "`status --json` as the sink embeds it: the same object without the `stream` tag."
+      },
+      "StatusDocument": {
+        "type": "object",
+        "properties": {
+          "salmon-status": {
+            "const": 1
+          },
+          "host": {
+            "type": "string"
+          },
+          "written": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "type": "string"
+                },
+                "applied": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "label",
+                "id",
+                "sha256",
+                "applied"
+              ]
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/StatusObject"
+          },
+          "last": {
+            "type": "object",
+            "properties": {
+              "converge": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Report"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "follow": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Report"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "converge",
+              "follow"
+            ]
+          }
+        },
+        "required": [
+          "salmon-status",
+          "host",
+          "written",
+          "mode",
+          "labels",
+          "status",
+          "last"
+        ],
+        "description": "The document `run serve --status-sink` writes (to a file, or POSTed to a URL). Not served over HTTP by the loop; described here because it embeds `status` and two Reports and is read by other tools (`salmon-fleet status`)."
+      }
+    }
+  }
+}

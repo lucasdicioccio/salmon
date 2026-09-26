@@ -54,6 +54,7 @@ import System.IO (Handle, hClose)
 import System.Posix.IO (FdOption (CloseOnExec), createPipe, fdToHandle, setFdOption)
 import System.Posix.Types (Fd (..))
 import System.Timeout (timeout)
+import qualified Test.ServeApi as Api
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 import Text.Read (readMaybe)
@@ -306,7 +307,13 @@ exchange running req = do
         Just resp ->
             case eitherDecode (HTTP.responseBody resp) of
                 Left err -> assertFailure ("not JSON: " <> err <> ": " <> LChar8.unpack (HTTP.responseBody resp))
-                Right v -> pure (HTTP.statusCode (HTTP.responseStatus resp), v)
+                Right v -> do
+                    let status = HTTP.statusCode (HTTP.responseStatus resp)
+                    assertEqual
+                        ("schema errors in " <> show (HTTP.method req) <> " " <> show (HTTP.path req) <> " -> " <> show status)
+                        []
+                        (Api.validateResponse (HTTP.method req) (HTTP.path req) status v)
+                    pure (status, v)
 
 -- | A synchronous command: the kinds of the reports it answered with.
 sync :: Running -> String -> IO [Text]
@@ -392,7 +399,10 @@ withEvents running query act = do
             else case fieldOf "data: " of
                 [raw] -> case eitherDecodeStrict raw of
                     Left err -> assertFailure ("event data is not JSON: " <> err <> ": " <> Char8.unpack raw)
-                    Right v ->
+                    Right v -> do
+                        -- every event any test in this spec reads is also checked
+                        -- against the OpenAPI document
+                        assertEqual ("schema errors in event " <> Char8.unpack raw) [] (Api.validateEventData v)
                         pure (Just (Sse (readMaybe . Char8.unpack =<< headMay (fieldOf "id: ")) v))
                 _ -> assertFailure ("not one data line: " <> Char8.unpack block)
     headMay (x : _) = Just x

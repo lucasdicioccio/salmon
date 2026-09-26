@@ -91,6 +91,8 @@ test-suite salmon-ops-recipes-test
                     , Test.ClientModelSpec
                     , Test.AptRepositorySpec
                     , Test.DebianPackageSpec
+                    , Test.ServeApi
+                    , Test.ServeApiSpec
                     , Test.PgVectorSpec
                     , Test.PlakarSpec
                     , Test.WireGuardSpec

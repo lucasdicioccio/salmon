@@ -13,7 +13,7 @@ sentinels at the bottom of this module, which is the cue to add its golden.
 The status sink's document ("Salmon.Actions.Serve.StatusSink") has its
 golden here too, since it is built from these same objects.
 -}
-module Test.ReportJsonSpec (tests) where
+module Test.ReportJsonSpec (tests, goldens, sinkDocumentText) where
 
 import Control.Exception (ErrorCall (..), toException)
 import Data.Aeson (Value (..), eitherDecode, encode, toJSON)
@@ -446,12 +446,7 @@ sinkDocumentGolden = do
                 , StatusSink.docLastConverge = Just (toJSON (Tagged.FromServe (Serve.ConvergeStop True 0)))
                 , StatusSink.docLastFollow = Just (toJSON (Tagged.FromFollow (Follow.Backoff 2 60000000)))
                 }
-        expectedText =
-            "{\"salmon-status\":1,\"host\":\"web-3\",\"written\":\"2026-09-24T10:41:07Z\",\"mode\":\"following\""
-                <> ",\"labels\":[{\"label\":\"web\",\"id\":\"web@42\",\"sha256\":\"32ea59311d97a7c0\",\"applied\":\"2026-09-24T10:40:00Z\"}]"
-                <> ",\"status\":{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}"
-                <> ",\"last\":{\"converge\":{\"stream\":\"serve\",\"kind\":\"converge-stop\",\"ok\":true,\"remaining\":0}"
-                <> ",\"follow\":{\"stream\":\"follow\",\"kind\":\"backoff\",\"failures\":2,\"next_us\":60000000}}}"
+        expectedText = sinkDocumentText
     expected <- case eitherDecode (LText.encodeUtf8 (LText.fromStrict expectedText)) of
         Left err -> assertFailure ("golden is not valid JSON: " <> err)
         Right v -> pure (v :: Value)
@@ -463,6 +458,15 @@ sinkDocumentGolden = do
         "without `last`"
         (Right doc{StatusSink.docLastConverge = Nothing, StatusSink.docLastFollow = Nothing})
         (eitherDecode "{\"salmon-status\":1,\"host\":\"web-3\",\"written\":\"2026-09-24T10:41:07Z\",\"mode\":\"following\",\"labels\":[{\"label\":\"web\",\"id\":\"web@42\",\"sha256\":\"32ea59311d97a7c0\",\"applied\":\"2026-09-24T10:40:00Z\"}],\"status\":{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}}")
+
+-- | The status sink's document as the golden above spells it.
+sinkDocumentText :: Text
+sinkDocumentText =
+    "{\"salmon-status\":1,\"host\":\"web-3\",\"written\":\"2026-09-24T10:41:07Z\",\"mode\":\"following\""
+        <> ",\"labels\":[{\"label\":\"web\",\"id\":\"web@42\",\"sha256\":\"32ea59311d97a7c0\",\"applied\":\"2026-09-24T10:40:00Z\"}]"
+        <> ",\"status\":{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}"
+        <> ",\"last\":{\"converge\":{\"stream\":\"serve\",\"kind\":\"converge-stop\",\"ok\":true,\"remaining\":0}"
+        <> ",\"follow\":{\"stream\":\"follow\",\"kind\":\"backoff\",\"failures\":2,\"next_us\":60000000}}}"
 
 -------------------------------------------------------------------------------
 
