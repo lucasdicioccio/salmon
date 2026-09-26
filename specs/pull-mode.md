@@ -304,6 +304,10 @@ handed without also handing it the power to sign, and `Keys.jwkKey` is the
 one public-key format already written by the tree; the signature is EdDSA
 over Ed25519 through `jose`, not a JWS.
 
+*Known gap* (found reading the code against Dominator's trust zones): a
+signature is not bound to a label, and the key set is global. See "Considered:
+ideas from Dominator", item 1 (feature `66dbf803`).
+
 ### Bootstrap is the existing push pattern, once
 
 `Self.uploadSelf`, then `ssh host bin run serve --follow <registry> --label …`
@@ -358,6 +362,101 @@ zero".
 - **Secrets in documents.** The document names seeds; seeds that need secret
   material should keep using pre-provisioned files (see the recipe
   key-exchange-agnostic convention), not inline them.
+
+## Considered: ideas from Dominator
+
+Not decided, and not scheduled unless a feature says so. Source: Dominator's
+design document (`design-docs/Dominator/README.md`, Cloud-Foundations). Its
+shape is different: a controller *polls* every agent (`subd`), diffs the agent's
+filesystem against a required image and orders it to fetch and update, with
+immutable images and near-atomic transitions as goals. So none of its transport
+carries over. What does is its operational thinking about rollout and trust,
+which pull mode has so far left to "registry writes".
+
+### 1. A signature should be bound to a label, and keys to zones
+
+Dominator keeps different trusted keys per trust zone (its `CA.pem` is a
+"computed file", so a controller in a public cloud cannot push into the internal
+zone). The equivalent here has a gap, from reading the code:
+
+- `Follow.Verifier` is `Digest -> ByteString -> IO (Either Text ByteString)`:
+  it is never told which label the bytes were fetched for, though both call
+  sites (`Follow.hs`, the round and the cache replay) have it.
+- `Signature.verifyEnvelope` verifies the `document` member and nothing else. A
+  document's `id` is opaque and may be `web-api@...` by convention, but nothing
+  checks that it names the label.
+- `--follow-key` is one set for every label, and any one key accepts.
+
+So someone who can write to the registry but cannot sign can copy a valid signed
+`canary` document to the `prod` label's address, and every host following `prod`
+applies it. The same swap works against the cache, whose entries are read back
+through the same verifier. An older signed document can also be replayed unless
+`--follow-refuse-older` is on and both documents carry `published`.
+
+The fix has two parts:
+
+- **Bind the label.** A signed `label` in the document, checked by the verifier
+  (which then needs the label as an argument), and a refusal that names both
+  labels on a mismatch. Documents signed before this have no `label`: accept them
+  behind an explicit flag for a migration window, and refuse by default after.
+- **Keys per label.** `--follow-key LABEL=FILE`, so a key speaks only for the
+  labels it is bound to. A bare `--follow-key FILE` keeps meaning "any label".
+
+### 2. A rollout brake that needs no controller
+
+Dominator's controller enforces global limits (the share of machines rebooting at
+once, and health-failure rates correlated with updates). Pull has jitter and a
+debounce, but a new document reaches every host within one poll interval, so a
+bad one is fleet-wide within about a minute.
+
+- **A deterministic stagger.** An optional `rollout: {"window": "1h"}` in the
+  document: each host applies after `hash(host, digest) mod window`. No
+  coordination, and the same host always lands in the same slot for one document.
+- **A hold marker.** `{"hold": true}` under a label: hosts keep what they have
+  applied and report `held` in the status document. It is the emergency brake,
+  and it does not depend on publishing an older document, which
+  `--follow-refuse-older` would reject.
+
+### 3. Policy at the write path, and a gate on the sink
+
+Dominator restricts who may write the MDB and rate-limits changes to the
+required image (a minimum time to upgrade a cluster), and splits "planned" from
+"required" so preloading is a safe permission and activating is not. Here the
+registry is that write path:
+
+- Owners per directory in a git registry (`canary/` by CI, `prod/` by people) need
+  no code, only a paragraph in the guide.
+- Minimum interval between publishes and a deprecated flag belong in a
+  `salmon-fleet publish` command, not on hosts.
+- The step "publish to `canary`, watch the sink, publish to `prod`" is a script
+  today. `salmon-fleet gate --label canary --converged 100% --for 10m`, with an
+  exit code, makes it something CI can wait on. It reads the sink documents
+  `Actions.Fleet` already folds.
+
+### 4. Reverting after a failed pass (opt-in, with a warning)
+
+Dominator's update is near-atomic and ends in a health check. A pass here goes
+node by node, so a failure leaves a half-applied world until the next document.
+An opt-in `--follow-revert` per label could re-inject the previously applied
+document if a health node fails within a window. It needs the cache to keep the
+previous document. **Warning:** re-declaring the old document retires the new
+seeds, which runs `down` on them: destructive for anything stateful (Postgres),
+so never a default.
+
+### 5. Lower priority, speculative
+
+- **Preload.** A `planned` list that stages downloads and builds without
+  activating. Nodes have no "stage only" notion; it needs a marker in `dynamics`
+  first.
+- **Document expiry.** An `expires` timestamp so a host reports
+  `document-expired` (a visible fact, not a decision) if the registry has been
+  unreachable past it. It fits "nothing decides a host is dead".
+
+### Not for us
+
+Image-based immutability, whole-filesystem scanning, and a central controller
+that holds global fleet state. Ours is host-reported and eventually consistent,
+which is what "What this does not solve" already says.
 
 ## Non-goals (v1)
 
