@@ -310,6 +310,10 @@ insufficient for some concrete case.
   need to bind low ports (`CAP_NET_BIND_SERVICE`) if configured to listen
   below 1024 — `appInstanceHardening`'s "drop all capabilities" sketch
   above needs per-recipe review, not a single one-size-fits-all profile.
+  **Decided (owner, 2026-09-26):** hardening profiles are data per recipe,
+  starting from no capabilities and adding only what is needed: Nginx gets
+  `CAP_NET_BIND_SERVICE` for low ports; PgBouncer and Postgrest get none unless a
+  test shows otherwise. This replaces the one-size sketch.
 - **Detecting bwrap availability / unprivileged userns support**: some
   hardened kernels (grsecurity-influenced sysctls, some container hosts)
   disable unprivileged `CLONE_NEWUSER`. Should `Bwrap`'s `Op` have a
