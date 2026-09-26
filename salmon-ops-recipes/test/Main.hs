@@ -1,5 +1,6 @@
 module Main (main) where
 
+import qualified Test.AptRepositorySpec as AptRepositorySpec
 import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
@@ -94,6 +95,7 @@ main =
             , ConcurrentSpec.tests
             , DaemonSpec.tests
             , DagSpec.tests
+            , AptRepositorySpec.tests
             , DebianPackageSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests

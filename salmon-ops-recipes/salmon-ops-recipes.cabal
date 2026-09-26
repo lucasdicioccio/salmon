@@ -89,6 +89,7 @@ test-suite salmon-ops-recipes-test
     other-modules:    Test.Harness
                     , Test.CheckSpec
                     , Test.ClientModelSpec
+                    , Test.AptRepositorySpec
                     , Test.DebianPackageSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
