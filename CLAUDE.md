@@ -535,6 +535,19 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
   pinning exactly that certificate. Not done: client certificates, a read-only token.
+  **`GET /openapi.json`** answers `salmon-ops/openapi/serve-api.openapi.json`, an OpenAPI 3.1 description of
+  every route above, embedded at build time (`Http.openApiDocument`, so a server describes itself with the
+  file its build was checked against). It is **hand-written, with a drift test rather than a generator**
+  (`salmon-ops` stays light; the validator lives in the test suite as `Test/ServeApi.hs` and understands only
+  the keywords the document uses, a new one failing `unsupportedKeywords`). The report union is a `oneOf` of
+  one schema per `(stream, kind)`, and the checking is strict, an undeclared field being an error:
+  `Test/ServeApiSpec.hs` validates every `Test/ReportJsonSpec.hs` golden as a report and as an event's `data:`,
+  compares the `(stream, kind)` set both ways, and compares the routes in `Http.hs`'s source with the
+  document's operations both ways; `ServeHttpSpec` and `ServeEventsSpec` validate every JSON response and
+  every SSE event they read against the schema of that operation and status. So a new report constructor,
+  a renamed field or a new route fails a test. The seed words of `POST /command` are binary-specific and the
+  document says so instead of enumerating them; the event stream is described by `EventData` and prose, not
+  AsyncAPI. Operations marked `x-tcp-only` are answered by the TCP listener's middleware only.
   **`Actions/Serve/Events.hs`** is milestone 4, `GET /events`: one numbered, replayable record
   of every report, as server-sent events (`id: N` / `data: {…}`, the `Tagged` object with `seq`
   added and `origin` — the object `history` entries use — when the report was stamped for a

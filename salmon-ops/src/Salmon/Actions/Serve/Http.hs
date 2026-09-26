@@ -179,6 +179,9 @@ module Salmon.Actions.Serve.Http (
     -- * The command body
     renderStructured,
 
+    -- * The machine-readable description of this API
+    openApiDocument,
+
     -- * The read model
     WorldView (..),
     viewWorld,
@@ -195,7 +198,7 @@ import Control.Monad (forM_, join, unless, void, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Crypto.Random as Random
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.:?), (.=))
-import Data.FileEmbed (embedDir, makeRelativeToProject)
+import Data.FileEmbed (embedDir, embedFile, makeRelativeToProject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bits (xor, (.&.), (.|.))
@@ -988,12 +991,14 @@ application server req respond =
         ("POST", ["command"]) -> command >>= respond
         ("GET", ["events"]) -> events
         ("GET", []) -> respond (static "index.html")
+        ("GET", ["openapi.json"]) -> respond (Wai.responseLBS HTTP.status200 [(HTTP.hContentType, "application/json")] (LByteString.fromStrict openApiDocument))
         -- over TCP 'requireToken' answers this; anywhere else there is nothing to log into
         ("GET", ["auth"]) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/")] "")
         ("POST", ["auth", "logout"]) -> respond (Wai.responseLBS HTTP.status303 [(HTTP.hLocation, "/")] "")
         ("GET", ["auth", "session"]) -> respond (json HTTP.status200 (object ["session" .= False]))
         ("GET", ("ui" : rest)) -> respond (static (Text.unpack (Text.intercalate "/" rest)))
         (_, ["events"]) -> respond (methodNotAllowed ["GET"])
+        (_, ["openapi.json"]) -> respond (methodNotAllowed ["GET"])
         (_, ["dag"]) -> respond (methodNotAllowed ["GET"])
         (_, ["status"]) -> respond (methodNotAllowed ["GET"])
         (_, ["history"]) -> respond (methodNotAllowed ["GET"])
@@ -1160,6 +1165,14 @@ the page itself.
 -}
 uiFiles :: [(FilePath, ByteString.ByteString)]
 uiFiles = $(makeRelativeToProject "ui" >>= embedDir)
+
+{- | @openapi\/serve-api.openapi.json@, read at compile time: the machine-readable
+description of this module's routes, answered at @GET \/openapi.json@. Embedded
+so that what a server says about itself is the file its own build was checked
+against ("Test.ServeApiSpec").
+-}
+openApiDocument :: ByteString.ByteString
+openApiDocument = $(makeRelativeToProject "openapi/serve-api.openapi.json" >>= embedFile)
 
 {- | One embedded file, or the same @404@ an unknown route gets — the set is
 closed at compile time, so there is nothing to look up on disk.

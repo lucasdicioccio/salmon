@@ -7,6 +7,7 @@ import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
+import qualified Test.ServeApiSpec as ServeApiSpec
 import qualified Test.PgVectorSpec as PgVectorSpec
 import qualified Test.PlakarSpec as PlakarSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
@@ -100,6 +101,7 @@ main =
             , DagSpec.tests
             , AptRepositorySpec.tests
             , DebianPackageSpec.tests
+            , ServeApiSpec.tests
             , PgVectorSpec.tests
             , PlakarSpec.tests
             , WireGuardSpec.tests

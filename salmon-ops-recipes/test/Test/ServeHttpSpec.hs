@@ -53,6 +53,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 import qualified Salmon.Actions.Help as Help
+import qualified Test.ServeApi as Api
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.Serve.Http as Http
@@ -78,6 +79,7 @@ tests =
         , testCase "a structured body renders to a line that tokenizes back to its seed" structuredRoundTrips
         , testCase "reads answer while the loop is inside a long up" readsDuringLongUp
         , testCase "/help/seed, /history and the error responses" theOtherReads
+        , testCase "GET /openapi.json is the embedded document, and every route it documents answers" openApiServed
         , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
         , testCase "GET / is the web UI's page, /ui/* its files, and a missing one is 404" theWebUi
         , testCase "two seeds colliding on one ref: /dag carries the kept and replaced pair while both are wanted" conflictingPairOnDag
@@ -268,7 +270,15 @@ exchange running req = do
         Just resp ->
             case eitherDecode (HTTP.responseBody resp) of
                 Left err -> assertFailure ("not JSON: " <> err <> ": " <> LChar8.unpack (HTTP.responseBody resp))
-                Right v -> pure (HTTP.statusCode (HTTP.responseStatus resp), v)
+                Right v -> do
+                    let status = HTTP.statusCode (HTTP.responseStatus resp)
+                    -- every JSON answer this spec gets is also checked against
+                    -- the schema the OpenAPI document gives that operation and status
+                    assertEqual
+                        ("schema errors in " <> show (HTTP.method req) <> " " <> show (HTTP.path req) <> " -> " <> show status)
+                        []
+                        (Api.validateResponse (HTTP.method req) (HTTP.path req) status v)
+                    pure (status, v)
 
 -- | A synchronous command: the kinds of the reports it answered with.
 sync :: Running -> String -> IO [Text]
@@ -680,3 +690,23 @@ dagCarriesMode = do
         assertEqual "/status moved with it" (Just "following") (textAt ["mode"] st')
         _ <- finish running
         pure ()
+
+{- | @GET \/openapi.json@ answers the very bytes the binary embeds, and every
+operation the document describes is one the loop answers (anything but the
+@404@ of an unknown route). The other direction — a route in the code the
+document does not describe — is "Test.ServeApiSpec"'s source comparison.
+-}
+openApiServed :: IO ()
+openApiServed =
+    withRunning $ \running -> do
+        (code, ctype, body) <- getRaw running "/openapi.json"
+        assertEqual "status" 200 code
+        assertEqual "content type" (Just "application/json") ctype
+        assertEqual "the embedded document" (LChar8.fromStrict Http.openApiDocument) body
+        forM_ Api.unixRoutes $ \(method, template) -> do
+            let route = Text.unpack (Text.replace "{file}" "ui.js" template)
+            req0 <- HTTP.parseRequest ("http://salmon" <> route)
+            let req = req0{HTTP.method = LChar8.toStrict (LChar8.pack (Text.unpack method))}
+            -- the status line only: /events never ends
+            status <- HTTP.withResponse req (runningManager running) (pure . HTTP.statusCode . HTTP.responseStatus)
+            assertBool (Text.unpack method <> " " <> route <> " is documented but answers 404") (status /= 404)
