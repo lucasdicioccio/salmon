@@ -195,7 +195,8 @@ data ControlPlaneSeed
 -- ControlPlane/Spec.hs — FromJSON/ToJSON directive, output of `config`
 data ControlPlaneSpec
     = ControlPlaneSpec
-    { cps_pair :: Pair               -- SreBox.PostgresPair, or a Patroni cluster
+    { cps_pair :: Pair               -- a Patroni cluster for anything serving real traffic;
+                                     -- SreBox.PostgresPair only for test/disaster/low-SLA use
     , cps_bouncers :: [PgBouncer.BouncerConfig]
     , cps_app_instances :: [AppInstanceSetup]     -- mirrors PostgrestSetup
     , cps_postgrest :: [PostgrestSetup]
@@ -251,9 +252,17 @@ Two independently-shippable pieces, not one:
 
 ## Open questions
 
-- **Which database tier per deployment tier**: does the shared tier run on
-  `pg-switchover.md` and only the dedicated tier on `pg-patroni.md`, or does
-  everything that serves real traffic go to Patroni?
+- **Which database tier per deployment tier (decided, owner, 2026-09-26):**
+  everything that serves real traffic runs on `pg-patroni.md`, whatever its
+  sizing tier: an operator should not have to notice an outage, so Patroni decides
+  where the primary is, and the primary's location never appears in a directive.
+  `pg-switchover.md`'s pair stays what its own spec says it is: the tier for test
+  harnesses, disaster scenarios and low-SLA services, where a declared primary is
+  the point. Consequences: `cps_pair` holds a Patroni cluster (plus its routed
+  endpoint) for a real deployment and a `Pair` only for those other uses, so the
+  seed needs both variants; every real deployment needs the third, small etcd
+  machine (two machines cannot form a quorum); and the control plane's real path
+  waits on the Patroni work (`pg-patroni.md`) rather than on the pair.
 - **Monitoring stack**: Prometheus + node_exporter + something for alerts
   (Alertmanager? a hosted service?) — needs a decision before §5 can be
   more than a stub.
