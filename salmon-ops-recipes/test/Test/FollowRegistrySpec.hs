@@ -511,7 +511,7 @@ verifyHook =
             cache = root </> "cache"
             -- a verifier that refuses any document mentioning the seed `evil`
             refusing :: Follow.Verifier
-            refusing _ bytes
+            refusing _ _ bytes
                 | "evil" `Text.isInfixOf` Text.decodeUtf8Lenient (LByteString.toStrict bytes) = pure (Left "mentions evil")
                 | otherwise = pure (Right bytes)
             knobs = Knobs (Just cache) refusing

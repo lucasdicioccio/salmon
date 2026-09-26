@@ -304,9 +304,13 @@ handed without also handing it the power to sign, and `Keys.jwkKey` is the
 one public-key format already written by the tree; the signature is EdDSA
 over Ed25519 through `jose`, not a JWS.
 
-*Known gap* (found reading the code against Dominator's trust zones): a
-signature is not bound to a label, and the key set is global. See "Considered:
-ideas from Dominator", item 1 (feature `66dbf803`).
+*Closed* (feature `66dbf803`; the gap was found reading the code against
+Dominator's trust zones): a signature is bound to a label, and a key may be
+bound to labels. The signed document carries a top-level `label`, the verifier
+is told the label it is looking at and refuses a mismatch naming both, and
+`--follow-key LABEL=FILE` makes a key speak for that label only. See
+"Considered: ideas from Dominator", item 1, and CLAUDE.md's "Signature.hs"
+paragraph.
 
 ### Bootstrap is the existing push pattern, once
 

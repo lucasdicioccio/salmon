@@ -14,6 +14,7 @@ module Test.FollowSignatureSpec (tests) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
+import Control.Monad (forM_)
 import Control.Concurrent.STM (TChan, atomically, newTChanIO, readTChan, writeTChan)
 import Control.Exception (SomeException, throwIO, try)
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecode, encode)
@@ -66,6 +67,17 @@ tests =
             , testCase "no signatures, an envelope that does not parse, `none`, and a key file that is not one: each refused with its reason" refusals
             , testCase "the key id is the public key's SHA-256 thumbprint, the same from either half of the pair" keyIds
             ]
+        , testGroup
+            "Layer 0: a signature is worth something only at the address it was signed for"
+            [ testCase "a document signed for canary is refused at prod, naming both labels; at canary it is accepted" labelMismatch
+            , testCase "a key bound to canary does not verify a prod document, and the reason says the key may not speak there" keyBoundToLabel
+            , testCase "a bare key speaks for any label; a key bound to two labels speaks for both" bareAndMultiKeys
+            , testCase "a signed document naming no label is refused by default, and accepted under the migration policy" legacyUnlabelled
+            , testCase "the label is inside what is signed: rewriting it in the envelope breaks the signature" labelIsSigned
+            , testCase "signing refuses a document that already names another label, and keeps the same one" signRefusesOtherLabel
+            , testCase "--follow-key arguments: FILE, LABEL=FILE, and a path containing an = stays a path" keySpecs
+            ]
+        , testCase "Layer 1: a document validly signed for canary and planted at prod's address is refused, at fetch and on cache replay, and never applied" plantedAtOtherLabel
         , testCase "Layer 1: a signed document is applied through a directory registry; a tampered one is refused and never cached; the cache replays through the verifier, and a swapped key refuses it" followingSigned
         ]
 
@@ -86,6 +98,16 @@ sign :: Signature.PrivateKey -> ByteString -> IO ByteString
 sign key bytes = do
     signed <- Signature.signDocument key bytes
     either (assertFailure . ("signing failed: " <>) . Text.unpack) pure signed
+
+-- | Signed for a label: the document names it, inside what is signed.
+signFor :: Signature.PrivateKey -> Text -> ByteString -> IO ByteString
+signFor key lbl bytes = do
+    signed <- Signature.signDocumentFor key (Just (label lbl)) bytes
+    either (assertFailure . ("signing failed: " <>) . Text.unpack) pure signed
+
+-- | Every key speaks for every label; unlabelled documents refused.
+anyLabel :: [Signature.PublicKey] -> [Signature.TrustedKey]
+anyLabel = fmap Signature.trustsAnyLabel
 
 -- | Rewrite the @document@ member of an envelope, keeping everything else.
 withDocument :: (Value -> Value) -> ByteString -> ByteString
@@ -366,9 +388,9 @@ followingSigned =
         let web = label "web"
             reg = root </> "reg"
             cache = root </> "cache"
-            verifier = Signature.signedVerifier [Signature.publicKey key]
+            verifier = Signature.signedVerifier Signature.RefuseUnlabelled (anyLabel [Signature.publicKey key])
             publish bytes = createDirectoryIfMissing True reg >> LByteString.writeFile (Follow.documentPath reg web) bytes
-        good <- sign key (document "web@1" [["a"]])
+        good <- signFor key "web" (document "web@1" [["a"]])
         let evil = withDocument (retitle "web@evil") good
         publish good
         (w, _, freports, good2) <- withFollowing root reg verifier [web] $ \d -> do
@@ -382,7 +404,7 @@ followingSigned =
             cached <- Follow.readCacheEntry cache web
             assertEqual "the cache still holds the signed document, envelope and all" (Right (Just ("web@1", Follow.digestOf good, good))) (fmap (fmap (\c -> (c.cachedId, c.cachedDigest, c.cachedBytes))) cached)
             -- and a good document again is applied on top
-            good2 <- sign key (document "web@2" [["a"], ["b"]])
+            good2 <- signFor key "web" (document "web@2" [["a"], ["b"]])
             publish good2
             waitFor "the next file" (fileExists root "b")
             pure good2
@@ -406,7 +428,7 @@ followingSigned =
         assertBool "the replayed world converged" (allConvergedUp w2)
         -- the host's key is swapped: the same cache entry is refused on replay
         renameDirectory (root </> "files") (root </> "files.away2")
-        (_, sreports3, freports3, ()) <- withFollowing root reg (Signature.signedVerifier [Signature.publicKey other]) [web] $ \d -> do
+        (_, sreports3, freports3, ()) <- withFollowing root reg (Signature.signedVerifier Signature.RefuseUnlabelled (anyLabel [Signature.publicKey other])) [web] $ \d -> do
             waitFor "the refusal" (not . null . rejections <$> d.followReports)
             threadDelay (2 * interval)
         assertEqual "nothing replayed" [] [() | Follow.Replayed{} <- freports3]
@@ -418,3 +440,139 @@ followingSigned =
                 assertBool ("the refusal names the unknown key: " <> Text.unpack why) ("names no configured key" `Text.isInfixOf` why)
                 assertEqual "the refusal names the cache entry's digest, the last good envelope's" (Follow.digestOf good2) dg
             rs -> assertFailure ("expected exactly one refusal, got " <> show rs)
+
+-------------------------------------------------------------------------------
+-- labels
+
+verdictFor :: Signature.Legacy -> [Signature.TrustedKey] -> Text -> ByteString -> Either Text ByteString
+verdictFor legacy keys lbl = Signature.verifyEnvelopeFor legacy keys (label lbl)
+
+labelMismatch :: IO ()
+labelMismatch = do
+    key <- Signature.generateKeyPair
+    let keys = anyLabel [Signature.publicKey key]
+    canary <- signFor key "canary" (document "web@1" [["a"]])
+    assertBool "accepted at the label it was signed for" (either (const False) (const True) (verdictFor Signature.RefuseUnlabelled keys "canary" canary))
+    case verdictFor Signature.RefuseUnlabelled keys "prod" canary of
+        Right _ -> assertFailure "a canary document was accepted at prod"
+        Left why -> do
+            assertBool ("names the label it was signed for: " <> Text.unpack why) ("signed for label canary" `Text.isInfixOf` why)
+            assertBool ("names the label it was fetched for: " <> Text.unpack why) ("fetched for label prod" `Text.isInfixOf` why)
+
+keyBoundToLabel :: IO ()
+keyBoundToLabel = do
+    canaryKey <- Signature.generateKeyPair
+    prodKey <- Signature.generateKeyPair
+    let keys =
+            [ Signature.trustsOnly (label "canary") (Signature.publicKey canaryKey)
+            , Signature.trustsOnly (label "prod") (Signature.publicKey prodKey)
+            ]
+    fromCanaryKey <- signFor canaryKey "prod" (document "web@1" [["a"]])
+    -- the document even names prod, but the key that signed it may not speak there
+    expectLeft "canary's key at prod" "may not speak for label prod" (verdictFor Signature.RefuseUnlabelled keys "prod" fromCanaryKey)
+    fromProdKey <- signFor prodKey "prod" (document "web@1" [["a"]])
+    assertBool "prod's key at prod" (either (const False) (const True) (verdictFor Signature.RefuseUnlabelled keys "prod" fromProdKey))
+    expectLeft "a label no key speaks for" "no signing key" (verdictFor Signature.RefuseUnlabelled keys "staging" fromProdKey)
+
+bareAndMultiKeys :: IO ()
+bareAndMultiKeys = do
+    bare <- Signature.generateKeyPair
+    two <- Signature.generateKeyPair
+    let keys =
+            [ Signature.trustsAnyLabel (Signature.publicKey bare)
+            , Signature.TrustedKey (Signature.publicKey two) (Just [label "a", label "b"])
+            ]
+    forM_ ["a", "b", "c"] $ \l -> do
+        d <- signFor bare l (document "web@1" [["x"]])
+        assertBool ("bare key at " <> Text.unpack l) (either (const False) (const True) (verdictFor Signature.RefuseUnlabelled keys l d))
+    forM_ ["a", "b"] $ \l -> do
+        d <- signFor two l (document "web@1" [["x"]])
+        assertBool ("two-label key at " <> Text.unpack l) (either (const False) (const True) (verdictFor Signature.RefuseUnlabelled keys l d))
+    dc <- signFor two "c" (document "web@1" [["x"]])
+    expectLeft "two-label key at c" "may not speak for label c" (verdictFor Signature.RefuseUnlabelled keys "c" dc)
+
+legacyUnlabelled :: IO ()
+legacyUnlabelled = do
+    key <- Signature.generateKeyPair
+    let keys = anyLabel [Signature.publicKey key]
+    old <- sign key (document "web@1" [["a"]])
+    expectLeft "unlabelled, by default" "names no label" (verdictFor Signature.RefuseUnlabelled keys "prod" old)
+    expectLeft "and the reason says how to migrate" "--follow-accept-unlabelled" (verdictFor Signature.RefuseUnlabelled keys "prod" old)
+    assertBool "accepted under the migration policy" (either (const False) (const True) (verdictFor Signature.AcceptUnlabelled keys "prod" old))
+    -- the flag does not weaken a document that does name a label
+    canary <- signFor key "canary" (document "web@1" [["a"]])
+    expectLeft "a mismatch under the migration policy" "signed for label canary" (verdictFor Signature.AcceptUnlabelled keys "prod" canary)
+
+labelIsSigned :: IO ()
+labelIsSigned = do
+    key <- Signature.generateKeyPair
+    let keys = anyLabel [Signature.publicKey key]
+    canary <- signFor key "canary" (document "web@1" [["a"]])
+    -- what a registry that can write but not sign would try: relabel the document
+    let relabelled = withDocument (\v -> case v of Object o -> Object (KeyMap.insert "label" (String "prod") o); other -> other) canary
+    expectLeft "relabelled in the envelope" "does not verify" (verdictFor Signature.RefuseUnlabelled keys "prod" relabelled)
+
+signRefusesOtherLabel :: IO ()
+signRefusesOtherLabel = do
+    key <- Signature.generateKeyPair
+    canary <- signFor key "canary" (document "web@1" [["a"]])
+    -- sign the labelled document's own bytes again for another label
+    let inner = case eitherDecode canary of
+            Right (Object o) | Just d <- KeyMap.lookup "document" o -> encode d
+            _ -> error "not an envelope"
+    refused <- Signature.signDocumentFor key (Just (label "prod")) inner
+    case refused of
+        Left why -> assertBool ("names both: " <> Text.unpack why) ("prod" `Text.isInfixOf` why)
+        Right _ -> assertFailure "re-signed a canary document for prod"
+    same <- Signature.signDocumentFor key (Just (label "canary")) inner
+    assertBool "the same label is fine" (either (const False) (const True) same)
+
+keySpecs :: IO ()
+keySpecs = do
+    assertEqual "bare" (Right (Nothing, "keys/a.pub")) (Signature.parseKeySpec "keys/a.pub")
+    assertEqual "labelled" (Right (Just (label "canary"), "keys/a.pub")) (Signature.parseKeySpec "canary=keys/a.pub")
+    assertEqual "a path containing = stays a path" (Right (Nothing, "keys/a=b.pub")) (Signature.parseKeySpec "keys/a=b.pub")
+    assertBool "a bad label is refused" (either (const True) (const False) (Signature.parseKeySpec "bad label=keys/a.pub"))
+
+-- | The attack, end to end: a document validly signed for `canary` is copied
+-- to `prod`'s address. Refused as fetched, and refused again when it sits in
+-- the cache and is replayed; nothing is declared and nothing is built.
+plantedAtOtherLabel :: IO ()
+plantedAtOtherLabel =
+    withTempDir $ \root -> do
+        key <- Signature.generateKeyPair
+        let prod = label "prod"
+            reg = root </> "reg"
+            cache = root </> "cache"
+            verifier = Signature.signedVerifier Signature.RefuseUnlabelled (anyLabel [Signature.publicKey key])
+            publish bytes = createDirectoryIfMissing True reg >> LByteString.writeFile (Follow.documentPath reg prod) bytes
+        forCanary <- signFor key "canary" (document "canary@1" [["a"]])
+        publish forCanary
+        (_, sreports, freports, ()) <- withFollowing root reg verifier [prod] $ \d -> do
+            waitFor "the refusal" (not . null . rejections <$> d.followReports)
+            threadDelay (2 * interval)
+        assertEqual "nothing declared" [] [() | Serve.Declared{} <- sreports]
+        present <- fileExists root "a"
+        assertBool "nothing built" (not present)
+        case rejections freports of
+            [(dg, why)] -> do
+                assertEqual "it names the envelope's digest" (Follow.digestOf forCanary) dg
+                assertBool ("naming both labels: " <> Text.unpack why) ("signed for label canary" `Text.isInfixOf` why && "fetched for label prod" `Text.isInfixOf` why)
+            rs -> assertFailure ("expected exactly one refusal, got " <> show rs)
+        -- the same bytes as a cache entry for prod, read back through the same verifier
+        forProd <- signFor key "prod" (document "prod@1" [["b"]])
+        publish forProd
+        (_, _, freports2, ()) <- withFollowing root reg verifier [prod] $ \_ ->
+            waitFor "the file" (fileExists root "b")
+        assertEqual "the properly labelled document is applied" ["prod@1"] [did | Follow.Injected _ did _ _ _ <- freports2]
+        -- now plant the canary envelope as prod's cache entry, with the registry gone
+        renameDirectory reg (reg <> ".away")
+        renameDirectory (root </> "files") (root </> "files.away")
+        Follow.writeCache cache prod (Follow.Cached "canary@1" (Follow.digestOf forCanary) forCanary)
+        (_, sreports3, freports3, ()) <- withFollowing root reg verifier [prod] $ \d -> do
+            waitFor "the refusal on replay" (not . null . rejections <$> d.followReports)
+            threadDelay (2 * interval)
+        assertEqual "nothing replayed" [] [() | Follow.Replayed{} <- freports3]
+        assertEqual "nothing declared on replay" [] [() | Serve.Declared{} <- sreports3]
+        present2 <- fileExists root "b"
+        assertBool "nothing rebuilt from the planted cache entry" (not present2)

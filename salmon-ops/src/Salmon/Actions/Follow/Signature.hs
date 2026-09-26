@@ -53,6 +53,25 @@ every key it names, any one that verifies accepts. What is refused, and
 with what reason: a plain unsigned document (there is a key, so it is
 required), an envelope that does not parse, one with no signatures, and
 one whose signatures all fail — the reason names which.
+
+__A signature is worth something only at the address it was signed for.__ A
+registry that can be written to but not signed for could otherwise copy a
+validly signed @canary@ document to @prod@'s address, and every host following
+@prod@ would apply it (the cache, read back through the same verifier, is
+exposed the same way). So the verifier is told the label it is looking at
+('Salmon.Actions.Follow.Verifier') and holds two rules:
+
+* the __document names its label__: a top-level @label@ member of the
+  document, so the signature (which is over the document's canonical bytes)
+  covers it, where a label kept beside the signatures would not be signed at
+  all. A document whose @label@ is not the one it was fetched for is refused,
+  the reason naming both. @salmon-fleet sign --label L@ writes it.
+* a __key may speak for some labels only__ ('TrustedKey'): a key given as
+  @--follow-key LABEL=FILE@ verifies documents for that label and no other;
+  a bare @--follow-key FILE@ keeps meaning any label.
+
+A signed document with no @label@ (signed before this) is refused unless the
+'AcceptUnlabelled' migration policy is on, which is @--follow-accept-unlabelled@.
 -}
 module Salmon.Actions.Follow.Signature (
     -- * Keys
@@ -72,9 +91,17 @@ module Salmon.Actions.Follow.Signature (
     Envelope (..),
     Signature (..),
 
+    signDocumentFor,
+
     -- * The verifier
+    TrustedKey (..),
+    trustsAnyLabel,
+    trustsOnly,
+    Legacy (..),
+    parseKeySpec,
     signedVerifier,
     verifyEnvelope,
+    verifyEnvelopeFor,
 ) where
 
 import Control.Exception (SomeException, try)
@@ -97,7 +124,7 @@ import qualified Crypto.JOSE.JWA.JWS as JWS
 import Crypto.JOSE.JWK (JWK)
 import qualified Crypto.JOSE.JWK as JWK
 
-import Salmon.Actions.Follow (Digest, Verifier)
+import Salmon.Actions.Follow (Label, Verifier, labelText, mkLabel)
 
 -------------------------------------------------------------------------------
 -- keys
@@ -234,10 +261,23 @@ signed (not JSON, not an object, a key that signs nothing), or the
 envelope's bytes. The document is kept as parsed, so a publisher's
 annotations survive; what is signed is its canonical form. -}
 signDocument :: PrivateKey -> ByteString -> IO (Either Text ByteString)
-signDocument key@(PrivateKey k) bytes =
+signDocument key = signDocumentFor key Nothing
+
+{- | 'signDocument' for a document that names the label it is for: the
+@label@ member is put into the document before it is signed, so the
+signature covers it. A document that already names a different label is not
+signed (a mistake worth stopping on); one that names the same is left as it
+is. -}
+signDocumentFor :: PrivateKey -> Maybe Label -> ByteString -> IO (Either Text ByteString)
+signDocumentFor key@(PrivateKey k) mlabel bytes =
     case eitherDecode bytes of
         Left err -> pure (Left ("the document is not JSON: " <> Text.pack err))
-        Right doc@(Object _) -> do
+        Right (Object o0) | Just lbl <- mlabel, Just existing <- KeyMap.lookup "label" o0, existing /= String (labelText lbl) ->
+            pure (Left ("the document already names " <> Text.pack (show existing) <> " as its label, not " <> labelText lbl))
+        Right (Object o0) -> signObject (Object (maybe o0 (\lbl -> KeyMap.insert "label" (String (labelText lbl)) o0) mlabel))
+        Right _ -> pure (Left "the document is not a JSON object")
+  where
+    signObject doc = do
             outcome <- JOSE.runJOSE $ do
                 alg <- JWK.bestJWSAlg k
                 sig <- JWK.sign alg (view JWK.jwkMaterial k) (LByteString.toStrict (canonicalBytes doc))
@@ -246,7 +286,6 @@ signDocument key@(PrivateKey k) bytes =
                 Left (err :: JOSE.Error) -> Left ("cannot sign with this key: " <> Text.pack (show err))
                 Right (alg, sig) ->
                     Right (encode (Envelope doc [Signature (keyId (publicKey key)) alg sig]) <> "\n")
-        Right _ -> pure (Left "the document is not a JSON object")
 
 -------------------------------------------------------------------------------
 -- the verifier
@@ -254,12 +293,91 @@ signDocument key@(PrivateKey k) bytes =
 {- | Refuse everything but an envelope one of these keys signed, and hand
 the loop the document inside it. 'Right' is the inner document's canonical
 bytes; the digest handed in is only for the reasons' sake. -}
-signedVerifier :: [PublicKey] -> Verifier
-signedVerifier keys _ bytes = pure (verifyEnvelope keys bytes)
+signedVerifier :: Legacy -> [TrustedKey] -> Verifier
+signedVerifier legacy keys lbl _ bytes = pure (verifyEnvelopeFor legacy keys lbl bytes)
 
--- | 'signedVerifier', pure.
+{- | A @--follow-key@ argument: @FILE@, or @LABEL=FILE@ for a key that speaks
+for that label only. Something is a label only if what precedes the first
+@=@ has no @/@ and is a valid label, so a path that happens to contain an
+@=@ stays a path. -}
+parseKeySpec :: Text -> Either Text (Maybe Label, FilePath)
+parseKeySpec spec = case Text.breakOn "=" spec of
+    (l, r)
+        | not (Text.null r), not (Text.null l), not (Text.any (== '/') l) -> do
+            lbl <- mkLabel l
+            pure (Just lbl, Text.unpack (Text.drop 1 r))
+    _ -> Right (Nothing, Text.unpack spec)
+
+-- | A public key, and the labels it may speak for.
+data TrustedKey = TrustedKey
+    { trustedKey :: !PublicKey
+    , trustedLabels :: !(Maybe [Label])
+    -- ^ 'Nothing': any label. 'Just': these labels and no others.
+    }
+    deriving (Show, Eq)
+
+-- | A key that verifies documents for every label.
+trustsAnyLabel :: PublicKey -> TrustedKey
+trustsAnyLabel k = TrustedKey k Nothing
+
+-- | A key that verifies documents for one label only.
+trustsOnly :: Label -> PublicKey -> TrustedKey
+trustsOnly l k = TrustedKey k (Just [l])
+
+speaksFor :: Label -> TrustedKey -> Bool
+speaksFor l t = maybe True (l `elem`) t.trustedLabels
+
+-- | What to do with a signed document that names no label: one signed before
+-- documents named theirs.
+data Legacy
+    = -- | refuse it (the default)
+      RefuseUnlabelled
+    | -- | accept it, the migration flag
+      AcceptUnlabelled
+    deriving (Show, Eq)
+
+{- | 'signedVerifier', pure: the signature is checked against the keys that
+may speak for this label, then the document's own @label@ against the label
+it was fetched for. -}
+verifyEnvelopeFor :: Legacy -> [TrustedKey] -> Label -> ByteString -> Either Text ByteString
+verifyEnvelopeFor legacy keys lbl bytes = do
+    let here = [trustedKey t | t <- keys, speaksFor lbl t]
+        elsewhere = [trustedKey t | t <- keys, not (speaksFor lbl t)]
+    doc <- case verifiedDocument here bytes of
+        Right d -> Right d
+        Left why -> Left (why <> notTrustedHere elsewhere)
+    case doc of
+        Object o -> case KeyMap.lookup "label" o of
+            Just (String t)
+                | t == labelText lbl -> Right (canonicalBytes doc)
+                | otherwise ->
+                    Left ("the document is signed for label " <> t <> " but was fetched for label " <> labelText lbl <> ": refusing to apply one label's document at another's address")
+            Just other -> Left ("the document's label is not a string: " <> Text.pack (show other))
+            Nothing -> case legacy of
+                AcceptUnlabelled -> Right (canonicalBytes doc)
+                RefuseUnlabelled ->
+                    Left ("the signed document names no label, so it could have been signed for any address (this one is " <> labelText lbl <> "); sign it again with `salmon-fleet sign --label " <> labelText lbl <> "`, or accept unlabelled documents while migrating with --follow-accept-unlabelled")
+        _ -> Left "the signed document is not a JSON object"
+  where
+    -- a signature by a key that exists but may not speak here says so,
+    -- rather than the vaguer "names no configured key"
+    notTrustedHere elsewhere = case [keyId k | k <- elsewhere, signedBy k] of
+        [] -> ""
+        ids -> " (signed by " <> Text.intercalate ", " (fmap short ids) <> ", which may not speak for label " <> labelText lbl <> ")"
+    signedBy k = case eitherDecode bytes :: Either String Envelope of
+        Right env -> keyId k `elem` fmap sigKey env.envSignatures
+        Left _ -> False
+    short = Text.take 12
+
+-- | 'signedVerifier' for keys that each speak for every label, and a
+-- document that need not name one. The check that is only about the
+-- signature: what 'verifyEnvelopeFor' builds on.
 verifyEnvelope :: [PublicKey] -> ByteString -> Either Text ByteString
-verifyEnvelope keys bytes =
+verifyEnvelope keys bytes = canonicalBytes <$> verifiedDocument keys bytes
+
+-- | The document inside an envelope one of these keys signed.
+verifiedDocument :: [PublicKey] -> ByteString -> Either Text Value
+verifiedDocument keys bytes =
     case eitherDecode bytes :: Either String Value of
         Left err -> Left ("not a signed envelope, not even JSON: " <> Text.pack err)
         Right (Object o)
@@ -274,7 +392,7 @@ verifyEnvelope keys bytes =
                     let signed = LByteString.toStrict (canonicalBytes env.envDocument)
                         verdicts = [check signed key sig | sig <- env.envSignatures, key <- keys]
                      in if or (rights verdicts)
-                            then Right (canonicalBytes env.envDocument)
+                            then Right env.envDocument
                             else
                                 Left $
                                     "no signature verifies against any of the "

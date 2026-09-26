@@ -276,6 +276,10 @@ data FollowOptions = FollowOptions
     , followWorkdir :: !(Maybe FilePath)
     , followBucketEndpoint :: !(Maybe Text)
     , followKeys :: ![FilePath]
+    -- ^ each @FILE@ (a key that speaks for any label) or @LABEL=FILE@ (one that
+    -- speaks for that label only)
+    , followAcceptUnlabelled :: !Bool
+    -- ^ the migration flag: accept a signed document that names no label
     }
     deriving (Eq, Ord, Generic, Show)
 
@@ -590,9 +594,13 @@ runCommandParser =
             <*> many
                 ( strOption
                     ( long "follow-key"
-                        <> Options.Applicative.metavar "FILE"
-                        <> Options.Applicative.help "A public key (JWK, as `salmon-fleet keygen` writes FILE.pub) every fetched or replayed document must carry a signature by; repeatable, any one suffices. Without it documents are not required to be signed (the default). With it, an unsigned document is refused and never applied."
+                        <> Options.Applicative.metavar "[LABEL=]FILE"
+                        <> Options.Applicative.help "A public key (JWK, as `salmon-fleet keygen` writes FILE.pub) every fetched or replayed document must carry a signature by; repeatable, any one suffices. LABEL=FILE makes the key speak for that label only (repeat the flag for more labels); a bare FILE speaks for any label. A signed document must also name the label it was fetched for (`salmon-fleet sign --label`). Without --follow-key documents are not required to be signed (the default). With it, an unsigned document is refused and never applied."
                     )
+                )
+            <*> switch
+                ( long "follow-accept-unlabelled"
+                    <> Options.Applicative.help "The migration flag: accept a signed document that names no label (signed before documents named theirs). Off by default; it lets a validly signed document be served at another label's address, so turn it off once documents are re-signed with --label."
                 )
     defaultSecs :: (Scheduler.Config -> Int) -> Int
     defaultSecs f = f Scheduler.defaultConfig `div` 1000000
@@ -816,12 +824,16 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         Right a -> pure a
                     -- a key that cannot be loaded must not start a loop that
                     -- would then refuse everything, or accept everything
-                    keys <- forM followOptions.followKeys $ \path -> do
+                    keys <- forM followOptions.followKeys $ \spec -> do
+                        (scope, path) <- case Signature.parseKeySpec (Text.pack spec) of
+                            Left err -> hPutStrLn stderr ("--follow-key " <> spec <> ": " <> Text.unpack err) >> exitFailure
+                            Right parsed -> pure parsed
                         loaded <- Signature.readPublicKeyFile path
                         case loaded of
                             Left err -> hPutStrLn stderr ("--follow-key " <> path <> ": " <> Text.unpack err) >> exitFailure
-                            Right k -> pure k
-                    let verifier = if null keys then Follow.noVerifier else Signature.signedVerifier keys
+                            Right k -> pure (maybe (Signature.trustsAnyLabel k) (\l -> Signature.trustsOnly l k) scope)
+                    let legacy = if followOptions.followAcceptUnlabelled then Signature.AcceptUnlabelled else Signature.RefuseUnlabelled
+                        verifier = if null keys then Follow.noVerifier else Signature.signedVerifier legacy keys
                     registry <-
                         Registry.open
                             Registry.defaultOptions
