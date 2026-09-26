@@ -254,6 +254,8 @@ Mirrors `run tree`'s indentation, annotating matched lines:
   refactor-resistant than path globs, but requires node authors to annotate
   their ops. Worth a v2 if path-glob addressing turns out too fragile once
   recipes change shape.
+  **Decided (owner, 2026-09-26):** not built. There is no evidence yet that path
+  globs are too fragile; globs and `#ref` stay the two addressing schemes.
 
 ## Future work
 
@@ -266,8 +268,17 @@ Mirrors `run tree`'s indentation, annotating matched lines:
   correctness argument (a truly-required predecessor outside the selection
   would need to be forced skippable, which is a much easier way to shoot
   yourself in the foot than the exclusion case).
+  **Decided (owner, 2026-09-26):** the CLI is `query plan --only`, represented in
+  the plan as explicit roots rather than an inverted exclusion set. The
+  correctness argument for breaking the "predecessor is a real dependency"
+  invariant is written in this spec, as its own section, before any code.
 - The same `Plan`/digest idea applied to `downTree`, once teardown gets a
   `prelim`-equivalent.
+  **Decided (owner, 2026-09-26):** `downTreeWith` already takes a `Gate`, so the
+  blocker is gone. A node excluded going down stays standing, so its
+  predecessors are **Blocked** (as with a failed `down`), since pulling out what
+  an excluded node still stands on is unsafe. One plan file serves both
+  directions, "excluded" meaning "do not touch".
 
 ## Deviations from this design
 
