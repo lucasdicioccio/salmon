@@ -308,13 +308,14 @@ daemonOp d =
         mconcat
             [ "cfg=$(cat "
             , d.daemonConf
-            , "); while true; do echo \"[pid $$] $cfg\" >> "
+            , "); while true; do echo \"[pid $$] $cfg\" | tee -a "
             , d.daemonLog
             , "; sleep 1; done"
             ]
 
     -- everything the daemon does /except/ repeat its own output back: the
-    -- process writes a line a second and the node's ring already has them.
+    -- process writes a line a second (to its log and, through @tee@, to its
+    -- stdout, which is what the node's ring and a live tail follow).
     chatter = reportIf notWrote reportPrint
     notWrote Daemon.Wrote{} = False
     notWrote _ = True

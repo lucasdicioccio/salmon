@@ -84,6 +84,7 @@ tests =
         , testGroup
             "a node that owns its effect"
             [ testCase "is Up for as long as its action runs" managedIsUpWhileRunning
+            , testCase "every line its action writes is reported as Output, in order" managedOutputIsReported
             , testCase "exiting cleanly is Completed, not a restart" managedCleanExitRests
             , testCase "exiting non-zero is restarted" managedFailureRestarts
             , testCase "Restart Never respects even a crash" managedNeverStaysDown
@@ -734,6 +735,26 @@ managedIsUpWhileRunning = within 10 $ do
         assertEqual "spawned once" 1 =<< spawnsSoFar spawns
         rs <- seen trace
         assertEqual "and reported Done, which is what lets serve converge it" ["svc"] [act.shorthand | Acted (UpDown.Done act) <- rs]
+        putMVar gate ()
+
+managedOutputIsReported :: IO ()
+managedOutputIsReported = within 10 $ do
+    gate <- newEmptyMVar
+    let o =
+            nodeOn "chatty" [] $ \x ->
+                x
+                    { managed = Just $ \out -> do
+                        out "one"
+                        out "two"
+                        takeMVar gate >> pure ExitSuccess
+                    }
+    supervising (dagOf o) allUp $ \_ trace -> do
+        await trace (\rs -> length [() | Output{} <- rs] >= 2)
+        rs <- seen trace
+        assertEqual
+            "the lines, attributed to the node, in the order written"
+            [("chatty", "one"), ("chatty", "two")]
+            [(act.shorthand, line) | Output act line <- rs]
         putMVar gate ()
 
 managedCleanExitRests :: IO ()

@@ -66,7 +66,7 @@ import qualified Salmon.Actions.Serve.Events as Events
 import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Actions.Upkeep as Upkeep
-import Salmon.Builtin.Extension (Track', check, deps, down, help, nodeps, op, ref, up)
+import Salmon.Builtin.Extension (Track', check, deps, down, help, nodeps, op, opAct, ref, up)
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
@@ -160,6 +160,16 @@ eventShape = do
         (Just ("server", "enqueued", Just 9, Just "test#1"))
         (shape (Events.eventValue queued))
     assertEqual "with the line" (Just "up n1") (textAt ["line"] (Events.eventValue queued))
+    -- a line of a node's output is its own stream, so `?stream=output` is a live tail
+    case opAct (op "tail-node" nodeps id) of
+        Nothing -> assertFailure "an op with an extension has an act"
+        Just act -> do
+            let line = Events.Event 10 Nothing (Events.Reported (Tagged.FromUpkeep (Upkeep.Output act "hello")))
+            assertEqual "an output line is on the output stream, with its text"
+                (Just ("output", "output", Just 10, Nothing))
+                (shape (Events.eventValue line))
+            assertEqual "with the line" (Just "hello") (textAt ["line"] (Events.eventValue line))
+            assertBool "and a ?stream=upkeep client does not get it" (not (Events.matches (Events.Filter (Just (Set.fromList ["upkeep"])) Nothing) line))
     -- and a Tended report is unwrapped by the reporter
     ev <- Events.newEvents Events.defaultConfig
     runReporter (Events.eventsReporter ev) (Attributed Nothing (Tagged.FromServe (Serve.Tended (Upkeep.Holding 1))))

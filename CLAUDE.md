@@ -573,12 +573,20 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   event landing between the two reads is replayed rather than skipped. `?since=N` replays what
   the ring still holds above `N` then continues live; if `N+1` has fallen off, the first event
   is a synthetic `{"kind":"gap","from":<oldest>,"stream":"server"}` with no `id`, never a
-  silent skip. `?stream=serve,updown,upkeep,follow,server` and `?origin=NAME` filter server-side
+  silent skip. `?stream=serve,updown,upkeep,output,follow,server` and `?origin=NAME` filter server-side
   (the spec's "clients filter" is right about who decides, wrong about who pays). A comment
   line every `configKeepAlive` (15s) of silence keeps proxies and read timeouts from dropping
   an idle stream; a client hanging up is a failed write, which ends the stream and its
   subscription; the loop ending sets `serverStopped`, on which every open stream returns so
-  warp's graceful shutdown is not held behind a subscriber. `Test/ServeEventsSpec.hs`: a
+  warp's graceful shutdown is not held behind a subscriber. `**`output` is the live tail**: each line a *held* action (`managed`) writes through its `Output`
+  callback is reported as `Upkeep.Output act line` — beside going into the node's ring, which stays the
+  bounded backlog `/dag`'s `status.output` seeds a late client from — and filed on its own `output`
+  stream (`{stream: "output", kind: "output", ref, line}`), so `?stream=output` is a tail and a client
+  that filters to `upkeep` never reads a line. Not printed as text on a terminal. The web UI's dock
+  (`ui.js`: `toggleTail`, `applyOutput`) pins up to four windows, remembers the pinned refs in
+  `localStorage`, seeds a window from the ring only while it is empty, and closes one whose node is
+  gone from the next `/dag`. Only held actions produce lines: a one-shot `up`'s narration is not output.
+  Test/ServeEventsSpec.hs`: a
   seeded (`SALMON_EVENTS_SEED`) mid-pass disconnect-and-`?since=` equals an uninterrupted
   subscription; strictly increasing numbers across the three streams with `supervise on` and
   a node whose `check` always fails; ring overflow; `?async` then `?since=`; snapshot `seq`;

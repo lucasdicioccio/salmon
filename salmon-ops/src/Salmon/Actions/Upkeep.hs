@@ -349,6 +349,11 @@ data Report ext
       Wedged !(Act ext) !Micros
     | -- | ...and moving again
       Unwedged !(Act ext)
+    | -- | one line a node's held action produced, as it went into the node's
+      -- output ring: what a live tail follows. Only lines from an action a
+      -- machine holds; the ring's own narration (@up@, @spawn@, ...) is not
+      -- output.
+      Output !(Act ext) !Text
     | -- | a dependency that declared 'Salmon.Op.Supervision.RestForOne' left
       -- 'Up', so this node went back to 'WaitUp' to be brought up again on
       -- top of whatever that dependency becomes
@@ -1139,7 +1144,7 @@ upkeep standing ctx =
         -- leaving the block is what cancels the action, so a restart is
         -- guaranteed to have torn the old effect down before the new
         -- attempt spawns.
-        next <- withAsync (action (note status)) $ \running -> do
+        next <- withAsync (action (\line -> note status line >> say (Output act line))) $ \running -> do
             -- Up as soon as it is running: for a node whose action is the
             -- effect, "the action is running" is the whole of being up. The
             -- report is 'Done' for the same reason, which is what lets
