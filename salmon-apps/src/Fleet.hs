@@ -29,12 +29,13 @@ import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
 import qualified Salmon.Actions.Fleet as Fleet
+import qualified Salmon.Actions.Follow as Follow
 import qualified Salmon.Actions.Follow.Signature as Signature
 
 data Command
     = Status FilePath (Maybe String) Double Bool
     | Keygen FilePath
-    | Sign FilePath (Maybe FilePath)
+    | Sign FilePath (Maybe FilePath) (Maybe String)
 
 main :: IO ()
 main = do
@@ -48,13 +49,16 @@ main = do
             key <- Signature.generateKeyPair
             Signature.writeKeyPair path key
             hPutStrLn stderr ("salmon-fleet: wrote " <> path <> " (private, 0600) and " <> path <> ".pub (public); key id " <> Text.unpack (Signature.keyId (Signature.publicKey key)))
-        Sign keyPath out -> do
+        Sign keyPath out mlabel -> do
             loaded <- Signature.readPrivateKeyFile keyPath
             key <- case loaded of
                 Left err -> hPutStrLn stderr ("salmon-fleet: --key " <> Text.unpack err) >> exitFailure
                 Right k -> pure k
             document <- LByteString.getContents
-            signed <- Signature.signDocument key document
+            lbl <- case traverse (Follow.mkLabel . Text.pack) mlabel of
+                Left err -> hPutStrLn stderr ("salmon-fleet: --label: " <> Text.unpack err) >> exitFailure
+                Right l -> pure l
+            signed <- Signature.signDocumentFor key lbl document
             case signed of
                 Left err -> hPutStrLn stderr ("salmon-fleet: cannot sign: " <> Text.unpack err) >> exitFailure
                 Right envelope -> maybe LByteString.putStr LByteString.writeFile out envelope
@@ -91,6 +95,7 @@ commandP =
         Sign
             <$> strOption (long "key" <> metavar "FILE" <> help "The private key (JWK) to sign with, as `keygen --out FILE` wrote it.")
             <*> optional (strOption (long "out" <> metavar "FILE" <> help "Write the signed envelope here instead of standard output."))
+            <*> optional (strOption (long "label" <> metavar "LABEL" <> help "The label this document is for; put into the signed document so a host following another label refuses it. Hosts run with --follow-key refuse a signed document that names none, unless --follow-accept-unlabelled."))
     statusP =
         Status
             <$> strArgument (metavar "DIR" <> help "A directory of *.json status sink documents (one per host).")

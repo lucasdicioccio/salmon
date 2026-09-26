@@ -458,21 +458,26 @@ data Follow = Follow
     -- replay included; 'noVerifier' accepts everything
     }
 
-{- | The verify-before-inject hook: the digest and the bytes exactly as
-fetched; a reason to refuse them, or the bytes the loop is to parse as the
-'Document' — the same ones for a verifier that only checks, the unwrapped
-document for one that strips a signed envelope. It may throw, which is a
-refusal with the exception's text. -}
-type Verifier = Digest -> ByteString -> IO (Either Text ByteString)
+{- | The verify-before-inject hook: the label the bytes were fetched *for*,
+the digest and the bytes exactly as fetched; a reason to refuse them, or the
+bytes the loop is to parse as the 'Document' — the same ones for a verifier
+that only checks, the unwrapped document for one that strips a signed
+envelope. It may throw, which is a refusal with the exception's text.
+
+The label is an argument because a document is only worth applying at the
+address it was signed for: a verifier that is not told which label it is
+looking at cannot tell a @canary@ document that is validly signed from the
+same bytes served at @prod@'s address. -}
+type Verifier = Label -> Digest -> ByteString -> IO (Either Text ByteString)
 
 -- | Accepts everything as it is: the default, and unsigned mode.
 noVerifier :: Verifier
-noVerifier _ bytes = pure (Right bytes)
+noVerifier _ _ bytes = pure (Right bytes)
 
 -- | 'followVerify' with a throw contained as a refusal.
-verify :: Follow -> Digest -> ByteString -> IO (Either Text ByteString)
-verify follow digest bytes = do
-    outcome <- try (follow.followVerify digest bytes)
+verify :: Follow -> Label -> Digest -> ByteString -> IO (Either Text ByteString)
+verify follow lbl digest bytes = do
+    outcome <- try (follow.followVerify lbl digest bytes)
     pure $ case outcome of
         Left (ex :: SomeException) -> Left (Text.pack (show ex))
         Right verdict -> verdict
@@ -702,7 +707,7 @@ followerWith r clock rng mode applied follow primed = Producer $ \inbox -> do
                         -- what the verifier hands back: the cache is as
                         -- writable as the registry
                         Right (Just c) -> do
-                            verdict <- verify follow c.cachedDigest c.cachedBytes
+                            verdict <- verify follow lbl c.cachedDigest c.cachedBytes
                             case verdict of
                                 Left why -> runReporter r (Rejected lbl c.cachedDigest why) >> pure Nothing
                                 Right inner -> case eitherDecode inner of
@@ -787,7 +792,7 @@ fetchOne r follow st lbl = do
                 pure Scheduler.Unchanged
             | otherwise -> do
                 -- verified before it is parsed, on the bytes as fetched
-                verdict <- verify follow digest bytes
+                verdict <- verify follow lbl digest bytes
                 case verdict of
                     Left why -> complain (Rejected lbl digest why) >> pure Scheduler.Failed
                     Right inner -> case eitherDecode inner :: Either String Document of

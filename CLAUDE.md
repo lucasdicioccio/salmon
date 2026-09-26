@@ -750,6 +750,20 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   keygen --out FILE` (FILE 0600 and FILE.pub) and `salmon-fleet sign --key FILE < doc > signed`
   are the controller's half. Out of scope: rotation/revocation beyond several `--follow-key`s,
   signing inside a registry. See `Test/FollowSignatureSpec.hs`.
+  **A signature is bound to the address it was signed for.** `Verifier` takes the label the
+  bytes were fetched *for* (`Label -> Digest -> ByteString -> ...`), because a registry that can
+  be written to but not signed for could otherwise copy a validly signed `canary` document to
+  `prod`'s address and every host following `prod` would apply it; the cache, read back through
+  the same verifier, was exposed the same way. Two rules: the document names its label in a
+  top-level `label` member — *inside* what is signed (a label beside the signatures would be
+  unsigned) — and a mismatch is refused naming both labels; and a key may speak for some labels
+  only (`--follow-key LABEL=FILE`, repeatable; a bare `FILE` speaks for any label, and
+  `Signature.parseKeySpec` treats a path containing `=` as a path). `salmon-fleet sign --label L`
+  writes the label and refuses a document already naming another. A signed document with no
+  `label` (signed before this) is refused by default, the reason saying how to migrate; **`--follow-accept-unlabelled`**
+  is the migration flag, off by default, and it does not weaken a document that does name a label.
+  `--follow-refuse-older` is still opt-in, so an older signed document for the *same* label can
+  still be replayed without it.
   `ServeCommand.DeclareInline` exists for a document's `{"directive": {...}}` entries and is
   never spelled by a line of the input language. And a `Configure` that throws is now a
   `BadSeed` report rather than the end of the loop, for typed and fetched lines alike —
@@ -1115,7 +1129,7 @@ my-salmon run serve --follow DIR --label L --follow-cache CACHE [--follow-refuse
 my-salmon run serve --follow git+URL#BRANCH:SUBDIR | https://host/path | dns:ZONE | s3://B/P | gs://B/P --label L
                                          # the other registries (Salmon.Actions.Follow.Registry), chosen by the address's shape;
                                          # --follow-timeout S, --follow-workdir DIR, --follow-bucket-endpoint URL are theirs
-my-salmon run serve --follow REG --label L --follow-key PUB.jwk [--follow-key PUB2.jwk]
+my-salmon run serve --follow REG --label L --follow-key [LABEL=]PUB.jwk [--follow-key PUB2.jwk] [--follow-accept-unlabelled]
                                          # ... requiring every document (cache replay included) to be a signed envelope one of
                                          # these keys signed (Salmon.Actions.Follow.Signature); without --follow-key, unsigned
 my-salmon run serve --listen PATH        # the same, also accepting the line protocol on a unix socket at PATH
@@ -1138,7 +1152,7 @@ salmon-tui PATH                          # a terminal over --http PATH: /dag onc
 salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]
                                          # the same over --http-tcp, pinning FILE's certificate when given
 salmon-fleet keygen --out FILE           # an Ed25519 signing pair: FILE (JWK, 0600) and FILE.pub (for --follow-key)
-salmon-fleet sign --key FILE < doc.json  # the document wrapped in a signed envelope, on stdout (or --out FILE)
+salmon-fleet sign --key FILE [--label L] < doc.json  # the document wrapped in a signed envelope, on stdout (or --out FILE); --label puts the label inside what is signed
 ```
 
 Typical usage pipes them together: `my-salmon config 123 | my-salmon run up`. This split exists so
