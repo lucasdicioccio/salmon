@@ -655,15 +655,24 @@ machine that also has to run somebody else's units.
   So the one process whose restart behaviour cannot be expressed in the graph
   is the one that owns the graph. Probably fine and unavoidable; worth being
   deliberate rather than discovering it.
+  **Decided (owner, 2026-09-26):** it stays PID-1-only, as assumed here. (The
+  owner did not comment on this point explicitly; it is recorded as the default.)
 - **How small can stage 0 actually get?** Every line in it is a line that
   `run tree` cannot show you. Is there a defensible way to express the mounts
   as ops that run under a degraded engine, or is hardcoding them honest?
+  **Decided (owner, 2026-09-26):** stage 0 does the minimum that lets the
+  operations described in this spec run and lets PID 1 bootstrap, which is the
+  list proposed above (mounts, `RB_DISABLE_CAD`, signal handlers, the reaper and
+  the console).
 - **Seed vs directive on disk** is answered by pull mode's document format:
   a document entry is either `{"seed": [words]}` or `{"directive": {...}}`,
   mirroring `up` vs `up-directive`. A role can publish directives (hermetic,
   cannot fail `Configure` at boot) or seeds (flexible); the cached last
   document is what the VM boots from. What remains open is only whether a
   role should *refuse* seeds and insist on directives for the boot path.
+  **Decided (owner, 2026-09-26):** a role does not refuse seeds. The seed is
+  either known statically (compiled into the role) or read from a file at a
+  well-known path.
 - **Does the fleet story change the build model?** With labels addressing
   documents in a registry, "one cabal-built binary per role" is still right
   for the *graph*, but a role's parameters now come from the registry rather
@@ -676,6 +685,12 @@ machine that also has to run somebody else's units.
   present in the image. Worth deciding whether the goal is a static supervisor
   or a *minimal, known* image — they are different targets, and the second is
   probably the real one.
+  **Decided (owner, 2026-09-26):** PID 1 is the Rust `salmon-init` and PID 2, the
+  Haskell supervisor, is the *static* binary; this confirms the split above. The
+  image is heavily specialised, close to a microkernel, and stays minimal and
+  known because recipes shell out to tools that must be present. The target is
+  that this image, with `serve` and pull mode inside it, is the equivalent of a
+  kubelet.
 - **Interaction with `specs/multi-user-privilege-separation.md`.** That spec's
   L1 (`RunAs`/`Invoker`) and this one's service-spawn privilege drop want to be
   the same vocabulary — except the drop happens in Rust here, so what is shared
