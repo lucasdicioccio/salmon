@@ -34,13 +34,20 @@ treating a Terraform root module as one more `Op` in the graph (`up` runs
 both the Terraform-managed layer and everything salmon layers on top in one
 traversal.
 
-Recommendation: **build Model A first, treat Model B as optional/future**.
-Model A composes with "we may have already-existing terraform usage"
-directly — it's non-invasive by construction, since salmon never mutates
-anything Terraform owns. Model B requires deciding who owns lifecycle
-(salmon `down` calling `terraform destroy` against existing hand-managed
-infra is a real footgun — see §3's caveats) and isn't needed to unblock the
-pg-ha control-plane work, which only needs machine inventory as an input.
+Decision (owner, 2026-09-26): **Model B first, Model A as its degenerate case.**
+The target is teams with a lot of Terraform, and the simplest thing for them is
+to have salmon drive an existing root (`apply`), collect its state, and continue
+from there (for example, bring a VM up from a plan that already exists, then
+converge it). Model A is what a Model B node does when the root was already
+applied by someone else: skip `apply`, only read. What made Model A the first
+recommendation was that it needs no lifecycle ownership; that stays true, and is
+why `apply` is opt-in and `destroy` is never wired to `down` (see §3). The
+original recommendation, kept for the reasoning: Model A composes with "we may
+have already-existing terraform usage" directly, since salmon never mutates
+anything Terraform owns, while Model B requires deciding who owns lifecycle
+(salmon `down` calling `terraform destroy` against existing hand-managed infra
+is a real footgun) and is not needed to unblock the pg-ha control-plane work,
+which only needs machine inventory as an input.
 
 ## Design goals / non-goals
 
@@ -132,9 +139,9 @@ state file from the pg-ha spec. Nothing about `Actions/Serve.hs`'s `World`/
 `tf-outputs.json` currently says on every seed declaration, same as it
 would re-read any other input file.
 
-### 3. Optional: `Salmon.Builtin.Nodes.Terraform` as an `Op` (Model B)
+### 3. `Salmon.Builtin.Nodes.Terraform` as an `Op` (Model B, the first slice)
 
-If/when salmon-driven apply is actually wanted, it fits the existing node
+Salmon-driven apply is now the first slice (see the decision above). It fits the existing node
 shape cleanly — unlike `nft`/`ip link`, `terraform apply` *is* naturally
 idempotent (a no-op plan applies as a no-op), so this is a "prefer
 replace"-bucket node per CLAUDE.md's conventions, not a `prelim`-skip one:
@@ -181,20 +188,24 @@ handling machinery needed.
 
 ## Open questions
 
-- **Does "already-existing Terraform usage" mean one root module or
-  several** (e.g. separate network/compute/DNS roots, possibly separate
-  workspaces per tier/environment)? Determines whether `TerraformSource`
-  needs to be a list (read/merge outputs from multiple roots) rather than
-  one workdir — leaning towards supporting a list from the start since
-  "one big root module" vs "several small ones" is a common enough split
-  not to special-case away.
-- **Output naming contract**: does salmon assume specific output names
-  (`machine_ab_0_ip`, etc.) that the existing `.tf` files would need to
-  expose (possibly requiring someone to add outputs to already-existing
-  config), or does `gen` need a mapping/config layer between "whatever
-  outputs already exist" and "what the seed needs"? Depends entirely on
-  what the existing Terraform code currently outputs — worth looking at
-  before finalizing the parsing shape in §1.
+- **One root or several? (decided, 2026-09-26)** Several roots are several
+  nodes with ordinary dependency edges between them, so no list type is needed in
+  a seed for this. A node is one `TerraformRoot` (workdir, optional workspace,
+  optional var file).
+- **Output naming contract (decided, 2026-09-26).** Dependents take a *handle*
+  (the root plus a mapping from the names salmon asks for, such as
+  `machine_ab_0_ip`, to whatever the team's Terraform calls them, defaulting to
+  identity), so nobody edits existing `.tf` files to be readable. A missing key is
+  an error naming the key and the root. **Timing:** a `Tracked` value is a plain
+  value fixed when the graph is built (`Salmon.Op.Track`), so an address that only
+  exists after `apply` cannot travel that way; a dependent reads
+  `terraform output -json` through the handle at its own `up`. If the *shape* of
+  later nodes depends on outputs (how many machines), it uses the nested-walk
+  pattern the template databases already use.
+- **The `check` (decided, 2026-09-26).** `terraform plan -detailed-exitcode`
+  without changing anything: exit 0 is `Success`, 2 is drift (`Failure`), anything
+  else is a failure to ask. Under `serve` the tending loop then notices drift the
+  way it does for a systemd unit.
 - **Model B's `destroy` exposure**: even as an explicit opt-in value (not
   wired to `down`), should it require something stronger than "a Haskell
   value the caller chooses to reference" — e.g. a separate CLI subcommand
@@ -211,6 +222,11 @@ handling machinery needed.
 
 ## Phased plan
 
+0. (Decided first slice, 2026-09-26.) The `Terraform` node of §3: `apply`
+   (opt-in), the plan-based `check`, and the output-reading handle with the name
+   mapping. `destroy` is not wired to `down`. Steps 1 to 4 below are then the
+   reading-only variant (step 1), its wiring (step 2), the live variant folded
+   into the node (step 3), and what remains of step 4.
 1. `SreBox.TerraformState.readOutputs` (§1) against a captured
    `tf-outputs.json` file only — no live `terraform output` shell-out yet,
    no `Op` involved at all, just JSON parsing into typed values. Cheapest
