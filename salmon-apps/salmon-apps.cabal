@@ -162,10 +162,15 @@ test-suite salmon-apps-test
     hs-source-dirs:   test
     other-modules:    Test.FleetSpec
     build-depends:    base >=4.16.3.0
+                    , aeson
+                    , bytestring
+                    , directory
+                    , filepath
                     , salmon-apps
                     , salmon-ops
                     , tasty
                     , tasty-hunit
+                    , temporary
                     , text
                     , time
     ghc-options:      -Wall
