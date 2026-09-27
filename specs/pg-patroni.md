@@ -103,6 +103,16 @@ This is `ALTER SYSTEM`'s replacement. Patroni keeps
   pending, and its `up` can trigger `patronictl restart --pending`, which
   restarts replicas before the leader. Whether salmon should restart members
   at all, or only report, is an open question.
+- **Leaning, from the Zalando operator** (`pkg/cluster/sync.go`,
+  `syncPatroniConfig`, `restartInstances`): it patches `/config` **once**, since
+  the DCS is shared and any member will do, waits `loop_wait` plus two seconds
+  for members to apply it, and restarts **only members whose `pending_restart`
+  is set**. Replicas go first, except when a parameter was *decreased* that a
+  standby needs to be at least the primary's value (its
+  `requirePrimaryRestartWhenDecreased` list, e.g. `max_connections`): then the
+  primary restarts first, because a standby refuses to start below it. A member
+  that answers an empty config is not initialised yet, so the patch is skipped
+  for it, which for us is `Unknown`, not `Failure`.
 
 ### Routing to the leader
 
@@ -165,11 +175,55 @@ would otherwise run on every member.
 - `check`: `GET /leader` names the preferred member.
 - `up`: `POST /switchover`.
 
+**Choosing the target** (also from the operator, `pod.go`,
+`getSwitchoverCandidate`): with `synchronous_mode` on, the candidate is the sync
+standby, and salmon **waits for one to exist rather than falling back** to an
+asynchronous member, since that member may lack acknowledged writes. Otherwise
+it is the lowest-lag member whose state is `running`, `streaming` or `in archive
+recovery`. If there is no candidate the switchover is skipped and retried on the
+next pass, with the leader left alone. The state that pass needs is re-derived
+from `/cluster` each time, which is the property `PostgresPair` protects.
+
 The default is *no preference*. With a preference declared and supervision
 on, salmon would move the leader back after every automatic failover, as
 soon as the preferred member is healthy. That is sometimes what is wanted
 (a preferred site or a bigger machine) and sometimes a flap. It must be a
 choice, never the default.
+
+## Rolling maintenance of members
+
+Restarting or upgrading every member (a Postgres minor update, a Patroni
+package) is one operation in three steps, and the order is the safety:
+
+1. replicas, one at a time, waiting for each to report `streaming` again;
+2. a switchover of the leader to the candidate chosen as above;
+3. the old leader, now a replica.
+
+The operator's `recreatePods` does exactly this, and does not touch the leader
+when it has no safe candidate. Salmon's version is a node whose `check` is "no
+member is on an old version or pending a restart" and whose `up` walks that
+order from the controller. It must tolerate being killed halfway: the next pass
+re-observes and continues.
+
+## Gating risky operations
+
+Two guards the operator applies to operations that cannot be undone, both
+expressible with what already exists:
+
+- **A maintenance window** (`isInMaintenanceWindow` in `sync.go`). Outside the
+  window the operator freezes the desired version, so the change is never seen.
+  Our `Gate` on `upTreeWith` ("does this traversal want to touch this node at
+  all") is the place: a time-window gate for nodes that restart or upgrade. The
+  gate reports a `Skip`, and `status` shows why.
+- **Preconditions and a failure latch** (`majorversionupgrade.go`). It runs only
+  when every pod is running, every replica is `streaming` and lag is under
+  16 MB, and it labels the pods `critical-operation` so a node drain cannot
+  interfere. After a failure it records an annotation and does not retry
+  automatically until an operator clears it. The equivalents are the same
+  preconditions in the node's `check` (`Unknown` when unmet, so nothing
+  starts), `supGiveUpAfter` with the node parked, and a way to tell sibling
+  nodes on the same cluster to hold still while it runs (a `Pause`, see
+  `Op/Mailbox.hs`); that last one has no counterpart yet.
 
 ## Disaster scenarios
 
@@ -219,7 +273,8 @@ appears in a directive" is a rule rather than a guideline.
   the leader under load is also a small outage.
   **Decided (owner, 2026-09-26):** restart the members that have
   `pending_restart` set, replicas first, and the leader behind a
-  maintenance-window gate (what the Zalando operator does).
+  maintenance-window gate (what the Zalando operator does; see the leaning
+  under the config node above).
 - **`failsafe_mode` default** (see T5).
 - **REST API authentication:** Patroni's unsafe endpoints (`/switchover`,
   `PATCH /config`, `/restart`) need `restapi.authentication`. The
