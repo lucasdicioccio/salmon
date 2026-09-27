@@ -1,0 +1,12 @@
+digraph opgraph {
+  rankdir=BT;
+  bgcolor="transparent";
+  node [shape=box, style="filled", fontname="Helvetica,Arial,sans-serif", fontsize=11, fillcolor="#eef7f0", color="#3a7d44"];
+  edge [color="#3a7d44", fontname="Helvetica,Arial,sans-serif", fontsize=10, label="  before  "];
+
+  dir [label="directory\ncheck: does it exist?\nup: mkdir -p"];
+  cfg [label="config file\ncheck: do the bytes match?\nup: write the contents"];
+  svc [label="systemd service\ncheck: active, enabled, not stale?\nup: enable + (re)start"];
+
+  dir -> cfg -> svc;
+}
