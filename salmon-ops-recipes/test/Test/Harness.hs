@@ -503,19 +503,39 @@ primary/standby pair) without them fighting over the same IP. Caller picks
 addresses inside 'testBridgeCidr' that don't collide with each other or
 with 'testVmAddr' (still used by single-VM tests like
 "Test.QemuSmokeSpec" running concurrently in the same tasty run).
+
+Teardown ('runDown vmOp') is guaranteed from the moment 'upTree' has
+actually brought the qemu process up, whatever happens afterwards —
+including 'waitForSsh' timing out. That's the point of the inner
+'bracket' below: 'bringUp' used to run 'upTree' /then/ 'waitForSsh' as
+one action, so a 'waitForSsh' timeout threw out of 'bringUp' itself
+before it ever returned @(access, vmOp)@ — and the outer 'bracket''s
+cleanup only ever runs on a value 'bringUp' actually returned, so the
+qemu process it had just started was orphaned on the shared bridge
+(squatting its fixed test address for whichever spec runs next). Here,
+once 'upTree' succeeds, an inner @bracket _ (const (void (runDown
+vmOp)))@ owns teardown outright, and 'waitForSsh' runs strictly inside
+that scope.
 -}
 withVmAt :: Text.Text -> FilePath -> (VmAccess -> IO a) -> IO a
 withVmAt addr rootfs act =
-    withSystemTempDirectory "salmon-ops-recipes-test-vm" $ \tmpdir ->
-        bracket (bringUp tmpdir) cleanup (act . fst)
-  where
-    cleanup :: (VmAccess, Op) -> IO ()
-    cleanup (_, vmOp) = void (runDown vmOp)
-
-    bringUp :: FilePath -> IO (VmAccess, Op)
-    bringUp tmpdir = do
-        ensureTestBridge
+    withSystemTempDirectory "salmon-ops-recipes-test-vm" $ \tmpdir -> do
         identityFile <- ensureVmSshAccess tmpdir rootfs
+        vmOp <- bringUpVm tmpdir identityFile
+        -- Once 'upTree' above has returned successfully, the qemu process
+        -- exists — from here on, 'runDown vmOp' must run no matter what,
+        -- including a 'waitForSsh' timeout. This inner 'bracket' owns that
+        -- teardown outright; the outer 'withSystemTempDirectory' can no
+        -- longer be the only thing standing between a thrown exception and
+        -- an orphaned qemu process.
+        bracket
+            (pure (VmAccess (Ssh.Remote "root" addr) identityFile))
+            (const (void (runDown vmOp)))
+            (\access -> waitForSsh access >> act access)
+  where
+    bringUpVm :: FilePath -> FilePath -> IO Op
+    bringUpVm tmpdir identityFile = do
+        ensureTestBridge
         tapName <- freshTapName
         mac <- freshMac
         user <- testHarnessUser
@@ -550,9 +570,14 @@ withVmAt addr rootfs act =
         unless ok $ do
             trace <- readBack
             fail ("withVmAt: starting the sandbox VM failed:\n" <> unlines (map show trace))
-        let access = VmAccess (Ssh.Remote "root" addr) identityFile
-        waitForSsh access
-        pure (access, vmOp)
+        -- Note: no cleanup on this path's own failure — 'upTree' returning
+        -- 'False' (or throwing) here means the VM never came up in the
+        -- first place (or 'upTree' itself already unwound whatever partial
+        -- state it made), so there is nothing yet for an inner 'bracket' to
+        -- guarantee teardown of. It's only once we have a 'vmOp' that
+        -- successfully started that this function returns, at which point
+        -- the caller's 'bracket' above takes over.
+        pure vmOp
 
 {- | Generates a fresh SSH CA and a client key signed by it (both kept in
 the VM's own @tmpdir@, torn down with everything else there), and wires
