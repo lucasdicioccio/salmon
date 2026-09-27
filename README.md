@@ -221,6 +221,22 @@ above, where this project's own conventions get enforced:
 | `salmon-fleet` | the controller's side of pull mode: `status DIR` folds the hosts' status documents into one line per host; `keygen`/`sign` make signed documents |
 | `salmon-tui` | a terminal client for `run serve --http` (or `--http-tcp`) |
 
+### Installing a released binary
+
+`salmon-migrator`, `salmon-pgpair`, `salmon-fleet` and `salmon-tui` are published as prebuilt,
+stripped binaries on [GitHub Releases](https://github.com/lucasdicioccio/salmon/releases) —
+`salmon-toy-qemu-pg-ha` and the other binaries above stay build-from-source only, being
+demo/internal rather than blessed. Currently **linux-x86_64 only**. Grab the latest one — from a
+terminal or a CI step alike — with:
+
+```sh
+curl -fsSL https://github.com/lucasdicioccio/salmon/releases/latest/download/salmon-pgpair-linux-x86_64 -o salmon-pgpair && chmod +x salmon-pgpair
+```
+
+(swap `salmon-pgpair` for any of the other three binary names). See
+[`.github/workflows/release.yml`](.github/workflows/release.yml) for how a release is built —
+triggered by pushing a `vX.Y.Z` tag.
+
 ## Docs
 
 - [`resources/salmon-core.md`](resources/salmon-core.md) — the general, domain-independent
