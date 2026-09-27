@@ -33,6 +33,21 @@ a document on standard input wrapped in a signed envelope on standard
 output — so the round trip from a document to a host that verifies it needs
 no tool but this one. @sign@ writes to the filesystem only where @--out@
 says; @keygen@ refuses to overwrite a key that exists.
+
+@salmon-fleet describe@ and @salmon-fleet run ARGS@ are the
+@agents-exe@ bash-toolbox protocol (see @documentation/binary-tool.md@ in
+the @agents-exe@ repository) wrapped around @status@ alone — the only
+subcommand here that is flat-arg, one-shot and read-only to begin with.
+@describe@ prints the tool's JSON description ('fleetDescribe'\/'describeValue');
+@run DIR [--label L] [--stale S]@ runs the equivalent of
+@status DIR [--label L] [--stale S] --json@ (JSON forced; @--pretty@\/@--no-pretty@
+are a terminal's business and are not exposed to a toolbox caller, which is a
+program, not a terminal). @status@ itself is unchanged. One known gap: the
+current @describe@\/@run@ spec's @arity@ is @single@ or @optional@ only — there is
+no repeatable arity — so @--label@, repeatable on the real CLI, is exposed to the
+toolbox as a single optional string; a toolbox caller cannot filter on more than
+one label at once. @keygen@\/@sign@ are not exposed this way (out of scope for
+this pass).
 -}
 module Fleet (
     main,
@@ -40,10 +55,14 @@ module Fleet (
     -- * The pretty table (exposed for tests)
     decidePretty,
     prettyTable,
+
+    -- * The agents-exe bash-toolbox protocol (exposed for tests)
+    describeValue,
+    foldStatusDir,
 ) where
 
 import Control.Monad (forM_, unless, when)
-import Data.Aeson (encode)
+import Data.Aeson (Value, encode, object, (.=))
 import qualified Data.ByteString.Lazy as LByteString
 import Data.List (intercalate)
 import Data.Text (Text)
@@ -57,6 +76,7 @@ import System.Exit (exitFailure)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr, stdout)
 
 import Salmon.Actions.Serve (AppliedDocument (..))
+import Salmon.Actions.Serve.StatusSink (Document)
 import qualified Salmon.Actions.Fleet as Fleet
 import qualified Salmon.Actions.Follow as Follow
 import qualified Salmon.Actions.Follow.Signature as Signature
@@ -65,6 +85,8 @@ data Command
     = Status FilePath (Maybe String) Double Bool (Maybe Bool)
     | Keygen FilePath
     | Sign FilePath (Maybe FilePath) (Maybe String)
+    | Describe
+    | Run FilePath (Maybe String) Double
 
 main :: IO ()
 main = do
@@ -92,12 +114,7 @@ main = do
                 Left err -> hPutStrLn stderr ("salmon-fleet: cannot sign: " <> Text.unpack err) >> exitFailure
                 Right envelope -> maybe LByteString.putStr LByteString.writeFile out envelope
         Status dir label stale asJson prettyOverride -> do
-            (docs, rejected) <- Fleet.readStatusDir dir
-            forM_ rejected $ \(path, why) ->
-                hPutStrLn stderr ("salmon-fleet: skipping " <> path <> ": " <> why)
-            now <- getCurrentTime
-            let opts = Fleet.Options (Text.pack <$> label) (realToFrac stale)
-                rows = Fleet.fold opts now docs
+            (docs, rows, rejected) <- foldStatusDir dir label stale
             if asJson
                 then LByteString.putStr (encode rows <> "\n")
                 else do
@@ -107,12 +124,38 @@ main = do
                         else do
                             Text.putStrLn Fleet.renderHeader
                             forM_ rows (Text.putStrLn . Fleet.renderRow)
-            unless (null docs || not (null rows) || label == Nothing) $
-                hPutStrLn stderr ("salmon-fleet: no host carries label " <> maybe "" id label)
-            -- a directory with nothing readable in it is an error worth an
-            -- exit code: the fold has nothing to say and probably was not
-            -- pointed at the right place
-            unless (not (null docs) || null rejected) exitFailure
+            reportStatusOutcome docs rows rejected label
+        Describe ->
+            LByteString.putStr (encode describeValue <> "\n")
+        Run dir label stale -> do
+            (docs, rows, rejected) <- foldStatusDir dir label stale
+            LByteString.putStr (encode rows <> "\n")
+            reportStatusOutcome docs rows rejected label
+
+-- | @status@ and @run@'s shared work: read the directory, fold it. Kept in
+-- one place so the toolbox @run@ path (which always emits JSON) can't drift
+-- from what @status --json@ computes.
+foldStatusDir :: FilePath -> Maybe String -> Double -> IO ([(FilePath, Document)], [Fleet.Row], [(FilePath, String)])
+foldStatusDir dir label stale = do
+    (docs, rejected) <- Fleet.readStatusDir dir
+    forM_ rejected $ \(path, why) ->
+        hPutStrLn stderr ("salmon-fleet: skipping " <> path <> ": " <> why)
+    now <- getCurrentTime
+    let opts = Fleet.Options (Text.pack <$> label) (realToFrac stale)
+        rows = Fleet.fold opts now docs
+    pure (docs, rows, rejected)
+
+-- | @status@ and @run@'s shared stderr/exit-code behaviour: warn if
+-- @--label@ matched nobody, and exit non-zero if the directory had nothing
+-- readable in it at all.
+reportStatusOutcome :: [(FilePath, Document)] -> [Fleet.Row] -> [(FilePath, String)] -> Maybe String -> IO ()
+reportStatusOutcome docs rows rejected label = do
+    unless (null docs || not (null rows) || label == Nothing) $
+        hPutStrLn stderr ("salmon-fleet: no host carries label " <> maybe "" id label)
+    -- a directory with nothing readable in it is an error worth an
+    -- exit code: the fold has nothing to say and probably was not
+    -- pointed at the right place
+    unless (not (null docs) || null rejected) exitFailure
 
 {- | Pretty on an interactive terminal, TSV otherwise — the same convention
 @ls@\/@git@ follow — unless @--pretty@\/@--no-pretty@ (a 'Just') forces one
@@ -186,12 +229,74 @@ ansiRed = "\ESC[31m"
 ansiYellow = "\ESC[33m"
 ansiReset = "\ESC[0m"
 
+-------------------------------------------------------------------------------
+-- agents-exe bash-toolbox describe/run (documentation/binary-tool.md in the
+-- agents-exe repository): a slug, a description, and one arg object per
+-- 'runP' argument below, kept in exact correspondence with it by hand (see
+-- Test.FleetSpec's schema-shape test).
+
+-- | The JSON @salmon-fleet describe@ prints: this tool's toolbox interface,
+-- wrapping @status@ alone. See the module haddock for the known gap
+-- (@--label@ is repeatable on the real CLI; the current toolbox spec's
+-- @arity@ has no repeatable case, so it is exposed here as a single
+-- optional string).
+describeValue :: Value
+describeValue =
+    object
+        [ "slug" .= ("salmon-fleet-status" :: Text)
+        , "description"
+            .= ( "One line per host, folded from a directory of salmon `run serve --status-sink` "
+                    <> "status documents (one JSON file per host): host name, mode, applied labels, "
+                    <> "converged/errored node counts out of the total, and how long ago the host "
+                    <> "last wrote its status. Read-only; writes nothing." ::
+                    Text
+               )
+        , "args"
+            .= [ object
+                    [ "name" .= ("dir" :: Text)
+                    , "description" .= ("A directory of *.json status sink documents, one per host." :: Text)
+                    , "type" .= ("string" :: Text)
+                    , "backing_type" .= ("string" :: Text)
+                    , "arity" .= ("single" :: Text)
+                    , "mode" .= ("positional" :: Text)
+                    ]
+               , object
+                    [ "name" .= ("label" :: Text)
+                    , "description"
+                        .= ( "Only include hosts whose applied documents carry this label. The underlying "
+                                <> "CLI allows repeating --label; this toolbox arg is single-valued only, since "
+                                <> "the current describe/run spec has no repeatable arity." ::
+                                Text
+                           )
+                    , "type" .= ("string" :: Text)
+                    , "backing_type" .= ("string" :: Text)
+                    , "arity" .= ("optional" :: Text)
+                    , "mode" .= ("dashdashspace" :: Text)
+                    ]
+               , object
+                    [ "name" .= ("stale" :: Text)
+                    , "description" .= ("Flag a host whose status document is older than this many seconds (default 60)." :: Text)
+                    , "type" .= ("number" :: Text)
+                    , "backing_type" .= ("string" :: Text)
+                    , "arity" .= ("optional" :: Text)
+                    , "mode" .= ("dashdashspace" :: Text)
+                    ]
+               ]
+        , "empty-result"
+            .= object
+                [ "tag" .= ("AddMessage" :: Text)
+                , "contents" .= ("No status documents found in DIR (or none carry --label)." :: Text)
+                ]
+        ]
+
 commandP :: Parser Command
 commandP =
     hsubparser $
         command "status" (info statusP (progDesc "One line per host from the status documents in DIR."))
             <> command "keygen" (info keygenP (progDesc "Write a fresh Ed25519 signing key pair: FILE (private, 0600) and FILE.pub (public, for --follow-key)."))
             <> command "sign" (info signP (progDesc "Wrap the document on standard input in a signed envelope, on standard output (or --out FILE)."))
+            <> command "describe" (info (pure Describe) (progDesc "Print the agents-exe bash-toolbox JSON description of this tool (wraps `status` only)."))
+            <> command "run" (info runP (progDesc "The agents-exe bash-toolbox entry point: the equivalent of `status DIR [--label L] [--stale S] --json`."))
   where
     keygenP =
         Keygen
@@ -208,6 +313,14 @@ commandP =
             <*> option auto (long "stale" <> metavar "SECONDS" <> value 60 <> showDefault <> help "Flag a host whose document was written longer ago than this.")
             <*> switch (long "json" <> help "Emit the fold as one JSON array instead of lines.")
             <*> prettyOverrideP
+    -- agents-exe's flattening: DIR positional, --label/--stale
+    -- dashdashspace, exactly `describeValue`'s `args` — JSON is not a flag
+    -- here, it's what `run` always emits.
+    runP =
+        Run
+            <$> strArgument (metavar "DIR" <> help "A directory of *.json status sink documents (one per host).")
+            <*> optional (strOption (long "label" <> metavar "LABEL" <> help "Only hosts whose applied documents include this label."))
+            <*> option auto (long "stale" <> metavar "SECONDS" <> value 60 <> showDefault <> help "Flag a host whose document was written longer ago than this.")
     prettyOverrideP :: Parser (Maybe Bool)
     prettyOverrideP =
         flag' (Just True) (long "pretty" <> help "Force the table output even when standard output is not a terminal.")
