@@ -42,7 +42,13 @@ const state = {
   history: null, // last /history: {seeds: [...], elided}
   seedHelpLoaded: false,
   tails: new Map(), // full ref -> {lines, paused, held, pre} for each pinned live tail
+  zoom: { scale: 1, tx: 0, ty: 0 }, // the #viewport transform; world units are the raw layout() pixels
+  zoomInit: false, // true once the first fit-to-view has run
+  worldSize: null, // the current layout()'s {width, height}, for fitView
 };
+
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 4;
 
 // The dock holds a few windows, not one per node: a tail is for the node
 // being watched right now.
@@ -498,7 +504,7 @@ function render() {
   renderHeader();
   const empty = state.order.length === 0;
   $("empty").hidden = !empty;
-  $("graph").style.display = empty ? "none" : "";
+  $("graph-viewport").style.display = empty ? "none" : "";
   renderGraph();
   renderList();
   renderPanel();
@@ -523,16 +529,13 @@ function renderHeader() {
 }
 
 function renderGraph() {
-  const svg = $("graph");
   const edges = $("edges");
   const nodes = $("nodes");
   edges.replaceChildren();
   nodes.replaceChildren();
   if (state.order.length === 0) return;
   const { coords, width, height } = layout();
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("width", width);
-  svg.setAttribute("height", height);
+  state.worldSize = { width, height };
 
   for (const id of state.order) {
     const n = state.nodes.get(id);
@@ -577,6 +580,51 @@ function renderGraph() {
     paintNode(n);
   }
   highlightEdges();
+  if (state.zoomInit) applyZoom();
+  else fitView();
+}
+
+// ---------------------------------------------------------------------------
+// pan/zoom: a transform on #viewport, world units = layout()'s raw pixels.
+// The SVG itself has no viewBox (so 1 user unit = 1 CSS pixel of the
+// rendered element), which is what keeps the wheel/drag math below in plain
+// screen pixels instead of also tracking a separate content scale.
+
+function applyZoom() {
+  const z = state.zoom;
+  $("viewport").setAttribute("transform", `translate(${z.tx} ${z.ty}) scale(${z.scale})`);
+}
+
+// Fits the whole graph in the viewport, centred. Called once on first load
+// and from the "fit" button; a later re-render (a live update) keeps
+// whatever the operator has already panned/zoomed to.
+function fitView() {
+  const vp = $("graph-viewport");
+  const w = vp.clientWidth || 800;
+  const h = vp.clientHeight || 500;
+  const world = state.worldSize || { width: w, height: h };
+  const raw = Math.min((w - 24) / world.width, (h - 24) / world.height) || 1;
+  const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, raw));
+  state.zoom = {
+    scale,
+    tx: (w - world.width * scale) / 2,
+    ty: (h - world.height * scale) / 2,
+  };
+  state.zoomInit = true;
+  applyZoom();
+}
+
+// Zooms by `factor`, keeping the point at (cx, cy) — viewport-relative
+// screen pixels — fixed under the cursor.
+function zoomAt(cx, cy, factor) {
+  const z = state.zoom;
+  const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z.scale * factor));
+  const localX = (cx - z.tx) / z.scale;
+  const localY = (cy - z.ty) / z.scale;
+  z.scale = newScale;
+  z.tx = cx - localX * newScale;
+  z.ty = cy - localY * newScale;
+  applyZoom();
 }
 
 function text(cls, x, y, content) {
@@ -1134,6 +1182,74 @@ function declare(verb) {
 
 $("panel-close").addEventListener("click", () => select(state.selected));
 $("reload").addEventListener("click", loadDag);
+
+// wheel to zoom (centred on the cursor), drag to pan; a drag that actually
+// moved suppresses the click it ends with, so panning never also selects
+// whatever node the pointer happened to end up over.
+{
+  const svg = $("graph");
+  const vp = $("graph-viewport");
+  let dragging = false;
+  let justPanned = false;
+  let start = null;
+
+  svg.addEventListener(
+    "wheel",
+    (ev) => {
+      ev.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+    },
+    { passive: false },
+  );
+
+  svg.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    dragging = true;
+    justPanned = false;
+    start = { x: ev.clientX, y: ev.clientY, tx: state.zoom.tx, ty: state.zoom.ty };
+    svg.setPointerCapture(ev.pointerId);
+    svg.classList.add("panning");
+  });
+  svg.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - start.x;
+    const dy = ev.clientY - start.y;
+    if (Math.hypot(dx, dy) > 3) justPanned = true;
+    state.zoom.tx = start.tx + dx;
+    state.zoom.ty = start.ty + dy;
+    applyZoom();
+  });
+  const endDrag = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    svg.classList.remove("panning");
+    if (ev && ev.pointerId !== undefined) {
+      try {
+        svg.releasePointerCapture(ev.pointerId);
+      } catch {
+        // already released
+      }
+    }
+  };
+  svg.addEventListener("pointerup", endDrag);
+  svg.addEventListener("pointercancel", endDrag);
+  // capture phase: runs before a node `g`'s own (bubbling) click listener
+  svg.addEventListener(
+    "click",
+    (ev) => {
+      if (!justPanned) return;
+      justPanned = false;
+      ev.stopPropagation();
+      ev.preventDefault();
+    },
+    true,
+  );
+
+  $("zoom-in").addEventListener("click", () => zoomAt(vp.clientWidth / 2, vp.clientHeight / 2, 1.3));
+  $("zoom-out").addEventListener("click", () => zoomAt(vp.clientWidth / 2, vp.clientHeight / 2, 1 / 1.3));
+  $("zoom-reset").addEventListener("click", fitView);
+}
 
 for (const b of document.querySelectorAll("#actions button[data-line]")) {
   b.addEventListener("click", () => {
