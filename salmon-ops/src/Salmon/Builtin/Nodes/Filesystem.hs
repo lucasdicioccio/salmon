@@ -428,6 +428,20 @@ The @check@ compares what is on disk, so a file already in the right state is
 skipped; a file that is *missing* is a 'Failure' rather than something this
 node creates, because the node that owns the bytes is the one that should
 have made it and reporting otherwise would hide that failure behind this one.
+
+When 'ownedPath' is a directory, the ownership (but not 'ownedMode') is
+applied __recursively__ to everything already underneath it: a rootfs handed
+over to an unprivileged user has packages installed into it (openssh-server's
+@sshd_config.d@, say) that own only their own top-level entry, and a caller
+declaring "this whole subtree is now theirs" means exactly that, not "the
+directory entry is theirs but whatever some package dropped inside it stays
+root's". Only the directory entry itself gets 'ownedMode' applied (as
+before); every descendant keeps its own permission bits — chown, not chmod,
+since a config file wanting @0644@ and a host key wanting @0600@ underneath
+the same handed-over directory must not both end up at whatever single mode
+the caller gave the top of the tree. A missing directory is still a
+'Failure', same as a missing file, since walking a tree that is not there
+would have nothing to walk.
 -}
 ownedFile :: FileOwnership -> Op
 ownedFile owner =
@@ -448,11 +462,17 @@ showOctalMode :: Posix.FileMode -> String
 showOctalMode m = "0o" <> showOct (toInteger m) ""
 
 {- | Resolves the wanted ids and compares them, plus the permission bits,
-against the file's current status.
+against the file's current status -- and, for a directory, against every
+entry underneath it too (see 'ownedFile').
+
+Note this uses 'doesPathExist' rather than 'doesFileExist': the latter is
+'False' for a directory, which used to make this check report every
+directory-shaped 'ownedFile' as permanently missing, no matter what @up@ had
+already done to it.
 -}
 checkOwnership :: FileOwnership -> IO CheckResult
 checkOwnership owner = do
-    exists <- doesFileExist owner.ownedPath
+    exists <- doesPathExist owner.ownedPath
     if not exists
         then pure (Failure $ "missing: " <> Text.pack owner.ownedPath)
         else do
@@ -460,6 +480,7 @@ checkOwnership owner = do
             wantedUid <- traverse lookupUid owner.ownedUser
             wantedGid <- traverse lookupGid owner.ownedGroup
             let actualMode = Posix.fileMode status .&. permissionBits
+            treeIssue <- checkTreeOwnership wantedUid wantedGid owner.ownedPath
             pure $ case () of
                 _
                     | actualMode /= owner.ownedMode ->
@@ -470,6 +491,7 @@ checkOwnership owner = do
                         Failure $ "wrong owner: " <> Text.pack owner.ownedPath
                     | maybe False (/= Posix.fileGroup status) wantedGid ->
                         Failure $ "wrong group: " <> Text.pack owner.ownedPath
+                    | Just reason <- treeIssue -> Failure reason
                     | otherwise -> Success
 
 applyOwnership :: FileOwnership -> IO ()
@@ -480,11 +502,64 @@ applyOwnership owner = do
     -- other way round silently drops them.
     Posix.setOwnerAndGroup owner.ownedPath uid gid
     Posix.setFileMode owner.ownedPath owner.ownedMode
+    isDir <- doesDirectoryExist owner.ownedPath
+    when isDir $ do
+        entries <- treeEntries owner.ownedPath
+        mapM_ (chownEntry uid gid) entries
 
 -- | The bits 'ownedMode' speaks about: permissions and the set-id/sticky
 -- trio, never the file-type bits 'Posix.fileMode' also carries.
 permissionBits :: Posix.FileMode
 permissionBits = 0o7777
+
+-- | Every descendant of a directory -- files, directories and symlinks
+-- alike -- depth-first, without ever following a symlink into whatever it
+-- points at (so a symlink under a handed-over tree is chowned itself, its
+-- target is somebody else's business, and a symlink cycle can't loop this).
+treeEntries :: FilePath -> IO [FilePath]
+treeEntries path = do
+    names <- listDirectory path
+    let children = map (path </>) names
+    descendants <- concat <$> traverse recurse children
+    pure (children <> descendants)
+  where
+    recurse child = do
+        isSymlink <- pathIsSymbolicLink child
+        if isSymlink
+            then pure []
+            else do
+                isDir <- doesDirectoryExist child
+                if isDir then treeEntries child else pure []
+
+-- | 'Nothing' means "checked only what 'checkOwnership' also checks at the
+-- top" (not a directory, or nothing underneath owned wrong); reports the
+-- first mismatch found, same shape as the top-level checks above.
+checkTreeOwnership :: Maybe Posix.UserID -> Maybe Posix.GroupID -> FilePath -> IO (Maybe Text.Text)
+checkTreeOwnership wantedUid wantedGid path = do
+    isDir <- doesDirectoryExist path
+    if not isDir
+        then pure Nothing
+        else do
+            entries <- treeEntries path
+            go entries
+  where
+    go [] = pure Nothing
+    go (p : ps) = do
+        st <- Posix.getSymbolicLinkStatus p
+        if maybe False (/= Posix.fileOwner st) wantedUid
+            then pure (Just $ "wrong owner: " <> Text.pack p)
+            else
+                if maybe False (/= Posix.fileGroup st) wantedGid
+                    then pure (Just $ "wrong group: " <> Text.pack p)
+                    else go ps
+
+-- | Never follows a symlink to chown whatever it points at.
+chownEntry :: Posix.UserID -> Posix.GroupID -> FilePath -> IO ()
+chownEntry uid gid path = do
+    isSymlink <- pathIsSymbolicLink path
+    if isSymlink
+        then Posix.setSymbolicLinkOwnerAndGroup path uid gid
+        else Posix.setOwnerAndGroup path uid gid
 
 lookupUid :: Text.Text -> IO Posix.UserID
 lookupUid name = PosixUser.userID <$> PosixUser.getUserEntryForName (Text.unpack name)
