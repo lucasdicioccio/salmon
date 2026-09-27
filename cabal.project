@@ -1,5 +1,12 @@
 packages: salmon-core salmon-ops salmon-ops-recipes salmon-apps
 
+-- Pinned rather than left to ghcup's machine-wide default: the pinned prodapi-proxy
+-- source-repository-package below hard-bounds `base < 4.20`, so a build against GHC 9.10.3
+-- (base 4.20) fails to resolve. GHC 9.8.2 is what CI (.github/workflows/release.yml) already
+-- builds against; this just makes the local build stop depending on whichever GHC happens to be
+-- `ghcup set` on the machine building it.
+with-compiler: ghc-9.8.2
+
 source-repository-package
   type: git
   location: https://github.com/lucasdicioccio/acme-not-a-joke.git
