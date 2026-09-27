@@ -435,7 +435,7 @@ ksConfigContents setup =
 
     siteInfo :: StanzaSetup -> SiteSetup -> SiteInfo
     siteInfo ss site =
-        SiteInfo site.site_setup_title (url ss) Nothing (Just $ linkedSites site)
+        SiteInfo site.site_setup_title (url ss) Nothing (Just $ linkedSites site) Nothing Nothing Nothing Nothing
 
     proxy :: StanzaSetup -> ApiProxyConfig
     proxy ss = ss.stanza_setup_ks_proxy_config
