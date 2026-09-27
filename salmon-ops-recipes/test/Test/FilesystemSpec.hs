@@ -21,8 +21,21 @@ module Test.FilesystemSpec (tests) where
 
 import qualified Data.ByteString.Char8 as C8
 import Data.Text (Text)
-import System.Directory (doesDirectoryExist, doesFileExist, getModificationTime, removeFile)
+import qualified Data.Text as Text
+import Data.Bits ((.&.))
+import System.Directory (
+    createDirectory,
+    createDirectoryIfMissing,
+    createFileLink,
+    doesDirectoryExist,
+    doesFileExist,
+    getModificationTime,
+    pathIsSymbolicLink,
+    removeFile,
+ )
 import System.FilePath ((</>))
+import qualified System.Posix.Files as Posix
+import qualified System.Posix.User as PosixUser
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
@@ -52,6 +65,14 @@ tests =
             , testCase "a directory already gone is not a teardown failure" downOfAbsentDirSucceeds
             , testCase "a file's down still takes the enclosing directory with it" downRemovesBoth
             , testCase "but a directory holding something undeclared still fails" downOfNonEmptyDirFails
+            ]
+        , testGroup
+            "ownedFile: recursive tree ownership"
+            [ testCase "a missing directory is a Failure, same as a missing file" ownedMissingDirIsFailure
+            , testCase "a directory is checkable at all (not doesFileExist's permanent 'missing')" ownedDirectoryIsCheckable
+            , testCase "up recurses into nested files and subdirectories" ownedUpChownsDescendants
+            , testCase "ownedMode is applied to the top entry only, never descendants" ownedModeNotAppliedToDescendants
+            , testCase "a dangling symlink inside the tree is chowned itself, never followed" ownedTreeDoesNotFollowSymlinks
             ]
         ]
 
@@ -213,6 +234,87 @@ downOfNonEmptyDirFails = withTempDir $ \d -> do
     writeFile (dir </> "undeclared.txt") "left behind\n"
     assertEqual "teardown of a non-empty directory fails" False =<< runDown (FS.dir (FS.Directory dir))
     assertBool "and leaves it standing" =<< doesDirectoryExist dir
+
+-------------------------------------------------------------------------------
+
+{- | The current process's own username\/group, so tests can declare "this
+tree is owned by me" -- a chown any unprivileged test process is always
+allowed to perform on files it already owns -- without needing root.
+-}
+selfOwnership :: IO (Text, Text)
+selfOwnership = do
+    user <- Text.pack <$> PosixUser.getEffectiveUserName
+    gid <- PosixUser.getEffectiveGroupID
+    group <- Text.pack . PosixUser.groupName <$> PosixUser.getGroupEntryForID gid
+    pure (user, group)
+
+ownedMissingDirIsFailure :: IO ()
+ownedMissingDirIsFailure = withTempDir $ \d -> do
+    (user, group) <- selfOwnership
+    let owner = FS.FileOwnership (d </> "never-made") (Just user) (Just group) 0o755
+    verdict <- FS.checkOwnership owner
+    assertBool "missing directory is a Failure" (isFailure verdict)
+
+{- | Before (I5)'s fix this used 'doesFileExist', which is 'False' for a
+directory -- so a directory-shaped 'ownedFile' reported permanently
+"missing", however many times 'up' ran.
+-}
+ownedDirectoryIsCheckable :: IO ()
+ownedDirectoryIsCheckable = withTempDir $ \d -> do
+    (user, group) <- selfOwnership
+    let path = d </> "handed-over"
+    createDirectory path
+    let owner = FS.FileOwnership path (Just user) (Just group) 0o755
+    assertBool "up succeeded" =<< runUp (FS.ownedFile owner)
+    assertEqual "the directory now checks as Success" Success =<< FS.checkOwnership owner
+
+{- | A rootfs handed to an unprivileged user has package-installed
+subdirectories (etc\/ssh\/sshd_config.d, say) that only the top-level chown
+used to reach. 'up' must walk the whole tree.
+-}
+ownedUpChownsDescendants :: IO ()
+ownedUpChownsDescendants = withTempDir $ \d -> do
+    (user, group) <- selfOwnership
+    let top = d </> "rootfs-etc-ssh"
+    let sub = top </> "sshd_config.d"
+    createDirectoryIfMissing True sub
+    writeFile (sub </> "99-salmon-test.conf") "# nothing\n"
+    let owner = FS.FileOwnership top (Just user) (Just group) 0o755
+    assertBool "up succeeded" =<< runUp (FS.ownedFile owner)
+    assertEqual "the whole tree now checks as Success" Success =<< FS.checkOwnership owner
+
+-- | 'ownedMode' is a statement about the directory entry itself, not a
+-- recursive chmod -- a config file wanting 0644 and a host key wanting
+-- 0600 underneath the same handed-over directory must not both end up at
+-- whatever single mode the caller gave the top of the tree.
+ownedModeNotAppliedToDescendants :: IO ()
+ownedModeNotAppliedToDescendants = withTempDir $ \d -> do
+    (user, group) <- selfOwnership
+    let top = d </> "mode-scoped"
+    let nested = top </> "keep-this-mode.conf"
+    createDirectory top
+    writeFile nested "unchanged\n"
+    Posix.setFileMode nested 0o600
+    let owner = FS.FileOwnership top (Just user) (Just group) 0o755
+    assertBool "up succeeded" =<< runUp (FS.ownedFile owner)
+    nestedMode <- (.&. 0o7777) . Posix.fileMode <$> Posix.getFileStatus nested
+    assertEqual "the nested file's own mode survived untouched" 0o600 nestedMode
+
+{- | A symlink under a handed-over tree is chowned itself
+('setSymbolicLinkOwnerAndGroup'); its target is somebody else's business,
+and a dangling one must not make the walk throw trying to stat through it.
+-}
+ownedTreeDoesNotFollowSymlinks :: IO ()
+ownedTreeDoesNotFollowSymlinks = withTempDir $ \d -> do
+    (user, group) <- selfOwnership
+    let top = d </> "with-a-symlink"
+    createDirectory top
+    let link = top </> "dangling"
+    createFileLink "/nonexistent-salmon-test-target" link
+    let owner = FS.FileOwnership top (Just user) (Just group) 0o755
+    assertBool "up succeeded despite the dangling symlink" =<< runUp (FS.ownedFile owner)
+    assertBool "the symlink is still a symlink, not resolved/replaced" =<< pathIsSymbolicLink link
+    assertEqual "and the tree checks as Success" Success =<< FS.checkOwnership owner
 
 -------------------------------------------------------------------------------
 
