@@ -1,0 +1,18 @@
+digraph switchover {
+  rankdir=LR;
+  bgcolor="transparent";
+  node [shape=box, style="filled", fontname="Helvetica,Arial,sans-serif", fontsize=11];
+  edge [fontname="Helvetica,Arial,sans-serif", fontsize=10];
+
+  declaredA [label="declared:\nprimary on A", fillcolor="#eef2f7", color="#4a6fa5"];
+  pause [label="PauseBouncers", fillcolor="#f7f2ee", color="#8a6d3b"];
+  stop [label="StopMember A\n(clean shutdown)", fillcolor="#f7f2ee", color="#8a6d3b"];
+  promote [label="Promote B", fillcolor="#f7f2ee", color="#8a6d3b"];
+  repoint [label="RepointBouncers B", fillcolor="#f7f2ee", color="#8a6d3b"];
+  rejoin [label="Rejoin A\npg_rewind onto B's history", fillcolor="#f7f2ee", color="#8a6d3b"];
+  declaredB [label="declared:\nprimary on B", fillcolor="#eef2f7", color="#4a6fa5"];
+  refused [label="refused:\ndifferent clusters, or\nboth primary, or\npeer didn't stop cleanly, or\npeer is ahead", shape=note, fillcolor="#fbeaea", color="#a94442"];
+
+  declaredA -> pause -> stop -> promote -> repoint -> rejoin -> declaredB;
+  declaredA -> refused [style=dashed, label="unsafe declaration"];
+}

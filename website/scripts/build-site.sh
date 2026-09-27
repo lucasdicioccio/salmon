@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."  # repo root
 OUT="${1:-docs}"
 ./website/scripts/sync-repo-docs.sh
-mkdir -p "$OUT"/{audios,css,docs,gen,hashtags,images,js,json,raw,text,topics,videos}
+mkdir -p "$OUT"/{audios,css,docs,gen,gen/out,gen/images,hashtags,images,js,json,raw,text,topics,videos}
 kitchen-sink produce --srcDir website/src --outDir "$OUT" > /dev/null
 touch "$OUT/.nojekyll"
 echo "produced $(ls "$OUT"/*.html | wc -l) pages into $OUT/"

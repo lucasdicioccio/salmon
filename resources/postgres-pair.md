@@ -115,6 +115,8 @@ the host, outside all three guests, for the same reason.
 PauseBouncers -> StopMember A -> Promote B -> RepointBouncers B -> Rejoin A -> Done
 ```
 
+![A switchover from A to B: pause bouncers, stop A cleanly, promote B, repoint bouncers, rejoin A through pg_rewind; an unsafe declaration is refused instead of run](/gen/images/pg-switchover.dot.png)
+
 - **PauseBouncers** holds the clients rather than dropping them. With
   `pool_mode = transaction`, `PAUSE` waits for transactions in flight and
   queues what comes after, so a client sees latency where it would otherwise

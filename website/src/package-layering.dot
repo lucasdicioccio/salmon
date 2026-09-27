@@ -1,0 +1,17 @@
+digraph packages {
+  rankdir=LR;
+  bgcolor="transparent";
+  node [shape=box, style="filled", fontname="Helvetica,Arial,sans-serif", fontsize=12, fillcolor="#eef2f7", color="#4a6fa5"];
+  edge [color="#4a6fa5", fontname="Helvetica,Arial,sans-serif", fontsize=10];
+
+  core [label="salmon-core\nGraph / OpGraph / Track / Eval"];
+  ops [label="salmon-ops\nbuiltins + drivers (up/down/serve)"];
+  recipes [label="salmon-ops-recipes\nopinionated compositions"];
+  apps [label="salmon-apps\nbinaries"];
+  experimental [label="salmon-ops-recipes-experimental\nkitchen-sink, ACME", style="filled,dashed", fillcolor="#f7f2ee", color="#8a6d3b"];
+
+  ops -> core [label="depends on"];
+  recipes -> ops;
+  apps -> recipes;
+  experimental -> recipes [style=dashed, label="branches off"];
+}

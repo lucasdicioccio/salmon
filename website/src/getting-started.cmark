@@ -44,12 +44,7 @@ cabal build salmon-migrator                                          # a single 
 
 The project is layered strictly bottom-to-top:
 
-```
-salmon-core  <-  salmon-ops  <-  salmon-ops-recipes  <-  salmon-apps
-                                        ^
-                                        |
-                          salmon-ops-recipes-experimental
-```
+![salmon-core is depended on by salmon-ops, which is depended on by salmon-ops-recipes, which is depended on by salmon-apps; salmon-ops-recipes-experimental branches off salmon-ops-recipes as an alternate, heavier leaf](/gen/images/package-layering.dot.png)
 
 - **`salmon-core`** — the algebraic `Graph`, and the `OpGraph`/`Track`/`Eval`
   abstractions that let "create a file" and "turn a server up" be the same
@@ -97,6 +92,37 @@ my-salmon config <seed-args...> | my-salmon run tree   # print the dependency tr
 my-salmon config <seed-args...> | my-salmon query show --select '/some/path/**'
 my-salmon run serve                                    # read seed declarations as commands, keep converging
 ```
+
+`run tree` prints the dependency tree the directive expands to. This is the
+repository's own `salmon-ops-serve-fixture`, run at page-build time (not
+pasted by hand — it is regenerated whenever the fixture's output changes),
+declaring a tiny bundle of two files under a directory:
+
+```sh
+salmon-ops-serve-fixture config --dir /tmp/demo --name web --file index.html --file style.css \
+  | salmon-ops-serve-fixture run tree
+```
+
+<pre id="run-tree-output">(loading the actual output…)</pre>
+<script>
+(function () {
+  var out = document.getElementById("run-tree-output");
+  var box = document.getElementById("search-box");
+  var base = (box && box.dataset && box.dataset.basePath) || "";
+  fetch(base + "/gen/out/getting-started.cmark__run-tree")
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then(function (t) { out.textContent = t; })
+    .catch(function () {
+      out.textContent = "(couldn't load the generated output — see /gen/out/getting-started.cmark__run-tree)";
+    });
+})();
+</script>
+
+Two file nodes share the directory node that has to exist "before" either of
+them (`Ref`-deduped, so it is walked once); the bundle node on top is what a
+seed declares up or down. This is the shape every graph in the repo has,
+whether it is a handful of files or a clustered database: nodes with a
+`before` edge, walked in dependency order, deduped by `Ref`.
 
 The split keeps the possibly-impure "decide what I want" step separate from
 the hermetic "make it so" step, which is meant to run unattended, often on
@@ -147,6 +173,12 @@ four to `Salmon.Builtin.CommandLine.execCommandOrSeed`. The
 [cookbook](/docs-howto-ops.html) walks through each piece with a worked
 example, and `salmon-apps/src/Migrator.hs` in the repository is a complete
 one.
+
+=generator:cmd.json
+{"cmd":"website/scripts/gen-run-tree.sh"
+,"args":[]
+,"target":"run-tree"
+}
 
 =base:main-css.tramaj-json
 { "format": "css"
