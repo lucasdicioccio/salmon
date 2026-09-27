@@ -102,7 +102,6 @@ data GitSiteStanzaConfig
     , stanza_cfg_pemPath :: FilePath
     , stanza_cfg_repo :: Git.Repo
     , stanza_cfg_sourceSubdir :: FilePath
-    , stanza_cfg_dhallSubdir :: FilePath
     , stanza_cfg_ks_proxy_config :: ApiProxyConfig
     , stanza_cfg_ks_linked_sites :: [LinkedSite]
     }
@@ -137,7 +136,6 @@ data SiteSetup
     { site_setup_title :: Text
     , site_setup_sourceDir :: FilePath
     , site_setup_subdir :: FilePath
-    , site_setup_dhall_subdir :: FilePath
     , site_setup_ks_linked_sites :: [LinkedSite]
     }
     deriving (Generic)
@@ -185,7 +183,6 @@ gitConfigToSetup cfg =
             title
             sourcedir
             subdir
-            dhalldir
             linkedSites
     dom = Certs.getDomain . fst $ cfg.stanza_cfg_certSpec
     title = cfg.stanza_cfg_title
@@ -194,7 +191,6 @@ gitConfigToSetup cfg =
     pempath = remoteStanzaDir </> "ks.pem"
     keypath = remoteStanzaDir </> "ks.key"
     subdir = cfg.stanza_cfg_sourceSubdir
-    dhalldir = cfg.stanza_cfg_dhallSubdir
     proxy = cfg.stanza_cfg_ks_proxy_config
     linkedSites = cfg.stanza_cfg_ks_linked_sites
 
@@ -309,9 +305,8 @@ keyPath = stanzaPath "cert.key"
 siteSrcDir = stanzaPath "src"
 siteExecRoot = siteSrcDir
 
-siteSrcPath, siteDhallRoot :: StanzaSetup -> SiteSetup -> FilePath
+siteSrcPath :: StanzaSetup -> SiteSetup -> FilePath
 siteSrcPath ss site = siteSrcDir ss </> site.site_setup_subdir
-siteDhallRoot ss site = siteSrcDir ss </> site.site_setup_dhall_subdir
 
 siteTrashDir :: StanzaSetup -> FilePath
 siteTrashDir = stanzaPath "old"
@@ -433,7 +428,6 @@ ksConfigContents setup =
                 KitchenSinkDirectorySourceStanza
                     (siteSrcPath ss site)
                     (siteInfo ss site)
-                    (Just $ siteDhallRoot ss site)
                     (Just $ siteExecRoot ss)
 
     linkedSites :: SiteSetup -> [LinkedSite]
