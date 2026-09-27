@@ -174,7 +174,11 @@ function applyEvent(e) {
 }
 
 // ---------------------------------------------------------------------------
-// live tails: a dock of pinned mini terminals, one per node
+// live tails: a dock of pinned mini terminals, one per node. Besides a
+// managed action's own `output` lines, a tailed node's updown/upkeep reports
+// are formatted into the same window (prefixed by stream) — those exist for
+// every node, so a one-shot builtin's tail is not silent just because it has
+// no `managed` action to produce raw output.
 
 function storedPins() {
   try {
@@ -235,13 +239,55 @@ function toggleTail(ref) {
 }
 
 function applyOutput(e) {
-  const t = e.ref && state.tails.get(e.ref.full);
-  if (!t || typeof e.line !== "string") return;
+  if (e.ref && typeof e.line === "string") pushTailLine(e.ref.full, e.line);
+}
+
+// Shared by a managed action's raw output and by the formatted updown/upkeep
+// report lines below; a no-op if that ref has no open tail window.
+function pushTailLine(ref, line) {
+  const t = state.tails.get(ref);
+  if (!t) return;
   // paused holds the view still; what arrives meanwhile is kept for resume
   const into = t.paused ? t.held : t.lines;
-  into.push(e.line);
+  into.push(line);
   if (into.length > TAIL_MAX_LINES) into.splice(0, into.length - TAIL_MAX_LINES);
   if (!t.paused) paintTail(t);
+}
+
+function formatUpDownLine(e) {
+  switch (e.kind) {
+    case "failed":
+      return `failed: ${e.error}`;
+    case "conflicting":
+      return `conflicting: kept ${e.kept && e.kept.shorthand}, replaced ${e.replaced && e.replaced.shorthand}`;
+    case "instructed":
+      return `instructed: ${e.instruction}`;
+    case "dropped-instructions":
+      return `dropped ${e.dropped} instruction(s)`;
+    default:
+      return e.kind;
+  }
+}
+
+function formatUpkeepLine(e) {
+  switch (e.kind) {
+    case "next-look":
+      return `next-look: ${(e.check && e.check.kind) || "?"}${e.delay_us != null ? ` (retry in ${Math.round(e.delay_us / 1e6)}s)` : ""}`;
+    case "upkeep":
+      return `upkeep: ${e.state}`;
+    case "downkeep":
+      return `downkeep: ${e.state}`;
+    case "demoted":
+      return `demoted by ${e.dependency && e.dependency.short}`;
+    case "gave-up":
+      return `gave up after ${e.failures} failure(s)`;
+    case "wedged":
+      return `wedged (${Math.round(e.silent_us / 1e6)}s silent)`;
+    case "reapplying":
+      return `reapplying (retry in ${Math.round(e.delay_us / 1e6)}s)`;
+    default:
+      return e.kind;
+  }
 }
 
 function paintTail(t) {
@@ -331,6 +377,7 @@ function nodeOf(e) {
 }
 
 function applyUpDown(e) {
+  if (e.ref) pushTailLine(e.ref.full, `[updown] ${formatUpDownLine(e)}`);
   const n = nodeOf(e);
   if (!n) return;
   n.last = e.kind;
@@ -368,6 +415,7 @@ function applyUpkeep(e) {
     applyUpDown({ ...e.report, stream: "updown" });
     return;
   }
+  if (e.ref) pushTailLine(e.ref.full, `[upkeep] ${formatUpkeepLine(e)}`);
   const n = nodeOf(e);
   if (!n) return;
   n.last = e.kind;
@@ -573,7 +621,9 @@ function renderGraph() {
     const title = document.createElementNS(SVG, "title");
     title.textContent = n.help;
     g.appendChild(title);
-    g.addEventListener("click", () => select(id));
+    // Selection is handled by the delegated, coordinate-based hit test
+    // below (pointer capture retargets click's own bubble path away from
+    // this element), not a listener here.
     g.addEventListener("animationend", () => g.classList.remove("pulse"));
     nodes.appendChild(g);
     n.el = g;
@@ -1234,14 +1284,23 @@ $("reload").addEventListener("click", loadDag);
   };
   svg.addEventListener("pointerup", endDrag);
   svg.addEventListener("pointercancel", endDrag);
-  // capture phase: runs before a node `g`'s own (bubbling) click listener
+  // Pointer capture is set on every pointerdown (above), which means the
+  // browser retargets the whole click's mouse-compat sequence to `svg`
+  // itself rather than whatever node is under the cursor — so a node `g`'s
+  // own click listener never sees it. Hit-test from coordinates instead of
+  // relying on the (retargeted) event target/bubble path.
   svg.addEventListener(
     "click",
     (ev) => {
-      if (!justPanned) return;
-      justPanned = false;
-      ev.stopPropagation();
-      ev.preventDefault();
+      if (justPanned) {
+        justPanned = false;
+        ev.stopPropagation();
+        ev.preventDefault();
+        return;
+      }
+      const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+      const nodeEl = hit && hit.closest ? hit.closest("[data-ref]") : null;
+      if (nodeEl) select(nodeEl.dataset.ref);
     },
     true,
   );
