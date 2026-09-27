@@ -1,0 +1,74 @@
+name: release
+
+# Publishes the blessed salmon-apps binaries (see CLAUDE.md's "Packages" section for what
+# counts as blessed vs. demo/internal) as GitHub Release assets.
+#
+# Triggered on a `v*` tag push only (not every commit) to keep GHC/cabal build time — the real,
+# unavoidable cost here since GitHub-hosted Actions minutes/storage are free for a public repo —
+# bounded to release cadence rather than per-commit.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04 # oldest currently-supported Ubuntu GitHub-hosted runner image (22.04
+                           # is mid-deprecation as of writing), for the broadest glibc
+                           # compatibility on the produced binaries; no cross-platform matrix yet.
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up GHC and cabal
+        id: setup-haskell
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.8.2'
+          cabal-version: '3.12.1.0'
+
+      - name: Cache the cabal store and dist-newstyle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.setup-haskell.outputs.cabal-store }}
+            dist-newstyle
+          # Keyed on the resolved GHC/cabal versions plus a hash of everything that determines
+          # the build plan (cabal.project* and every .cabal file) — the standard pattern for
+          # Haskell CI caching. Falls back to the most recent cache for this OS/GHC pair (a
+          # slightly stale cache still saves most of the rebuild) when nothing matches exactly.
+          key: ${{ runner.os }}-ghc${{ steps.setup-haskell.outputs.ghc-version }}-cabal${{ steps.setup-haskell.outputs.cabal-version }}-${{ hashFiles('cabal.project', '**/*.cabal') }}
+          restore-keys: |
+            ${{ runner.os }}-ghc${{ steps.setup-haskell.outputs.ghc-version }}-cabal${{ steps.setup-haskell.outputs.cabal-version }}-
+
+      - name: cabal update
+        run: cabal update
+
+      - name: Build the blessed binaries
+        run: cabal build salmon-migrator salmon-pgpair salmon-fleet salmon-tui
+
+      - name: Locate, strip and rename binaries
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for exe in salmon-migrator salmon-pgpair salmon-fleet salmon-tui; do
+            # `cabal list-bin` can emit incidental noise on stdout (e.g. git checkout lines
+            # while it re-verifies a source-repository-package) ahead of the path itself, so
+            # take only the last line rather than trusting the whole output to be the path.
+            bin_path="$(cabal list-bin "$exe" | tail -n1)"
+            dest="release-assets/${exe}-linux-x86_64"
+            cp "$bin_path" "$dest"
+            strip "$dest"
+            chmod +x "$dest"
+          done
+          ls -la release-assets
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
