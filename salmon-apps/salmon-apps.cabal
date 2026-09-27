@@ -44,6 +44,7 @@ library
                     , containers
                     , directory
                     , filepath
+                    , layoutz-hs
                     , optparse-applicative
                     , optparse-generic
                     , process
@@ -154,3 +155,21 @@ executable salmon-tui
     -- the stream is followed on its own thread while brick owns the terminal
     ghc-options:      -threaded
     default-language: Haskell2010
+
+test-suite salmon-apps-test
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    other-modules:    Test.FleetSpec
+    build-depends:    base >=4.16.3.0
+                    , salmon-apps
+                    , salmon-ops
+                    , tasty
+                    , tasty-hunit
+                    , text
+                    , time
+    ghc-options:      -Wall
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , ScopedTypeVariables
