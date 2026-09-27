@@ -573,7 +573,9 @@ function renderGraph() {
     const title = document.createElementNS(SVG, "title");
     title.textContent = n.help;
     g.appendChild(title);
-    g.addEventListener("click", () => select(id));
+    // Selection is handled by the delegated, coordinate-based hit test
+    // below (pointer capture retargets click's own bubble path away from
+    // this element), not a listener here.
     g.addEventListener("animationend", () => g.classList.remove("pulse"));
     nodes.appendChild(g);
     n.el = g;
@@ -1234,14 +1236,23 @@ $("reload").addEventListener("click", loadDag);
   };
   svg.addEventListener("pointerup", endDrag);
   svg.addEventListener("pointercancel", endDrag);
-  // capture phase: runs before a node `g`'s own (bubbling) click listener
+  // Pointer capture is set on every pointerdown (above), which means the
+  // browser retargets the whole click's mouse-compat sequence to `svg`
+  // itself rather than whatever node is under the cursor — so a node `g`'s
+  // own click listener never sees it. Hit-test from coordinates instead of
+  // relying on the (retargeted) event target/bubble path.
   svg.addEventListener(
     "click",
     (ev) => {
-      if (!justPanned) return;
-      justPanned = false;
-      ev.stopPropagation();
-      ev.preventDefault();
+      if (justPanned) {
+        justPanned = false;
+        ev.stopPropagation();
+        ev.preventDefault();
+        return;
+      }
+      const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+      const nodeEl = hit && hit.closest ? hit.closest("[data-ref]") : null;
+      if (nodeEl) select(nodeEl.dataset.ref);
     },
     true,
   );
