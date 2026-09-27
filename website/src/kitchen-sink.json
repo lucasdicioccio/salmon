@@ -3,5 +3,11 @@
 , "basePath": "/salmon"
 , "twitterLogin": "lucasdicioccio"
 , "commands": []
+, "linkedSites":
+  [ {"baseURL": "https://kitchensink-tech.github.io/", "siteTitle": "Kitchen Sink", "siteType": "kitchen-sink"}
+  , {"baseURL": "https://lucasdicioccio.github.io/tramaj/", "siteTitle": "tramaj", "siteType": "kitchen-sink"}
+  , {"baseURL": "https://lucasdicioccio.github.io/agents-exe/", "siteTitle": "agents-exe", "siteType": "kitchen-sink"}
+  , {"baseURL": "https://dicioccio.fr/", "siteTitle": "Lucas' blog.", "siteType": "kitchen-sink"}
+  ]
 , "api": {"tag":"NoProxying"}
 }
