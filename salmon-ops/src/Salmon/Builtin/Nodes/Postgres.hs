@@ -514,6 +514,11 @@ psqlAdminRun_Sudo port = Command go
             ]
     -- CREATE ROLE has no IF NOT EXISTS form, but (unlike CREATE DATABASE) it's
     -- fine inside a DO block, so we guard it with an explicit existence check.
+    -- The password is set unconditionally afterward, the same way
+    -- CreateReplicationUser does below: guarding the ALTER behind the IF NOT
+    -- EXISTS, as this used to, means a rotated password never reaches the
+    -- cluster and the failure arrives later as "password authentication
+    -- failed" somewhere that looks unrelated.
     go (CreateUser name pass) =
         proc
             "sudo"
@@ -525,9 +530,11 @@ psqlAdminRun_Sudo port = Command go
                         , Text.unpack name
                         , "') THEN CREATE ROLE "
                         , Text.unpack name
+                        , " WITH LOGIN; END IF; END $$; ALTER ROLE "
+                        , Text.unpack name
                         , " WITH LOGIN PASSWORD "
                         , quotePass pass
-                        , "; END IF; END $$;"
+                        , ";"
                         ]
                    ]
             )
