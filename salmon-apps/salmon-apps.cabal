@@ -48,9 +48,9 @@ library
                     , optparse-applicative
                     , optparse-generic
                     , process
-                    , salmon-core
-                    , salmon-ops
-                    , salmon-ops-recipes
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
+                    , salmon-ops-recipes ^>=0.1.0.0
                     , text
                     , time
                     , vty
@@ -167,7 +167,7 @@ test-suite salmon-apps-test
                     , directory
                     , filepath
                     , salmon-apps
-                    , salmon-ops
+                    , salmon-ops ^>=0.1.0.0
                     , tasty
                     , tasty-hunit
                     , temporary
