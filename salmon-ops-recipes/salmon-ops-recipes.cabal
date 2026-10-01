@@ -67,8 +67,8 @@ library
                     , optparse-generic
                     , process
                     , process-extras
-                    , salmon-core
-                    , salmon-ops
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
                     , text
                     , time
                     , tls
@@ -168,9 +168,9 @@ test-suite salmon-ops-recipes-test
                     , process
                     , process-extras
                     , stm
-                    , salmon-core
-                    , salmon-ops
-                    , salmon-ops-recipes
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
+                    , salmon-ops-recipes ^>=0.1.0.0
                     , tasty
                     , tasty-hunit
                     , tasty-quickcheck

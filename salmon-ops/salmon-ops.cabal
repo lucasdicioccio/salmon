@@ -144,7 +144,7 @@ library
                     , optparse-generic
                     , process
                     , process-extras
-                    , salmon-core
+                    , salmon-core ^>=0.1.0.0
                     , stm
                     , text
                     , time
@@ -168,8 +168,8 @@ executable salmon-ops-dot-fixture
     hs-source-dirs:   fixtures
     build-depends:    base >=4.16.3.0
                     , mtl
-                    , salmon-core
-                    , salmon-ops
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
                     , text
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
@@ -184,8 +184,8 @@ executable salmon-postgres-replication-fixture
     hs-source-dirs:   fixtures
     build-depends:    base >=4.16.3.0
                     , mtl
-                    , salmon-core
-                    , salmon-ops
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
                     , text
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
@@ -202,8 +202,8 @@ executable salmon-qemu-host-setup-fixture
                     , directory
                     , mtl
                     , filepath
-                    , salmon-core
-                    , salmon-ops
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
                     , text
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
@@ -223,8 +223,8 @@ executable salmon-ops-serve-fixture
                     , optparse-applicative
                     , optparse-generic
                     , process
-                    , salmon-core
-                    , salmon-ops
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
                     , text
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
