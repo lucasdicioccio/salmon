@@ -41,6 +41,9 @@ store = KlosetStore "/var/backups/kloset" "/etc/plakar.key"
 job :: PlakarJob
 job = PlakarJob "nightly" store "/srv/data" (dailyAt "3" "17") "root" (keepDays 30) (26 * 3600) "/opt/salmon/plakar/nightly.sh"
 
+gcs :: GcsStore
+gcs = GcsStore "backups" "bkt" "/pre/fix" "/etc/sa.json" "application_credentials" Nothing
+
 tests :: TestTree
 tests =
     testGroup
@@ -93,6 +96,29 @@ tests =
                 assertBool "" ("'/srv/it'\\''s'" `Text.isInfixOf` renderBackupScript job{jobSource = "/srv/it's"} ["-days", "1"])
             , testCase "the digest is lower-case hex" $
                 assertEqual "" "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" (sha256Hex "")
+            ]
+        , testGroup
+            "integrations and the GCS store"
+            [ testCase "pinned and latest render as pkg add arguments" $ do
+                assertEqual "" "gcs@1.0.2" (pkgAddArg (Integration "gcs" (Pinned "1.0.2") Nothing))
+                assertEqual "" "gcs" (pkgAddArg (Integration "gcs" Latest Nothing))
+            , testCase "a pinned integration is found at its version" $
+                assertEqual "" Success (interpretPkgList (Integration "gcs" (Pinned "1.0.2") Nothing) ExitSuccess "gcs@v1.0.2\n")
+            , testCase "another version is not installed" $
+                assertBool "" (interpretPkgList (Integration "gcs" (Pinned "1.0.2") Nothing) ExitSuccess "gcs@v1.0.1\n" /= Success)
+            , testCase "latest accepts any version, but not another name" $ do
+                assertEqual "" Success (interpretPkgList (Integration "gcs" Latest Nothing) ExitSuccess "gcs v0.3\n")
+                assertBool "" (interpretPkgList (Integration "gcs" Latest Nothing) ExitSuccess "s3 v0.3\n" /= Success)
+            , testCase "a failing listing is cannot tell" $
+                assertEqual "" Unknown (interpretPkgList (Integration "gcs" Latest Nothing) (ExitFailure 1) "")
+            , testCase "the store's arguments name only the credentials path" $
+                assertEqual "" ["backups", "gcs://bkt/pre/fix", "application_credentials=/etc/sa.json"] (gcsStoreAddArgs gcs)
+            , testCase "no prefix, no trailing slash" $
+                assertEqual "" "gcs://bkt" (gcsStoreAddArgs gcs{gcsPrefix = ""} !! 1)
+            , testCase "the store is found when shown with its location" $
+                assertEqual "" Success (interpretStoreShow gcs ExitSuccess "backups  location=gcs://bkt/pre/fix\n")
+            , testCase "an absent store is a failure" $
+                assertBool "" (interpretStoreShow gcs ExitSuccess "other location=gcs://x\n" /= Success)
             ]
         , testCase "a job with no retention rule is refused rather than run" $
             assertBool "" (either (const True) (const False) (pruneArgs (jobKeep job{jobKeep = KeepPolicy Nothing Nothing Nothing})))
