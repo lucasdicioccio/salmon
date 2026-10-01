@@ -263,6 +263,9 @@ data SystemCtlCall
     | Enable Scope UnitTarget
     | Up Scope UnitTarget
     | Stop Scope UnitTarget
+    | -- | @mask --now@: stops the unit and points it at @\/dev\/null@
+      Mask Scope UnitTarget
+    | Unmask Scope UnitTarget
     deriving (Show)
 
 callSystemctl :: Command "systemctl" SystemCtlCall
@@ -272,6 +275,58 @@ callSystemctl = Command go
     go (Enable sc u) = proc "systemctl" (scopeArgs sc <> ["enable", Text.unpack u])
     go (Up sc u) = proc "systemctl" (scopeArgs sc <> ["restart", Text.unpack u])
     go (Stop sc u) = proc "systemctl" (scopeArgs sc <> ["stop", Text.unpack u])
+    go (Mask sc u) = proc "systemctl" (scopeArgs sc <> ["mask", "--now", Text.unpack u])
+    go (Unmask sc u) = proc "systemctl" (scopeArgs sc <> ["unmask", Text.unpack u])
+
+{- | A unit that must never run, masked rather than merely disabled: a
+disabled unit can still be started by anything that @Wants=@ it (Debian's
+@postgresql.service@ pulls in every @postgresql\@V-C@), a masked one cannot.
+
+@up@ is @systemctl mask --now@, so a unit that is running when the mask lands
+is stopped; one that is not (a Postgres cluster started by Patroni is not
+owned by any unit) is untouched. @down@ unmasks and does not start anything.
+The @check@ reads @systemctl is-enabled@ ('interpretIsEnabled').
+-}
+maskedUnit :: Reporter Report -> Track' (Binary "systemctl") -> Scope -> UnitTarget -> Op
+maskedUnit r systemctl scope target =
+    withCommand (Mask scope target) $ \mask ->
+        withCommand (Unmask scope target) $ \unmask ->
+            op "systemd-masked-unit" nodeps $ \actions ->
+                actions
+                    { help = "masks " <> target <> " so that nothing can start it"
+                    , ref = mkRef "systemd-masked" target
+                    , check = checkMasked scope target
+                    , up = mask
+                    , down = unmask
+                    }
+  where
+    r' cmd = contramap (CallSystemCtl cmd) r
+    withCommand cmd f =
+        let
+            g :: (Reporter Binary.Report -> IO ()) -> Op
+            g callbin = f (callbin (r' cmd))
+         in
+            withBinary systemctl callSystemctl cmd g
+
+checkMasked :: Scope -> UnitTarget -> IO CheckResult
+checkMasked scope target = do
+    -- @is-enabled@ exits non-zero for most states, so the exit code carries
+    -- nothing; only the word it prints does.
+    (_code, out, _err) <-
+        readCreateProcessWithExitCode
+            (proc "systemctl" (scopeArgs scope <> ["is-enabled", Text.unpack target]))
+            ""
+    pure (interpretIsEnabled (Text.decodeUtf8With TextError.lenientDecode out))
+
+{- | The verdict on @systemctl is-enabled@'s output, pure. Only @masked@ is
+satisfied: @masked-runtime@ (a mask under @\/run@) does not survive a reboot,
+and a unit that is merely @disabled@ is the case this node exists to refuse.
+-}
+interpretIsEnabled :: Text -> CheckResult
+interpretIsEnabled out = case Text.strip (Text.takeWhile (/= '\n') (Text.strip out)) of
+    "masked" -> Success
+    "" -> Unknown
+    other -> Failure ("not masked: " <> Text.take 60 other)
 
 -------------------------------------------------------------------------------
 
