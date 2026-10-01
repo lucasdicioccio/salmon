@@ -24,7 +24,10 @@ Four packages are released together, at one shared version, in dependency order:
 scripts/release-hackage.sh --dry-run     # everything except the upload
 scripts/release-hackage.sh               # same, then upload all four as candidates
 scripts/release-hackage.sh --publish     # upload as published releases, then tag
+scripts/release-hackage.sh --docs-only   # only the Haddocks, for a version already on Hackage
 ```
+
+Options of note: `--no-docs` skips the Haddock build and upload; `--skip-tests` skips the test suites.
 
 What it does, stopping at the first failure:
 
@@ -36,9 +39,14 @@ What it does, stopping at the first failure:
    packages (so a file missing from `extra-source-files` fails here and not on Hackage);
    `--skip-tests` skips the tests. The podman-backed tests of `salmon-ops-recipes` are skipped
    loudly when `podman` is absent;
-5. uploads with `cabal upload` in dependency order, after a `[y/N]` question (`--yes` skips it).
-   Without `--publish` these are candidates; with it they are releases, which cannot be undone;
-6. after `--publish` only, creates the annotated tag `vVERSION` **locally**. The script never
+5. builds each package's documentation tarball with `cabal haddock --haddock-for-hackage` inside
+   the same unpacked-tarball project (`--no-docs` skips this). A Haddock failure stops the script
+   (a dry run reports it and carries on);
+6. uploads with `cabal upload` in dependency order, after a `[y/N]` question (`--yes` skips it).
+   Without `--publish` these are candidates; with it they are releases, which cannot be undone.
+   The docs tarballs are then uploaded with `cabal upload -d` (to the candidate, or with `--publish`
+   to the published release). The prompt says what will be uploaded and where;
+7. after `--publish` only, creates the annotated tag `vVERSION` **locally**. The script never
    pushes: `git push <remote> vVERSION` is yours to run.
 
 `--dry-run` also tells you, without uploading anything, what a real run would upload and tag.
@@ -53,7 +61,18 @@ What it does, stopping at the first failure:
 3. Run again with `--publish`. Re-uploading a candidate that already exists replaces it.
 4. Push the tag.
 
+## Docs for a release that is already published
+
+Hackage builds docs itself for published packages, but late or not at all. To upload them by hand
+for the version in the `.cabal` files (no package upload, no tag):
+
+```sh
+scripts/release-hackage.sh --docs-only --dry-run   # builds all four Haddocks, uploads nothing
+scripts/release-hackage.sh --docs-only             # same, then publishes the docs
+```
+
+`--docs-only` publishes the docs (they replace any existing ones); `--dry-run` is the way to look first.
+
 ## Known gaps
 
-- Haddocks are not uploaded; Hackage builds them itself for published packages.
 - There is no changelog check; write `CHANGELOG.md` entries before running.
