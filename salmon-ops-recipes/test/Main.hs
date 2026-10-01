@@ -11,6 +11,7 @@ import qualified Test.LlamaServerSpec as LlamaServerSpec
 import qualified Test.ServeApiSpec as ServeApiSpec
 import qualified Test.PgVectorSpec as PgVectorSpec
 import qualified Test.PlakarSpec as PlakarSpec
+import qualified Test.WireGuardMeshSpec as WireGuardMeshSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
@@ -111,6 +112,7 @@ main =
             , PgVectorSpec.tests
             , PlakarSpec.tests
             , WireGuardSpec.tests
+            , WireGuardMeshSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
             , FollowCacheSpec.tests

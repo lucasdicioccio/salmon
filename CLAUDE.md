@@ -47,6 +47,14 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   them is also what makes the demo a demo: `prereqs` is slow and rarely changes, `up` is the one
   you re-run, and re-running it with one word changed is the whole show.
 
+`SreBox.WireGuardMesh` (in `salmon-ops-recipes`) is a WireGuard mesh declared once (`MeshSeed`: peers with declared
+addresses, inline public keys, optional endpoints, groups; policies; routers) and unfolded by the pure `genHost`/`genAll`
+into one `HostSpec` per host, which `hostOp` turns into nodes and `hostDocument` wraps as a pull-mode document (one inline
+directive, label = host). Refusals are collected, not first-found (`validate`). It ships no secret: each host generates
+its own private key and public keys travel in the seed. Policies are an input chain on the mesh interface only
+(established, one accept per policy, final drop); an exit router's endpoint must be an IPv4 literal. Not done: the UPnP
+node, a `salmon-apps` binary, a Layer 2/3 test. See `specs/wireguard-mesh.md`.
+
 Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-recipes` ←
 `salmon-apps`, with `salmon-ops-recipes-experimental` branching off `salmon-ops-recipes` as an
 alternate, heavier leaf (nothing in the default package set depends on it).

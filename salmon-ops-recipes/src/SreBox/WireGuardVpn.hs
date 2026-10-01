@@ -208,18 +208,7 @@ clientVpn r bins spec =
     -- pin a host route to the server's own IP via whatever the kernel currently
     -- uses (the physical uplink), so the tunnel's own traffic doesn't loop over itself
     pinServerRoute :: Op
-    pinServerRoute =
-        ( op "wireguard-vpn-client-pin-server-route" (deps [justInstall bins.binIp]) $ \actions ->
-            actions
-                { help = "keeps the route to the VPN server itself off the tunnel"
-                , ref = mkRef "wg-vpn-pin-server-route" spec.client_server_ip
-                , up = do
-                    (via, dev) <- IpRoute.discoverGatewayFor spec.client_server_ip
-                    let cmd = IpRoute.ReplaceRoute (IpRoute.Route (IpRoute.RawNetwork (spec.client_server_ip <> "/32")) dev via)
-                    Binary.untrackedExec IpRoute.ipcommand cmd "" (contramap (IpRoute.RunIp cmd) ip_r)
-                }
-        )
-            `inject` serverPeer
+    pinServerRoute = pinHostRoute ip_r bins spec.client_server_ip `inject` serverPeer
 
     -- classic wg-quick "route all traffic" trick: two more-specific-than-default
     -- routes over the VPN interface, leaving the real default route (and every
@@ -229,3 +218,19 @@ clientVpn r bins spec =
         IpRoute.route ip_r bins.binIp (IpRoute.Route (IpRoute.RawNetwork "128.0.0.0/1") spec.client_wg_iface Nothing)
             `inject` IpRoute.route ip_r bins.binIp (IpRoute.Route (IpRoute.RawNetwork "0.0.0.0/1") spec.client_wg_iface Nothing)
             `inject` pinServerRoute
+
+{- | Keeps the route to one host off the tunnel: a @\/32@ via the gateway the
+kernel currently uses for it. Shared with "SreBox.WireGuardMesh", whose exit
+routers need the same pin. The address must be an IPv4 literal.
+-}
+pinHostRoute :: Reporter IpRoute.Report -> Binaries -> Text -> Op
+pinHostRoute ip_r bins addr =
+    op "wireguard-vpn-client-pin-server-route" (deps [justInstall bins.binIp]) $ \actions ->
+        actions
+            { help = "keeps the route to the VPN server itself off the tunnel"
+            , ref = mkRef "wg-vpn-pin-server-route" addr
+            , up = do
+                (via, dev) <- IpRoute.discoverGatewayFor addr
+                let cmd = IpRoute.ReplaceRoute (IpRoute.Route (IpRoute.RawNetwork (addr <> "/32")) dev via)
+                Binary.untrackedExec IpRoute.ipcommand cmd "" (contramap (IpRoute.RunIp cmd) ip_r)
+            }

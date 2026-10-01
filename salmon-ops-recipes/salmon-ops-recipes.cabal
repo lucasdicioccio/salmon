@@ -35,6 +35,7 @@ library
                    , SreBox.PostgresPair
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
+                   , SreBox.WireGuardMesh
                    , SreBox.Gcp.VmProvision
                    , SreBox.Gcp.CloudRunDeploy
                    , SreBox.Gcp.CloudRunAlerts
@@ -97,6 +98,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PgVectorSpec
                     , Test.PlakarSpec
                     , Test.WireGuardSpec
+                    , Test.WireGuardMeshSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
                     , Test.DaemonSpec
