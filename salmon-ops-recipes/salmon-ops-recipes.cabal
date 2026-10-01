@@ -1,24 +1,24 @@
 cabal-version:      2.4
 name:               salmon-ops-recipes
 version:            0.1.0.0
-
--- A short (one-line) description of the package.
--- synopsis:
-
--- A longer description of the package.
--- description:
-
--- A URL where users can report bugs.
--- bug-reports:
-
--- The license under which the package is released.
--- license:
+synopsis:           Opinionated recipes built from Salmon builtins.
+description:        Higher-level recipes (postgres migrations, postgres primary/standby pairs, micro DNS, ...) composed from salmon-ops builtins.
+homepage:           https://lucasdicioccio.github.io/salmon/
+bug-reports:        https://github.com/lucasdicioccio/salmon/issues
+license:            BSD-3-Clause
+license-file:       LICENSE
 author:             Lucas DiCioccio
 maintainer:         lucas@dicioccio.fr
+copyright:          2022-2026 Lucas DiCioccio
+category:           Development
+build-type:         Simple
+tested-with:        GHC == 9.10.3
+extra-doc-files:    CHANGELOG.md
 
--- A copyright notice.
--- copyright:
--- category:
+source-repository head
+    type:     git
+    location: https://github.com/lucasdicioccio/salmon
+    subdir:   salmon-ops-recipes
 
 library
     exposed-modules: SreBox.PostgresMigrations
@@ -40,7 +40,7 @@ library
                    , SreBox.Gcp.CloudRunAlerts
                    , SreBox.Gcp.PostgrestCloudRun
                    , SreBox.Gcp.PreviewEnvironment
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , base16-bytestring
                     , base64-bytestring
@@ -148,7 +148,7 @@ test-suite salmon-ops-recipes-test
                     , Test.UpkeepSpec
                     , Test.WindowSpec
     build-depends:    QuickCheck
-                    , base
+                    , base >=4.16.3.0 && <4.22
                     , aeson
                     , bytestring
                     , comonad
