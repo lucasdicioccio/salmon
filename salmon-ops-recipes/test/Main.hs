@@ -35,6 +35,7 @@ import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
 import qualified Test.EtcdSpec as EtcdSpec
+import qualified Test.PatroniSpec as PatroniSpec
 import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
@@ -131,6 +132,7 @@ main =
             , PostgresClusterSpec.tests
             , PgBouncerSpec.tests
             , EtcdSpec.tests
+            , PatroniSpec.tests
             , PostgresPairSpec.tests
             , PostgresTemplateSpec.tests
             , PostgresTlsSpec.tests

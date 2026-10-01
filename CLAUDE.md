@@ -151,6 +151,15 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   Netfilter, CronTask, Rsync, etc). Look at `Filesystem.hs` as the canonical small example of the
   `op` pattern (a value type like `Directory`/`FileContents`, a smart constructor returning `Op`
   that fills in `help`/`notes`/`ref`/`up`/`down`).
+  `Nodes/Patroni.hs` (`patroniMember`, `specs/pg-patroni.md`) is Patroni as a member: Patroni owns
+  Postgres, so nothing in it starts/promotes a cluster or names a primary in a `ref`/`help`/`notes`.
+  It uses postgresql-common's layout and **masks** Debian's `postgresql@V-C` unit
+  (`Systemd.maskedUnit`) so nothing starts the data directory behind Patroni. Patroni is started on
+  a config *directory*: `patroni.yml` is rendered here (fingerprint in `notes`), credentials are a
+  pre-provisioned fragment in the same directory that the node only `chown`s and watches. The
+  `check` is `GET /health` + `GET /patroni` (`interpretMember`): role reported never judged,
+  transitional states `Unknown`, `pending_restart` parsed but not judged (that is the cluster
+  config node's, which restarts pending members replicas-first per the spec).
 - **`Actions/UpDown.hs`** implements graph execution. Both directions run the same way: `expand`
   the `OpGraph` to a `Cofree Graph`, collapse that to a `Ref`-keyed DAG with `Salmon.Op.Dag`
   (below), then walk it. `upDag` walks it in dependency order — a node is applied once everything
