@@ -39,7 +39,6 @@ import System.FilePath ((</>))
 import System.IO (Handle, IOMode (ReadMode), hClose, hPutStr, withFile)
 import System.IO.Temp (withSystemTempFile)
 import System.Posix.Files (fileMode, getFileStatus)
-import System.Process (createPipe)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -54,7 +53,7 @@ import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (silent)
 import qualified Salmon.Reporter.Tagged as Tagged
 
-import Test.Harness (capture, withTempDir)
+import Test.Harness (capture, privatePipe, withTempDir)
 
 tests :: TestTree
 tests =
@@ -115,7 +114,7 @@ withRunning :: (Running -> IO a) -> IO a
 withRunning act =
     withTempDir $ \dir -> do
         let path = dir </> "serve.sock"
-        (stdinR, stdinW) <- createPipe
+        (stdinR, stdinW) <- privatePipe
         worldVar <- newEmptyMVar
         (own, seen) <- capture
         upsRef <- newIORef Map.empty
