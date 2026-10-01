@@ -50,6 +50,19 @@ tests =
             assertEqual "" True (ok (seedDecision self [(head others, Just (fmap listedOf members))]))
         , testCase "seed: a cluster that does not list us is refused" $
             assertEqual "" False (ok (seedDecision self [(head others, Just (fmap listedOf others))]))
+        , testCase "join: the config says existing and still lists every member" $ do
+            let t = Text.unpack (renderConfigFor Join cfg)
+            assertBool t ("initial-cluster-state: existing" `isInfixOf` t)
+            assertBool t (not ("initial-cluster-state: new" `isInfixOf` t))
+            assertBool t ("name: b" `isInfixOf` t)
+        , testCase "join: nobody answering is refused" $
+            assertEqual "" True (either (const True) (const False) (joinDecision self [(m, Nothing) | m <- others]))
+        , testCase "join: a cluster not listing us is added through its answerer" $
+            assertEqual "" (Right (AddVia (head others))) (joinDecision self [(head others, Just (fmap listedOf others))])
+        , testCase "join: a cluster already listing us is not asked to add again" $
+            assertEqual "" (Right AlreadyListed) (joinDecision self [(head others, Just (fmap listedOf members))])
+        , testCase "join: skips unreachable members and uses one that answers" $
+            assertEqual "" (Right (AddVia (others !! 1))) (joinDecision self [(head others, Nothing), (others !! 1, Just (fmap listedOf others))])
         ]
   where
     cfgText = Text.unpack (renderConfig cfg)
