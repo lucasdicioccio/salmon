@@ -166,7 +166,9 @@ else
     cat "$out" >&2
     if [ "$ok" = 1 ]; then
       # take the path cabal printed; fall back to searching the build directory
-      tb="$(sed -n 's/^Documentation tarball created: //p' "$out" | tail -n1)"
+      # cabal prints the path on the line after "Documentation tarball created:", and also for
+      # dependencies it documents on the way, so pick the line that names this package's tarball.
+      tb="$(grep -E "/$p-$VERSION-docs\\.tar\\.gz\$" "$out" | tail -n1 || true)"
       if [ -z "$tb" ] || [ ! -f "$tb" ]; then
         tb="$(find "$BUILD" -name "$p-$VERSION-docs.tar.gz" -print -quit)"
       fi
