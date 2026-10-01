@@ -13,6 +13,9 @@ usage: scripts/release-hackage.sh [options]
   --publish          upload as published releases instead of candidates, then tag locally
   --token-file FILE  file holding the Hackage API token (else \$HACKAGE_TOKEN; else cabal's own credentials)
   --set-bounds       rewrite internal dependencies to ^>=VERSION in the .cabal files, then exit
+  --no-docs          do not build or upload Haddock documentation
+  --docs-only        build and upload only the Haddocks, for the version already in the .cabal
+                     files: no package upload, no tag; publishes the docs unless --dry-run
   --skip-tests       build the unpacked tarballs but do not run their test suites
   --heavy-tests      also run the container/VM tier (qemu, podman; needs root-ish prerequisites, shared host)
   --keep             keep the work directory
@@ -21,13 +24,15 @@ usage: scripts/release-hackage.sh [options]
 USAGE
 }
 
-DRY=0 PUBLISH=0 TOKEN_FILE="" SET_BOUNDS=0 SKIP_TESTS=0 HEAVY=0 KEEP=0 YES=0
+DRY=0 PUBLISH=0 TOKEN_FILE="" SET_BOUNDS=0 NO_DOCS=0 DOCS_ONLY=0 SKIP_TESTS=0 HEAVY=0 KEEP=0 YES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
     --publish) PUBLISH=1 ;;
     --token-file) TOKEN_FILE="${2:?--token-file needs a file}"; shift ;;
     --set-bounds) SET_BOUNDS=1 ;;
+    --no-docs) NO_DOCS=1 ;;
+    --docs-only) DOCS_ONLY=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
     --heavy-tests) HEAVY=1 ;;
     --keep) KEEP=1 ;;
@@ -37,6 +42,9 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+[ "$NO_DOCS$DOCS_ONLY" != 11 ] || { echo "--no-docs and --docs-only are incompatible" >&2; exit 2; }
+[ "$DOCS_ONLY$PUBLISH" != 11 ] || { echo "--docs-only already publishes the docs; drop --publish" >&2; exit 2; }
 
 cd "$(git rev-parse --show-toplevel)"
 say() { printf '\n== %s\n' "$*"; }
@@ -91,6 +99,7 @@ SDIST="$WORK/sdist"; mkdir -p "$SDIST"
 CHECK_FAILED=0
 
 for p in "${PACKAGES[@]}"; do
+  if [ "$DOCS_ONLY" != 1 ]; then
   say "cabal check $p"
   # warnings exit 0; errors ("Hackage would reject this package") fail the release,
   # except in a dry run, which reports them and carries on so the rest can be exercised.
@@ -101,6 +110,7 @@ for p in "${PACKAGES[@]}"; do
     else
       die "cabal check failed for $p"
     fi
+  fi
   fi
   say "cabal sdist $p"
   cabal sdist "$p" --output-directory="$SDIST" >/dev/null
@@ -122,6 +132,9 @@ done
 # Build outside the working tree so nothing in it can leak in; the package store is shared.
 BUILD="$WORK/dist"
 say "build from tarballs"
+if [ "$DOCS_ONLY" = 1 ]; then
+  say "build and tests skipped (--docs-only)"
+else
 cabal build all --project-file="$UNPACK/cabal.project" --builddir="$BUILD"
 if [ "$SKIP_TESTS" = 1 ]; then
   say "tests skipped (--skip-tests)"
@@ -132,15 +145,66 @@ else
   say "test from tarballs${pattern:+ (container/VM tier excluded; --heavy-tests includes it)}"
   cabal test all --project-file="$UNPACK/cabal.project" --builddir="$BUILD" --test-show-details=direct "${pattern[@]}"
 fi
+fi
+
+# ---- 5b. haddock tarballs ---------------------------------------------------
+# Built from the unpacked tarballs, so the docs match what is released. Hackage builds docs
+# itself for published packages, but late or not at all; uploading them is the manual path.
+DOCS="$WORK/docs"; mkdir -p "$DOCS"
+DOCS_FAILED=0
+if [ "$NO_DOCS" = 1 ]; then
+  say "docs skipped (--no-docs)"
+else
+  for p in "${PACKAGES[@]}"; do
+    say "cabal haddock --haddock-for-hackage $p"
+    out="$WORK/haddock-$p.log"
+    ok=0
+    if cabal haddock --haddock-for-hackage --enable-documentation \
+         --project-file="$UNPACK/cabal.project" --builddir="$BUILD" "$p" > "$out" 2>&1; then
+      ok=1
+    fi
+    cat "$out" >&2
+    if [ "$ok" = 1 ]; then
+      # take the path cabal printed; fall back to searching the build directory
+      # cabal prints the path on the line after "Documentation tarball created:", and also for
+      # dependencies it documents on the way, so pick the line that names this package's tarball.
+      tb="$(grep -E "/$p-$VERSION-docs\\.tar\\.gz\$" "$out" | tail -n1 || true)"
+      if [ -z "$tb" ] || [ ! -f "$tb" ]; then
+        tb="$(find "$BUILD" -name "$p-$VERSION-docs.tar.gz" -print -quit)"
+      fi
+      if [ -n "$tb" ] && [ -f "$tb" ]; then
+        cp "$tb" "$DOCS/$p-$VERSION-docs.tar.gz"
+        continue
+      fi
+      echo "release-hackage: cannot find the docs tarball for $p" >&2
+    fi
+    if [ "$DRY" = 1 ]; then
+      echo "release-hackage: WOULD BLOCK A REAL RELEASE: haddock failed for $p" >&2
+      DOCS_FAILED=1
+    else
+      die "haddock failed for $p"
+    fi
+  done
+  ls -1 "$DOCS"
+fi
 
 # ---- 6. upload --------------------------------------------------------------
+DOCS_PUBLISH="$PUBLISH"; [ "$DOCS_ONLY" = 1 ] && DOCS_PUBLISH=1
 what="candidates"; [ "$PUBLISH" = 1 ] && what="PUBLISHED releases (irreversible)"
 if [ "$DRY" = 1 ]; then
   say "dry run: stopping before the upload"
   if [ "$CHECK_FAILED" = 1 ]; then echo "NOTE: cabal check failed above; a real run would have stopped there."; fi
-  echo "would upload as $what, in this order:"
-  for p in "${PACKAGES[@]}"; do echo "  $p-$VERSION.tar.gz"; done
-  if [ "$PUBLISH" = 1 ]; then echo "would then run: git tag -a v$VERSION $COMMIT (never pushed)"; fi
+  if [ "$DOCS_FAILED" = 1 ]; then echo "NOTE: haddock failed above; a real run would have stopped there."; fi
+  if [ "$DOCS_ONLY" != 1 ]; then
+    echo "would upload as $what, in this order:"
+    for p in "${PACKAGES[@]}"; do echo "  $p-$VERSION.tar.gz"; done
+  fi
+  if [ "$NO_DOCS" != 1 ]; then
+    dwhat="the candidate"; if [ "$PUBLISH" = 1 ] || [ "$DOCS_ONLY" = 1 ]; then dwhat="the PUBLISHED release"; fi
+    echo "would upload docs (cabal upload -d) to $dwhat, in this order:"
+    for p in "${PACKAGES[@]}"; do echo "  $p-$VERSION-docs.tar.gz"; done
+  fi
+  if [ "$PUBLISH" = 1 ] && [ "$DOCS_ONLY" != 1 ]; then echo "would then run: git tag -a v$VERSION $COMMIT (never pushed)"; fi
   exit 0
 fi
 
@@ -152,19 +216,39 @@ fi
 if [ -n "${HACKAGE_TOKEN:-}" ]; then creds="the API token"; else creds="cabal's configured credentials"; fi
 
 if [ "$YES" != 1 ]; then
-  printf 'Upload %s %s as %s, using %s? [y/N] ' "${PACKAGES[*]}" "$VERSION" "$what" "$creds"
+  todo=""
+  if [ "$DOCS_ONLY" != 1 ]; then todo="the packages as $what"; fi
+  if [ "$NO_DOCS" != 1 ]; then
+    d="docs to the candidate"; [ "$DOCS_PUBLISH" = 1 ] && d="docs to the PUBLISHED release"
+    todo="${todo:+$todo and }$d"
+  fi
+  printf 'Upload %s %s (%s), using %s? [y/N] ' "${PACKAGES[*]}" "$VERSION" "$todo" "$creds"
   read -r ans; [ "$ans" = y ] || die "aborted"
 fi
 
-for p in "${PACKAGES[@]}"; do
-  say "upload $p $VERSION ($what)"
-  flags=()
-  if [ -n "${HACKAGE_TOKEN:-}" ]; then flags+=(--token="$HACKAGE_TOKEN"); fi
-  if [ "$PUBLISH" = 1 ]; then flags+=(--publish); fi
-  cabal upload ${flags[@]+"${flags[@]}"} "$SDIST/$p-$VERSION.tar.gz"
-done
+if [ "$DOCS_ONLY" != 1 ]; then
+  for p in "${PACKAGES[@]}"; do
+    say "upload $p $VERSION ($what)"
+    flags=()
+    if [ -n "${HACKAGE_TOKEN:-}" ]; then flags+=(--token="$HACKAGE_TOKEN"); fi
+    if [ "$PUBLISH" = 1 ]; then flags+=(--publish); fi
+    cabal upload ${flags[@]+"${flags[@]}"} "$SDIST/$p-$VERSION.tar.gz"
+  done
+fi
 
-if [ "$PUBLISH" = 1 ]; then
+if [ "$NO_DOCS" != 1 ]; then
+  for p in "${PACKAGES[@]}"; do
+    say "upload docs $p $VERSION"
+    flags=(-d)
+    if [ -n "${HACKAGE_TOKEN:-}" ]; then flags+=(--token="$HACKAGE_TOKEN"); fi
+    if [ "$DOCS_PUBLISH" = 1 ]; then flags+=(--publish); fi
+    cabal upload "${flags[@]}" "$DOCS/$p-$VERSION-docs.tar.gz"
+  done
+fi
+
+if [ "$DOCS_ONLY" = 1 ]; then
+  say "docs published; nothing else touched, no tag"
+elif [ "$PUBLISH" = 1 ]; then
   git tag -a "v$VERSION" -m "salmon $VERSION" "$COMMIT"
   say "tagged v$VERSION locally; push it yourself: git push <remote> v$VERSION"
 else
