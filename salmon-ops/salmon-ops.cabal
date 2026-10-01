@@ -87,6 +87,8 @@ library
                    , Salmon.Builtin.Nodes.Nginx
                    , Salmon.Builtin.Nodes.Npm
                    , Salmon.Builtin.Nodes.PgBouncer
+                   , Salmon.Builtin.Nodes.PortMapping
+                   , Salmon.Builtin.Nodes.PortMapping.Upnpc
                    , Salmon.Builtin.Nodes.Etcd
                    , Salmon.Builtin.Nodes.Postgres
                    , Salmon.Builtin.Nodes.LlamaServer
