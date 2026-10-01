@@ -1,30 +1,30 @@
 cabal-version:      2.4
 name:               salmon-ops
 version:            0.1.0.0
-
--- A short (one-line) description of the package.
--- synopsis:
-
--- A longer description of the package.
--- description:
-
--- A URL where users can report bugs.
--- bug-reports:
-
--- The license under which the package is released.
--- license:
+synopsis:           IO builtins and command line plumbing for Salmon operations.
+description:        Builtin operations (files, systemd, debian packages, podman, postgres, wireguard, certificates, ssh, ...) built on salmon-core, plus the shared command line, the long-running serve loop with its HTTP API and web UI.
+homepage:           https://lucasdicioccio.github.io/salmon/
+bug-reports:        https://github.com/lucasdicioccio/salmon/issues
+license:            BSD-3-Clause
+license-file:       LICENSE
 author:             Lucas DiCioccio
 maintainer:         lucas@dicioccio.fr
-
--- A copyright notice.
--- copyright:
--- category:
+copyright:          2022-2026 Lucas DiCioccio
+category:           Development
+build-type:         Simple
+tested-with:        GHC == 9.10.3
+extra-doc-files:    CHANGELOG.md
 extra-source-files:
                     ui/index.html
                     ui/ui.js
                     ui/ui.css
                     ui/auth.html
                     openapi/serve-api.openapi.json
+
+source-repository head
+    type:     git
+    location: https://github.com/lucasdicioccio/salmon
+    subdir:   salmon-ops
 
 library
     exposed-modules: Salmon.Actions.Concurrent
@@ -118,7 +118,7 @@ library
                    , Salmon.Op.Ref
                    , Salmon.Reporter
                    , Salmon.Reporter.Tagged
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , async
                     , aeson
                     , base64-bytestring
@@ -166,7 +166,7 @@ library
 executable salmon-ops-dot-fixture
     main-is:          DotFixture.hs
     hs-source-dirs:   fixtures
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , mtl
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops ^>=0.1.0.0
@@ -182,7 +182,7 @@ executable salmon-ops-dot-fixture
 executable salmon-postgres-replication-fixture
     main-is:          PostgresReplicationFixture.hs
     hs-source-dirs:   fixtures
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , mtl
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops ^>=0.1.0.0
@@ -198,7 +198,7 @@ executable salmon-postgres-replication-fixture
 executable salmon-qemu-host-setup-fixture
     main-is:          QemuHostSetupFixture.hs
     hs-source-dirs:   fixtures
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , directory
                     , mtl
                     , filepath
@@ -216,7 +216,7 @@ executable salmon-qemu-host-setup-fixture
 executable salmon-ops-serve-fixture
     main-is:          ServeFixture.hs
     hs-source-dirs:   fixtures
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , directory
                     , filepath

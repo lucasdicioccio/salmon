@@ -244,6 +244,7 @@
                   "serve",
                   "updown",
                   "upkeep",
+                  "output",
                   "follow",
                   "server"
                 ]
@@ -1574,6 +1575,57 @@
           "kind",
           "ref",
           "node"
+        ]
+      },
+      "Upkeep_output": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "output"
+          },
+          "kind": {
+            "const": "output"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "line": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "line"
+        ],
+        "description": "One line a held (`managed`) action wrote; filed on its own `output` stream so `?stream=output` is a live tail."
+      },
+      "UpkeepUntagged_output": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "output"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "line": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "line"
         ]
       },
       "Upkeep_demoted": {
@@ -3140,6 +3192,9 @@
             "$ref": "#/components/schemas/Upkeep_unwedged"
           },
           {
+            "$ref": "#/components/schemas/Upkeep_output"
+          },
+          {
             "$ref": "#/components/schemas/Upkeep_demoted"
           },
           {
@@ -3232,6 +3287,9 @@
           },
           {
             "$ref": "#/components/schemas/UpkeepUntagged_unwedged"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_output"
           },
           {
             "$ref": "#/components/schemas/UpkeepUntagged_demoted"
@@ -3662,6 +3720,7 @@
               "serve",
               "updown",
               "upkeep",
+              "output",
               "follow",
               "server"
             ]
