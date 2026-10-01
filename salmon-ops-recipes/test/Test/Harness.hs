@@ -25,6 +25,7 @@ module Test.Harness (
 
     -- * scratch filesystem
     withTempDir,
+    privatePipe,
 
     -- * skipping tests when a precondition isn't met
     requireExecutable,
@@ -58,7 +59,7 @@ module Test.Harness (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, bracket_)
-import Control.Monad (unless, void)
+import Control.Monad (forM_, unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
 import Data.List (isInfixOf)
@@ -81,7 +82,8 @@ import System.Directory (XdgDirectory (XdgConfig), canonicalizePath, createDirec
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import System.IO (Handle, hPutStrLn, stderr)
+import System.Posix.IO (FdOption (CloseOnExec), createPipe, fdToHandle, setFdOption)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.User (getEffectiveUserID, getLoginName)
 import System.Process (readProcessWithExitCode)
@@ -133,6 +135,21 @@ runDownCapturing o = do
     (r, readBack) <- capture
     _ <- downTree r nat o
     readBack
+
+{- | A pipe neither end of which a child process may inherit.
+
+The suite runs spec groups in parallel in one process, some of them spawn
+processes, and nothing in the tree passes @close_fds@, so a child spawned
+meanwhile inherits every descriptor not marked close-on-exec. A child holding
+a copy of a loop's stdin write end keeps the loop from ever reading end of
+input. @process@'s 'System.Process.createPipe' is plain; use this instead for
+any pipe a test expects to see EOF on.
+-}
+privatePipe :: IO (Handle, Handle)
+privatePipe = do
+    (r, w) <- createPipe
+    forM_ [r, w] $ \fd -> setFdOption fd CloseOnExec True
+    (,) <$> fdToHandle r <*> fdToHandle w
 
 -- | A fresh, auto-cleaned-up temp directory for filesystem-touching nodes.
 withTempDir :: (FilePath -> IO a) -> IO a

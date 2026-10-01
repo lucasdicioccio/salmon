@@ -49,7 +49,6 @@ import qualified Network.TLS as TLS
 import System.FilePath ((</>))
 import System.IO (Handle, hClose)
 import System.Posix.Files (setFileMode)
-import System.Process (createPipe)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -69,7 +68,7 @@ import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (contramap, silent)
 import qualified Salmon.Reporter.Tagged as Tagged
 
-import Test.Harness (capture, requireExecutable, runUp, withTempDir)
+import Test.Harness (capture, privatePipe, requireExecutable, runUp, withTempDir)
 
 tests :: TestTree
 tests =
@@ -247,7 +246,7 @@ withRunningWith policy act =
     withTempDir $ \dir -> do
         material <- mintMaterial (dir </> "tls")
         let unixPath = dir </> "serve.http"
-        (stdinR, stdinW) <- createPipe
+        (stdinR, stdinW) <- privatePipe
         worldVar <- newEmptyMVar
         (own, _) <- capture
         upsRef <- newIORef Map.empty
