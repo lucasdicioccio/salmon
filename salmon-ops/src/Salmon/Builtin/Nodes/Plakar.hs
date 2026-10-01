@@ -28,8 +28,17 @@ unrecoverable by design); and a job without a retention policy (prune deletes
 snapshots irreversibly). A store's @down@ does nothing, because deleting a
 backup store is not something a teardown gets to do.
 
-v1 is a local store. Remote stores (S3-compatible, GCS) are Plakar
-integrations installed with @plakar pkg add@ and are a follow-up.
+A local store needs nothing more. Remote stores (S3-compatible, GCS) are Plakar
+integrations installed per user with @plakar pkg add@: 'plakarIntegration'
+installs one, 'gcsStore' declares a GCS store under a name and 'remoteKloset'
+creates the Kloset in it ('plakarJobOn' then backs up into it, addressing it as
+@\@name@). S3-compatible is not done.
+
+__Unverified against a real plakar__ (none was available when this was
+written): the output format of @pkg list@ ('interpretPkgList' is deliberately
+tolerant), and the option name the GCS integration reads its credentials file
+from ('gcsCredentialsOption'). Both are one-line fixes in pure functions with
+tests.
 -}
 module Salmon.Builtin.Nodes.Plakar (
     PlakarRelease (..),
@@ -42,6 +51,19 @@ module Salmon.Builtin.Nodes.Plakar (
     pruneArgs,
     PlakarJob (..),
     plakarJob,
+    plakarJobOn,
+
+    -- * Integrations and remote stores
+    IntegrationVersion (..),
+    Integration (..),
+    plakarIntegration,
+    interpretPkgList,
+    pkgAddArg,
+    GcsStore (..),
+    gcsStore,
+    gcsStoreAddArgs,
+    interpretStoreShow,
+    remoteKloset,
 
     -- * Pieces, exposed for tests
     interpretVersion,
@@ -68,7 +90,7 @@ import System.Directory (doesFileExist, removeFile)
 import qualified System.Posix.Files as Posix
 import qualified System.Posix.Types as Posix
 import System.Process.ByteString (readCreateProcessWithExitCode)
-import System.Process.ListLike (proc)
+import System.Process.ListLike (CreateProcess, proc)
 import Text.Printf (printf)
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -236,7 +258,14 @@ The check reads the store as whoever runs salmon, so that user must be able
 to read the keyfile as well as the job's user.
 -}
 plakarJob :: Track' (Binary "plakar") -> PlakarJob -> Op
-plakarJob plakar job = case pruneArgs job.jobKeep of
+plakarJob plakar job = plakarJobOn (kloset plakar job.jobStore) job
+
+{- | 'plakarJob' over a store node the caller supplies ('remoteKloset', say)
+instead of the local 'kloset'. 'jobStore''s path is what is given to @at@, so
+for a named remote store it is @\@name@.
+-}
+plakarJobOn :: Op -> PlakarJob -> Op
+plakarJobOn storeOp job = case pruneArgs job.jobKeep of
     Left why ->
         op "plakar-job" nodeps $ \actions ->
             actions
@@ -248,7 +277,7 @@ plakarJob plakar job = case pruneArgs job.jobKeep of
         let script = renderBackupScript job prune
             scriptOp = filecontents (FileContents job.jobScriptPath script)
             cronOp = crontask ignoreTrack (CronTask job.jobName job.jobUser job.jobSchedule "/bin/bash" [Text.pack job.jobScriptPath])
-         in op "plakar-job" (deps [kloset plakar job.jobStore, scriptOp, cronOp]) $ \actions ->
+         in op "plakar-job" (deps [storeOp, scriptOp, cronOp]) $ \actions ->
                 actions
                     { help = "backs up " <> Text.pack job.jobSource <> " into " <> Text.pack job.jobStore.storePath
                     , notes = ["fresh means a snapshot newer than " <> Text.pack (show job.jobMaxAge), "up runs the backup once"]
@@ -314,7 +343,164 @@ renderBackupScript job prune =
 
 -------------------------------------------------------------------------------
 
-decode :: ByteString.ByteString -> Text
+-- | Which release of an integration to install. No default: a directive always says.
+data IntegrationVersion
+    = Pinned Text
+    | -- | Whatever is newest at first install. The check cannot tell newest
+      -- from installed, so an installed integration is never upgraded.
+      Latest
+    deriving (Eq, Show)
+
+-- | A Plakar integration (@gcs@, @s3@, ...), installed for one user.
+data Integration = Integration
+    { integrationName :: Text
+    , integrationVersion :: IntegrationVersion
+    , integrationUser :: Maybe Text
+    -- ^ whose plugin directory it goes in: the user that runs the backup
+    }
+    deriving (Eq, Show)
+
+-- | The argument @pkg add@ takes: @name@ or @name\@version@.
+pkgAddArg :: Integration -> Text
+pkgAddArg i = case i.integrationVersion of
+    Latest -> i.integrationName
+    Pinned v -> i.integrationName <> "@" <> v
+
+{- | Installs an integration with @plakar pkg add@, checked against @plakar pkg
+list@; @down@ is @pkg rm@. Whether @pkg add@ on an installed package is
+harmless is unverified, which is why @up@ only runs when the check fails.
+-}
+plakarIntegration :: Track' (Binary "plakar") -> Integration -> Op
+plakarIntegration plakar i =
+    op "plakar-integration" (deps [justInstall plakar]) $ \actions ->
+        actions
+            { help = "installs plakar integration " <> pkgAddArg i
+            , notes =
+                [ "installed for " <> maybe "the user running salmon" id i.integrationUser
+                , "latest means newest at first install: an installed integration is never upgraded"
+                ]
+            , ref = mkRef "plakar-integration" (i.integrationName, i.integrationUser)
+            , check = do
+                (code, out, _) <- readCreateProcessWithExitCode (asUser i.integrationUser ["plakar", "pkg", "list"]) ""
+                pure (interpretPkgList i code (decode out))
+            , up = () <$ runAs i.integrationUser ["plakar", "pkg", "add", Text.unpack (pkgAddArg i)]
+            , down = () <$ runAs i.integrationUser ["plakar", "pkg", "rm", Text.unpack i.integrationName]
+            }
+
+{- | Is the integration in a @pkg list@ output? Tolerant of the format: some
+line has the name as a word (or before an @\@@) and, when pinned, mentions the
+version.
+-}
+interpretPkgList :: Integration -> ExitCode -> Text -> CheckResult
+interpretPkgList _ (ExitFailure _) _ = Unknown
+interpretPkgList i ExitSuccess out
+    | any matches (Text.lines out) = Success
+    | otherwise = Failure ("integration " <> pkgAddArg i <> " is not installed")
+  where
+    matches l =
+        let ws = concatMap (Text.splitOn "@") (Text.words l)
+            versioned = case i.integrationVersion of
+                Latest -> True
+                Pinned v -> v `Text.isInfixOf` l
+         in i.integrationName `elem` ws && versioned
+
+-- | A GCS store, named in plakar's per-user store configuration.
+data GcsStore = GcsStore
+    { gcsStoreName :: Text
+    , gcsBucket :: Text
+    , gcsPrefix :: Text
+    -- ^ path inside the bucket, may be empty
+    , gcsCredentialsFile :: FilePath
+    -- ^ a service-account key, provisioned by somebody else; only its path is ever an argument
+    , gcsCredentialsOption :: Text
+    -- ^ the integration's option name for it (unverified: @application_credentials@ is a guess)
+    , gcsStoreUser :: Maybe Text
+    }
+    deriving (Eq, Show)
+
+-- | The arguments after @plakar store add@: name, location, credentials option.
+gcsStoreAddArgs :: GcsStore -> [Text]
+gcsStoreAddArgs s =
+    [ s.gcsStoreName
+    , "gcs://" <> s.gcsBucket <> (if Text.null s.gcsPrefix then "" else "/" <> Text.dropWhile (== '/') s.gcsPrefix)
+    , s.gcsCredentialsOption <> "=" <> Text.pack s.gcsCredentialsFile
+    ]
+
+{- | Declares the store with @plakar store add@, once the integration is
+installed. @down@ is @store rm@: the configuration entry only, the bucket's
+contents are not touched. Refuses at @up@ a credentials file that is missing,
+empty or readable by others.
+-}
+gcsStore :: Op -> GcsStore -> Op
+gcsStore integration s =
+    op "plakar-gcs-store" (deps [integration]) $ \actions ->
+        actions
+            { help = "plakar store " <> s.gcsStoreName <> " on gs://" <> s.gcsBucket
+            , notes = ["credentials from " <> Text.pack s.gcsCredentialsFile <> ", never copied by salmon"]
+            , ref = mkRef "plakar-gcs-store" (s.gcsStoreName, s.gcsStoreUser)
+            , check = do
+                (code, out, _) <- readCreateProcessWithExitCode (asUser s.gcsStoreUser ["plakar", "store", "show"]) ""
+                pure (interpretStoreShow s code (decode out))
+            , up = do
+                problem <- keyfileStatus s.gcsCredentialsFile
+                maybe (pure ()) (\p -> ioError (userError ("credentials " <> s.gcsCredentialsFile <> ": " <> Text.unpack p))) problem
+                () <$ runAs s.gcsStoreUser (["plakar", "store", "add"] <> map Text.unpack (gcsStoreAddArgs s))
+            , down = () <$ runAs s.gcsStoreUser ["plakar", "store", "rm", Text.unpack s.gcsStoreName]
+            }
+
+-- | The store is declared when @store show@ names it and its location.
+interpretStoreShow :: GcsStore -> ExitCode -> Text -> CheckResult
+interpretStoreShow _ (ExitFailure _) _ = Unknown
+interpretStoreShow s ExitSuccess out
+    | s.gcsStoreName `Text.isInfixOf` out && ("gcs://" <> s.gcsBucket) `Text.isInfixOf` out = Success
+    | otherwise = Failure ("no store " <> s.gcsStoreName <> " on gs://" <> s.gcsBucket)
+
+{- | Creates the Kloset inside a named remote store (@plakar at \@name create@).
+The check is a listing: success with nothing on stderr, since the exit code is
+@0@ even when plakar could not start its cache process.
+-}
+remoteKloset :: Op -> Maybe Text -> Text -> FilePath -> Op
+remoteKloset storeOp user name keyfile =
+    op "plakar-remote-kloset" (deps [storeOp]) $ \actions ->
+        actions
+            { help = "kloset in remote store @" <> name
+            , notes = ["passphrase from " <> Text.pack keyfile, "down does not delete the store"]
+            , ref = mkRef "plakar-remote-kloset" (name, user)
+            , check = existsNow
+            , up = do
+                problem <- keyfileStatus keyfile
+                maybe (pure ()) (\p -> ioError (userError ("keyfile " <> keyfile <> ": " <> Text.unpack p))) problem
+                _ <- runAs user ["plakar", "-keyfile", keyfile, "at", "@" <> Text.unpack name, "create"]
+                r <- existsNow
+                case r of
+                    Success -> pure ()
+                    _ -> ioError (userError ("plakar create left no usable store @" <> Text.unpack name))
+            , down = pure ()
+            }
+  where
+    existsNow = do
+        (code, _, err) <- readCreateProcessWithExitCode (asUser user ["plakar", "-keyfile", keyfile, "at", "@" <> Text.unpack name, "ls", "-latest"]) ""
+        pure $ case code of
+            ExitSuccess | Text.null (Text.strip (decode err)) -> Success
+            ExitSuccess -> Failure ("store @" <> name <> " said: " <> Text.take 200 (decode err))
+            ExitFailure _ -> Failure ("store @" <> name <> " is not usable")
+
+-- | @sudo -H -u USER cmd@, or the command itself.
+asUser :: Maybe Text -> [String] -> CreateProcess
+asUser Nothing (c : args) = proc c args
+asUser Nothing [] = proc "true" []
+asUser (Just u) argv = proc "sudo" (["-H", "-u", Text.unpack u] <> argv)
+
+runAs :: Maybe Text -> [String] -> IO Text
+runAs u argv = do
+    (code, out, err) <- readCreateProcessWithExitCode (asUser u argv) ""
+    case code of
+        ExitSuccess -> pure (decode out)
+        ExitFailure n -> throwIO (Binary.CommandFailedSimple (unwords (take 3 argv) <> ": " <> take 500 (Text.unpack (decode err))) n)
+
+-------------------------------------------------------------------------------
+
+decode ::ByteString.ByteString -> Text
 decode = Text.decodeUtf8With TextError.lenientDecode
 
 -- | Runs a command, throwing on a non-zero exit; returns its stdout.
