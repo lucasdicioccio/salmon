@@ -857,6 +857,17 @@ than always silently hitting whichever cluster happens to be on the default port
 that only ever manage `"main"` pass `Postgres.localServer.serverPort` (5432); a caller managing
 multiple clusters on one box passes each cluster's own port.
 
+`Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
+shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
+trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port
+pointing at another host is refused rather than taken over, `down` deletes only one whose description is
+`salmon:NAME`, no gateway (nothing answered, or a device that is not an IGD) is `Unknown` for `check` and a
+throw for `up`/`down`, and a private/CGNAT external address is a `Failure`/refusal (double NAT). The pure
+parsers live in `PortMapping/Upnpc.hs` for reuse by a capabilities report; `Test/PortMappingSpec.hs` covers
+them on captured output (the no-device and not-an-IGD ones are real; the IGD listing is from `upnpc.c`'s
+format, never seen on a live IGD). NAT-PMP/PCP and a gateway-address `Dynamic` are not done
+(`gatewayExternalAddress` is the IO accessor instead).
+
 Template databases: `Postgres.cloneDatabase` (a `CREATE DATABASE … TEMPLATE` node, whose
 `Retention` says whether `down` drops it — `retainedClone` for an open PR's environment,
 `disposableClone` for a test fixture or a merged PR) and
