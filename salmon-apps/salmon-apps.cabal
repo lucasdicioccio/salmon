@@ -1,24 +1,24 @@
 cabal-version:      2.4
 name:               salmon-apps
 version:            0.1.0.0
-
--- A short (one-line) description of the package.
-synopsis: A set of utilities built with Salmon at their core.
-
--- A longer description of the package.
-description: Tools useful for operating systems, and which benefit from specialized implementations configured via external files.
-
--- A URL where users can report bugs.
-bug-reports: https://github.com/lucasdicioccio/salmon/issues
-
--- The license under which the package is released.
--- license:
+synopsis:           A set of utilities built with Salmon at their core.
+description:        Tools useful for operating systems, and which benefit from specialized implementations configured via external files: salmon-migrator, salmon-pgpair, salmon-fleet, salmon-tui and others.
+homepage:           https://lucasdicioccio.github.io/salmon/
+bug-reports:        https://github.com/lucasdicioccio/salmon/issues
+license:            BSD-3-Clause
+license-file:       LICENSE
 author:             Lucas DiCioccio
 maintainer:         lucas@dicioccio.fr
+copyright:          2022-2026 Lucas DiCioccio
+category:           Development
+build-type:         Simple
+tested-with:        GHC == 9.10.3
+extra-doc-files:    CHANGELOG.md
 
--- A copyright notice.
--- copyright:
--- category:
+source-repository head
+    type:     git
+    location: https://github.com/lucasdicioccio/salmon
+    subdir:   salmon-apps
 
 library
     exposed-modules:
@@ -36,7 +36,7 @@ library
                     Migrator.Seed
                     Migrator.Spec
 
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , brick
                     , bytestring
@@ -68,7 +68,7 @@ library
 
 executable salmon-toy-qemu-pg-ha
     main-is:          QemuPgHaToyApp.hs
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     ghc-options:      -threaded
@@ -76,7 +76,7 @@ executable salmon-toy-qemu-pg-ha
 
 executable salmon-patroni-rootfs
     main-is:          PatroniRootfsApp.hs
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     ghc-options:      -threaded
@@ -84,7 +84,7 @@ executable salmon-patroni-rootfs
 
 executable salmon-pgpair
     main-is:          PgPairApp.hs
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     -- every salmon binary can end up running the concurrent driver (`run
@@ -100,7 +100,7 @@ executable salmon-migrator
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     -- every salmon binary can end up running the concurrent driver (`run
@@ -111,7 +111,7 @@ executable salmon-migrator
 executable salmon-init-locally
     main-is:          InitializerApp.hs
 
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     -- every salmon binary can end up running the concurrent driver (`run
@@ -122,7 +122,7 @@ executable salmon-init-locally
 executable salmon-pg-backup
     main-is:          PgBackupApp.hs
 
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     ghc-options:      -threaded
@@ -131,7 +131,7 @@ executable salmon-pg-backup
 executable salmon-fleet
     main-is:          FleetApp.hs
 
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     ghc-options:      -threaded
@@ -140,7 +140,7 @@ executable salmon-fleet
 executable salmon-gcp-toy
     main-is:          GcpToyApp.hs
 
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     ghc-options:      -threaded
@@ -149,7 +149,7 @@ executable salmon-gcp-toy
 executable salmon-tui
     main-is:          TuiApp.hs
 
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , salmon-apps
     hs-source-dirs:   app
     -- the stream is followed on its own thread while brick owns the terminal
@@ -161,7 +161,7 @@ test-suite salmon-apps-test
     main-is:          Main.hs
     hs-source-dirs:   test
     other-modules:    Test.FleetSpec
-    build-depends:    base >=4.16.3.0
+    build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , bytestring
                     , directory
