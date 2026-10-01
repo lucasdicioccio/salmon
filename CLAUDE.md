@@ -51,11 +51,13 @@ Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-
 `salmon-apps`, with `salmon-ops-recipes-experimental` branching off `salmon-ops-recipes` as an
 alternate, heavier leaf (nothing in the default package set depends on it).
 
-Some `source-repository-package` git dependencies in `cabal.project` point at the author's other
-repos (`acme-not-a-joke`, `prodapi`, `prodapi-proxy`, `purescript-bridge`) pinned by commit hash —
-these are not on Hackage. `cabal.perso.project` (untracked, gitignored, alongside its
-`.perso.project.local`) carries an extra `kitchen-sink` source-repository-package entry and an
-extra `salmon-personal-apps` package used only by the author's personal, non-public binaries.
+`cabal.project` has no `source-repository-package` pins and no `with-compiler`: the author's other
+libraries (`acme-not-a-joke`, `prodapi-*`, `purescript-bridge`, `kitchen-sink`) resolve from Hackage,
+and the build is on GHC 9.10.3. Caveat: Hackage's `acme-not-a-joke-0.1.0.0` bounds `filepath <1.5`
+(GHC 9.10 ships 1.5), so a project building `salmon-ops-recipes-experimental` needs
+`allow-newer: acme-not-a-joke:filepath` until a new release. `cabal.perso.project` (untracked,
+gitignored, alongside its `.perso.project.local`) carries an extra `salmon-personal-apps` package
+used only by the author's personal, non-public binaries.
 
 ## Build
 
@@ -75,7 +77,7 @@ containers (see `salmon-ops-recipes/test/Test/Harness.hs` and `Test.PostgresInit
 pattern) — those need a working `podman` on the machine running the tests and are skipped loudly
 if it's missing.
 
-`cabal.project` carries `allow-newer` pins for `dhall-json` against `aeson`/`bytestring`/`text`;
+`cabal.project.local` (tracked) carries `allow-newer` pins for `dhall-json` against `aeson`/`bytestring`/`text`;
 don't remove these without checking the build still resolves.
 
 ## Core architecture (salmon-core)

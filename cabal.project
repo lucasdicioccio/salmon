@@ -1,37 +1,4 @@
 packages: salmon-core salmon-ops salmon-ops-recipes salmon-apps
 
--- Pinned rather than left to ghcup's machine-wide default: the pinned prodapi-proxy
--- source-repository-package below hard-bounds `base < 4.20`, so a build against GHC 9.10.3
--- (base 4.20) fails to resolve. GHC 9.8.2 is what CI (.github/workflows/release.yml) already
--- builds against; this just makes the local build stop depending on whichever GHC happens to be
--- `ghcup set` on the machine building it.
-with-compiler: ghc-9.8.2
-
-source-repository-package
-  type: git
-  location: https://github.com/lucasdicioccio/acme-not-a-joke.git
-  tag: abccc90d4d0f767594f402475cd5e4106a707051
-
-source-repository-package
-    type: git
-    location: https://github.com/lucasdicioccio/prodapi.git
-    tag: 8431beee54673b05adcbefc887410f166006f5b4
-    subdir: prodapi-core
-
-source-repository-package
-    type: git
-    location: https://github.com/lucasdicioccio/prodapi.git
-    tag: 8431beee54673b05adcbefc887410f166006f5b4
-    subdir: prodapi-web
-
-source-repository-package
-    type: git
-    location: https://github.com/lucasdicioccio/prodapi.git
-    tag: 8431beee54673b05adcbefc887410f166006f5b4
-    subdir: prodapi-proxy
-
-source-repository-package
-    type: git
-    location: https://github.com/eskimor/purescript-bridge.git
-    tag: 5ee8778ff141ae6ad9a6057921ec4d49e067b6f0
-
+-- acme-not-a-joke, prodapi-*, and purescript-bridge are resolved from Hackage (they used to be
+-- pinned source-repository-package entries); nothing is pinned here anymore.

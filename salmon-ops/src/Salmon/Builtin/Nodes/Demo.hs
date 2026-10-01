@@ -4,7 +4,7 @@ import Salmon.Actions.Dot
 import Salmon.Builtin.Extension
 import Salmon.Op.Ref
 
-import Data.Text as Text
+import Data.Text as Text hiding (show)
 
 collatz :: [Int] -> Op
 collatz ks =
