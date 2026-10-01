@@ -17,7 +17,9 @@ worse, found a second cluster. 'seedGuard' is the node that stops this: it
 asks every other member, and if one answers and its member list does not
 contain this member, it throws 'ClusterExists' instead of letting the unit
 start. Joining a member to a running cluster (@etcdctl member add@, then
-start with @existing@) is a separate phase, not done here.
+start with @existing@) is the /join/ phase, 'etcdJoinMember': 'joinGuard'
+asks the running members, adds this one to the list if it is not there yet,
+and the config it writes says @initial-cluster-state: existing@.
 
 A member whose data directory already holds a bootstrapped member (a restart)
 is never re-seeded: etcd ignores @initial-cluster*@ once it has data, and the
@@ -92,12 +94,24 @@ data EtcdConfig
 
 -------------------------------------------------------------------------------
 
-{- | The config file etcd reads with @--config-file@. Always the seed phase:
+-- | Which phase of a cluster's life a member is started in.
+data Phase = Seed | Join
+    deriving (Eq, Show)
+
+phaseState :: Phase -> Text
+phaseState Seed = "new"
+phaseState Join = "existing"
+
+{- | The config file etcd reads with @--config-file@, in the seed phase:
 @initial-cluster-state: new@. Harmless on a restart, since etcd ignores it
 once the data directory is bootstrapped.
 -}
 renderConfig :: EtcdConfig -> Text
-renderConfig cfg =
+renderConfig = renderConfigFor Seed
+
+-- | The config for a phase; only @initial-cluster-state@ differs.
+renderConfigFor :: Phase -> EtcdConfig -> Text
+renderConfigFor phase cfg =
     Text.unlines
         [ "name: " <> self.member_name
         , "data-dir: " <> Text.pack cfg.etcd_data_dir
@@ -106,7 +120,7 @@ renderConfig cfg =
         , "advertise-client-urls: " <> self.member_client_url
         , "initial-advertise-peer-urls: " <> self.member_peer_url
         , "initial-cluster: " <> renderInitialCluster cfg.etcd_cluster
-        , "initial-cluster-state: new"
+        , "initial-cluster-state: " <> phaseState phase
         , "initial-cluster-token: " <> cfg.etcd_cluster_token
         , "client-transport-security:"
         , "  trusted-ca-file: " <> Text.pack cfg.etcd_client_tls.tls_ca
@@ -150,6 +164,8 @@ unitConfig cfg =
 data EtcdctlCall
     = EndpointHealth TlsFiles Text
     | MemberList TlsFiles Text
+    | MemberAdd TlsFiles Text Member
+    -- ^ against this endpoint, add this member
     deriving (Show)
 
 etcdctl :: Command "etcdctl" EtcdctlCall
@@ -157,6 +173,8 @@ etcdctl = Command go
   where
     go (EndpointHealth tls ep) = proc "etcdctl" (common tls ep <> ["endpoint", "health"])
     go (MemberList tls ep) = proc "etcdctl" (common tls ep <> ["member", "list", "-w", "json"])
+    go (MemberAdd tls ep m) =
+        proc "etcdctl" (common tls ep <> ["member", "add", Text.unpack m.member_name, "--peer-urls=" <> Text.unpack m.member_peer_url])
     common :: TlsFiles -> Text -> [String]
     common tls ep =
         [ "--endpoints=" <> Text.unpack ep
@@ -280,18 +298,81 @@ seedGuard etcdctlBin cfg =
                 bootstrapped <- isBootstrapped cfg
                 pure (if bootstrapped then Success else Failure "data directory holds no member yet")
             , up = do
-                answers <- mapM ask others
+                answers <- mapM (askOther cfg) others
                 either throwIO pure (seedDecision cfg.etcd_self answers)
             , down = pure ()
             }
   where
     others = filter (/= cfg.etcd_self) cfg.etcd_cluster
-    ask :: Member -> IO (Member, Maybe [Listed])
-    ask m = do
-        r <- try (askMembers cfg m.member_client_url)
-        case r of
-            Left (_ :: SomeException) -> pure (m, Nothing)
-            Right bs -> pure (m, either (const Nothing) Just (parseMemberList bs))
+
+-------------------------------------------------------------------------------
+
+-- | Thrown when a join finds no running member to join.
+newtype NoClusterToJoin = NoClusterToJoin Text
+    deriving (Eq)
+
+instance Show NoClusterToJoin where
+    show (NoClusterToJoin who) =
+        "etcd: no other member answered, so there is no running cluster for "
+            <> Text.unpack who
+            <> " to join; seed the cluster first (starting it with existing would never elect anyone)"
+
+instance Exception NoClusterToJoin
+
+-- | What the join phase does next, given what the other members said.
+data JoinStep
+    = -- | already in the member list (added earlier, perhaps never started): just start
+      AlreadyListed
+    | -- | ask this member to add us
+      AddVia Member
+    deriving (Eq, Show)
+
+{- | The join decision, pure. Nobody answering is refused (nothing to join).
+Somebody answering and listing us means the add was already done; the first
+answerer not listing us is the one to add through.
+-}
+joinDecision :: Member -> [(Member, Maybe [Listed])] -> Either NoClusterToJoin JoinStep
+joinDecision self answers =
+    case [(m, ls) | (m, Just ls) <- answers] of
+        [] -> Left (NoClusterToJoin self.member_name)
+        ((m, ls) : _)
+            | self.member_peer_url `elem` concatMap (.listed_peer_urls) ls -> Right AlreadyListed
+            | otherwise -> Right (AddVia m)
+
+{- | Guards and performs the join: @etcdctl member add@ through a running
+member, idempotently. Satisfied when the data directory already holds a member
+(a restart), or when the cluster already lists this member's peer URL. Throws
+'NoClusterToJoin' when no other member answers, and lets a failing @member
+add@ throw (the unit must not start on a failed add).
+-}
+joinGuard :: Track' (Binary "etcdctl") -> EtcdConfig -> Op
+joinGuard etcdctlBin cfg =
+    op "etcd-join-guard" (deps [justInstall etcdctlBin]) $ \actions ->
+        actions
+            { help = "adds this member to the running cluster (member add) before it starts with existing"
+            , notes = ["skipped when the data directory already holds a member"]
+            , ref = mkRef "etcd-join-guard" (Text.pack cfg.etcd_data_dir)
+            , check = do
+                bootstrapped <- isBootstrapped cfg
+                pure (if bootstrapped then Success else Failure "data directory holds no member yet")
+            , up = do
+                answers <- mapM (askOther cfg) others
+                step <- either throwIO pure (joinDecision cfg.etcd_self answers)
+                case step of
+                    AlreadyListed -> pure ()
+                    AddVia m ->
+                        Binary.untrackedExec etcdctl (MemberAdd cfg.etcd_client_tls m.member_client_url cfg.etcd_self) "" silent
+            , down = pure ()
+            }
+  where
+    others = filter (/= cfg.etcd_self) cfg.etcd_cluster
+
+askOther :: EtcdConfig -> Member -> IO (Member, Maybe [Listed])
+askOther cfg m = do
+    r <- try (askMembers cfg m.member_client_url)
+    case r of
+        Left (_ :: SomeException) -> pure (m, Nothing)
+        Right bs -> pure (m, either (const Nothing) Just (parseMemberList bs))
 
 -- | etcd keeps its raft state in @DATA/member@; its presence means the member has been bootstrapped.
 isBootstrapped :: EtcdConfig -> IO Bool
@@ -314,11 +395,35 @@ etcdMember ::
     Track' (Binary "etcdctl") ->
     EtcdConfig ->
     Op
-etcdMember r systemctl etcdBin etcdctlBin cfg =
+etcdMember = etcdMemberIn Seed
+
+{- | A member joining a running cluster: the same node as 'etcdMember' with the
+join guard (@member add@) in place of the seed guard and
+@initial-cluster-state: existing@ in the config. @etcdctl@ is run against the
+other declared members, so at least one must be up.
+-}
+etcdJoinMember ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' (Binary "etcd") ->
+    Track' (Binary "etcdctl") ->
+    EtcdConfig ->
+    Op
+etcdJoinMember = etcdMemberIn Join
+
+etcdMemberIn ::
+    Phase ->
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' (Binary "etcd") ->
+    Track' (Binary "etcdctl") ->
+    EtcdConfig ->
+    Op
+etcdMemberIn phase r systemctl etcdBin etcdctlBin cfg =
     op "etcd-member" (deps [service]) $ \actions ->
         actions
             { help = "an etcd cluster member, healthy and listed with the declared peers"
-            , notes = ["v3 API only", "seed phase only: join is not implemented"]
+            , notes = ["v3 API only", "phase: " <> phaseState phase]
             , ref = mkRef "etcd-member" cfg.etcd_self.member_peer_url
             , check = checkMember cfg
             , up = waitHealthy cfg
@@ -332,11 +437,15 @@ etcdMember r systemctl etcdBin etcdctlBin cfg =
     prereqs =
         op
             "etcd-setup"
-            (deps [justInstall etcdBin, justInstall etcdctlBin, datadir, configFile, seedGuard etcdctlBin cfg])
+            (deps [justInstall etcdBin, justInstall etcdctlBin, datadir, configFile, guard])
             id
 
+    guard = case phase of
+        Seed -> seedGuard etcdctlBin cfg
+        Join -> joinGuard etcdctlBin cfg
+
     datadir = FS.dir (FS.Directory cfg.etcd_data_dir)
-    configFile = FS.filecontents (FS.FileContents cfg.etcd_config_file (renderConfig cfg))
+    configFile = FS.filecontents (FS.FileContents cfg.etcd_config_file (renderConfigFor phase cfg))
 
 -- | Polls until the member's check passes; throws 'NotHealthy' (with the last reason) at the deadline.
 waitHealthy :: EtcdConfig -> IO ()
