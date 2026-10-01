@@ -12,9 +12,11 @@ Four packages are released together, at one shared version, in dependency order:
 3. Commit everything. The script refuses to run if tracked files are modified.
 4. Make sure `cabal check` is clean of errors in each package (Hackage rejects a package with
    no `license`, `synopsis`/`description`, or an upper bound on `base`).
-5. Create a Hackage API token (hackage.haskell.org, account page) and keep it in the
-   environment as `HACKAGE_TOKEN`, or in a file passed with `--token-file FILE`.
-   The script never stores it and never prints it.
+5. Credentials: either rely on cabal's own configured credentials (nothing to do if
+   `cabal upload` already works for you), or create a Hackage API token (hackage.haskell.org,
+   account page) and keep it in the environment as `HACKAGE_TOKEN`, or in a file passed with
+   `--token-file FILE`. A token, when given, wins over cabal's credentials. The confirmation
+   prompt says which will be used. The script never stores a token and never prints it.
 
 ## Run it
 

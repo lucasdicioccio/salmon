@@ -11,7 +11,7 @@ usage: scripts/release-hackage.sh [options]
 
   --dry-run          do everything except the upload (sdist, build, test); no network upload
   --publish          upload as published releases instead of candidates, then tag locally
-  --token-file FILE  file holding the Hackage API token (else \$HACKAGE_TOKEN is used)
+  --token-file FILE  file holding the Hackage API token (else \$HACKAGE_TOKEN; else cabal's own credentials)
   --set-bounds       rewrite internal dependencies to ^>=VERSION in the .cabal files, then exit
   --skip-tests       build the unpacked tarballs but do not run their test suites
   --heavy-tests      also run the container/VM tier (qemu, podman; needs root-ish prerequisites, shared host)
@@ -148,18 +148,20 @@ if [ -n "$TOKEN_FILE" ]; then
   [ -r "$TOKEN_FILE" ] || die "cannot read $TOKEN_FILE"
   HACKAGE_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 fi
-[ -n "${HACKAGE_TOKEN:-}" ] || die "no Hackage token: set HACKAGE_TOKEN or pass --token-file FILE (or use --dry-run)"
+# With no token, cabal uses its own configured credentials (its config file or prompt).
+if [ -n "${HACKAGE_TOKEN:-}" ]; then creds="the API token"; else creds="cabal's configured credentials"; fi
 
 if [ "$YES" != 1 ]; then
-  printf 'Upload %s %s as %s? [y/N] ' "${PACKAGES[*]}" "$VERSION" "$what"
+  printf 'Upload %s %s as %s, using %s? [y/N] ' "${PACKAGES[*]}" "$VERSION" "$what" "$creds"
   read -r ans; [ "$ans" = y ] || die "aborted"
 fi
 
 for p in "${PACKAGES[@]}"; do
   say "upload $p $VERSION ($what)"
-  flags=(--token="$HACKAGE_TOKEN")
+  flags=()
+  if [ -n "${HACKAGE_TOKEN:-}" ]; then flags+=(--token="$HACKAGE_TOKEN"); fi
   if [ "$PUBLISH" = 1 ]; then flags+=(--publish); fi
-  cabal upload "${flags[@]}" "$SDIST/$p-$VERSION.tar.gz"
+  cabal upload ${flags[@]+"${flags[@]}"} "$SDIST/$p-$VERSION.tar.gz"
 done
 
 if [ "$PUBLISH" = 1 ]; then
