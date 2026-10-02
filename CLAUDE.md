@@ -38,6 +38,7 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
+  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); nmap, STUN, hairpin and a second-vantage inbound test are not done; the `natpmpc` parser has no captured fixture.
   `salmon-docs-sync` (`DocsSync.hs`) is salmon on its own repo: `check` fingerprints the tracked inputs of
   `website/scripts/build-site.sh` against `docs/.docs-sync-stamp`; `up` rebuilds `docs/`, stamps, commits and pushes it.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
