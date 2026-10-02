@@ -188,7 +188,7 @@ fi
 # binary and ssh:call re-runs the remote directive on every pass. That is
 # salmon's behaviour today, not a defect of the toy -- and the remote pass is
 # itself idempotent, which is what the marker check below reads.
-NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-toy-peer-reached|gcp-toy-secret-read|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
+NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-toy-peer-reached|gcp-toy-secret-read|gcp-toy-dns-name-servers|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
 run_pass up-2 up || VERDICT+=("idempotency pass: FAILED")
 UNEXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -Ev "$NO_CHECK" || true)
 EXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -E "$NO_CHECK" | cut -d: -f1 | sort | uniq -c | tr '\n' ' ' || true)
@@ -198,6 +198,23 @@ if [[ -n $UNEXPECTED ]]; then
     VERDICT+=("idempotency: $(echo "$UNEXPECTED" | wc -l) node(s) with a check were re-applied")
 else
     VERDICT+=("idempotency: every checked node was skipped")
+fi
+
+# With --dns-zone: the name servers Cloud DNS assigned, which is what goes to
+# the registrar. The toy's own node printed them during the pass (read through
+# CloudDns.readNameServers); this reads them independently and compares.
+DNS_ZONE=$(field dnsZone)
+if [[ -n $DNS_ZONE && $DNS_ZONE != null ]]; then
+    echo "== verify the DNS zone's assigned name servers"
+    printed=$(grep -h '^name servers for ' "$OUT/up-1.log" "$OUT/up-retry.log" 2>/dev/null | tail -1 || true)
+    assigned=$(gcloud dns managed-zones describe "$PREFIX-zone" --project "$PROJECT" --format='value(nameServers)' 2>/dev/null | tr ';' ' ' || true)
+    echo "   printed by the toy: ${printed:-nothing}"
+    echo "   gcloud says:        ${assigned:-nothing}"
+    if [[ -n $assigned && $printed == *"$assigned" ]]; then
+        VERDICT+=("dns: zone $PREFIX-zone for $DNS_ZONE, delegate to: $assigned")
+    else
+        VERDICT+=("dns: NAME SERVERS NOT PRINTED, or not the ones gcloud reports")
+    fi
 fi
 
 # The VM half is only really proven by what the uploaded binary left behind.
@@ -322,6 +339,9 @@ else
         gone gcloud storage buckets describe "gs://$PROJECT-$PREFIX" --project "$PROJECT" || leftovers=1
         gone gcloud iam service-accounts describe "$PREFIX-sa@$PROJECT.iam.gserviceaccount.com" --project "$PROJECT" || leftovers=1
         gone gcloud artifacts repositories describe "$PREFIX-repo" --location "$REGION" --project "$PROJECT" || leftovers=1
+        if [[ -n $DNS_ZONE && $DNS_ZONE != null ]]; then
+            gone gcloud dns managed-zones describe "$PREFIX-zone" --project "$PROJECT" || leftovers=1
+        fi
         if [[ $TIER -ge 2 ]]; then
             gone gcloud compute instances describe "$PREFIX-vm" --zone "$(field vmZone)" --project "$PROJECT" || leftovers=1
             gone gcloud compute addresses describe "$PREFIX-ip" --region "$REGION" --project "$PROJECT" || leftovers=1
