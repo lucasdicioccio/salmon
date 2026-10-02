@@ -355,6 +355,7 @@ pair =
         , Pair.pair_bouncers = [bouncer]
         , Pair.pair_may_discard = Nothing
         , Pair.pair_reseed = Nothing
+        , Pair.pair_conn_security = Nothing
         , Pair.pair_repl_role = "replicator"
         , Pair.pair_repl_passfile = "/etc/postgresql/repl.pgpass"
         , Pair.pair_rewind_role = "rewinder"

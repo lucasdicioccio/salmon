@@ -620,6 +620,7 @@ pairWith a b side =
         , Pair.pair_seed = Nothing
         , Pair.pair_may_discard = Nothing
         , Pair.pair_reseed = Nothing
+        , Pair.pair_conn_security = Nothing
         }
   where
     member host identity = Pair.Member "root" host "main" 5432 (Just identity) Nothing

@@ -37,7 +37,7 @@ Three kinds of node, and only one of them mentions a role:
 
 | Node | Says |
 |---|---|
-| `member` (one per machine) | how to be *either* half of the pair: replication settings, `pg_hba` lines for the peer, the replication and rewind roles. Nothing about which half it is. |
+| `member` (one per machine) | how to be *either* half of the pair: replication settings, `pg_hba` lines for the peer (see "How the two members talk to each other"), the replication and rewind roles. Nothing about which half it is. |
 | `bouncerSetup` (one per bouncer) | pgbouncer's own configuration, and a routing file it includes but does not own |
 | `pairRole` | *"this pair's primary is on B"* — the only declaration an operator edits |
 
@@ -221,6 +221,84 @@ will answer. `root` is sent what it always was, with no `sudo` in front, so a
 machine with no sudo for root to go through is unaffected — though the scripts
 themselves have always used `sudo -u postgres`, so sudo is installed either
 way.
+
+## How the two members talk to each other
+
+Streaming replication, the first clone, `pg_rewind` and the slot bookkeeping
+are all connections one member makes to the other. What those connections must
+be is a declaration (`pair_conn_security`), with three values:
+
+| `--conn-security` | `pg_hba.conf` on each member, for the peer | what the connecting side demands |
+|---|---|---|
+| `plain` (default) | `host ... md5` | nothing: libpq's `sslmode=prefer` |
+| `tls-scram` | `hostssl ... scram-sha-256` | `sslmode=require`, or `verify-ca`/`verify-full` with `--tls-ca` |
+| `tls-cert` | `hostssl ... cert` | the same, plus a client certificate per role |
+
+`plain` is the weak one and is the default on purpose: it is what every pair
+was before the choice existed, and a recipe that tightened `pg_hba.conf` under
+a running pair on upgrade would break replication on upgrade. It is fine on a
+network nobody else is on, and not for replication that crosses anything
+shared.
+
+```
+# encrypted, password proven by SCRAM, server not verified (Debian's self-signed cert is enough)
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --conn-security tls-scram
+
+# and the server verified against a CA, each member serving its own certificate
+salmon-pgpair config ... --conn-security tls-scram \
+    --tls-ca /etc/postgresql/pair-ca.crt --tls-verify-full \
+    --tls-server-cert /etc/postgresql/server.crt --tls-server-key /etc/postgresql/server.key
+
+# and the two roles authenticated by certificate rather than by password
+salmon-pgpair config ... --conn-security tls-cert --tls-ca ... --tls-server-cert ... --tls-server-key ...
+```
+
+Every file named is **pre-provisioned on both members at the same path** —
+like the passfiles, the pair neither issues certificates nor moves them
+(`SreBox.PostgresTls` can issue them; how they travel is yours). Keys are
+`postgres`-owned and `0600`. With `tls-cert`, `salmon-pgpair` expects the
+client certificates at `/etc/postgresql/salmon-{replication,rewind}.{crt,key}`,
+each with `CN` equal to its role (`replicator`, `rewinder`); a binary using the
+recipe as a library names its own paths (`ClientCerts`). `--tls-verify-full`
+needs each server certificate to name the address given as `--a`/`--b`, so for
+members declared by address, an IP subject alternative name. `--tls-ca` is also
+what each cluster trusts client certificates against when `--tls-server-cert`
+is given; without server files the cluster's TLS settings are left as found.
+
+What a pass does about it, and what it means for a pair that is already
+deployed:
+
+- **A pair that does not set the option is unchanged.** Same two hba lines,
+  appended only if missing; no `sslmode` in any connection; a directive
+  written before the field existed parses as `plain`. The member script does
+  gain two no-ops there: it looks for the stronger choices' lines to remove
+  (there are none), and compares a standby's `primary_conninfo` with what it
+  would write (it is equal).
+- **Changing the option replaces the pair's own two lines per member; it does
+  not append beside them.** `pg_hba.conf` is first-match and `host` matches
+  TLS connections too, so an old `host ... md5` line left above a new
+  `hostssl` line would keep accepting plaintext. Only the exact lines this
+  recipe writes for this peer and these roles are removed; nothing else in the
+  file is touched, and a wider line of your own above them still wins — the
+  pair owns its lines, not the file.
+- **`pg_hba.conf` is not touched until the cluster says it serves TLS.** A
+  `hostssl` line on a cluster with `ssl = off` matches nothing, so the member
+  node fails first, naming the reason, and replication carries on as it was.
+  `tls-cert` likewise wants an `ssl_ca_file`. Afterwards the server is asked
+  (`pg_hba_file_rules`) whether it could load the file.
+- **The running standby is brought along.** Its `primary_conninfo` is
+  rewritten (and reloaded) when it already points at its peer and differs from
+  the declared one, so the stronger demand applies to the connection that
+  exists rather than waiting for the next rejoin. The walreceiver reconnects
+  once. With `tls-scram` the roles' passwords are re-stored as SCRAM verifiers
+  from the same passfiles.
+- **The passfiles are still needed with `tls-cert`**: the roles are still
+  given their passwords, though no line the pair writes accepts one.
+
+This was exercised by hand on two Debian trixie containers (Postgres 17):
+plain, then `tls-scram` on the running pair, a switchover, `tls-cert` with
+`--tls-verify-full`, a switchover back, a fresh `--seed`, back to plain, and
+both refusals. It has not been run in the qemu tier, nor on older Postgres.
 
 ## What a switchover actually does
 

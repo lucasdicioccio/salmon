@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {- | A primary and a streaming standby on two machines, with the primary's
 location declared rather than discovered.
@@ -53,6 +54,17 @@ module SreBox.PostgresPair (
     sshUser,
     remoteCommand,
     slotNameFor,
+
+    -- * How the two machines talk to each other
+    ConnSecurity (..),
+    Tls (..),
+    ServerCheck (..),
+    ServerFiles (..),
+    ClientCerts (..),
+    connSecurity,
+    hbaLinesFor,
+    hbaLinesRetired,
+    securityProblems,
 
     -- * What the machines are
     Lsn (..),
@@ -275,11 +287,238 @@ data Pair
     -- a pair that is healthy, or merely lagging, never has anything wiped.
     -- 'pair_seed' cannot do this job -- it is the /first/ clone, and its
     -- guard leaves a data directory of the primary's own cluster alone.
+    , pair_conn_security :: Maybe ConnSecurity
+    -- ^ what the replication and rewind connections between the two members
+    -- must be: see 'ConnSecurity'. Absent (also from a directive written
+    -- before this field existed) it is 'PlainMd5', which is what every pair
+    -- was before there was a choice; read it through 'connSecurity'.
     }
     deriving (Eq, Show, Generic)
 
 instance FromJSON Pair
 instance ToJSON Pair
+
+{- | What the connections one member makes to the other -- streaming
+replication, @pg_basebackup@, @pg_rewind@, the slot bookkeeping -- must be.
+
+Three choices, weakest first, and the weakest is the one with the plain
+name: it is what an absent 'pair_conn_security' means, because that is what
+every pair deployed before this type existed is, and a recipe that tightened
+@pg_hba.conf@ under a running pair on upgrade would be a recipe that broke
+replication on upgrade.
+
+['PlainMd5'] @host ... md5@. TLS is not required by either end (libpq's
+default @sslmode=prefer@ will use it if the server offers it, and will not
+mind if somebody in the middle says it does not), and @md5@ accepts a
+password stored either way. For a network nobody else is on.
+
+['TlsScram'] @hostssl ... scram-sha-256@. The server refuses a connection
+that is not TLS, the client refuses one too (@sslmode=require@ or stricter,
+see 'ServerCheck'), and the password is only ever proven, never sent. The
+roles' passwords are re-stored as SCRAM verifiers on the way.
+
+['TlsClientCert'] @hostssl ... cert@. As above for the transport, and the
+/client/ is authenticated by a certificate whose @CN@ is the role's name --
+what "SreBox.PostgresTls" sets up for application clients, here for the two
+roles the pair itself connects as. The passfiles are still read (the roles
+are still given their passwords), but no line this recipe writes accepts one.
+
+Every file named in here is __pre-provisioned on both members, at the same
+path__: this recipe does not issue certificates and does not move them, for
+the same reason it does not move passwords.
+-}
+data ConnSecurity
+    = PlainMd5
+    | TlsScram Tls
+    | TlsClientCert Tls ClientCerts
+    deriving (Eq, Show, Generic)
+
+instance FromJSON ConnSecurity
+instance ToJSON ConnSecurity
+
+-- | The transport half of a TLS choice: both ends of it.
+data Tls
+    = Tls
+    { tls_check :: ServerCheck
+    -- ^ how hard a connecting member checks the one it connects to.
+    , tls_server :: Maybe ServerFiles
+    -- ^ what each member serves TLS with. 'Nothing' leaves the cluster's
+    -- TLS settings as they were found -- Debian's clusters are created with
+    -- @ssl = on@ and a self-signed certificate, which is enough for
+    -- 'Encrypted' and for nothing stricter. Either way the member node
+    -- refuses to write a @hostssl@ line on a cluster that is not serving
+    -- TLS, since such a line matches nothing.
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON Tls
+instance ToJSON Tls
+
+{- | What the connecting side demands of the server's certificate.
+
+'Encrypted' is @sslmode=require@: the connection is encrypted and that is
+all -- whoever answers at the peer's address is believed, so it keeps out an
+eavesdropper and not somebody who can redirect the connection. The other two
+name a CA certificate (on each member) and are @verify-ca@ and
+@verify-full@; the last also wants the certificate to name 'member_host',
+which for members declared by address means a certificate with that address
+among its subject alternative names.
+-}
+data ServerCheck
+    = Encrypted
+    | VerifyCa FilePath
+    | VerifyFull FilePath
+    deriving (Eq, Show, Generic)
+
+instance FromJSON ServerCheck
+instance ToJSON ServerCheck
+
+{- | A member's own certificate and key, and the CA it accepts client
+certificates from. The paths are the same on both members; the files are
+not (each member's certificate is its own). The key must be readable by
+@postgres@ and by nobody else, or the cluster does not load it.
+-}
+data ServerFiles
+    = ServerFiles
+    { server_cert :: FilePath
+    , server_key :: FilePath
+    , server_client_ca :: Maybe FilePath
+    -- ^ @ssl_ca_file@. Needed by 'TlsClientCert' (set here, or already set
+    -- on the cluster); left as found when absent.
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON ServerFiles
+instance ToJSON ServerFiles
+
+{- | The certificates the pair's two roles present, on each member (either
+may be the one connecting). Each certificate's @CN@ must be the role's name:
+that equality is the whole authentication. Keys are read by @postgres@ (the
+standby's own connection, @pg_rewind@) and by root (the first clone), and
+libpq refuses one that group or others can read.
+-}
+data ClientCerts
+    = ClientCerts
+    { client_repl_cert :: FilePath
+    , client_repl_key :: FilePath
+    , client_rewind_cert :: FilePath
+    , client_rewind_key :: FilePath
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON ClientCerts
+instance ToJSON ClientCerts
+
+-- | The pair's choice, with the absent one spelled out.
+connSecurity :: Pair -> ConnSecurity
+connSecurity = fromMaybe PlainMd5 . pair_conn_security
+
+{- | The two @pg_hba.conf@ lines a member needs for a choice: the peer's
+replication connection, and the peer's rewind connection.
+-}
+hbaLinesFor :: Pair -> Side -> ConnSecurity -> [Text]
+hbaLinesFor pair side sec = hbaShape pair side (shapeOf sec)
+
+{- | The lines the /other/ choices would have written on this member, which
+a member removes before it adds its own.
+
+@pg_hba.conf@ is read top to bottom and the first line that matches decides,
+and @host@ matches a TLS connection as well as a plain one: left in place,
+the @host ... md5@ line of a pair that was 'PlainMd5' yesterday sits above
+the @hostssl@ line appended today and goes on accepting everything it ever
+did. So this one recipe, whose lines are otherwise append-if-missing,
+removes -- exactly these lines, compared whole, and nothing else in the file.
+-}
+hbaLinesRetired :: Pair -> Side -> ConnSecurity -> [Text]
+hbaLinesRetired pair side sec =
+    concat [hbaShape pair side shape | shape <- hbaShapes, shape /= shapeOf sec]
+
+hbaShapes :: [(Text, Text)]
+hbaShapes = [("host", "md5"), ("hostssl", "scram-sha-256"), ("hostssl", "cert")]
+
+shapeOf :: ConnSecurity -> (Text, Text)
+shapeOf PlainMd5 = ("host", "md5")
+shapeOf (TlsScram _) = ("hostssl", "scram-sha-256")
+shapeOf (TlsClientCert _ _) = ("hostssl", "cert")
+
+hbaShape :: Pair -> Side -> (Text, Text) -> [Text]
+hbaShape pair side (kind, method) =
+    [ Text.unwords [kind, "replication", pair.pair_repl_role, peer.member_host <> "/32", method]
+    , Text.unwords [kind, "all", pair.pair_rewind_role, peer.member_host <> "/32", method]
+    ]
+  where
+    peer = memberOn pair (other side)
+
+{- | Everything wrong with the declared choice, not the first thing.
+
+The paths end up inside a libpq connection string, inside a line of
+@postgresql.auto.conf@, inside a shell script: a path that is not a plain
+word would be read as something else by one of the three.
+-}
+securityProblems :: Pair -> [Text]
+securityProblems pair = case connSecurity pair of
+    PlainMd5 -> []
+    TlsScram tls -> tlsProblems tls
+    TlsClientCert tls cc ->
+        tlsProblems tls
+            <> path "replication client certificate" cc.client_repl_cert
+            <> path "replication client key" cc.client_repl_key
+            <> path "rewind client certificate" cc.client_rewind_cert
+            <> path "rewind client key" cc.client_rewind_key
+  where
+    tlsProblems :: Tls -> [Text]
+    tlsProblems tls =
+        ( case tls.tls_check of
+            Encrypted -> []
+            VerifyCa ca -> path "CA certificate" ca
+            VerifyFull ca -> path "CA certificate" ca
+        )
+            <> foldMap
+                ( \(sf :: ServerFiles) ->
+                    path "server certificate" sf.server_cert
+                        <> path "server key" sf.server_key
+                        <> foldMap (path "client CA certificate") sf.server_client_ca
+                )
+                tls.tls_server
+    path :: Text -> FilePath -> [Text]
+    path what p =
+        [ what <> ": \"" <> Text.pack p <> "\" is not an absolute path made of plain characters"
+        | not (take 1 p == "/" && all plain p)
+        ]
+    plain c = c `notElem` (" \t\n\r'\"\\$`" :: String)
+
+data ConnAs = AsReplication | AsRewind
+
+{- | What a connection string gains from the choice. Nothing at all for
+'PlainMd5', so that pair's scripts are what they always were.
+-}
+sslParams :: Pair -> ConnAs -> [String]
+sslParams pair who = case connSecurity pair of
+    PlainMd5 -> []
+    TlsScram tls -> check tls.tls_check
+    TlsClientCert tls cc -> check tls.tls_check <> certs cc
+  where
+    check Encrypted = ["sslmode=require"]
+    check (VerifyCa ca) = ["sslmode=verify-ca", "sslrootcert=" <> ca]
+    check (VerifyFull ca) = ["sslmode=verify-full", "sslrootcert=" <> ca]
+    certs :: ClientCerts -> [String]
+    certs cc = case who of
+        AsReplication -> ["sslcert=" <> cc.client_repl_cert, "sslkey=" <> cc.client_repl_key]
+        AsRewind -> ["sslcert=" <> cc.client_rewind_cert, "sslkey=" <> cc.client_rewind_key]
+
+{- | The same, as environment, for the one command here that builds its own
+connection: 'Postgres.cloneFromPrimaryScript', whose @pg_basebackup@ and
+identity query take a host and a user rather than a string. libpq reads
+these wherever a connection string says nothing, and every other connection
+in these scripts says it in the string.
+-}
+sslEnvironment :: Pair -> [String]
+sslEnvironment pair =
+    [ "export " <> var <> "=" <> shQuote (drop 1 value)
+    | param <- sslParams pair AsReplication
+    , let (key, value) = break (== '=') param
+    , Just var <- [lookup key [("sslmode", "PGSSLMODE"), ("sslrootcert", "PGSSLROOTCERT"), ("sslcert", "PGSSLCERT"), ("sslkey", "PGSSLKEY")]]
+    ]
 
 memberOn :: Pair -> Side -> Member
 memberOn pair A = pair.pair_a
@@ -995,16 +1234,17 @@ dropStaleSlot pair side =
 
 primaryConninfo :: Pair -> Side -> String
 primaryConninfo pair side =
-    unwords
+    unwords $
         [ "host=" <> Text.unpack (memberOn pair side).member_host
         , "port=" <> show (memberOn pair side).member_port
         , "user=" <> Text.unpack pair.pair_repl_role
         , "passfile=" <> pair.pair_repl_passfile
         ]
+            <> sslParams pair AsReplication
 
 replicationConn :: Pair -> Side -> String
 replicationConn pair side =
-    unwords
+    unwords $
         [ "host=" <> Text.unpack (memberOn pair side).member_host
         , "port=" <> show (memberOn pair side).member_port
         , "user=" <> Text.unpack pair.pair_repl_role
@@ -1013,15 +1253,17 @@ replicationConn pair side =
           -- and pg_hba matches that against the database name.
           "replication=true"
         ]
+            <> sslParams pair AsReplication
 
 sourceServer :: Pair -> Side -> String
 sourceServer pair side =
-    unwords
+    unwords $
         [ "host=" <> Text.unpack (memberOn pair side).member_host
         , "port=" <> show (memberOn pair side).member_port
         , "user=" <> Text.unpack pair.pair_rewind_role
         , "dbname=postgres"
         ]
+            <> sslParams pair AsRewind
 
 
 shQuote :: String -> String
@@ -1090,8 +1332,12 @@ member r pair side =
             , notes =
                 [ "accepts replication and rewind connections from " <> peer.member_host
                 , "cluster " <> m.member_cluster <> " on port " <> Text.pack (show m.member_port)
+                , -- what a re-declaration with another choice changes, so
+                  -- that `run serve` sees one
+                  "those connections: " <> securityNote (connSecurity pair)
                 ]
             , up = do
+                refuseBadSecurity pair
                 (code, out, err) <- sshToTarget pair (OnMember m) (memberScript pair side)
                 runReporter r (Acted m.member_host code (Text.strip (out <> err)))
                 case code of
@@ -1103,9 +1349,6 @@ member r pair side =
     m = memberOn pair side
     peer = memberOn pair (other side)
 
-{- | The script 'member' runs. Pure, like the steps, so that what it does to
-a machine can be read without one.
--}
 {- | Builds one member out of the other: @pg_basebackup@, then everything
 that makes it this pair's standby.
 
@@ -1130,6 +1373,7 @@ seedMember r pair side =
                 [ "clones only over a pristine or matching data directory, and refuses anything else"
                 ]
             , up = do
+                refuseBadSecurity pair
                 (code, out, err) <- sshToTarget pair (OnMember m) (seedScript pair side)
                 runReporter r (Acted m.member_host code (Text.strip (out <> err)))
                 case code of
@@ -1152,13 +1396,14 @@ this member streams with is made on the primary.
 seedScriptWith :: [String] -> Pair -> Side -> String
 seedScriptWith between pair side =
     unlines $
-        [ Postgres.cloneFromPrimaryScript setup
-        , -- the clone leaves it running and streaming with whatever
+        sslEnvironment pair
+            <> [ Postgres.cloneFromPrimaryScript setup
+               , -- the clone leaves it running and streaming with whatever
           -- pg_basebackup's -R wrote; from here it is this pair's standby,
           -- with this pair's slot, which nothing else would give it.
           "version=$(pg_lsclusters --no-header | awk -v c=" <> shQuote (Text.unpack m.member_cluster) <> " '$2==c {print $1}' | head -n1)"
         , "datadir=/var/lib/postgresql/$version/" <> Text.unpack m.member_cluster
-        ]
+               ]
             <> between
             <> standbyTail pair side
             <> [ unwords ["pg_ctlcluster", "\"$version\"", Text.unpack m.member_cluster, "restart"]
@@ -1318,6 +1563,69 @@ bouncerSetupScript pair b =
             , PgBouncer.bouncer_routing_file = Just b.bouncer_routing_path
             }
 
+{- | A declaration whose paths would not survive being spliced into a script
+runs nothing at all, and says everything that is wrong with it.
+-}
+refuseBadSecurity :: Pair -> IO ()
+refuseBadSecurity pair =
+    case securityProblems pair of
+        [] -> pure ()
+        problems ->
+            throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": pair_conn_security: " <> Text.intercalate "; " problems)))
+
+-- | The choice in words, for a node's @notes@: paths, never contents.
+securityNote :: ConnSecurity -> Text
+securityNote PlainMd5 = "host, md5 (TLS not required)"
+securityNote (TlsScram tls) = "hostssl, scram-sha-256, " <> tlsNote tls
+securityNote (TlsClientCert tls cc) =
+    "hostssl, client certificates ("
+        <> Text.pack cc.client_repl_cert
+        <> ", "
+        <> Text.pack cc.client_rewind_cert
+        <> "), "
+        <> tlsNote tls
+
+tlsNote :: Tls -> Text
+tlsNote tls =
+    Text.intercalate
+        ", "
+        [ case tls.tls_check of
+            Encrypted -> "server not verified (sslmode=require)"
+            VerifyCa ca -> "server verified against " <> Text.pack ca <> " (verify-ca)"
+            VerifyFull ca -> "server and its name verified against " <> Text.pack ca <> " (verify-full)"
+        , case tls.tls_server of
+            Nothing -> "the cluster's TLS settings left as found"
+            Just sf -> "served with " <> Text.pack sf.server_cert
+        ]
+
+{- | The script 'member' runs. Pure, like the steps, so that what it does to
+a machine can be read without one.
+
+= What it does to @pg_hba.conf@
+
+It removes the lines the pair's /other/ 'ConnSecurity' choices would have
+written for this peer ('hbaLinesRetired'), and appends this choice's two if
+they are missing ('hbaLinesFor'). Removing is what makes a tightened choice
+mean anything -- see 'hbaLinesRetired' -- and it touches those exact lines
+only. A line somebody else wrote above them that also matches the peer still
+wins: this recipe owns its lines, not the file.
+
+For the TLS choices, in this order: the cluster is made to serve TLS (if
+'tls_server' says with what), it is /asked/ whether it does, and only then
+is the file touched. A @hostssl@ line on a cluster with @ssl = off@ matches
+nothing, so a pass that wrote one first would cut the pair's replication to
+announce that TLS is not set up. Afterwards the server is asked whether it
+could read the file it was given (@pg_hba_file_rules@), since a file it
+cannot parse is silently not loaded.
+
+= What it does on a standby
+
+Aligns @primary_conninfo@ with the declared choice, if and only if the
+standby is already pointed at its peer: a choice changed on a running pair
+otherwise reaches the standby's own connection at its next rejoin, and with
+client certificates that connection would fail at its next reconnect. It
+never points a standby anywhere -- that is the role node's, through a rejoin.
+-}
 memberScript :: Pair -> Side -> String
 memberScript pair side =
     unlines $
@@ -1326,10 +1634,9 @@ memberScript pair side =
         , "hba=/etc/postgresql/$version/" <> cluster <> "/pg_hba.conf"
         ]
             <> map setting (Postgres.replicationSettings Postgres.defaultReplicationTuning)
-            <> map hbaLine
-                [ "host replication " <> Text.unpack pair.pair_repl_role <> " " <> Text.unpack peer.member_host <> "/32 md5"
-                , "host all " <> Text.unpack pair.pair_rewind_role <> " " <> Text.unpack peer.member_host <> "/32 md5"
-                ]
+            <> servesTls
+            <> map (retireHbaLine . Text.unpack) (hbaLinesRetired pair side security)
+            <> map (hbaLine . Text.unpack) (hbaLinesFor pair side security)
             <> -- roles are catalog rows: they reach the other machine through
                -- the WAL like any other write, so only a primary makes them,
                -- and a standby that is one tomorrow already has them.
@@ -1338,10 +1645,22 @@ memberScript pair side =
                , "  rewindpw=$(awk -F: 'NR==1 {print $5}' " <> shQuote pair.pair_rewind_passfile <> ")"
                , "  " <> heredoc (roleSql "REPLICATION LOGIN" pair.pair_repl_role "$replpw")
                , "  " <> heredoc (roleSql "LOGIN" pair.pair_rewind_role "$rewindpw" <> " " <> grants)
+               , "else"
+               , -- a standby already pointed at its peer connects the way the
+                 -- pair now says to. Compared first: for a pair whose choice
+                 -- did not change this is one query and nothing else.
+                 "  conninfo=$(" <> query "SELECT setting FROM pg_settings WHERE name = 'primary_conninfo'" <> ")"
+               , "  case \"$conninfo\" in"
+               , "    " <> shQuote ("host=" <> Text.unpack peer.member_host <> " ") <> "*)"
+               , "      [ \"$conninfo\" = " <> shQuote wantedConninfo <> " ] || "
+                    <> psql' ("ALTER SYSTEM SET primary_conninfo = " <> Text.unpack (quoteSql (Text.pack wantedConninfo)))
+                    <> " ;;"
+               , "  esac"
                , "fi"
                ]
-            <> [ psql' "SELECT pg_reload_conf()"
-               , -- the same shape as systemd's NeedDaemonReload: the file has
+            <> [psql' "SELECT pg_reload_conf()"]
+            <> hbaLoaded
+            <> [ -- the same shape as systemd's NeedDaemonReload: the file has
                  -- changed, and only the running server knows whether what
                  -- changed needs it to come back.
                  "pending=$(" <> query "SELECT count(*) FROM pg_settings WHERE pending_restart" <> ")"
@@ -1352,11 +1671,61 @@ memberScript pair side =
     peer = memberOn pair (other side)
     cluster = Text.unpack m.member_cluster
     port = show m.member_port
+    security = connSecurity pair
+    wantedConninfo = primaryConninfo pair (other side)
 
     setting (k, v) = psql' ("ALTER SYSTEM SET " <> Text.unpack k <> " = " <> Text.unpack (quoteSql v))
     quoteSql v = "'" <> Text.replace "'" "''" v <> "'"
 
     hbaLine l = "grep -qxF " <> shQuote l <> " \"$hba\" || echo " <> shQuote l <> " >> \"$hba\""
+
+    {- Written back with `cat >`, not moved into place: the file keeps its
+    owner, its mode and its inode, which are postgresql-common's. -}
+    retireHbaLine l =
+        "if grep -qxF " <> shQuote l <> " \"$hba\"; then awk -v l=" <> shQuote l
+            <> " '$0 != l' \"$hba\" > \"$hba.salmon\" && cat \"$hba.salmon\" > \"$hba\"; rm -f \"$hba.salmon\"; fi"
+
+    servesTls = case security of
+        PlainMd5 -> []
+        TlsScram tls -> serving tls False
+        TlsClientCert tls _ -> serving tls True
+
+    serving :: Tls -> Bool -> [String]
+    serving tls needsClientCa =
+        foldMap serverFiles tls.tls_server
+            <> [ psql' "SELECT pg_reload_conf()"
+               , "[ \"$(" <> query "SHOW ssl" <> ")\" = on ] || { echo "
+                    <> shQuote ("cluster " <> cluster <> " is not serving TLS (ssl is off), so a hostssl line would match nothing: pg_hba.conf left as it was")
+                    <> " >&2; exit 1; }"
+               ]
+            <> [ "[ -n \"$(" <> query "SHOW ssl_ca_file" <> ")\" ] || { echo "
+                    <> shQuote ("cluster " <> cluster <> " has no ssl_ca_file, so it cannot check a client certificate: pg_hba.conf left as it was")
+                    <> " >&2; exit 1; }"
+               | needsClientCa
+               ]
+
+    serverFiles :: ServerFiles -> [String]
+    serverFiles sf =
+        map readable ([sf.server_cert, sf.server_key] <> foldMap pure sf.server_client_ca)
+            <> [ setting ("ssl_cert_file", Text.pack sf.server_cert)
+               , setting ("ssl_key_file", Text.pack sf.server_key)
+               ]
+            <> foldMap (\ca -> [setting ("ssl_ca_file", Text.pack ca)]) sf.server_client_ca
+            <> [setting ("ssl", "on")]
+
+    readable f =
+        "sudo -u postgres test -r " <> shQuote f <> " || { echo "
+            <> shQuote ("pre-provisioned file missing or unreadable by postgres: " <> f)
+            <> " >&2; exit 1; }"
+
+    hbaLoaded = case security of
+        PlainMd5 -> []
+        _ ->
+            [ "broken=$(" <> query "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL" <> ")"
+            , "[ \"$broken\" = 0 ] || { echo "
+                <> shQuote "the server could not read pg_hba.conf as it now stands (see pg_hba_file_rules), so it is still using the previous one"
+                <> " >&2; exit 1; }"
+            ]
 
     psql' sql = "sudo -u postgres psql -p " <> port <> " -tAX -d postgres -c " <> shQuote sql
     query = psql'
@@ -1370,9 +1739,13 @@ memberScript pair side =
         "sudo -u postgres psql -p " <> port <> " -tAX -d postgres >/dev/null <<PAIR_SQL\n" <> sql <> "\nPAIR_SQL"
 
     {- Created if missing, and its password set either way, so that rotating
-    the passfile is enough to rotate the role. -}
+    the passfile is enough to rotate the role -- and, under a TLS choice,
+    stored as a SCRAM verifier whatever the cluster's own default is, since
+    @scram-sha-256@ in pg_hba.conf refuses a role whose password is stored
+    as md5. -}
     roleSql attrs role pw =
-        "DO \\$do\\$ BEGIN CREATE ROLE "
+        storedAs
+            <> "DO \\$do\\$ BEGIN CREATE ROLE "
             <> Text.unpack role
             <> " "
             <> attrs
@@ -1384,6 +1757,10 @@ memberScript pair side =
             <> " PASSWORD '"
             <> pw
             <> "';"
+
+    storedAs = case security of
+        PlainMd5 -> ""
+        _ -> "SET password_encryption = 'scram-sha-256'; "
 
     grants =
         unwords
@@ -1405,7 +1782,7 @@ pairRole r pair =
                 , maybe "no side may be re-seeded" (\s -> "may be re-seeded, if its slot is lost: " <> Text.pack (show s)) pair.pair_reseed
                 ]
             , check = verdict <$> decide pair
-            , up = converge r pair
+            , up = refuseBadSecurity pair >> converge r pair
             }
 
 {- | The whole pair as one declaration: both machines configured to be
