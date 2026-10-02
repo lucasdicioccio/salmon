@@ -622,7 +622,7 @@ pairWith a b side =
         , Pair.pair_reseed = Nothing
         }
   where
-    member host identity = Pair.Member "root" host "main" 5432 (Just identity)
+    member host identity = Pair.Member "root" host "main" 5432 (Just identity) Nothing
 
 -------------------------------------------------------------------------------
 

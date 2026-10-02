@@ -61,6 +61,8 @@ data Seed
     , seedReseed :: Maybe Side
     , seedHostA :: Text
     , seedHostB :: Text
+    , seedSshA :: Maybe Text
+    , seedSshB :: Maybe Text
     , seedBouncer :: Maybe Text
     , seedIdentity :: Maybe FilePath
     , seedIdentityA :: Maybe FilePath
@@ -111,6 +113,11 @@ instance ParseRecord Seed where
                     )
                 <*> strOption (long "a" <> help "machine A")
                 <*> strOption (long "b" <> help "machine B")
+                -- the address the peer and the bouncers use is not always
+                -- one the controller can reach: a VPC's internal address
+                -- against the external one an operator sees.
+                <*> optional (strOption (long "ssh-a" <> help "where to ssh for machine A, when that is not the address its peer reaches it on (--a)"))
+                <*> optional (strOption (long "ssh-b" <> help "where to ssh for machine B, when that is not the address its peer reaches it on (--b)"))
                 <*> optional (strOption (long "bouncer" <> help "a pgbouncer whose clients should follow the primary"))
                 <*> optional (strOption (long "ssh-identity" <> help "a key to reach the machines with"))
                 -- a fleet usually has one key; these exist because a test
@@ -125,8 +132,8 @@ toPair :: Seed -> Pair.Pair
 toPair seed =
     Pair.Pair
         { Pair.pair_name = seed.seedName
-        , Pair.pair_a = machine (seed.seedIdentityA <|> seed.seedIdentity) seed.seedHostA
-        , Pair.pair_b = machine (seed.seedIdentityB <|> seed.seedIdentity) seed.seedHostB
+        , Pair.pair_a = machine (seed.seedIdentityA <|> seed.seedIdentity) seed.seedSshA seed.seedHostA
+        , Pair.pair_b = machine (seed.seedIdentityB <|> seed.seedIdentity) seed.seedSshB seed.seedHostB
         , Pair.pair_primary = unSide seed.seedPrimary
         , Pair.pair_repl_role = "replicator"
         , Pair.pair_repl_passfile = "/etc/postgresql/salmon-replication.pgpass"
@@ -143,9 +150,10 @@ toPair seed =
         , Pair.pair_reseed = fmap unSide seed.seedReseed
         }
   where
-    machine identity host =
+    machine identity sshHost host =
         Pair.Member
             { Pair.member_ssh_user = "root"
+            , Pair.member_ssh_host = sshHost
             , Pair.member_host = host
             , Pair.member_cluster = "main"
             , Pair.member_port = 5432

@@ -988,6 +988,14 @@ argument. What follows is the list of things that are load-bearing; each was a d
   is the first clone and leaves a same-cluster directory alone. The Layer 3 case for it is
   written (`Test.PostgresSwitchoverSpec`, S6 continued) and has not been run.
 
+- **A member has two addresses and only one of them is its name.** `member_host` is how the peer
+  and the bouncers reach it (hba lines, `primary_conninfo`, the routing file, what `o_upstream` is
+  compared with, the `ref`s, the reports); `member_ssh_host` (optional, absent meaning
+  `member_host`; `--ssh-a`/`--ssh-b` on `salmon-pgpair`) is where the controller's ssh goes and is
+  read by `sshLogin` alone, so a controller outside a VPC can reach members on their external
+  addresses while they replicate on internal ones. `Test.PostgresPairSpec` renders every script
+  the recipe can send and asserts none contains the ssh address.
+
 - **Traffic moves through pgbouncer's admin console**: `PAUSE`, rewrite, `RELOAD`, `RESUME`, never
   a restart, since a restart drops the clients the bouncer is there to hold. That is why the
   routing lives in its own file pulled in by `%include` and deliberately *not* among

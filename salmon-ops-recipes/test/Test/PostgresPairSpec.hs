@@ -17,6 +17,8 @@ becomes /allowed/ only when the operator has said so through
 -}
 module Test.PostgresPairSpec (tests) where
 
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -39,6 +41,7 @@ tests =
         , testGroup "nextStep, with the primary declared on A" mirrorTests
         , testGroup "stepCommand" commandTests
         , testGroup "re-seeding a standby whose slot is lost (pair_reseed)" reseedTests
+        , testGroup "a member reached over ssh on another address (member_ssh_host)" sshHostTests
         ]
 
 {- | What a step actually does to a machine. Pure, so the destructive half of
@@ -180,6 +183,90 @@ commandTests =
             | needle `isPrefixOf` rest = (reverse acc, rest)
             | otherwise = go (c : acc) cs
 
+{- | A member has two addresses when the controller is outside the network
+the pair talks over. The ssh one is the controller's route and nothing more:
+no script, on any machine, may contain it, or a peer would be told to reach
+its primary on an address it cannot route to.
+-}
+sshHostTests :: [TestTree]
+sshHostTests =
+    [ testCase "ssh goes to the ssh address" $ do
+        assertEqual "" "root@203.0.113.1" (Pair.sshLogin (Pair.OnMember (Pair.memberOn split Pair.A)))
+        assertEqual "" "root@203.0.113.2" (Pair.sshLogin (Pair.OnMember (Pair.memberOn split Pair.B)))
+    , testCase "and to member_host when none is declared" $ do
+        assertEqual "" "10.0.0.1" (Pair.memberSshHost (Pair.memberOn pair Pair.A))
+        assertEqual "" "root@10.0.0.1" (Pair.sshLogin (Pair.OnMember (Pair.memberOn pair Pair.A)))
+    , testCase "a bouncer's login is unchanged" $
+        assertEqual "" "root@10.0.0.3" (Pair.sshLogin (Pair.OnBouncer bouncer))
+    , testCase "no rendered script contains an ssh address" $
+        mapM_
+            ( \(name, s) ->
+                mapM_
+                    (\addr -> assertBool (name <> " contains " <> addr) (not (addr `isInfixOf` s)))
+                    ["203.0.113.1", "203.0.113.2"]
+            )
+            (scriptsOf split)
+    , testCase "and every one of them is what the pair without ssh addresses renders" $ do
+        assertBool "expected scripts to compare" (length (scriptsOf pair) > 15)
+        assertEqual "" (scriptsOf pair) (scriptsOf split)
+    , testCase "the scripts still name the peer by member_host" $ do
+        assertBool "rejoin" (named "Rejoin A" "host=10.0.0.2")
+        assertBool "hba" (named "member A" "10.0.0.2/32")
+        assertBool "routing" (named "RepointBouncers B" "host=10.0.0.2")
+    , testCase "a step addresses the member by the same name, wherever ssh goes" $
+        case Pair.stepCommand split (Pair.StopMember Pair.A) of
+            Right ((Pair.OnMember m, _) : _) -> do
+                assertEqual "" "10.0.0.1" (Pair.member_host m)
+                assertEqual "" "203.0.113.1" (Pair.memberSshHost m)
+            _ -> assertFailure "expected a command on a member"
+    , testCase "what a standby reports as its upstream is compared with member_host" $ do
+        let decideFor p = Pair.nextStep p (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5") settled
+        assertEqual "" Pair.Done (decideFor split)
+        -- streaming from the ssh address would be somebody else's standby
+        assertEqual
+            ""
+            (Pair.Rejoin Pair.A)
+            (Pair.nextStep split (streamingFrom "203.0.113.2" "0/5") (primaryAt "0/5") settled)
+    , testCase "a directive written before the field existed still parses" $
+        case Aeson.fromJSON (dropSshHost (Aeson.toJSON (Pair.memberOn pair Pair.A))) of
+            Aeson.Success m -> assertEqual "" (Pair.memberOn pair Pair.A) m
+            Aeson.Error why -> assertFailure why
+    ]
+  where
+    split =
+        pair
+            { Pair.pair_a = (Pair.pair_a pair){Pair.member_ssh_host = Just "203.0.113.1"}
+            , Pair.pair_b = (Pair.pair_b pair){Pair.member_ssh_host = Just "203.0.113.2"}
+            }
+    named name needle = any (\(n, s) -> n == name && needle `isInfixOf` s) (scriptsOf split)
+    -- every script this recipe can send to any machine, named for the
+    -- failure text
+    scriptsOf :: Pair.Pair -> [(String, String)]
+    scriptsOf p0 =
+        concat
+            [ [("probe " <> show side, Pair.probeScript (Pair.memberOn p side)) | side <- sides]
+            , [("member " <> show side, Pair.memberScript p side) | side <- sides]
+            , [("seed " <> show side, Pair.seedScript p side) | side <- sides]
+            , [("bouncer setup", Pair.bouncerSetupScript p b) | b <- Pair.pair_bouncers p]
+            , [("bouncer probe", Pair.bouncerProbeScript b) | b <- Pair.pair_bouncers p]
+            , [ (show st, sc)
+              | st <- steps
+              , Right cs <- [Pair.stepCommand p st]
+              , (_, sc) <- cs
+              ]
+            ]
+      where
+        p = p0{Pair.pair_seed = Just Pair.A, Pair.pair_reseed = Just Pair.A}
+    sides = [Pair.A, Pair.B]
+    steps =
+        Pair.PauseBouncers
+            : concat
+                [ [Pair.StopMember s, Pair.Promote s, Pair.Rejoin s, Pair.StartMember s, Pair.Reseed s, Pair.RepointBouncers s]
+                | s <- sides
+                ]
+    dropSshHost (Aeson.Object o) = Aeson.Object (KeyMap.delete "member_ssh_host" o)
+    dropSshHost v = v
+
 -------------------------------------------------------------------------------
 
 pair :: Pair.Pair
@@ -201,7 +288,7 @@ pair =
         , Pair.pair_catch_up_seconds = 60
         }
   where
-    member host = Pair.Member "root" host "main" 5432 Nothing
+    member host = Pair.Member "root" host "main" 5432 Nothing Nothing
 
 bouncer :: Pair.Bouncer
 bouncer =
@@ -216,6 +303,8 @@ bouncer =
         , Pair.bouncer_alias = "app"
         , Pair.bouncer_dbname = "app"
         , Pair.bouncer_routing_path = "/etc/pgbouncer/routing.ini"
+        , Pair.bouncer_config_dir = "/etc/pgbouncer"
+        , Pair.bouncer_listen_port = 6432
         }
 
 lsn :: Text -> Pair.Lsn

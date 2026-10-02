@@ -336,6 +336,7 @@ thePair root =
             , Pair.member_cluster = "main"
             , Pair.member_port = 5432
             , Pair.member_ssh_identity = Just (Keys.privateKeyPath (clientKey root))
+            , Pair.member_ssh_host = Nothing
             }
 
 theBouncer :: FilePath -> Pair.Bouncer

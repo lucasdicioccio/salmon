@@ -48,6 +48,8 @@ module SreBox.PostgresPair (
     Pair (..),
     Bouncer (..),
     memberOn,
+    memberSshHost,
+    sshLogin,
     slotNameFor,
 
     -- * What the machines are
@@ -122,9 +124,13 @@ other B = A
 
 {- | One machine of the pair.
 
-@member_ssh_user@ and @member_host@ are how the /controller/ reaches it;
-@member_host@ is also how the peer and the bouncers do, so it has to be an
-address both can use.
+@member_host@ is how the /peer and the bouncers/ reach it: it is what goes
+into @pg_hba.conf@, @primary_conninfo@ and the routing file, and what a
+standby reports as its upstream. @member_ssh_user@ and 'memberSshHost' are
+how the /controller/ reaches it, and nothing else reads them: on a cloud
+network the operator sees a machine on its external address and the peer
+sees it on its internal one, and with one field for both the controller has
+to live inside that network.
 -}
 data Member
     = Member
@@ -136,11 +142,20 @@ data Member
     -- ^ a key to authenticate with, for a machine that does not answer to
     -- whatever the controller offers by default. Per member rather than per
     -- pair: two machines need not have been given the same key.
+    , member_ssh_host :: Maybe Text
+    -- ^ where the controller's ssh goes, when that is not 'member_host'.
+    -- Absent (also from a directive written before this field existed) it is
+    -- 'member_host'. It appears in no script, no ref and no report: it is
+    -- the controller's route to the machine, not the machine's name.
     }
     deriving (Eq, Show, Generic)
 
 instance FromJSON Member
 instance ToJSON Member
+
+-- | The address the controller's ssh connects to for this member.
+memberSshHost :: Member -> Text
+memberSshHost m = fromMaybe m.member_host m.member_ssh_host
 
 {- | One pgbouncer in front of the pair, and everything needed to move
 traffic through it without dropping any.
@@ -1529,15 +1544,24 @@ targetName (OnBouncer b) = b.bouncer_name
 sshTo :: Pair -> Side -> String -> IO (ExitCode, Text, Text)
 sshTo pair side = sshToTarget pair (OnMember (memberOn pair side))
 
+{- | The @user\@host@ the controller's ssh is given for a machine: the one
+place a member's ssh address is read. Everything a script /contains/ about a
+member is its 'member_host'.
+-}
+sshLogin :: Target -> Text
+sshLogin (OnMember m) = m.member_ssh_user <> "@" <> memberSshHost m
+sshLogin (OnBouncer b) = b.bouncer_ssh_user <> "@" <> b.bouncer_ssh_host
+
 -- | The same, for whichever kind of machine a step addresses.
 sshToTarget :: Pair -> Target -> String -> IO (ExitCode, Text, Text)
 sshToTarget pair target script = do
     (code, out, err) <- readCreateProcessWithExitCode (proc "ssh" args) ""
     pure (code, decode out, decode err)
   where
-    (login, identity) = case target of
-        OnMember m -> (m.member_ssh_user <> "@" <> m.member_host, m.member_ssh_identity)
-        OnBouncer b -> (b.bouncer_ssh_user <> "@" <> b.bouncer_ssh_host, b.bouncer_ssh_identity)
+    login = sshLogin target
+    identity = case target of
+        OnMember m -> m.member_ssh_identity
+        OnBouncer b -> b.bouncer_ssh_identity
     {- A neutral locale, because ssh forwards the caller's and Debian's psql
     is a perl wrapper that complains about every locale the guest does not
     have -- fifteen lines of it, per invocation, into the report of a node
