@@ -125,6 +125,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresReplicationSpec
                     , Test.PostgresClusterSpec
                     , Test.PgBouncerSpec
+                    , Test.HaproxySpec
                     , Test.EtcdSpec
                     , Test.PatroniSpec
                     , Test.PgPairDemoSpec
