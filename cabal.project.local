@@ -1,4 +1,1 @@
-allow-newer: dhall-json:aeson
-allow-newer: dhall-json:bytestring
-allow-newer: dhall-json:text
 ignore-project: False
