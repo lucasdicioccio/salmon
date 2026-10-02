@@ -109,6 +109,23 @@ every bouncer, as the users the declaration names, and `salmon-pgpair` itself
 never on the controller. In the qemu demo the controller is the process on
 the host, outside all three guests, for the same reason.
 
+The controller need not sit on the network the pair talks over. `--a` and
+`--b` are the addresses the *peer and the bouncers* use — they go into
+`pg_hba.conf`, `primary_conninfo` and the routing file — and by default they
+are also where the controller's ssh goes. When those differ, as on a cloud
+network where an operator reaches a machine on its external address and its
+peer reaches it on its internal one, say where ssh goes separately:
+
+```
+salmon-pgpair config --primary A --a 10.0.0.2 --ssh-a 203.0.113.1 \
+                                 --b 10.0.0.3 --ssh-b 203.0.113.2 ...
+```
+
+(`member_ssh_host` in the directive, absent meaning `member_host`.) The ssh
+address is the controller's route and nothing else: no script sent to any
+machine contains it, and reports, refs and the standby's upstream comparison
+all keep naming the member by `--a`/`--b`.
+
 ## What a switchover actually does
 
 ```
