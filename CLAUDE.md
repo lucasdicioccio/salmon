@@ -38,6 +38,8 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
+  `salmon-docs-sync` (`DocsSync.hs`) is salmon on its own repo: `check` fingerprints the tracked inputs of
+  `website/scripts/build-site.sh` against `docs/.docs-sync-stamp`; `up` rebuilds `docs/`, stamps, commits and pushes it.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
   itself, with a client that keeps writing while the primary moves: a demo of
   `specs/pg-switchover.md`, and the throwaway-validation counterpart to `salmon-gcp-toy`. Its two
