@@ -175,3 +175,56 @@ What both guarantee, and what a third transport should too:
 `down` removes the delivered file. An upload's `down` treats a machine it
 cannot reach as having nothing left to remove, since failing there would
 block the teardown of the machine itself.
+
+## Pattern: a container as a service, pulled with the machine's own identity
+
+"This image runs as a service on this machine" is two nodes and no shipped
+secret.
+
+```haskell
+import qualified Salmon.Builtin.Nodes.Debian.OS as OS
+import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
+import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
+
+appService :: Text -> Op
+appService tag =
+    Quadlet.quadletContainer reportPrint OS.systemctl prerequisites app
+  where
+    authfile = Podman.AuthFile "/etc/app/registry-auth.json"
+    app =
+        (Quadlet.container (Podman.ContainerName "app") ("europe-west1-docker.pkg.dev/acme/repo/app:" <> tag))
+            { Quadlet.containerEnvFile = Just "/etc/app/env"
+            , Quadlet.containerPorts = [Podman.PortMapping "8080" "8080" Podman.TCPPort]
+            , Quadlet.containerAuthFile = Just authfile
+            , Quadlet.containerStartTimeout = Just 300
+            }
+    prerequisites = Track $ \_ ->
+        ArtifactRegistry.instanceLogin reportPrint OS.podman authfile (Core.Region "europe-west1")
+```
+
+`quadletContainer` writes `/etc/containers/systemd/app.container`, reloads
+systemd and restarts `app.service` when that file changed: a new tag, or new
+bytes in the env file, whose hash is folded into the quadlet. The env file is
+somebody else's node (see the pattern above); here it is only read.
+Otherwise the service is checked (`systemctl show`) and left alone.
+
+`instanceLogin` is for a GCE instance: it asks the metadata server for the
+instance's service account's token and logs podman in with it, into an auth
+file of its own. Nothing is copied to the machine. The token lasts about an
+hour, so the node records its expiry and its `check` asks for a new login
+only when that is near; under `run serve` the credential stays fresh on its
+own. The instance's service account needs `roles/artifactregistry.reader` on
+the repository and the instance an access scope that allows it.
+
+Things to know:
+
+- The image is pulled by the service's *start*. A failed pull is a failed
+  `up` of the service node, and a slow one needs `containerStartTimeout`.
+- A tag that keeps its name while its content moves (`:latest`) is not a
+  change. Deploy by a tag that changes, or by digest.
+- Anywhere other than a GCE instance, use `Podman.login` with whatever
+  supplies the password; the quadlet only needs the auth file's path.
+- Needs podman 4.4 or later on the machine. A user-scope container
+  (`Systemd.User`, `~/.config/containers/systemd`) needs no root.

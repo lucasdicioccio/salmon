@@ -163,14 +163,22 @@ that no longer happens. Change the file (any change) and @NeedDaemonReload@
 makes it happen again.
 -}
 checkService :: Config -> IO CheckResult
-checkService cfg = do
+checkService cfg = checkUnit interpretShow cfg.config_scope cfg.config_target
+
+{- | 'checkService' for any unit, with the caller's own reading of what
+@systemctl show@ printed: the one @systemctl show@ and its "we could not ask"
+answer, shared with nodes whose unit is not one 'Config' describes (a quadlet's
+generated service, see "Salmon.Builtin.Nodes.Podman.Quadlet").
+-}
+checkUnit :: ([Text] -> CheckResult) -> Scope -> UnitTarget -> IO CheckResult
+checkUnit interpret scope target = do
     (code, out, _err) <-
         readCreateProcessWithExitCode
             ( proc
                 "systemctl"
-                ( scopeArgs cfg.config_scope
+                ( scopeArgs scope
                     <> [ "show"
-                       , Text.unpack cfg.config_target
+                       , Text.unpack target
                        , "--property=ActiveState"
                        , "--property=UnitFileState"
                        , "--property=NeedDaemonReload"
@@ -179,7 +187,7 @@ checkService cfg = do
             )
             ""
     pure $ case code of
-        ExitSuccess -> interpretShow (Text.lines (Text.decodeUtf8With TextError.lenientDecode out))
+        ExitSuccess -> interpret (Text.lines (Text.decodeUtf8With TextError.lenientDecode out))
         ExitFailure _ ->
             -- not "the unit is down": we could not ask. Saying 'Failure'
             -- here would have a supervisor restart every unit on a box
@@ -196,13 +204,24 @@ A property that is missing entirely is treated as absent rather than assumed:
 @ActiveState=inactive@ rather than by way of a special case.
 -}
 interpretShow :: [Text] -> CheckResult
-interpretShow ls
+interpretShow = interpretShowAccepting installedStates
+
+-- | The @UnitFileState@s of a unit this module installed and enabled.
+installedStates :: [Text]
+installedStates = ["enabled", "enabled-runtime", "static", "indirect"]
+
+{- | 'interpretShow' with the acceptable @UnitFileState@s as an argument: a
+unit written by a generator is @generated@, can never be @enabled@, and is
+exactly as installed as it will ever be.
+-}
+interpretShowAccepting :: [Text] -> [Text] -> CheckResult
+interpretShowAccepting accepted ls
     | property "NeedDaemonReload" == Just "yes" =
         Failure "the unit file on disk has changed since systemd loaded it"
     | otherwise = case property "ActiveState" of
         Just "active" -> case property "UnitFileState" of
             Just st
-                | st `elem` ["enabled", "enabled-runtime", "static", "indirect"] -> Success
+                | st `elem` accepted -> Success
                 | otherwise -> Failure ("the unit is running but " <> st)
             -- running, and systemd has no install state for it at all: not
             -- a thing this node can author, so not a thing to complain

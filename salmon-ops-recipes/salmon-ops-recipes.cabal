@@ -153,6 +153,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ServeSpec
                     , Test.ServeTlsSpec
                     , Test.StatusSinkSpec
+                    , Test.QuadletSpec
                     , Test.SystemdSpec
                     , Test.UpTreeSpec
                     , Test.UpkeepSpec
