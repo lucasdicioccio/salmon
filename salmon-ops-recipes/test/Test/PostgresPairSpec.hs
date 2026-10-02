@@ -38,6 +38,7 @@ tests =
         [ testGroup "what a member needs" memberTests
         , testGroup "slot names" slotNameTests
         , testGroup "what a bouncer is doing" bouncerTests
+        , testGroup "one bouncer routing several databases (bouncer_more_databases)" severalDatabasesTests
         , testGroup "parseLsn" lsnTests
         , testGroup "parseObserved" observedTests
         , testGroup "the probe script" probeTests
@@ -343,6 +344,7 @@ bouncer =
         , Pair.bouncer_console_passfile = "/etc/pgbouncer/console.pgpass"
         , Pair.bouncer_alias = "app"
         , Pair.bouncer_dbname = "app"
+        , Pair.bouncer_more_databases = Nothing
         , Pair.bouncer_routing_path = "/etc/pgbouncer/routing.ini"
         , Pair.bouncer_config_dir = "/etc/pgbouncer"
         , Pair.bouncer_listen_port = 6432
@@ -350,6 +352,109 @@ bouncer =
 
 lsn :: Text -> Pair.Lsn
 lsn t = maybe (error ("bad lsn in test: " <> Text.unpack t)) id (Pair.parseLsn t)
+
+{- | Several databases of the pair behind one bouncer: one routing file, one
+pause, one reload, and a probe that does not call the pair arrived until
+every alias agrees.
+-}
+severalDatabasesTests :: [TestTree]
+severalDatabasesTests =
+    [ testCase "a directive written before the field existed still parses, as the one database it named" $
+        case Aeson.fromJSON (dropMore (Aeson.toJSON bouncer)) of
+            Aeson.Success b -> do
+                assertEqual "" bouncer b
+                assertEqual "" [Pair.RoutedDatabase "app" "app"] (Pair.routedDatabases b)
+            Aeson.Error why -> assertFailure why
+    , testCase "and one naming several round-trips" $
+        case Aeson.fromJSON (Aeson.toJSON two) of
+            Aeson.Success b -> assertEqual "" two b
+            Aeson.Error why -> assertFailure why
+    , testCase "the first database is the one the bouncer always had" $
+        assertEqual
+            ""
+            [Pair.RoutedDatabase "app" "app", Pair.RoutedDatabase "jobs" "jobs_db"]
+            (Pair.routedDatabases two)
+    , testCase "the probe answers for every alias, in the order they are declared" $
+        assertEqual
+            ""
+            [Pair.BouncerState (Just "10.0.0.2") False, Pair.BouncerState (Just "10.0.0.1") True]
+            (Pair.parseBouncerStates two "name|host|port|database|paused\njobs|10.0.0.1|5432|jobs_db|1\napp|10.0.0.2|5432|app|0\npgbouncer|||pgbouncer|0\n")
+    , -- which is what a database added to a bouncer already standing looks
+      -- like: the routing file is the role node's, so it is the role node
+      -- that has to notice
+      testCase "an alias the bouncer does not know is going nowhere, whatever the others say" $
+        assertEqual
+            ""
+            [Pair.BouncerState (Just "10.0.0.2") False, Pair.BouncerState Nothing False]
+            (Pair.parseBouncerStates two "name|host|paused\napp|10.0.0.2|0\n")
+    , testCase "arrived only once every alias is at the primary and none is held" $
+        assertEqual "" Pair.Done (arrived [Pair.BouncerState (Just "10.0.0.2") False, Pair.BouncerState (Just "10.0.0.2") False])
+    , testCase "one alias left at the old primary is a repoint, not an arrival" $
+        assertEqual "" (Pair.RepointBouncers Pair.B) (arrived [Pair.BouncerState (Just "10.0.0.2") False, Pair.BouncerState (Just "10.0.0.1") False])
+    , testCase "nor is one alias the bouncer has never heard of" $
+        assertEqual "" (Pair.RepointBouncers Pair.B) (arrived [Pair.BouncerState (Just "10.0.0.2") False, Pair.BouncerState Nothing False])
+    , testCase "nor one alias still held" $
+        assertEqual "" (Pair.RepointBouncers Pair.B) (arrived [Pair.BouncerState (Just "10.0.0.2") False, Pair.BouncerState (Just "10.0.0.2") True])
+    , -- the old primary is not stopped while any database still passes
+      -- writes to it
+      testCase "a switchover pauses until every alias is held" $ do
+        assertEqual "" Pair.PauseBouncers (moving [Pair.BouncerState (Just "10.0.0.1") True, Pair.BouncerState (Just "10.0.0.1") False])
+        assertEqual "" (Pair.StopMember Pair.A) (moving [Pair.BouncerState (Just "10.0.0.1") True, Pair.BouncerState (Just "10.0.0.1") True])
+    , testCase "pausing holds every database, and checks each" $ do
+        let s' = script Pair.PauseBouncers
+        assertEqual "one command for the one bouncer" 1 (length (scripts Pair.PauseBouncers))
+        assertBool s' ("PAUSE app" `isInfixOf` s')
+        assertBool s' ("PAUSE jobs" `isInfixOf` s')
+        assertBool s' ("-v want='app'" `isInfixOf` s')
+        assertBool s' ("-v want='jobs'" `isInfixOf` s')
+    , testCase "repointing writes every database into one file, reloads once, and resumes each" $ do
+        let s' = script (Pair.RepointBouncers Pair.B)
+        assertEqual "one command for the one bouncer" 1 (length (scripts (Pair.RepointBouncers Pair.B)))
+        assertEqual "" 1 (count "[databases]" s')
+        assertBool s' ("app = host=10.0.0.2 port=5432 dbname=app\njobs = host=10.0.0.2 port=5432 dbname=jobs_db\nSALMON_ROUTING" `isInfixOf` s')
+        assertEqual "" 1 (count "'RELOAD'" s')
+        assertBool s' ("RESUME app" `isInfixOf` s')
+        assertBool s' ("RESUME jobs" `isInfixOf` s')
+        -- nobody is let go before the bouncer has read where to send them
+        assertBool s' (at "'RELOAD'" s' < at "RESUME app" s')
+        assertBool s' (at "'RELOAD'" s' < at "RESUME jobs" s')
+    , testCase "standing the bouncer up writes the same file, for the declared primary" $ do
+        let s' = Pair.bouncerSetupScript several two
+        assertBool s' ("[databases]\napp = host=10.0.0.2 port=5432 dbname=app\njobs = host=10.0.0.2 port=5432 dbname=jobs_db\nSALMON_ROUTING" `isInfixOf` s')
+    , testCase "with one database, the scripts name nothing else" $ do
+        let s' = concatMap snd (scriptsOf pair)
+        assertBool s' (not ("jobs" `isInfixOf` s'))
+    , testCase "a declaration with nothing wrong has no problems" $ do
+        assertEqual "" [] (Pair.bouncerProblems pair)
+        assertEqual "" [] (Pair.bouncerProblems several)
+    , testCase "an alias routed twice is refused, since only one of the two could ever be observed" $
+        assertEqual
+            ""
+            ["bouncer bouncer-1: the database app is routed more than once"]
+            (Pair.bouncerProblems pair{Pair.pair_bouncers = [bouncer{Pair.bouncer_more_databases = Just [Pair.RoutedDatabase "app" "other"]}]})
+    , testCase "and so is a name that a routing file or a shell would read as something else" $
+        assertEqual
+            ""
+            2
+            (length (Pair.bouncerProblems pair{Pair.pair_bouncers = [bouncer{Pair.bouncer_more_databases = Just [Pair.RoutedDatabase "jobs; RESUME" "x y"]}]}))
+    ]
+  where
+    two = bouncer{Pair.bouncer_more_databases = Just [Pair.RoutedDatabase "jobs" "jobs_db"]}
+    several = pair{Pair.pair_bouncers = [two]}
+    -- the primary is where it is declared, and its peer streams from it
+    arrived = Pair.nextStep several (streamingFrom "10.0.0.2" "0/5") (primaryAt "0/5")
+    -- the primary is still on A, and B is declared
+    moving = Pair.nextStep several (primaryAt "0/5") (streamingFrom "10.0.0.1" "0/5")
+    scripts st = case Pair.stepCommand several st of
+        Right cs -> map snd cs
+        Left why -> error ("expected a command for " <> show st <> ": " <> Text.unpack why)
+    script = concat . scripts
+    dropMore (Aeson.Object o) = Aeson.Object (KeyMap.delete "bouncer_more_databases" o)
+    dropMore v = v
+    count needle hay = length (filter (isPrefixOf needle) (tails' hay))
+    at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
+    tails' [] = [[]]
+    tails' xs@(_ : rest) = xs : tails' rest
 
 -- | A standby streaming from the machine it should be streaming from.
 streamingFrom :: Text -> Text -> Pair.Observed

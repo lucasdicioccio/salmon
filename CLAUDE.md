@@ -1164,6 +1164,23 @@ argument. What follows is the list of things that are load-bearing; each was a d
   it with `PgBouncer.renderIni` over ssh and restarts on change — `PgBouncer.setup` is the local
   equivalent, and watches the ini the same way) and the routing file has another (the role node, which does not), and one
   file with two writers is how a switchover becomes an outage.
+- **A bouncer routes a list of databases, and every alias has to agree.** `routedDatabases` is
+  `bouncer_alias`/`bouncer_dbname` followed by the optional `bouncer_more_databases` (absent in a
+  directive written before it, so such a directive is the one-database bouncer it was;
+  `salmon-pgpair --also-db NAME`, repeatable). They share one routing file (`routingLines`, used by
+  both writers), are paused one by one and each checked, and move in one rewrite and one `RELOAD`
+  before each is resumed and checked. The probe (`parseBouncerStates`) yields one `BouncerState` per
+  *alias*, not per bouncer, because `nextStep` reads them as a set and a bouncer summed up as one
+  state would have to lie whenever its databases disagree: nothing stops the old primary until every
+  alias is held, and nothing is `Done` until every alias is at the primary and unpaused. That is
+  also how a database added to a standing bouncer gets routed: `bouncerSetup` never rewrites an
+  existing routing file, the new alias reads as going nowhere, and the role node repoints (to where
+  the others already are, so nobody moves). A database *removed* stays in the file until the next
+  repoint. `bouncerProblems` refuses an alias routed twice (only one could ever be observed) and
+  an extra name that is not a plain word. Two `Bouncer`s on one host still do not work — one ini,
+  one service — which is why it is a list on one. Hand-run against a real pgbouncer with two
+  writers; no Layer 3 case declares a bouncer, so the full switchover with two databases is
+  unverified.
 
 `SreBox.PostgresPairPrereqs` is what the pair assumes was done first, as nodes (`pairWithPrereqs` = `pairOp` plus
 them): `memberPrereqs` (packages if missing, the named cluster exists, the two passfiles), `bouncerPrereqs` (packages,

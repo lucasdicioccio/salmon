@@ -19,7 +19,7 @@ composing the pair as a library can declare (this one does not).
 -}
 module PgPair (main) where
 
-import Control.Applicative ((<|>))
+import Control.Applicative (many, (<|>))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Control.Exception (throwIO)
@@ -77,6 +77,7 @@ data Seed
     , seedKnownHosts :: Maybe FilePath
     , seedSshUser :: Text
     , seedDatabase :: Text
+    , seedAlsoDatabases :: [Text]
     , seedConnSecurity :: Security
     , seedTlsCa :: Maybe FilePath
     , seedTlsVerifyFull :: Bool
@@ -154,6 +155,7 @@ instance ParseRecord Seed where
                 -- has every script run under one `sudo -n`.
                 <*> strOption (long "ssh-user" <> help "who to ssh as, on the machines and the bouncer: root, or a login with passwordless sudo" <> value "root")
                 <*> strOption (long "db" <> help "the database clients connect to" <> value "app")
+                <*> many (strOption (long "also-db" <> help "another database of the pair the same bouncer routes, moved in the same pause and reload as --db; repeatable"))
                 <*> option
                     auto
                     ( long "conn-security"
@@ -169,7 +171,7 @@ toPair :: Seed -> Either String Pair.Pair
 toPair seed = do
     security <- connSecurity seed
     let pair = (plainPair seed){Pair.pair_conn_security = security}
-    case Pair.securityProblems pair of
+    case Pair.securityProblems pair <> Pair.bouncerProblems pair of
         [] -> Right pair
         problems -> Left (Text.unpack (Text.intercalate "; " problems))
 
@@ -260,4 +262,9 @@ plainPair seed =
             , Pair.bouncer_routing_path = "/etc/pgbouncer/routing.ini"
             , Pair.bouncer_config_dir = "/etc/pgbouncer"
             , Pair.bouncer_listen_port = 6432
+            , -- Nothing rather than an empty list, so that a seed with no
+              -- --also-db configures to the directive it always did
+              Pair.bouncer_more_databases = case seed.seedAlsoDatabases of
+                [] -> Nothing
+                more -> Just [Pair.RoutedDatabase db db | db <- more]
             }

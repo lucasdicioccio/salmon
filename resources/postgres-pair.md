@@ -330,6 +330,42 @@ role node owns the routing file (`bouncerSetup` writes it only when it is
 missing), and applies a change gently. One file with two writers is how a switchover becomes
 an outage.
 
+### Several databases behind one bouncer
+
+A pair often carries more than one database (an application and its side
+services), and one pgbouncer can route them all. Declare the others beside the
+first:
+
+```sh
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --bouncer 10.0.0.4 \
+  --db app --also-db jobs --also-db audit
+```
+
+In the directive that is `bouncer_more_databases`, a list of
+`{"routed_alias": ..., "routed_dbname": ...}` beside `bouncer_alias` and
+`bouncer_dbname`; a directive without the field is the one-database bouncer it
+always was. Declaring a second `Bouncer` on the same machine is not the way:
+both would write the same `pgbouncer.ini` and own the same service.
+
+All of a bouncer's databases live in the one routing file and move together:
+each is `PAUSE`d and checked, the file is rewritten once with a line per
+database, one `RELOAD`, then each is `RESUME`d and checked. The role node asks
+after every alias separately and requires all of them to agree — the old
+primary is not stopped while any alias still passes writes, and the pair has
+not arrived while any alias is held or pointed elsewhere.
+
+- **Adding a database** to a bouncer that is already up needs nothing special.
+  `bouncerSetup` leaves the existing routing file alone, the role node finds
+  the new alias going nowhere, and repoints: the file is rewritten with every
+  database at the current primary and reloaded, without a restart.
+- **Removing one** from the declaration stops the pair from managing it; its
+  line stays in the routing file until the next repoint rewrites the file.
+- **Refused**: one alias routed twice on a bouncer, and an extra database name
+  that is not made of letters, digits, `_`, `-` and `.`.
+- The databases, roles and `pg_hba.conf` lines themselves are the
+  prerequisites' (one `app` entry per database), as is every user in the
+  bouncer's `userlist.txt`.
+
 ## When it refuses, and why
 
 A refusal is the recipe saying it cannot prove the next step is safe:
