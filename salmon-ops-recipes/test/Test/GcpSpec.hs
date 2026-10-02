@@ -15,13 +15,17 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isAsciiLower, isDigit)
-import Data.List (isInfixOf, isSubsequenceOf, nub)
+import Data.List (isInfixOf, isPrefixOf, isSubsequenceOf, nub, tails)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Foldable (toList)
 import qualified Data.Map as Map
 import GHC.IO.Exception (ExitCode (..))
-import System.Process (readProcessWithExitCode)
+import System.Directory (createDirectory)
+import System.Environment (getEnv)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import System.Process.ListLike (CmdSpec (..), CreateProcess, cmdspec)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
@@ -658,8 +662,296 @@ lbTests =
                 assertEqual err ExitSuccess code
             )
             scripts
+    , testCase "a plain balancer renders none of the HTTPS, rule or timeout steps" $ do
+        mapM_
+            (\w -> assertBool (w <> "\n" <> script) (not (w `isInfixOf` script)))
+            ["target-https-proxies", "certificate-manager", "addresses", "--address", "url-maps import", "--timeout", "ssl-certificates"]
+        assertBool script ("gcloud compute url-maps create 'web-url-map' --project=\"$PROJECT\" --region=\"$REGION\" --default-service='web-backend'" `isInfixOf` script)
+    , testCase "a managed certificate is an authorization per domain, a certificate over them, an HTTPS proxy and a :443 rule" $ do
+        let sc = createScript full
+        mapM_
+            (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+            [ "gcloud certificate-manager dns-authorizations create 'web-cert-app-example-org' --project=\"$PROJECT\" --location=\"$REGION\" --domain='app.example.org' --type=PER_PROJECT_RECORD"
+            , "gcloud certificate-manager dns-authorizations create 'web-cert-api-example-org'"
+            , "gcloud certificate-manager certificates create 'web-cert' --project=\"$PROJECT\" --location=\"$REGION\" --domains='app.example.org,api.example.org' --dns-authorizations='web-cert-app-example-org,web-cert-api-example-org'"
+            , "gcloud compute target-https-proxies create 'web-https-proxy' --project=\"$PROJECT\" --region=\"$REGION\" --url-map='web-url-map' --url-map-region=\"$REGION\" --certificate-manager-certificates='web-cert'"
+            , "--target-https-proxy='web-https-proxy' --target-https-proxy-region=\"$REGION\" --ports=443"
+            , "gcloud compute addresses create 'web-ip' --project=\"$PROJECT\" --region=\"$REGION\""
+            ]
+    , testCase "with HTTPS both forwarding rules sit on the one reserved address" $ do
+        let rules = [l | l <- lines (createScript full), "forwarding-rules create" `isInfixOf` l]
+        assertEqual "" 2 (length rules)
+        mapM_ (\l -> assertBool l ("--address='web-ip' --address-region=\"$REGION\"" `isInfixOf` l)) rules
+    , testCase "the certificate exists before the proxy that names it, the address before the rules" $ do
+        let sc = createScript full
+        assertBool sc (["certificates create", "target-https-proxies create", "forwarding-rules create"] `inOrder` sc)
+        assertBool sc (["addresses create", "forwarding-rules create"] `inOrder` sc)
+        assertBool sc (["backend-services create 'web-slow-backend'", "url-maps import"] `inOrder` sc)
+    , testCase "a certificate somebody else made is named by --ssl-certificates, and not created or deleted" $ do
+        let own = full{LoadBalancing.albCertificates = [LoadBalancing.ComputeCertificate "own"]}
+        let sc = createScript own
+        assertBool sc ("--ssl-certificates='own' --ssl-certificates-region=\"$REGION\"" `isInfixOf` sc)
+        assertBool sc (not ("certificate-manager" `isInfixOf` sc))
+        assertBool "" (not ("ssl-certificates delete" `isInfixOf` deleteScript own))
+        assertBool "" ("need 'ssl-certificates own'" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript own))
+    , testCase "host rules make the URL map an import of the whole map, every run" $ do
+        let sc = createScript full
+        assertBool sc ("| gcloud compute url-maps import 'web-url-map' --project=\"$PROJECT\" --region=\"$REGION\" --quiet" `isInfixOf` sc)
+        assertBool sc (not ("url-maps create" `isInfixOf` sc))
+        assertBool sc (not ("exists gcloud compute url-maps" `isInfixOf` sc))
+    , testCase "the URL map sends each host to its service and each path rule to its own" $
+        assertEqual
+            ""
+            ( object
+                [ "name" .= ("web-url-map" :: Text.Text)
+                , "defaultService" .= svcUrl "web-backend"
+                , "hostRules"
+                    .= [ object ["hosts" .= (["app.example.org", "www.example.org"] :: [Text.Text]), "pathMatcher" .= ("m0" :: Text.Text)]
+                       , object ["hosts" .= (["api.example.org"] :: [Text.Text]), "pathMatcher" .= ("m1" :: Text.Text)]
+                       ]
+                , "pathMatchers"
+                    .= [ object
+                            [ "name" .= ("m0" :: Text.Text)
+                            , "defaultService" .= svcUrl "web-backend"
+                            , "pathRules" .= [object ["paths" .= (["/events/*", "/poll"] :: [Text.Text]), "service" .= svcUrl "web-slow-backend"]]
+                            ]
+                       , object ["name" .= ("m1" :: Text.Text), "defaultService" .= svcUrl "web-api-backend"]
+                       ]
+                ]
+            )
+            (LoadBalancing.renderUrlMap full)
+    , testCase "a named backend service has its own resource, NEG and backends" $ do
+        let sc = createScript full
+        mapM_
+            (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+            [ "gcloud compute backend-services create 'web-slow-backend'"
+            , "gcloud compute backend-services add-backend 'web-slow-backend' --project=\"$PROJECT\" --region=\"$REGION\" --instance-group='ig-slow' --instance-group-zone='europe-west1-c'"
+            , "gcloud compute network-endpoint-groups create 'web-api-neg'"
+            , "gcloud compute backend-services add-backend 'web-api-backend' --project=\"$PROJECT\" --region=\"$REGION\" --network-endpoint-group='web-api-neg'"
+            ]
+    , testCase "a health check shared by two services is created once" $ do
+        let creates = [l | l <- lines (createScript full), "health-checks create" `isInfixOf` l]
+        assertEqual (unlines creates) 1 (length creates)
+    , testCase "a timeout is set on every run, not only at creation" $ do
+        let sc = createScript full
+        assertBool sc ("\ngcloud compute backend-services update 'web-slow-backend' --project=\"$PROJECT\" --region=\"$REGION\" --timeout=3600\n" `isInfixOf` sc)
+        assertBool sc ("\ngcloud compute backend-services update 'web-backend' --project=\"$PROJECT\" --region=\"$REGION\" --timeout=60\n" `isInfixOf` sc)
+        assertBool sc (not ("update 'web-api-backend'" `isInfixOf` sc))
+    , testCase "the check asks after the HTTPS pieces, the timeouts, the hosts and the certificate's state" $ do
+        let sc = Text.unpack (LoadBalancing.renderLbCheckScript full)
+        mapM_
+            (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+            [ "target-https-proxies describe 'web-https-proxy'"
+            , "forwarding-rules describe 'web-https-fw'"
+            , "addresses describe 'web-ip'"
+            , "certificate-manager certificates describe 'web-cert'"
+            , "certificate-manager dns-authorizations describe 'web-cert-api-example-org'"
+            , "value(managed.state)"
+            , "value(timeoutSec)"
+            , "MISSING timeout 3600s on web-slow-backend"
+            , "MISSING host-rule api.example.org"
+            , "get-health 'web-slow-backend'"
+            , "backend-services describe 'web-api-backend'"
+            ]
+    , testCase "teardown takes dependants first: rules, proxies, address, map, services, certificate, authorizations" $ do
+        let sc = deleteScript full
+        assertBool
+            sc
+            ( [ "forwarding-rules delete 'web-https-fw'"
+              , "forwarding-rules delete 'web-fw'"
+              , "target-https-proxies delete 'web-https-proxy'"
+              , "target-http-proxies delete 'web-proxy'"
+              , "addresses delete 'web-ip'"
+              , "url-maps delete 'web-url-map'"
+              , "backend-services delete 'web-backend'"
+              , "backend-services delete 'web-slow-backend'"
+              , "backend-services delete 'web-api-backend'"
+              , "network-endpoint-groups delete 'web-api-neg'"
+              , "health-checks delete 'hc'"
+              , "certificate-manager certificates delete 'web-cert'"
+              , "certificate-manager dns-authorizations delete 'web-cert-app-example-org'"
+              ]
+                `inOrder` sc
+            )
+    , testCase "with HTTPS the balancer's address is read off the HTTPS rule" $
+        assertBool "" ("web-https-fw" `elem` processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbAddressDescribe full)))
+    , testCase "an authorization's record is asked for by location, as three fields" $
+        assertEqual
+            ""
+            ["certificate-manager", "dns-authorizations", "describe", "web-cert-app-example-org", "--format", "value(dnsResourceRecord.name,dnsResourceRecord.type,dnsResourceRecord.data)", "--location", "europe-west1", "--project", "p"]
+            (processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbDnsAuthorizationDescribe full "web-cert-app-example-org")))
+    , testCase "the authorizations are named from the certificate and the domain" $
+        assertEqual
+            ""
+            [("app.example.org", "web-cert-app-example-org"), ("api.example.org", "web-cert-api-example-org")]
+            (LoadBalancing.dnsAuthorizations full)
+    , testCase "an authorization's record is three tab-separated fields" $
+        assertEqual
+            ""
+            (Just (LoadBalancing.DnsAuthorizationRecord "_acme-challenge_abc.app.example.org." "CNAME" "0123.4.europe-west1.authorize.certificatemanager.goog."))
+            (LoadBalancing.parseDnsAuthorizationRecord "_acme-challenge_abc.app.example.org.\tCNAME\t0123.4.europe-west1.authorize.certificatemanager.goog.\n")
+    , testCase "an authorization with no record yet reads as nothing" $ do
+        assertEqual "" Nothing (LoadBalancing.parseDnsAuthorizationRecord "")
+        assertEqual "" Nothing (LoadBalancing.parseDnsAuthorizationRecord "\t\t\n")
+        assertEqual "" Nothing (LoadBalancing.parseDnsAuthorizationRecord "a\tCNAME\n")
+    , testCase "a certificate still provisioning is Unknown, an active one Success, a failed one a Failure naming it" $ do
+        assertEqual "" Unknown (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nCERT web-cert PROVISIONING\n")
+        assertEqual "" Success (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nCERT web-cert ACTIVE\n")
+        case LoadBalancing.interpretLbCheck ExitSuccess "CERT web-cert FAILED\n" of
+            Failure t -> assertBool (Text.unpack t) ("web-cert" `isInfixOf` Text.unpack t)
+            other -> assertBool (show other) False
+    , testCase "a wrong timeout or an unrouted host is a Failure" $ do
+        assertBool "" (isFailure (LoadBalancing.interpretLbCheck ExitSuccess "MISSING timeout 3600s on web-slow-backend\n"))
+        assertBool "" (isFailure (LoadBalancing.interpretLbCheck ExitSuccess "MISSING host-rule api.example.org\nCERT web-cert ACTIVE\n"))
+    , testCase "an unhealthy named service is Unknown like the default one" $
+        assertEqual "" Unknown (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nHEALTH slow UNHEALTHY\n")
+    , testCase "a sound declaration has no problems" $ do
+        assertEqual "" [] (LoadBalancing.albProblems alb)
+        assertEqual "" [] (LoadBalancing.albProblems full)
+    , testCase "every problem of a declaration is named, not the first" $ do
+        let bad =
+                full
+                    { LoadBalancing.albServices = full.albServices <> [LoadBalancing.BackendService "slow" [] Nothing (Just 0)]
+                    , LoadBalancing.albHostRules =
+                        [ LoadBalancing.HostRule ["app.example.org"] (LoadBalancing.NamedService "nope") [LoadBalancing.PathRule [] LoadBalancing.DefaultService]
+                        , LoadBalancing.HostRule ["app.example.org"] LoadBalancing.DefaultService []
+                        , LoadBalancing.HostRule [] LoadBalancing.DefaultService []
+                        ]
+                    , LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "c" [], LoadBalancing.ComputeCertificate "own"]
+                    }
+        let problems = unlines (map Text.unpack (LoadBalancing.albProblems bad))
+        mapM_
+            (\w -> assertBool (w <> "\n" <> problems) (w `isInfixOf` problems))
+            ["declared twice: slow", "undeclared backend service: nope", "names no host", "names no path", "two rules: app.example.org", "cannot share a proxy", "c names no domain", "must be positive: 0"]
+    , testCase "httpLoadBalancer is the plain balancer" $
+        assertEqual
+            ""
+            alb{LoadBalancing.albNetwork = Nothing}
+            (LoadBalancing.httpLoadBalancer "web" (Core.Project "p") (Core.Region "europe-west1") alb.albBackends alb.albHealthCheck)
+    , testCase "rendered scripts with every feature parse as bash" $ do
+        let scripts = [s' | cmd <- [LoadBalancing.LbCreate full, LoadBalancing.LbCheck full, LoadBalancing.LbDelete full], (_ : s' : _) <- [processArgs (prepare LoadBalancing.loadBalancingCommand cmd)]]
+        mapM_
+            ( \sc -> do
+                (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", sc] ""
+                assertEqual err ExitSuccess code
+            )
+            scripts
+    , testGroup "against a stand-in gcloud" $
+        -- Not GCP: a shell script that keeps "resources" as files and answers
+        -- describe/create/delete the way these scripts assume gcloud does.
+        -- What it shows is the scripts' own logic -- guards, ordering,
+        -- quoting, what a second run does -- and nothing about the API.
+        [ testCase "up creates everything once, and a second up creates nothing more" $
+            withFakeGcloud $ \run mutations -> do
+                (code, _, err) <- run (createScript full)
+                assertEqual err ExitSuccess code
+                first <- mutations
+                mapM_
+                    (\w -> assertBool (w <> "\n" <> unlines first) (any (w `isInfixOf`) first))
+                    ["target-https-proxies create web-https-proxy", "certificates create web-cert", "url-maps import web-url-map", "forwarding-rules create web-https-fw", "backend-services add-backend web-slow-backend"]
+                (code2, _, err2) <- run (createScript full)
+                assertEqual err2 ExitSuccess code2
+                second <- drop (length first) <$> mutations
+                -- the "set" verbs run again by design; nothing is created or attached twice
+                assertBool (unlines second) (not (any (\l -> " create " `isInfixOf` l || "add-backend" `isInfixOf` l) second))
+                assertBool (unlines second) (any ("url-maps import" `isInfixOf`) second)
+        , testCase "the check of what up made is Success, and of nothing at all a Failure" $
+            withFakeGcloud $ \run _ -> do
+                let checkScript = Text.unpack (LoadBalancing.renderLbCheckScript full)
+                (code0, out0, _) <- run checkScript
+                let before = LoadBalancing.interpretLbCheck code0 (Text.pack out0)
+                assertBool (show before) (isFailure before)
+                _ <- run (createScript full)
+                (code1, out1, err1) <- run checkScript
+                assertEqual (out1 <> err1) Success (LoadBalancing.interpretLbCheck code1 (Text.pack out1))
+        , testCase "the check notices a host dropped from the map and a timeout changed behind it" $
+            withFakeGcloud $ \run _ -> do
+                _ <- run (createScript full{LoadBalancing.albHostRules = take 1 full.albHostRules, LoadBalancing.albTimeoutSec = Just 30})
+                (code, out, _) <- run (Text.unpack (LoadBalancing.renderLbCheckScript full))
+                case LoadBalancing.interpretLbCheck code (Text.pack out) of
+                    Failure t -> do
+                        assertBool (Text.unpack t) ("host-rule api.example.org" `isInfixOf` Text.unpack t)
+                        assertBool (Text.unpack t) ("timeout 60s on web-backend" `isInfixOf` Text.unpack t)
+                        assertBool (Text.unpack t) (not ("host-rule app.example.org" `isInfixOf` Text.unpack t))
+                    other -> assertBool (show other) False
+        , testCase "down removes everything up made and leaves the caller's instance groups" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- run (createScript full)
+                (code, _, err) <- run (deleteScript full)
+                assertEqual err ExitSuccess code
+                (_, out, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" out
+                made <- mutations
+                assertBool (unlines made) (not (any ("instance-groups delete" `isInfixOf`) made))
+        , testCase "a plain balancer goes up, checks and comes down the same way" $
+            withFakeGcloud $ \run _ -> do
+                (code, _, err) <- run (createScript alb)
+                assertEqual err ExitSuccess code
+                (code1, out1, _) <- run (Text.unpack (LoadBalancing.renderLbCheckScript alb))
+                assertEqual out1 Success (LoadBalancing.interpretLbCheck code1 (Text.pack out1))
+                (code2, _, err2) <- run (deleteScript alb)
+                assertEqual err2 ExitSuccess code2
+                (_, out, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" out
+        ]
     ]
   where
+    svcUrl :: Text.Text -> Text.Text
+    svcUrl n = "https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/backendServices/" <> n
+    inOrder :: [String] -> String -> Bool
+    inOrder [] _ = True
+    inOrder (w : ws) hay = case breakOn w hay of
+        Nothing -> False
+        Just rest -> inOrder ws rest
+    breakOn :: String -> String -> Maybe String
+    breakOn w hay = case [drop (length w) t | t <- tails hay, w `isPrefixOf` t] of
+        (rest : _) -> Just rest
+        [] -> Nothing
+    deleteScript a = case processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbDelete a)) of
+        (_ : s : _) -> s
+        other -> error (show other)
+    withFakeGcloud :: ((String -> IO (ExitCode, String, String)) -> IO [String] -> IO a) -> IO a
+    withFakeGcloud body =
+        withSystemTempDirectory "salmon-fake-gcloud" $ \dir -> do
+            let fake = dir </> "gcloud.sh"
+            let state = dir </> "state"
+            let logFile = dir </> "mutations.log"
+            createDirectory state
+            writeFile logFile ""
+            writeFile fake fakeGcloud
+            path <- getEnv "PATH"
+            -- A shell function that has bash /read/ the stand-in, rather
+            -- than an executable on PATH: this suite runs its groups in
+            -- parallel in one process, and exec'ing a file some other
+            -- test's fork still holds open for writing is ETXTBSY.
+            let run sc =
+                    readCreateProcessWithExitCode
+                        (proc "bash" ["-c", "gcloud() { bash \"$FAKE_GCLOUD\" \"$@\"; }\n" <> sc])
+                            { env = Just [("PATH", path), ("FAKE_GCLOUD", fake), ("FAKE_GCLOUD_STATE", state), ("FAKE_GCLOUD_LOG", logFile)]
+                            }
+                        ""
+            body run (lines <$> (readFile logFile >>= \c -> length c `seq` pure c))
+    full =
+        alb
+            { LoadBalancing.albBackends = [LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b") [8080]]
+            , LoadBalancing.albTimeoutSec = Just 60
+            , LoadBalancing.albServices =
+                [ LoadBalancing.BackendService
+                    "slow"
+                    [LoadBalancing.InstanceGroupBackend "ig-slow" (LoadBalancing.InstanceGroupZone "europe-west1-c") [9090]]
+                    (Just (LoadBalancing.HealthCheck "hc" 8080))
+                    (Just 3600)
+                , LoadBalancing.BackendService "api" [LoadBalancing.CloudRunBackend "api-svc"] Nothing Nothing
+                ]
+            , LoadBalancing.albHostRules =
+                [ LoadBalancing.HostRule
+                    ["app.example.org", "www.example.org"]
+                    LoadBalancing.DefaultService
+                    [LoadBalancing.PathRule ["/events/*", "/poll"] (LoadBalancing.NamedService "slow")]
+                , LoadBalancing.HostRule ["api.example.org"] (LoadBalancing.NamedService "api") []
+                ]
+            , LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["app.example.org", "api.example.org"]]
+            }
     isBash p = case cmdspec p of
         RawCommand "bash" ("-c" : _) -> True
         _ -> False
@@ -678,7 +970,56 @@ lbTests =
                 , LoadBalancing.CloudRunBackend "svc"
                 ]
             , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck "hc" 8080)
+            , LoadBalancing.albTimeoutSec = Nothing
+            , LoadBalancing.albServices = []
+            , LoadBalancing.albHostRules = []
+            , LoadBalancing.albCertificates = []
             }
+
+{- | A stand-in for @gcloud@: resources are files named
+@\<collection\>.\<name\>@ under @$FAKE_GCLOUD_STATE@, and every call that
+would change something is appended to @$FAKE_GCLOUD_LOG@. It answers only
+the calls "Salmon.Builtin.Nodes.Gcp.LoadBalancing"'s scripts make, and its
+@--format@ output is this module's guess at gcloud's, not a recording.
+-}
+fakeGcloud :: String
+fakeGcloud =
+    unlines
+        [ "#!/usr/bin/env bash"
+        , "set -euo pipefail"
+        , "S=\"$FAKE_GCLOUD_STATE\""
+        , "coll=\"$2\"; verb=\"$3\"; name=\"$4\""
+        , "if [ \"$verb\" = create ] && [ \"$name\" = tcp ]; then name=\"$5\"; fi"
+        , "format=''; group=''; timeout=''"
+        , "for a in \"$@\"; do case \"$a\" in"
+        , "  --format=*) format=\"${a#--format=}\";;"
+        , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
+        , "  --network-endpoint-group=*) group=\"/networkEndpointGroups/${a#--network-endpoint-group=}\";;"
+        , "  --timeout=*) timeout=\"${a#--timeout=}\";;"
+        , "esac; done"
+        , "f=\"$S/$coll.$name\""
+        , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
+        , "case \"$verb\" in"
+        , "  describe)"
+        , "    [ \"$coll\" = instance-groups ] && exit 0"
+        , "    [ -e \"$f\" ] || { echo \"NOT_FOUND $coll $name\" >&2; exit 1; }"
+        , "    case \"$format\" in"
+        , "      'value(backends[].group)') paste -sd';' \"$f.backends\" 2>/dev/null || true;;"
+        , "      'value(timeoutSec)') cat \"$f.timeout\" 2>/dev/null || echo 30;;"
+        , "      'value(managed.state)') echo ACTIVE;;"
+        , "      'value(hostRules[].hosts)') grep -o '\"hosts\":\\[[^]]*\\]' \"$f\" | sed -e 's/\"hosts\"://' -e 's/[]\\[\"]//g' | paste -sd';' || true;;"
+        , "      'value(IPAddress)') echo 203.0.113.7;;"
+        , "    esac;;"
+        , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\";;"
+        , "  import) mutate; cat > \"$f\";;"
+        , "  update) [ -e \"$f\" ] || exit 1; mutate; echo \"$timeout\" > \"$f.timeout\";;"
+        , "  add-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" 2>/dev/null && { echo 'already a backend' >&2; exit 1; }; mutate; echo \"$group\" >> \"$f.backends\";;"
+        , "  set-named-ports) mutate;;"
+        , "  get-health) echo 'HEALTHY;HEALTHY';;"
+        , "  delete) [ -e \"$f\" ] || exit 1; mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\";;"
+        , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
+        , "esac"
+        ]
 
 -------------------------------------------------------------------------------
 

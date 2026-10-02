@@ -996,6 +996,25 @@ rule, and the GCP toy uses both to point `lb.DNS_NAME` at its balancer (`--dns-z
 record-set command has been run against a real project, so the `describe` JSON shape, the `^DELIM^` escaping, how Cloud
 DNS spells back a `TXT` or an `AAAA`, and the toy's tier 3 record are unverified.
 
+`Gcp.LoadBalancing.applicationLoadBalancer` is one node for a whole *regional external* Application Load Balancer: a
+bash script of `describe`-guarded creates, a read-only check script whose lines `interpretLbCheck` judges, a delete
+script. Beyond the default backend service (`albBackends`, `<name>-backend`) it takes named ones (`albServices`,
+`<name>-<service>-backend`, each with its own backends, health check and `--timeout`), `albHostRules` (hosts to a
+`ServiceRef`, with `PathRule`s) and `albCertificates`. Load-bearing: a regional balancer cannot use the classic
+Google-managed `compute ssl-certificates`, so `ManagedCertificate` is a regional **Certificate Manager** certificate
+over one DNS authorization per domain, whose `CNAME` (name and data both GCP's) the caller publishes
+(`dnsAuthorizations`, `readDnsAuthorizationRecord`; the toy does it with a nested `CloudDns.recordSet` walk) — the
+certificate is `PROVISIONING`, and the check `Unknown`, until that resolves publicly. Any certificate turns on a
+`<name>-https-proxy` and a `:443` rule `<name>-https-fw`, and both forwarding rules then sit on a reserved address
+`<name>-ip` (`readAddress` reads the HTTPS rule's); with none, the scripts are what they were. Host rules make the URL
+map a whole-map `url-maps import` (JSON on stdin, `renderUrlMap`) on every `up`, and a timeout an `update` on every
+`up`: those are the two "set" verbs, everything else is created once. `albProblems` (undeclared or duplicate service,
+host in two rules, mixed certificate kinds, ...) is a `Failure`/throw before any call. The check sees declared hosts
+and timeouts, not path rules. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of it. **Layer 0 only**:
+`Test/GcpSpec.hs` runs the scripts against a stand-in `gcloud` (a shell function, not a recording), so none of the
+HTTPS, rule or timeout calls has met a real project; `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
+commands and what is unverified.
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port
