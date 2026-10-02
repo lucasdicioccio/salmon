@@ -111,6 +111,20 @@ data CloudRunOptions = CloudRunOptions
     -- that the binding was refused, and the service answers 403 to everyone.
     -- Being part of the service's spec rather than a separate IAM write, it
     -- either deploys or fails. 'False' (the default) leaves the deploy alone.
+    , croMinInstances :: Maybe Int
+    -- ^ @--min-instances@: how many instances stay up with no traffic.
+    -- 'Nothing' (the default) leaves the deploy alone, which for a new
+    -- service is Cloud Run's scale-to-zero. A service with a background loop
+    -- (a scheduler tick, a lease) needs at least one, and needs
+    -- 'croCpuAlwaysAllocated' with it: an idle instance is otherwise kept
+    -- but given no CPU outside a request. Unsetting it does not put a
+    -- service back to zero; say @Just 0@.
+    , croCpuAlwaysAllocated :: Bool
+    -- ^ @--no-cpu-throttling@: CPU is allocated for the instance's whole
+    -- life rather than only while it handles a request ("instance-based
+    -- billing"). 'False' (the default) leaves the deploy alone rather than
+    -- passing @--cpu-throttling@, so turning this off again is not something
+    -- a redeploy does.
     }
     deriving (Eq, Show)
 
@@ -126,6 +140,8 @@ defaultCloudRunOptions =
         , croPort = Nothing
         , croAllowUnauthenticated = False
         , croInvokerIamCheckDisabled = False
+        , croMinInstances = Nothing
+        , croCpuAlwaysAllocated = False
         }
 
 -- | A CloudRun service.
@@ -178,7 +194,7 @@ cloudRunService r gcloudTrack svc =
 exit code and output, split out for testability.
 
 The service is satisfied only when what it runs is what was declared, in
-three respects, each compared /exactly/ against the service's template (the
+four respects, each compared /exactly/ against the service's template (the
 revision a deploy would create):
 
 * __the image__, by equality: @img:1@ is not @img:10@, which a substring
@@ -190,6 +206,11 @@ revision a deploy would create):
   a different value or is missing. Variables bound from Secret Manager
   ('croSecrets') have no @value@ and are the secrets' business, not
   compared here.
+* __the scaling knobs, when declared__: 'croMinInstances' against the
+  template's @autoscaling.knative.dev/minScale@ annotation (absent reads as
+  0) and 'croCpuAlwaysAllocated' against @run.googleapis.com/cpu-throttling@
+  being @false@. An undeclared knob is not compared, the same way it is not
+  passed to the deploy, so whatever the service has is left alone.
 
 Every drift is named in the 'Failure', which is what makes @run up@ deploy
 again. The reason gives names, never an environment variable's value: those
@@ -215,11 +236,14 @@ data Template = Template
     , tmplServiceAccount :: Maybe Text
     , tmplEnv :: Map Text Text
     -- ^ the plain variables only
+    , tmplAnnotations :: Map Text Text
+    -- ^ the template's @metadata.annotations@, where the scaling knobs live
     }
 
 templateOf :: Value -> Maybe Template
 templateOf v = do
-    spec <- field "spec" v >>= field "template" >>= field "spec"
+    tmpl <- field "spec" v >>= field "template"
+    spec <- field "spec" tmpl
     let container = case field "containers" spec of
             Just (Array cs) | (c : _) <- toList cs -> Just c
             _ -> Nothing
@@ -234,6 +258,9 @@ templateOf v = do
             { tmplImage = textOf =<< (container >>= field "image")
             , tmplServiceAccount = textOf =<< field "serviceAccountName" spec
             , tmplEnv = Map.fromList (mapMaybe plain envEntries)
+            , tmplAnnotations = case field "metadata" tmpl >>= field "annotations" of
+                Just (Object o) -> Map.fromList [(Key.toText k, t) | (k, String t) <- KeyMap.toList o]
+                _ -> Map.empty
             }
   where
     field k (Object o) = KeyMap.lookup (Key.fromText k) o
@@ -254,6 +281,15 @@ drifts svc t =
           ]
         , [ "environment variable " <> k <> " is " <> why
           | (k, why) <- envDrift
+          ]
+        , [ "min instances is " <> got <> ", not " <> Text.pack (show n)
+          | Just n <- [svc.crsOptions.croMinInstances]
+          , let got = Map.findWithDefault "0" "autoscaling.knative.dev/minScale" t.tmplAnnotations
+          , got /= Text.pack (show n)
+          ]
+        , [ "CPU is throttled outside requests, not always allocated"
+          | svc.crsOptions.croCpuAlwaysAllocated
+          , Map.lookup "run.googleapis.com/cpu-throttling" t.tmplAnnotations /= Just "false"
           ]
         ]
   where
@@ -294,6 +330,8 @@ optionArgs opts =
         , maybe [] (\v -> ["--port", show v]) opts.croPort
         , ["--allow-unauthenticated" | opts.croAllowUnauthenticated]
         , ["--no-invoker-iam-check" | opts.croInvokerIamCheckDisabled]
+        , maybe [] (\v -> ["--min-instances", show v]) opts.croMinInstances
+        , ["--no-cpu-throttling" | opts.croCpuAlwaysAllocated]
         ]
 
 cloudRunCommand :: Command "gcloud" CloudRunCommand
