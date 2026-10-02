@@ -163,6 +163,35 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `check` is `GET /health` + `GET /patroni` (`interpretMember`): role reported never judged,
   transitional states `Unknown`, `pending_restart` parsed but not judged (that is the cluster
   config node's, which restarts pending members replicas-first per the spec).
+  Two things a real Patroni (4.0.7, first run in `Test/PgBackRestSpec.hs`) required of that layout:
+  `pat_pg_hba` is rendered under `postgresql.pg_hba`, not `bootstrap.pg_hba` (a replica never runs
+  the bootstrap section, and with the configuration outside the data directory nothing else gives
+  it a `pg_hba.conf`), and `pgConfSeed` lays an empty `postgresql.conf` in the config directory
+  once (Patroni renames it to `postgresql.base.conf` and dies on the rename, after `initdb`, if it
+  is absent). Debian's `patroni` also needs `python3-etcd` to speak to etcd at all.
+  `Nodes/PgBackRest.hs` is the continuous archive (pgBackRest chosen over WAL-G), i.e. PITR, which
+  `SreBox.PostgresBackup`'s `pg_dump` cannot give. `pgbackrest.conf` is rendered (no credential:
+  bucket keys and the cipher passphrase are a pre-provisioned `*.conf` fragment, only `chown`ed,
+  loaded through `--config-include-path`), and every command is a pure argv
+  (`stanzaCreateArgs`/`backupArgs`/`restoreArgs`/`archiveCommand`/`restoreCommand`) naming the
+  config file and stanza explicitly, so the same words serve a node, `archive_command`, Patroni and
+  an operator. Load-bearing: **the repository must be shared** (a mount every member sees, or S3);
+  `stanza`/`firstBackup` check the *repository* (`info --output=json`, `interpretStanza`/
+  `interpretHasBackup`, readable from any member) but their `up` only succeeds on the current
+  primary, so on other members they fail until the leader has done it — nothing names a primary;
+  `restoredCluster` never passes `--delta`/`--force`, so pgBackRest itself refuses a non-empty data
+  directory and the check leaves a directory holding a cluster alone; the one overwriting command,
+  `replicaCreateCommand` (`--delta restore`), is handed to Patroni. `patroniArchive` makes the
+  `Patroni.Archive` that `pat_archive` takes: `create_replica_methods: [pgbackrest, basebackup]`
+  (`keep_data`, `no_params`), `recovery_conf.restore_command`, and `archive_mode`/`archive_command`
+  as *local* `postgresql.parameters` (so they hold on a cluster bootstrapped earlier;
+  `archive_mode` then shows as `pending_restart`). `patroniArchiveRecovering` is a custom bootstrap
+  restoring a *new* scope to a target (rendered, never run). `backupScript`/`scheduledBackup` gate
+  on Patroni's `/primary`, not the spec's `/replica`: a backup from a standby needs
+  `backup-standby` and a second pg host, not rendered. `Test/PgBackRestSpec.hs` Layer 2 runs the
+  rendered words in a container: PITR to a timestamp on a plain cluster, and two Patroni members
+  on one etcd where the second is asserted (from Patroni's log) to have been made by pgBackRest.
+  The filesystem nodes themselves and S3 are not exercised there.
 - **`Actions/UpDown.hs`** implements graph execution. Both directions run the same way: `expand`
   the `OpGraph` to a `Cofree Graph`, collapse that to a `Ref`-keyed DAG with `Salmon.Op.Dag`
   (below), then walk it. `upDag` walks it in dependency order — a node is applied once everything

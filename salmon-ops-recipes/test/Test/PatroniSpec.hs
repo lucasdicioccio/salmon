@@ -44,6 +44,10 @@ tests =
         , testCase "bootstrap parameters carry wal_log_hints and the hba lines" $ do
             has "wal_log_hints: \"on\""
             has "- \"host replication repl 10.0.0.0/24 scram-sha-256\""
+        , testCase "pg_hba is local configuration, which a replica reads too, not bootstrap's" $ do
+            let (bootstrap, local) = breakOn "\npostgresql:\n" rendered
+            assertBool bootstrap (not ("pg_hba" `isInfixOf` bootstrap))
+            assertBool local ("  pg_hba:\n    - \"host replication repl" `isInfixOf` local)
         , testCase "the Debian unit to mask is the cluster's own" $
             assertEqual "" "postgresql@16-main.service" (debianClusterUnit cfg)
         , testCase "running and healthy is Success, whatever the role" $ do
@@ -80,6 +84,8 @@ tests =
     verdict = interpretMember "demo"
     isFailure (Failure _) = True
     isFailure _ = False
+    breakOn needle hay = case Text.breakOn needle (Text.pack hay) of
+        (a, b) -> (Text.unpack a, Text.unpack b)
 
 body :: Text -> Text -> ByteString
 body st role =
@@ -106,4 +112,5 @@ cfg =
         , pat_user = "postgres"
         , pat_binary = "/usr/bin/patroni"
         , pat_ready_timeout_seconds = 60
+        , pat_archive = Nothing
         }

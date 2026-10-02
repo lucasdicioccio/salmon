@@ -6,7 +6,10 @@
 
 The guests have no network past boot, so every package a scenario needs is
 baked in here: @postgresql@, @patroni@, @etcd-server@ and @haproxy@ on all
-three machines (a scenario decides which member runs which). It is the
+three machines (a scenario decides which member runs which), plus
+@python3-etcd@ (Debian's @patroni@ does not depend on it, and without it
+Patroni has no etcd implementation at all) and @pgbackrest@ for the archive
+scenarios. It is the
 same shape as @salmon-toy-qemu-pg-ha prereqs@ -- 'Debootstrap.rootTree' plus
 'Debootstrap.ensureVm9pBoot' -- and is the only part that needs root:
 
@@ -88,7 +91,7 @@ rootfsOf root n = root </> ("patroni-" <> show n) </> "root"
 patroniPackages :: Debootstrap.Includes
 patroniPackages =
     Debootstrap.vmEssentials
-        <> map Package ["postgresql", "sudo", "patroni", "etcd-server", "etcd-client", "haproxy"]
+        <> map Package ["postgresql", "sudo", "patroni", "python3-etcd", "pgbackrest", "etcd-server", "etcd-client", "haproxy"]
 
 configure :: Configure IO Seed Spec
 configure = Configure $ \(SeedPrereqs root) -> Prereqs root <$> unprivilegedUser

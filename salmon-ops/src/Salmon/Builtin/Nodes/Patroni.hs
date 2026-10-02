@@ -66,6 +66,7 @@ import Network.HTTP.Client (
     responseTimeoutMicro,
  )
 import Network.HTTP.Types.Status (statusCode)
+import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import qualified System.Posix.Types as Posix
 
@@ -75,6 +76,7 @@ import Salmon.Builtin.Nodes.Binary (Binary, justInstall)
 import Salmon.Builtin.Nodes.Etcd (TlsFiles (..))
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -106,7 +108,7 @@ data PatroniConfig
     , pat_pg_connect_address :: Text
     -- ^ @host:port@ clients and other members reach this Postgres by
     , pat_pg_hba :: [Text]
-    -- ^ @pg_hba.conf@ lines, written into the bootstrap configuration
+    -- ^ @pg_hba.conf@ lines, the whole file, written by Patroni on every member
     , pat_bootstrap_parameters :: [(Text, Text)]
     -- ^ @postgresql.parameters@ at /bootstrap/ only; afterwards the DCS is
     -- owned by whoever patches @\/config@
@@ -119,8 +121,47 @@ data PatroniConfig
     , pat_binary :: FilePath
     , pat_ready_timeout_seconds :: Int
     -- ^ how long @up@ waits for the check to pass
+    , pat_archive :: Maybe Archive
+    -- ^ a continuous archive to build replicas from and to archive WAL into; 'Nothing' is base backups from the leader only
     }
     deriving (Show)
+
+{- | A continuous WAL archive, as far as Patroni is concerned: commands, as one
+shell string each. Which tool they belong to is not this module's business
+("Salmon.Builtin.Nodes.PgBackRest" makes one with @patroniArchive@), and no
+credential is in them.
+-}
+data Archive
+    = Archive
+    { arc_methods :: [ReplicaMethod]
+    -- ^ @create_replica_methods@, tried in order
+    , arc_basebackup_fallback :: Bool
+    -- ^ end the list with Patroni's own @basebackup@, for an archive that holds no backup yet
+    , arc_archive_command :: Text
+    , arc_restore_command :: Text
+    , arc_bootstrap :: Maybe BootstrapMethod
+    -- ^ make a /new/ cluster's first member from the archive instead of @initdb@
+    }
+    deriving (Eq, Show)
+
+data ReplicaMethod
+    = ReplicaMethod
+    { rm_name :: Text
+    , rm_command :: Text
+    , rm_keep_data :: Bool
+    -- ^ Patroni leaves the data directory in place for the command (a delta restore reuses it)
+    , rm_no_params :: Bool
+    -- ^ Patroni appends no @--scope@, @--datadir@, ... of its own
+    }
+    deriving (Eq, Show)
+
+-- | A custom bootstrap: the command leaves a data directory with its own recovery settings, which Patroni keeps.
+data BootstrapMethod
+    = BootstrapMethod
+    { bm_name :: Text
+    , bm_command :: Text
+    }
+    deriving (Eq, Show)
 
 -- | @wal_log_hints@ is restart-only and what @pg_rewind@ needs, so it has to be set before there is data to lose.
 defaultBootstrapParameters :: [(Text, Text)]
@@ -181,7 +222,7 @@ renderPatroni c =
         , ("etcd3", YM etcd)
         ,
             ( "bootstrap"
-            , YM
+            , YM $
                 [
                     ( "dcs"
                     , YM
@@ -200,22 +241,52 @@ renderPatroni c =
                         ]
                     )
                 , ("initdb", YL [YS "data-checksums"])
-                , ("pg_hba", YL (fmap YS c.pat_pg_hba))
                 ]
+                    <> bootstrapMethod
             )
         ,
             ( "postgresql"
-            , YM
+            , YM $
                 [ ("listen", YS c.pat_pg_listen)
                 , ("connect_address", YS c.pat_pg_connect_address)
                 , ("data_dir", YS (Text.pack (pgDataDir c)))
                 , ("config_dir", YS (Text.pack (pgConfigDir c)))
                 , ("bin_dir", YS (Text.pack (pgBinDir c)))
                 , ("use_unix_socket", YB True)
+                , -- local, not bootstrap: a replica never runs the bootstrap section, and with the
+                  -- configuration outside the data directory nothing else would give it a pg_hba.conf
+                  ("pg_hba", YL (fmap YS c.pat_pg_hba))
                 ]
+                    <> maybe [] archive c.pat_archive
             )
         ]
   where
+    -- local parameters, not the DCS's: they hold on a cluster bootstrapped
+    -- before the archive was declared, and archive_mode (restart-only) then
+    -- shows as pending_restart, which is the cluster config node's to act on
+    archive :: Archive -> [(Text, Y)]
+    archive a =
+        [ ("create_replica_methods", YL (fmap (YS . rm_name) a.arc_methods <> [YS "basebackup" | a.arc_basebackup_fallback]))
+        ]
+            <> [ (m.rm_name, YM [("command", YS m.rm_command), ("keep_data", YB m.rm_keep_data), ("no_params", YB m.rm_no_params)])
+               | m <- a.arc_methods
+               ]
+            <> [ ("recovery_conf", YM [("restore_command", YS a.arc_restore_command)])
+               , ("parameters", YM [("archive_mode", YS "on"), ("archive_command", YS a.arc_archive_command)])
+               ]
+    bootstrapMethod = case c.pat_archive >>= arc_bootstrap of
+        Nothing -> []
+        Just b ->
+            [ ("method", YS b.bm_name)
+            ,
+                ( b.bm_name
+                , YM
+                    [ ("command", YS b.bm_command)
+                    , ("keep_existing_recovery_conf", YB True)
+                    , ("no_params", YB True)
+                    ]
+                )
+            ]
     etcd =
         [("hosts", YS (Text.intercalate "," c.pat_etcd_hosts))]
             <> maybe
@@ -373,7 +444,7 @@ patroniMember r systemctl patroniBin c =
     prereqs =
         op
             "patroni-setup"
-            (deps [justInstall patroniBin, configFile, secrets, mask])
+            (deps [justInstall patroniBin, configFile, secrets, mask, pgConfSeed c])
             id
 
     configFile = FS.filecontents (FS.FileContents (patroniFile c) (renderPatroni c))
@@ -382,3 +453,33 @@ patroniMember r systemctl patroniBin c =
     secrets = FS.ownedFile (FS.FileOwnership c.pat_secrets_file (Just c.pat_user) Nothing (0o600 :: Posix.FileMode))
 
     mask = Systemd.maskedUnit r systemctl Systemd.System (debianClusterUnit c)
+
+{- | Postgres' configuration directory, the service user's, holding a
+@postgresql.conf@ for Patroni to build on.
+
+With the configuration outside the data directory, Patroni does not create
+the file it then renames to @postgresql.base.conf@: a bootstrap dies on the
+rename, having already run @initdb@, and a new replica likewise. Debian's own
+integration gets the file from @pg_createcluster@, which this builtin does not
+run. So an empty one is laid down, once: afterwards the file is Patroni's
+(either name counts as present) and is never rewritten here.
+-}
+pgConfSeed :: PatroniConfig -> Op
+pgConfSeed c =
+    op "patroni-pg-conf-seed" (deps [ownedDir]) $ \actions ->
+        actions
+            { help = "a postgresql.conf for Patroni to build on, in " <> Text.pack (pgConfigDir c)
+            , notes = ["written once, empty; Patroni owns it afterwards"]
+            , ref = mkRef "patroni-pg-conf-seed" (pgConfigDir c)
+            , check = do
+                present <- or <$> traverse (doesFileExist . (pgConfigDir c </>)) ["postgresql.conf", "postgresql.base.conf"]
+                pure (if present then Success else Failure "no postgresql.conf for Patroni to build on")
+            , up = do
+                ByteString.writeFile seed ""
+                FS.applyOwnership (FS.FileOwnership seed (Just c.pat_user) Nothing (0o644 :: Posix.FileMode))
+            }
+  where
+    seed = pgConfigDir c </> "postgresql.conf"
+    ownedDir =
+        FS.ownedFile (FS.FileOwnership (pgConfigDir c) (Just c.pat_user) Nothing (0o755 :: Posix.FileMode))
+            `inject` FS.dir (FS.Directory (pgConfigDir c))

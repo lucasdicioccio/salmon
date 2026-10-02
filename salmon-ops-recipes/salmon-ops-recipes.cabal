@@ -118,6 +118,7 @@ test-suite salmon-ops-recipes-test
                     , Test.LedgerSpec
                     , Test.MigratorTemplateSpec
                     , Test.PgBackupSpec
+                    , Test.PgBackRestSpec
                     , Test.PodmanSpec
                     , Test.PostgresBackupSpec
                     , Test.PostgresInitSpec
