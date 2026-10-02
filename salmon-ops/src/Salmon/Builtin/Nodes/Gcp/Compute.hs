@@ -292,8 +292,9 @@ right: it can be created, read, attached and released on its own schedule.
 
 An external one still cannot be known when the graph is /declared/ -- GCP
 picks the address -- which is why 'readAddress' exists as a separate,
-out-of-graph read for a driver to use between two passes. An internal one
-can: see 'InternalAddress'.
+out-of-graph read: for a driver to use between two passes, or for a
+"Salmon.Builtin.Nodes.Deferred" node to use within one. An internal one can:
+see 'InternalAddress'.
 -}
 data Address = Address
     { addressName :: Text
@@ -368,9 +369,12 @@ interpretAddress addr code out =
 
 Deliberately not an 'Op': what GCP picked is knowable only after the address
 node's @up@, while an 'Op' that needs the IP (an ssh endpoint, say) is built
-before any @up@ runs. A driver that wants both therefore converges once,
-calls this, and declares the rest -- see @salmon-apps@'s @GcpToy@ tier 2 and
-its driver script. 'Nothing' when the address does not exist yet.
+before any @up@ runs. Either a driver converges once, calls this, and
+declares the rest, or the part that needs the IP is built at @up@ from this
+read ("Salmon.Builtin.Nodes.Deferred"; @SreBox.Gcp.VmProvision@'s
+@provisionedVmReadingHost@ is that for an ssh host) -- @salmon-apps@'s
+@GcpToy@ tier 2 does the second and its driver script the first. 'Nothing'
+when the address does not exist yet.
 -}
 readAddress :: Address -> IO (Maybe Text)
 readAddress addr = do
