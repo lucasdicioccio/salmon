@@ -51,6 +51,7 @@ tests =
     testGroup
         "Salmon.Builtin.Nodes.Gcp"
         [ testGroup "Core.interpretAdc" adcTests
+        , testGroup "Core.declaredAccount" accountTests
         , testGroup "Compute.interpretInstanceStatus" instanceTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
         , testGroup "ArtifactRegistry.interpretRepoDescribe" repoTests
@@ -92,6 +93,39 @@ adcTests =
     , testCase "no token means ADC is not configured" $
         assertBool "" (isFailure (Core.interpretAdc (ExitFailure 1)))
     ]
+
+-------------------------------------------------------------------------------
+
+accountTests :: [TestTree]
+accountTests =
+    [ testCase "the active account is read from the core/account property" $
+        assertEqual "" ["config", "get-value", "account"] Core.activeAccountArgs
+    , testCase "the declared account being active is satisfied" $
+        assertEqual "" Success (verdict ExitSuccess "deployer@example.com\n")
+    , testCase "addresses compare without regard to case" $
+        assertEqual "" Success (verdict ExitSuccess "Deployer@Example.com\n")
+    , testCase "another active account is refused, naming both" $
+        case verdict ExitSuccess "someone-else@example.com\n" of
+            Failure why -> do
+                assertBool "names the active one" ("someone-else@example.com" `Text.isInfixOf` why)
+                assertBool "names the declared one" ("deployer@example.com" `Text.isInfixOf` why)
+            other -> assertBool ("expected Failure, got " <> show other) False
+    , testCase "an account that merely contains the declared one is refused" $
+        assertBool "" (isFailure (verdict ExitSuccess "not-deployer@example.com\n"))
+    , testCase "no active account is refused (empty stdout, or the old (unset) on stdout)" $ do
+        assertBool "empty" (isFailure (verdict ExitSuccess ""))
+        assertBool "unset" (isFailure (verdict ExitSuccess "(unset)\n"))
+    , testCase "gcloud failing is a Failure, never a pass" $
+        assertBool "" (isFailure (verdict (ExitFailure 1) "deployer@example.com\n"))
+    , testCase "--account is appended to an argument list" $
+        assertEqual
+            ""
+            ["auth", "print-access-token", "--account", "deployer@example.com"]
+            (Core.withAccount declared ["auth", "print-access-token"])
+    ]
+  where
+    declared = Core.Account "deployer@example.com"
+    verdict = Core.interpretAccount declared
 
 -------------------------------------------------------------------------------
 

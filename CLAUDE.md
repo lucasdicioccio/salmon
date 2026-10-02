@@ -931,6 +931,15 @@ the metadata server's token for the instance's own service account, plus a `chec
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run; no container has been started by a test, the
 metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
+`Gcp.Core.declaredAccount` asserts who the GCP nodes act as. Every one of them shells out to `gcloud`, and so does
+`Core.printAccessToken`: all act as gcloud's *active account*, which `applicationDefaultCredentials` (a different
+credential, used by nothing in the tree) says nothing about. The node's `check` reads `gcloud config get-value account`
+(`interpretAccount`, pure: case-insensitive match, empty or `(unset)` is no account, a non-zero exit is a `Failure`) and
+its `up` throws on anything but a match, so dependants are `Blocked` before anything is created. It never sets the
+account (that is the operator's machine configuration), is keyed `"gcp-account" account`, and is opt-in: a recipe that
+does not declare one behaves as before (`salmon-gcp-toy --account EMAIL` is the one caller). The check is once per pass,
+not `--account` on every call (`Core.withAccount` exists for a caller that wants that). Never run against a real gcloud.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another
