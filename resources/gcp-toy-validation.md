@@ -374,3 +374,12 @@ leftover.
   Log both in as the same identity.
 - **`CloudRun`'s check is a substring match** on the image, so `img:1` matches
   `img:10`, and a changed env var or service account is not noticed.
+- **`CloudRunOptions`' scaling knobs have never met a real service.**
+  `croMinInstances` (`--min-instances`) and `croCpuAlwaysAllocated`
+  (`--no-cpu-throttling`) — what a service with a background loop needs to
+  stay up and keep its CPU between requests — render, and the check compares
+  them, when declared, against the template annotations
+  `autoscaling.knative.dev/minScale` and `run.googleapis.com/cpu-throttling`.
+  Those two names are from Cloud Run's documented service YAML, not from a
+  `describe` the toy captured: if gcloud reports them otherwise, a service
+  declaring either knob redeploys on every pass.

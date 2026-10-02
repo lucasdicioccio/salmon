@@ -254,14 +254,19 @@ secret k = object ["name" .= k, "valueFrom" .= object ["secretKeyRef" .= object 
 
 -- | The parts of @gcloud run services describe --format=json@ the check reads.
 describeJson :: Text.Text -> Maybe Text.Text -> [Value] -> Text.Text
-describeJson image sa env =
+describeJson = describeJsonWith []
+
+-- | The same, with annotations on the revision template.
+describeJsonWith :: [(Text.Text, Text.Text)] -> Text.Text -> Maybe Text.Text -> [Value] -> Text.Text
+describeJsonWith annotations image sa env =
     Text.decodeUtf8 . LByteString.toStrict . encode $
         object
             [ "spec"
                 .= object
                     [ "template"
                         .= object
-                            [ "spec"
+                            [ "metadata" .= object ["annotations" .= Map.fromList annotations]
+                            , "spec"
                                 .= object
                                     ( [ "containers" .= [object ["image" .= image, "env" .= env]]
                                       ]
@@ -426,6 +431,9 @@ cloudRunOptionTests =
         assertBool (show bare) (not ("--cpu" `elem` bare))
         assertBool (show bare) (not ("--allow-unauthenticated" `elem` bare))
         assertBool (show bare) (not ("--no-invoker-iam-check" `elem` bare))
+        assertBool (show bare) (not ("--min-instances" `elem` bare))
+        assertBool (show bare) (not ("--no-cpu-throttling" `elem` bare))
+        assertBool (show bare) (not ("--cpu-throttling" `elem` bare))
         let full = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc))
         assertBool (show full) (["--cpu", "1000m"] `isSubsequenceOf` full)
         assertBool (show full) (["--memory", "256Mi"] `isSubsequenceOf` full)
@@ -438,8 +446,50 @@ cloudRunOptionTests =
             args = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc{CloudRun.crsOptions = opts}))
         assertBool (show args) ("--no-invoker-iam-check" `elem` args)
         assertBool (show args) (not ("--allow-unauthenticated" `elem` args))
+    , testCase "min instances and always-allocated CPU are deploy flags" $ do
+        -- What a service with a background loop needs: an instance that
+        -- stays, and CPU for it outside a request.
+        let args = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc{CloudRun.crsOptions = alwaysOn}))
+        assertBool (show args) (["--min-instances", "1"] `isSubsequenceOf` args)
+        assertBool (show args) ("--no-cpu-throttling" `elem` args)
+        -- Just 0 is said, not dropped: it is how a service is put back to
+        -- scaling to zero.
+        let zero = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy svc{CloudRun.crsOptions = CloudRun.defaultCloudRunOptions{CloudRun.croMinInstances = Just 0}}))
+        assertBool (show zero) (["--min-instances", "0"] `isSubsequenceOf` zero)
+    , testCase "declared scaling knobs are compared against the template's annotations" $ do
+        let on = declared{CloudRun.crsOptions = alwaysOn}
+            out anns = describeJsonWith anns "us-docker.pkg.dev/p/r/img:1" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1"]
+            both = [("autoscaling.knative.dev/minScale", "1"), ("run.googleapis.com/cpu-throttling", "false")]
+        assertEqual "" Success (verdict on (out both))
+        -- no annotation at all is scale-to-zero and throttled
+        assertBool "" (isFailure (verdict on (out [])))
+        assertBool "" (isFailure (verdict on (out [("autoscaling.knative.dev/minScale", "2"), ("run.googleapis.com/cpu-throttling", "false")])))
+        assertBool "" (isFailure (verdict on (out [("autoscaling.knative.dev/minScale", "1"), ("run.googleapis.com/cpu-throttling", "true")])))
+        -- Just 0 is satisfied by the annotation being absent
+        let zero = declared{CloudRun.crsOptions = CloudRun.defaultCloudRunOptions{CloudRun.croMinInstances = Just 0}}
+        assertEqual "" Success (verdict zero (out []))
+        assertBool "" (isFailure (verdict zero (out both)))
+    , testCase "undeclared scaling knobs are not compared" $
+        -- Whatever the service has is left alone, as the deploy leaves it.
+        assertEqual
+            ""
+            Success
+            ( verdict
+                declared
+                ( describeJsonWith
+                    [("autoscaling.knative.dev/minScale", "3"), ("run.googleapis.com/cpu-throttling", "false")]
+                    "us-docker.pkg.dev/p/r/img:1"
+                    (Just "sa@p.iam.gserviceaccount.com")
+                    [plain "A" "1"]
+                )
+            )
     ]
   where
+    alwaysOn =
+        CloudRun.defaultCloudRunOptions
+            { CloudRun.croMinInstances = Just 1
+            , CloudRun.croCpuAlwaysAllocated = True
+            }
     svc =
         CloudRun.CloudRunService
             { CloudRun.crsName = "svc"
