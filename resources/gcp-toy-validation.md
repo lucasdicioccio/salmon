@@ -161,6 +161,18 @@ nothing about that VM.
 | `Gcp.LoadBalancing.applicationLoadBalancer` | health check, backend service, named ports, URL map, target proxy, forwarding rule |
 | `Systemd.systemdService` (on the VM) | `salmon-toy-web.service`, a `python3 -m http.server` over a page salmon wrote |
 
+With `--dns-zone DNS_NAME`, tier 3 also declares
+`Gcp.CloudDns.resolvedRecordSet`: an `A` record `lb.DNS_NAME` (TTL 300) at
+the address GCP gave the forwarding rule. That address does not exist until
+the balancer's `up` has run, so the record's data is read at `up`
+(`Gcp.LoadBalancing.readAddress`) instead of being declared — no extra pass.
+Its `check` describes the record set and compares it with the address read
+again, so a second `up` skips it. The script compares what the zone holds
+with the forwarding rule's address; it does not resolve the name, since
+nothing resolves through a zone the registrar does not delegate to. `down`
+removes the record before the zone, which Cloud DNS would otherwise refuse
+to delete.
+
 Three of those exist only because a regional external ALB is an Envoy fleet
 rather than a Google frontend, and that is what the tier is really testing:
 the proxies run *inside* the VPC, in a proxy-only subnet that must already

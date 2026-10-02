@@ -12,6 +12,7 @@ module Test.GcpSpec (tests) where
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isAsciiLower, isDigit)
 import Data.List (isInfixOf, isSubsequenceOf, nub)
@@ -66,6 +67,7 @@ tests =
         , testGroup "Ssh.ClientOpts" clientOptsTests
         , testGroup "Monitoring" monitoringTests
         , testGroup "CloudDns" cloudDnsTests
+        , testGroup "CloudDns record sets" cloudDnsRecordTests
         , testGroup "SreBox.Gcp.CloudRunAlerts" cloudRunAlertsTests
         , testGroup "SreBox.Gcp.VmProvision.caTrustStartupScript" caTrustScriptTests
         ]
@@ -578,6 +580,11 @@ lbTests =
         assertBool "" (isFailure (LoadBalancing.interpretLbCheck ExitSuccess "MISSING backend neg x\nHEALTH backend UNHEALTHY\n"))
     , testCase "a broken check script is a Failure" $
         assertBool "" (isFailure (LoadBalancing.interpretLbCheck (ExitFailure 2) ""))
+    , testCase "the balancer's address is read off its forwarding rule" $
+        assertEqual
+            ""
+            ["compute", "forwarding-rules", "describe", "x-fw", "--format", "value(IPAddress)", "--region", "europe-west1", "--project", "my-project"]
+            (processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbAddressDescribe (alb {LoadBalancing.albName = "x", LoadBalancing.albProject = Core.Project "my-project", LoadBalancing.albRegion = Core.Region "europe-west1"}))))
     , testCase "check script describes every sub-resource and asks for health" $ do
         let sc = Text.unpack (LoadBalancing.renderLbCheckScript alb)
         mapM_ (\w -> assertBool w (w `isInfixOf` sc)) ["url-maps describe", "target-http-proxies describe", "forwarding-rules describe", "get-health", "health-checks describe"]
@@ -1114,3 +1121,107 @@ cloudDnsTests =
   where
     zone = CloudDns.ManagedZone "example-zone" (Core.Project "my-project") "example.org" "a zone"
     described = Text.encodeUtf8 zoneDescribeJson
+
+cloudDnsRecordTests :: [TestTree]
+cloudDnsRecordTests =
+    [ testCase "create names the record, its zone, type, TTL and data" $
+        assertEqual
+            ""
+            ["dns", "record-sets", "create", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--ttl", "300", "--rrdatas=192.0.2.1,192.0.2.2"]
+            (args (CloudDns.RecordSetsCreate a))
+    , testCase "update differs from create by its verb only" $
+        assertEqual
+            ""
+            (map (\w -> if w == "create" then "update" else w) (args (CloudDns.RecordSetsCreate a)))
+            (args (CloudDns.RecordSetsUpdate a))
+    , testCase "describe asks for JSON, by name and type" $
+        assertEqual
+            ""
+            ["dns", "record-sets", "describe", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--format", "json"]
+            (args (CloudDns.RecordSetsDescribe a))
+    , testCase "delete names the record and its type" $
+        assertEqual
+            ""
+            ["dns", "record-sets", "delete", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project"]
+            (args (CloudDns.RecordSetsDelete a))
+    , testCase "a CNAME's target gets its trailing dot" $
+        assertEqual "" "--rrdatas=target.example.net." (last (args (CloudDns.RecordSetsCreate cname)))
+    , testCase "a TXT is quoted, and a comma in it moves the list separator" $
+        assertEqual "" "--rrdatas=^;^\"v=spf1 ip4:192.0.2.0/24,-all\";\"second\"" (last (args (CloudDns.RecordSetsCreate txt)))
+    , testCase "the separator is one no datum contains" $ do
+        assertEqual "" "a,b" (CloudDns.renderRrdatas ["a", "b"])
+        assertEqual "" "^|^a,;|b" (CloudDns.renderRrdatas ["a,;", "b"])
+        assertEqual "" "^|||^,;|#~%@!|||x||" (CloudDns.renderRrdatas [",;|#~%@!", "x||"])
+    , testCase "TXT data escapes quotes and backslashes" $
+        assertEqual "" "\"say \\\"hi\\\" \\\\ bye\"" (CloudDns.txtRdata "say \"hi\" \\ bye")
+    , testCase "a long TXT is split into strings of 255 and reads back whole" $ do
+        let long = Text.replicate 60 "0123456789"
+            rdata = CloudDns.txtRdata long
+        assertEqual "" [257, 257, 92] (map Text.length (Text.splitOn " " rdata))
+        assertEqual "" long (CloudDns.txtContent rdata)
+    , testCase "txtContent undoes txtRdata, spaces and escapes included" $
+        mapM_
+            (\t -> assertEqual (Text.unpack t) t (CloudDns.txtContent (CloudDns.txtRdata t)))
+            ["v=spf1 -all", "say \"hi\" \\ bye", "", "a  b", "trailing \\"]
+    , testCase "txtContent takes unquoted data as it is" $
+        assertEqual "" "plain" (CloudDns.txtContent "plain")
+    , testCase "the description's TTL and data are read" $
+        assertEqual "" (Right (CloudDns.RecordDescription 300 ["192.0.2.2", "192.0.2.1"])) (CloudDns.parseRecordDescribe (described 300 ["192.0.2.2", "192.0.2.1"]))
+    , testCase "the declared data in any order is satisfied" $
+        assertEqual "" Success (CloudDns.interpretRecordDescribe a ExitSuccess (described 300 ["192.0.2.2", "192.0.2.1"]))
+    , testCase "describe failing means the record is absent" $
+        assertBool "" (isFailure (CloudDns.interpretRecordDescribe a (ExitFailure 1) ""))
+    , testCase "other data is a failure naming both" $
+        case CloudDns.interpretRecordDescribe a ExitSuccess (described 300 ["192.0.2.9"]) of
+            Failure why -> do
+                assertBool (Text.unpack why) ("192.0.2.9" `Text.isInfixOf` why)
+                assertBool (Text.unpack why) ("192.0.2.1, 192.0.2.2" `Text.isInfixOf` why)
+            other -> assertBool ("expected a Failure, got " <> show other) False
+    , testCase "a subset of the declared data is a failure" $
+        assertBool "" (isFailure (CloudDns.interpretRecordDescribe a ExitSuccess (described 300 ["192.0.2.1"])))
+    , testCase "another TTL is a failure naming both" $
+        case CloudDns.interpretRecordDescribe a ExitSuccess (described 60 ["192.0.2.1", "192.0.2.2"]) of
+            Failure why -> assertBool (Text.unpack why) ("60" `Text.isInfixOf` why && "300" `Text.isInfixOf` why)
+            other -> assertBool ("expected a Failure, got " <> show other) False
+    , testCase "output that is not a record description cannot be judged" $
+        assertEqual "" Unknown (CloudDns.interpretRecordDescribe a ExitSuccess "not json")
+    , testCase "a CNAME compares whatever the dot and case" $
+        assertEqual "" Success (CloudDns.interpretRecordDescribe (cname {CloudDns.recordData = ["Target.Example.NET"]}) ExitSuccess (described 300 ["target.example.net."]))
+    , testCase "a TXT compares by content, quoted as Cloud DNS reports it" $
+        assertEqual "" Success (CloudDns.interpretRecordDescribe txt ExitSuccess (described 300 ["\"second\"", "\"v=spf1 ip4:192.0.2.0/24,\" \"-all\""]))
+    , testCase "an AAAA compares whatever the case" $
+        assertEqual "" Success (CloudDns.interpretRecordDescribe (a {CloudDns.recordType = CloudDns.AAAA, CloudDns.recordData = ["2001:DB8::1"]}) ExitSuccess (described 300 ["2001:db8::1"]))
+    , testCase "up creates what describe did not find and updates what it did" $ do
+        assertEqual "" ["create"] (verb (CloudDns.recordUpCommand a (ExitFailure 1)))
+        assertEqual "" ["update"] (verb (CloudDns.recordUpCommand a ExitSuccess))
+    , testCase "a writable record set has no problems, at the apex included" $ do
+        assertEqual "" [] (CloudDns.recordSetProblems a)
+        assertEqual "" [] (CloudDns.recordSetProblems (a {CloudDns.recordName = "Example.org"}))
+        assertEqual "" [] (CloudDns.recordSetProblems cname)
+    , testCase "no data, a name outside the zone, a CNAME at the apex or with two targets are refused" $ do
+        assertEqual "" 1 (length (CloudDns.recordSetProblems (a {CloudDns.recordData = []})))
+        assertEqual "" 1 (length (CloudDns.recordSetProblems (a {CloudDns.recordName = "www.example.net"})))
+        assertEqual "" 1 (length (CloudDns.recordSetProblems (a {CloudDns.recordName = "wwwexample.org"})))
+        assertEqual "" 1 (length (CloudDns.recordSetProblems (cname {CloudDns.recordName = "example.org"})))
+        assertEqual "" 1 (length (CloudDns.recordSetProblems (cname {CloudDns.recordData = ["a.example.net", "b.example.net"]})))
+    , testCase "a record set that cannot be written fails its check whatever is live" $
+        assertBool "" (isFailure (CloudDns.interpretRecordDescribe (a {CloudDns.recordName = "www.example.net"}) ExitSuccess (described 300 ["192.0.2.1", "192.0.2.2"])))
+    ]
+  where
+    zone = CloudDns.ManagedZone "example-zone" (Core.Project "my-project") "example.org" "a zone"
+    a = CloudDns.RecordSet zone "www.example.org" CloudDns.A 300 ["192.0.2.1", "192.0.2.2"]
+    cname = CloudDns.RecordSet zone "alias.example.org." CloudDns.CNAME 300 ["target.example.net"]
+    txt = CloudDns.RecordSet zone "example.org" CloudDns.TXT 300 ["v=spf1 ip4:192.0.2.0/24,-all", "second"]
+    args = processArgs . prepare CloudDns.cloudDnsCommand
+    verb = take 1 . drop 2 . args
+    described :: Int -> [Text.Text] -> ByteString.ByteString
+    described ttl rrdatas =
+        LByteString.toStrict $
+            encode $
+                object
+                    [ "kind" .= ("dns#resourceRecordSet" :: Text.Text)
+                    , "name" .= ("www.example.org." :: Text.Text)
+                    , "type" .= ("A" :: Text.Text)
+                    , "ttl" .= ttl
+                    , "rrdatas" .= rrdatas
+                    ]

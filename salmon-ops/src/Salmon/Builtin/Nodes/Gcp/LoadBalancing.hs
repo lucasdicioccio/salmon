@@ -7,6 +7,7 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     HealthCheck (..),
     ApplicationLoadBalancer (..),
     applicationLoadBalancer,
+    readAddress,
     interpretLbDescribe,
     interpretLbCheck,
     renderLbCheckScript,
@@ -102,6 +103,23 @@ applicationLoadBalancer r gcloudTrack alb =
                 ""
         pure $ interpretLbCheck code (Text.decodeUtf8With TextErr.lenientDecode out)
 
+{- | The address GCP gave the balancer's forwarding rule. 'Nothing' when the
+rule does not exist yet.
+
+Out of graph, like "Salmon.Builtin.Nodes.Gcp.Compute".@readAddress@: the
+address is picked at creation, so nothing can name it when the graph is
+declared. It is what a DNS record pointing at the balancer resolves at @up@
+(see "Salmon.Builtin.Nodes.Gcp.CloudDns".@resolvedRecordSet@).
+-}
+readAddress :: ApplicationLoadBalancer -> IO (Maybe Text)
+readAddress alb = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode (prepare loadBalancingCommand (LbAddressDescribe alb)) ""
+    let ip = Text.strip (Text.decodeUtf8With TextErr.lenientDecode out)
+    pure $ case code of
+        ExitSuccess | not (Text.null ip) -> Just ip
+        _ -> Nothing
+
 -- | The verdict drawn from @gcloud compute url-maps describe@'s exit code.
 -- This only tells us the URL map exists; 'interpretLbCheck' is what the node
 -- itself uses and looks at every sub-resource and the backends' health.
@@ -138,6 +156,7 @@ data LoadBalancingCommand
     | LbCheck ApplicationLoadBalancer
     | LbDescribe ApplicationLoadBalancer
     | LbDelete ApplicationLoadBalancer
+    | LbAddressDescribe ApplicationLoadBalancer
     deriving (Show)
 
 loadBalancingCommand :: Command "gcloud" LoadBalancingCommand
@@ -163,6 +182,18 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
                 )
     LbCheck alb ->
         proc "bash" ["-c", Text.unpack (renderLbCheckScript alb)]
+    LbAddressDescribe alb ->
+        gcloudProc $
+            withProject alb.albProject
+                ( withRegion alb.albRegion
+                    [ "compute"
+                    , "forwarding-rules"
+                    , "describe"
+                    , Text.unpack (alb.albName <> "-fw")
+                    , "--format"
+                    , "value(IPAddress)"
+                    ]
+                )
     LbDelete alb ->
         proc "bash" ["-c", Text.unpack (renderLbDeleteScript alb)]
 

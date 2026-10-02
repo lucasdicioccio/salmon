@@ -188,7 +188,7 @@ instance ParseRecord Seed where
                 -- caller has to look it up.
                 <*> optional (strOption (long "vm-internal-ip" <> metavar "IP" <> Opt.help "tier 2: pin the VM to this internal address, a free one in the region's `default` subnet; needs --peer-internal-ip"))
                 <*> optional (strOption (long "peer-internal-ip" <> metavar "IP" <> Opt.help "tier 2: also boot a peer with no external address, pinned to this internal one, which the VM then fetches a page from; needs --vm-internal-ip"))
-                <*> optional (strOption (long "dns-zone" <> metavar "DNS_NAME" <> Opt.help "tier 0: also create a public Cloud DNS zone for this domain and print the name servers it was assigned (cents per month)"))
+                <*> optional (strOption (long "dns-zone" <> metavar "DNS_NAME" <> Opt.help "tier 0: also create a public Cloud DNS zone for this domain and print the name servers it was assigned (cents per month); at tier 3, also point lb.DNS_NAME at the balancer"))
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -682,7 +682,7 @@ effect, so it prints on every pass, which is the point.
 -}
 dnsNameServers :: Spec -> CloudDns.ManagedZone -> Op
 dnsNameServers spec zone =
-    op "gcp-toy-dns-name-servers" (deps [zoneNode]) $ \actions ->
+    op "gcp-toy-dns-name-servers" (deps [dnsZoneNode spec zone]) $ \actions ->
         actions
             { help = Text.unwords ["prints the name servers assigned to", CloudDns.fqdn zone.zoneDnsName]
             , ref = mkRef "gcp-toy-dns-name-servers" (spec.project, zone.zoneName)
@@ -696,10 +696,11 @@ dnsNameServers spec zone =
                                 (Text.unwords (["name servers for", CloudDns.fqdn zone.zoneDnsName <> ":"] <> ns))
                             )
             }
-  where
-    zoneNode =
-        CloudDns.managedZone reportPrint Core.gcloud zone
-            `inject` api spec CloudDns.dnsApi
+
+dnsZoneNode :: Spec -> CloudDns.ManagedZone -> Op
+dnsZoneNode spec zone =
+    CloudDns.managedZone reportPrint Core.gcloud zone
+        `inject` api spec CloudDns.dnsApi
 
 tier1 :: Spec -> [Op]
 tier1 spec =
@@ -1003,8 +1004,53 @@ and that changes what has to be true before one can be created:
 -}
 tier3 :: Spec -> [Op]
 tier3 spec = case (spec.vmConfig, spec.lbConfig) of
-    (Just vm, Just lb) -> [balancer spec vm lb]
+    (Just vm, Just lb) ->
+        balancer spec vm lb
+            : [balancerRecord spec vm lb zone | zone <- maybe [] (pure . dnsZoneOf spec) spec.dnsZone]
     _ -> []
+
+{- | With @--dns-zone@: @lb.DNS_NAME@, an @A@ record at the balancer's
+address.
+
+GCP picks that address when the forwarding rule is created, so the record's
+data is resolved at @up@ ('CloudDns.resolvedRecordSet' over
+'LoadBalancing.readAddress') rather than declared -- which is what spares
+this a pass of its own, where the VM's address needs one because a /seed/
+has to carry it. The zone goes underneath as well as the balancer: Cloud DNS
+refuses to delete a zone that still holds the record.
+-}
+balancerRecord :: Spec -> VmConfig -> LbConfig -> CloudDns.ManagedZone -> Op
+balancerRecord spec vm lb zone =
+    CloudDns.resolvedRecordSet
+        reportPrint
+        Core.gcloud
+        (CloudDns.RecordSet zone (balancerRecordName zone) CloudDns.A 300 [])
+        (fmap pure <$> LoadBalancing.readAddress (albSpec spec vm lb))
+        `inject` dnsZoneNode spec zone
+        `inject` balancer spec vm lb
+
+-- | The name the toy points at its balancer.
+balancerRecordName :: CloudDns.ManagedZone -> Text
+balancerRecordName zone = "lb." <> CloudDns.fqdn zone.zoneDnsName
+
+albSpec :: Spec -> VmConfig -> LbConfig -> LoadBalancing.ApplicationLoadBalancer
+albSpec spec vm lb =
+    LoadBalancing.ApplicationLoadBalancer
+        { LoadBalancing.albName = spec.prefix <> "-lb"
+        , LoadBalancing.albProject = projectOf spec
+        , LoadBalancing.albRegion = regionOf spec
+        , -- omitted rather than "default": the forwarding rule falls back
+          -- to the default network, which is the one everything else here
+          -- is on, and naming it is one more thing to get wrong.
+          LoadBalancing.albNetwork = Nothing
+        , LoadBalancing.albBackends =
+            [ LoadBalancing.InstanceGroupBackend
+                (instanceGroupSpec spec vm).groupName
+                (LoadBalancing.InstanceGroupZone vm.vmZone)
+                [lb.lbPort]
+            ]
+        , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck (spec.prefix <> "-hc") lb.lbPort)
+        }
 
 balancer :: Spec -> VmConfig -> LbConfig -> Op
 balancer spec vm lb =
@@ -1016,23 +1062,7 @@ balancer spec vm lb =
     computeApi = api spec "compute.googleapis.com"
 
     alb :: LoadBalancing.ApplicationLoadBalancer
-    alb =
-        LoadBalancing.ApplicationLoadBalancer
-            { LoadBalancing.albName = spec.prefix <> "-lb"
-            , LoadBalancing.albProject = projectOf spec
-            , LoadBalancing.albRegion = regionOf spec
-            , -- omitted rather than "default": the forwarding rule falls back
-              -- to the default network, which is the one everything else here
-              -- is on, and naming it is one more thing to get wrong.
-              LoadBalancing.albNetwork = Nothing
-            , LoadBalancing.albBackends =
-                [ LoadBalancing.InstanceGroupBackend
-                    (instanceGroupSpec spec vm).groupName
-                    (LoadBalancing.InstanceGroupZone vm.vmZone)
-                    [lb.lbPort]
-                ]
-            , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck (spec.prefix <> "-hc") lb.lbPort)
-            }
+    alb = albSpec spec vm lb
 
     proxySubnet :: Op
     proxySubnet =

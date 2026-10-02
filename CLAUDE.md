@@ -940,7 +940,22 @@ apex `NS`/`SOA`, so record nodes must depend on the zone. `readNameServers` is t
 `Compute.readAddress`) of the name servers Cloud DNS assigned, which cannot be known at declaration: what goes to the
 registrar, and what a delegation probe compares with. The GCP toy declares it under `--dns-zone DNS_NAME` (tier 0) with
 a node that prints them. Layer 0 only (`Test/GcpSpec.hs`, on a description written from the API's resource shape, not
-captured); never run against a real project. Record sets are not done.
+captured); never run against a real project.
+
+`Gcp.CloudDns.recordSet` is a record set in such a zone (`A`, `AAAA`, `CNAME`, `TXT`; `gcloud dns record-sets`), keyed
+`"gcp-dns-record" (project, zone name, name, type)` with TTL and data in `notes`. Its `check` reads `describe --format
+json` and compares TTL and data as a set (`interpretRecordDescribe`); `up` describes, then `create`s or `update`s
+(`recordUpCommand`), since there is no "set" verb. Load-bearing: the name and type are the effect site, so unlike the
+zone a record made by hand is **taken over** by `up` and deleted by `down` whatever it holds; the node has no
+dependency of its own, so the caller injects the zone (it may also be one salmon does not manage); a `TXT` is declared
+unquoted and quoted/escaped/split at 255 by `txtRdata`, compared through `txtContent`; `--rrdatas` switches to gcloud's
+`^DELIM^` form when a datum holds a comma (`renderRrdatas`); `recordSetProblems` (no data, a `CNAME` with several
+targets or at the apex, a name outside the zone) is a `Failure` for `check` and a throw for `up` before anything is
+sent. `resolvedRecordSet` is the same node with data read at `check`/`up` time (`IO (Maybe [Text])`, `Nothing` being
+`Unknown`/a throw), for an address GCP picks: `Gcp.LoadBalancing.readAddress` is that read for a balancer's forwarding
+rule, and the GCP toy uses both to point `lb.DNS_NAME` at its balancer (`--dns-zone` at tier 3). Layer 0 only: no
+record-set command has been run against a real project, so the `describe` JSON shape, the `^DELIM^` escaping, how Cloud
+DNS spells back a `TXT` or an `AAAA`, and the toy's tier 3 record are unverified.
 
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
