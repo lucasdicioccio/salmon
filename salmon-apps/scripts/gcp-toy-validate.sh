@@ -317,6 +317,66 @@ if [[ $TIER -ge 3 ]]; then
                 VERDICT+=("dns: lb.$DNS_ZONE DOES NOT POINT AT THE BALANCER (holds: ${recorded:-nothing})")
             fi
         fi
+        # With --lb-https: the pieces are read back one by one, because the
+        # last of them -- a certificate Google has actually issued -- only
+        # happens when DNS_NAME is delegated to this zone's name servers, and
+        # a run without that should still say which of the rest worked.
+        if grep -q '"lbHttps":true' "$DIRECTIVE"; then
+            echo "== verify HTTPS, the rules and the second backend service"
+            HOST="lb.$DNS_ZONE"
+            CERT="$PREFIX-lb-cert"
+            AUTHZ="$CERT-${HOST//./-}"
+            https_ip=$(gcloud compute forwarding-rules describe "$PREFIX-lb-https-fw" --region "$REGION" --project "$PROJECT" --format='value(IPAddress)' 2>/dev/null || true)
+            if [[ -n $https_ip && $https_ip == "$LB_IP" ]]; then
+                VERDICT+=("https: :443 and :80 share the reserved address ($LB_IP)")
+            else
+                VERDICT+=("https: FORWARDING RULES DISAGREE (:80 $LB_IP, :443 ${https_ip:-nothing})")
+            fi
+            map=$(gcloud compute url-maps describe "$PREFIX-lb-url-map" --region "$REGION" --project "$PROJECT" --format=json 2>/dev/null || true)
+            if [[ $map == *"\"$HOST\""* && $map == *"/slow/*"* && $map == *"$PREFIX-lb-slow-backend"* ]]; then
+                VERDICT+=("rules: the URL map routes $HOST, and /slow/* to the second backend service")
+            else
+                VERDICT+=("rules: THE URL MAP LACKS THE HOST OR PATH RULE (see: gcloud compute url-maps describe $PREFIX-lb-url-map)")
+            fi
+            timeout=$(gcloud compute backend-services describe "$PREFIX-lb-slow-backend" --region "$REGION" --project "$PROJECT" --format='value(timeoutSec)' 2>/dev/null || true)
+            if [[ $timeout == 120 ]]; then
+                VERDICT+=("timeout: the second backend service waits 120s")
+            else
+                VERDICT+=("timeout: NOT SET (the second backend service reports: ${timeout:-nothing})")
+            fi
+            authz_name=$(gcloud certificate-manager dns-authorizations describe "$AUTHZ" --location "$REGION" --project "$PROJECT" --format='value(dnsResourceRecord.name)' 2>/dev/null || true)
+            authz_data=$(gcloud certificate-manager dns-authorizations describe "$AUTHZ" --location "$REGION" --project "$PROJECT" --format='value(dnsResourceRecord.data)' 2>/dev/null || true)
+            published=$(gcloud dns record-sets describe "$authz_name" --zone "$PREFIX-zone" --type CNAME --project "$PROJECT" --format='value(rrdatas)' 2>/dev/null || true)
+            echo "   authorization $AUTHZ wants: ${authz_name:-?} CNAME ${authz_data:-?}"
+            if [[ -n $authz_data && $published == "$authz_data" ]]; then
+                VERDICT+=("authorization: the zone holds the CNAME Certificate Manager asked for")
+            else
+                VERDICT+=("authorization: THE ZONE DOES NOT HOLD THE CNAME (holds: ${published:-nothing})")
+            fi
+            # Issuance takes minutes once the CNAME resolves publicly, and
+            # never happens if the domain is not delegated: a bounded wait.
+            state=""
+            for attempt in $(seq 1 "${CERT_WAIT_ATTEMPTS:-30}"); do
+                state=$(gcloud certificate-manager certificates describe "$CERT" --location "$REGION" --project "$PROJECT" --format='value(managed.state)' 2>/dev/null || true)
+                [[ $state == ACTIVE || $state == FAILED ]] && break
+                [[ $attempt == 1 || $((attempt % 6)) == 0 ]] && echo "   certificate $CERT: ${state:-not found} (attempt $attempt)"
+                sleep 20
+            done
+            if [[ $state == ACTIVE ]]; then
+                VERDICT+=("certificate: $CERT is ACTIVE")
+                # --resolve, not the public name: the A record may not have
+                # propagated, and what is under test is the balancer. No -k:
+                # the certificate has to be valid for the name.
+                body=$(curl -sS --max-time 10 --resolve "$HOST:443:$LB_IP" "https://$HOST/" 2>&1 || true)
+                if [[ $body == *"$PROJECT"* ]]; then
+                    VERDICT+=("https: the balancer served the VM's page over HTTPS, certificate verified for $HOST")
+                else
+                    VERDICT+=("https: NOT SERVING (last response: ${body:0:120})")
+                fi
+            else
+                VERDICT+=("certificate: $CERT IS ${state:-MISSING}, not ACTIVE -- is $DNS_ZONE delegated to the zone's name servers? HTTPS was not probed")
+            fi
+        fi
     fi
 fi
 
@@ -361,6 +421,13 @@ else
         fi
         if [[ $TIER -ge 3 ]]; then
             gone gcloud compute forwarding-rules describe "$PREFIX-lb-fw" --region "$REGION" --project "$PROJECT" || leftovers=1
+            if grep -q '"lbHttps":true' "$DIRECTIVE"; then
+                gone gcloud compute forwarding-rules describe "$PREFIX-lb-https-fw" --region "$REGION" --project "$PROJECT" || leftovers=1
+                gone gcloud compute target-https-proxies describe "$PREFIX-lb-https-proxy" --region "$REGION" --project "$PROJECT" || leftovers=1
+                gone gcloud compute addresses describe "$PREFIX-lb-ip" --region "$REGION" --project "$PROJECT" || leftovers=1
+                gone gcloud compute backend-services describe "$PREFIX-lb-slow-backend" --region "$REGION" --project "$PROJECT" || leftovers=1
+                gone gcloud certificate-manager certificates describe "$PREFIX-lb-cert" --location "$REGION" --project "$PROJECT" || leftovers=1
+            fi
             gone gcloud compute url-maps describe "$PREFIX-lb-url-map" --region "$REGION" --project "$PROJECT" || leftovers=1
             gone gcloud compute backend-services describe "$PREFIX-lb-backend" --region "$REGION" --project "$PROJECT" || leftovers=1
             gone gcloud compute instance-groups unmanaged describe "$PREFIX-ig" --zone "$(field vmZone)" --project "$PROJECT" || leftovers=1

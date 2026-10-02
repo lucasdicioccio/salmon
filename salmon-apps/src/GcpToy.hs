@@ -69,6 +69,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.Map as Map
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAsciiLower, isDigit)
+import Data.Functor.Identity (runIdentity)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -81,6 +82,7 @@ import System.FilePath (takeDirectory)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
+import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -110,7 +112,7 @@ import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (reportPrint)
+import Salmon.Reporter (reportPrint, silent)
 
 import qualified SreBox.Gcp.CloudRunAlerts as CloudRunAlerts
 import qualified SreBox.Gcp.CloudRunDeploy as CloudRunDeploy
@@ -152,6 +154,7 @@ data Seed = Seed
     , seedPeerInternalIp :: Maybe Text
     , seedDnsZone :: Maybe Text
     , seedAccount :: Maybe Text
+    , seedLbHttps :: Bool
     }
     deriving (Eq, Show)
 
@@ -191,6 +194,7 @@ instance ParseRecord Seed where
                 <*> optional (strOption (long "peer-internal-ip" <> metavar "IP" <> Opt.help "tier 2: also boot a peer with no external address, pinned to this internal one, which the VM then fetches a page from; needs --vm-internal-ip"))
                 <*> optional (strOption (long "dns-zone" <> metavar "DNS_NAME" <> Opt.help "tier 0: also create a public Cloud DNS zone for this domain and print the name servers it was assigned (cents per month); at tier 3, also point lb.DNS_NAME at the balancer"))
                 <*> optional (strOption (long "account" <> metavar "EMAIL" <> Opt.help "the account gcloud must be acting as; any other active account is refused before anything is created (Gcp.Core.declaredAccount)"))
+                <*> switch (long "lb-https" <> Opt.help "tier 3, with --dns-zone: also serve lb.DNS_NAME over HTTPS with a Google-managed certificate, through a host rule, a path rule and a second backend service with a longer timeout")
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -265,6 +269,8 @@ on, and there is exactly one place to say it.
 data LbConfig = LbConfig
     { lbProxyRange :: Text
     , lbPort :: Int
+    , lbHttps :: Maybe Bool
+    -- ^ 'Maybe' so a directive written before the field existed still reads
     }
     deriving (Eq, Show, Generic)
 
@@ -367,10 +373,12 @@ configure = Configure $ \seed -> do
         _ -> fail "--vm-internal-ip and --peer-internal-ip go together: give both or neither"
     when (maybe False (not . validDnsName) seed.seedDnsZone) $
         fail "--dns-zone must be a domain name: dot-separated labels of [a-z0-9-], at least two"
+    when (seed.seedLbHttps && (seed.seedTier < 3 || seed.seedDnsZone == Nothing)) $
+        fail "--lb-https needs --tier 3 and --dns-zone: the certificate is for lb.DNS_NAME and is authorized through that zone"
     let lb =
             if seed.seedTier < 3
                 then Nothing
-                else Just (LbConfig seed.seedLbProxyRange seed.seedLbPort)
+                else Just (LbConfig seed.seedLbProxyRange seed.seedLbPort (if seed.seedLbHttps then Just True else Nothing))
     pure $
         Spec
             { role = Control
@@ -1014,8 +1022,69 @@ tier3 :: Spec -> [Op]
 tier3 spec = case (spec.vmConfig, spec.lbConfig) of
     (Just vm, Just lb) ->
         balancer spec vm lb
-            : [balancerRecord spec vm lb zone | zone <- maybe [] (pure . dnsZoneOf spec) spec.dnsZone]
+            : concat
+                [ balancerRecord spec vm lb zone
+                    : [ certificateAuthorizationRecord spec vm lb zone authz
+                      | (_domain, authz) <- LoadBalancing.dnsAuthorizations (albSpec spec vm lb)
+                      ]
+                | zone <- maybe [] (pure . dnsZoneOf spec) spec.dnsZone
+                ]
     _ -> []
+
+{- | With @--lb-https@: the @CNAME@ Certificate Manager wants in the zone
+before it issues the balancer's certificate.
+
+GCP picks the record's /name/ as well as its data (a per-project
+authorization is @_acme-challenge_\<hash\>.lb.DNS_NAME@), so this cannot be
+a 'CloudDns.resolvedRecordSet', whose identity is the name. It is a node
+that reads the authorization once the balancer's @up@ has made it and runs
+'CloudDns.recordSet' for what it read as a nested walk -- checking the
+returned 'Bool', since nothing else tells this pass the nested one failed.
+No @check@: the nested node has one, so a second pass costs a @describe@.
+
+On the way down the authorization is still there (this node goes before the
+balancer does), so the same read finds the record to delete; if it is
+already gone there is no name left to delete by, and nothing is done.
+-}
+certificateAuthorizationRecord :: Spec -> VmConfig -> LbConfig -> CloudDns.ManagedZone -> Text -> Op
+certificateAuthorizationRecord spec vm lb zone authz =
+    op "gcp-toy-cert-authorization-record" (deps [dnsZoneNode spec zone, balancer spec vm lb]) $ \actions ->
+        actions
+            { help = Text.unwords ["publishes the DNS record of certificate authorization", authz]
+            , ref = mkRef "gcp-toy-cert-authorization-record" (spec.project, zone.zoneName, authz)
+            , up = do
+                found <- readRecord
+                case found of
+                    Nothing -> throwIO (userError ("no DNS record could be read for authorization " <> Text.unpack authz))
+                    Just rs -> nested "up" (UpDown.upTree silent (pure . runIdentity) (CloudDns.recordSet reportPrint Core.gcloud rs))
+            , down = do
+                found <- readRecord
+                case found of
+                    Nothing -> pure ()
+                    Just rs -> nested "down" (UpDown.downTree silent (pure . runIdentity) (CloudDns.recordSet reportPrint Core.gcloud rs))
+            }
+  where
+    readRecord :: IO (Maybe CloudDns.RecordSet)
+    readRecord = (>>= toRecordSet) <$> LoadBalancing.readDnsAuthorizationRecord (albSpec spec vm lb) authz
+
+    -- Certificate Manager only ever asks for a CNAME; anything else is
+    -- treated as unreadable rather than published as something it is not.
+    toRecordSet :: LoadBalancing.DnsAuthorizationRecord -> Maybe CloudDns.RecordSet
+    toRecordSet found
+        | found.authorizationRecordType == "CNAME" =
+            Just (CloudDns.RecordSet zone found.authorizationRecordName CloudDns.CNAME 300 [found.authorizationRecordData])
+        | otherwise = Nothing
+
+    nested :: String -> IO Bool -> IO ()
+    nested what act = do
+        ok <- act
+        when (not ok) $ throwIO (userError ("authorization record " <> what <> " failed for " <> Text.unpack authz))
+
+-- | The name the toy serves over HTTPS, without the trailing dot.
+httpsHost :: Spec -> LbConfig -> Maybe Text
+httpsHost spec lb = case (lb.lbHttps, spec.dnsZone) of
+    (Just True, Just dnsName) -> Just ("lb." <> dnsName)
+    _ -> Nothing
 
 {- | With @--dns-zone@: @lb.DNS_NAME@, an @A@ record at the balancer's
 address.
@@ -1051,21 +1120,49 @@ albSpec spec vm lb =
           -- to the default network, which is the one everything else here
           -- is on, and naming it is one more thing to get wrong.
           LoadBalancing.albNetwork = Nothing
-        , LoadBalancing.albBackends =
-            [ LoadBalancing.InstanceGroupBackend
-                (instanceGroupSpec spec vm).groupName
-                (LoadBalancing.InstanceGroupZone vm.vmZone)
-                [lb.lbPort]
+        , LoadBalancing.albBackends = [group]
+        , LoadBalancing.albHealthCheck = Just healthCheck
+        , LoadBalancing.albTimeoutSec = Nothing
+        , -- Everything below is --lb-https only, and is there to put each
+          -- thing the balancer can express through a real project once: a
+          -- second backend service (the same group, a longer timeout), a
+          -- host rule, a path rule to that service, a managed certificate.
+          -- The VM serves one page, so /slow/* answers 404 through the
+          -- balancer -- the rule is to be read back from the URL map.
+          LoadBalancing.albServices =
+            [ LoadBalancing.BackendService "slow" [group] (Just healthCheck) (Just 120)
+            | _ <- hosts
             ]
-        , LoadBalancing.albHealthCheck = Just (LoadBalancing.HealthCheck (spec.prefix <> "-hc") lb.lbPort)
+        , LoadBalancing.albHostRules =
+            [ LoadBalancing.HostRule
+                [host]
+                LoadBalancing.DefaultService
+                [LoadBalancing.PathRule ["/slow/*"] (LoadBalancing.NamedService "slow")]
+            | host <- hosts
+            ]
+        , LoadBalancing.albCertificates =
+            [ LoadBalancing.ManagedCertificate (spec.prefix <> "-lb-cert") [host]
+            | host <- hosts
+            ]
         }
+  where
+    hosts = maybe [] pure (httpsHost spec lb)
+    healthCheck = LoadBalancing.HealthCheck (spec.prefix <> "-hc") lb.lbPort
+    group =
+        LoadBalancing.InstanceGroupBackend
+            (instanceGroupSpec spec vm).groupName
+            (LoadBalancing.InstanceGroupZone vm.vmZone)
+            [lb.lbPort]
 
 balancer :: Spec -> VmConfig -> LbConfig -> Op
 balancer spec vm lb =
     foldl
         inject
         (LoadBalancing.applicationLoadBalancer reportPrint Core.gcloud alb)
-        ([proxySubnet, membership, backendFirewall] <> served)
+        ( [proxySubnet, membership, backendFirewall]
+            <> [api spec LoadBalancing.certificateManagerApi | _ <- maybe [] pure (httpsHost spec lb)]
+            <> served
+        )
   where
     computeApi = api spec "compute.googleapis.com"
 

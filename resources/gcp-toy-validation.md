@@ -174,6 +174,33 @@ nothing resolves through a zone the registrar does not delegate to. `down`
 removes the record before the zone, which Cloud DNS would otherwise refuse
 to delete.
 
+With `--lb-https` as well (it needs `--dns-zone`), the same balancer also
+serves `lb.DNS_NAME` over HTTPS, and the tier puts everything else
+`Gcp.LoadBalancing` can express through the project once:
+
+| Declared | Resource |
+|---|---|
+| `ManagedCertificate` | a regional Certificate Manager certificate `<prefix>-lb-cert` for `lb.DNS_NAME`, and one DNS authorization `<prefix>-lb-cert-lb-<DNS_NAME, dots as dashes>` |
+| (the certificate list being non-empty) | a reserved address `<prefix>-lb-ip`, a target HTTPS proxy `<prefix>-lb-https-proxy`, a second forwarding rule `<prefix>-lb-https-fw` on `:443` — both rules on that one address |
+| `BackendService "slow"` | a second backend service `<prefix>-lb-slow-backend` over the same instance group, with a 120-second timeout |
+| `HostRule` / `PathRule` | the URL map imported whole: `lb.DNS_NAME` to the default service, `/slow/*` to the second one |
+| a toy node | the `CNAME` the authorization asks for, published in the zone |
+
+A *regional* balancer cannot use the classic Google-managed
+`compute ssl-certificates` (those are global only, and are the ones that
+provision once DNS points at the balancer). What it takes is a regional
+Certificate Manager certificate issued against a **DNS authorization**: a
+`CNAME` whose name and target GCP picks, which the zone has to carry. So the
+order is the reverse of the classic one — the certificate can be issued
+before anything points at the balancer, but **only if `DNS_NAME` is really
+delegated to the zone's name servers** (the ones tier 0 prints). Without the
+delegation everything is created, the certificate stays `PROVISIONING`, the
+balancer's check says `Unknown`, and `:443` does not complete a handshake.
+
+The VM serves one page, so `/slow/*` answers `404` through the balancer; the
+path rule and the timeout are read back from the URL map and the backend
+service rather than observed in a response.
+
 Three of those exist only because a regional external ALB is an Envoy fleet
 rather than a Google frontend, and that is what the tier is really testing:
 the proxies run *inside* the VPC, in a proxy-only subnet that must already
@@ -264,7 +291,75 @@ Then, once tier 0 is clean, the same with `--tier 1` (needs `podman`), and/or
 `--vm-image-family`/`--vm-image-project` (Ubuntu 24.04 LTS), `--vm-user`
 (`salmon`) and `--ssh-source-range` (`0.0.0.0/0` — narrow it to your own
 address if the sandbox is not disposable). Tier 3 adds `--lb-proxy-range`
-(`192.168.100.0/24`) and `--lb-port` (`8080`).
+(`192.168.100.0/24`) and `--lb-port` (`8080`), and with `--dns-zone` takes
+`--lb-https`.
+
+### The HTTPS run
+
+Nothing below has been run against a real project yet; this is the run that
+would close the gap. It needs a domain you control, and the full verdict
+needs that domain (or a subdomain of it) delegated to the zone the toy
+creates, which takes two steps because the name servers are only known once
+the zone exists.
+
+```sh
+# 1. tier 0 with the zone, kept: prints the name servers Cloud DNS assigned
+salmon-apps/scripts/gcp-toy-validate.sh --keep -- \
+  --project YOUR_TOY_PROJECT \
+  --organization YOUR_ORG_ID \
+  --billing-account YOUR_BILLING_ACCOUNT \
+  --dns-zone toy.example.org \
+  --tier 0
+
+# 2. at the registrar (or in the parent zone): NS records for
+#    toy.example.org at those four name servers. Then wait for
+dig +short NS toy.example.org        # to answer with them
+
+# 3. the same project, tier 3 with HTTPS (the script drives both passes of a
+#    tier >= 2 itself: reserve the VM address, then re-issue with --vm-ip)
+salmon-apps/scripts/gcp-toy-validate.sh -- \
+  --project YOUR_TOY_PROJECT \
+  --existing-project \
+  --dns-zone toy.example.org \
+  --tier 3 --lb-https
+```
+
+Adjust step 3's project flags to whatever step 1 used; the point is that the
+zone, and so its name servers, must be the same one. `CERT_WAIT_ATTEMPTS`
+(default 30, twenty seconds apart) bounds how long the script waits for the
+certificate.
+
+A green run prints, beside the tier-3 lines:
+
+- `https: :443 and :80 share the reserved address`
+- `rules: the URL map routes lb.toy.example.org, and /slow/* to the second backend service`
+- `timeout: the second backend service waits 120s`
+- `authorization: the zone holds the CNAME Certificate Manager asked for`
+- `certificate: <prefix>-lb-cert is ACTIVE`
+- `https: the balancer served the VM's page over HTTPS, certificate verified for lb.toy.example.org`
+
+Without the delegation the first four can still be green; the certificate
+line then says so and HTTPS is not probed. To check by hand what the script
+checks:
+
+```sh
+gcloud compute url-maps describe <prefix>-lb-url-map --region REGION --project P
+gcloud compute backend-services describe <prefix>-lb-slow-backend --region REGION --project P --format='value(timeoutSec)'
+gcloud certificate-manager dns-authorizations describe <prefix>-lb-cert-lb-toy-example-org --location REGION --project P
+gcloud certificate-manager certificates describe <prefix>-lb-cert --location REGION --project P --format='value(managed.state)'
+curl --resolve lb.toy.example.org:443:LB_IP https://lb.toy.example.org/
+```
+
+A second `run up` on the directive should skip the balancer (its check is
+`Success` once the backends are healthy and the certificate is `ACTIVE`),
+though by design it would re-run two "set" calls if it did not: the URL map
+import and the timeout update.
+
+**Turning HTTPS on for a balancer that already exists** leaves its `:80`
+rule on the ephemeral address it was created with — a forwarding rule's
+address cannot be changed, and the script only creates what is missing. The
+`:443` rule gets the reserved one, and `readAddress` reads that. Tear the
+balancer down first if the two must agree.
 
 Script options, before the `--`: `-y` skips the confirmation prompt, `--keep`
 skips teardown (it then prints the `run down` command to finish up later).
@@ -424,10 +519,32 @@ leftover.
   never been run. Mixing the two in one balancer is not an option — a backend
   service holds one kind of backend — so exercising it means a second
   balancer.
-- **HTTPS, and anything past the default route.** The URL map has one default
-  service and the forwarding rule is plain `:80`; managed certificates, host
-  and path rules, and the `--network`-carrying form of the forwarding rule are
-  all rendered-but-unrun.
+- **HTTPS, host and path rules, several backend services, timeouts: declared
+  by `--lb-https`, never run.** `Gcp.LoadBalancing` renders all of it and the
+  toy declares it, but no `certificate-manager` command, no `url-maps import`,
+  no `target-https-proxies` call and no `--address`-carrying forwarding rule
+  has met a real project. The Layer 0 tests run the scripts against a
+  stand-in `gcloud` written from the same assumptions, so they show the
+  scripts' own logic (guards, order, what a second run does) and nothing
+  about the API. Specifically unverified: that a regional DNS authorization
+  takes `--type=PER_PROJECT_RECORD`; that `target-https-proxies create
+  --region` accepts `--certificate-manager-certificates` by bare name; that
+  `url-maps import` reads JSON on stdin and replaces an existing map under
+  `--quiet`; how `value(hostRules[].hosts)`, `value(timeoutSec)`,
+  `value(managed.state)` and the three-field `dnsResourceRecord` read print;
+  that a reserved regional address in the default tier is accepted by an
+  `EXTERNAL_MANAGED` forwarding rule; and that one instance group can back
+  two backend services of one balancer. "The HTTPS run" above is the run
+  that settles these.
+- **The balancer's check does not see path rules**, nor which service a host
+  is sent to: only that each declared host is in the map, and each declared
+  timeout on its service. A path rule changed behind salmon is put back by
+  the next `up` that runs for another reason, not noticed.
+- **No HTTP-to-HTTPS redirect, no client-facing TLS policy, no self-managed
+  certificate upload.** `:80` serves the same map as `:443`;
+  `ComputeCertificate` names a regional certificate somebody else made.
+- **The `--network`-carrying form of the forwarding rule** is still
+  rendered-but-unrun.
 - **Two credentials; only the one that acts is pinned.** `gcp-adc` validates
   ADC, which no node here uses: every `gcloud` call and
   `Core.printAccessToken` (the registry login password) act as the active
