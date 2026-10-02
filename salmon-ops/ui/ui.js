@@ -459,8 +459,8 @@ function pulse(n) {
 
 const BOX_W = 176;
 const BOX_H = 66;
-const GAP_X = 28;
-const GAP_Y = 64;
+const GAP_X = 24;
+const GAP_Y = 72;
 const PAD = 12;
 
 function layout() {
@@ -512,16 +512,52 @@ function layout() {
     place();
   }
 
-  // coordinates: each layer a row, centred on the widest one
-  const widest = Math.max(...layers.map((r) => r.length));
-  const width = widest * BOX_W + (widest - 1) * GAP_X + 2 * PAD;
+  // coordinates: rows are not centred on the widest one. Each node starts
+  // packed to the left, then alternating sweeps pull it towards the mean x
+  // of its neighbours (dependencies going down, dependants going up), each
+  // row being re-packed by isotonic regression (pool-adjacent-violators) so
+  // order is kept, boxes never overlap, and the squared distance to the
+  // targets is as small as the separation allows. Parents end up above
+  // their children and chains run straight; narrow layers hug their
+  // neighbours instead of floating in the middle of the widest row.
+  const STEP = BOX_W + GAP_X;
+  const xs = new Map();
+  layers.forEach((row) => row.forEach((id, i) => xs.set(id, i * STEP)));
+  const settle = (row, neigh) => {
+    // y_i = x_i - i*STEP must be non-decreasing; targets shifted likewise
+    const blocks = [];
+    row.forEach((id, i) => {
+      const ns = neigh(id).map((d) => xs.get(d)).filter((x) => x !== undefined);
+      const t = (ns.length ? ns.reduce((p, q) => p + q, 0) / ns.length : xs.get(id)) - i * STEP;
+      blocks.push({ sum: t, n: 1 });
+      while (blocks.length > 1) {
+        const last = blocks[blocks.length - 1];
+        const prev = blocks[blocks.length - 2];
+        if (prev.sum / prev.n <= last.sum / last.n) break;
+        blocks.pop();
+        prev.sum += last.sum;
+        prev.n += last.n;
+      }
+    });
+    let i = 0;
+    for (const bl of blocks) {
+      for (let k = 0; k < bl.n; k++, i++) xs.set(row[i], bl.sum / bl.n + i * STEP);
+    }
+  };
+  for (let sweep = 0; sweep < 6; sweep++) {
+    for (let l = 1; l < layers.length; l++) settle(layers[l], depsOf);
+    for (let l = layers.length - 2; l >= 0; l--) settle(layers[l], dependantsOf);
+  }
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (const x of xs.values()) {
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+  }
+  const width = maxX - minX + BOX_W + 2 * PAD;
   const coords = new Map();
   layers.forEach((row, l) => {
-    const rowWidth = row.length * BOX_W + (row.length - 1) * GAP_X;
-    const x0 = PAD + (width - 2 * PAD - rowWidth) / 2;
-    row.forEach((id, i) => {
-      coords.set(id, { x: x0 + i * (BOX_W + GAP_X), y: PAD + l * (BOX_H + GAP_Y) });
-    });
+    row.forEach((id) => coords.set(id, { x: PAD + xs.get(id) - minX, y: PAD + l * (BOX_H + GAP_Y) }));
   });
   const height = layers.length * BOX_H + (layers.length - 1) * GAP_Y + 2 * PAD;
   return { coords, width, height };
