@@ -915,6 +915,14 @@ teardown of the machine the file is on. `salmon-gcp-toy` tier 2 uses the upload 
 `Test/SecretDeliverySpec.hs` runs the remote scripts under a local `sh`; neither transport has been run against a
 real machine.
 
+`Podman.buildImage` builds with the Containerfile's own directory as context (the build runs *in* that directory, no
+context argument) and no `--target`; `Podman.buildImageWith` takes a `BuildOptions` for the two cases that does not
+cover: `buildContext` (the context is passed as the positional argument, `-f` gets the Containerfile's path as given,
+and the working directory is left alone, so a relative path is relative to the salmon process for both) and
+`buildTarget` (`--target`, one stage of a multi-stage file; several images from one file are several nodes). The `ref`
+stays the tag alone, the options go in `notes` only when they are not the default, so a plain `buildImage` node is
+described as before. `Test/PodmanCommandSpec.hs` holds the argv, `Test/PodmanSpec.hs` a real multi-stage build.
+
 `Nodes/Podman/Quadlet.hs` (`quadletContainer`) is a container as a systemd service: a `NAME.container` file in
 `/etc/containers/systemd` that podman's generator turns into `NAME.service` at every `daemon-reload`. It is
 `systemdService` for that file and reuses its mechanism: written through `filecontents`, checked with the same
