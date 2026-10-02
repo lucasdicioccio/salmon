@@ -507,6 +507,25 @@ lbTests =
         assertEqual "" Success (LoadBalancing.interpretLbDescribe ExitSuccess)
     , testCase "describe failing means the load balancer is absent" $
         assertBool "" (isFailure (LoadBalancing.interpretLbDescribe (ExitFailure 1)))
+    , testCase "a complete, healthy balancer is Success" $
+        assertEqual "" Success (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nHEALTH backend HEALTHY\n")
+    , testCase "no health lines (Cloud Run NEG) and nothing missing is Success" $
+        assertEqual "" Success (LoadBalancing.interpretLbCheck ExitSuccess "")
+    , testCase "a missing sub-resource is a Failure naming it" $ do
+        let v = LoadBalancing.interpretLbCheck ExitSuccess "MISSING url-maps x-url-map\nHEALTH backend HEALTHY\n"
+        assertBool "" (isFailure v)
+        case v of
+            Failure t -> assertBool "names it" ("url-maps x-url-map" `isInfixOf` Text.unpack t)
+            _ -> pure ()
+    , testCase "unhealthy backends (the post-up window) are Unknown, not Failure" $
+        assertEqual "" Unknown (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nHEALTH backend UNHEALTHY\n")
+    , testCase "missing outranks unhealthy" $
+        assertBool "" (isFailure (LoadBalancing.interpretLbCheck ExitSuccess "MISSING backend neg x\nHEALTH backend UNHEALTHY\n"))
+    , testCase "a broken check script is a Failure" $
+        assertBool "" (isFailure (LoadBalancing.interpretLbCheck (ExitFailure 2) ""))
+    , testCase "check script describes every sub-resource and asks for health" $ do
+        let sc = Text.unpack (LoadBalancing.renderLbCheckScript alb)
+        mapM_ (\w -> assertBool w (w `isInfixOf` sc)) ["url-maps describe", "target-http-proxies describe", "forwarding-rules describe", "get-health", "health-checks describe"]
     , testCase "shellQuote neutralizes a value that would otherwise break out of quoting" $ do
         assertEqual "no special characters" "'tenant-1'" (LoadBalancing.shellQuote "tenant-1")
         assertEqual
@@ -536,7 +555,7 @@ lbTests =
         let regionalScript = createScript alb{LoadBalancing.albBackends = [LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupRegion "europe-west1") [8080]]}
         assertBool regionalScript ("--instance-group-region='europe-west1'" `isInfixOf` regionalScript)
     , testCase "rendered scripts parse as bash" $ do
-        let scripts = [s' | cmd <- [LoadBalancing.LbCreate alb, LoadBalancing.LbDelete alb], (_ : s' : _) <- [processArgs (prepare LoadBalancing.loadBalancingCommand cmd)]]
+        let scripts = [s' | cmd <- [LoadBalancing.LbCreate alb, LoadBalancing.LbCheck alb, LoadBalancing.LbDelete alb], (_ : s' : _) <- [processArgs (prepare LoadBalancing.loadBalancingCommand cmd)]]
         mapM_
             ( \script -> do
                 (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", script] ""

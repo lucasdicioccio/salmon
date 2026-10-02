@@ -8,6 +8,8 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     ApplicationLoadBalancer (..),
     applicationLoadBalancer,
     interpretLbDescribe,
+    interpretLbCheck,
+    renderLbCheckScript,
     shellQuote,
     Report (..),
     LoadBalancingCommand (..),
@@ -16,6 +18,8 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
 
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextErr
 import GHC.IO.Exception (ExitCode (..))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (proc)
@@ -92,24 +96,46 @@ applicationLoadBalancer r gcloudTrack alb =
 
     checkLb :: IO CheckResult
     checkLb = do
-        (code, _out, _err) <-
+        (code, out, _err) <-
             readCreateProcessWithExitCode
-                (prepare loadBalancingCommand (LbDescribe alb))
+                (prepare loadBalancingCommand (LbCheck alb))
                 ""
-        pure $ interpretLbDescribe code
+        pure $ interpretLbCheck code (Text.decodeUtf8With TextErr.lenientDecode out)
 
--- | The verdict drawn from @gcloud compute url-maps describe@'s exit code,
--- split out for testability. This only tells us the URL map exists, not
--- that every sub-resource it points at is healthy -- see the module-level
--- note on richer LB checks.
+-- | The verdict drawn from @gcloud compute url-maps describe@'s exit code.
+-- This only tells us the URL map exists; 'interpretLbCheck' is what the node
+-- itself uses and looks at every sub-resource and the backends' health.
 interpretLbDescribe :: ExitCode -> CheckResult
 interpretLbDescribe ExitSuccess = Success
 interpretLbDescribe (ExitFailure n) = Failure ("load balancer not found (exit " <> Text.pack (show n) <> ")")
+
+{- | The verdict drawn from 'renderLbCheckScript''s exit code and stdout.
+
+The script prints @MISSING <what>@ for each absent sub-resource or
+unattached backend, and @HEALTH <group> <state>@ per backend instance of an
+instance-group backend. A missing piece is a 'Failure' (the node's @up@ is
+idempotent and will create it). Backends that are not (yet) @HEALTHY@ are
+'Unknown': a freshly brought-up balancer reports @UNHEALTHY@ for roughly two
+minutes, and re-running @up@ would not shorten that. A Cloud Run (NEG)
+backend has no health to ask for, so its presence and attachment is the
+whole check.
+-}
+interpretLbCheck :: ExitCode -> Text -> CheckResult
+interpretLbCheck (ExitFailure n) _ = Failure ("load balancer check failed (exit " <> Text.pack (show n) <> ")")
+interpretLbCheck ExitSuccess out
+    | not (null missing) = Failure ("load balancer incomplete: missing " <> Text.intercalate ", " missing)
+    | not (null unhealthy) = Unknown
+    | otherwise = Success
+  where
+    ls = map Text.words (Text.lines out)
+    missing = [Text.unwords rest | ("MISSING" : rest) <- ls]
+    unhealthy = [st | ["HEALTH", _, st] <- ls, st /= "HEALTHY"]
 
 -------------------------------------------------------------------------------
 
 data LoadBalancingCommand
     = LbCreate ApplicationLoadBalancer
+    | LbCheck ApplicationLoadBalancer
     | LbDescribe ApplicationLoadBalancer
     | LbDelete ApplicationLoadBalancer
     deriving (Show)
@@ -135,6 +161,8 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
                     , Text.unpack (alb.albName <> "-url-map")
                     ]
                 )
+    LbCheck alb ->
+        proc "bash" ["-c", Text.unpack (renderLbCheckScript alb)]
     LbDelete alb ->
         proc "bash" ["-c", Text.unpack (renderLbDeleteScript alb)]
 
@@ -305,6 +333,64 @@ renderLbScript alb =
                 <> " --ports=80"
             )
         ]
+
+{- | Renders a read-only bash script that describes every sub-resource the
+create script makes and asks the backend service for its health. It always
+exits 0 unless the script itself breaks; findings are lines on stdout (see
+'interpretLbCheck').
+-}
+renderLbCheckScript :: ApplicationLoadBalancer -> Text
+renderLbCheckScript alb =
+    Text.unlines $
+        [ "set -uo pipefail"
+        , "PROJECT=" <> shellQuote alb.albProject.projectId
+        , "REGION=" <> shellQuote alb.albRegion.regionName
+        , "exists() { \"$@\" >/dev/null 2>&1; }"
+        , "need() { local what=\"$1\"; shift; exists \"$@\" || echo \"MISSING $what\"; }"
+        ]
+            <> map hcLine (maybe [] pure alb.albHealthCheck)
+            <> [ need' "backend-services" "-backend"
+               , need' "url-maps" "-url-map"
+               , need' "target-http-proxies" "-proxy"
+               , need' "forwarding-rules" "-fw"
+               ]
+            <> concatMap backendLines alb.albBackends
+            <> [healthLines | any isIg alb.albBackends]
+  where
+    q :: Text -> Text
+    q suffix = shellQuote (alb.albName <> suffix)
+    isIg :: Backend -> Bool
+    isIg = \case InstanceGroupBackend{} -> True; CloudRunBackend _ -> False
+    need' :: Text -> Text -> Text
+    need' coll suffix =
+        "need " <> shellQuote (coll <> " " <> alb.albName <> suffix)
+            <> " gcloud compute " <> coll <> " describe " <> q suffix <> regional
+    hcLine :: HealthCheck -> Text
+    hcLine hc =
+        "need " <> shellQuote ("health-checks " <> hc.healthCheckName)
+            <> " gcloud compute health-checks describe " <> shellQuote hc.healthCheckName <> regional
+    attached :: Text -> Text -> Text
+    attached suffix what =
+        "gcloud compute backend-services describe " <> q "-backend" <> regional
+            <> " --format='value(backends[].group)' 2>/dev/null | tr ';' '\\n' | grep -q -- "
+            <> shellQuote (suffix <> "$") <> " || echo " <> shellQuote ("MISSING backend " <> what)
+    backendLines :: Backend -> [Text]
+    backendLines = \case
+        InstanceGroupBackend ig loc _ ->
+            [ "need " <> shellQuote ("instance-group " <> ig)
+                <> " gcloud compute instance-groups describe " <> shellQuote ig <> groupLocation loc
+            , attached ("/instanceGroups/" <> ig) ("instance-group " <> ig)
+            ]
+        CloudRunBackend _ ->
+            [ need' "network-endpoint-groups" "-neg"
+            , attached ("/networkEndpointGroups/" <> alb.albName <> "-neg") ("neg " <> alb.albName <> "-neg")
+            ]
+    -- one state per backend instance; ';' separates a backend's instances
+    healthLines :: Text
+    healthLines =
+        "gcloud compute backend-services get-health " <> q "-backend" <> regional
+            <> " --format='value(status.healthStatus[].healthState)' 2>/dev/null"
+            <> " | tr ';' '\\n' | while read -r st; do [ -n \"$st\" ] && echo \"HEALTH backend $st\"; done; true"
 
 -- | The @--project@\/@--region@ pair every regional resource in these scripts
 -- is addressed by, reading the variables the script sets up front.
