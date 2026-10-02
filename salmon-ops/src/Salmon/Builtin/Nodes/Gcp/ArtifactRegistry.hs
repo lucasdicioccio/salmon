@@ -9,11 +9,34 @@ module Salmon.Builtin.Nodes.Gcp.ArtifactRegistry (
     Report (..),
     ArtifactRegistryCommand (..),
     artifactRegistryCommand,
+
+    -- * Pulling from a GCE instance
+    dockerRegistry,
+    instanceLogin,
+    InstanceToken (..),
+    parseInstanceToken,
+    instanceToken,
+    tokenStampPath,
+    interpretTokenStamp,
+    refreshMargin,
+    MetadataError (..),
 ) where
 
+import Control.Exception (Exception, throwIO)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as Aeson (parseEither)
+import qualified Data.ByteString.Lazy as LByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import GHC.IO.Exception (ExitCode (..))
+import qualified Network.HTTP.Client as Http
+import qualified Network.HTTP.Types.Status as Http
+import System.Directory (doesFileExist)
+import System.IO.Error (catchIOError)
+import Text.Read (readMaybe)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (proc)
 
@@ -21,7 +44,9 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
+import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject)
+import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import Salmon.Op.Ref
 import Salmon.Op.Track
@@ -106,6 +131,127 @@ configureDockerAuth r gcloudTrack project region =
 
     dockerHost :: Region -> Text
     dockerHost rgn = rgn.regionName <> "-docker.pkg.dev"
+
+-------------------------------------------------------------------------------
+
+-- | The docker-format registry of a region, as a podman 'Podman.Registry'.
+dockerRegistry :: Region -> Podman.Registry
+dockerRegistry region = Podman.Registry (region.regionName <> "-docker.pkg.dev")
+
+{- | A GCE instance logging podman in to its region's registry /as the
+instance's own service account/.
+
+'configureDockerAuth' is the workstation's road: it needs @gcloud@ and
+somebody's credentials. A VM has neither and needs neither -- the metadata
+server hands any process on the instance an access token for the service
+account the instance runs as, and Artifact Registry takes that token as the
+password of the user @oauth2accesstoken@. So this is 'Podman.login' with the
+metadata server as the password, and no secret is shipped to the machine.
+
+What it adds to 'Podman.login' is a @check@. That node has none, which is
+right for a credential nobody can ask after; this one can be asked after,
+because the metadata server says when the token expires. The expiry is
+written beside the auth file ('tokenStampPath') after a successful login, and
+'interpretTokenStamp' answers 'Success' while more than 'refreshMargin' of it
+is left. A one-shot @run up@ therefore logs in again only when it has to, and
+under @run serve@ the credential is /tended/: without the check the node
+would be parked, the token would lapse within the hour, and the next image
+change would fail its pull with credentials that look present.
+
+The margin is under the five minutes before expiry at which the metadata
+server starts handing out a new token, so a login the check asked for gets a
+token that outlives the margin, and the check does not fail again at once.
+
+Needs, on the GCP side and declared elsewhere:
+@roles\/artifactregistry.reader@ on the repository for the instance's service
+account, and an instance whose access scopes allow it (@cloud-platform@, or
+the read-only storage scope).
+-}
+instanceLogin :: Reporter Podman.Report -> Track' (Binary "podman") -> Podman.AuthFile -> Region -> Op
+instanceLogin r podman authfile region =
+    fmap (fmap tended) (Podman.login r podman authfile (dockerRegistry region) (Podman.Username "oauth2accesstoken") (tokenValue <$> instanceToken))
+  where
+    stamp = tokenStampPath authfile
+
+    tended :: Extension -> Extension
+    tended ext =
+        ext
+            { check = do
+                now <- getCurrentTime
+                present <- doesFileExist (Podman.getAuthFile authfile)
+                recorded <- if present then readStamp else pure Nothing
+                pure (interpretTokenStamp now recorded)
+            , up = do
+                ext.up
+                -- asked again rather than remembered from the login: the
+                -- metadata server caches, so this is the same token, and a
+                -- stamp is only ever written after a login that worked.
+                token <- instanceToken
+                now <- getCurrentTime
+                writeFile stamp (show (round (utcTimeToPOSIXSeconds (addUTCTime token.tokenLifetime now)) :: Integer) <> "\n")
+            , down = FS.removeFileIfPresent stamp >> ext.down
+            }
+
+    readStamp :: IO (Maybe Text)
+    readStamp = (Just <$> Text.readFile stamp) `catchIOError` const (pure Nothing)
+
+-- | Where the expiry of the token in an auth file is recorded.
+tokenStampPath :: Podman.AuthFile -> FilePath
+tokenStampPath authfile = Podman.getAuthFile authfile <> ".expires"
+
+-- | How much of a token's life must be left for it to be left alone.
+refreshMargin :: NominalDiffTime
+refreshMargin = 120
+
+{- | Is the recorded login still good for a pull? The stamp is the expiry in
+seconds since the epoch; 'Nothing' is no stamp, or no auth file to go with it.
+-}
+interpretTokenStamp :: UTCTime -> Maybe Text -> CheckResult
+interpretTokenStamp _ Nothing = Failure "not logged in to the registry"
+interpretTokenStamp now (Just recorded) =
+    case readMaybe (Text.unpack (Text.strip recorded)) :: Maybe Integer of
+        Nothing -> Failure "the recorded token expiry is unreadable"
+        Just seconds
+            | diffUTCTime (posixSecondsToUTCTime (fromInteger seconds)) now > refreshMargin -> Success
+            | otherwise -> Failure "the registry token has expired, or is about to"
+
+-- | An access token and how long it is good for from when it was handed out.
+data InstanceToken
+    = InstanceToken
+    { tokenValue :: !Text
+    , tokenLifetime :: !NominalDiffTime
+    }
+
+data MetadataError
+    = MetadataStatus !Int
+    | MetadataUnreadable !String
+    deriving (Show)
+
+instance Exception MetadataError
+
+-- | The metadata server's answer: @{"access_token": .., "expires_in": .., "token_type": ..}@.
+parseInstanceToken :: LByteString.ByteString -> Either String InstanceToken
+parseInstanceToken body = do
+    value <- Aeson.eitherDecode body
+    flip Aeson.parseEither value $ Aeson.withObject "token" $ \o -> do
+        token <- o Aeson..: "access_token"
+        seconds <- o Aeson..: "expires_in"
+        if Text.null token
+            then fail "empty access_token"
+            else pure (InstanceToken token (fromInteger seconds))
+
+{- | The instance's default service account's token, from the metadata
+server. Only answers on a GCE instance; anywhere else the name does not
+resolve and this throws, which fails the node that asked.
+-}
+instanceToken :: IO InstanceToken
+instanceToken = do
+    manager <- Http.newManager Http.defaultManagerSettings{Http.managerResponseTimeout = Http.responseTimeoutMicro 10000000}
+    request <- Http.parseRequest "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+    response <- Http.httpLbs request{Http.requestHeaders = [("Metadata-Flavor", "Google")]} manager
+    case Http.statusCode (Http.responseStatus response) of
+        200 -> either (throwIO . MetadataUnreadable) pure (parseInstanceToken (Http.responseBody response))
+        other -> throwIO (MetadataStatus other)
 
 -------------------------------------------------------------------------------
 

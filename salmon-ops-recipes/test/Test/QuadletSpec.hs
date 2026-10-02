@@ -1,0 +1,284 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+{- | Layer 0 coverage for "Salmon.Builtin.Nodes.Podman.Quadlet" and for the
+instance login in "Salmon.Builtin.Nodes.Gcp.ArtifactRegistry": what is
+rendered, what the check concludes, and what a re-declaration can see.
+
+One group is not pure: where podman's own quadlet generator is installed, the
+rendered file is handed to it in dry-run mode, which is the only local
+evidence that the keys written are keys this podman accepts. It reads a
+scratch directory and writes nothing; it is skipped loudly without the
+generator. Nothing here starts a container, talks to systemd, or reaches a
+registry or a metadata server -- that the generated service pulls and serves
+is a Layer 3 claim, and is not made here.
+-}
+module Test.QuadletSpec (tests) where
+
+import qualified Data.ByteString.Lazy.Char8 as LC8
+import Data.List (isInfixOf)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import Data.Time.Clock (addUTCTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import System.Directory (doesFileExist)
+import System.Environment (getEnvironment)
+import System.Exit (ExitCode (..))
+import System.FilePath ((</>))
+import System.IO (hPutStrLn, stderr)
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
+
+import Salmon.Actions.UpDown (CheckResult (..))
+import Salmon.Builtin.Extension
+import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
+import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
+import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import Salmon.Op.Actions (Act (..))
+import Salmon.Reporter (silent)
+import Test.Harness (withTempDir)
+
+tests :: TestTree
+tests =
+    testGroup
+        "Salmon.Builtin.Nodes.Podman.Quadlet"
+        [ testGroup "rendering" renderTests
+        , testGroup "watched files" watchedTests
+        , testGroup "refusals" problemTests
+        , testGroup "check" checkTests
+        , testGroup "node" nodeTests
+        , testGroup "generator" generatorTests
+        , testGroup "instance login" loginTests
+        ]
+
+app :: Quadlet.Container
+app =
+    (Quadlet.container (Podman.ContainerName "app") "europe-west1-docker.pkg.dev/acme/repo/app:v3")
+        { Quadlet.containerDescription = "the app"
+        , Quadlet.containerAfter = ["network-online.target"]
+        , Quadlet.containerEnvFile = Just "/etc/app/env"
+        , Quadlet.containerPorts = [Podman.PortMapping "8080" "80" Podman.TCPPort]
+        , Quadlet.containerVolumes = [Podman.VolumeMount "/srv/app" "/data" Podman.ReadOnly]
+        , Quadlet.containerAuthFile = Just (Podman.AuthFile "/etc/app/auth.json")
+        , Quadlet.containerStartTimeout = Just 300
+        }
+
+renderTests :: [TestTree]
+renderTests =
+    [ testCase "a full container, key by key" $
+        assertEqual
+            ""
+            ( Text.unlines
+                [ "[Unit]"
+                , "Description=the app"
+                , "After=network-online.target"
+                , ""
+                , "[Container]"
+                , "ContainerName=app"
+                , "Image=europe-west1-docker.pkg.dev/acme/repo/app:v3"
+                , "EnvironmentFile=/etc/app/env"
+                , "PublishPort=8080:80/tcp"
+                , "Volume=/srv/app:/data:ro"
+                , "PodmanArgs=--authfile=/etc/app/auth.json"
+                , ""
+                , "[Service]"
+                , "Restart=on-failure"
+                , "TimeoutStartSec=300"
+                , ""
+                , "[Install]"
+                , "WantedBy=multi-user.target"
+                ]
+            )
+            (Quadlet.renderContainer app)
+    , testCase "the starting point renders only what it must" $
+        assertEqual
+            ""
+            ( Text.unlines
+                [ "[Unit]"
+                , "Description=container web (salmon)"
+                , ""
+                , "[Container]"
+                , "ContainerName=web"
+                , "Image=docker.io/library/nginx:1.27"
+                , ""
+                , "[Service]"
+                , "Restart=on-failure"
+                , ""
+                , "[Install]"
+                , "WantedBy=multi-user.target"
+                ]
+            )
+            (Quadlet.renderContainer (Quadlet.container (Podman.ContainerName "web") "docker.io/library/nginx:1.27"))
+    , testCase "no WantedBy, no [Install] section" $
+        assertBool "" $
+            not ("[Install]" `Text.isInfixOf` Quadlet.renderContainer app{Quadlet.containerWantedBy = Nothing})
+    , testCase "restart policies and udp ports are spelled as systemd and podman spell them" $ do
+        let rendered =
+                Quadlet.renderContainer
+                    app
+                        { Quadlet.containerRestart = Quadlet.RestartAlways
+                        , Quadlet.containerPorts = [Podman.PortMapping "5353" "53" Podman.UDPPort]
+                        }
+        assertBool "" ("Restart=always\n" `Text.isInfixOf` rendered)
+        assertBool "" ("PublishPort=5353:53/udp\n" `Text.isInfixOf` rendered)
+    , testCase "the file and the unit are named after the container" $ do
+        assertEqual "" "/etc/containers/systemd/app.container" (Quadlet.quadletPath app)
+        assertEqual "" "app.service" (Quadlet.serviceTarget app)
+    , testCase "a new image reference is a different file" $
+        assertBool "" $
+            Quadlet.renderContainer app /= Quadlet.renderContainer app{Quadlet.containerImage = "europe-west1-docker.pkg.dev/acme/repo/app:v4"}
+    ]
+
+watchedTests :: [TestTree]
+watchedTests =
+    [ testCase "the env file is watched, before anything else named" $
+        assertEqual "" ["/etc/app/env", "/etc/app/extra.conf"] (Quadlet.watchedFiles app{Quadlet.containerWatched = ["/etc/app/extra.conf"]})
+    , testCase "a changed env file changes the quadlet, an unchanged one does not" $ withTempDir $ \dir -> do
+        let env = dir </> "env"
+            c = app{Quadlet.containerEnvFile = Just env}
+        writeFile env "PORT=80\n"
+        before <- Quadlet.renderContainerWatching c
+        again <- Quadlet.renderContainerWatching c
+        writeFile env "PORT=81\n"
+        after <- Quadlet.renderContainerWatching c
+        assertEqual "" before again
+        assertBool "the quadlet did not change with the env file" (before /= after)
+        assertBool "the fingerprint replaced the declaration" (Quadlet.renderContainer c `Text.isPrefixOf` after)
+    , testCase "the env file's contents are not in the quadlet" $ withTempDir $ \dir -> do
+        let env = dir </> "env"
+        writeFile env "API_KEY=hunter2hunter2\n"
+        rendered <- Quadlet.renderContainerWatching app{Quadlet.containerEnvFile = Just env}
+        assertBool "" (not ("hunter2" `Text.isInfixOf` rendered))
+    , testCase "nothing watched renders the declaration exactly" $ do
+        let c = app{Quadlet.containerEnvFile = Nothing}
+        rendered <- Quadlet.renderContainerWatching c
+        assertEqual "" (Quadlet.renderContainer c) rendered
+    ]
+
+problemTests :: [TestTree]
+problemTests =
+    [ testCase "a well-formed container has no problems" $
+        assertEqual "" [] (Quadlet.containerProblems app)
+    , testCase "a line break in the image is refused, not written as a second key" $
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerImage = "img:v1\nPodmanArgs=--privileged"})))
+    , testCase "an empty image or name is refused" $ do
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerImage = " "})))
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerName = Podman.ContainerName ""})))
+    , testCase "a name that is a path is refused" $
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerName = Podman.ContainerName "../x"})))
+    ]
+
+checkTests :: [TestTree]
+checkTests =
+    [ testCase "a running generated unit is satisfied" $
+        assertEqual "" Success (Quadlet.interpretShow ["ActiveState=active", "UnitFileState=generated", "NeedDaemonReload=no"])
+    , testCase "the same lines are not satisfied for an authored unit" $
+        assertBool "" (Systemd.interpretShow ["ActiveState=active", "UnitFileState=generated", "NeedDaemonReload=no"] /= Success)
+    , testCase "a changed quadlet needs bringing up, running or not" $
+        assertBool "" (isFailure (Quadlet.interpretShow ["ActiveState=active", "UnitFileState=generated", "NeedDaemonReload=yes"]))
+    , testCase "a quadlet systemd has not generated yet needs bringing up" $
+        -- what `systemctl show` prints between the file being written and the reload
+        assertBool "" (isFailure (Quadlet.interpretShow ["ActiveState=inactive", "UnitFileState=", "NeedDaemonReload=no"]))
+    , testCase "a stopped or failed container needs bringing up" $ do
+        assertBool "" (isFailure (Quadlet.interpretShow ["ActiveState=inactive", "UnitFileState=generated", "NeedDaemonReload=no"]))
+        assertBool "" (isFailure (Quadlet.interpretShow ["ActiveState=failed", "UnitFileState=generated", "NeedDaemonReload=no"]))
+    , testCase "a container still starting (pulling) is Unknown, not Failure" $
+        assertEqual "" Unknown (Quadlet.interpretShow ["ActiveState=activating", "UnitFileState=generated", "NeedDaemonReload=no"])
+    ]
+  where
+    isFailure (Failure _) = True
+    isFailure _ = False
+
+nodeTests :: [TestTree]
+nodeTests =
+    [ testCase "the node is keyed on the unit, not on the image" $ do
+        let a = refOf (node app)
+            b = refOf (node app{Quadlet.containerImage = "other:v1"})
+        assertEqual "moving the image declared a second node" a b
+        assertBool "two containers are one node" (a /= refOf (node app{Quadlet.containerName = Podman.ContainerName "other"}))
+    , testCase "a new image is visible in the node's description" $
+        -- so `run serve` sees the re-declaration as a change
+        assertBool "" (notesOf (node app) /= notesOf (node app{Quadlet.containerImage = "europe-west1-docker.pkg.dev/acme/repo/app:v4"}))
+    , testCase "the same declaration describes itself the same way" $
+        assertEqual "" (notesOf (node app)) (notesOf (node app))
+    ]
+  where
+    node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+
+generatorPath :: FilePath
+generatorPath = "/usr/libexec/podman/quadlet"
+
+generatorTests :: [TestTree]
+generatorTests =
+    [ testCase "podman's own generator accepts the rendered file" $ withGenerator $ withTempDir $ \dir -> do
+        let envFile = dir </> "env"
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just envFile}
+        writeFile envFile "PORT=80\n"
+        Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderContainerWatching c
+        environment <- getEnvironment
+        (code, out, err) <-
+            readCreateProcessWithExitCode
+                (proc generatorPath ["--user", "--dryrun"]){env = Just (("QUADLET_UNIT_DIRS", dir) : environment)}
+                ""
+        let said = out <> err
+        case code of
+            ExitSuccess -> pure ()
+            ExitFailure n -> assertFailure ("the generator exited " <> show n <> ": " <> said)
+        assertBool said ("---app.service---" `isInfixOf` said)
+        assertBool said (not ("unsupported key" `isInfixOf` said))
+        assertBool said ("--authfile=/etc/app/auth.json" `isInfixOf` said)
+        assertBool said (("--env-file " <> envFile) `isInfixOf` said)
+        assertBool said ("--publish 8080:80/tcp" `isInfixOf` said)
+        assertBool said ("europe-west1-docker.pkg.dev/acme/repo/app:v3" `isInfixOf` said)
+        assertBool said (("SourcePath=" <> Quadlet.quadletPath c) `isInfixOf` said)
+    ]
+  where
+    withGenerator :: IO () -> IO ()
+    withGenerator act = do
+        present <- doesFileExist generatorPath
+        if present
+            then act
+            else hPutStrLn stderr ("SKIPPED: no quadlet generator at " <> generatorPath <> "; the rendered file was not checked against podman")
+
+loginTests :: [TestTree]
+loginTests =
+    [ testCase "the registry is the region's docker host" $
+        assertEqual "" (Podman.Registry "europe-west1-docker.pkg.dev") (ArtifactRegistry.dockerRegistry (Core.Region "europe-west1"))
+    , testCase "the metadata server's answer is read for the token and its lifetime" $
+        case ArtifactRegistry.parseInstanceToken (LC8.pack "{\"access_token\":\"ya29.abc\",\"expires_in\":3599,\"token_type\":\"Bearer\"}") of
+            Right token -> do
+                assertEqual "" ("ya29.abc" :: Text) token.tokenValue
+                assertEqual "" 3599 token.tokenLifetime
+            Left err -> assertFailure err
+    , testCase "an answer with no token, or an empty one, is not a token" $ do
+        assertBool "" (isLeft' (ArtifactRegistry.parseInstanceToken (LC8.pack "{\"error\":\"nope\"}")))
+        assertBool "" (isLeft' (ArtifactRegistry.parseInstanceToken (LC8.pack "{\"access_token\":\"\",\"expires_in\":10}")))
+        assertBool "" (isLeft' (ArtifactRegistry.parseInstanceToken (LC8.pack "<html>")))
+    , testCase "no stamp is not logged in" $
+        assertBool "" (isFailure (ArtifactRegistry.interpretTokenStamp now Nothing))
+    , testCase "a token with life left is left alone" $
+        assertEqual "" Success (ArtifactRegistry.interpretTokenStamp now (Just "1700003000\n"))
+    , testCase "a token inside the margin, or past it, is renewed" $ do
+        assertBool "" (isFailure (ArtifactRegistry.interpretTokenStamp now (Just "1700000060")))
+        assertBool "" (isFailure (ArtifactRegistry.interpretTokenStamp now (Just "1699990000")))
+        assertBool "" (isFailure (ArtifactRegistry.interpretTokenStamp (addUTCTime 2900 now) (Just "1700003000")))
+    , testCase "a token the metadata server would not yet replace outlives the margin" $
+        -- the server hands out a new token once the cached one has under five
+        -- minutes left, so a login never yields one the check refuses at once
+        assertBool "" (ArtifactRegistry.refreshMargin < 300)
+    , testCase "an unreadable stamp is renewed, not trusted" $
+        assertBool "" (isFailure (ArtifactRegistry.interpretTokenStamp now (Just "soon")))
+    , testCase "the stamp sits beside the auth file" $
+        assertEqual "" "/etc/app/auth.json.expires" (ArtifactRegistry.tokenStampPath (Podman.AuthFile "/etc/app/auth.json"))
+    ]
+  where
+    now = posixSecondsToUTCTime 1700000000
+    isFailure (Failure _) = True
+    isFailure _ = False
+    isLeft' :: Either String ArtifactRegistry.InstanceToken -> Bool
+    isLeft' = either (const True) (const False)

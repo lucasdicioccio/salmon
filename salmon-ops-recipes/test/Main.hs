@@ -60,6 +60,7 @@ import qualified Test.ServeSocketSpec as ServeSocketSpec
 import qualified Test.ServeSpec as ServeSpec
 import qualified Test.ServeTlsSpec as ServeTlsSpec
 import qualified Test.StatusSinkSpec as StatusSinkSpec
+import qualified Test.QuadletSpec as QuadletSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
@@ -158,6 +159,7 @@ main =
             , ServeSpec.tests
             , ServeTlsSpec.tests
             , StatusSinkSpec.tests
+            , QuadletSpec.tests
             , SystemdSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests
