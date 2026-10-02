@@ -11,6 +11,7 @@ an operator actually declared.
 -}
 module Test.RewriteSpec (tests) where
 
+import qualified Data.List.NonEmpty as NEList
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Set (Set)
@@ -39,6 +40,9 @@ tests =
         , testCase "an ignored node is left out of the batch" ignoredIsLeftAlone
         , testCase "a batch stands in for its members, other nodes for themselves" membership
         , testCase "no packages means no rewrite at all" noPackagesNoOp
+        , testCase "a deb node depends on an apt index node for its package" debDependsOnIndex
+        , testCase "the index nodes of wanted packages become one, under the install batch" indexBatched
+        , testCase "index nodes are left as declared on the way down" indexNotBatchedDown
         ]
 
 -------------------------------------------------------------------------------
@@ -62,9 +66,21 @@ shorthands :: Rewrite.Rewritten Extension -> [Text]
 shorthands c = [act.shorthand | act <- Map.elems (Dag.dagNodes (Rewrite.computedDag c))]
 
 -- | Only rewrites record membership, so these are exactly the nodes a
--- rewrite introduced.
+-- rewrite introduced -- less the collected apt index node ('indexBatches'),
+-- which rides along with every install batch and has tests of its own.
 batchRefs :: Rewrite.Rewritten Extension -> [Ref]
-batchRefs = Map.keys . Rewrite.computedMembers
+batchRefs c = filter (`notElem` indexBatches c) (Map.keys (Rewrite.computedMembers c))
+
+-- | The introduced nodes that stand in for apt index nodes.
+indexBatches :: Rewrite.Rewritten Extension -> [Ref]
+indexBatches c =
+    [ r
+    | r <- Map.keys (Rewrite.computedMembers c)
+    , fmap (\act -> act.shorthand) (Dag.representativeOf (Rewrite.computedDag c) r) == Just "apt-index"
+    ]
+
+indexRef :: Text -> Ref
+indexRef name = mkRef "debian-apt-index" [name]
 
 -- | The one batch this graph produced; fails the test rather than throwing
 -- if a rewrite produced none or several.
@@ -117,15 +133,20 @@ putting the removal first because both want the dpkg lock.
 -}
 splitByDirection :: IO ()
 splitByDirection = do
-    let desired = Set.fromList [pkgRef "curl", mkRef "root" ()]
+    let desired = Set.fromList [pkgRef "curl", indexRef "curl", mkRef "root" ()]
         c = computeWith (Phase desired Set.empty) root3
     assertEqual "two batches" 2 (length (batchRefs c))
     let [(installRef, _)] = [(r, m) | (r, m) <- Map.toList (Rewrite.computedMembers c), m == Set.singleton (pkgRef "curl")]
         [(removeRef, _)] = [(r, m) | (r, m) <- Map.toList (Rewrite.computedMembers c), m == Set.fromList [pkgRef "git", pkgRef "jq"]]
+    [indexBatch] <- pure (indexBatches c)
     assertEqual
-        "the install batch waits on the removal batch"
-        [removeRef]
-        (Dag.dependenciesOf (Rewrite.computedDag c) installRef)
+        "the install batch waits on the removal batch, and on the index of what it installs"
+        (Set.fromList [removeRef, indexBatch])
+        (Set.fromList (Dag.dependenciesOf (Rewrite.computedDag c) installRef))
+    assertEqual
+        "that index asks after the wanted package only"
+        (Set.singleton (indexRef "curl"))
+        (Rewrite.membersOf c indexBatch)
 
 {- | Two declarations disagree about @curl@ — one is being retracted, the
 other still wants it. The ledger already answered that by union, and the
@@ -184,6 +205,57 @@ membership = do
         "a node no rewrite touched stands in for itself"
         (Set.singleton (mkRef "root" ()))
         (Rewrite.membersOf c (mkRef "root" ()))
+
+debDependsOnIndex :: IO ()
+debDependsOnIndex = do
+    let dag = Dag.foldDag Dag.sameRepresentative (evalDeps (pkg "curl"))
+    assertEqual
+        "unrewritten, deb curl waits on the index for curl"
+        [indexRef "curl"]
+        (Dag.dependenciesOf dag (pkgRef "curl"))
+    assertEqual
+        "and debs waits on one index node for its whole set"
+        1
+        ( length
+            ( filter
+                (== "apt-index")
+                [ act.shorthand
+                | act <-
+                    Map.elems
+                        ( Dag.dagNodes
+                            ( Dag.foldDag
+                                Dag.sameRepresentative
+                                (evalDeps (Debian.debs (Debian.Package "curl" NEList.:| [Debian.Package "git", Debian.Package "curl"])))
+                            )
+                        )
+                ]
+            )
+        )
+
+indexBatched :: IO ()
+indexBatched = do
+    let c = computeWith (Phase (allRefs root3) Set.empty) root3
+    assertEqual "three index nodes became one" 1 (length (filter (== "apt-index") (shorthands c)))
+    [indexBatch] <- pure (indexBatches c)
+    batch <- onlyBatch c
+    assertEqual
+        "standing in for all three"
+        (Set.fromList (map indexRef ["curl", "git", "jq"]))
+        (Rewrite.membersOf c indexBatch)
+    assertEqual
+        "one refresh, before the one install"
+        [indexBatch]
+        (Dag.dependenciesOf (Rewrite.computedDag c) batch)
+    assertEqual
+        "and it names every package it asks after"
+        (Just ["curl", "git", "jq"])
+        (fmap (\act -> act.extension.notes) (Dag.representativeOf (Rewrite.computedDag c) indexBatch))
+
+indexNotBatchedDown :: IO ()
+indexNotBatchedDown = do
+    let c = computeWith (Phase Set.empty Set.empty) root3
+    assertEqual "no index batch" [] (indexBatches c)
+    assertEqual "the three declared index nodes survive" 3 (length (filter (== "apt-index") (shorthands c)))
 
 noPackagesNoOp :: IO ()
 noPackagesNoOp = do

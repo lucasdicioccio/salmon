@@ -54,16 +54,23 @@ shimmedCommands :: [String]
 -- redirected into the sandbox exactly like the `up` it guards. Unshimmed, it
 -- answers about the host: this machine has postgresql installed, so the
 -- container never got it and the recipe failed one step later.
-shimmedCommands = ["apt-get", "dpkg-query", "sudo", "bash", "chmod"]
+-- "apt-cache" is here for the same reason: it is the check of the apt index
+-- node 'deb' depends on, and it must ask the container's index, not the host's.
+shimmedCommands = ["apt-get", "apt-cache", "dpkg-query", "sudo", "bash", "chmod"]
 
 setupNakedPGAgainstSandbox :: IO ()
 setupNakedPGAgainstSandbox = requireExecutable "podman" $
     withContainer (Podman.Image "debian:bookworm") (Podman.PortMapping "15432" "5432" Podman.TCPPort) $ \cid -> do
         -- sandbox prep, not part of the recipe under test: a fresh base
-        -- image has no apt cache and no sudo, both of which a real target
-        -- server is assumed to already have.
+        -- image has no sudo, which a real target server is assumed to
+        -- already have.
         podmanExec_ cid ["apt-get", "update", "-qq"]
         podmanExec_ cid ["bash", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo"]
+        -- ... and then the index is thrown away again, so the recipe starts
+        -- where a fresh cloud image does: `apt-get install postgresql` has
+        -- no candidate until something refreshes the index, and that
+        -- something has to be the recipe's own `deb` node.
+        podmanExec_ cid ["bash", "-c", "rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin"]
 
         withShimmedPath cid shimmedCommands $ do
             let op = PostgresInit.setupNakedPG silent "appdb"

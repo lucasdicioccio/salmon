@@ -436,7 +436,10 @@ some other part of the codebase can later recover by type, without changing
   calls" out of a graph for special handling.
 - `Debian.Package.deb` stashes a `Package`, which the `batchPackages` **rewrite**
   (`Salmon.Op.Rewrite`) collects across the whole graph into one `apt-get`
-  invocation.
+  invocation. The `aptIndex` node every `deb` depends on (it runs `apt-get
+  update` when `apt-cache policy` has no candidate for a package that is not
+  installed yet) carries an `AptIndexFor` the same rewrite collects, so a
+  batched graph refreshes the index at most once.
 - A `Salmon.Op.Supervision.Supervision` states how the node wants to be tended:
   whether to put it back when its `check` says the effect has gone (`Always`/
   `OnFailure`/`Never`, defaulting to `OnFailure`), how long its silence may

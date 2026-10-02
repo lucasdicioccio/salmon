@@ -174,7 +174,7 @@ refTests =
 
 -- | The binaries the recipe reaches along its chain, as in "Test.PostgresInitSpec".
 shimmedCommands :: [String]
-shimmedCommands = ["apt-get", "dpkg-query", "sudo", "bash", "chmod"]
+shimmedCommands = ["apt-get", "apt-cache", "dpkg-query", "sudo", "bash", "chmod"]
 
 templateLifecycle :: IO ()
 templateLifecycle = requireExecutable "podman" $

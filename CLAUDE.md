@@ -965,6 +965,23 @@ collects what HAProxy would refuse (duplicate names/ports, names or hosts that s
 `configFiles` throws them rather than write the file. `patroniRouter` is the usual 5000/5001 pair. No `check` beyond
 the unit's, no TLS, no recipe or binary wiring it to `patroniMember` yet; see `Test/HaproxySpec.hs` (Layer 0 only).
 
+`Debian.Package.deb`/`debs` depend on an `aptIndex` node (same module), which is what makes them work on a
+machine whose index was never refreshed (a fresh cloud image: `apt-get install` fails with "no installation
+candidate" for some packages and not others). Its `check` is `Success` when the packages are already
+installed (so a graph naming packages it has still runs as an ordinary user) or when `apt-cache policy`
+reports a candidate for each (`interpretAptPolicy`: `Candidate: (none)` or no stanza is no candidate —
+`apt-cache show` is not used, it succeeds for a name merely referred to); otherwise `up` runs `apt-get
+update`. So on a machine with a usable index nothing is refreshed, and it is not a freshness guarantee.
+Three things are load-bearing. A virtual name (`ssh-client`) or a typo never gets a candidate, so a refresh
+*this process* ran within `aptIndexFreshFor` (1h) satisfies the check — otherwise `Upkeep` would re-run
+`apt-get update` at its delay floor. Refreshes are serialised by a process-global `MVar` and the question is
+re-asked under it, so many index nodes becoming ready at once under `serve` run one update;
+`AptRepository`'s own update takes the same lock (`recordingAptIndexRefresh`), since a `deb` installed from
+a repository depends on both nodes in no order. And
+`batchPackages` collapses the wanted index nodes into one (`AptIndexFor` on `dynamics`), which the install
+batch inherits as a dependency; on the way down they are left as declared, their `down` being nothing. A
+harness that shims `apt-get`/`dpkg-query` into a sandbox must shim `apt-cache` too.
+
 Template databases: `Postgres.cloneDatabase` (a `CREATE DATABASE … TEMPLATE` node, whose
 `Retention` says whether `down` drops it — `retainedClone` for an open PR's environment,
 `disposableClone` for a test fixture or a merged PR) and
