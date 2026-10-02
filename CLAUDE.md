@@ -1045,6 +1045,20 @@ argument. What follows is the list of things that are load-bearing; each was a d
   equivalent, and watches the ini the same way) and the routing file has another (the role node, which does not), and one
   file with two writers is how a switchover becomes an outage.
 
+`SreBox.PostgresPairPrereqs` is what the pair assumes was done first, as nodes (`pairWithPrereqs` = `pairOp` plus
+them): `memberPrereqs` (packages if missing, the named cluster exists, the two passfiles), `bouncerPrereqs` (packages,
+console passfile, auth file) and `applications` (per member: `pg_hba` lines on either half, role/password/database on
+whichever is the primary). Load-bearing: every secret is a `SecretFile` — a path *on the target machine* that somebody
+else provisioned, installed to where the pair reads it with owner and mode — so no transport is chosen and no content is
+in a script, `notes` or a report (the `ALTER ROLE … PASSWORD` goes to `psql` on stdin with its output withheld, since
+psql quotes the statement it failed on). The auth file is copied only when it differs and pgbouncer is
+`try-restart`ed only then. **Applications are ordered after the role node**, because a member about to be cloned is a
+pristine cluster not in recovery and a database made there makes the seed clone refuse. Ordering against the pair's own
+nodes is declared by naming them again with one more dependency (same `Ref`, same representative, so the fold merges
+edges). `validate` collects refusals; a node whose declaration fails it throws. `salmon-toy-qemu-pg-ha` uses it (its
+`inventSecrets` only leaves files); `salmon-pgpair` does not. See `Test/PostgresPairPrereqsSpec.hs`, which runs the
+install and password scripts against stand-ins on `PATH`. Not run: any Layer 3 spec with it.
+
 `Test.PostgresPairSpec` is the whole table at Layer 0, refusals included;
 `Test.PostgresSwitchoverSpec` moves a real primary between two VMs and back, stops a controller
 after each step in turn to show a plain pass finishes what it left, kills a primary outright to

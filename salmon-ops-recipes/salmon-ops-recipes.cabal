@@ -33,6 +33,7 @@ library
                    , SreBox.PostgresBackup
                    , SreBox.PostgresTemplate
                    , SreBox.PostgresPair
+                   , SreBox.PostgresPairPrereqs
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
                    , SreBox.WireGuardMesh
@@ -132,6 +133,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PatroniHarnessSpec
                     , Test.PatroniVms
                     , Test.PostgresPairSpec
+                    , Test.PostgresPairPrereqsSpec
                     , Test.PostgresSwitchoverSpec
                     , Test.PostgresVms
                     , Test.PostgresTemplateSpec
