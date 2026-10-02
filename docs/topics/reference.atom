@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">salmon</title><id>https://lucasdicioccio.github.io/salmon/atom.xml</id><updated>2026-09-25T14:15:36Z</updated><entry><id>https://lucasdicioccio.github.io/salmon/builtins.html</id><title type="text">Builtins, recipes and binaries</title><updated>2026-09-25T14:15:36Z</updated><author><name>Lucas DiCioccio</name></author><content type="html">&lt;div class="main-article"&gt;&lt;section class="main-section"&gt;&lt;p&gt;&lt;em&gt;Generated from &lt;a href="https://github.com/lucasdicioccio/salmon/blob/master/README.md"&gt;&lt;code&gt;README.md&lt;/code&gt;&lt;/a&gt; — the repository is the canonical source, and may be ahead of this page.&lt;/em&gt;&lt;/p&gt;
+<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">salmon</title><id>https://lucasdicioccio.github.io/salmon/atom.xml</id><updated>2026-10-02T09:15:59Z</updated><entry><id>https://lucasdicioccio.github.io/salmon/builtins.html</id><title type="text">Builtins, recipes and binaries</title><updated>2026-10-02T09:15:59Z</updated><author><name>Lucas DiCioccio</name></author><content type="html">&lt;div class="main-article"&gt;&lt;section class="main-section"&gt;&lt;p&gt;&lt;em&gt;Generated from &lt;a href="https://github.com/lucasdicioccio/salmon/blob/master/README.md"&gt;&lt;code&gt;README.md&lt;/code&gt;&lt;/a&gt; — the repository is the canonical source, and may be ahead of this page.&lt;/em&gt;&lt;/p&gt;
 &lt;h2 id="builtins-recipes-and-binaries"&gt;Builtins, recipes and binaries&lt;/h2&gt;
 &lt;h3 id="builtin-nodes"&gt;Builtin nodes&lt;/h3&gt;
 &lt;p&gt;&lt;code&gt;salmon-ops/src/Salmon/Builtin/Nodes/&lt;/code&gt; — mostly atomic, small-diameter ops,
@@ -84,4 +84,15 @@ above, where this project’s own conventions get enforced:&lt;/p&gt;
 &lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-fleet&lt;/code&gt;&lt;/td&gt;&lt;td&gt;the controller's side of pull mode: &lt;code&gt;status DIR&lt;/code&gt; folds the hosts' status documents into one line per host; &lt;code&gt;keygen&lt;/code&gt;/&lt;code&gt;sign&lt;/code&gt; make signed documents&lt;/td&gt;&lt;/tr&gt;
 &lt;tr&gt;&lt;td&gt;&lt;code&gt;salmon-tui&lt;/code&gt;&lt;/td&gt;&lt;td&gt;a terminal client for &lt;code&gt;run serve --http&lt;/code&gt; (or &lt;code&gt;--http-tcp&lt;/code&gt;)&lt;/td&gt;&lt;/tr&gt;
 &lt;/table&gt;
+&lt;h4 id="installing-a-released-binary"&gt;Installing a released binary&lt;/h4&gt;
+&lt;p&gt;&lt;code&gt;salmon-migrator&lt;/code&gt;, &lt;code&gt;salmon-pgpair&lt;/code&gt;, &lt;code&gt;salmon-fleet&lt;/code&gt; and &lt;code&gt;salmon-tui&lt;/code&gt; are published as prebuilt,
+stripped binaries on &lt;a href="https://github.com/lucasdicioccio/salmon/releases"&gt;GitHub Releases&lt;/a&gt; —
+&lt;code&gt;salmon-toy-qemu-pg-ha&lt;/code&gt; and the other binaries above stay build-from-source only, being
+demo/internal rather than blessed. Currently &lt;strong&gt;linux-x86_64 only&lt;/strong&gt;. Grab the latest one — from a
+terminal or a CI step alike — with:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-sh"&gt;curl -fsSL https://github.com/lucasdicioccio/salmon/releases/latest/download/salmon-pgpair-linux-x86_64 -o salmon-pgpair &amp;amp;&amp;amp; chmod +x salmon-pgpair
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;(swap &lt;code&gt;salmon-pgpair&lt;/code&gt; for any of the other three binary names). See
+&lt;a href="https://github.com/lucasdicioccio/salmon/blob/master/.github/workflows/release.yml"&gt;&lt;code&gt;.github/workflows/release.yml&lt;/code&gt;&lt;/a&gt; for how a release is built —
+triggered by pushing a &lt;code&gt;vX.Y.Z&lt;/code&gt; tag.&lt;/p&gt;
 &lt;/section&gt;&lt;/div&gt;</content><link href="https://lucasdicioccio.github.io/salmon/builtins.html" rel="alternate"/><summary type="text">Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them.</summary></entry></feed>

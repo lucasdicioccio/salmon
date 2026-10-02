@@ -1,4 +1,4 @@
-<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Postgres with automatic failover: salmon provisions, Patroni decides</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><meta property="og:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="article:published_time" content="2026-09-25T14:15:36Z"><meta name="article:modified_time" content="2026-09-25T14:15:36Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-patroni.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-patroni.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T14:15:36Z","datePublished":"2026-09-25T14:15:36Z","description":"Status: draft / not implemented. A design sketch to react to, not a committed","headline":"Postgres with automatic failover: salmon provisions, Patroni decides","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Postgres with automatic failover: salmon provisions, Patroni decides</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1266 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-ha-control-plane.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">2/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-patroni.md"><code>specs/pg-patroni.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Postgres with automatic failover: salmon provisions, Patroni decides</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><meta property="og:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="article:published_time" content="2026-10-02T09:15:59Z"><meta name="article:modified_time" content="2026-10-02T09:15:59Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-patroni.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-patroni.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-02T09:15:59Z","datePublished":"2026-10-02T09:15:59Z","description":"Status: draft / not implemented. A design sketch to react to, not a committed","headline":"Postgres with automatic failover: salmon provisions, Patroni decides","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Postgres with automatic failover: salmon provisions, Patroni decides</h1><p>On <span>Fri, 02 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1737 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-ha-control-plane.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">2/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-patroni.md"><code>specs/pg-patroni.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
 <h2 id="postgres-with-automatic-failover-salmon-provisions-patroni-decides">Postgres with automatic failover: salmon provisions, Patroni decides</h2>
 <p>Status: draft / not implemented. A design sketch to react to, not a committed
 plan.</p>
@@ -107,6 +107,17 @@ pending, and its <code>up</code> can trigger <code>patronictl restart --pending<
 restarts replicas before the leader. Whether salmon should restart members
 at all, or only report, is an open question.
 </li>
+<li><strong>Leaning, from the Zalando operator</strong> (<code>pkg/cluster/sync.go</code>,
+<code>syncPatroniConfig</code>, <code>restartInstances</code>): it patches <code>/config</code> <strong>once</strong>, since
+the DCS is shared and any member will do, waits <code>loop_wait</code> plus two seconds
+for members to apply it, and restarts <strong>only members whose <code>pending_restart</code>
+is set</strong>. Replicas go first, except when a parameter was <em>decreased</em> that a
+standby needs to be at least the primary’s value (its
+<code>requirePrimaryRestartWhenDecreased</code> list, e.g. <code>max_connections</code>): then the
+primary restarts first, because a standby refuses to start below it. A member
+that answers an empty config is not initialised yet, so the patch is skipped
+for it, which for us is <code>Unknown</code>, not <code>Failure</code>.
+</li>
 </ul>
 <h4 id="routing-to-the-leader">Routing to the leader</h4>
 <p>Three options, from least to most machinery. The recipe should offer the
@@ -173,11 +184,55 @@ from the archive instead of loading the leader with a base backup.
 <li><code>up</code>: <code>POST /switchover</code>.
 </li>
 </ul>
+<p><strong>Choosing the target</strong> (also from the operator, <code>pod.go</code>,
+<code>getSwitchoverCandidate</code>): with <code>synchronous_mode</code> on, the candidate is the sync
+standby, and salmon <strong>waits for one to exist rather than falling back</strong> to an
+asynchronous member, since that member may lack acknowledged writes. Otherwise
+it is the lowest-lag member whose state is <code>running</code>, <code>streaming</code> or <code>in archive recovery</code>. If there is no candidate the switchover is skipped and retried on the
+next pass, with the leader left alone. The state that pass needs is re-derived
+from <code>/cluster</code> each time, which is the property <code>PostgresPair</code> protects.</p>
 <p>The default is <em>no preference</em>. With a preference declared and supervision
 on, salmon would move the leader back after every automatic failover, as
 soon as the preferred member is healthy. That is sometimes what is wanted
 (a preferred site or a bigger machine) and sometimes a flap. It must be a
 choice, never the default.</p>
+<h3 id="rolling-maintenance-of-members">Rolling maintenance of members</h3>
+<p>Restarting or upgrading every member (a Postgres minor update, a Patroni
+package) is one operation in three steps, and the order is the safety:</p>
+<ol>
+<li>replicas, one at a time, waiting for each to report <code>streaming</code> again;
+</li>
+<li>a switchover of the leader to the candidate chosen as above;
+</li>
+<li>the old leader, now a replica.
+</li>
+</ol>
+<p>The operator’s <code>recreatePods</code> does exactly this, and does not touch the leader
+when it has no safe candidate. Salmon’s version is a node whose <code>check</code> is “no
+member is on an old version or pending a restart” and whose <code>up</code> walks that
+order from the controller. It must tolerate being killed halfway: the next pass
+re-observes and continues.</p>
+<h3 id="gating-risky-operations">Gating risky operations</h3>
+<p>Two guards the operator applies to operations that cannot be undone, both
+expressible with what already exists:</p>
+<ul>
+<li><strong>A maintenance window</strong> (<code>isInMaintenanceWindow</code> in <code>sync.go</code>). Outside the
+window the operator freezes the desired version, so the change is never seen.
+Our <code>Gate</code> on <code>upTreeWith</code> (“does this traversal want to touch this node at
+all”) is the place: a time-window gate for nodes that restart or upgrade. The
+gate reports a <code>Skip</code>, and <code>status</code> shows why.
+</li>
+<li><strong>Preconditions and a failure latch</strong> (<code>majorversionupgrade.go</code>). It runs only
+when every pod is running, every replica is <code>streaming</code> and lag is under
+16 MB, and it labels the pods <code>critical-operation</code> so a node drain cannot
+interfere. After a failure it records an annotation and does not retry
+automatically until an operator clears it. The equivalents are the same
+preconditions in the node’s <code>check</code> (<code>Unknown</code> when unmet, so nothing
+starts), <code>supGiveUpAfter</code> with the node parked, and a way to tell sibling
+nodes on the same cluster to hold still while it runs (a <code>Pause</code>, see
+<code>Op/Mailbox.hs</code>); that last one has no counterpart yet.
+</li>
+</ul>
 <h3 id="disaster-scenarios">Disaster scenarios</h3>
 <p>These reuse <code>pg-switchover.md</code>’s scenario catalogue where the cause is the
 same, with different expected outcomes, plus the ones only consensus makes
@@ -226,6 +281,10 @@ simpler to reason about, and portable to non-Debian hosts.
 <li><strong>Should the config node restart members</strong> (<code>patronictl restart --pending</code>), or report <code>pending_restart</code> and leave the restart to an
 operator? Restarting is what <code>run up</code> means everywhere else. A restart of
 the leader under load is also a small outage.
+<strong>Decided (owner, 2026-09-26):</strong> restart the members that have
+<code>pending_restart</code> set, replicas first, and the leader behind a
+maintenance-window gate (what the Zalando operator does; see the leaning
+under the config node above).
 </li>
 <li><strong><code>failsafe_mode</code> default</strong> (see T5).
 </li>

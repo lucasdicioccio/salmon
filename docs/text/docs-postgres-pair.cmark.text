@@ -77,6 +77,8 @@ The controller does not have to be always up or unique-by-design: it keeps no st
 PauseBouncers -> StopMember A -> Promote B -> RepointBouncers B -> Rejoin A -> Done
 ```
 
+![A switchover from A to B: pause bouncers, stop A cleanly, promote B, repoint bouncers, rejoin A through pg_rewind; an unsafe declaration is refused instead of run](/gen/images/pg-switchover.dot.png )
+
 - **PauseBouncers** holds the clients rather than dropping them. With `pool_mode = transaction`, `PAUSE` waits for transactions in flight and queues what comes after, so a client sees latency where it would otherwise see an error.
 
 - **StopMember** is a _clean_ stop, which hands the standby everything it has not got, including the shutdown checkpoint the promotion waits for. It also pins `wal_keep_size` first, because a clean shutdown ends in a checkpoint and a checkpoint recycles the WAL a later rewind reads.

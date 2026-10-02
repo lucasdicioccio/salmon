@@ -1,0 +1,8 @@
+serve-fixture-bundle (n6592824503498048121) 
+  <- file-contents
+  <- file-contents
+file-contents (1422851260476985444) writes /tmp/salmon-getting-started-demo/web/index.html with some contents
+  <- directory
+directory (3315342797002916238) ensures /tmp/salmon-getting-started-demo/web exists, including subdirs
+file-contents (2758568756336132608) writes /tmp/salmon-getting-started-demo/web/style.css with some contents
+  <- directory
