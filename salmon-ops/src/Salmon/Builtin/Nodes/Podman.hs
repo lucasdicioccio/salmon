@@ -146,13 +146,52 @@ pullImage r podman reg img =
     r' = contramap (PullImage reg img) r
     r'' = contramap (RemoveImage reg img) r
 
+{- | How @podman build@ is told what to build, beyond the Containerfile and
+the tag. 'defaultBuildOptions' is what 'buildImage' has always done.
+
+* 'buildContext': the build context directory, i.e. what @COPY@\/@ADD@ paths
+  are relative to. 'Nothing' is the Containerfile's own directory (the build
+  runs /in/ that directory, with no context argument). A repository whose
+  Containerfiles live in a subdirectory but are written for the repository
+  root as context sets this to the root.
+* 'buildTarget': the stage of a multi-stage Containerfile to stop at
+  (@--target@). 'Nothing' builds the last stage. Several images built from
+  one file are several nodes, one 'TagName' each.
+-}
+data BuildOptions
+    = BuildOptions
+    { buildContext :: Maybe FilePath
+    , buildTarget :: Maybe Text
+    }
+    deriving (Eq, Ord, Show)
+
+defaultBuildOptions :: BuildOptions
+defaultBuildOptions = BuildOptions Nothing Nothing
+
+{- | Builds an image from a Containerfile, with that file's own directory as
+the build context and no @--target@: 'buildImageWith' 'defaultBuildOptions'.
+-}
 buildImage :: Reporter Report -> Track' (Binary "podman") -> FS.File "containerfile" -> TagName -> Op
-buildImage r podman containerfile tagname =
+buildImage r podman = buildImageWith r podman defaultBuildOptions
+
+{- | 'buildImage' with an explicit build context and\/or a @--target@ stage
+(see 'BuildOptions').
+
+The 'ref' is the tag alone, as for 'buildImage': a tag is one effect site
+whatever it was built from, so two declarations building the same tag from
+different contexts or stages are a collision, not two nodes. The options
+are spelled in 'notes' when they are not the default, which is what lets
+such a collision -- or a re-declaration that only moves the target -- be
+seen as a differing representative.
+-}
+buildImageWith :: Reporter Report -> Track' (Binary "podman") -> BuildOptions -> FS.File "containerfile" -> TagName -> Op
+buildImageWith r podman opts containerfile tagname =
     FS.withFile containerfile $ \containerfilepath ->
-        withBinary podman podmanCommand (Build containerfilepath tagname) $ \build ->
+        withBinary podman podmanCommand (BuildWith opts containerfilepath tagname) $ \build ->
             op "podman-build" (deps []) $ \actions ->
                 actions
                     { help = "builds a podman image in container path and tag it"
+                    , notes = buildNotes opts
                     , ref = mkRef "podman-build" tagname
                     , up = build (r' containerfilepath)
                     , down = Binary.untrackedExec podmanCommand (RmiTag tagname) "" r''
@@ -160,6 +199,13 @@ buildImage r podman containerfile tagname =
   where
     r' containerfilepath = contramap (BuildImage containerfilepath tagname) r
     r'' = contramap (RemoveBuiltImage tagname) r
+
+-- | Nothing for 'defaultBuildOptions', so a plain 'buildImage' node is
+-- described exactly as it was before the options existed.
+buildNotes :: BuildOptions -> [Text]
+buildNotes opts =
+    maybe [] (\c -> ["build context: " <> Text.pack c]) opts.buildContext
+        <> maybe [] (\t -> ["target stage: " <> t]) opts.buildTarget
 
 {- | Logs in to a registry, writing credentials to an explicit 'AuthFile'
 rather than the ambient default (see 'AuthFile'’s own note on why that
@@ -295,7 +341,9 @@ skipIfNetworkExists name = do
 data PodmanCommand
     = Pull !Registry !Image
     | Run !Registry !Image !ContainerName !RunOptions
-    | Build !FilePath !TagName
+    | -- | 'BuildWith' 'defaultBuildOptions'.
+      Build !FilePath !TagName
+    | BuildWith !BuildOptions !FilePath !TagName
     | Push !(Maybe AuthFile) !TagName
     | Logout !AuthFile !Registry
     | CreateNetworkCmd !NetworkName
@@ -312,18 +360,8 @@ podmanCommand = Command $ \cmd -> case cmd of
             [ "pull"
             , (Text.unpack $ getRegistry r) </> (Text.unpack $ getImage i)
             ]
-    (Build fullpath tagname) ->
-        ( proc
-            "podman"
-            [ "build"
-            , "-t"
-            , Text.unpack tagname
-            , "-f"
-            , takeFileName fullpath
-            ]
-        )
-            { cwd = Just $ takeDirectory fullpath
-            }
+    (Build fullpath tagname) -> buildProc defaultBuildOptions fullpath tagname
+    (BuildWith opts fullpath tagname) -> buildProc opts fullpath tagname
     (Push mAuthFile tagname) ->
         proc "podman" $
             -- --authfile is a flag of `podman push`, not a global option:
@@ -385,6 +423,28 @@ podmanCommand = Command $ \cmd -> case cmd of
         proc "podman" ["rm", "-f", Text.unpack (getContainerName cname)]
     (RemoveNetworkCmd name) ->
         proc "podman" ["network", "rm", Text.unpack (getNetworkName name)]
+
+{- | @podman build@, in one of two shapes.
+
+With no explicit context the build runs /in/ the Containerfile's directory,
+naming the file by its basename and giving no context argument (podman then
+takes the working directory) -- the shape this module always rendered.
+
+With one, the working directory is left alone and both paths are passed as
+given: @-f@ the Containerfile, the context as the positional argument. A
+relative path is then relative to wherever the salmon process runs, for
+both alike.
+-}
+buildProc :: BuildOptions -> FilePath -> TagName -> CreateProcess
+buildProc opts fullpath tagname = case opts.buildContext of
+    Nothing ->
+        (proc "podman" (["build", "-t", Text.unpack tagname, "-f", takeFileName fullpath] <> target))
+            { cwd = Just $ takeDirectory fullpath
+            }
+    Just context ->
+        proc "podman" (["build", "-t", Text.unpack tagname, "-f", fullpath] <> target <> [context])
+  where
+    target = maybe [] (\t -> ["--target", Text.unpack t]) opts.buildTarget
 
 -------------------------------------------------------------------------------
 

@@ -4,7 +4,7 @@ is for).
 -}
 module Test.PodmanCommandSpec (tests) where
 
-import System.Process (CmdSpec (..), cmdspec)
+import System.Process (CmdSpec (..), cmdspec, cwd)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertEqual, testCase)
 
@@ -19,7 +19,50 @@ tests =
         , testCase "push with an authfile passes --authfile to push, not to podman itself" pushRendersTagWithAuth
         , testCase "logout targets the same authfile login wrote to" logoutRendersAuthFile
         , testCase "rmi tolerates an image that is already gone" rmiIgnoresMissing
+        , testCase "build with no options runs in the Containerfile's directory, as it always did" buildDefault
+        , testCase "the options-less Build constructor renders the same as BuildWith defaultBuildOptions" buildConstructorsAgree
+        , testCase "build with a target adds --target and still runs in the Containerfile's directory" buildTargetOnly
+        , testCase "build with a context passes it as the positional argument and leaves the working directory alone" buildContextOnly
+        , testCase "build with a context and a target" buildContextAndTarget
         ]
+
+build :: Podman.BuildOptions -> (CmdSpec, Maybe FilePath)
+build opts =
+    let p = prepare Podman.podmanCommand (Podman.BuildWith opts "/repo/deploy/Containerfile" "img:1")
+     in (cmdspec p, cwd p)
+
+buildDefault :: IO ()
+buildDefault =
+    assertEqual
+        ""
+        (RawCommand "podman" ["build", "-t", "img:1", "-f", "Containerfile"], Just "/repo/deploy")
+        (build Podman.defaultBuildOptions)
+
+buildConstructorsAgree :: IO ()
+buildConstructorsAgree =
+    let p = prepare Podman.podmanCommand (Podman.Build "/repo/deploy/Containerfile" "img:1")
+     in assertEqual "" (build Podman.defaultBuildOptions) (cmdspec p, cwd p)
+
+buildTargetOnly :: IO ()
+buildTargetOnly =
+    assertEqual
+        ""
+        (RawCommand "podman" ["build", "-t", "img:1", "-f", "Containerfile", "--target", "api"], Just "/repo/deploy")
+        (build Podman.defaultBuildOptions{Podman.buildTarget = Just "api"})
+
+buildContextOnly :: IO ()
+buildContextOnly =
+    assertEqual
+        ""
+        (RawCommand "podman" ["build", "-t", "img:1", "-f", "/repo/deploy/Containerfile", "/repo"], Nothing)
+        (build Podman.defaultBuildOptions{Podman.buildContext = Just "/repo"})
+
+buildContextAndTarget :: IO ()
+buildContextAndTarget =
+    assertEqual
+        ""
+        (RawCommand "podman" ["build", "-t", "img:1", "-f", "/repo/deploy/Containerfile", "--target", "api", "/repo"], Nothing)
+        (build (Podman.BuildOptions (Just "/repo") (Just "api")))
 
 pushRendersTagNoAuth :: IO ()
 pushRendersTagNoAuth =
