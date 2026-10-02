@@ -73,3 +73,53 @@ once-ever guarantee, and every `run up` runs every migration again. So write
 each migration to be idempotent (`CREATE ... IF NOT EXISTS`, `ADD COLUMN IF
 NOT EXISTS`, a guarded `DO $$ ... $$` block, a backfill with a `WHERE` that
 selects only unfinished rows), like any other `up`.
+
+## Pattern: partition by hand, one plan per privilege level
+
+**Problem.** One directive contains nodes that need different identities —
+say a build that must run as an unprivileged `builder` user, and the rest
+(packages, systemd units) that need root — and you do not want the whole
+`run up` under `sudo`. There is no per-node `RunAs` in the tree yet
+(`specs/multi-user-privilege-separation.md` sketches it, L1 to L4); until
+then you can cut the graph yourself with what `query plan` already offers.
+
+**Recipe.** Compute two `Plan`s from the same directive, one selecting the
+builder's nodes and one excluding them, and run each under its own identity:
+
+```sh
+my-salmon config ... > directive.json
+
+# everything the unprivileged builder owns
+my-salmon query plan --select '/**/cabal-build/**' --select '/**/git-repo/**' \
+  < directive.json > builder.plan
+# everything else
+my-salmon query plan --exclude '/**/cabal-build/**' --exclude '/**/git-repo/**' \
+  < directive.json > root.plan
+
+sudo -u builder my-salmon run up --plan builder.plan < directive.json
+sudo             my-salmon run up --plan root.plan    < directive.json
+```
+
+(`my-salmon query tree` shows the declared paths the globs are matched
+against.) A plan carries the digest of the directive it was computed from,
+so both passes are pinned to the same `directive.json`: a plan computed
+against one graph cannot be silently applied to another. Run the pass whose
+nodes are depended upon first.
+
+**Limitations.** Both are silent, which is why this is a stopgap and not a
+feature:
+
+- **The cut must be topological, and nothing checks it.** Each invocation
+  walks only its own subset, with correct ordering inside it. If a root node
+  must run *between* two builder nodes, no ordering of the two passes
+  expresses that, and salmon will not tell you; check by hand that no node in
+  the first pass depends on a node in the second.
+- **Addressing is by path glob.** A recipe refactor that renames a shorthand
+  silently changes which nodes land in which privilege domain, and a
+  mis-partitioned privilege is a bad failure mode. Re-run `query plan` and
+  look at what each plan selects after any change to the recipe.
+
+Also note `run down --plan` does not exist, so teardown cannot be partitioned
+this way. The tagged-domain design in
+`specs/multi-user-privilege-separation.md` (L3) removes the glob and checks
+the cut.
