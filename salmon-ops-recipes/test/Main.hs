@@ -27,6 +27,7 @@ import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanCommandSpec as PodmanCommandSpec
 import qualified Test.MigratorTemplateSpec as MigratorTemplateSpec
+import qualified Test.PgBackRestSpec as PgBackRestSpec
 import qualified Test.PgBackupSpec as PgBackupSpec
 import qualified Test.PodmanSpec as PodmanSpec
 import qualified Test.PostgresBackupSpec as PostgresBackupSpec
@@ -92,6 +93,7 @@ main =
                   PostgresInitSpec.tests
                 , PostgresTemplateSpec.sandboxTests
                 , MigratorTemplateSpec.tests
+                , PgBackRestSpec.sandboxTests
                 , -- the rest of the VM specs: they share one bridge and a
                   -- handful of fixed addresses, so two at once is two guests
                   -- claiming one address.
@@ -133,6 +135,7 @@ main =
             , PgBouncerSpec.tests
             , EtcdSpec.tests
             , PatroniSpec.tests
+            , PgBackRestSpec.tests
             , PostgresPairSpec.tests
             , PostgresTemplateSpec.tests
             , PostgresTlsSpec.tests

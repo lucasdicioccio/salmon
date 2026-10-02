@@ -168,6 +168,32 @@ would otherwise run on every member.
   story, and as Patroni's `create_replica_methods`, which rebuilds a replica
   from the archive instead of loading the leader with a base backup.
 
+  **Implemented, pgBackRest first** (`Salmon.Builtin.Nodes.PgBackRest`,
+  `Patroni.pat_archive`). What writing it settled, and what it did not:
+  - The repository has to be one every member reads (a shared mount, or S3):
+    a replica is built from an archive it can reach.
+  - `stanza-create` and `backup` are "exactly one member" operations too: with
+    one `pg1-path` configured, pgBackRest refuses both on a standby. The nodes
+    check the *repository* (which any member can read) and their `up` succeeds
+    only on whichever member leads at that moment; no directive names it.
+  - The scheduled backup gates on `/primary`, not `/replica` as written above.
+    A backup taken from a standby needs `backup-standby` and a second `pg`
+    host reached over ssh or TLS. Not done.
+  - `archive_mode`/`archive_command` are local `postgresql.parameters` in
+    `patroni.yml`, not DCS keys, so that declaring an archive on an existing
+    cluster takes effect; `archive_mode` is restart-only and shows up as
+    `pending_restart` for the config node.
+  - Point-in-time recovery of a whole Patroni cluster is a custom bootstrap of
+    a *new* scope (`patroniArchiveRecovering`). Rendered; never run.
+  - Shown in a container (`Test.PgBackRestSpec`, Layer 2): recovery to a
+    timestamp on a plain cluster, and a second Patroni member made by
+    pgBackRest rather than by a base backup. T7 on the three VMs is not run.
+  - Two defects in the Patroni builtin surfaced on the way, both from keeping
+    the configuration outside the data directory: `bootstrap.pg_hba` never
+    reaches a replica (now `postgresql.pg_hba`), and Patroni does not create
+    the `postgresql.conf` it renames (now seeded, empty, once). And Debian's
+    `patroni` does not pull in `python3-etcd`.
+
 ## Switchover, under Patroni
 
 `pg-switchover.md`'s role node has a counterpart here, and it is opt-in: a
@@ -259,6 +285,7 @@ appears in a directive" is a rule rather than a guideline.
 3. **`Patroni`** plus the cluster-wide config node; T1, T3, T4.
 4. **Routing:** multi-host connection strings first, then HAProxy; T2, T6.
 5. **Archive and PITR** (pgBackRest or WAL-G), and backups on one member; T7.
+   *pgBackRest builtin and the Patroni wiring are in; T7 itself is not run.*
 6. **The opt-in preferred leader.**
 
 ## Open questions
