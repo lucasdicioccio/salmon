@@ -735,7 +735,7 @@ vmPrerequisites spec vm =
             , Compute.firewallTargetTags = [sshTag spec]
             }
         `inject` computeApi
-    , FS.filecontents (FS.FileContents (startupScriptPath spec) (startupScript vm))
+    , VmProvision.caTrustStartupScriptFile (startupScriptPath spec) vm.vmUser
     ]
         -- The peer and the VM's own reservation come before the VM: the VM
         -- is pinned to an address that should be reserved first, and what it
@@ -832,7 +832,8 @@ peerStartupScript spec peer =
 
 gceInstance :: Spec -> VmConfig -> Compute.Instance
 gceInstance spec vm =
-    Compute.Instance
+    VmProvision.withStartupScriptFile (startupScriptPath spec) $
+      Compute.Instance
         { Compute.instanceName = vmName spec
         , Compute.instanceProject = projectOf spec
         , Compute.instanceZone = Core.Zone vm.vmZone
@@ -848,7 +849,7 @@ gceInstance spec vm =
         , Compute.instanceSubnet = "default"
         , Compute.instanceServiceAccount = Nothing
         , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
-        , Compute.instanceMetadataFiles = Map.fromList [("startup-script", startupScriptPath spec)]
+        , Compute.instanceMetadataFiles = Map.empty
         , Compute.instanceExternalAddress = Compute.ReservedExternal (addressSpec spec).addressName
         , Compute.instanceInternalAddress = maybe Compute.EphemeralInternal (Compute.PinnedInternal . peerVmInternalIp) spec.peerConfig
         , -- tags are fixed at create time, so the tier-3 one has to be on the
@@ -997,43 +998,3 @@ caKey spec = Keys.SSHKeyPair Keys.ED25519 (spec.workDir <> "/ssh") "toy-ca"
 clientKey :: Spec -> Keys.SSHKeyPair
 clientKey spec = Keys.SSHKeyPair Keys.ED25519 (spec.workDir <> "/ssh") "toy-client"
 
-{- | What makes the VM trust the CA at all -- the piece
-'Salmon.Builtin.Nodes.Gcp.SshAccess'.@installMetadataCaKey@ deliberately does
-not do: it publishes the CA's public key as project metadata, and nothing on
-a GCE instance reads that key by itself.
-
-It also creates the login user the certificate names as its principal (with
-no OS Login, a principal has to be a local account), gives it passwordless
-sudo (@uploadAndCallSelfAsSudo@ runs the uploaded binary under sudo), and
-makes sure rsync is there for the upload. Idempotent, because a startup
-script runs on every boot.
--}
-startupScript :: VmConfig -> Text
-startupScript vm =
-    Text.unlines
-        [ "#!/bin/bash"
-        , "set -eux"
-        , -- The key is published just before the instance is created, and
-          -- "just before" is not "already visible from inside the guest": a
-          -- 404 here used to abort the whole script under `set -e`, leaving a
-          -- VM with no CA, no login user and an sshd that was never
-          -- restarted. Waiting is cheap; the alternative is a VM that can
-          -- only be fixed by a reset.
-          "for attempt in $(seq 1 30); do"
-        , "  if curl -fsS -H 'Metadata-Flavor: Google' \\"
-        , "      http://metadata.google.internal/computeMetadata/v1/project/attributes/ssh-ca \\"
-        , "      > /etc/ssh/salmon_ca.pub; then break; fi"
-        , "  echo \"ssh-ca not in metadata yet (attempt $attempt)\"; sleep 2"
-        , "done"
-        , "test -s /etc/ssh/salmon_ca.pub"
-        , "chmod 644 /etc/ssh/salmon_ca.pub"
-        , "grep -qxF 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' /etc/ssh/sshd_config \\"
-        , "  || echo 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' >> /etc/ssh/sshd_config"
-        , "id -u " <> user <> " >/dev/null 2>&1 || useradd -m -s /bin/bash " <> user
-        , "printf '%s ALL=(ALL) NOPASSWD:ALL\\n' " <> user <> " > /etc/sudoers.d/" <> user
-        , "chmod 440 /etc/sudoers.d/" <> user
-        , "command -v rsync >/dev/null || { apt-get update -qq && apt-get install -y rsync; }"
-        , "systemctl restart ssh || systemctl restart sshd"
-        ]
-  where
-    user = vm.vmUser

@@ -198,7 +198,7 @@ above, where this project's own conventions get enforced:
 | `Gcp.CloudRunAlerts` | the standard Cloud Monitoring alerts for a Cloud Run service (5xx ratio, p99 latency, memory, instances at max) to one email |
 | `Gcp.PostgrestCloudRun` | PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate |
 | `Gcp.PreviewEnvironment` | several Cloud Run deploys composed into one named node: a preview environment |
-| `Gcp.VmProvision` | turn up a GCE instance, then run a salmon binary on it over SSH via `Self` |
+| `Gcp.VmProvision` | turn up a GCE instance, then run a salmon binary on it over SSH via `Self`; exports the startup script that makes the instance trust the SSH CA |
 
 `salmon-ops-recipes-experimental` (not part of the default package set — see
 [Build](#build)) holds `SreBox.CertSigning` (certificate signing workflows),

@@ -25,15 +25,22 @@ module SreBox.Gcp.VmProvision (
     VmProvisionConfig (..),
     provisionedVm,
     Report (..),
+
+    -- * Making the instance trust the CA
+    caTrustStartupScript,
+    caTrustStartupScriptFile,
+    withStartupScriptFile,
 ) where
 
 import Data.Aeson (FromJSON, ToJSON)
+import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Nodes.Binary (Binary)
+import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
 import Salmon.Builtin.Nodes.Keys (SSHKeyPair)
@@ -73,9 +80,11 @@ data VmProvisionConfig directive = VmProvisionConfig
     -- ^ a unique name for this provisioning declaration, used as the 'Ref' key.
     , vmp_instance :: Compute.Instance
     , vmp_ca :: SSHKeyPair
-    -- ^ the CA whose public key is pushed into project metadata; instances
-    -- must be configured (e.g. via a startup script writing @sshd_config@'s
-    -- @TrustedUserCAKeys@) to trust it, which is outside this module's scope.
+    -- ^ the CA whose public key is pushed into project metadata. Nothing on
+    -- an instance reads that key by itself: the instance has to boot with a
+    -- startup script that does, which is 'caTrustStartupScript' (written to
+    -- a file by 'caTrustStartupScriptFile', a node for 'vmp_prerequisites',
+    -- and named in 'vmp_instance' by 'withStartupScriptFile').
     , vmp_clientIdentity :: SSHKeyPair
     -- ^ the key salmon connects with, signed by 'vmp_ca'.
     , vmp_sshUser :: Text
@@ -101,6 +110,66 @@ data VmProvisionConfig directive = VmProvisionConfig
     , vmp_directiveTrack :: Track' directive
     , vmp_directive :: directive
     }
+
+{- | The startup script that makes an instance trust the CA 'provisionedVm'
+publishes -- the piece 'SshAccess.installMetadataCaKey' deliberately does not
+do: it puts the CA's public key in project metadata, and nothing on a GCE
+instance reads that key by itself.
+
+Given the login user (the principal the client certificate names, i.e.
+'vmp_sshUser'), the script: waits for the @ssh-ca@ project attribute and
+writes it to @\/etc\/ssh\/salmon_ca.pub@; points sshd's @TrustedUserCAKeys@ at
+it; creates the user (without OS Login a principal has to be a local
+account); gives it passwordless sudo ('Self.uploadAndCallSelfAsSudoWith' runs
+the uploaded binary under sudo); makes sure @rsync@ is there for the upload;
+and restarts sshd. Idempotent, because a startup script runs on every boot.
+
+The wait loop is load-bearing. The key is published just before the instance
+is created, and "just before" is not "already visible from inside the guest":
+a bare @curl -f@ that meets a 404 aborts the whole script under @set -e@,
+leaving a machine with no CA, no login user and an sshd that was never
+restarted -- one nobody can log into, fixable only by a reset. That is the
+reason this lives here rather than in each consumer's copy.
+
+The user is spliced into shell unquoted, so it must be a plain account name;
+it comes from the declaration, never from input.
+-}
+caTrustStartupScript :: Text -> Text
+caTrustStartupScript user =
+    Text.unlines
+        [ "#!/bin/bash"
+        , "set -eux"
+        , "for attempt in $(seq 1 30); do"
+        , "  if curl -fsS -H 'Metadata-Flavor: Google' \\"
+        , "      http://metadata.google.internal/computeMetadata/v1/project/attributes/ssh-ca \\"
+        , "      > /etc/ssh/salmon_ca.pub; then break; fi"
+        , "  echo \"ssh-ca not in metadata yet (attempt $attempt)\"; sleep 2"
+        , "done"
+        , "test -s /etc/ssh/salmon_ca.pub"
+        , "chmod 644 /etc/ssh/salmon_ca.pub"
+        , "grep -qxF 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' /etc/ssh/sshd_config \\"
+        , "  || echo 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' >> /etc/ssh/sshd_config"
+        , "id -u " <> user <> " >/dev/null 2>&1 || useradd -m -s /bin/bash " <> user
+        , "printf '%s ALL=(ALL) NOPASSWD:ALL\\n' " <> user <> " > /etc/sudoers.d/" <> user
+        , "chmod 440 /etc/sudoers.d/" <> user
+        , "command -v rsync >/dev/null || { apt-get update -qq && apt-get install -y rsync; }"
+        , "systemctl restart ssh || systemctl restart sshd"
+        ]
+
+{- | 'caTrustStartupScript' written to a local file, as a node: @gcloud@ takes
+a startup script by path (@--metadata-from-file@), so the file has to exist
+before the instance is created. Belongs in 'vmp_prerequisites'.
+-}
+caTrustStartupScriptFile :: FilePath -> Text -> Op
+caTrustStartupScriptFile path user =
+    FS.filecontents (FS.FileContents path (caTrustStartupScript user))
+
+{- | Points an instance's @startup-script@ metadata at a local file, replacing
+whichever one it named and leaving every other metadata file alone.
+-}
+withStartupScriptFile :: FilePath -> Compute.Instance -> Compute.Instance
+withStartupScriptFile path inst =
+    inst{Compute.instanceMetadataFiles = Map.insert "startup-script" path inst.instanceMetadataFiles}
 
 {- | How this recipe's ssh, rsync and probe all authenticate: the signed
 client key, and a known-hosts file kept beside it rather than in the calling

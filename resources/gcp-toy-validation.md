@@ -79,7 +79,7 @@ then provisions with *this same binary*.
 |---|---|
 | `Gcp.Compute.address` | a reserved regional external IP, `<prefix>-ip` |
 | `Gcp.Compute.firewallRule` | `tcp:22` from `--ssh-source-range` to instances tagged `<prefix>-ssh` |
-| `Filesystem.filecontents` | the startup script, passed as `--metadata-from-file` |
+| `SreBox.Gcp.VmProvision.caTrustStartupScriptFile` (a `Filesystem.filecontents`) | the startup script, passed as `--metadata-from-file` |
 | `Keys.sshKey` ×2, `Keys.signKey` | a CA and a client key, and a certificate for `--vm-user` |
 | `Gcp.SshAccess.installMetadataCaKey` | the CA's public key, into project metadata |
 | `Gcp.Compute.gceInstance` | the VM, claiming the address and carrying the tag |
@@ -87,7 +87,12 @@ then provisions with *this same binary*.
 | `Self.uploadAndCallSelfAsSudoWith` (via `SreBox.Gcp.VmProvision.provisionedVm`) | rsyncs this binary over and runs `run up` on it there |
 
 The startup script is what closes the gap `installMetadataCaKey` leaves:
-nothing on a GCE instance reads that metadata key by itself. It fetches the
+nothing on a GCE instance reads that metadata key by itself. It is not the
+toy's own: `SreBox.Gcp.VmProvision` exports it as `caTrustStartupScript`
+(text, given the login user), with `caTrustStartupScriptFile` to write it as
+a node and `withStartupScriptFile` to name it in an `Instance`'s metadata, so
+a consumer does not carry a copy. It waits for the key to be visible (a 404
+under `set -e` would otherwise leave a machine nobody can log into), fetches the
 CA from the metadata server into `/etc/ssh/salmon_ca.pub`, points sshd's
 `TrustedUserCAKeys` at it, creates the login user the certificate names as
 its principal (with no OS Login, a principal must be a local account), gives
