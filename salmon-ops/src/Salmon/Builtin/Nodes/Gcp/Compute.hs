@@ -5,11 +5,15 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     BootDisk (..),
     Instance (..),
     InstancePower (..),
+    ExternalAddress (..),
+    InternalAddress (..),
     gceInstance,
     Address (..),
+    AddressKind (..),
     address,
     readAddress,
     interpretAddressDescribe,
+    interpretAddress,
     FirewallRule (..),
     firewallRule,
     interpretFirewallDescribe,
@@ -96,6 +100,41 @@ deletes either.
 data InstancePower = PoweredOn | PoweredOff
     deriving (Eq, Show)
 
+{- | The external (public) address of an instance's one network interface.
+
+'NoExternalAddress' is a machine nothing outside the VPC can reach and that
+cannot reach out either, unless the network has a Cloud NAT: no package
+mirror, no container registry. It is the right choice for a machine only its
+peers talk to (a database member), and it is fixed at create time like the
+rest of the interface.
+-}
+data ExternalAddress
+    = -- | one GCP picks at create time and takes back with the instance
+      EphemeralExternal
+    | -- | a reserved external 'Address', by name
+      ReservedExternal Text
+    | -- | none at all (@--no-address@)
+      NoExternalAddress
+    deriving (Eq, Show)
+
+{- | The internal address of an instance's one network interface.
+
+'PinnedInternal' is what lets a graph /name/ a machine before it exists: the
+address is the caller's choice (it must lie in 'instanceSubnet''s range and
+be free), so unlike an external one it is known when the graph is declared
+and can go into a peer's @pg_hba.conf@ or a config file in the same pass.
+GCP keeps such an address for the life of the instance, across stops and
+starts, but hands it to anyone once the instance is deleted; reserving it as
+well (an 'Address' of kind 'InternalAddress' carrying the same literal, which
+the instance should then depend on) is what keeps it across a re-creation.
+-}
+data InternalAddress
+    = -- | whatever GCP picks in the subnet
+      EphemeralInternal
+    | -- | this literal (@--private-network-ip@)
+      PinnedInternal Text
+    deriving (Eq, Show)
+
 -- | A GCE instance.
 data Instance = Instance
     { instanceName :: Text
@@ -113,9 +152,13 @@ data Instance = Instance
     -- ^ metadata whose value is read from a local file
     -- (@--metadata-from-file@) -- how a multi-line @startup-script@ is
     -- passed without quoting it into a single argv value.
-    , instanceAddress :: Maybe Text
-    -- ^ a reserved static address to attach, by name (see 'address'); an
-    -- instance with none gets an ephemeral one GCP picks.
+    , instanceExternalAddress :: ExternalAddress
+    -- ^ reserved by name (see 'address'), ephemeral, or none
+    , instanceInternalAddress :: InternalAddress
+    -- ^ pinned to a declared literal, or left to GCP. Like the rest of the
+    -- interface it is only read at create time: 'gceInstance''s check looks
+    -- at the instance's status, so an existing instance holding another
+    -- address is not noticed and not changed.
     , instanceTags :: [Text]
     }
     deriving (Eq, Show)
@@ -239,7 +282,7 @@ planInstanceUp PoweredOff ExitSuccess status =
 
 -------------------------------------------------------------------------------
 
-{- | A reserved regional external IP.
+{- | A reserved regional IP, external or internal.
 
 Reserved rather than ephemeral because an ephemeral address is handed out at
 instance-create time and taken back when the instance goes away, so nothing
@@ -247,25 +290,39 @@ that has to /name/ the machine (an SSH client, a DNS record, a config file)
 can be written before it exists. A reserved one is a resource in its own
 right: it can be created, read, attached and released on its own schedule.
 
-It still cannot be known when the graph is /declared/ -- GCP picks the
-address -- which is why 'readAddress' exists as a separate, out-of-graph
-read for a driver to use between two passes.
+An external one still cannot be known when the graph is /declared/ -- GCP
+picks the address -- which is why 'readAddress' exists as a separate,
+out-of-graph read for a driver to use between two passes. An internal one
+can: see 'InternalAddress'.
 -}
 data Address = Address
     { addressName :: Text
     , addressProject :: Project
     , addressRegion :: Region
+    , addressKind :: AddressKind
     }
     deriving (Eq, Show)
 
--- | Idempotently reserves a regional external IP.
+-- | Which side of the VPC's edge a reserved 'Address' is on.
+data AddressKind
+    = ExternalAddress
+    | {- | In this subnet (by name, in the address's region), at this literal
+      if one is given and wherever GCP picks in the subnet's range otherwise.
+      Give the literal when an instance is to be pinned to it
+      ('PinnedInternal' takes the same one): the check then also compares
+      what was reserved with what was declared.
+      -}
+      InternalAddress Text (Maybe Text)
+    deriving (Eq, Show)
+
+-- | Idempotently reserves a regional IP.
 address :: Reporter Report -> Track' (Binary "gcloud") -> Address -> Op
 address r gcloudTrack addr =
     withBinary gcloudTrack computeCommand (AddressesCreate addr) $ \create ->
         withBinary gcloudTrack computeCommand (AddressesDelete addr) $ \delete ->
             op "gcp-address" nodeps $ \actions ->
                 actions
-                    { help = Text.unwords ["reserves external IP", addr.addressName]
+                    { help = Text.unwords ["reserves", kindWord, "IP", addr.addressName]
                     , ref = mkRef "gcp-address" (addr.addressProject.projectId, addr.addressRegion.regionName, addr.addressName)
                     , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create (rFor' (AddressesCreate addr)))
                     , down = Core.downIfPresent checkAddress (delete (rFor' (AddressesDelete addr)))
@@ -274,11 +331,16 @@ address r gcloudTrack addr =
   where
     rFor' cmd = contramap (RunComputeCommand cmd) r
 
+    kindWord = case addr.addressKind of
+        ExternalAddress -> "external"
+        InternalAddress _ Nothing -> "internal"
+        InternalAddress _ (Just ip) -> "internal (" <> ip <> ")"
+
     checkAddress :: IO CheckResult
     checkAddress = do
         (code, out, _err) <-
             readCreateProcessWithExitCode (prepare computeCommand (AddressesDescribe addr)) ""
-        pure $ interpretAddressDescribe addr.addressName code (Text.strip (Text.decodeUtf8 out))
+        pure $ interpretAddress addr code (Text.strip (Text.decodeUtf8 out))
 
 -- | The verdict drawn from @gcloud compute addresses describe
 -- --format=value(address)@, split out for testability.
@@ -287,6 +349,20 @@ interpretAddressDescribe name (ExitFailure _) _ = Failure ("address not reserved
 interpretAddressDescribe name ExitSuccess out
     | Text.null out = Failure ("address reserved but has no IP: " <> name)
     | otherwise = Success
+
+{- | 'interpretAddressDescribe', and for an internal address declared with a
+literal, that the reservation holds /that/ literal. A reservation of the
+same name on another address is a 'Failure' @up@ cannot repair (@create@
+refuses an existing name), which is the point: the instance pinned to the
+declared literal would otherwise be created on an address nothing reserved.
+-}
+interpretAddress :: Address -> ExitCode -> Text -> CheckResult
+interpretAddress addr code out =
+    case (interpretAddressDescribe addr.addressName code out, addr.addressKind) of
+        (Success, InternalAddress _ (Just wanted))
+            | out /= wanted ->
+                Failure ("address " <> addr.addressName <> " is reserved as " <> out <> ", declared " <> wanted)
+        (verdict, _) -> verdict
 
 {- | Reads a reserved address's actual IP, outside any graph.
 
@@ -563,7 +639,15 @@ computeCommand = Command $ \cmd -> case cmd of
                 <> maybe [] (\sa -> ["--service-account", Text.unpack sa]) inst.instanceServiceAccount
                 <> concatMap (\(k, v) -> ["--metadata", Text.unpack k <> "=" <> Text.unpack v]) (Map.toList inst.instanceMetadata)
                 <> concatMap (\(k, v) -> ["--metadata-from-file", Text.unpack k <> "=" <> v]) (Map.toList inst.instanceMetadataFiles)
-                <> maybe [] (\addr -> ["--address", Text.unpack addr]) inst.instanceAddress
+                <> ( case inst.instanceExternalAddress of
+                        EphemeralExternal -> []
+                        ReservedExternal addr -> ["--address", Text.unpack addr]
+                        NoExternalAddress -> ["--no-address"]
+                   )
+                <> ( case inst.instanceInternalAddress of
+                        EphemeralInternal -> []
+                        PinnedInternal ip -> ["--private-network-ip", Text.unpack ip]
+                   )
                 <> if null inst.instanceTags then [] else ["--tags", Text.unpack (Text.intercalate "," inst.instanceTags)]
     InstancesDescribe inst ->
         gcloudProc $
@@ -637,6 +721,12 @@ computeCommand = Command $ \cmd -> case cmd of
                 , "--region"
                 , Text.unpack addr.addressRegion.regionName
                 ]
+                -- gcloud has no "internal" switch: naming a subnet is what
+                -- makes the reservation an internal one.
+                <> case addr.addressKind of
+                    ExternalAddress -> []
+                    InternalAddress sub ip ->
+                        ["--subnet", Text.unpack sub] <> maybe [] (\lit -> ["--addresses", Text.unpack lit]) ip
     AddressesDescribe addr ->
         gcloudProc $
             withProject addr.addressProject
