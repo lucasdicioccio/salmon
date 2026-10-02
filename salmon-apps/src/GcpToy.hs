@@ -33,11 +33,13 @@ address below, these are known when the graph is declared, so the firewall
 rule that admits the VM by its @\/32@ and the URL the VM fetches are written
 in the same pass that creates the machines.
 
-Tier 2 takes __two passes__, which is not a wart but the shape of the
-problem: GCP picks the address, so nothing can name the machine until after
-the address node's @up@. Pass one declares the infrastructure; the driver
-then reads the IP (@Compute.readAddress@) and passes it back in as
-@--vm-ip@, and pass two declares the same graph plus the provisioning step.
+Tier 2 is __one pass__. GCP picks the address, so nothing can name the
+machine until after the address node's @up@, and an 'Op' naming it cannot be
+built at declaration: the part that has to (the ssh probe, the secret upload,
+the remote call) is therefore built inside a node's @up@, from the address
+read then ('VmProvision.provisionedVmReadingHost'). @--vm-ip@ is still
+accepted and declares that part as ordinary nodes, which is what the driver
+script's second pass does and what shows them in @run tree@.
 
 When the project is created by this binary (the default), it is the deepest
 node of the graph, so @run down@ tears every resource down individually
@@ -770,40 +772,43 @@ tier1 spec =
 -- Tier 2: a VM, provisioned over an SSH CA by this same binary.
 
 tier2 :: Spec -> [Op]
-tier2 spec = case spec.vmConfig of
-    Nothing -> []
-    Just vm -> case vm.vmIp of
-        -- First pass: the address does not have an IP yet, so nothing can
-        -- name the machine. Declare the infrastructure and stop; the driver
-        -- reads the IP and comes back with --vm-ip.
-        Nothing -> [infrastructure spec vm]
-        Just ip -> [provisioned spec vm ip]
+tier2 spec = [provisioned spec vm | vm <- maybe [] pure spec.vmConfig]
 
--- | The address, the firewall opening, the startup script, and the VM.
-infrastructure :: Spec -> VmConfig -> Op
-infrastructure spec vm =
-    op "gcp-toy-vm-infra" (deps [instanceNode spec vm]) $ \actions ->
-        actions
-            { help = Text.unwords ["reserves an address and boots", vmName spec]
-            , ref = mkRef "gcp-toy-vm-infra" (spec.project, vmName spec)
-            }
+{- | The machine, created and provisioned.
 
-provisioned :: Spec -> VmConfig -> Text -> Op
-provisioned spec vm ip =
-    VmProvision.provisionedVm
-        reportPrint
-        Core.gcloud
-        OS.sshClient
+With @--vm-ip@ the host is declared and every node is an ordinary one.
+Without it the host is read from the reserved address once the instance is
+up, and what names the machine is a sub-graph walked from inside this node --
+one pass instead of two, at the price of that sub-graph being opaque to
+@run tree@.
+-}
+provisioned :: Spec -> VmConfig -> Op
+provisioned spec vm = case vm.vmIp of
+    Just ip ->
+        VmProvision.provisionedVm reportPrint Core.gcloud OS.sshClient (at ip (config ip))
+    Nothing ->
+        VmProvision.provisionedVmReadingHost
+            reportPrint
+            Core.gcloud
+            OS.sshClient
+            (Compute.readAddress (addressSpec spec))
+            at
+            -- overwritten with the address read
+            (config "")
+  where
+    at ip cfg = cfg{VmProvision.vmp_beforeCall = \opts -> [deliveredSecret spec vm ip opts]}
+
+    config host =
         VmProvision.VmProvisionConfig
             { VmProvision.vmp_name = vmName spec
             , VmProvision.vmp_instance = gceInstance spec vm
             , VmProvision.vmp_ca = caKey spec
             , VmProvision.vmp_clientIdentity = clientKey spec
             , VmProvision.vmp_sshUser = vm.vmUser
-            , VmProvision.vmp_sshHost = ip
+            , VmProvision.vmp_sshHost = host
             , VmProvision.vmp_sshPort = 22
             , VmProvision.vmp_prerequisites = vmPrerequisites spec vm
-            , VmProvision.vmp_beforeCall = \opts -> [deliveredSecret spec vm ip opts]
+            , VmProvision.vmp_beforeCall = const []
             , VmProvision.vmp_remoteDir = "/home/" <> Text.unpack vm.vmUser
             , VmProvision.vmp_selfPath = vm.vmSelfPath
             , VmProvision.vmp_directiveTrack = program
@@ -834,7 +839,8 @@ deliveredSecret spec vm ip opts =
 localSecretPath :: Spec -> FilePath
 localSecretPath spec = spec.workDir <> "/secrets/toy-secret"
 
--- | The instance on its own, for the first pass (which has no IP to ssh to).
+-- | The instance on its own, for what stands on the machine rather than on
+-- its being provisioned (the balancer's instance group).
 instanceNode :: Spec -> VmConfig -> Op
 instanceNode spec vm =
     foldl inject (Compute.gceInstance reportPrint Core.gcloud (gceInstance spec vm)) (vmPrerequisites spec vm)
@@ -848,10 +854,10 @@ vmPrerequisites spec vm =
     [ computeApi
     , -- The CA has to be in project metadata before the instance *boots*,
       -- not merely before it is provisioned: the startup script reads the key
-      -- at boot and nothing re-runs it afterwards. Declared here (rather than
-      -- left to 'VmProvision', which only appears in the second pass) so the
-      -- first pass -- the one that creates the VM -- carries it. Both
-      -- declarations are the same node: same 'Ref', deduped by the fold.
+      -- at boot and nothing re-runs it afterwards. Declared here as well as
+      -- by 'VmProvision' so that 'instanceNode', which does not go through
+      -- that recipe, carries it. Both declarations are the same node: same
+      -- 'Ref', deduped by the fold.
       sshCaInMetadata spec
     , Compute.address reportPrint Core.gcloud (addressSpec spec) `inject` computeApi
     , Compute.firewallRule
@@ -1117,13 +1123,10 @@ balancer spec vm lb =
                 }
             `inject` computeApi
 
-    -- On the pass that knows the IP, the balancer is declared *after* the
-    -- machine has been provisioned, so the backend is already serving by the
-    -- time the first health check runs. On the first pass there is no such
-    -- node and the balancer simply comes up in front of an unhealthy backend,
-    -- which is legal and is what the second pass fixes.
+    -- The balancer is declared *after* the machine has been provisioned, so
+    -- the backend is already serving by the time the first health check runs.
     served :: [Op]
-    served = maybe [] (\ip -> [provisioned spec vm ip]) vm.vmIp
+    served = [provisioned spec vm]
 
 instanceGroupSpec :: Spec -> VmConfig -> Compute.InstanceGroup
 instanceGroupSpec spec vm =

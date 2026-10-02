@@ -24,6 +24,7 @@ because @RUNNING@ says nothing about sshd being reachable yet.
 module SreBox.Gcp.VmProvision (
     VmProvisionConfig (..),
     provisionedVm,
+    provisionedVmReadingHost,
     Report (..),
 
     -- * Making the instance trust the CA
@@ -40,6 +41,7 @@ import qualified Data.Text as Text
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Nodes.Binary (Binary)
+import qualified Salmon.Builtin.Nodes.Deferred as Deferred
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
@@ -60,6 +62,8 @@ data Report
     | RunSshAccess !SshAccess.Report
     | RunKeys !Keys.Report
     | RunSelf !Self.Report
+    | -- | 'provisionedVmReadingHost': the hand-off's own nested walk.
+      RunHandOff !Deferred.Report
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -70,10 +74,11 @@ its setup as a @directive@, run by a re-uploaded copy of the calling binary.
 The SSH endpoint (host/port/user) is supplied by the caller rather than
 derived from the 'Compute.Instance', mirroring
 @specs/gcloud-support.md@ section 6's own signature: an ephemeral instance's
-address generally is not known until after 'up' runs, so a recipe that needs
-one has to either reserve a static address up front or thread it through
-some other channel -- deriving it here would just move that problem, not
-solve it.
+address generally is not known until after 'up' runs. A caller that knows the
+host (a declared internal address, a second pass handed the address by its
+driver) writes it in 'vmp_sshHost' and uses 'provisionedVm'; one that does not
+(a reserved external address, which GCP picks) gives a read of it to
+'provisionedVmReadingHost' instead.
 -}
 data VmProvisionConfig directive = VmProvisionConfig
     { vmp_name :: Text
@@ -204,16 +209,95 @@ provisionedVm ::
     VmProvisionConfig directive ->
     Op
 provisionedVm r gcloudTrack keygenTrack cfg =
-    op "gcp-vm-provision" (deps [foldl inject (trackedGraph call) (sshReady : beforeCall)]) $ \actions ->
+    op "gcp-vm-provision" (deps [handOff r cfg [vm, signedClient]]) $ \actions ->
         actions
-            { help = Text.unwords ["provisions GCE VM", cfg.vmp_instance.instanceName, "over SSH and runs the self binary on it"]
+            { help = provisionHelp cfg
             , ref = mkRef "gcp-vm-provision" cfg.vmp_name
             }
+  where
+    (vm, signedClient) = machine r gcloudTrack keygenTrack cfg
+
+{- | 'provisionedVm' for a host that is not known when the graph is declared
+-- an instance behind a reserved external address, which GCP picks -- so that
+one pass creates the machine /and/ provisions it.
+
+The host is a read (@'Compute.readAddress' addr@, typically) done once the
+instance is up, and everything that has to name the machine -- the ssh probe,
+the 'vmp_beforeCall' uploads, the remote call -- is a
+"Salmon.Builtin.Nodes.Deferred" sub-graph built from what the read found.
+The instance, the CA and the signed client key name nothing and stay
+ordinary nodes, declared and ordered as in 'provisionedVm'.
+
+Of the config, 'vmp_sshHost' is overwritten with the host read (give it
+anything), and the completion function is applied after that: it is where a
+'vmp_beforeCall' that needs the host is set, since one written in the config
+would have to close over a host nobody has yet.
+
+Three things follow from the hand-off being a nested walk, beyond what
+'Salmon.Builtin.Nodes.Deferred.deferred' says of any:
+
+* The node that makes the read answer has to be up before the instance is:
+  the address belongs in 'vmp_prerequisites', where an instance claiming it
+  by name needs it anyway.
+* The 'vmp_beforeCall' nodes are walked /down/ by this node's @down@ along
+  with the probe and the call, dependencies included. Whatever they stand on
+  that is also declared elsewhere should be injected into this recipe's node
+  rather than into them.
+* A read that finds nothing fails this node's @up@ (nothing is provisioned
+  at a guess) and makes its @down@ a no-op.
+-}
+provisionedVmReadingHost ::
+    forall directive.
+    (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
+    Track' (Binary "gcloud") ->
+    Track' (Binary "ssh-keygen") ->
+    -- | the ssh host, once the instance is up; e.g. @Compute.readAddress addr@
+    IO (Maybe Text) ->
+    -- | completes the config with the host just read
+    (Text -> VmProvisionConfig directive -> VmProvisionConfig directive) ->
+    VmProvisionConfig directive ->
+    Op
+provisionedVmReadingHost r gcloudTrack keygenTrack readHost complete cfg =
+    op "gcp-vm-provision" (deps [late `inject` vm `inject` signedClient]) $ \actions ->
+        actions
+            { help = provisionHelp cfg
+            , notes = ["ssh host read once the instance is up"]
+            , ref = mkRef "gcp-vm-provision" cfg.vmp_name
+            }
+  where
+    (vm, signedClient) = machine r gcloudTrack keygenTrack cfg
+
+    late :: Op
+    late =
+        Deferred.deferred
+            (contramap RunHandOff r)
+            Deferred.Deferred
+                { Deferred.deferredName = "gcp-vm-provision:" <> cfg.vmp_name
+                , Deferred.deferredHelp =
+                    Text.unwords ["reads the address of", cfg.vmp_instance.instanceName, "then waits for ssh and runs the self binary on it"]
+                , Deferred.deferredRead = readHost
+                , Deferred.deferredGraph = \host -> handOff r (complete host cfg{vmp_sshHost = host}) []
+                }
+
+provisionHelp :: VmProvisionConfig directive -> Text
+provisionHelp cfg =
+    Text.unwords ["provisions GCE VM", cfg.vmp_instance.instanceName, "over SSH and runs the self binary on it"]
+
+{- | The half that names no host: the instance (after the CA is published and
+every 'vmp_prerequisites' node), and the client key signed by that CA.
+-}
+machine ::
+    Reporter Report ->
+    Track' (Binary "gcloud") ->
+    Track' (Binary "ssh-keygen") ->
+    VmProvisionConfig directive ->
+    (Op, Op)
+machine r gcloudTrack keygenTrack cfg = (vm, signedClient)
   where
     rCompute = contramap RunCompute r
     rSshAccess = contramap RunSshAccess r
     rKeys = contramap RunKeys r
-    rSelf = contramap RunSelf r
 
     -- The CA's public key has to be in project metadata *before* the
     -- instance boots: the instance's startup script reads it from there to
@@ -247,13 +331,30 @@ provisionedVm r gcloudTrack keygenTrack cfg =
             [Keys.Principal cfg.vmp_sshUser]
             cfg.vmp_clientIdentity
 
+{- | The half that names the host ('vmp_sshHost'): the ssh probe, standing on
+the nodes given, then every 'vmp_beforeCall' node, then the remote call.
+-}
+handOff ::
+    forall directive.
+    (FromJSON directive, ToJSON directive) =>
+    Reporter Report ->
+    VmProvisionConfig directive ->
+    [Op] ->
+    Op
+handOff r cfg sshNeeds = foldl inject (trackedGraph call) (sshReady : beforeCall)
+  where
+    rSshAccess = contramap RunSshAccess r
+    rSelf = contramap RunSelf r
+
     sshReady :: Op
     sshReady =
-        SshAccess.sshAvailable
-            rSshAccess
-            (SshAccess.SshEndpoint (Just cfg.vmp_sshUser) cfg.vmp_sshHost cfg.vmp_sshPort (clientOpts cfg))
-            `inject` vm
-            `inject` signedClient
+        foldl
+            inject
+            ( SshAccess.sshAvailable
+                rSshAccess
+                (SshAccess.SshEndpoint (Just cfg.vmp_sshUser) cfg.vmp_sshHost cfg.vmp_sshPort (clientOpts cfg))
+            )
+            sshNeeds
 
     beforeCall :: [Op]
     beforeCall = [step `inject` sshReady | step <- cfg.vmp_beforeCall (clientOpts cfg)]

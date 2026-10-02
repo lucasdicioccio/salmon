@@ -938,6 +938,21 @@ the metadata server's token for the instance's own service account, plus a `chec
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run; no container has been started by a test, the
 metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
+`Nodes/Deferred.hs` (`deferred`) is a sub-graph built at `up` from a value another node of the same pass produced: the
+node holds a read (`IO (Maybe a)`) and a recipe (`a -> Op`), and its `up` reads, builds and runs a nested `upTree`
+(`down` the same with `downTree`), throwing if the nested walk fails. It is the `PostgresTemplate` opaque-walk shape
+with the graph a function of the read, and exists because an `Op` is built before any `up` runs. Load-bearing: the
+read never runs at declaration; a read finding nothing fails `up` (`Unresolved`) and makes `down` a reported no-op;
+the node has no dependencies, so the caller injects the producer; **only what needs the value goes inside**, since
+`down` tears the whole sub-graph down and a node also declared outside (a project, an API, the producer) would go
+with it; the inside is invisible to `run tree`/`dag`/`query`, rewrites and `serve`'s per-node state, and with no
+`check` the node is `Immaterial`, so under `serve` it parks and its inner nodes are not tended.
+`VmProvision.provisionedVmReadingHost` is the one user: `provisionedVm` with the ssh host read
+(`Compute.readAddress`) once the instance is up, the instance/CA/signed key ordinary nodes and the ssh probe,
+`vmp_beforeCall` nodes and remote call deferred, so a VM behind a reserved external address is created and provisioned
+in one pass. The GCP toy's tier 2 uses it when `--vm-ip` is absent. `Test/DeferredSpec.hs` is Layer 0 (in-process
+nodes, and the recipe's declared shape); the one-pass path has never been run against a real project.
+
 `Gcp.Core.declaredAccount` asserts who the GCP nodes act as. Every one of them shells out to `gcloud`, and so does
 `Core.printAccessToken`: all act as gcloud's *active account*, which `applicationDefaultCredentials` (a different
 credential, used by nothing in the tree) says nothing about. The node's `check` reads `gcloud config get-value account`

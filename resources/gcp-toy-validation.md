@@ -112,13 +112,25 @@ CA from the metadata server into `/etc/ssh/salmon_ca.pub`, points sshd's
 its principal (with no OS Login, a principal must be a local account), gives
 it passwordless sudo, and makes sure `rsync` is there for the upload.
 
-**Tier 2 runs in two passes, and the script drives both.** GCP picks the
-address, so the first pass reserves it and stops; the driver then reads the
-IP (`gcloud compute addresses describe`, the call `Compute.readAddress`
-wraps) and re-issues the directive with `--vm-ip`, and
-the second pass declares the same graph plus the provisioning step. That is
-not a wart of the toy: an `Op` naming the host has to be built before any
-`up` runs, so *something* outside the graph has to carry the address across.
+**Tier 2 provisions in the pass that creates the machine.** GCP picks the
+address, and an `Op` naming the host has to be built before any `up` runs, so
+the nodes that name it (the ssh probe, the secret upload, the remote call)
+cannot be declared. Without `--vm-ip` the toy uses
+`VmProvision.provisionedVmReadingHost`: the instance, the CA and the signed
+key are ordinary nodes, and the hand-off is one `Salmon.Builtin.Nodes.Deferred`
+node whose `up` reads the address (`Compute.readAddress`), builds those nodes
+from it and walks them. `run tree` shows that node and not what is inside it.
+
+The script still drives two passes: after the first it reads the IP itself
+(`gcloud compute addresses describe`) and re-issues the directive with
+`--vm-ip`, which declares the hand-off as ordinary nodes. The second pass is
+then expected to skip or re-check what the first already did, rather than to
+do the provisioning. **The one-pass path has not been run against a real
+project**; before this change the first pass stopped at the instance, so a
+first pass that fails at `deferred` is this code, not the infrastructure.
+Under `run serve`, moving from a seed without `--vm-ip` to one with it
+retires the deferred node, whose `down` removes the uploaded secret before the
+declared upload puts it back.
 
 What proves it worked is the file the uploaded binary writes on the VM,
 `/var/lib/salmon-toy/provisioned`; the script reads it back over ssh. The

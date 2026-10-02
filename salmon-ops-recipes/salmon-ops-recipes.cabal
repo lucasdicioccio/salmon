@@ -106,6 +106,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ConcurrentSpec
                     , Test.DaemonSpec
                     , Test.DagSpec
+                    , Test.DeferredSpec
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
                     , Test.FollowCacheSpec

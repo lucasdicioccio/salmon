@@ -83,6 +83,7 @@ library
                    , Salmon.Builtin.Nodes.Git
                    , Salmon.Builtin.Nodes.User
                    , Salmon.Builtin.Nodes.Keys
+                   , Salmon.Builtin.Nodes.Deferred
                    , Salmon.Builtin.Nodes.LinuxBridge
                    , Salmon.Builtin.Nodes.Netfilter
                    , Salmon.Builtin.Nodes.Nginx

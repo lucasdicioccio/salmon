@@ -15,6 +15,7 @@ import qualified Test.WireGuardMeshSpec as WireGuardMeshSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
 import qualified Test.PortMappingSpec as PortMappingSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
+import qualified Test.DeferredSpec as DeferredSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
 import qualified Test.FilesystemSpec as FilesystemSpec
 import qualified Test.FollowCacheSpec as FollowCacheSpec
@@ -122,6 +123,7 @@ main =
             , WireGuardSpec.tests
             , WireGuardMeshSpec.tests
             , PortMappingSpec.tests
+            , DeferredSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests
             , FollowCacheSpec.tests
