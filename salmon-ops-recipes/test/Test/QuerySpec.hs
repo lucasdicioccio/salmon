@@ -182,7 +182,8 @@ computedFor rewrites o =
 
 onlyBatch :: Rewrite.Rewritten Extension -> IO Ref
 onlyBatch c =
-    case Map.keys (Rewrite.computedMembers c) of
+    -- the batch of packages, not the collected apt index node beside it
+    case [r | (r, members) <- Map.toList (Rewrite.computedMembers c), pkgRef "curl" `Set.member` members] of
         [r] -> pure r
         rs -> assertFailure ("expected exactly one batch, got " <> show (length rs))
 

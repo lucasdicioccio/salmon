@@ -90,6 +90,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Filesystem (FileContents (..), checkFileContents, removeFileIfPresent)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
+import Salmon.Builtin.Nodes.Debian.Package (recordingAptIndexRefresh)
 import Salmon.Op.Ref
 import Salmon.Op.Track (Track (..))
 
@@ -410,8 +411,11 @@ checkIndexFresh repo = do
   where
     filterExisting = fmap concat . traverse (\p -> (\e -> [p | e]) <$> doesFileExist p)
 
+-- Under the lock "Salmon.Builtin.Nodes.Debian.Package"'s index node takes:
+-- a @deb@ installed from this repository depends on both nodes, in no order,
+-- and two @apt-get update@s at once fail each other on apt's lists lock.
 runAptUpdate :: IO ()
-runAptUpdate = do
+runAptUpdate = recordingAptIndexRefresh $ do
     (code, _out, err) <- readCreateProcessWithExitCode (proc "apt-get" ["update", "-q"]) ""
     case code of
         ExitSuccess -> pure ()

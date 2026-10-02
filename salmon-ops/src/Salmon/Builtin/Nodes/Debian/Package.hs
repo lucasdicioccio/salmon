@@ -11,6 +11,7 @@ import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Reporter
 
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Dynamic (toDyn)
 import Data.Foldable (toList)
 import qualified Data.List as List
@@ -20,8 +21,10 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import GHC.IO.Exception (ExitCode (..))
 import System.Environment (getEnvironment)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, env, proc)
 import qualified Data.Text.Encoding as Text
@@ -36,6 +39,8 @@ data Package = Package {pkgName :: Text}
 -- | Which apt-get invocation a 'Report' is for (including the full package set, e.g. to see why an install failed with "too many arguments").
 data AptCommand
     = AptInstall !(NEList.NonEmpty Package)
+    | -- | the index refresh, on behalf of these packages
+      AptUpdate !(NEList.NonEmpty Package)
     | AptRemove !(NEList.NonEmpty Package)
     deriving (Show)
 
@@ -51,7 +56,7 @@ deb = debWith silent
 -- | Like 'deb', but takes a 'Reporter' to observe the apt-get invocation (command, exit code, stdout/stderr).
 debWith :: Reporter Report -> Package -> Op
 debWith r pkg =
-    op "deb" nodeps $ \actions ->
+    op "deb" (deps [aptIndexWith r pkgs]) $ \actions ->
         actions
             { help = "installs " <> pkg.pkgName
             , ref = mkRef "debian-deb" pkg.pkgName
@@ -78,7 +83,7 @@ debs = debsWith silent
 -- | Like 'debs', but takes a 'Reporter' to observe the apt-get invocation (command, exit code, stdout/stderr).
 debsWith :: Reporter Report -> NEList.NonEmpty Package -> Op
 debsWith r pkgs =
-    op "debs" nodeps $ \actions ->
+    op "debs" (deps [aptIndexWith r dedupedPkgs]) $ \actions ->
         actions
             { help = "installs " <> Text.pack (show (length pkgset)) <> " packages"
             , notes = pkgName <$> toList pkgset
@@ -102,6 +107,194 @@ debsWith r pkgs =
     downAction :: IO ()
     downAction =
         Binary.untrackedExec aptUninstallCommand dedupedPkgs "" (contramap (RunAptGet (AptRemove dedupedPkgs)) r)
+
+-------------------------------------------------------------------------------
+
+{- | What an 'aptIndex' node carries on @dynamics@: the packages it makes sure
+apt has heard of. 'batchPackages' collects these the way it collects
+'Package's, so a batched graph refreshes the index once.
+-}
+newtype AptIndexFor = AptIndexFor [Package]
+    deriving (Eq, Ord, Show)
+
+{- | The apt index knowing how to install these packages: the node 'deb' and
+'debs' depend on, and the reason they work on a machine whose index has never
+been refreshed.
+
+A fresh cloud image boots with whatever index the image was built with --
+often none, or @main@ without @universe@ -- and @apt-get install@ then fails
+with "has no installation candidate" for some packages and succeeds for
+others, on one machine in one state. So before any install, this node asks
+whether apt has a /candidate/ for each package and runs @apt-get update@ when
+it does not.
+
+= When it does nothing
+
+The check ('checkAptIndex') is satisfied, and @apt-get update@ is not run,
+when either holds:
+
+* every package is __already installed__ ('checkPackagesInstalled') -- an
+  index is only needed to install something, and this is what keeps a graph
+  naming packages it already has runnable as an ordinary user;
+* @apt-cache policy@ reports a __candidate__ for every one of them. That is
+  the case on any machine whose index is in ordinary use, so there an install
+  costs one @apt-cache@ call more than it did and no refresh.
+
+Note what it is /not/: a freshness guarantee. An index that knows an old
+version of a package is good enough to install that package, and "track the
+latest" is no more this node's job than it is 'deb''s.
+
+= Virtual names and names nobody has
+
+@apt-cache policy@ says @Candidate: (none)@ for a purely virtual package
+(@ssh-client@) even on a fresh index, and nothing at all for a name it has
+never heard of. Neither can be told from "the index is stale", so both cost
+one refresh -- after which this node has done all it can, and whether the
+name installs is 'deb''s to report, with apt's own message. To keep a
+supervisor from re-running @apt-get update@ at its delay floor over such a
+name, a refresh this process ran less than 'aptIndexFreshFor' ago satisfies
+the check whatever @apt-cache@ says.
+
+= Concurrency
+
+Refreshes are serialised inside the process, and the question is asked again
+under the lock: of twenty of these becoming ready at once on a fresh machine
+(which @run serve@ does, without 'batchPackages'), one runs @apt-get update@
+and nineteen find their candidates. Another /process/ holding apt's lists
+lock still fails the command, and the node with it.
+
+= Beside an external repository
+
+A @deb@ given a "Salmon.Builtin.Nodes.Debian.AptRepository" has that node and
+this one as two dependencies with no order between them. The repository's own
+@apt-get update@ goes through 'recordingAptIndexRefresh', so the two never run
+at once and a refresh by either answers for both. Where this node happens to
+go first for a package only the repository carries, it runs one refresh that
+finds nothing -- once, on the pass that adds the repository.
+
+= down
+
+Nothing. A refreshed index is not something to take back.
+-}
+aptIndex :: NEList.NonEmpty Package -> Op
+aptIndex = aptIndexWith silent
+
+-- | Like 'aptIndex', but takes a 'Reporter' to observe the @apt-get update@.
+aptIndexWith :: Reporter Report -> NEList.NonEmpty Package -> Op
+aptIndexWith r pkgs =
+    op "apt-index" nodeps $ \actions ->
+        actions
+            { help = "refreshes apt's package lists unless they already offer " <> describe names
+            , notes = names
+            , ref = mkRef "debian-apt-index" names
+            , up = refreshAptIndex r dedupedPkgs
+            , check = checkAptIndex dedupedPkgs
+            , dynamics = [toDyn (AptIndexFor (toList dedupedPkgs))]
+            }
+  where
+    dedupedPkgs :: NEList.NonEmpty Package
+    dedupedPkgs = NEList.fromList (Set.toList (Set.fromList (toList pkgs)))
+    names :: [Text]
+    names = pkgName <$> toList dedupedPkgs
+    describe [one] = one
+    describe many = Text.pack (show (length many)) <> " packages"
+
+-- | How long a refresh run by this process answers for: see 'aptIndex'.
+aptIndexFreshFor :: NominalDiffTime
+aptIndexFreshFor = 3600
+
+{- | When this process last ran @apt-get update@ successfully, and the lock
+that serialises doing so. Process-global because the thing it guards is: there
+is one apt index per machine, however many nodes and graphs ask after it.
+-}
+aptIndexRefreshed :: MVar (Maybe UTCTime)
+aptIndexRefreshed = unsafePerformIO (newMVar Nothing)
+{-# NOINLINE aptIndexRefreshed #-}
+
+{- | Run something that refreshes the apt index -- an @apt-get update@ -- with
+no other such refresh of this process running, and remember that it happened.
+For any node that refreshes the index on its own account.
+-}
+recordingAptIndexRefresh :: IO () -> IO ()
+recordingAptIndexRefresh act =
+    modifyMVar_ aptIndexRefreshed $ \_ -> act >> (Just <$> getCurrentTime)
+
+refreshedRecently :: Maybe UTCTime -> IO Bool
+refreshedRecently Nothing = pure False
+refreshedRecently (Just at) = do
+    now <- getCurrentTime
+    pure (diffUTCTime now at < aptIndexFreshFor)
+
+checkAptIndex :: NEList.NonEmpty Package -> IO CheckResult
+checkAptIndex pkgs = do
+    recent <- refreshedRecently =<< readMVar aptIndexRefreshed
+    checkAptIndexGiven recent pkgs
+
+checkAptIndexGiven :: Bool -> NEList.NonEmpty Package -> IO CheckResult
+checkAptIndexGiven recent pkgs = do
+    installed <- checkPackagesInstalled pkgs
+    case installed of
+        Success -> pure Success
+        _ -> do
+            baseEnv <- getEnvironment
+            -- LC_ALL=C: "Candidate:" is a translated string.
+            (code, out, _err) <-
+                readCreateProcessWithExitCode
+                    (proc "apt-cache" ("policy" : names)){env = Just (("LC_ALL", "C") : filter ((/= "LC_ALL") . fst) baseEnv)}
+                    ""
+            pure $ interpretAptPolicy recent (fmap Text.pack names) code (Text.decodeUtf8 out)
+  where
+    names = [Text.unpack pkg.pkgName | pkg <- toList pkgs]
+
+{- | The verdict drawn from @apt-cache policy NAME...@, split out for
+testability. The first argument is whether this process refreshed the index
+recently, in which case there is nothing more a refresh could do.
+
+@apt-cache policy@ and not @apt-cache show@: the latter succeeds for a name
+another package merely refers to. A name with no stanza at all, or one whose
+stanza says @Candidate: (none)@, has no candidate.
+-}
+interpretAptPolicy :: Bool -> [Text] -> ExitCode -> Text -> CheckResult
+interpretAptPolicy _ _ (ExitFailure _) _ =
+    -- could not ask; not evidence either way.
+    Unknown
+interpretAptPolicy recent wanted ExitSuccess out =
+    case filter (not . (`Set.member` candidates)) wanted of
+        [] -> Success
+        missing
+            | recent -> Success
+            | otherwise -> Failure ("no installation candidate in the apt index for: " <> Text.intercalate ", " missing)
+  where
+    candidates :: Set Text
+    candidates = Set.fromList (go Nothing (Text.lines out))
+
+    go :: Maybe Text -> [Text] -> [Text]
+    go _ [] = []
+    go current (line : rest)
+        -- a stanza opens with "name:" at column 0; everything under it is indented
+        | Just name <- Text.stripSuffix ":" line
+        , not (Text.null name)
+        , not (Text.isPrefixOf " " line) =
+            go (Just name) rest
+        | Just name <- current
+        , Just value <- Text.stripPrefix "Candidate:" (Text.strip line)
+        , Text.strip value /= "(none)"
+        , not (Text.null (Text.strip value)) =
+            name : go Nothing rest
+        | otherwise = go current rest
+
+refreshAptIndex :: Reporter Report -> NEList.NonEmpty Package -> IO ()
+refreshAptIndex r pkgs =
+    modifyMVar_ aptIndexRefreshed $ \lastRefresh -> do
+        -- asked again under the lock: whoever held it may have just done this.
+        recent <- refreshedRecently lastRefresh
+        verdict <- checkAptIndexGiven recent pkgs
+        case verdict of
+            Success -> pure lastRefresh
+            _ -> do
+                baseEnv <- getEnvironment
+                Binary.untrackedExec (aptUpdateCommand baseEnv) () "" (contramap (RunAptGet (AptUpdate pkgs)) r)
+                Just <$> getCurrentTime
 
 {- | Collect every @deb@ node in the graph into one @apt-get@ invocation per
 direction: one install batch for the packages some live declaration still
@@ -136,6 +329,12 @@ what serialises them, and an edge costs nothing and needs no retry loop to
 tell "could not lock" from "no such package". Removals first is also simply
 the right order — it is what one would do by hand to clear conflicts.
 
+The 'aptIndex' nodes those @deb@ nodes depend on are collected the same way,
+into one node asking after every wanted package at once, which the install
+batch then depends on (it inherits its members' dependencies). Only the
+wanted ones: an index node has nothing to do on the way down, so the rest are
+left as declared.
+
 A batch is one node, so a failure is attributed to all of its members: the
 batch's @apt-get@ exiting non-zero says the batch failed, not which package,
 and narrowing it would mean parsing apt's prose. That is the trade a
@@ -143,8 +342,27 @@ collection makes — efficiency for attribution.
 -}
 batchPackages :: Reporter Report -> Rewrite Extension
 batchPackages r phase computed =
-    edge . batchOf "installs" installRef wanted . batchOf "removes" removeRef unwanted $ computed
+    edge . batchOf "installs" installRef wanted . batchOf "removes" removeRef unwanted . batchIndex $ computed
   where
+    -- the index nodes of whatever is wanted up, as one node.
+    batchIndex :: Rewritten Extension -> Rewritten Extension
+    batchIndex c
+        | Just pkgs <- NEList.nonEmpty (Set.toList (Set.fromList (concat [ps | (_, fors) <- indexes, AptIndexFor ps <- fors])))
+        , Just act <- opAct (aptIndexWith r pkgs) =
+            Rewrite.introduce
+                act{extension = act.extension{ref = mkRef "debian-apt-index-batch" (pkgName <$> toList pkgs)}}
+                (Set.fromList (fmap fst indexes))
+                c
+        | otherwise = c
+
+    indexes :: [(Ref, [AptIndexFor])]
+    indexes =
+        [ (aref, fors)
+        | (aref, fors) <- Rewrite.collectDynamic computed
+        , not (Set.member aref phase.phaseIgnored)
+        , Set.member aref phase.phaseDesired
+        ]
+
     -- (ref, the packages that node declares) for every deb node this
     -- traversal is allowed to touch.
     declared :: [(Ref, [Package])]
@@ -313,6 +531,10 @@ aptInstallProcess pkgs baseEnv =
   where
     args :: [String]
     args = ["install", "-y", "-q"] <> [Text.unpack pkg.pkgName | pkg <- toList pkgs]
+
+aptUpdateCommand :: [(String, String)] -> Binary.Command "apt-get" ()
+aptUpdateCommand baseEnv =
+    Binary.Command $ \() -> (proc "apt-get" ["update", "-q"]){env = Just (("DEBIAN_FRONTEND", "noninteractive") : baseEnv)}
 
 aptUninstallCommand :: Binary.Command "apt-get" (NEList.NonEmpty Package)
 aptUninstallCommand = Binary.Command aptUninstallProcess
