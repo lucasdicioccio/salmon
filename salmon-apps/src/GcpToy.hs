@@ -65,6 +65,7 @@ module GcpToy (
 
 import Control.Exception (throwIO)
 import Control.Monad (when)
+import qualified Data.ByteString as ByteString
 import qualified Data.Map as Map
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAsciiLower, isDigit)
@@ -75,7 +76,8 @@ import GHC.Generics (Generic)
 import Options.Applicative (auto, execParser, flag', fullDesc, header, helper, info, long, metavar, option, optional, progDesc, strOption, switch, value, (<**>), (<|>))
 import qualified Options.Applicative as Opt
 import Options.Generic (ParseRecord (..))
-import System.Directory (doesFileExist, makeAbsolute)
+import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute)
+import System.FilePath (takeDirectory)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
@@ -99,7 +101,10 @@ import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.SecretDelivery as SecretDelivery
+import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Self as Self
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (mkRef)
@@ -402,7 +407,7 @@ VM: one file, whose existence is the whole proof that the hand-off worked.
 -}
 onVm :: Spec -> Op
 onVm spec =
-    op "gcp-toy-on-vm" (deps (marker : maybe [] (\lb -> [webServer spec lb]) spec.lbConfig <> maybe [] (\peer -> [peerReached spec peer `inject` marker]) spec.peerConfig)) $ \actions ->
+    op "gcp-toy-on-vm" (deps (marker : secretRead spec : maybe [] (\lb -> [webServer spec lb]) spec.lbConfig <> maybe [] (\peer -> [peerReached spec peer `inject` marker]) spec.peerConfig)) $ \actions ->
         actions
             { help = "the tier-2 payload, declared by this binary running on the VM"
             , ref = mkRef "gcp-toy-on-vm" spec.project
@@ -410,6 +415,48 @@ onVm spec =
   where
     path = maybe "/var/lib/salmon-toy/provisioned" vmMarkerPath spec.vmConfig
     marker = FS.filecontents (FS.FileContents path ("provisioned by salmon-gcp-toy for " <> spec.project <> "\n"))
+
+{- | Where the control side's generated secret lands on the VM, delivered by
+"Salmon.Builtin.Nodes.SecretDelivery" before the uploaded binary runs.
+-}
+secretPlacement :: SecretDelivery.Placement
+secretPlacement = SecretDelivery.Placement "/etc/salmon-toy/secret" "root" "root" "0600"
+
+-- | What the control side generates: 32 random bytes, as 64 hex characters.
+secretLength :: Int
+secretLength = 64
+
+-- | Where the VM records that it read the secret, for the driver to read back.
+secretMarkerPath :: FilePath
+secretMarkerPath = "/var/lib/salmon-toy/secret-read"
+
+{- | The uploaded binary reading the secret the control side delivered.
+
+The secret is not in this directive -- which is printed in the remote call's
+own report -- and that is the point being validated: the VM-side graph knows
+a /path/, and the bytes got there by another road. The proof left behind is
+a marker saying how many bytes were read, which is a property of the
+declaration (see 'secretLength') and not of the secret. A file that is
+absent, or is not what the control side generates, fails the node.
+-}
+secretRead :: Spec -> Op
+secretRead spec =
+    op "gcp-toy-secret-read" nodeps $ \actions ->
+        actions
+            { help = Text.unwords ["reads the delivered secret at", Text.pack path]
+            , ref = mkRef "gcp-toy-secret-read" (spec.project, path)
+            , up = do
+                present <- doesFileExist path
+                when (not present) $
+                    throwIO (userError ("no secret was delivered at " <> path))
+                bytes <- ByteString.readFile path
+                when (ByteString.length bytes /= secretLength) $
+                    throwIO (userError ("the file at " <> path <> " is not the generated secret: " <> show (ByteString.length bytes) <> " bytes"))
+                createDirectoryIfMissing True (takeDirectory secretMarkerPath)
+                writeFile secretMarkerPath ("read " <> show (ByteString.length bytes) <> " bytes of a delivered secret for " <> Text.unpack spec.project <> "\n")
+            }
+  where
+    path = SecretDelivery.placePath secretPlacement
 
 -- | Where the VM leaves what the peer answered, for the driver to read back.
 peerMarkerPath :: FilePath
@@ -696,12 +743,36 @@ provisioned spec vm ip =
             , VmProvision.vmp_sshHost = ip
             , VmProvision.vmp_sshPort = 22
             , VmProvision.vmp_prerequisites = vmPrerequisites spec vm
-            , VmProvision.vmp_beforeCall = const []
+            , VmProvision.vmp_beforeCall = \opts -> [deliveredSecret spec vm ip opts]
             , VmProvision.vmp_remoteDir = "/home/" <> Text.unpack vm.vmUser
             , VmProvision.vmp_selfPath = vm.vmSelfPath
             , VmProvision.vmp_directiveTrack = program
             , VmProvision.vmp_directive = spec{role = OnVm}
             }
+
+{- | A secret generated on the control side and put on the VM before the
+uploaded binary runs: 'Secrets.sharedSecretFile' makes it, and
+'SecretDelivery.uploadSecretFile' sends it over the connection the
+provisioning already uses (the 'Ssh.ClientOpts' handed to @vmp_beforeCall@),
+to be owned by root and readable by nobody else. 'secretRead' is the other
+end.
+-}
+deliveredSecret :: Spec -> VmConfig -> Text -> Ssh.ClientOpts -> Op
+deliveredSecret spec vm ip opts =
+    SecretDelivery.uploadSecretFile
+        opts
+        reportPrint
+        OS.ssh
+        SecretDelivery.SecretUpload
+            { SecretDelivery.uploadSource = localSecretPath spec
+            , SecretDelivery.uploadRemote = Ssh.Remote vm.vmUser ip
+            , SecretDelivery.uploadPlacement = secretPlacement
+            , SecretDelivery.uploadElevation = SecretDelivery.WithSudo
+            }
+        `inject` Secrets.sharedSecretFile reportPrint ignoreTrack (Secrets.Secret Secrets.Hex (secretLength `div` 2) (localSecretPath spec))
+
+localSecretPath :: Spec -> FilePath
+localSecretPath spec = spec.workDir <> "/secrets/toy-secret"
 
 -- | The instance on its own, for the first pass (which has no IP to ssh to).
 instanceNode :: Spec -> VmConfig -> Op

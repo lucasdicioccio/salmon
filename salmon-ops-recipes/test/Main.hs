@@ -23,6 +23,7 @@ import qualified Test.FollowSchedulerSpec as FollowSchedulerSpec
 import qualified Test.FollowSignatureSpec as FollowSignatureSpec
 import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpSpec as GcpSpec
+import qualified Test.SecretDeliverySpec as SecretDeliverySpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
 import qualified Test.PodmanCommandSpec as PodmanCommandSpec
@@ -127,6 +128,7 @@ main =
             , FollowSignatureSpec.tests
             , FollowSpec.tests
             , GcpSpec.tests
+            , SecretDeliverySpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests
             , PodmanCommandSpec.tests
