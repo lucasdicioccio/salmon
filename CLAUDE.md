@@ -939,12 +939,19 @@ restart. Load-bearing: a generated unit's `UnitFileState` is `generated` and it 
 generator's, so `up` is reload + restart); the file node's `down` reloads after removing, or the unit outlives its file;
 the pull happens *inside the service's start* (`containerStartTimeout`); credentials go through
 `PodmanArgs=--authfile=`, since podman 4.9's generator refuses the `AuthFile=` key; the `ref` is `"systemd-unit"
-NAME.service`, the same site as an authored unit; a moving tag (`:latest`) is not a change it can see.
+NAME.service`, the same site as an authored unit; a moving tag (`:latest`) is not a change it can see; the quadlet
+directory is its own node (`podman-quadlet-dir`), created if missing and never removed, since `Filesystem.dir`'s `down`
+refuses a non-empty directory and that one holds every quadlet on the machine (and the file node's extras are applied to
+the file node only — an `fmap` over the `Op` reaches its dependencies too, which made two quadlets' shared directory a
+`Conflicting` pair).
 `Gcp.ArtifactRegistry.instanceLogin` is the other half for a GCE instance: `Podman.login` as `oauth2accesstoken` with
 the metadata server's token for the instance's own service account, plus a `check` on the token's recorded expiry
 (`AUTHFILE.expires`), so the credential is renewed by `run up` only when needed and tended under `serve`.
-`Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run; no container has been started by a test, the
-metadata path has not been run on an instance, and the GCP toy does not use either yet.
+`Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
+itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
+podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/
+down; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
+test, the metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
 `Nodes/Deferred.hs` (`deferred`) is a sub-graph built at `up` from a value another node of the same pass produced: the
 node holds a read (`IO (Maybe a)`) and a recipe (`a -> Op`), and its `up` reads, builds and runs a nested `upTree`

@@ -9,12 +9,14 @@ rendered file is handed to it in dry-run mode, which is the only local
 evidence that the keys written are keys this podman accepts. It reads a
 scratch directory and writes nothing; it is skipped loudly without the
 generator. Nothing here starts a container, talks to systemd, or reaches a
-registry or a metadata server -- that the generated service pulls and serves
-is a Layer 3 claim, and is not made here.
+registry or a metadata server; "Test.QuadletUserSpec" runs the node against
+this user's own systemd, and the system scope, the pull from a registry and
+the instance login are Layer 3 claims not made in either.
 -}
 module Test.QuadletSpec (tests) where
 
 import qualified Data.ByteString.Lazy.Char8 as LC8
+import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -38,6 +40,7 @@ import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.Actions (Act (..))
+import qualified Salmon.Op.Dag as Dag
 import Salmon.Reporter (silent)
 import Test.Harness (withTempDir)
 
@@ -204,6 +207,16 @@ nodeTests =
         assertBool "" (notesOf (node app) /= notesOf (node app{Quadlet.containerImage = "europe-west1-docker.pkg.dev/acme/repo/app:v4"}))
     , testCase "the same declaration describes itself the same way" $
         assertEqual "" (notesOf (node app)) (notesOf (node app))
+    , testCase "two quadlets in one directory share it without a conflict" $ do
+        let other = app{Quadlet.containerName = Podman.ContainerName "other"}
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [node app, node other]) id))
+        assertEqual "the shared directory was described two ways" 0 (length (Dag.dagConflicts dag))
+    , testCase "the shared directory carries nothing of one container's" $ do
+        let dag = Dag.foldDag Dag.sameRepresentative (evalDeps (node app))
+            dirs = [act | act <- Map.elems (Dag.dagNodes dag), act.shorthand == "podman-quadlet-dir"]
+        assertEqual "not exactly one directory node" 1 (length dirs)
+        assertBool "the directory carries the container's notes" $
+            not (any (Text.isPrefixOf "quadlet:") (concatMap (\act -> act.extension.notes) dirs))
     ]
   where
     node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack

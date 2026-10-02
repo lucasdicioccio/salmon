@@ -62,6 +62,7 @@ import qualified Test.ServeSpec as ServeSpec
 import qualified Test.ServeTlsSpec as ServeTlsSpec
 import qualified Test.StatusSinkSpec as StatusSinkSpec
 import qualified Test.QuadletSpec as QuadletSpec
+import qualified Test.QuadletUserSpec as QuadletUserSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
@@ -108,6 +109,8 @@ main =
                 , PgBackupSpec.tests
                 , PgPairDemoSpec.tests
                 , PatroniHarnessSpec.tests
+                , -- the user's own systemd manager and podman
+                  QuadletUserSpec.tests
                 ]
             , CheckSpec.tests
             , ClientModelSpec.tests
