@@ -86,6 +86,7 @@ import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
 import qualified Salmon.Builtin.Nodes.Gcp.Billing as Billing
+import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
 import qualified Salmon.Builtin.Nodes.Gcp.CloudRun as CloudRun
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.Iam as Iam
@@ -149,6 +150,7 @@ data Seed = Seed
     , seedAlertEmail :: Maybe Text
     , seedVmInternalIp :: Maybe Text
     , seedPeerInternalIp :: Maybe Text
+    , seedDnsZone :: Maybe Text
     }
     deriving (Eq, Show)
 
@@ -186,6 +188,7 @@ instance ParseRecord Seed where
                 -- caller has to look it up.
                 <*> optional (strOption (long "vm-internal-ip" <> metavar "IP" <> Opt.help "tier 2: pin the VM to this internal address, a free one in the region's `default` subnet; needs --peer-internal-ip"))
                 <*> optional (strOption (long "peer-internal-ip" <> metavar "IP" <> Opt.help "tier 2: also boot a peer with no external address, pinned to this internal one, which the VM then fetches a page from; needs --vm-internal-ip"))
+                <*> optional (strOption (long "dns-zone" <> metavar "DNS_NAME" <> Opt.help "tier 0: also create a public Cloud DNS zone for this domain and print the name servers it was assigned (cents per month)"))
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -298,6 +301,8 @@ data Spec = Spec
     , alertEmail :: Maybe Text
     -- ^ tier 1: the standard alerts on the service go here, if anywhere
     , peerConfig :: Maybe PeerConfig
+    , dnsZone :: Maybe Text
+    -- ^ tier 0: a Cloud DNS zone for this domain, if any
     }
     deriving (Eq, Show, Generic)
 
@@ -356,6 +361,8 @@ configure = Configure $ \seed -> do
                 fail "--vm-internal-ip and --peer-internal-ip must be IPv4 literals"
             pure (Just (PeerConfig vmInternal peerInternal 8081))
         _ -> fail "--vm-internal-ip and --peer-internal-ip go together: give both or neither"
+    when (maybe False (not . validDnsName) seed.seedDnsZone) $
+        fail "--dns-zone must be a domain name: dot-separated labels of [a-z0-9-], at least two"
     let lb =
             if seed.seedTier < 3
                 then Nothing
@@ -380,6 +387,7 @@ configure = Configure $ \seed -> do
             , lbConfig = lb
             , alertEmail = if seed.seedTier >= 1 then seed.seedAlertEmail else Nothing
             , peerConfig = peer
+            , dnsZone = seed.seedDnsZone
             }
   where
     validIpv4 t = case Text.splitOn "." t of
@@ -387,6 +395,15 @@ configure = Configure $ \seed -> do
         _ -> False
     validOctet o =
         not (Text.null o) && Text.length o <= 3 && Text.all isDigit o && (read (Text.unpack o) :: Int) <= 255
+    validDnsName t =
+        let labels = Text.splitOn "." (Text.dropWhileEnd (== '.') t)
+         in length labels >= 2 && all validLabel labels
+    validLabel l =
+        not (Text.null l)
+            && Text.length l <= 63
+            && Text.all (\x -> isAsciiLower x || isDigit x || x == '-') l
+            && not ("-" `Text.isPrefixOf` l)
+            && not ("-" `Text.isSuffixOf` l)
     validProjectId t =
         Text.length t >= 6 && Text.length t <= 30 && validPrefix t && not ("-" `Text.isSuffixOf` t)
     validPrefix t =
@@ -641,6 +658,7 @@ tier0 spec =
     [ grant spec "roles/storage.objectViewer" ("buckets/" <> bucketName) `inject` bucket
     , grant spec "roles/artifactregistry.reader" repoResource `inject` repository spec
     ]
+        <> [dnsNameServers spec zone | zone <- maybe [] (pure . dnsZoneOf spec) spec.dnsZone]
   where
     -- bucket names are global: scoping by project id keeps two sandboxes apart
     bucketName = spec.project <> "-" <> spec.prefix
@@ -649,6 +667,39 @@ tier0 spec =
             `inject` api spec "storage.googleapis.com"
     repoResource =
         Text.intercalate "/" ["projects", spec.project, "locations", spec.region, "repositories", (repo spec).repoName]
+
+dnsZoneOf :: Spec -> Text -> CloudDns.ManagedZone
+dnsZoneOf spec dnsName =
+    CloudDns.ManagedZone (spec.prefix <> "-zone") (projectOf spec) dnsName "salmon-gcp-toy validation zone"
+
+{- | The zone, and on top of it a node that reads back the name servers
+Cloud DNS assigned and prints them: what an operator would enter at the
+registrar to delegate the domain.
+
+Printing is a node rather than something @main@ does because only a node
+runs /after/ the zone's @up@. No @check@: it answers nothing about an
+effect, so it prints on every pass, which is the point.
+-}
+dnsNameServers :: Spec -> CloudDns.ManagedZone -> Op
+dnsNameServers spec zone =
+    op "gcp-toy-dns-name-servers" (deps [zoneNode]) $ \actions ->
+        actions
+            { help = Text.unwords ["prints the name servers assigned to", CloudDns.fqdn zone.zoneDnsName]
+            , ref = mkRef "gcp-toy-dns-name-servers" (spec.project, zone.zoneName)
+            , up = do
+                servers <- CloudDns.readNameServers zone
+                case servers of
+                    Nothing -> throwIO (userError ("no name servers could be read for zone " <> Text.unpack zone.zoneName))
+                    Just ns ->
+                        putStrLn
+                            ( Text.unpack
+                                (Text.unwords (["name servers for", CloudDns.fqdn zone.zoneDnsName <> ":"] <> ns))
+                            )
+            }
+  where
+    zoneNode =
+        CloudDns.managedZone reportPrint Core.gcloud zone
+            `inject` api spec CloudDns.dnsApi
 
 tier1 :: Spec -> [Op]
 tier1 spec =

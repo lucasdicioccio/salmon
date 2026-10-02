@@ -67,6 +67,7 @@ library
                    , Salmon.Builtin.Nodes.Demo
                    , Salmon.Builtin.Nodes.Gcp.ArtifactRegistry
                    , Salmon.Builtin.Nodes.Gcp.Billing
+                   , Salmon.Builtin.Nodes.Gcp.CloudDns
                    , Salmon.Builtin.Nodes.Gcp.CloudRun
                    , Salmon.Builtin.Nodes.Gcp.Compute
                    , Salmon.Builtin.Nodes.Gcp.Core

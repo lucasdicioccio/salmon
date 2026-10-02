@@ -29,6 +29,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Nodes.Binary (prepare)
 import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
 import qualified Salmon.Builtin.Nodes.Gcp.Billing as Billing
+import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
 import qualified Salmon.Builtin.Nodes.Gcp.CloudRun as CloudRun
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
@@ -64,6 +65,7 @@ tests =
         , testGroup "CloudRun options" cloudRunOptionTests
         , testGroup "Ssh.ClientOpts" clientOptsTests
         , testGroup "Monitoring" monitoringTests
+        , testGroup "CloudDns" cloudDnsTests
         , testGroup "SreBox.Gcp.CloudRunAlerts" cloudRunAlertsTests
         , testGroup "SreBox.Gcp.VmProvision.caTrustStartupScript" caTrustScriptTests
         ]
@@ -1036,3 +1038,79 @@ caTrustScriptTests =
     numbered = zip [1 :: Int ..] scriptLines
     loopLines =
         takeWhile (/= "done") (dropWhile (not . ("for attempt in" `Text.isPrefixOf`)) scriptLines)
+
+-------------------------------------------------------------------------------
+-- Cloud DNS
+
+{- | The shape of @gcloud dns managed-zones describe --format json@, written
+from the Cloud DNS API's @ManagedZone@ resource rather than captured from a
+live project.
+-}
+zoneDescribeJson :: Text.Text
+zoneDescribeJson =
+    Text.unlines
+        [ "{"
+        , "  \"cloudLoggingConfig\": {\"kind\": \"dns#managedZoneCloudLoggingConfig\"},"
+        , "  \"creationTime\": \"2026-10-02T15:04:05.678Z\","
+        , "  \"description\": \"a zone\","
+        , "  \"dnsName\": \"example.org.\","
+        , "  \"id\": \"1234567890123456789\","
+        , "  \"kind\": \"dns#managedZone\","
+        , "  \"name\": \"example-zone\","
+        , "  \"nameServers\": ["
+        , "    \"ns-cloud-c1.googledomains.com.\","
+        , "    \"ns-cloud-c2.googledomains.com.\","
+        , "    \"ns-cloud-c3.googledomains.com.\","
+        , "    \"ns-cloud-c4.googledomains.com.\""
+        , "  ],"
+        , "  \"visibility\": \"public\""
+        , "}"
+        ]
+
+cloudDnsTests :: [TestTree]
+cloudDnsTests =
+    [ testCase "create names the zone, its DNS name with the trailing dot, a description and public visibility" $
+        assertEqual
+            ""
+            ["dns", "managed-zones", "create", "example-zone", "--dns-name", "example.org.", "--description", "a zone", "--visibility", "public", "--project", "my-project"]
+            (processArgs (prepare CloudDns.cloudDnsCommand (CloudDns.ZonesCreate zone)))
+    , testCase "describe asks for JSON" $
+        assertEqual
+            ""
+            ["dns", "managed-zones", "describe", "example-zone", "--format", "json", "--project", "my-project"]
+            (processArgs (prepare CloudDns.cloudDnsCommand (CloudDns.ZonesDescribe zone)))
+    , testCase "delete is quiet" $
+        assertEqual
+            ""
+            ["dns", "managed-zones", "delete", "example-zone", "--quiet", "--project", "my-project"]
+            (processArgs (prepare CloudDns.cloudDnsCommand (CloudDns.ZonesDelete zone)))
+    , testCase "fqdn lower-cases and ends in exactly one dot" $
+        assertEqual "" ["example.org.", "example.org.", "example.org."] (map CloudDns.fqdn ["example.org", "Example.ORG.", " example.org..\n"])
+    , testCase "the assigned name servers are read in order" $
+        assertEqual
+            ""
+            (Right ["ns-cloud-c1.googledomains.com.", "ns-cloud-c2.googledomains.com.", "ns-cloud-c3.googledomains.com.", "ns-cloud-c4.googledomains.com."])
+            (CloudDns.describedNameServers <$> CloudDns.parseZoneDescribe described)
+    , testCase "a description with no nameServers parses to none" $
+        assertEqual
+            ""
+            (Right (CloudDns.ZoneDescription "example.org." []))
+            (CloudDns.parseZoneDescribe "{\"dnsName\": \"example.org.\"}")
+    , testCase "a zone described for the declared DNS name is satisfied" $
+        assertEqual "" Success (CloudDns.interpretZoneDescribe zone ExitSuccess described)
+    , testCase "the declared name's dot and case do not matter" $
+        assertEqual "" Success (CloudDns.interpretZoneDescribe (zone {CloudDns.zoneDnsName = "Example.org."}) ExitSuccess described)
+    , testCase "describe failing means the zone is absent" $
+        assertBool "" (isFailure (CloudDns.interpretZoneDescribe zone (ExitFailure 1) ""))
+    , testCase "a zone of that name serving another domain is a failure naming both" $
+        case CloudDns.interpretZoneDescribe (zone {CloudDns.zoneDnsName = "example.net"}) ExitSuccess described of
+            Failure why -> do
+                assertBool (Text.unpack why) ("example.org." `Text.isInfixOf` why)
+                assertBool (Text.unpack why) ("example.net." `Text.isInfixOf` why)
+            other -> assertBool ("expected a Failure, got " <> show other) False
+    , testCase "output that is not a zone description cannot be judged" $
+        assertEqual "" Unknown (CloudDns.interpretZoneDescribe zone ExitSuccess "not json")
+    ]
+  where
+    zone = CloudDns.ManagedZone "example-zone" (Core.Project "my-project") "example.org" "a zone"
+    described = Text.encodeUtf8 zoneDescribeJson

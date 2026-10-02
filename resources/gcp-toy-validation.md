@@ -44,6 +44,18 @@ Tiers are cumulative, ordered by cost. Pick one with `--tier`.
 | `Gcp.ArtifactRegistry.artifactRepository` | `<prefix>-repo`, docker format |
 | `Gcp.Iam.iamBinding` ×2 | `storage.objectViewer` on the bucket, `artifactregistry.reader` on the repo |
 
+With `--dns-zone DNS_NAME`, tier 0 also enables `dns.googleapis.com` and
+declares `Gcp.CloudDns.managedZone` — a public zone `<prefix>-zone` for that
+domain — with a toy node on top that reads back the name servers Cloud DNS
+assigned (`Gcp.CloudDns.readNameServers`) and prints them:
+
+    name servers for example.org.: ns-cloud-c1.googledomains.com. ns-cloud-c2.googledomains.com. ...
+
+Those four are what goes to the registrar to delegate the domain. Creating a
+zone needs no proof that you own the name, and nothing resolves through it
+until the registrar points there, so any name will do for a validation run. A
+zone is billed per month, pro rata (cents). `down` deletes it.
+
 **Tier 1** (cents) adds `SreBox.Gcp.CloudRunDeploy.buildPushDeploy`: podman
 builds an image, logs in to `<region>-docker.pkg.dev` with an isolated
 authfile, pushes, and `Gcp.CloudRun.cloudRunService` deploys it as
@@ -352,6 +364,12 @@ leftover.
 
 ## Gaps this does not cover
 
+- **The DNS zone has not been run against a real project yet.** The `gcloud
+  dns managed-zones` argv and the reading of `describe --format json` are
+  covered by Layer 0 tests, on a description written from the API's
+  `ManagedZone` resource rather than captured; that the zone is created, its
+  name servers printed, the second pass skips it and `down` removes it is
+  what the first run with `--dns-zone` will show.
 - **The peer has not been run against a real project yet.** The `gcloud`
   argv for a pinned internal address, a reserved internal address and an
   instance with no external address is covered by Layer 0 tests; that GCP

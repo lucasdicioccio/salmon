@@ -931,6 +931,17 @@ the metadata server's token for the instance's own service account, plus a `chec
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run; no container has been started by a test, the
 metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
+`Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
+zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
+--format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another
+domain is a `Failure` naming both, `up` then fails on "already exists" and `down` leaves it alone, since a zone's DNS
+name is immutable and the zone may be somebody else's. Cloud DNS refuses to delete a zone holding records beyond its
+apex `NS`/`SOA`, so record nodes must depend on the zone. `readNameServers` is the out-of-graph read (like
+`Compute.readAddress`) of the name servers Cloud DNS assigned, which cannot be known at declaration: what goes to the
+registrar, and what a delegation probe compares with. The GCP toy declares it under `--dns-zone DNS_NAME` (tier 0) with
+a node that prints them. Layer 0 only (`Test/GcpSpec.hs`, on a description written from the API's resource shape, not
+captured); never run against a real project. Record sets are not done.
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port
