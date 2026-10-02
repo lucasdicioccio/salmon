@@ -42,6 +42,7 @@ tests =
         , testGroup "stepCommand" commandTests
         , testGroup "re-seeding a standby whose slot is lost (pair_reseed)" reseedTests
         , testGroup "a member reached over ssh on another address (member_ssh_host)" sshHostTests
+        , testGroup "a machine reached as a login that is not root (member_ssh_user)" sshUserTests
         ]
 
 {- | What a step actually does to a machine. Pure, so the destructive half of
@@ -188,6 +189,65 @@ the pair talks over. The ssh one is the controller's route and nothing more:
 no script, on any machine, may contain it, or a peer would be told to reach
 its primary on an address it cannot route to.
 -}
+sshUserTests :: [TestTree]
+sshUserTests =
+    [ testCase "root is sent the script as it always was, with no sudo in front" $ do
+        assertEqual "" ["bash", "-c"] (take 2 (Pair.remoteCommand (Pair.OnMember (Pair.memberOn pair Pair.A)) "true"))
+        assertEqual "" ["bash", "-c"] (take 2 (Pair.remoteCommand (Pair.OnBouncer bouncer) "true"))
+    , testCase "any other login has the whole script under one sudo that never prompts" $ do
+        assertEqual "" ["sudo", "-n", "bash", "-c"] (take 4 (Pair.remoteCommand (Pair.OnMember (Pair.memberOn unprivileged Pair.A)) "true"))
+        assertEqual "" ["sudo", "-n", "bash", "-c"] (take 4 (Pair.remoteCommand (Pair.OnMember (Pair.memberOn unprivileged Pair.B)) "true"))
+        assertEqual "" ["sudo", "-n", "bash", "-c"] (take 4 (Pair.remoteCommand (Pair.OnBouncer unprivilegedBouncer) "true"))
+    , testCase "the script is one word either way, and the same word" $ do
+        let asRoot = Pair.remoteCommand (Pair.OnMember (Pair.memberOn pair Pair.A)) "echo 'it''s'; id -u"
+            asOther = Pair.remoteCommand (Pair.OnMember (Pair.memberOn unprivileged Pair.A)) "echo 'it''s'; id -u"
+        assertEqual "" 3 (length asRoot)
+        assertEqual "" 5 (length asOther)
+        assertEqual "" (drop 2 asRoot) (drop 4 asOther)
+    , testCase "the locale is set inside the script, where sudo cannot reset it" $
+        assertBool "" ("export LANG=C LC_ALL=C" `isInfixOf` last (Pair.remoteCommand (Pair.OnMember (Pair.memberOn unprivileged Pair.A)) "true"))
+    , testCase "the login is that user's" $ do
+        assertEqual "" "ops@10.0.0.1" (Pair.sshLogin (Pair.OnMember (Pair.memberOn unprivileged Pair.A)))
+        assertEqual "" "ops@10.0.0.3" (Pair.sshLogin (Pair.OnBouncer unprivilegedBouncer))
+    , testCase "who logs in changes no script: the privilege is the wrapper's" $ do
+        assertBool "expected scripts to compare" (length (scriptsOf pair) > 15)
+        assertEqual "" (scriptsOf pair) (scriptsOf unprivileged)
+    ]
+  where
+    unprivilegedBouncer = bouncer{Pair.bouncer_ssh_user = "ops"}
+    unprivileged =
+        pair
+            { Pair.pair_a = (Pair.pair_a pair){Pair.member_ssh_user = "ops"}
+            , Pair.pair_b = (Pair.pair_b pair){Pair.member_ssh_user = "ops"}
+            , Pair.pair_bouncers = [unprivilegedBouncer]
+            }
+
+-- every script this recipe can send to any machine, named for the
+-- failure text
+scriptsOf :: Pair.Pair -> [(String, String)]
+scriptsOf p0 =
+    concat
+        [ [("probe " <> show side, Pair.probeScript (Pair.memberOn p side)) | side <- sides]
+        , [("member " <> show side, Pair.memberScript p side) | side <- sides]
+        , [("seed " <> show side, Pair.seedScript p side) | side <- sides]
+        , [("bouncer setup", Pair.bouncerSetupScript p b) | b <- Pair.pair_bouncers p]
+        , [("bouncer probe", Pair.bouncerProbeScript b) | b <- Pair.pair_bouncers p]
+        , [ (show st, sc)
+          | st <- steps
+          , Right cs <- [Pair.stepCommand p st]
+          , (_, sc) <- cs
+          ]
+        ]
+  where
+    p = p0{Pair.pair_seed = Just Pair.A, Pair.pair_reseed = Just Pair.A}
+    sides = [Pair.A, Pair.B]
+    steps =
+        Pair.PauseBouncers
+            : concat
+                [ [Pair.StopMember s, Pair.Promote s, Pair.Rejoin s, Pair.StartMember s, Pair.Reseed s, Pair.RepointBouncers s]
+                | s <- sides
+                ]
+
 sshHostTests :: [TestTree]
 sshHostTests =
     [ testCase "ssh goes to the ssh address" $ do
@@ -239,31 +299,6 @@ sshHostTests =
             , Pair.pair_b = (Pair.pair_b pair){Pair.member_ssh_host = Just "203.0.113.2"}
             }
     named name needle = any (\(n, s) -> n == name && needle `isInfixOf` s) (scriptsOf split)
-    -- every script this recipe can send to any machine, named for the
-    -- failure text
-    scriptsOf :: Pair.Pair -> [(String, String)]
-    scriptsOf p0 =
-        concat
-            [ [("probe " <> show side, Pair.probeScript (Pair.memberOn p side)) | side <- sides]
-            , [("member " <> show side, Pair.memberScript p side) | side <- sides]
-            , [("seed " <> show side, Pair.seedScript p side) | side <- sides]
-            , [("bouncer setup", Pair.bouncerSetupScript p b) | b <- Pair.pair_bouncers p]
-            , [("bouncer probe", Pair.bouncerProbeScript b) | b <- Pair.pair_bouncers p]
-            , [ (show st, sc)
-              | st <- steps
-              , Right cs <- [Pair.stepCommand p st]
-              , (_, sc) <- cs
-              ]
-            ]
-      where
-        p = p0{Pair.pair_seed = Just Pair.A, Pair.pair_reseed = Just Pair.A}
-    sides = [Pair.A, Pair.B]
-    steps =
-        Pair.PauseBouncers
-            : concat
-                [ [Pair.StopMember s, Pair.Promote s, Pair.Rejoin s, Pair.StartMember s, Pair.Reseed s, Pair.RepointBouncers s]
-                | s <- sides
-                ]
     dropSshHost (Aeson.Object o) = Aeson.Object (KeyMap.delete "member_ssh_host" o)
     dropSshHost v = v
 

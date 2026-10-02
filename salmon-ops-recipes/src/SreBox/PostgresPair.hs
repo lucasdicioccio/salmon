@@ -50,6 +50,8 @@ module SreBox.PostgresPair (
     memberOn,
     memberSshHost,
     sshLogin,
+    sshUser,
+    remoteCommand,
     slotNameFor,
 
     -- * What the machines are
@@ -138,6 +140,9 @@ to live inside that network.
 data Member
     = Member
     { member_ssh_user :: Text
+    -- ^ who the controller logs in as. Anything but @root@ must have
+    -- passwordless sudo: every script is then run under one @sudo -n@
+    -- (see 'remoteCommand').
     , member_host :: Postgres.Host
     , member_cluster :: Postgres.ClusterName
     , member_port :: Postgres.Port
@@ -175,6 +180,7 @@ data Bouncer
     { bouncer_name :: Text
     -- ^ what to call it in reports; it identifies nothing else.
     , bouncer_ssh_user :: Text
+    -- ^ as 'member_ssh_user': @root@, or a login with passwordless sudo.
     , bouncer_ssh_host :: Text
     -- ^ how the /controller/ reaches it, which need not be how clients do.
     , bouncer_ssh_identity :: Maybe FilePath
@@ -1552,8 +1558,42 @@ place a member's ssh address is read. Everything a script /contains/ about a
 member is its 'member_host'.
 -}
 sshLogin :: Target -> Text
-sshLogin (OnMember m) = m.member_ssh_user <> "@" <> memberSshHost m
-sshLogin (OnBouncer b) = b.bouncer_ssh_user <> "@" <> b.bouncer_ssh_host
+sshLogin target = sshUser target <> "@" <> case target of
+    OnMember m -> memberSshHost m
+    OnBouncer b -> b.bouncer_ssh_host
+
+-- | The user the controller logs in as on a machine.
+sshUser :: Target -> Text
+sshUser (OnMember m) = m.member_ssh_user
+sshUser (OnBouncer b) = b.bouncer_ssh_user
+
+{- | The words ssh is given after the login: the script, under one @bash -c@,
+and under one @sudo@ when the login is not root.
+
+Every script this recipe sends was written to be run by root -- it appends to
+@pg_hba.conf@, calls @pg_ctlcluster@, installs into @\/etc\/pgbouncer@,
+restarts units, and reaches postgres through @sudo -u postgres@ -- and stock
+cloud images refuse root logins. So the privilege is taken once, around the
+whole script, rather than line by line: one wrapper cannot miss a line, and a
+script reads the same whoever logged in. A root login is sent what it always
+was, with no @sudo@ in front, so a machine without sudo installed still works
+as root.
+
+@-n@ because nobody is there to type a password: a login whose sudo wants one
+fails at once, saying so, rather than waiting on a prompt. The locale is set
+/inside/ the script, since sudo resets the environment.
+-}
+remoteCommand :: Target -> String -> [String]
+remoteCommand target script = escalate <> ["bash", "-c", shQuote quieted]
+  where
+    escalate
+        | sshUser target == "root" = []
+        | otherwise = ["sudo", "-n"]
+    {- A neutral locale, because ssh forwards the caller's and Debian's psql
+    is a perl wrapper that complains about every locale the guest does not
+    have -- fifteen lines of it, per invocation, into the report of a node
+    that did nothing wrong. -}
+    quieted = "export LANG=C LC_ALL=C\n" <> script
 
 -- | The same, for whichever kind of machine a step addresses.
 sshToTarget :: Pair -> Target -> String -> IO (ExitCode, Text, Text)
@@ -1565,11 +1605,6 @@ sshToTarget pair target script = do
     identity = case target of
         OnMember m -> m.member_ssh_identity
         OnBouncer b -> b.bouncer_ssh_identity
-    {- A neutral locale, because ssh forwards the caller's and Debian's psql
-    is a perl wrapper that complains about every locale the guest does not
-    have -- fifteen lines of it, per invocation, into the report of a node
-    that did nothing wrong. -}
-    quieted = "export LANG=C LC_ALL=C\n" <> script
     args =
         concat
             [ maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) identity
@@ -1583,6 +1618,6 @@ sshToTarget pair target script = do
               -- the probe is already running.
               ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
             , [Text.unpack login]
-            , ["bash", "-c", shQuote quieted]
+            , remoteCommand target script
             ]
     decode = Text.decodeUtf8With TextError.lenientDecode

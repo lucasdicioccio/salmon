@@ -1037,6 +1037,18 @@ argument. What follows is the list of things that are load-bearing; each was a d
   addresses while they replicate on internal ones. `Test.PostgresPairSpec` renders every script
   the recipe can send and asserts none contains the ssh address.
 
+- **The ssh login need not be root, and the privilege is taken once.** Every script the recipe
+  sends assumes root (hba appends, `pg_ctlcluster`, installs into `/etc/pgbouncer`, `systemctl`),
+  and stock cloud images refuse root logins. `remoteCommand` — the words after the login, and the
+  only place `sshToTarget` (so also `PostgresPairPrereqs`) gets them — puts the whole script under
+  one `sudo -n bash -c` when `member_ssh_user`/`bouncer_ssh_user` is not `root`, and renders a
+  root login exactly as before. One wrapper rather than a prefix per line because a wrapper cannot
+  miss a line and the scripts stay the same text whoever logs in (`Test.PostgresPairSpec` asserts
+  both); `-n` because a sudo that wants a password must fail, not prompt; the locale export stays
+  inside the script since sudo resets the environment. `--ssh-user` on `salmon-pgpair` (default
+  `root`) sets it for both members and the bouncer. Not run: the qemu switchover spec with a
+  non-root login — the guests have only root, and the Layer 3 tier was not exercised for this.
+
 - **Traffic moves through pgbouncer's admin console**: `PAUSE`, rewrite, `RELOAD`, `RESUME`, never
   a restart, since a restart drops the clients the bouncer is there to hold. That is why the
   routing lives in its own file pulled in by `%include` and deliberately *not* among

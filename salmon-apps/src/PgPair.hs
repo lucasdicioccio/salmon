@@ -71,6 +71,7 @@ data Seed
     , seedIdentityB :: Maybe FilePath
     , seedIdentityBouncer :: Maybe FilePath
     , seedKnownHosts :: Maybe FilePath
+    , seedSshUser :: Text
     , seedDatabase :: Text
     }
 
@@ -128,6 +129,9 @@ instance ParseRecord Seed where
                 <*> optional (strOption (long "ssh-identity-b" <> help "a key for machine B alone"))
                 <*> optional (strOption (long "ssh-identity-bouncer" <> help "a key for the bouncer alone"))
                 <*> optional (strOption (long "ssh-known-hosts" <> help "a known-hosts file to learn the machines' keys into"))
+                -- stock cloud images refuse root logins; anything but root
+                -- has every script run under one `sudo -n`.
+                <*> strOption (long "ssh-user" <> help "who to ssh as, on the machines and the bouncer: root, or a login with passwordless sudo" <> value "root")
                 <*> strOption (long "db" <> help "the database clients connect to" <> value "app")
 
 toPair :: Seed -> Pair.Pair
@@ -154,7 +158,7 @@ toPair seed =
   where
     machine identity sshHost host =
         Pair.Member
-            { Pair.member_ssh_user = "root"
+            { Pair.member_ssh_user = seed.seedSshUser
             , Pair.member_ssh_host = sshHost
             , Pair.member_host = host
             , Pair.member_cluster = "main"
@@ -165,7 +169,7 @@ toPair seed =
     bouncer host =
         Pair.Bouncer
             { Pair.bouncer_name = host
-            , Pair.bouncer_ssh_user = "root"
+            , Pair.bouncer_ssh_user = seed.seedSshUser
             , Pair.bouncer_ssh_host = host
             , Pair.bouncer_ssh_identity = seed.seedIdentityBouncer <|> seed.seedIdentity
             , -- pgbouncer's admin console is an ordinary connection to the
