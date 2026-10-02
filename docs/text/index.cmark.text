@@ -17,6 +17,14 @@ my-salmon run serve --http /run/salmon.sock             # keep converging, tend 
 
 Provisioning tooling tends to force a choice between one-off scripts (highly tunable, don't compose) and do-everything tools (powerful, but their behaviour and their configuration become inseparable). Salmon's bet: both are the same problem at different scales if operations are represented as an inspectable dependency graph rather than a flat ordered script — with the graph itself given real up/down/check semantics, so it converges to a target state (and back) instead of just running once.
 
+Every node in that graph is the same shape, however small or large the effect it manages — a `check` answering "is this already in place", an `up` that makes it so, and edges saying what has to happen first:
+
+![A tiny op graph: a directory, a config file that needs the directory, and a systemd service that needs the config file, each with its own check/up pair](/gen/images/op-graph.dot.png )
+
+## See it work
+
+The clearest demo in the repository is [`salmon-toy-qemu-pg-ha`](/docs-postgres-pair.html ): three qemu guests it builds for itself, a live Postgres primary/standby pair kept up by `salmon-pgpair`, and a client that keeps writing through a bouncer while the primary moves. Declaring a new primary drives a real switchover — pause the bouncer, stop the old primary cleanly, promote the standby, repoint the bouncer, rejoin the old primary through `pg_rewind`; killing the primary outright is refused without an explicit `--may-discard`, and rewound with it. See [`specs/pg-switchover.md`](https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-switchover.md ) for the argument, and [the Postgres pair guide](/docs-postgres-pair.html ) for what it does and does not promise (it is an operator-decided failover, never an automatic one).
+
 The code is on GitHub at [`lucasdicioccio/salmon`](https://github.com/lucasdicioccio/salmon ). It is a Haskell cabal multi-package project: `salmon-core` (the graph model, no IO), `salmon-ops` (the builtin nodes and the drivers, one-shot and `serve`), `salmon-ops-recipes` (opinionated compositions) and `salmon-apps` (the binaries).
 
 ## What it looks like

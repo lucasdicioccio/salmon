@@ -10,11 +10,7 @@ cabal build salmon-core salmon-ops salmon-ops-recipes salmon-apps   # individual
 cabal build salmon-migrator                                          # a single executable
 &lt;/code&gt;&lt;/pre&gt;
 &lt;p&gt;The project is layered strictly bottom-to-top:&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;salmon-core  &amp;lt;-  salmon-ops  &amp;lt;-  salmon-ops-recipes  &amp;lt;-  salmon-apps
-                                        ^
-                                        |
-                          salmon-ops-recipes-experimental
-&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;img src="/salmon/gen/images/package-layering.dot.png" alt="salmon-core is depended on by salmon-ops, which is depended on by salmon-ops-recipes, which is depended on by salmon-apps; salmon-ops-recipes-experimental branches off salmon-ops-recipes as an alternate, heavier leaf" /&gt;&lt;/p&gt;
 &lt;ul&gt;
 &lt;li&gt;&lt;strong&gt;&lt;code&gt;salmon-core&lt;/code&gt;&lt;/strong&gt; — the algebraic &lt;code&gt;Graph&lt;/code&gt;, and the &lt;code&gt;OpGraph&lt;/code&gt;/&lt;code&gt;Track&lt;/code&gt;/&lt;code&gt;Eval&lt;/code&gt;
 abstractions that let “create a file” and “turn a server up” be the same
@@ -59,6 +55,32 @@ my-salmon config &amp;lt;seed-args...&amp;gt; | my-salmon run tree   # print the
 my-salmon config &amp;lt;seed-args...&amp;gt; | my-salmon query show --select '/some/path/**'
 my-salmon run serve                                    # read seed declarations as commands, keep converging
 &lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;run tree&lt;/code&gt; prints the dependency tree the directive expands to. This is the
+repository’s own &lt;code&gt;salmon-ops-serve-fixture&lt;/code&gt;, run at page-build time (not
+pasted by hand — it is regenerated whenever the fixture’s output changes),
+declaring a tiny bundle of two files under a directory:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-sh"&gt;salmon-ops-serve-fixture config --dir /tmp/demo --name web --file index.html --file style.css \
+  | salmon-ops-serve-fixture run tree
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre id="run-tree-output"&gt;(loading the actual output…)&lt;/pre&gt;
+&lt;script&gt;
+(function () {
+  var out = document.getElementById("run-tree-output");
+  var box = document.getElementById("search-box");
+  var base = (box &amp;&amp; box.dataset &amp;&amp; box.dataset.basePath) || "";
+  fetch(base + "/gen/out/getting-started.cmark__run-tree")
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then(function (t) { out.textContent = t; })
+    .catch(function () {
+      out.textContent = "(couldn't load the generated output — see /gen/out/getting-started.cmark__run-tree)";
+    });
+})();
+&lt;/script&gt;
+&lt;p&gt;Two file nodes share the directory node that has to exist “before” either of
+them (&lt;code&gt;Ref&lt;/code&gt;-deduped, so it is walked once); the bundle node on top is what a
+seed declares up or down. This is the shape every graph in the repo has,
+whether it is a handful of files or a clustered database: nodes with a
+&lt;code&gt;before&lt;/code&gt; edge, walked in dependency order, deduped by &lt;code&gt;Ref&lt;/code&gt;.&lt;/p&gt;
 &lt;p&gt;The split keeps the possibly-impure “decide what I want” step separate from
 the hermetic “make it so” step, which is meant to run unattended, often on
 another machine. &lt;code&gt;run up&lt;/code&gt;/&lt;code&gt;run down&lt;/code&gt;/&lt;code&gt;run serve&lt;/code&gt; take &lt;code&gt;--json&lt;/code&gt; for one JSON

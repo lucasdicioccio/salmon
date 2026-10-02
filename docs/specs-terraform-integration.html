@@ -1,4 +1,4 @@
-<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html"><meta property="og:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="article:published_time" content="2026-09-25T14:15:36Z"><meta name="article:modified_time" content="2026-09-25T14:15:36Z"><meta name="ks:article_json" content="/salmon/json/specs-terraform-integration.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-terraform-integration.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T14:15:36Z","datePublished":"2026-09-25T14:15:36Z","description":"Status: draft / not implemented. This is a design sketch to react to, not a","headline":"Terraform integration: consuming (and optionally driving) existing Terraform-managed infra","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1439 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-salmon-as-init.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">18/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines-remaining.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/terraform-integration.md"><code>specs/terraform-integration.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Terraform integration: consuming (and optionally driving) existing Terraform-managed infra"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html"><meta property="og:description" content="Status: draft / not implemented. This is a design sketch to react to, not a"><meta name="article:published_time" content="2026-10-02T09:15:59Z"><meta name="article:modified_time" content="2026-10-02T09:15:59Z"><meta name="ks:article_json" content="/salmon/json/specs-terraform-integration.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-terraform-integration.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-02T09:15:59Z","datePublished":"2026-10-02T09:15:59Z","description":"Status: draft / not implemented. This is a design sketch to react to, not a","headline":"Terraform integration: consuming (and optionally driving) existing Terraform-managed infra","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-terraform-integration.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</h1><p>On <span>Fri, 02 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1657 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-salmon-as-init.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">18/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines-remaining.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/terraform-integration.md"><code>specs/terraform-integration.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
 <h2 id="terraform-integration-consuming-and-optionally-driving-existing-terraform-managed-infra">Terraform integration: consuming (and optionally driving) existing Terraform-managed infra</h2>
 <p>Status: draft / not implemented. This is a design sketch to react to, not a
 committed plan.</p>
@@ -27,13 +27,20 @@ treating a Terraform root module as one more <code>Op</code> in the graph (<code
 <code>apply</code>, <code>down</code> runs <code>destroy</code>), so a single <code>salmon-x run up</code> can bring up
 both the Terraform-managed layer and everything salmon layers on top in one
 traversal.</p>
-<p>Recommendation: <strong>build Model A first, treat Model B as optional/future</strong>.
-Model A composes with “we may have already-existing terraform usage”
-directly — it’s non-invasive by construction, since salmon never mutates
-anything Terraform owns. Model B requires deciding who owns lifecycle
-(salmon <code>down</code> calling <code>terraform destroy</code> against existing hand-managed
-infra is a real footgun — see §3’s caveats) and isn’t needed to unblock the
-pg-ha control-plane work, which only needs machine inventory as an input.</p>
+<p>Decision (owner, 2026-09-26): <strong>Model B first, Model A as its degenerate case.</strong>
+The target is teams with a lot of Terraform, and the simplest thing for them is
+to have salmon drive an existing root (<code>apply</code>), collect its state, and continue
+from there (for example, bring a VM up from a plan that already exists, then
+converge it). Model A is what a Model B node does when the root was already
+applied by someone else: skip <code>apply</code>, only read. What made Model A the first
+recommendation was that it needs no lifecycle ownership; that stays true, and is
+why <code>apply</code> is opt-in and <code>destroy</code> is never wired to <code>down</code> (see §3). The
+original recommendation, kept for the reasoning: Model A composes with “we may
+have already-existing terraform usage” directly, since salmon never mutates
+anything Terraform owns, while Model B requires deciding who owns lifecycle
+(salmon <code>down</code> calling <code>terraform destroy</code> against existing hand-managed infra
+is a real footgun) and is not needed to unblock the pg-ha control-plane work,
+which only needs machine inventory as an input.</p>
 <h3 id="design-goals--non-goals">Design goals / non-goals</h3>
 <p>Goals:</p>
 <ul>
@@ -112,8 +119,8 @@ state file from the pg-ha spec. Nothing about <code>Actions/Serve.hs</code>’s 
 <code>Epoch</code> model needs to change either: a <code>serve</code> loop re-reads whatever
 <code>tf-outputs.json</code> currently says on every seed declaration, same as it
 would re-read any other input file.</p>
-<h4 id="3-optional-salmonbuiltinnodesterraform-as-an-op-model-b">3. Optional: <code>Salmon.Builtin.Nodes.Terraform</code> as an <code>Op</code> (Model B)</h4>
-<p>If/when salmon-driven apply is actually wanted, it fits the existing node
+<h4 id="3-salmonbuiltinnodesterraform-as-an-op-model-b-the-first-slice">3. <code>Salmon.Builtin.Nodes.Terraform</code> as an <code>Op</code> (Model B, the first slice)</h4>
+<p>Salmon-driven apply is now the first slice (see the decision above). It fits the existing node
 shape cleanly — unlike <code>nft</code>/<code>ip link</code>, <code>terraform apply</code> <em>is</em> naturally
 idempotent (a no-op plan applies as a no-op), so this is a “prefer
 replace”-bucket node per CLAUDE.md’s conventions, not a <code>prelim</code>-skip one:</p>
@@ -150,21 +157,26 @@ same as they’d take a secret read from any other file today. No new secret-
 handling machinery needed.</p>
 <h3 id="open-questions">Open questions</h3>
 <ul>
-<li><strong>Does “already-existing Terraform usage” mean one root module or
-several</strong> (e.g. separate network/compute/DNS roots, possibly separate
-workspaces per tier/environment)? Determines whether <code>TerraformSource</code>
-needs to be a list (read/merge outputs from multiple roots) rather than
-one workdir — leaning towards supporting a list from the start since
-“one big root module” vs “several small ones” is a common enough split
-not to special-case away.
+<li><strong>One root or several? (decided, 2026-09-26)</strong> Several roots are several
+nodes with ordinary dependency edges between them, so no list type is needed in
+a seed for this. A node is one <code>TerraformRoot</code> (workdir, optional workspace,
+optional var file).
 </li>
-<li><strong>Output naming contract</strong>: does salmon assume specific output names
-(<code>machine_ab_0_ip</code>, etc.) that the existing <code>.tf</code> files would need to
-expose (possibly requiring someone to add outputs to already-existing
-config), or does <code>gen</code> need a mapping/config layer between “whatever
-outputs already exist” and “what the seed needs”? Depends entirely on
-what the existing Terraform code currently outputs — worth looking at
-before finalizing the parsing shape in §1.
+<li><strong>Output naming contract (decided, 2026-09-26).</strong> Dependents take a <em>handle</em>
+(the root plus a mapping from the names salmon asks for, such as
+<code>machine_ab_0_ip</code>, to whatever the team’s Terraform calls them, defaulting to
+identity), so nobody edits existing <code>.tf</code> files to be readable. A missing key is
+an error naming the key and the root. <strong>Timing:</strong> a <code>Tracked</code> value is a plain
+value fixed when the graph is built (<code>Salmon.Op.Track</code>), so an address that only
+exists after <code>apply</code> cannot travel that way; a dependent reads
+<code>terraform output -json</code> through the handle at its own <code>up</code>. If the <em>shape</em> of
+later nodes depends on outputs (how many machines), it uses the nested-walk
+pattern the template databases already use.
+</li>
+<li><strong>The <code>check</code> (decided, 2026-09-26).</strong> <code>terraform plan -detailed-exitcode</code>
+without changing anything: exit 0 is <code>Success</code>, 2 is drift (<code>Failure</code>), anything
+else is a failure to ask. Under <code>serve</code> the tending loop then notices drift the
+way it does for a systemd unit.
 </li>
 <li><strong>Model B’s <code>destroy</code> exposure</strong>: even as an explicit opt-in value (not
 wired to <code>down</code>), should it require something stronger than “a Haskell
@@ -183,7 +195,13 @@ ordinary <code>terraform</code> errors rather than needing salmon-side detection
 </li>
 </ul>
 <h3 id="phased-plan">Phased plan</h3>
-<ol>
+<ol start="0">
+<li>(Decided first slice, 2026-09-26.) The <code>Terraform</code> node of §3: <code>apply</code>
+(opt-in), the plan-based <code>check</code>, and the output-reading handle with the name
+mapping. <code>destroy</code> is not wired to <code>down</code>. Steps 1 to 4 below are then the
+reading-only variant (step 1), its wiring (step 2), the live variant folded
+into the node (step 3), and what remains of step 4.
+</li>
 <li><code>SreBox.TerraformState.readOutputs</code> (§1) against a captured
 <code>tf-outputs.json</code> file only — no live <code>terraform output</code> shell-out yet,
 no <code>Op</code> involved at all, just JSON parsing into typed values. Cheapest

@@ -1,4 +1,4 @@
-<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Pull mode: a `serve` that fetches its own declarations</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pull-mode.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Pull mode: a `serve` that fetches its own declarations"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Pull mode: a `serve` that fetches its own declarations"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pull-mode.html"><meta property="og:description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="article:published_time" content="2026-09-25T14:15:36Z"><meta name="article:modified_time" content="2026-09-25T14:15:36Z"><meta name="ks:article_json" content="/salmon/json/specs-pull-mode.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pull-mode.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-09-25T14:15:36Z","datePublished":"2026-09-25T14:15:36Z","description":"Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,","headline":"Pull mode: a `serve` that fetches its own declarations","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pull-mode.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/">home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Pull mode: a `serve` that fetches its own declarations</h1><p>On <span>Fri, 25 Sep 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 4505 words, 3 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-future-work.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">10/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-qemu-test-vms-progress.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pull-mode.md"><code>specs/pull-mode.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Pull mode: a `serve` that fetches its own declarations</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pull-mode.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Pull mode: a `serve` that fetches its own declarations"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Pull mode: a `serve` that fetches its own declarations"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pull-mode.html"><meta property="og:description" content="Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,"><meta name="article:published_time" content="2026-10-02T09:15:59Z"><meta name="article:modified_time" content="2026-10-02T09:15:59Z"><meta name="ks:article_json" content="/salmon/json/specs-pull-mode.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pull-mode.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-02T09:15:59Z","datePublished":"2026-10-02T09:15:59Z","description":"Status: milestones 1 to 7 below are implemented (`Salmon.Actions.Follow`,","headline":"Pull mode: a `serve` that fetches its own declarations","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pull-mode.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Pull mode: a `serve` that fetches its own declarations</h1><p>On <span>Fri, 02 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 5582 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-future-work.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">10/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-qemu-test-vms-progress.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pull-mode.md"><code>specs/pull-mode.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
 <h2 id="pull-mode-a-serve-that-fetches-its-own-declarations">Pull mode: a <code>serve</code> that fetches its own declarations</h2>
 <p>Status: milestones 1 to 7 below are implemented (<code>Salmon.Actions.Follow</code>,
 <code>Salmon.Actions.Follow.Scheduler</code>, <code>Salmon.Actions.Follow.Registry</code> and its
@@ -266,6 +266,13 @@ with deviations listed there. The one worth reading here: the key is a
 handed without also handing it the power to sign, and <code>Keys.jwkKey</code> is the
 one public-key format already written by the tree; the signature is EdDSA
 over Ed25519 through <code>jose</code>, not a JWS.</p>
+<p><em>Closed</em> (feature <code>66dbf803</code>; the gap was found reading the code against
+Dominator’s trust zones): a signature is bound to a label, and a key may be
+bound to labels. The signed document carries a top-level <code>label</code>, the verifier
+is told the label it is looking at and refuses a mismatch naming both, and
+<code>--follow-key LABEL=FILE</code> makes a key speak for that label only. See
+“Considered: ideas from Dominator”, item 1, and CLAUDE.md’s “Signature.hs”
+paragraph.</p>
 <h4 id="bootstrap-is-the-existing-push-pattern-once">Bootstrap is the existing push pattern, once</h4>
 <p><code>Self.uploadSelf</code>, then <code>ssh host bin run serve --follow &lt;registry&gt; --label …</code>
 under a <code>Systemd.systemdService</code> unit (which gives restart-on-crash and
@@ -286,6 +293,10 @@ document on disk and replay it on start; the journal for <code>World</code> prop
 its own item and should land first or alongside.
 <em>The cache shipped in milestone 4</em> (<code>--follow-cache</code>); the <code>World</code> journal
 has not, and is still its own item.
+<strong>Decided (owner, 2026-09-26):</strong> the <code>World</code> journal records the <em>declarations</em>
+only (which seeds are live), appended before each pass. Convergence states and
+<code>Upkeep</code> tallies are not journaled: each node’s <code>check</code> re-derives them on the
+first pass after a restart. <code>--follow-cache</code> stays for fetched documents.
 </li>
 <li><strong><code>supervise off</code>/<code>autoconverge off</code> typed interactively</strong> should be
 respected by the fetcher — it must not silently re-enable either. The diff
@@ -327,6 +338,139 @@ material should keep using pre-provisioned files (see the recipe
 key-exchange-agnostic convention), not inline them.
 </li>
 </ul>
+<h3 id="considered-ideas-from-dominator">Considered: ideas from Dominator</h3>
+<p>Not decided, and not scheduled unless a feature says so. Source: Dominator’s
+design document (<code>design-docs/Dominator/README.md</code>, Cloud-Foundations). Its
+shape is different: a controller <em>polls</em> every agent (<code>subd</code>), diffs the agent’s
+filesystem against a required image and orders it to fetch and update, with
+immutable images and near-atomic transitions as goals. So none of its transport
+carries over. What does is its operational thinking about rollout and trust,
+which pull mode has so far left to “registry writes”.</p>
+<h4 id="1-a-signature-should-be-bound-to-a-label-and-keys-to-zones">1. A signature should be bound to a label, and keys to zones</h4>
+<p>Dominator keeps different trusted keys per trust zone (its <code>CA.pem</code> is a
+“computed file”, so a controller in a public cloud cannot push into the internal
+zone). The equivalent here has a gap, from reading the code:</p>
+<ul>
+<li><code>Follow.Verifier</code> is <code>Digest -&gt; ByteString -&gt; IO (Either Text ByteString)</code>:
+it is never told which label the bytes were fetched for, though both call
+sites (<code>Follow.hs</code>, the round and the cache replay) have it.
+</li>
+<li><code>Signature.verifyEnvelope</code> verifies the <code>document</code> member and nothing else. A
+document’s <code>id</code> is opaque and may be <code>web-api@...</code> by convention, but nothing
+checks that it names the label.
+</li>
+<li><code>--follow-key</code> is one set for every label, and any one key accepts.
+</li>
+</ul>
+<p>So someone who can write to the registry but cannot sign can copy a valid signed
+<code>canary</code> document to the <code>prod</code> label’s address, and every host following <code>prod</code>
+applies it. The same swap works against the cache, whose entries are read back
+through the same verifier. An older signed document can also be replayed unless
+<code>--follow-refuse-older</code> is on and both documents carry <code>published</code>.</p>
+<p>The swap, as a sequence:</p>
+<pre><code>writer (can write, cannot sign)   registry            host following `prod`
+        |  copy signed canary doc     |                        |
+        |  to prod's address --------&gt;|                        |
+        |                             |&lt;--- fetch prod --------|
+        |                             |---- canary doc -------&gt;|
+        |                             |      verify: signature valid (same key set),
+        |                             |      nothing compares the document to `prod`
+        |                             |                        |-- applies canary's seeds
+</code></pre>
+<p>The fix has two parts:</p>
+<ul>
+<li><strong>Bind the label.</strong> A signed <code>label</code> in the document, checked by the verifier
+(which then needs the label as an argument), and a refusal that names both
+labels on a mismatch. Documents signed before this have no <code>label</code>: accept them
+behind an explicit flag for a migration window, and refuse by default after.
+</li>
+<li><strong>Keys per label.</strong> <code>--follow-key LABEL=FILE</code>, so a key speaks only for the
+labels it is bound to. A bare <code>--follow-key FILE</code> keeps meaning “any label”.
+</li>
+</ul>
+<h4 id="2-a-rollout-brake-that-needs-no-controller">2. A rollout brake that needs no controller</h4>
+<p>Dominator’s controller enforces global limits (the share of machines rebooting at
+once, and health-failure rates correlated with updates). Pull has jitter and a
+debounce, but a new document reaches every host within one poll interval, so a
+bad one is fleet-wide within about a minute.</p>
+<ul>
+<li><strong>A deterministic stagger.</strong> An optional <code>rollout: {&quot;window&quot;: &quot;1h&quot;}</code> in the
+document: each host applies after <code>hash(host, digest) mod window</code>. No
+coordination, and the same host always lands in the same slot for one document.
+</li>
+<li><strong>A hold marker.</strong> <code>{&quot;hold&quot;: true}</code> under a label: hosts keep what they have
+applied and report <code>held</code> in the status document. It is the emergency brake,
+and it does not depend on publishing an older document, which
+<code>--follow-refuse-older</code> would reject.
+</li>
+</ul>
+<h4 id="3-policy-at-the-write-path-and-a-gate-on-the-sink">3. Policy at the write path, and a gate on the sink</h4>
+<p>Dominator restricts who may write the MDB and rate-limits changes to the
+required image (a minimum time to upgrade a cluster), and splits “planned” from
+“required” so preloading is a safe permission and activating is not. Here the
+registry is that write path:</p>
+<ul>
+<li>Owners per directory in a git registry (<code>canary/</code> by CI, <code>prod/</code> by people) need
+no code, only a paragraph in the guide.
+</li>
+<li>Minimum interval between publishes and a deprecated flag belong in a
+<code>salmon-fleet publish</code> command, not on hosts.
+</li>
+<li>The step “publish to <code>canary</code>, watch the sink, publish to <code>prod</code>” is a script
+today. <code>salmon-fleet gate --label canary --converged 100% --for 10m</code>, with an
+exit code, makes it something CI can wait on. It reads the sink documents
+<code>Actions.Fleet</code> already folds.
+</li>
+</ul>
+<h4 id="4-reverting-after-a-failed-pass-opt-in-with-a-warning">4. Reverting after a failed pass (opt-in, with a warning)</h4>
+<p>Dominator’s update is near-atomic and ends in a health check. A pass here goes
+node by node, so a failure leaves a half-applied world until the next document.
+An opt-in <code>--follow-revert</code> per label could re-inject the previously applied
+document if a health node fails within a window. It needs the cache to keep the
+previous document. <strong>Warning:</strong> re-declaring the old document retires the new
+seeds, which runs <code>down</code> on them: destructive for anything stateful (Postgres),
+so never a default.</p>
+<h4 id="5-lower-priority-speculative">5. Lower priority, speculative</h4>
+<ul>
+<li><strong>Preload.</strong> A <code>planned</code> list that stages downloads and builds without
+activating. Nodes have no “stage only” notion; it needs a marker in <code>dynamics</code>
+first.
+</li>
+<li><strong>Document expiry.</strong> An <code>expires</code> timestamp so a host reports
+<code>document-expired</code> (a visible fact, not a decision) if the registry has been
+unreachable past it. It fits “nothing decides a host is dead”.
+</li>
+</ul>
+<h4 id="review-notes-owner-on-pr-41">Review notes (owner, on PR #41)</h4>
+<p>Directions, not decisions; each answers one paragraph above.</p>
+<ul>
+<li><strong>Atomic transitions without a diff primitive.</strong> Dominator diffs a filesystem
+against an image. Here that is not needed. What can be added is an operation
+whose file contents arrive through an atomic link or atomic move, so a file is
+never half-written. A <em>staged</em> operation is also possible: a first op computes
+a decision, the next dependent op reads it and skips its turn-up work when the
+decision says nothing changed.
+</li>
+<li><strong>Known labels at compile time.</strong> Add types so the set of labels is fixed when
+the binary is built (item 1), rather than an arbitrary string checked at run
+time.
+</li>
+<li><strong>Time gates by graph rewriting.</strong> For the stagger and hold (item 2), a node
+that checks a point in time has passed and otherwise waits. To keep delay logic
+out of every operation’s author, introduce these gates by graph rewriting (the
+<code>Op/Rewrite.hs</code> mechanism), not in each recipe.
+</li>
+<li><strong>Atomic flips.</strong> For a revert (item 4) the best available is to atomically
+flip the wanted and unwanted seeds in one go, not to undo a half-applied pass.
+</li>
+<li><strong>Staged depth is a seed parameter.</strong> How deep a rollout is staged (item 5,
+preload) is a different, parameterized seed, not a new mechanism.
+</li>
+</ul>
+<h4 id="not-for-us">Not for us</h4>
+<p>Image-based immutability, whole-filesystem scanning, and a central controller
+that holds global fleet state. Ours is host-reported and eventually consistent,
+which is what “What this does not solve” already says.</p>
 <h3 id="non-goals-v1">Non-goals (v1)</h3>
 <ul>
 <li>A server that <em>pushes</em> to hosts (that’s the generic-server sketch, and a
