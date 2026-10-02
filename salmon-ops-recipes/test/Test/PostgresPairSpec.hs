@@ -20,6 +20,10 @@ module Test.PostgresPairSpec (tests) where
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf, isPrefixOf)
+import System.Exit (ExitCode (..))
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process (readProcessWithExitCode)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Tasty (TestTree, testGroup)
@@ -43,6 +47,7 @@ tests =
         , testGroup "re-seeding a standby whose slot is lost (pair_reseed)" reseedTests
         , testGroup "a member reached over ssh on another address (member_ssh_host)" sshHostTests
         , testGroup "a machine reached as a login that is not root (member_ssh_user)" sshUserTests
+        , testGroup "how the two members talk to each other (pair_conn_security)" securityTests
         ]
 
 {- | What a step actually does to a machine. Pure, so the destructive half of
@@ -315,6 +320,7 @@ pair =
         , Pair.pair_bouncers = [bouncer]
         , Pair.pair_may_discard = Nothing
         , Pair.pair_reseed = Nothing
+        , Pair.pair_conn_security = Nothing
         , Pair.pair_repl_role = "replicator"
         , Pair.pair_repl_passfile = "/etc/postgresql/repl.pgpass"
         , Pair.pair_rewind_role = "rewinder"
@@ -430,7 +436,19 @@ memberTests =
         let s' = Pair.memberScript pair Pair.A <> Pair.memberScript pair Pair.B
         mapM_
             (\w -> assertBool (w <> " has no business in a member's script") (not (w `isInfixOf` s')))
-            ["pg_promote", "standby.signal", "primary_conninfo", "pg_rewind", "primary", "standby"]
+            ["pg_promote", "standby.signal", "pg_rewind", "standby"]
+    , -- it does read primary_conninfo, on whichever machine is in recovery
+      -- when it runs, to keep that connection as secure as the pair says:
+      -- which is a question it asks the machine, not the declaration.
+      testCase "nor does the declared primary change a word of it" $
+        mapM_
+            ( \side ->
+                assertEqual
+                    ""
+                    (Pair.memberScript pair{Pair.pair_primary = Pair.A} side)
+                    (Pair.memberScript pair{Pair.pair_primary = Pair.B} side)
+            )
+            [Pair.A, Pair.B]
     ]
   where
     at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
@@ -803,6 +821,240 @@ reseedTests =
     reseedScriptOn side = case Pair.stepCommand pairReseed (Pair.Reseed side) of
         Right [(_, sc)] -> sc
         _ -> ""
+    at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
+    tails' [] = [[]]
+    tails' xs@(_ : rest) = xs : tails' rest
+
+-------------------------------------------------------------------------------
+
+{- | 'Pair.pair_conn_security': what the replication and rewind connections
+between the two members must be.
+
+Two things are being held here. A pair that says nothing is exactly the pair
+it was before there was anything to say -- the same two @pg_hba.conf@ lines,
+no @sslmode@ anywhere. And a pair that says something stronger gets it at
+/both/ ends of /every/ connection: a @hostssl@ line the old @host@ line still
+shadows, or one connection string left at libpq's default, is the option
+doing nothing while reading as if it did.
+-}
+securityTests :: [TestTree]
+securityTests =
+    [ testCase "a pair that says nothing is host, md5: what every pair was" $ do
+        assertEqual "" Pair.PlainMd5 (Pair.connSecurity pair)
+        assertEqual
+            ""
+            ["host replication replicator 10.0.0.2/32 md5", "host all rewinder 10.0.0.2/32 md5"]
+            (Pair.hbaLinesFor pair Pair.A Pair.PlainMd5)
+        assertEqual "" (scriptsOf pair) (scriptsOf pair{Pair.pair_conn_security = Just Pair.PlainMd5})
+    , testCase "and none of its scripts asks for TLS, or for a password stored another way" $
+        mapM_
+            ( \(name, sc) ->
+                mapM_
+                    (\w -> assertBool (name <> " contains " <> w) (not (w `isInfixOf` sc)))
+                    ["sslmode", "PGSSLMODE", "password_encryption", "ssl_cert_file", "pg_hba_file_rules"]
+            )
+            (scriptsOf pair)
+    , testCase "a directive written before the field existed still parses, as that pair" $
+        case Aeson.fromJSON (dropSecurity (Aeson.toJSON pair)) of
+            Aeson.Success p -> assertEqual "" pair p
+            Aeson.Error why -> assertFailure why
+    , testCase "every choice survives the directive" $
+        mapM_
+            ( \p -> case Aeson.fromJSON (Aeson.toJSON p) of
+                Aeson.Success p' -> assertEqual "" p p'
+                Aeson.Error why -> assertFailure why
+            )
+            [pair, scram, verified, certs]
+    , testCase "tls-scram: the peer is let in over TLS only, proving a SCRAM password" $ do
+        assertEqual
+            ""
+            ["hostssl replication replicator 10.0.0.2/32 scram-sha-256", "hostssl all rewinder 10.0.0.2/32 scram-sha-256"]
+            (Pair.hbaLinesFor scram Pair.A (Pair.connSecurity scram))
+        let s' = Pair.memberScript scram Pair.A
+        assertBool s' ("echo 'hostssl replication replicator 10.0.0.2/32 scram-sha-256' >> \"$hba\"" `isInfixOf` s')
+        assertBool s' ("SET password_encryption = 'scram-sha-256'; DO" `isInfixOf` s')
+    , -- pg_hba.conf is first match wins, and `host` matches TLS too
+      testCase "and the lines of the weaker choice are removed, not left above the new ones" $ do
+        assertEqual
+            ""
+            [ "host replication replicator 10.0.0.2/32 md5"
+            , "host all rewinder 10.0.0.2/32 md5"
+            , "hostssl replication replicator 10.0.0.2/32 cert"
+            , "hostssl all rewinder 10.0.0.2/32 cert"
+            ]
+            (Pair.hbaLinesRetired scram Pair.A (Pair.connSecurity scram))
+        let s' = Pair.memberScript scram Pair.A
+        assertBool s' (at "awk -v l='host replication replicator 10.0.0.2/32 md5'" s' < at "echo 'hostssl replication" s')
+    , testCase "a choice never retires its own lines" $
+        mapM_
+            ( \p ->
+                mapM_
+                    (\l -> assertBool (show l) (l `notElem` Pair.hbaLinesRetired p Pair.A (Pair.connSecurity p)))
+                    (Pair.hbaLinesFor p Pair.A (Pair.connSecurity p))
+            )
+            [pair, scram, verified, certs]
+    , -- a hostssl line on a cluster with ssl off matches nothing: writing it
+      -- first would cut replication in order to report that TLS is not set up
+      testCase "pg_hba.conf is not touched until the cluster has said it serves TLS" $ do
+        let s' = Pair.memberScript scram Pair.A
+        assertBool s' ("SHOW ssl" `isInfixOf` s')
+        assertBool s' (at "SHOW ssl" s' < at "\"$hba.salmon\"" s')
+        assertBool s' (at "SHOW ssl" s' < at ">> \"$hba\"" s')
+    , testCase "and afterwards the server is asked whether it could read the file" $
+        assertBool "" ("pg_hba_file_rules WHERE error IS NOT NULL" `isInfixOf` Pair.memberScript scram Pair.A)
+    , testCase "tls-scram: every connection one member makes to the other demands TLS" $ do
+        let rejoin = scriptOf scram (Pair.Rejoin Pair.A)
+        -- pg_rewind's source, the standby's own connection, and the slot
+        assertBool rejoin ("user=rewinder dbname=postgres sslmode=require'" `isInfixOf` rejoin)
+        assertBool rejoin ("passfile=/etc/postgresql/repl.pgpass sslmode=require" `isInfixOf` rejoin)
+        assertBool rejoin ("replication=true sslmode=require'" `isInfixOf` rejoin)
+        let reseed = scriptOf scram{Pair.pair_reseed = Just Pair.A} (Pair.Reseed Pair.A)
+        assertBool reseed ("replication=true sslmode=require' -c 'IDENTIFY_SYSTEM'" `isInfixOf` reseed)
+    , -- the clone builds its own connection from a host and a user
+      testCase "and the first clone gets it from the environment, before it connects" $ do
+        let s' = Pair.seedScript scram Pair.A
+        assertBool s' ("export PGSSLMODE='require'" `isInfixOf` s')
+        assertBool s' (at "export PGSSLMODE" s' < at "IDENTIFY_SYSTEM" s')
+        assertBool s' (at "export PGSSLMODE" s' < at "pg_basebackup" s')
+    , testCase "a CA makes the connecting side check who answered" $ do
+        let rejoin = scriptOf verified (Pair.Rejoin Pair.A)
+        assertBool rejoin ("sslmode=verify-full sslrootcert=/etc/postgresql/pair-ca.crt" `isInfixOf` rejoin)
+        assertBool rejoin (not ("sslmode=require" `isInfixOf` rejoin))
+        let seed = Pair.seedScript verified Pair.A
+        assertBool seed ("export PGSSLROOTCERT='/etc/postgresql/pair-ca.crt'" `isInfixOf` seed)
+    , testCase "server files are checked readable, then set, then TLS turned on" $ do
+        let s' = Pair.memberScript verified Pair.A
+        assertBool s' ("sudo -u postgres test -r '/etc/postgresql/server.key'" `isInfixOf` s')
+        assertBool s' ("ALTER SYSTEM SET ssl_cert_file = '\\''/etc/postgresql/server.crt'\\''" `isInfixOf` s')
+        assertBool s' (at "test -r" s' < at "ALTER SYSTEM SET ssl_cert_file" s')
+        assertBool s' (at "ALTER SYSTEM SET ssl = " s' < at "SHOW ssl" s')
+        -- no client CA was declared, so the cluster's own is left alone
+        assertBool s' (not ("ssl_ca_file" `isInfixOf` s'))
+    , testCase "tls-cert: the peer is let in on a certificate, and each role presents its own" $ do
+        assertEqual
+            ""
+            ["hostssl replication replicator 10.0.0.2/32 cert", "hostssl all rewinder 10.0.0.2/32 cert"]
+            (Pair.hbaLinesFor certs Pair.A (Pair.connSecurity certs))
+        let rejoin = scriptOf certs (Pair.Rejoin Pair.A)
+        assertBool rejoin ("user=rewinder dbname=postgres sslmode=verify-ca sslrootcert=/etc/postgresql/pair-ca.crt sslcert=/etc/postgresql/rewind.crt sslkey=/etc/postgresql/rewind.key'" `isInfixOf` rejoin)
+        assertBool rejoin ("passfile=/etc/postgresql/repl.pgpass sslmode=verify-ca sslrootcert=/etc/postgresql/pair-ca.crt sslcert=/etc/postgresql/repl.crt sslkey=/etc/postgresql/repl.key" `isInfixOf` rejoin)
+        let seed = Pair.seedScript certs Pair.A
+        assertBool seed ("export PGSSLCERT='/etc/postgresql/repl.crt'" `isInfixOf` seed)
+        assertBool seed ("export PGSSLKEY='/etc/postgresql/repl.key'" `isInfixOf` seed)
+    , testCase "tls-cert: a cluster that trusts no CA is refused before the file is touched" $ do
+        let s' = Pair.memberScript certs Pair.A
+        assertBool s' ("ALTER SYSTEM SET ssl_ca_file = '\\''/etc/postgresql/pair-ca.crt'\\''" `isInfixOf` s')
+        assertBool s' (at "SHOW ssl_ca_file" s' < at ">> \"$hba\"" s')
+    , -- a choice changed under a running pair has to reach the connection
+      -- the standby already has configured, or it is only true after the
+      -- next rejoin -- and with certificates, broken at the next reconnect
+      testCase "a standby pointed at its peer is given the connection the pair now declares" $ do
+        let s' = Pair.memberScript certs Pair.A
+        assertBool s' ("'host=10.0.0.2 '*)" `isInfixOf` s')
+        assertBool s' ("ALTER SYSTEM SET primary_conninfo = '\\''host=10.0.0.2 port=5432 user=replicator passfile=/etc/postgresql/repl.pgpass sslmode=verify-ca" `isInfixOf` s')
+    , testCase "and one whose connection already is that, is left alone" $ do
+        let s' = Pair.memberScript pair Pair.A
+        assertBool s' ("[ \"$conninfo\" = 'host=10.0.0.2 port=5432 user=replicator passfile=/etc/postgresql/repl.pgpass' ] || " `isInfixOf` s')
+    , testCase "a path that is not a plain word is refused, all of them at once" $ do
+        assertEqual "" [] (Pair.securityProblems pair)
+        assertEqual "" [] (Pair.securityProblems certs)
+        let bad =
+                pair
+                    { Pair.pair_conn_security =
+                        Just
+                            ( Pair.TlsClientCert
+                                (Pair.Tls (Pair.VerifyCa "relative/ca.crt") Nothing)
+                                (Pair.ClientCerts "/etc/a b.crt" "/etc/it's.key" "/etc/ok.crt" "/etc/$(id).key")
+                            )
+                    }
+        assertEqual "" 4 (length (Pair.securityProblems bad))
+    , testCase "every script of every choice is a script bash can read" $
+        mapM_
+            ( \p ->
+                mapM_
+                    ( \(name, sc) -> do
+                        (code, _, err) <- readProcessWithExitCode "bash" ["-n"] sc
+                        assertEqual (name <> ": " <> err) ExitSuccess code
+                    )
+                    (scriptsOf p)
+            )
+            [pair, scram, verified, certs]
+    , -- the one part of the member script that needs no Postgres to run: what
+      -- it does to the file itself
+      testCase "tightening a deployed pair rewrites its own two lines and nothing else" $
+        withSystemTempDirectory "salmon-pair-hba" $ \dir -> do
+            let hba = dir </> "pg_hba.conf"
+            writeFile hba (unlines (before <> deployed <> after))
+            runHba scram hba
+            got <- readFile hba
+            assertEqual
+                ""
+                ( before
+                    <> after
+                    <> ["hostssl replication replicator 10.0.0.2/32 scram-sha-256", "hostssl all rewinder 10.0.0.2/32 scram-sha-256"]
+                )
+                (lines got)
+            -- and a second pass changes nothing
+            runHba scram hba
+            again <- readFile hba
+            assertEqual "" got again
+            -- back to the weaker choice: the file is what it was, lines at the end
+            runHba pair hba
+            back <- readFile hba
+            assertEqual "" (before <> after <> deployed) (lines back)
+    , testCase "an already-deployed pair that says nothing has its file left byte for byte" $
+        withSystemTempDirectory "salmon-pair-hba" $ \dir -> do
+            let hba = dir </> "pg_hba.conf"
+            writeFile hba (unlines (before <> deployed <> after))
+            runHba pair hba
+            got <- readFile hba
+            assertEqual "" (unlines (before <> deployed <> after)) got
+    ]
+  where
+    tls = Pair.Tls Pair.Encrypted Nothing
+    scram = pair{Pair.pair_conn_security = Just (Pair.TlsScram tls)}
+    verified =
+        pair
+            { Pair.pair_conn_security =
+                Just
+                    ( Pair.TlsScram
+                        ( Pair.Tls
+                            (Pair.VerifyFull "/etc/postgresql/pair-ca.crt")
+                            (Just (Pair.ServerFiles "/etc/postgresql/server.crt" "/etc/postgresql/server.key" Nothing))
+                        )
+                    )
+            }
+    certs =
+        pair
+            { Pair.pair_conn_security =
+                Just
+                    ( Pair.TlsClientCert
+                        ( Pair.Tls
+                            (Pair.VerifyCa "/etc/postgresql/pair-ca.crt")
+                            (Just (Pair.ServerFiles "/etc/postgresql/server.crt" "/etc/postgresql/server.key" (Just "/etc/postgresql/pair-ca.crt")))
+                        )
+                        (Pair.ClientCerts "/etc/postgresql/repl.crt" "/etc/postgresql/repl.key" "/etc/postgresql/rewind.crt" "/etc/postgresql/rewind.key")
+                    )
+            }
+
+    scriptOf p st = case Pair.stepCommand p st of
+        Right ((_, sc) : _) -> sc
+        _ -> ""
+
+    dropSecurity (Aeson.Object o) = Aeson.Object (KeyMap.delete "pair_conn_security" o)
+    dropSecurity v = v
+
+    before = ["# somebody else's", "local all postgres peer", "host all all 127.0.0.1/32 scram-sha-256"]
+    after = ["host app app_owner 10.0.0.3/32 md5", "host replication replicator 10.0.0.9/32 md5"]
+    deployed = ["host replication replicator 10.0.0.2/32 md5", "host all rewinder 10.0.0.2/32 md5"]
+
+    -- the lines of the member script that edit the file, run on a file
+    runHba p hba = do
+        let edits = [l | l <- lines (Pair.memberScript p Pair.A), "\"$hba\"" `isInfixOf` l, not ("hba=" `isPrefixOf` l)]
+        assertBool "expected the script to edit the file" (not (null edits))
+        (code, _, err) <- readProcessWithExitCode "bash" ["-c", unlines (["set -e", "hba=\"$1\""] <> edits), "bash", hba] ""
+        assertEqual err ExitSuccess code
+
     at needle hay = length (takeWhile (not . isPrefixOf needle) (tails' hay))
     tails' [] = [[]]
     tails' xs@(_ : rest) = xs : tails' rest

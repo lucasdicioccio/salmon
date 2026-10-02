@@ -22,7 +22,8 @@ module PgPair (main) where
 import Control.Applicative ((<|>))
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Options.Applicative (auto, execParser, fullDesc, header, help, helper, info, long, option, optional, progDesc, strOption, value, (<**>))
+import Control.Exception (throwIO)
+import Options.Applicative (auto, execParser, fullDesc, header, help, helper, info, long, option, optional, progDesc, strOption, switch, value, (<**>))
 import Options.Generic (ParseRecord (..))
 
 import qualified Salmon.Actions.Serve as Serve
@@ -48,7 +49,10 @@ program :: Track' Pair.Pair
 program = Track (Pair.pairOp reportPrint)
 
 configure :: Configure IO Seed Pair.Pair
-configure = Configure (pure . toPair)
+configure = Configure $ \seed ->
+    case toPair seed of
+        Right pair -> pure pair
+        Left why -> throwIO (userError ("salmon-pgpair: " <> why))
 
 {- | What an operator types. Everything else about the pair is convention,
 which is what makes the interesting part -- @--primary@ -- short enough to
@@ -73,7 +77,24 @@ data Seed
     , seedKnownHosts :: Maybe FilePath
     , seedSshUser :: Text
     , seedDatabase :: Text
+    , seedConnSecurity :: Security
+    , seedTlsCa :: Maybe FilePath
+    , seedTlsVerifyFull :: Bool
+    , seedTlsServerCert :: Maybe FilePath
+    , seedTlsServerKey :: Maybe FilePath
     }
+
+{- | @--conn-security@'s three words. The weakest is the default and has the
+plain name, because it is what every pair made before the flag existed is.
+-}
+data Security = Plain | TlsScram | TlsCert
+
+instance Read Security where
+    readsPrec _ s = case span (`notElem` (" \t" :: String)) s of
+        ("plain", rest) -> [(Plain, rest)]
+        ("tls-scram", rest) -> [(TlsScram, rest)]
+        ("tls-cert", rest) -> [(TlsCert, rest)]
+        _ -> []
 
 -- | Parsed rather than derived, so that @--primary A@ is what it looks like.
 newtype Side = Side {unSide :: Pair.Side}
@@ -133,9 +154,65 @@ instance ParseRecord Seed where
                 -- has every script run under one `sudo -n`.
                 <*> strOption (long "ssh-user" <> help "who to ssh as, on the machines and the bouncer: root, or a login with passwordless sudo" <> value "root")
                 <*> strOption (long "db" <> help "the database clients connect to" <> value "app")
+                <*> option
+                    auto
+                    ( long "conn-security"
+                        <> help "what the replication and rewind connections between the two machines must be: plain (host, md5, TLS not required; the default), tls-scram (hostssl, scram-sha-256) or tls-cert (hostssl, client certificates pre-provisioned on both machines as /etc/postgresql/salmon-{replication,rewind}.{crt,key})"
+                        <> value Plain
+                    )
+                <*> optional (strOption (long "tls-ca" <> help "a CA certificate, on both machines, to verify the other machine's certificate against (sslmode=verify-ca); without it a TLS connection is encrypted and the server is not verified"))
+                <*> switch (long "tls-verify-full" <> help "with --tls-ca: also require the other machine's certificate to name the address given as --a/--b")
+                <*> optional (strOption (long "tls-server-cert" <> help "the certificate each machine serves TLS with, pre-provisioned at this path on both; without it the cluster's TLS settings are left as found"))
+                <*> optional (strOption (long "tls-server-key" <> help "its key, readable by postgres alone"))
 
-toPair :: Seed -> Pair.Pair
-toPair seed =
+toPair :: Seed -> Either String Pair.Pair
+toPair seed = do
+    security <- connSecurity seed
+    let pair = (plainPair seed){Pair.pair_conn_security = security}
+    case Pair.securityProblems pair of
+        [] -> Right pair
+        problems -> Left (Text.unpack (Text.intercalate "; " problems))
+
+{- | The flags as a 'Pair.ConnSecurity', or what is contradictory about them.
+'Nothing' for @plain@, so that such a directive is byte for byte what it was
+before the flag existed.
+-}
+connSecurity :: Seed -> Either String (Maybe Pair.ConnSecurity)
+connSecurity seed = case seed.seedConnSecurity of
+    Plain
+        | tlsFlagGiven -> Left "--tls-ca, --tls-verify-full, --tls-server-cert and --tls-server-key mean nothing with --conn-security plain"
+        | otherwise -> Right Nothing
+    TlsScram -> Just . Pair.TlsScram <$> tls
+    TlsCert -> do
+        t <- tls
+        pure . Just $
+            Pair.TlsClientCert
+                t
+                Pair.ClientCerts
+                    { Pair.client_repl_cert = "/etc/postgresql/salmon-replication.crt"
+                    , Pair.client_repl_key = "/etc/postgresql/salmon-replication.key"
+                    , Pair.client_rewind_cert = "/etc/postgresql/salmon-rewind.crt"
+                    , Pair.client_rewind_key = "/etc/postgresql/salmon-rewind.key"
+                    }
+  where
+    tlsFlagGiven =
+        seed.seedTlsVerifyFull
+            || any (/= Nothing) [seed.seedTlsCa, seed.seedTlsServerCert, seed.seedTlsServerKey]
+    tls = Pair.Tls <$> check <*> server
+    check = case (seed.seedTlsCa, seed.seedTlsVerifyFull) of
+        (Nothing, False) -> Right Pair.Encrypted
+        (Nothing, True) -> Left "--tls-verify-full needs --tls-ca: there is nothing to verify a name against"
+        (Just ca, False) -> Right (Pair.VerifyCa ca)
+        (Just ca, True) -> Right (Pair.VerifyFull ca)
+    server = case (seed.seedTlsServerCert, seed.seedTlsServerKey) of
+        (Nothing, Nothing) -> Right Nothing
+        -- the CA that signs the servers is taken to sign the clients too:
+        -- one CA per pair is the convention this binary is made of.
+        (Just cert, Just key) -> Right (Just (Pair.ServerFiles cert key seed.seedTlsCa))
+        _ -> Left "--tls-server-cert and --tls-server-key go together"
+
+plainPair :: Seed -> Pair.Pair
+plainPair seed =
     Pair.Pair
         { Pair.pair_name = seed.seedName
         , Pair.pair_a = machine (seed.seedIdentityA <|> seed.seedIdentity) seed.seedSshA seed.seedHostA
@@ -154,6 +231,7 @@ toPair seed =
         , Pair.pair_bouncers = foldMap (pure . bouncer) seed.seedBouncer
         , Pair.pair_may_discard = fmap unSide seed.seedMayDiscard
         , Pair.pair_reseed = fmap unSide seed.seedReseed
+        , Pair.pair_conn_security = Nothing
         }
   where
     machine identity sshHost host =

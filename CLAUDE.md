@@ -1110,6 +1110,38 @@ argument. What follows is the list of things that are load-bearing; each was a d
   `root`) sets it for both members and the bouncer. Not run: the qemu switchover spec with a
   non-root login — the guests have only root, and the Layer 3 tier was not exercised for this.
 
+- **What the two members' connections to each other must be is declared, and the weak one is the
+  default with the plain name.** `pair_conn_security` (`Maybe ConnSecurity`, absent meaning
+  `PlainMd5`; `--conn-security plain|tls-scram|tls-cert` on `salmon-pgpair`) covers every
+  connection one member makes to the other — streaming, `pg_basebackup`, `pg_rewind`, the slot
+  bookkeeping: `PlainMd5` is `host ... md5` and no `sslmode` (what every pair was, and what a
+  directive without the field still is, script for script); `TlsScram` is `hostssl ...
+  scram-sha-256` with `sslmode=require`/`verify-ca`/`verify-full` (`ServerCheck`) and the roles'
+  passwords re-stored as SCRAM; `TlsClientCert` is `hostssl ... cert` with a certificate per role
+  (`CN` = role name). All certificate files are pre-provisioned paths on both members, never
+  issued or moved here. Four things are load-bearing. **The pair's own hba lines are replaced,
+  not appended** (`hbaLinesRetired`, exact whole-line matches only): hba is first-match and
+  `host` matches TLS too, so yesterday's `host ... md5` line left above today's `hostssl` line
+  makes the option a no-op that reads as if it worked; everything else in the file, including a
+  wider line somebody else wrote above, is untouched. **The cluster is asked whether it serves
+  TLS (`SHOW ssl`, and `ssl_ca_file` for certificates) before hba is touched**, since a `hostssl`
+  line on `ssl = off` matches nothing and would cut replication to report that TLS is missing;
+  afterwards `pg_hba_file_rules` is asked whether the file loaded. **The member script realigns a
+  standby's `primary_conninfo`** (`ALTER SYSTEM`, only when it already points at the peer and
+  differs) so a choice changed on a running pair reaches the connection already configured —
+  which is why `memberTests` no longer forbids the word `primary_conninfo` in that script and
+  instead asserts the script is identical whichever side is declared primary. And **the first
+  clone gets it from `PGSSL*` environment** exported ahead of `Postgres.cloneFromPrimaryScript`
+  (which builds its own connection), every other connection saying it in its string.
+  `securityProblems` refuses paths that are not plain absolute words, in `up` and in
+  `salmon-pgpair config`. Verified by hand against two Debian trixie / Postgres 17 containers
+  (plain → tls-scram → switchover → tls-cert with verify-full → switchover → fresh seed → back to
+  plain, plus both refusals), with ssh replaced by `podman exec`; not run in the Layer 3 tier,
+  and not on Postgres older than 17. Not done: `channel_binding`, a CRL, per-member client
+  certificate paths, the reseed path under TLS (rendered and syntax-checked only), and the
+  demoted side's leftover (unused) `primary_conninfo` on a primary is only rewritten at its next
+  rejoin.
+
 - **Traffic moves through pgbouncer's admin console**: `PAUSE`, rewrite, `RELOAD`, `RESUME`, never
   a restart, since a restart drops the clients the bouncer is there to hold. That is why the
   routing lives in its own file pulled in by `%include` and deliberately *not* among
