@@ -9,6 +9,14 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     -- * gcloud binary
     gcloud,
 
+    -- * The account gcloud acts as
+    Account (..),
+    declaredAccount,
+    interpretAccount,
+    activeAccountArgs,
+    readActiveAccount,
+    withAccount,
+
     -- * Application Default Credentials
     applicationDefaultCredentials,
     interpretAdc,
@@ -34,6 +42,7 @@ module Salmon.Builtin.Nodes.Gcp.Core (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, throwIO, try)
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -75,6 +84,7 @@ data Report
 -- | The various gcloud invocations that 'Core' knows how to run.
 data GcloudCommand
     = AdcPrintAccessToken
+    | ConfigGetAccount
     deriving (Show)
 
 -- | Builds a 'CreateProcess' for a gcloud invocation.
@@ -82,6 +92,8 @@ gcloudCommand :: Command "gcloud" GcloudCommand
 gcloudCommand = Command $ \cmd -> case cmd of
     AdcPrintAccessToken ->
         gcloudProc ["auth", "application-default", "print-access-token"]
+    ConfigGetAccount ->
+        gcloudProc activeAccountArgs
 
 -- | A provider for the @gcloud@ binary. For Phase 1 we assume @gcloud@ is on
 -- @PATH@; callers can override with a real installer if they prefer.
@@ -93,8 +105,15 @@ gcloud = Track $ \_ ->
             , ref = mkRef "gcloud" ("gcloud" :: Text)
             }
 
--- | Validates Application Default Credentials. Almost every other GCP op
--- should depend on this node.
+{- | Validates Application Default Credentials.
+
+Mind what this does /not/ say: every @gcloud@ invocation in this tree, and
+'printAccessToken', acts as gcloud's /active account/, which is a separate
+credential from the application-default one and may belong to somebody else.
+This node passing says a client library could authenticate; it says nothing
+about who the other GCP nodes will act as. 'declaredAccount' is the node
+that does.
+-}
 applicationDefaultCredentials :: Reporter Report -> Track' (Binary "gcloud") -> Op
 applicationDefaultCredentials r gcloudTrack =
     withBinary gcloudTrack gcloudCommand AdcPrintAccessToken $ \up ->
@@ -122,8 +141,94 @@ interpretAdc :: ExitCode -> CheckResult
 interpretAdc ExitSuccess = Success
 interpretAdc (ExitFailure n) = Failure ("gcloud ADC not available (exit " <> Text.pack (show n) <> ")")
 
-{- | Fetches a fresh OAuth2 access token for the active gcloud identity
-(ADC, unless a service account or user has been separately configured).
+-------------------------------------------------------------------------------
+-- The active account
+
+-- | The account (a user's or a service account's email) gcloud should act as.
+newtype Account = Account {accountEmail :: Text}
+    deriving (Eq, Ord, Show)
+
+{- | The arguments reading the account gcloud will act as. It is the
+@core/account@ property, so it honours @CLOUDSDK_CORE_ACCOUNT@ and the active
+configuration alike, which is exactly what every other invocation does.
+-}
+activeAccountArgs :: [String]
+activeAccountArgs = ["config", "get-value", "account"]
+
+-- | Append @--account@ to a gcloud argument list.
+withAccount :: Account -> [String] -> [String]
+withAccount a args = args <> ["--account", Text.unpack a.accountEmail]
+
+{- | Asserts that gcloud's active account is the declared one, and refuses
+otherwise.
+
+Every GCP node shells out to @gcloud@, which acts as whichever account is
+active on the machine; with several Google accounts logged in, a graph would
+otherwise silently run as the wrong one. A recipe that knows who it means to
+be puts this node under its other GCP nodes (where 'applicationDefaultCredentials'
+used to stand alone), so a mismatch fails this node and blocks the rest
+before anything is created.
+
+It never /changes/ the active account: that is the operator's machine
+configuration, shared with everything else on it. Its @up@ re-reads and
+throws on anything but a match, saying what to run. Nothing is done on
+@down@.
+-}
+declaredAccount :: Reporter Report -> Track' (Binary "gcloud") -> Account -> Op
+declaredAccount _r gcloudTrack acct =
+    withBinary gcloudTrack gcloudCommand ConfigGetAccount $ \_run ->
+        op "gcp-account" nodeps $ \actions ->
+            actions
+                { help = "asserts the account gcloud acts as"
+                , notes = ["declared account: " <> acct.accountEmail]
+                , ref = mkRef "gcp-account" acct.accountEmail
+                , up = refuseUnlessDeclared
+                , check = checkAccount
+                }
+  where
+    checkAccount :: IO CheckResult
+    checkAccount = uncurry (interpretAccount acct) <$> readActiveAccount
+
+    refuseUnlessDeclared :: IO ()
+    refuseUnlessDeclared = do
+        result <- checkAccount
+        case result of
+            Success -> pure ()
+            Failure why ->
+                throwIO . userError . Text.unpack $
+                    why
+                        <> "; refusing to act as another identity (gcloud config set account "
+                        <> acct.accountEmail
+                        <> ", or export CLOUDSDK_CORE_ACCOUNT)"
+            other -> throwIO (userError ("could not establish gcloud's active account: " <> show other))
+
+-- | Runs @gcloud config get-value account@: its exit code and stdout.
+readActiveAccount :: IO (ExitCode, ByteString)
+readActiveAccount = do
+    (code, out, _err) <- readCreateProcessWithExitCode (gcloudProc activeAccountArgs) ""
+    pure (code, out)
+
+{- | The verdict drawn from @gcloud config get-value account@.
+
+With no account set, gcloud exits 0 and prints @(unset)@ on stderr, leaving
+stdout empty (older releases printed it on stdout), so both spellings count
+as none. Addresses are compared without regard to case, as Google does.
+-}
+interpretAccount :: Account -> ExitCode -> ByteString -> CheckResult
+interpretAccount _ (ExitFailure n) _ =
+    Failure ("could not read gcloud's active account (exit " <> Text.pack (show n) <> ")")
+interpretAccount acct ExitSuccess out
+    | Text.null active || active == "(unset)" =
+        Failure ("gcloud has no active account, declared " <> acct.accountEmail)
+    | Text.toCaseFold active == Text.toCaseFold (Text.strip acct.accountEmail) = Success
+    | otherwise =
+        Failure ("gcloud's active account is " <> active <> ", declared " <> acct.accountEmail)
+  where
+    active = Text.strip (Text.decodeUtf8With TextError.lenientDecode out)
+
+{- | Fetches a fresh OAuth2 access token for gcloud's /active account/ (not
+the application-default credentials; see 'declaredAccount' for pinning who
+that is).
 
 This is the credential a container registry expects for username
 @oauth2accesstoken@ -- see "SreBox.Gcp.CloudRunDeploy", which feeds this

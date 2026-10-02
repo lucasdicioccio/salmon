@@ -36,6 +36,7 @@ Tiers are cumulative, ordered by cost. Pick one with `--tier`.
 | Node | Resource |
 |---|---|
 | `Gcp.Core.applicationDefaultCredentials` | validates ADC before anything else runs |
+| `Gcp.Core.declaredAccount` | with `--account EMAIL`: refuses unless gcloud's active account is that one |
 | `Gcp.ResourceManager.project` | the project itself (skipped with `--existing-project`) |
 | `Gcp.Billing.linkBillingAccount` | links the billing account |
 | `Gcp.ServiceUsage.enableService` | `storage`, `iam`, `artifactregistry` (and `run` at tier 1, `monitoring` with `--alert-email`) |
@@ -236,6 +237,12 @@ gcloud auth application-default login
 gcloud config get-value account                      # confirm the sandbox identity
 ```
 
+Pass `--account you@example.com` in the seed to have the graph check this
+rather than you: `Gcp.Core.declaredAccount` reads `gcloud config get-value
+account` and, on any other answer, fails before a single resource is created,
+blocking everything declared on top of it. It never switches the account
+itself. Without the flag nothing is asserted, as before.
+
 The script prints the active account and the ambient project when it starts.
 The ambient project should not matter: every node passes `--project`
 explicitly. If a run only works when the ambient project happens to be right,
@@ -421,9 +428,13 @@ leftover.
   service and the forwarding rule is plain `:80`; managed certificates, host
   and path rules, and the `--network`-carrying form of the forwarding rule are
   all rendered-but-unrun.
-- **Two credentials, one identity assumed.** `gcp-adc` validates ADC;
-  `Core.printAccessToken` (the registry login password) uses the active account.
-  Log both in as the same identity.
+- **Two credentials; only the one that acts is pinned.** `gcp-adc` validates
+  ADC, which no node here uses: every `gcloud` call and
+  `Core.printAccessToken` (the registry login password) act as the active
+  account. `--account` (`Core.declaredAccount`) asserts who that is; nothing
+  compares the ADC identity with it, and the assertion is made once per pass
+  rather than passed as `--account` on each call, so an account switched
+  mid-pass is not caught.
 - **`CloudRun`'s check is a substring match** on the image, so `img:1` matches
   `img:10`, and a changed env var or service account is not noticed.
 - **`CloudRunOptions`' scaling knobs have never met a real service.**

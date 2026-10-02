@@ -151,6 +151,7 @@ data Seed = Seed
     , seedVmInternalIp :: Maybe Text
     , seedPeerInternalIp :: Maybe Text
     , seedDnsZone :: Maybe Text
+    , seedAccount :: Maybe Text
     }
     deriving (Eq, Show)
 
@@ -189,6 +190,7 @@ instance ParseRecord Seed where
                 <*> optional (strOption (long "vm-internal-ip" <> metavar "IP" <> Opt.help "tier 2: pin the VM to this internal address, a free one in the region's `default` subnet; needs --peer-internal-ip"))
                 <*> optional (strOption (long "peer-internal-ip" <> metavar "IP" <> Opt.help "tier 2: also boot a peer with no external address, pinned to this internal one, which the VM then fetches a page from; needs --vm-internal-ip"))
                 <*> optional (strOption (long "dns-zone" <> metavar "DNS_NAME" <> Opt.help "tier 0: also create a public Cloud DNS zone for this domain and print the name servers it was assigned (cents per month); at tier 3, also point lb.DNS_NAME at the balancer"))
+                <*> optional (strOption (long "account" <> metavar "EMAIL" <> Opt.help "the account gcloud must be acting as; any other active account is refused before anything is created (Gcp.Core.declaredAccount)"))
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -303,6 +305,8 @@ data Spec = Spec
     , peerConfig :: Maybe PeerConfig
     , dnsZone :: Maybe Text
     -- ^ tier 0: a Cloud DNS zone for this domain, if any
+    , account :: Maybe Text
+    -- ^ the account gcloud must be acting as, if declared
     }
     deriving (Eq, Show, Generic)
 
@@ -388,6 +392,7 @@ configure = Configure $ \seed -> do
             , alertEmail = if seed.seedTier >= 1 then seed.seedAlertEmail else Nothing
             , peerConfig = peer
             , dnsZone = seed.seedDnsZone
+            , account = seed.seedAccount
             }
   where
     validIpv4 t = case Text.splitOn "." t of
@@ -593,8 +598,10 @@ adc = Core.applicationDefaultCredentials reportPrint Core.gcloud
 
 -- | Whatever every project-scoped resource must wait for.
 foundation :: Spec -> [Op]
-foundation spec = adc : catMaybes [projectNode, billingNode]
+foundation spec = identity <> catMaybes [projectNode, billingNode]
   where
+    -- who acts: ADC is usable, and gcloud's active account is the declared one
+    identity = adc : [Core.declaredAccount reportPrint Core.gcloud (Core.Account a) | Just a <- [spec.account]]
     projectNode =
         fmap
             ( \parent ->
@@ -602,7 +609,7 @@ foundation spec = adc : catMaybes [projectNode, billingNode]
                     reportPrint
                     Core.gcloud
                     (ResourceManager.ProjectSpec (projectOf spec) (toParent parent) mempty)
-                    `inject` adc
+                    `injectAll` identity
             )
             spec.createProjectUnder
     billingNode =
@@ -611,10 +618,11 @@ foundation spec = adc : catMaybes [projectNode, billingNode]
                 foldl
                     inject
                     (Billing.linkBillingAccount reportPrint Core.gcloud (projectOf spec) (Billing.BillingAccount acct))
-                    (adc : catMaybes [projectNode])
+                    (identity <> catMaybes [projectNode])
             )
             spec.billingAccount
 
+    injectAll = foldl inject
     toParent (OrganizationParent org) = ResourceManager.Organization org
     toParent (FolderParent folder) = ResourceManager.Folder folder
     toParent NoParentRef = ResourceManager.NoParent
