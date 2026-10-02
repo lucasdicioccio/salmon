@@ -84,6 +84,7 @@ then provisions with *this same binary*.
 | `Gcp.SshAccess.installMetadataCaKey` | the CA's public key, into project metadata |
 | `Gcp.Compute.gceInstance` | the VM, claiming the address and carrying the tag |
 | `Gcp.SshAccess.sshAvailable` | waits for sshd to answer *as that user, with that certificate* |
+| `Secrets.sharedSecretFile`, `SecretDelivery.uploadSecretFile` (a `vmp_beforeCall` node) | a secret generated in the workdir, put on the VM as `/etc/salmon-toy/secret`, `root:root 0600`, before the binary runs |
 | `Self.uploadAndCallSelfAsSudoWith` (via `SreBox.Gcp.VmProvision.provisionedVm`) | rsyncs this binary over and runs `run up` on it there |
 
 The startup script is what closes the gap `installMetadataCaKey` leaves:
@@ -245,6 +246,18 @@ and `SALMON_GCP_TOY=<binary>` override the log directory and the binary.
 reports that state with its own message rather than as a plain "not found",
 because the `up` that follows is going to fail on the id, not on credentials.
 
+**Tier 2 also delivers a secret.** The control side generates 32 random
+bytes into `<workdir>/secrets/toy-secret` and
+`Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile` writes them to
+`/etc/salmon-toy/secret` on the VM over the connection the provisioning
+already uses, before the uploaded binary is called. The VM-side directive
+knows only the path: its `gcp-toy-secret-read` node reads the file, fails if
+it is absent or not 64 bytes long, and leaves
+`/var/lib/salmon-toy/secret-read` saying how many bytes it read. The script
+reads that marker and the file's owner and mode back, never its contents. On
+the second pass the upload should be a `Skip` (its check compares the remote
+file with the local one), which the script notes.
+
 ## What the passes mean
 
 | Pass | What a clean result looks like | What a dirty one tells you |
@@ -346,6 +359,15 @@ leftover.
   `compute addresses create --subnet … --addresses …` in the same pass, and
   that the VM then reaches the peer, is what the first run with
   `--vm-internal-ip`/`--peer-internal-ip` will show.
+- **The secret delivery has not been run against a real VM yet.** The remote
+  scripts are covered by Layer 0 tests that run them under a local `sh`, and
+  the ssh command line by its rendering; `sudo -n sh -c` reading the secret
+  from ssh's standard input on a real guest is what the first tier-2 run
+  will show.
+- **`Gcp.SecretManager.secretFile` is not exercised by the toy at all.** It is
+  the on-machine transport (the instance reads Secret Manager as its own
+  service account); the toy's VM has no service account granted on anything,
+  and only the `gcloud` argv and the local placement are tested.
 - **An instance's addresses are not checked for drift.** `gceInstance`'s
   check reads the instance's status only, so an instance that exists on
   another internal address than the declared one is reported satisfied.

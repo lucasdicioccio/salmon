@@ -898,6 +898,23 @@ than always silently hitting whichever cluster happens to be on the default port
 that only ever manage `"main"` pass `Postgres.localServer.serverPort` (5432); a caller managing
 multiple clusters on one box passes each cluster's own port.
 
+`Nodes/SecretDelivery.hs` is how a pre-provisioned secret gets onto a machine: a transport the *caller* declares,
+never a recipe (recipes keep taking paths). Two of them. `uploadSecretFile` runs on the controlling machine and sends
+a local file over ssh as the remote command's stdin (`sudo -n sh -c` under `WithSudo`) into a `0600` temp file beside
+the destination, then chown/chmod/rename; its `check` runs `cmp` on the remote against the same stdin, then `stat`,
+and `interpretProbe` reads the exit code (3 missing, 4 contents, 5 owner/mode, 255 — ssh not connecting — is
+`Unknown`). `Gcp.SecretManager.secretFile` is the on-machine one: the instance reads the secret as its own service
+account (`gcloud secrets versions access`, stdout captured in-process and deliberately *not* through the tracked
+runner, whose report carries stdout) and `installSecretBytes` places it. Load-bearing: the bytes are read at
+`up`/`check` time and never at graph build; they are in no argv, report, failure text, `help` or `notes`, **and
+neither is any digest of them** (so, unlike `filecontents`, a re-declared secret is not `Stale` under `serve` — the
+check is what notices); a mode granting anything to others is refused by `validatePlacement`, which is also the gate
+on what gets spliced into a root shell; the `Ref` is `("secret-upload", host, path)` / `("secret-file", path)`, the
+effect site; and the upload's `down` does not throw on ssh exit 255, because a failed `down` there would block the
+teardown of the machine the file is on. `salmon-gcp-toy` tier 2 uses the upload through `vmp_beforeCall`.
+`Test/SecretDeliverySpec.hs` runs the remote scripts under a local `sh`; neither transport has been run against a
+real machine.
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port

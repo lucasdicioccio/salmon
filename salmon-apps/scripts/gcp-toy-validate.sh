@@ -188,7 +188,7 @@ fi
 # binary and ssh:call re-runs the remote directive on every pass. That is
 # salmon's behaviour today, not a defect of the toy -- and the remote pass is
 # itself idempotent, which is what the marker check below reads.
-NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-toy-peer-reached|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
+NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-toy-peer-reached|gcp-toy-secret-read|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
 run_pass up-2 up || VERDICT+=("idempotency pass: FAILED")
 UNEXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -Ev "$NO_CHECK" || true)
 EXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -E "$NO_CHECK" | cut -d: -f1 | sort | uniq -c | tr '\n' ' ' || true)
@@ -215,6 +215,27 @@ if [[ $TIER -ge 2 ]]; then
         VERDICT+=("vm: the uploaded binary ran on the VM over the salmon CA")
     else
         VERDICT+=("vm: MARKER NOT FOUND on the VM ($marker)")
+    fi
+fi
+
+# The secret is generated on this side and uploaded before the remote call;
+# the witness is what the uploaded binary wrote after reading it, plus the
+# file's owner and mode. Its contents are never fetched back.
+if [[ $TIER -ge 2 ]]; then
+    echo "== verify the VM read the secret delivered to it"
+    secret_read=$(ssh -i "$WORKDIR/ssh/toy-client" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+        "$VM_USER@$VM_IP" cat /var/lib/salmon-toy/secret-read 2>&1 | tail -1)
+    secret_stat=$(ssh -i "$WORKDIR/ssh/toy-client" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+        "$VM_USER@$VM_IP" sudo stat -c "'%U:%G %a'" /etc/salmon-toy/secret 2>&1 | tail -1)
+    echo "   /var/lib/salmon-toy/secret-read: $secret_read"
+    echo "   /etc/salmon-toy/secret:          $secret_stat"
+    if [[ $secret_read == *"of a delivered secret for $PROJECT"* && $secret_stat == "root:root 600" ]]; then
+        VERDICT+=("secret: delivered root:root 0600 and read by the uploaded binary")
+    else
+        VERDICT+=("secret: NOT DELIVERED OR NOT READ ($secret_read; $secret_stat)")
+    fi
+    if grep -q '^Skip .*secret:upload' "$OUT/up-2.log"; then
+        echo "   the second pass skipped the upload (the remote file already matched)"
     fi
 fi
 

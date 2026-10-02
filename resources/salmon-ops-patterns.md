@@ -123,3 +123,55 @@ Also note `run down --plan` does not exist, so teardown cannot be partitioned
 this way. The tagged-domain design in
 `specs/multi-user-privilege-separation.md` (L3) removes the glob and checks
 the cut.
+
+## Pattern: secrets are files somebody else put there
+
+Recipes take a secret as a path to a file that already exists, and never as
+a value: a directive is printed in reports and piped on standard input, and
+a recipe that shipped its own secrets would have picked a transport for
+everyone using it. What puts the file there is a separate node the caller
+opts into, and there are two.
+
+**From the controlling machine, over ssh** —
+`Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile`:
+
+```haskell
+SecretDelivery.uploadSecretFile clientOpts reporter Debian.ssh
+    SecretDelivery.SecretUpload
+        { uploadSource = "secrets/app/db-password"        -- local, read at up time
+        , uploadRemote = Ssh.Remote "salmon" "10.0.0.2"
+        , uploadPlacement = SecretDelivery.Placement "/etc/app/db-password" "app" "app" "0600"
+        , uploadElevation = SecretDelivery.WithSudo        -- any owner but the login user
+        }
+```
+
+It belongs wherever the hand-off to the machine is declared; for
+`SreBox.Gcp.VmProvision` that is `vmp_beforeCall`, which hands over the
+`Ssh.ClientOpts` to use. Inject the node that generates the local file
+(`Secrets.sharedSecretFile`, a certificate, ...) so both happen in one pass.
+
+**On the machine itself, from Secret Manager** —
+`Salmon.Builtin.Nodes.Gcp.SecretManager.secretFile`, declared in the graph
+that runs on the instance, which reads the secret as the instance's own
+service account. Only the secret's *name* is in the directive. The instance
+needs `roles/secretmanager.secretAccessor` on the secret, the
+`cloud-platform` scope and a `gcloud`; the enclosing directory is a
+dependency you declare.
+
+What both guarantee, and what a third transport should too:
+
+- the bytes are read when `up`/`check` runs, never when the graph is built,
+  so they are not in the directive, `ref`, `help` or `notes`;
+- they travel on standard input, never in an argv;
+- no report or failure text carries them — **nor a digest of them**. A
+  fingerprint in `notes` is what would let `run serve` mark a re-declared
+  secret `Stale`, and it is left out deliberately: a digest of a password is
+  an offline guessing oracle for whoever can read a report. A changed secret
+  is noticed by the node's `check`, which compares the bytes themselves;
+- the file is written to a `0600` temporary beside the destination, then
+  chowned, chmoded and renamed over it, and a mode granting anything to
+  *others* is refused.
+
+`down` removes the delivered file. An upload's `down` treats a machine it
+cannot reach as having nothing left to remove, since failing there would
+block the teardown of the machine itself.

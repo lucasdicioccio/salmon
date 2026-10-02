@@ -150,6 +150,13 @@ applications after the role node. Things worth knowing:
 - With `--ssh-a`/`--ssh-b` (`member_ssh_host`) nothing changes here: these
   nodes reach a machine exactly as the pair's own do.
 
+Getting those files there is a node the caller declares, not one the recipe
+does: `Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile` puts a local
+secret file on a machine over ssh with an owner and a mode, and
+`Gcp.SecretManager.secretFile` has an instance read one out of Secret Manager
+as itself. Either goes before the pair's nodes; the recipe still only sees a
+path.
+
 `--seed B` is the first clone of a pair's life. It is safe to leave declared —
 the clone does nothing once the two sides share a system identifier, and
 refuses a machine holding a cluster it does not recognise. It is *not* the way
