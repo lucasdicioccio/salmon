@@ -42,6 +42,7 @@ import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified SreBox.Gcp.CloudRunAlerts as CloudRunAlerts
+import qualified SreBox.Gcp.VmProvision as VmProvision
 
 tests :: TestTree
 tests =
@@ -64,6 +65,7 @@ tests =
         , testGroup "Ssh.ClientOpts" clientOptsTests
         , testGroup "Monitoring" monitoringTests
         , testGroup "SreBox.Gcp.CloudRunAlerts" cloudRunAlertsTests
+        , testGroup "SreBox.Gcp.VmProvision.caTrustStartupScript" caTrustScriptTests
         ]
 
 -- | Extracts the argument list of a prepared gcloud 'CreateProcess', for
@@ -946,3 +948,41 @@ cloudRunAlertsTests =
             , CloudRunAlerts.cra_maxInstances = Just 2
             , CloudRunAlerts.cra_thresholds = CloudRunAlerts.defaultAlertThresholds
             }
+
+-------------------------------------------------------------------------------
+
+caTrustScriptTests :: [TestTree]
+caTrustScriptTests =
+    [ testCase "the fetch is inside a retry loop, never a bare command under set -e" $ do
+        assertEqual "errexit is on, which is what makes a bare fetch fatal" (Just "set -eux") (lookup 2 numbered)
+        assertBool "the curl is the condition of an `if`, so a 404 does not abort the script" $
+            any (\l -> "if curl -fsS" `Text.isInfixOf` l && "Metadata-Flavor: Google" `Text.isInfixOf` l) loopLines
+        assertBool "the loop retries with a pause" $
+            any ("sleep 2" `Text.isInfixOf`) loopLines
+        assertBool "it reads the attribute installMetadataCaKey publishes" $
+            any ("/computeMetadata/v1/project/attributes/ssh-ca" `Text.isInfixOf`) loopLines
+    , testCase "running out of attempts still fails, on an empty key file" $
+        assertEqual
+            "an empty TrustedUserCAKeys file locks everybody out, so sshd is not touched without a key"
+            ["done", "test -s /etc/ssh/salmon_ca.pub"]
+            (take 2 (dropWhile (/= "done") scriptLines))
+    , testCase "sshd is told about the key only after it is there, and restarted last" $ do
+        let at needle = [n | (n, l) <- numbered, needle `Text.isInfixOf` l]
+        assertBool "" (at "test -s" < at "TrustedUserCAKeys /etc/ssh/salmon_ca.pub' >>")
+        assertEqual "" (Just "systemctl restart ssh || systemctl restart sshd") (lookup (length scriptLines) numbered)
+    , testCase "the sshd_config line is appended only if missing (a startup script runs every boot)" $
+        assertBool "" (any ("grep -qxF 'TrustedUserCAKeys /etc/ssh/salmon_ca.pub' /etc/ssh/sshd_config" `Text.isPrefixOf`) scriptLines)
+    , testCase "the login user is created, given passwordless sudo, and named nowhere else" $ do
+        assertBool "" ("id -u deployer >/dev/null 2>&1 || useradd -m -s /bin/bash deployer" `elem` scriptLines)
+        assertBool "" ("printf '%s ALL=(ALL) NOPASSWD:ALL\\n' deployer > /etc/sudoers.d/deployer" `elem` scriptLines)
+        assertBool "" ("chmod 440 /etc/sudoers.d/deployer" `elem` scriptLines)
+        assertEqual
+            "a different user changes those three lines only"
+            3
+            (length (filter id (zipWith (/=) scriptLines (Text.lines (VmProvision.caTrustStartupScript "other")))))
+    ]
+  where
+    scriptLines = Text.lines (VmProvision.caTrustStartupScript "deployer")
+    numbered = zip [1 :: Int ..] scriptLines
+    loopLines =
+        takeWhile (/= "done") (dropWhile (not . ("for attempt in" `Text.isPrefixOf`)) scriptLines)
