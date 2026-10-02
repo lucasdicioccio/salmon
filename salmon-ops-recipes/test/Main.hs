@@ -41,6 +41,7 @@ import qualified Test.PatroniSpec as PatroniSpec
 import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
+import qualified Test.PostgresPairPrereqsSpec as PostgresPairPrereqsSpec
 import qualified Test.PostgresSwitchoverSpec as PostgresSwitchoverSpec
 import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
@@ -139,6 +140,7 @@ main =
             , PatroniSpec.tests
             , PgBackRestSpec.tests
             , PostgresPairSpec.tests
+            , PostgresPairPrereqsSpec.tests
             , PostgresTemplateSpec.tests
             , PostgresTlsSpec.tests
             , PostgrestCloudRunSpec.tests

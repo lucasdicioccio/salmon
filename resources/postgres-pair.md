@@ -81,6 +81,74 @@ What it assumes was done before it ever ran, because a recipe that ships
 secrets has chosen a transport for everyone who uses it: both machines have a
 Postgres cluster and the two `.pgpass` files the pair names, and the bouncer
 has pgbouncer, a `userlist.txt` and the `.pgpass` for its admin console. The recipe is given paths.
+`salmon-pgpair` leaves all of that to you; a binary of your own can declare
+it with the recipe below.
+
+## What it needs first
+
+`SreBox.PostgresPairPrereqs` is that assumption written as nodes, for a
+binary that composes the pair as a library. It still ships no secret: every
+secret is a file **already on the machine it is for**, left there by whatever
+your deployment uses to move secrets, and a `SecretFile` says where
+(`secret_from`) and how it must be held (owner, group, mode). The recipe
+installs it where the pair reads it. A file provisioned straight to its
+destination (`secret_from = Nothing`) only has its owner and mode set.
+
+| Node | Does |
+|---|---|
+| `memberPrereqs` (one per machine) | installs the packages that are missing, checks a cluster of the declared name exists, and puts the replication and rewind passfiles where the pair names them, `postgres:postgres 0600` |
+| `bouncerPrereqs` (one per bouncer) | the packages, the console passfile, and pgbouncer's auth file — copied only when it differs, and pgbouncer restarted (`try-restart`) only then |
+| `applications` (one per machine) | a `pg_hba.conf` line per application and client address, and, on whichever machine is the primary, the role, its password and the database it owns |
+
+```haskell
+Prereqs.pairWithPrereqs reportPrint pair
+    Prereqs.defaultPrereqs
+        { Prereqs.prereq_repl_passfile = Prereqs.postgresOwned "/run/secrets/replication.pgpass"
+        , Prereqs.prereq_rewind_passfile = Prereqs.postgresOwned "/run/secrets/rewind.pgpass"
+        , Prereqs.prereq_console_passfile = Prereqs.postgresOwned "/run/secrets/console.pgpass"
+        , Prereqs.prereq_userlist = (Prereqs.postgresOwned "/run/secrets/userlist.txt"){Prereqs.secret_mode = "0640"}
+        , Prereqs.prereq_applications =
+            [ Prereqs.Application
+                { Prereqs.app_role = "app"
+                , Prereqs.app_database = "app"
+                , Prereqs.app_passfile = "/run/secrets/app.pgpass" -- on each member
+                , Prereqs.app_clients = ["10.0.0.4"]               -- the bouncer, as the members see it
+                , Prereqs.app_hba_method = "md5"
+                }
+            ]
+        }
+```
+
+`pairWithPrereqs` is `pairOp` with those nodes in order: a machine's
+prerequisites before the pair's own node for that machine, and the
+applications after the role node. Things worth knowing:
+
+- **The auth file is the quiet one.** pgbouncer reads `userlist.txt` when it
+  starts and not again, so a file written under a running process is a correct
+  password that does not work. The restart happens when the file changed and
+  only then, because any other restart drops the clients the bouncer is
+  holding. The file is yours, in pgbouncer's `auth_file` format, hashed however
+  you chose; left in place rather than installed, nothing can tell it changed
+  and restarting is yours too.
+- **Applications come after the role node**, not before the pair. A machine
+  about to be cloned is a pristine cluster that is not in recovery, and a
+  database created on it is exactly what makes `--seed` refuse to clone over
+  it. So if a machine is unreachable the applications node for it fails, and
+  says so, after the pair itself has converged.
+- **A password is never in a script, an argument or a report.** It is read on
+  the member (the fifth field of the passfile's first line, as for the pair's
+  own passfiles), fed to `psql` on standard input, and the one statement
+  holding it has its output withheld: a failure there is reported in words.
+  Rotating a passfile and re-running rotates the role.
+- **`validate` lists everything wrong with a declaration** — names that are
+  not plain identifiers, relative paths, an application claiming the pair's
+  own role — since these words end up in scripts run as root. A node whose
+  declaration does not pass refuses to run.
+- An application's `pg_hba.conf` line goes on both members, because that file
+  is not replicated; the address is the client's as the members see it, which
+  need not be where the controller's ssh goes.
+- With `--ssh-a`/`--ssh-b` (`member_ssh_host`) nothing changes here: these
+  nodes reach a machine exactly as the pair's own do.
 
 `--seed B` is the first clone of a pair's life. It is safe to leave declared —
 the clone does nothing once the two sides share a system identifier, and
@@ -222,6 +290,11 @@ on:
   inserts that came back an error:          0
   acknowledged rows missing afterwards:     0
 ```
+
+The toy invents its own passwords — constants in its source — and is careful
+to do only that with them: one node leaves files in `/etc/salmon-toy-secrets`
+on each guest, playing the part of whoever provisions secrets, and everything
+done *with* those files is `SreBox.PostgresPairPrereqs`, as in a deployment.
 
 `prereqs` is the only part that needs root — debootstrapping a root
 filesystem, regenerating an initrd that can mount a 9p root, and handing

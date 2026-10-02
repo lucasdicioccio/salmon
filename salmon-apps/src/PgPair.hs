@@ -13,7 +13,9 @@ agree with it.
 What it assumes was done before it ever ran, because a recipe that ships
 secrets has chosen a transport for everybody who uses it: the two machines
 have a Postgres cluster, the bouncer has pgbouncer and a @userlist.txt@, and
-all three have the @.pgpass@ files named below. See @specs\/pg-switchover.md@.
+all three have the @.pgpass@ files named below. See @specs\/pg-switchover.md@,
+and "SreBox.PostgresPairPrereqs" for that layer as nodes, which a binary
+composing the pair as a library can declare (this one does not).
 -}
 module PgPair (main) where
 

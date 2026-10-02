@@ -85,6 +85,9 @@ module SreBox.PostgresPair (
     converge,
     convergeUpTo,
     stepBudget,
+
+    -- * For recipes beside this one ("SreBox.PostgresPairPrereqs")
+    sshToTarget,
 ) where
 
 import Control.Concurrent (threadDelay)

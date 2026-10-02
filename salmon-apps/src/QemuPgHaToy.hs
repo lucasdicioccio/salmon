@@ -59,6 +59,14 @@ A deployment. The secrets here are constants in the source, because the
 point is to be able to read the whole thing: a pair in earnest is handed
 @.pgpass@ files that somebody else provisioned, which is why
 "SreBox.PostgresPair" takes paths and never passwords.
+
+The toy therefore plays both parts, and keeps them apart. 'inventSecrets' is
+the somebody else: it leaves files in @\/etc\/salmon-toy-secrets@ on each
+guest and does nothing more. Everything a deployment would also have to do
+with such files -- install them where the pair reads them, restart pgbouncer
+when its auth file changed, give the application a role, a database and a
+@pg_hba.conf@ line -- is "SreBox.PostgresPairPrereqs", exactly as a
+deployment would use it.
 -}
 module QemuPgHaToy (main) where
 
@@ -98,6 +106,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Reporter (reportPrint, silent)
 
 import qualified SreBox.PostgresPair as Pair
+import qualified SreBox.PostgresPairPrereqs as Prereqs
 
 main :: IO ()
 main = do
@@ -407,16 +416,20 @@ prereqs root owner =
 
 demo :: FilePath -> Pair.Pair -> Text -> FilePath -> FilePath -> [(Text, FilePath, FilePath)] -> Op
 demo root pair user unitDir runtimeDir boots =
-    Pair.pairOp reportPrint pair `inject` secrets
+    canary root pair `inject` foldl inject (Prereqs.pairWithPrereqs reportPrint pair toyPrereqs) provisioned
   where
-    secrets =
-        op "toy-secrets" (deps (map secretsOn machines)) $ \actions ->
-            actions
-                { help = "the passwords a deployment would have provisioned"
-                , ref = mkRef "toy-secrets" root
-                }
+    {- Each machine's prerequisites wait for that machine's secrets, which
+    wait for the machine. Said by naming the recipe's node again with one
+    more dependency: it is the same node, so the walk merges the two. -}
+    provisioned =
+        [ Prereqs.memberPrereqs reportPrint pair toyPrereqs Pair.A `inject` secretsOn MachineA
+        , Prereqs.memberPrereqs reportPrint pair toyPrereqs Pair.B `inject` secretsOn MachineB
+        ]
+            <> [ Prereqs.bouncerPrereqs reportPrint pair toyPrereqs b `inject` secretsOn MachineBouncer
+               | b <- pair.pair_bouncers
+               ]
 
-    secretsOn m = provisionSecrets root m `inject` reachable root m
+    secretsOn m = inventSecrets root m `inject` reachable root m
 
     reachable r m = guestUp r m
 
@@ -509,8 +522,41 @@ awaitSsh root m =
 -------------------------------------------------------------------------------
 -- The secrets a deployment would have provisioned, and this toy invents.
 
-provisionSecrets :: FilePath -> Machine -> Op
-provisionSecrets root m =
+-- | Where the toy's "somebody else" leaves secrets on a guest.
+secretsDir :: FilePath
+secretsDir = "/etc/salmon-toy-secrets"
+
+{- | What the pair needs first, in a deployment's own terms: every secret is
+a file in 'secretsDir' on the machine it is for, and the recipe puts it
+where the pair reads it. The packages are baked into the rootfs (these
+guests have no route to a mirror), which the recipe finds out for itself and
+so never reaches for @apt-get@.
+-}
+toyPrereqs :: Prereqs.Prereqs
+toyPrereqs =
+    Prereqs.defaultPrereqs
+        { Prereqs.prereq_repl_passfile = Prereqs.postgresOwned (secretsDir </> "replication.pgpass")
+        , Prereqs.prereq_rewind_passfile = Prereqs.postgresOwned (secretsDir </> "rewind.pgpass")
+        , Prereqs.prereq_console_passfile = Prereqs.postgresOwned (secretsDir </> "console.pgpass")
+        , Prereqs.prereq_userlist = (Prereqs.postgresOwned (secretsDir </> "userlist.txt")){Prereqs.secret_mode = "0644"}
+        , Prereqs.prereq_applications =
+            [ -- the application's own access, which the pair knows nothing
+              -- about: it routes a database, it does not own one.
+              Prereqs.Application
+                { Prereqs.app_role = "app"
+                , Prereqs.app_database = "app"
+                , Prereqs.app_passfile = secretsDir </> "app.pgpass"
+                , Prereqs.app_clients = [machineAddr MachineBouncer]
+                , Prereqs.app_hba_method = "md5"
+                }
+            ]
+        }
+
+{- | The toy as the somebody else: files in 'secretsDir', and nothing done
+with them. This is the only node that knows a password.
+-}
+inventSecrets :: FilePath -> Machine -> Op
+inventSecrets root m =
     op "toy-secret" nodeps $ \actions ->
         actions
             { help = "passwords on " <> machineName m
@@ -523,63 +569,57 @@ provisionSecrets root m =
             }
 
 secretScript :: Machine -> String
-secretScript MachineBouncer =
-    unlines
-        [ "set -e"
-        , "mkdir -p /etc/pgbouncer"
-        , -- postgres's own scheme: md5, then the hex digest of password and
-          -- user run together.
-          "md5() { printf 'md5%s' \"$(printf '%s%s' \"$2\" \"$1\" | md5sum | cut -d' ' -f1)\"; }"
-        , "{"
-        , "  printf '\"router\" \"%s\"\\n' \"$(md5 router " <> Text.unpack consolePassword <> ")\""
-        , "  printf '\"app\" \"%s\"\\n' \"$(md5 app " <> Text.unpack appPassword <> ")\""
-        , "} > /tmp/toy-userlist.txt"
-        , "printf '*:*:*:router:" <> Text.unpack consolePassword <> "\\n' > /etc/pgbouncer/console.pgpass"
-        , "chmod 0600 /etc/pgbouncer/console.pgpass"
-        , "chown postgres:postgres /etc/pgbouncer/console.pgpass"
-        , {- pgbouncer reads its auth file when it starts and not again, so a
-          userlist written under a running process is a password that does
-          not work yet -- and the symptom is an authentication failure with
-          a correct password in a correct file, which is a bad afternoon.
-          Restarting is fine here and only here: this runs before there are
-          clients, and only when the file actually changed, because on every
-          later pass a restart would drop the very clients the bouncer is in
-          the way to protect. -}
-          "if ! cmp -s /tmp/toy-userlist.txt /etc/pgbouncer/userlist.txt; then"
-        , "  install -m 0644 -o postgres -g postgres /tmp/toy-userlist.txt /etc/pgbouncer/userlist.txt"
-        , "  systemctl restart pgbouncer"
-        , "fi"
-        , "rm -f /tmp/toy-userlist.txt"
-        ]
-secretScript _ =
+secretScript m =
     unlines $
         [ "set -e"
-        , "export LANG=C LC_ALL=C"
-        , "version=$(pg_lsclusters --no-header | awk '{print $1}' | head -n1)"
-        , "hba=/etc/postgresql/$version/main/pg_hba.conf"
+        , "umask 077"
+        , "mkdir -p " <> secretsDir
         ]
-            <> [ "printf '*:*:*:" <> role <> ":" <> pwd <> "\\n' > " <> path <> "; chown postgres:postgres " <> path <> "; chmod 0600 " <> path
-               | (path, role, pwd) <-
-                    [ ("/etc/postgresql/toy-replication.pgpass", "replicator", Text.unpack replPassword)
-                    , ("/etc/postgresql/toy-rewind.pgpass", "rewinder", Text.unpack rewindPassword)
+            <> case m of
+                MachineBouncer ->
+                    [ -- postgres's own scheme: md5, then the hex digest of
+                      -- password and user run together.
+                      "md5() { printf 'md5%s' \"$(printf '%s%s' \"$2\" \"$1\" | md5sum | cut -d' ' -f1)\"; }"
+                    , "{"
+                    , "  printf '\"router\" \"%s\"\\n' \"$(md5 router " <> Text.unpack consolePassword <> ")\""
+                    , "  printf '\"app\" \"%s\"\\n' \"$(md5 app " <> Text.unpack appPassword <> ")\""
+                    , "} > " <> secretsDir </> "userlist.txt"
+                    , pgpass "console.pgpass" "router" consolePassword
                     ]
-               ]
-            <> [ -- the application's own access, which the pair knows nothing
-                 -- about: it routes a database, it does not own one.
-                 "line='host all app " <> Text.unpack (machineAddr MachineBouncer) <> "/32 md5'"
-               , "grep -qxF \"$line\" \"$hba\" || echo \"$line\" >> \"$hba\""
-               , "pg_ctlcluster \"$version\" main reload"
-               , "if [ \"$(sudo -u postgres psql -tAXc 'SELECT pg_is_in_recovery()')\" = f ]; then"
-               , "  sudo -u postgres psql -tAX -d postgres >/dev/null <<TOY_SQL"
-               , "DO \\$do\\$ BEGIN CREATE ROLE app LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END \\$do\\$;"
-               , "ALTER ROLE app LOGIN PASSWORD '" <> Text.unpack appPassword <> "';"
-               , "TOY_SQL"
-               , "  sudo -u postgres psql -tAXc \"SELECT 1 FROM pg_database WHERE datname='app'\" | grep -q 1 ||"
-               , "    sudo -u postgres psql -tAXc 'CREATE DATABASE app OWNER app'"
-               , "  sudo -u postgres psql -d app -tAXc 'CREATE TABLE IF NOT EXISTS canary (n int primary key, at timestamptz default now())'"
-               , "  sudo -u postgres psql -d app -tAXc 'GRANT ALL ON canary TO app'"
-               , "fi"
-               ]
+                _ ->
+                    [ pgpass "replication.pgpass" "replicator" replPassword
+                    , pgpass "rewind.pgpass" "rewinder" rewindPassword
+                    , pgpass "app.pgpass" "app" appPassword
+                    ]
+  where
+    pgpass file role pwd =
+        "printf '*:*:*:" <> role <> ":" <> Text.unpack pwd <> "\\n' > " <> secretsDir </> file
+
+{- | The table the client writes to. The toy's own, and not a prerequisite
+of anything: it is made last, on whichever member is the primary by then.
+-}
+canary :: FilePath -> Pair.Pair -> Op
+canary root pair =
+    op "toy-canary" nodeps $ \actions ->
+        actions
+            { help = "the table the client writes to"
+            , ref = mkRef "toy-canary" pair.pair_name
+            , up = forM_ [MachineA, MachineB] $ \m -> do
+                (code, out, err) <- sshToGuest root m canaryScript
+                unless (code == ExitSuccess) $
+                    fail ("the canary table on " <> Text.unpack (machineName m) <> ": " <> out <> err)
+            }
+
+canaryScript :: String
+canaryScript =
+    unlines
+        [ "set -e"
+        , "export LANG=C LC_ALL=C"
+        , "if [ \"$(sudo -u postgres psql -tAXc 'SELECT pg_is_in_recovery()')\" = f ]; then"
+        , "  sudo -u postgres psql -d app -tAXc 'CREATE TABLE IF NOT EXISTS canary (n int primary key, at timestamptz default now())'"
+        , "  sudo -u postgres psql -d app -tAXc 'GRANT ALL ON canary TO app'"
+        , "fi"
+        ]
 
 -------------------------------------------------------------------------------
 -- The client: on the host, through the bouncer, like anybody else's.
