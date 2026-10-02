@@ -23,6 +23,14 @@ Decisions taken for v1:
 * No third-party service is contacted: the external address comes from the
   gateway, or from an echo URL the operator declares with @--echo@.
 
+DNS setup probes (@--domain@, see 'DomainSpec' and "Report.Dns") ask whether
+a domain is delegated to the name servers of the zone meant to serve it,
+whether those servers agree, and whether declared names resolve to what the
+zone says. The expected servers come from @--ns@ or, read with @gcloud@, from
+a Cloud DNS zone (@--zone PROJECT\/ZONE@). These probes send DNS queries to
+the parent zone's servers, the expected servers and a resolver: that is their
+subject, not a third-party service.
+
 Not done (follow-ups in the feature): @nmap@, STUN, hairpin NAT, inbound
 reachability from a second vantage. The @natpmpc@ parser follows the
 tool's documented output and has no captured fixture yet.
@@ -32,6 +40,7 @@ module Report (
 
     -- * Seed and findings
     Spec (..),
+    DomainSpec (..),
     Verdict (..),
     Finding (..),
     findingValue,
@@ -46,6 +55,10 @@ module Report (
 
     -- * Probes
     probesFor,
+    probesWith,
+    dnsSetupProbes,
+    expectedServers,
+    parseZoneRef,
 
     -- * Pure parsers (exposed for tests)
     parseDigAddresses,
@@ -57,6 +70,7 @@ module Report (
 ) where
 
 import Control.Concurrent.Async (forConcurrently)
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (SomeException, evaluate, throwIO, try)
 import Control.Monad (forM_)
 import Data.Aeson (FromJSON, ToJSON, Value, object, (.=))
@@ -83,7 +97,10 @@ import Text.Read (readMaybe)
 
 import Salmon.Actions.UpDown (CheckResult (Failure, Success), expandDag)
 import qualified Salmon.Actions.UpDown as UpDown
+import Report.Dns
 import Salmon.Builtin.Extension
+import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
+import Salmon.Builtin.Nodes.Gcp.Core (Project (..))
 import Salmon.Builtin.Nodes.PortMapping.Upnpc
 import Salmon.Op.Dag (Dag (..), dagOrder)
 import Data.Functor.Identity (runIdentity)
@@ -105,11 +122,32 @@ data Spec = Spec
     -- ^ gateway address, handed to @natpmpc -g@
     , specUpnp :: Bool
     , specNatpmp :: Bool
+    , specDomain :: Maybe DomainSpec
+    -- ^ a domain whose DNS setup is reported on
     }
     deriving (Eq, Show, Generic)
 
 instance ToJSON Spec
 instance FromJSON Spec
+
+{- | A domain and the hosted zone meant to serve it. The expected name
+servers are 'domNameServers' when given, and otherwise read from the Cloud
+DNS zone 'domZone' names.
+-}
+data DomainSpec = DomainSpec
+    { domName :: Text
+    , domNameServers :: [Text]
+    , domZone :: Maybe Text
+    -- ^ @PROJECT\/ZONE@, a Cloud DNS managed zone
+    , domRecords :: [Text]
+    -- ^ @[TYPE:]NAME[=VALUE,...]@, see 'parseRecordQuery'
+    , domResolver :: Maybe Text
+    -- ^ the resolver asked for what the world sees; the system's when absent
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON DomainSpec
+instance FromJSON DomainSpec
 
 data Verdict = Yes | No | Unknown
     deriving (Eq, Show, Generic)
@@ -232,7 +270,13 @@ unknownFor q why method = Finding q Unknown [why] method Nothing []
 
 -- | The probes a 'Spec' asks for.
 probesFor :: Collector -> Spec -> [Op]
-probesFor c spec =
+probesFor c = probesWith c expectedServers
+
+{- | 'probesFor' with the read of a domain's expected name servers supplied,
+so that a caller can share one read between the probes (or fake it).
+-}
+probesWith :: Collector -> (DomainSpec -> IO (Either Text [Text])) -> Spec -> [Op]
+probesWith c expected spec =
     concat
         [ [probeOp c "Does the router offer UPnP-IGD port mapping?" upnpProbe | specUpnp spec]
         , [probeOp c "Does the router answer NAT-PMP / PCP?" (natpmpProbe (specGateway spec)) | specNatpmp spec]
@@ -240,6 +284,7 @@ probesFor c spec =
         , [probeOp c ("Does " <> n <> " resolve?") (dnsProbe n) | n <- specNames spec]
         , [probeOp c ("Can this host open TCP to " <> hp <> "?") (tcpProbe hp) | hp <- specTcp spec]
         , [probeOp c "Does this host have a global IPv6 address?" ipv6Probe]
+        , maybe [] (\d -> dnsSetupProbes c (expected d) d) (specDomain spec)
         ]
 
 -- | Runs a command, treating a missing binary as a reason rather than a crash.
@@ -387,6 +432,136 @@ ipv6Probe = do
   where
     mk v ev = Finding "Does this host have a global IPv6 address?" v ev "ip -6 addr show scope global" Nothing []
 
+-------------------------------------------------------------------------------
+-- DNS setup
+
+-- | Splits @PROJECT\/ZONE@.
+parseZoneRef :: Text -> Maybe (Text, Text)
+parseZoneRef t = case Text.splitOn "/" (Text.strip t) of
+    [p, z] | not (Text.null p), not (Text.null z) -> Just (p, z)
+    _ -> Nothing
+
+{- | The name servers the domain should be delegated to: the declared ones,
+else those Cloud DNS assigned to the declared zone (a read-only
+@gcloud dns managed-zones describe@), else a reason there are none.
+-}
+expectedServers :: DomainSpec -> IO (Either Text [Text])
+expectedServers d
+    | not (null (domNameServers d)) = pure (Right (normalizeName <$> domNameServers d))
+    | Just z <- domZone d = case parseZoneRef z of
+        Nothing -> pure (Left ("--zone " <> z <> " is not of the form PROJECT/ZONE"))
+        Just (p, zn) -> do
+            r <- try (CloudDns.readNameServers (CloudDns.ManagedZone zn (Project p) (domName d) ""))
+            pure $ case r of
+                Right (Just ns) -> Right (normalizeName <$> ns)
+                Right Nothing -> Left ("gcloud could not describe the Cloud DNS zone " <> z <> " (absent, or not readable by this account)")
+                Left (e :: SomeException) -> Left ("gcloud could not run: " <> Text.pack (show e))
+    | otherwise = pure (Left "no expected name servers: declare them with --ns, or a Cloud DNS zone with --zone")
+
+-- | Runs an action at most once, handing every caller the first result.
+once :: IO a -> IO (IO a)
+once act = do
+    cell <- newMVar Nothing
+    pure $ modifyMVar cell $ \m -> case m of
+        Just x -> pure (m, x)
+        Nothing -> act >>= \x -> pure (Just x, x)
+
+-- | @dig@ printing its header and the answer section, plus whatever the flags add.
+dig :: [String] -> Text -> Text -> Maybe Text -> IO (Either Text DigAnswer)
+dig flags ty name server = do
+    r <- run "dig" (["+time=2", "+tries=1", "+noall", "+comments", "+answer"] <> flags <> [Text.unpack ty, Text.unpack name] <> maybe [] (\s -> ["@" <> Text.unpack s]) server)
+    pure (parseDig . snd <$> r)
+
+-- | The two DNS setup probes for one domain, plus one per declared record.
+dnsSetupProbes :: Collector -> IO (Either Text [Text]) -> DomainSpec -> [Op]
+dnsSetupProbes c expected d =
+    [ probeOp c delegationQ (delegationProbe delegationQ expected domain)
+    , probeOp c zoneQ (zoneProbe zoneQ expected domain)
+    ]
+        <> [probeOp c (recordQ r) (recordProbe (recordQ r) expected (domResolver d) r) | r <- domRecords d]
+  where
+    domain = normalizeName (domName d)
+    delegationQ = "Is " <> domain <> " delegated to the expected name servers?"
+    zoneQ = "Do the expected name servers of " <> domain <> " agree?"
+    recordQ r = "Does " <> r <> " resolve to what the zone says?"
+
+-- | The first of these servers that answers at all, with its answer.
+firstAnswer :: [Text] -> (Text -> IO (Either Text DigAnswer)) -> IO (Maybe (Text, DigAnswer))
+firstAnswer [] _ = pure Nothing
+firstAnswer (s : rest) ask = do
+    r <- ask s
+    case r of
+        Right a | isJust (digStatus a) -> pure (Just (s, a))
+        _ -> firstAnswer rest ask
+
+delegationProbe :: Text -> IO (Either Text [Text]) -> Text -> IO Finding
+delegationProbe q expected domain = do
+    parent <- findParent (parentCandidates domain)
+    case parent of
+        Left why -> pure (mk Unknown [why] Nothing)
+        Right (zone, servers) -> do
+            answer <- firstAnswer (take 3 servers) (dig ["+authority", "+norecurse"] "NS" domain . Just)
+            case answer of
+                Nothing -> pure (mk Unknown ["none of the name servers of " <> zone <> " answered"] Nothing)
+                Just (server, a) -> do
+                    j <- (\e -> judgeDelegation domain e a) <$> expected
+                    pure (mk (verdictOf j) (jEvidence j <> ["asked " <> server <> ", a name server of " <> zone]) (jMeaning j))
+  where
+    mk v ev m = Finding q v ev "dig +norecurse NS, asked of the parent zone's servers" m []
+    findParent [] = pure (Left ("no parent zone with name servers was found for " <> domain))
+    findParent (z : zs) = do
+        r <- run "dig" ["+short", "+time=2", "+tries=1", "NS", Text.unpack z]
+        case r of
+            Left why -> pure (Left why)
+            Right (_, out) -> case parseDigNames out of
+                [] -> findParent zs
+                ns -> pure (Right (z, ns))
+
+zoneProbe :: Text -> IO (Either Text [Text]) -> Text -> IO Finding
+zoneProbe q expected domain = do
+    e <- expected
+    case e of
+        Left why -> pure (mk Unknown [why] Nothing)
+        Right servers -> do
+            views <- forConcurrently servers $ \s -> do
+                ns <- dig ["+norecurse"] "NS" domain (Just s)
+                soa <- dig ["+norecurse"] "SOA" domain (Just s)
+                pure (s, serverView domain ns soa)
+            let j = judgeZone servers views
+            pure (mk (verdictOf j) (jEvidence j) (jMeaning j))
+  where
+    mk v ev m = Finding q v ev "dig +norecurse NS and SOA, asked of each expected server" m []
+
+recordProbe :: Text -> IO (Either Text [Text]) -> Maybe Text -> Text -> IO Finding
+recordProbe q expected resolver raw = case parseRecordQuery raw of
+    Left why -> pure (mk Unknown [why] Nothing)
+    Right rq -> do
+        e <- expected
+        fromZone <- case e of
+            Left _ -> pure Nothing
+            Right servers -> firstAnswer servers $ \s -> do
+                r <- dig ["+norecurse"] (rqType rq) (rqName rq) (Just s)
+                -- a server that does not hold the zone is not the zone speaking
+                pure (r >>= \a -> if digAuthoritative a then Right a else Left "not authoritative")
+        fromResolver <- dig [] (rqType rq) (rqName rq) resolver
+        let seen = either (const Nothing) (\a -> if isJust (digStatus a) then Just a else Nothing) fromResolver
+            (zs, rs) = case (fromZone, seen) of
+                (Just (_, z), Just r) -> let (a, b) = answerValues rq z r in (Just a, Just b)
+                (Just (_, z), Nothing) -> (Just (fst (answerValues rq z z)), Nothing)
+                (Nothing, Just r) -> (Nothing, Just (snd (answerValues rq r r)))
+                (Nothing, Nothing) -> (Nothing, Nothing)
+            j = judgeRecord rq zs rs
+            who = maybe [] (\(s, _) -> ["asked " <> s <> " for the zone"]) fromZone <> either (\why -> [why]) (const []) e
+        pure (mk (verdictOf j) (jEvidence j <> who) (jMeaning j))
+  where
+    mk v ev m = Finding q v ev ("dig, asked of the zone's servers and of " <> maybe "the system resolver" ("the resolver " <>) resolver) m []
+
+verdictOf :: Judgement -> Verdict
+verdictOf j = case jOk j of
+    Just True -> Yes
+    Just False -> No
+    Nothing -> Unknown
+
 {- | Joins what separate probes learnt: for each resolved name, whether it
 points at the external address. Appended to the evidence of the DNS findings.
 -}
@@ -417,7 +592,10 @@ main = do
             input <- LByteString.getContents
             spec <- either (\e -> ioError (userError ("bad directive: " <> e))) pure (Aeson.eitherDecode input)
             c <- newCollector
-            fs <- crossCheck <$> runReport (secs * 1000000) c (reportOp (probesFor c spec))
+            -- one read of the expected name servers, shared by the DNS setup probes
+            expected <- traverse (once . expectedServers) (specDomain spec)
+            let probes = probesWith c (\d -> maybe (expectedServers d) id expected) spec
+            fs <- crossCheck <$> runReport (secs * 1000000) c (reportOp probes)
             forM_ fs $ \f ->
                 if asJson
                     then LChar.putStrLn (Aeson.encode (findingValue f))
@@ -437,5 +615,13 @@ main = do
             <*> O.optional (O.strOption (O.long "gateway" <> O.metavar "ADDR" <> O.help "gateway address for NAT-PMP"))
             <*> (not <$> O.switch (O.long "no-upnp" <> O.help "skip UPnP discovery"))
             <*> (not <$> O.switch (O.long "no-natpmp" <> O.help "skip NAT-PMP discovery"))
+            <*> O.optional domainParser
+    domainParser =
+        DomainSpec
+            <$> O.strOption (O.long "domain" <> O.metavar "DOMAIN" <> O.help "report on this domain's DNS setup: its delegation, and the servers it should be delegated to")
+            <*> many' (O.strOption (O.long "ns" <> O.metavar "SERVER" <> O.help "a name server the domain should be delegated to (repeatable)"))
+            <*> O.optional (O.strOption (O.long "zone" <> O.metavar "PROJECT/ZONE" <> O.help "a Cloud DNS zone to read the expected name servers from with gcloud, when no --ns is given"))
+            <*> many' (O.strOption (O.long "record" <> O.metavar "[TYPE:]NAME[=VALUE,...]" <> O.help "a name of the domain to compare between the zone's servers and a resolver; TYPE defaults to A (repeatable)"))
+            <*> O.optional (O.strOption (O.long "resolver" <> O.metavar "ADDR" <> O.help "the resolver to ask what the world sees; the system's when absent"))
     many' = O.many
 

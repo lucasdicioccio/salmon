@@ -33,6 +33,7 @@ library
                     PgBackup
                     DocsSync
                     Report
+                    Report.Dns
     other-modules:
                     Migrator.Ops
                     Migrator.Seed

@@ -39,6 +39,13 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
   `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); nmap, STUN, hairpin and a second-vantage inbound test are not done; the `natpmpc` parser has no captured fixture.
+  DNS setup probes (`--domain D [--ns S]... [--zone PROJECT/ZONE] [--record [TYPE:]NAME[=V,..]]... [--resolver ADDR]`,
+  pure half in `Report/Dns.hs`): the NS set the *parent's* servers hand out against the expected set (unregistered / no
+  delegation / not delegated / partly / delegated); whether each expected server holds the zone (`aa`) and they agree on
+  NS and SOA, which is how a deleted-and-recreated zone shows; and each declared name asked of the zone's servers and of
+  a resolver (the system's unless `--resolver`), telling "wrong record" from "not propagated". The expected set is
+  `--ns`, else `CloudDns.readNameServers` on `--zone` (a `gcloud ... describe`, read once per report), else every
+  verdict is `unknown` with the handed-out set as evidence. All of it is `dig`; that gcloud read has not been run.
   `salmon-docs-sync` (`DocsSync.hs`) is salmon on its own repo: `check` fingerprints the tracked inputs of
   `website/scripts/build-site.sh` against `docs/.docs-sync-stamp`; `up` rebuilds `docs/`, stamps, commits and pushes it.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
