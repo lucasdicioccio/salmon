@@ -16,6 +16,11 @@
 # (GCP picks the IP, so nothing can name the machine before it exists), then
 # the IP is read back and fed to `config --vm-ip` for the pass that provisions.
 #
+# With `--vm-internal-ip A --peer-internal-ip B` (two free addresses in the
+# region's `default` subnet), tier 2 also boots a peer with no external
+# address, pins both instances to those addresses, and has the VM fetch a page
+# from the peer on B; the script reads back what the VM got.
+#
 # Tier 3 puts a regional external load balancer in front of that VM and checks
 # it by fetching a page the VM only serves because the tier-2 hand-off
 # installed a systemd unit there. A balancer that exists proves nothing (one
@@ -183,7 +188,7 @@ fi
 # binary and ssh:call re-runs the remote directive on every pass. That is
 # salmon's behaviour today, not a defect of the toy -- and the remote pass is
 # itself idempotent, which is what the marker check below reads.
-NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
+NO_CHECK='^(gcloud|gcp-toy|gcp-toy-vm-infra|gcp-toy-on-vm|gcp-toy-peer-reached|gcp-cloudrun-deploy|gcp-vm-provision|gcp-metadata-ssh-ca|podman-build|podman-login|podman-push|directory|deb|pre-existing-file|remote|self-call|copy-oneself|ssh:call|rsync:sendfile): '
 run_pass up-2 up || VERDICT+=("idempotency pass: FAILED")
 UNEXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -Ev "$NO_CHECK" || true)
 EXPECTED=$(grep '^Eval ' "$OUT/up-2.log" | node_of | grep -E "$NO_CHECK" | cut -d: -f1 | sort | uniq -c | tr '\n' ' ' || true)
@@ -210,6 +215,27 @@ if [[ $TIER -ge 2 ]]; then
         VERDICT+=("vm: the uploaded binary ran on the VM over the salmon CA")
     else
         VERDICT+=("vm: MARKER NOT FOUND on the VM ($marker)")
+    fi
+fi
+
+# The peer has no external address, so the only witness of it being reachable
+# on its declared internal one is what the VM fetched from it.
+if [[ $TIER -ge 2 ]] && grep -q '"peerInternalIp"' "$DIRECTIVE"; then
+    PEER_IP=$(field peerInternalIp)
+    echo "== verify the VM reached its peer on $PEER_IP"
+    for name in "$PREFIX-vm" "$PREFIX-peer"; do
+        zone=$(field vmZone)
+        nic=$(gcloud compute instances describe "$name" --zone "$zone" --project "$PROJECT" \
+            --format='value(networkInterfaces[0].networkIP,networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)
+        echo "   $name: internal, external = ${nic:-could not describe}"
+    done
+    reached=$(ssh -i "$WORKDIR/ssh/toy-client" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+        "$VM_USER@$VM_IP" cat /var/lib/salmon-toy/peer-reached 2>&1 | tail -1)
+    echo "   /var/lib/salmon-toy/peer-reached: $reached"
+    if [[ $reached == *"peer of $PROJECT"* ]]; then
+        VERDICT+=("peer: the VM fetched the peer's page on its declared internal address")
+    else
+        VERDICT+=("peer: NOT REACHED on $PEER_IP ($reached)")
     fi
 fi
 

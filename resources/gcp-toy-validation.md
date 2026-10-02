@@ -106,6 +106,31 @@ What proves it worked is the file the uploaded binary writes on the VM,
 binary runs there with the same directive, tagged `OnVm`, which is why the
 payload is declared in the same `Track'` as everything else.
 
+**Tier 2 can also declare a peer** (a second `e2-micro`), with
+`--vm-internal-ip A --peer-internal-ip B`: two free addresses in the region's
+`default` subnet (`gcloud compute networks subnets describe default --region
+REGION --format='value(ipCidrRange)'` says which range; `10.132.0.0/20` in
+`europe-west1`).
+
+| Node | Resource |
+|---|---|
+| `Gcp.Compute.address` ×2 | reserved *internal* addresses `<prefix>-vm-internal` and `<prefix>-peer-internal`, at A and B |
+| `Gcp.Compute.gceInstance` | the VM again, now also pinned to A (`--private-network-ip`) |
+| `Gcp.Compute.gceInstance` | `<prefix>-peer`: pinned to B, and with no external address (`--no-address`) |
+| `Gcp.Compute.firewallRule` | `tcp:8081` from `A/32` to instances tagged `<prefix>-peer` |
+| `gcp-toy-peer-reached` (on the VM) | fetches `http://B:8081/` and keeps the answer in `/var/lib/salmon-toy/peer-reached` |
+
+The point is the contrast with the paragraph above: an internal address is
+the caller's choice, so it is known when the graph is declared, and the
+firewall rule naming the VM and the URL naming the peer are written before
+either machine exists. That is what a recipe naming its peers by address
+(`SreBox.PostgresPair`: a `/32` in `pg_hba.conf`, a `primary_conninfo`) needs
+to run on GCE without replicating over public addresses. The peer has no way
+out of the VPC — the toy declares no Cloud NAT — so its startup script uses
+only what the image ships. An instance's addresses are fixed when it is
+created: adding the two flags to a run whose VM already exists changes
+nothing about that VM.
+
 **Tier 3** (a forwarding rule's hourly rate on top of tier 2) puts a
 *regional external* Application Load Balancer in front of that VM.
 
@@ -308,6 +333,17 @@ leftover.
   cause is nearly always a firewall rule rather than the balancer.
 
 ## Gaps this does not cover
+
+- **The peer has not been run against a real project yet.** The `gcloud`
+  argv for a pinned internal address, a reserved internal address and an
+  instance with no external address is covered by Layer 0 tests; that GCP
+  accepts `--private-network-ip` on an address already reserved by a
+  `compute addresses create --subnet … --addresses …` in the same pass, and
+  that the VM then reaches the peer, is what the first run with
+  `--vm-internal-ip`/`--peer-internal-ip` will show.
+- **An instance's addresses are not checked for drift.** `gceInstance`'s
+  check reads the instance's status only, so an instance that exists on
+  another internal address than the declared one is reported satisfied.
 
 - **The VM's own teardown is the project delete.** `down` removes the
   instance, the address and the firewall rule as declared nodes, but nothing

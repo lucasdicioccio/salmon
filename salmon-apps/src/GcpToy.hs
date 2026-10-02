@@ -25,6 +25,14 @@ Tiers are cumulative and ordered by cost:
   /tier-2 hand-off/ installed, so a @200@ from the balancer's address is
   evidence for both halves at once.
 
+Tier 2 optionally declares a __peer__ (@--vm-internal-ip@ with
+@--peer-internal-ip@): a second instance with no external address at all,
+both instances pinned to the internal addresses given, and the VM-side
+payload fetching a page from the peer on that address. Unlike the external
+address below, these are known when the graph is declared, so the firewall
+rule that admits the VM by its @\/32@ and the URL the VM fetches are written
+in the same pass that creates the machines.
+
 Tier 2 takes __two passes__, which is not a wart but the shape of the
 problem: GCP picks the address, so nothing can name the machine until after
 the address node's @up@. Pass one declares the infrastructure; the driver
@@ -48,12 +56,14 @@ module GcpToy (
     Role (..),
     VmConfig (..),
     LbConfig (..),
+    PeerConfig (..),
     ImageSource (..),
     defaultBaseImage,
     configure,
     program,
 ) where
 
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import qualified Data.Map as Map
 import Data.Aeson (FromJSON, ToJSON)
@@ -66,6 +76,8 @@ import Options.Applicative (auto, execParser, flag', fullDesc, header, helper, i
 import qualified Options.Applicative as Opt
 import Options.Generic (ParseRecord (..))
 import System.Directory (doesFileExist, makeAbsolute)
+import System.Exit (ExitCode (..))
+import System.Process (readProcessWithExitCode)
 
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension
@@ -130,6 +142,8 @@ data Seed = Seed
     , seedLbProxyRange :: Text
     , seedLbPort :: Int
     , seedAlertEmail :: Maybe Text
+    , seedVmInternalIp :: Maybe Text
+    , seedPeerInternalIp :: Maybe Text
     }
     deriving (Eq, Show)
 
@@ -162,6 +176,11 @@ instance ParseRecord Seed where
                 <*> strOption (long "lb-proxy-range" <> value "192.168.100.0/24" <> Opt.showDefault <> Opt.help "tier 3 proxy-only subnet range (/26 or larger, must not overlap 10.128.0.0/9)")
                 <*> option auto (long "lb-port" <> value (8080 :: Int) <> Opt.showDefault <> Opt.help "tier 3 port the VM serves on, behind the balancer")
                 <*> optional (strOption (long "alert-email" <> metavar "ADDRESS" <> Opt.help "tier 1: also declare the standard Cloud Monitoring alerts on the service, to this email (SreBox.Gcp.CloudRunAlerts)"))
+                -- No default: the range of the `default` network's subnet
+                -- differs per region (10.132.0.0/20 in europe-west1), so the
+                -- caller has to look it up.
+                <*> optional (strOption (long "vm-internal-ip" <> metavar "IP" <> Opt.help "tier 2: pin the VM to this internal address, a free one in the region's `default` subnet; needs --peer-internal-ip"))
+                <*> optional (strOption (long "peer-internal-ip" <> metavar "IP" <> Opt.help "tier 2: also boot a peer with no external address, pinned to this internal one, which the VM then fetches a page from; needs --vm-internal-ip"))
         -- xor: once one branch has matched, the other flag is rejected by the parser
         imageSourceP =
             (FromContainerfile <$> strOption (long "containerfile" <> metavar "PATH" <> Opt.help "tier 1: build this Containerfile, with its directory as build context"))
@@ -242,6 +261,21 @@ data LbConfig = LbConfig
 instance FromJSON LbConfig
 instance ToJSON LbConfig
 
+{- | Tier 2's optional peer: two instances that name each other by internal
+addresses declared here, before either exists.
+-}
+data PeerConfig = PeerConfig
+    { peerVmInternalIp :: Text
+    -- ^ the tier-2 VM's, which the peer's firewall rule admits as a @\/32@
+    , peerInternalIp :: Text
+    -- ^ the peer's, which is its only address
+    , peerPort :: Int
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON PeerConfig
+instance ToJSON PeerConfig
+
 data Spec = Spec
     { role :: Role
     , project :: Text
@@ -258,6 +292,7 @@ data Spec = Spec
     , lbConfig :: Maybe LbConfig
     , alertEmail :: Maybe Text
     -- ^ tier 1: the standard alerts on the service go here, if anywhere
+    , peerConfig :: Maybe PeerConfig
     }
     deriving (Eq, Show, Generic)
 
@@ -305,6 +340,17 @@ configure = Configure $ \seed -> do
                             , vmSelfPath = self
                             , vmMarkerPath = "/var/lib/salmon-toy/provisioned"
                             }
+    peer <- case (seed.seedVmInternalIp, seed.seedPeerInternalIp) of
+        (Nothing, Nothing) -> pure Nothing
+        (Just vmInternal, Just peerInternal) -> do
+            when (seed.seedTier < 2) $
+                fail "--vm-internal-ip and --peer-internal-ip need --tier 2 or above"
+            when (vmInternal == peerInternal) $
+                fail "--vm-internal-ip and --peer-internal-ip must differ"
+            when (not (validIpv4 vmInternal && validIpv4 peerInternal)) $
+                fail "--vm-internal-ip and --peer-internal-ip must be IPv4 literals"
+            pure (Just (PeerConfig vmInternal peerInternal 8081))
+        _ -> fail "--vm-internal-ip and --peer-internal-ip go together: give both or neither"
     let lb =
             if seed.seedTier < 3
                 then Nothing
@@ -328,8 +374,14 @@ configure = Configure $ \seed -> do
             , vmConfig = vm
             , lbConfig = lb
             , alertEmail = if seed.seedTier >= 1 then seed.seedAlertEmail else Nothing
+            , peerConfig = peer
             }
   where
+    validIpv4 t = case Text.splitOn "." t of
+        parts@[_, _, _, _] -> all validOctet parts
+        _ -> False
+    validOctet o =
+        not (Text.null o) && Text.length o <= 3 && Text.all isDigit o && (read (Text.unpack o) :: Int) <= 255
     validProjectId t =
         Text.length t >= 6 && Text.length t <= 30 && validPrefix t && not ("-" `Text.isSuffixOf` t)
     validPrefix t =
@@ -350,7 +402,7 @@ VM: one file, whose existence is the whole proof that the hand-off worked.
 -}
 onVm :: Spec -> Op
 onVm spec =
-    op "gcp-toy-on-vm" (deps (marker : maybe [] (\lb -> [webServer spec lb]) spec.lbConfig)) $ \actions ->
+    op "gcp-toy-on-vm" (deps (marker : maybe [] (\lb -> [webServer spec lb]) spec.lbConfig <> maybe [] (\peer -> [peerReached spec peer `inject` marker]) spec.peerConfig)) $ \actions ->
         actions
             { help = "the tier-2 payload, declared by this binary running on the VM"
             , ref = mkRef "gcp-toy-on-vm" spec.project
@@ -358,6 +410,41 @@ onVm spec =
   where
     path = maybe "/var/lib/salmon-toy/provisioned" vmMarkerPath spec.vmConfig
     marker = FS.filecontents (FS.FileContents path ("provisioned by salmon-gcp-toy for " <> spec.project <> "\n"))
+
+-- | Where the VM leaves what the peer answered, for the driver to read back.
+peerMarkerPath :: FilePath
+peerMarkerPath = "/var/lib/salmon-toy/peer-reached"
+
+{- | The VM fetching the peer's page on the peer's /declared/ internal
+address, and keeping what came back.
+
+Declared on the VM side because that is the only place the claim can be
+tested from: the peer has no external address, so nothing outside the VPC can
+ask it anything. The fetch waits (up to about five minutes) since the peer
+was created moments before the VM and serves only once its own startup
+script has run. No @check@: the question is whether the peer answers /now/,
+and asking costs what fetching does.
+-}
+peerReached :: Spec -> PeerConfig -> Op
+peerReached spec peer =
+    op "gcp-toy-peer-reached" nodeps $ \actions ->
+        actions
+            { help = Text.unwords ["fetches", url, "from the peer's internal address"]
+            , ref = mkRef "gcp-toy-peer-reached" (spec.project, url)
+            , up = do
+                (code, out, err) <-
+                    readProcessWithExitCode
+                        "curl"
+                        ["-fsS", "--max-time", "10", "--retry", "30", "--retry-delay", "10", "--retry-all-errors", Text.unpack url]
+                        ""
+                case code of
+                    ExitSuccess
+                        | spec.project `Text.isInfixOf` Text.pack out -> writeFile peerMarkerPath out
+                        | otherwise -> throwIO (userError ("the peer answered, but not with its page: " <> take 200 out))
+                    ExitFailure n -> throwIO (userError ("could not reach the peer at " <> Text.unpack url <> " (curl exit " <> show n <> "): " <> take 400 err))
+            }
+  where
+    url = "http://" <> peer.peerInternalIp <> ":" <> Text.pack (show peer.peerPort) <> "/"
 
 {- | Tier 3's backend: a page, and a systemd unit serving it.
 
@@ -650,6 +737,10 @@ vmPrerequisites spec vm =
         `inject` computeApi
     , FS.filecontents (FS.FileContents (startupScriptPath spec) (startupScript vm))
     ]
+        -- The peer and the VM's own reservation come before the VM: the VM
+        -- is pinned to an address that should be reserved first, and what it
+        -- is provisioned to do is fetch a page from the peer.
+        <> maybe [] (\peer -> [internalAddress (vmInternalAddressSpec spec peer) `inject` computeApi, peerInstance spec vm peer]) spec.peerConfig
   where
     -- every tier-2 resource is a Compute Engine one, and a fresh project has
     -- that API off: addresses, firewall rules and instances all answer
@@ -666,7 +757,78 @@ sshCaInMetadata spec =
         `inject` Keys.sshKey reportPrint OS.sshClient (caKey spec)
 
 addressSpec :: Spec -> Compute.Address
-addressSpec spec = Compute.Address (spec.prefix <> "-ip") (projectOf spec) (regionOf spec)
+addressSpec spec = Compute.Address (spec.prefix <> "-ip") (projectOf spec) (regionOf spec) Compute.ExternalAddress
+
+-- | The reservation behind the VM's pinned internal address.
+vmInternalAddressSpec :: Spec -> PeerConfig -> Compute.Address
+vmInternalAddressSpec spec peer =
+    Compute.Address (spec.prefix <> "-vm-internal") (projectOf spec) (regionOf spec) (Compute.InternalAddress "default" (Just peer.peerVmInternalIp))
+
+-- | The reservation behind the peer's.
+peerInternalAddressSpec :: Spec -> PeerConfig -> Compute.Address
+peerInternalAddressSpec spec peer =
+    Compute.Address (spec.prefix <> "-peer-internal") (projectOf spec) (regionOf spec) (Compute.InternalAddress "default" (Just peer.peerInternalIp))
+
+internalAddress :: Compute.Address -> Op
+internalAddress = Compute.address reportPrint Core.gcloud
+
+{- | The peer: an instance with no external address, pinned to a declared
+internal one, serving one page to the tier-2 VM and to nothing else.
+
+It is everything the pair of flags on 'Compute.Instance' is for. Its firewall
+rule admits the VM by the @\/32@ the VM is pinned to, written before either
+machine exists -- the shape of a @pg_hba.conf@ line naming a replication
+peer. And with no external address it has no way out (the toy declares no
+Cloud NAT), so its startup script may only use what the image ships:
+@python3@, which every Ubuntu cloud image has.
+-}
+peerInstance :: Spec -> VmConfig -> PeerConfig -> Op
+peerInstance spec vm peer =
+    foldl
+        inject
+        (Compute.gceInstance reportPrint Core.gcloud inst)
+        [ computeApi
+        , internalAddress (peerInternalAddressSpec spec peer) `inject` computeApi
+        , Compute.firewallRule
+            reportPrint
+            Core.gcloud
+            Compute.FirewallRule
+                { Compute.firewallName = spec.prefix <> "-peer"
+                , Compute.firewallProject = projectOf spec
+                , Compute.firewallNetwork = "default"
+                , Compute.firewallAllow = "tcp:" <> Text.pack (show peer.peerPort)
+                , Compute.firewallSourceRanges = [peer.peerVmInternalIp <> "/32"]
+                , Compute.firewallTargetTags = [peerTag spec]
+                }
+            `inject` computeApi
+        , FS.filecontents (FS.FileContents (peerStartupScriptPath spec) (peerStartupScript spec peer))
+        ]
+  where
+    computeApi = api spec "compute.googleapis.com"
+    inst =
+        (gceInstance spec vm)
+            { Compute.instanceName = peerName spec
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", peerStartupScriptPath spec)]
+            , Compute.instanceExternalAddress = Compute.NoExternalAddress
+            , Compute.instanceInternalAddress = Compute.PinnedInternal peer.peerInternalIp
+            , Compute.instanceTags = [peerTag spec]
+            }
+
+{- | Serves one page naming the project, under a transient systemd unit so it
+outlives the startup script. Idempotent, because a startup script runs on
+every boot (and a transient unit does not survive one).
+-}
+peerStartupScript :: Spec -> PeerConfig -> Text
+peerStartupScript spec peer =
+    Text.unlines
+        [ "#!/bin/bash"
+        , "set -eux"
+        , "mkdir -p /var/www/salmon-toy-peer"
+        , "echo 'served by the salmon-gcp-toy peer of " <> spec.project <> "' > /var/www/salmon-toy-peer/index.html"
+        , "systemctl reset-failed salmon-toy-peer 2>/dev/null || true"
+        , "systemctl is-active --quiet salmon-toy-peer \\"
+        , "  || systemd-run --unit salmon-toy-peer /usr/bin/python3 -m http.server " <> Text.pack (show peer.peerPort) <> " --bind 0.0.0.0 --directory /var/www/salmon-toy-peer"
+        ]
 
 gceInstance :: Spec -> VmConfig -> Compute.Instance
 gceInstance spec vm =
@@ -687,7 +849,8 @@ gceInstance spec vm =
         , Compute.instanceServiceAccount = Nothing
         , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
         , Compute.instanceMetadataFiles = Map.fromList [("startup-script", startupScriptPath spec)]
-        , Compute.instanceAddress = Just (addressSpec spec).addressName
+        , Compute.instanceExternalAddress = Compute.ReservedExternal (addressSpec spec).addressName
+        , Compute.instanceInternalAddress = maybe Compute.EphemeralInternal (Compute.PinnedInternal . peerVmInternalIp) spec.peerConfig
         , -- tags are fixed at create time, so the tier-3 one has to be on the
           -- instance from the first pass -- there is no adding it later to a
           -- machine the balancer has already been pointed at.
@@ -807,6 +970,16 @@ instanceGroupSpec spec vm =
 
 vmName :: Spec -> Text
 vmName spec = spec.prefix <> "-vm"
+
+peerName :: Spec -> Text
+peerName spec = spec.prefix <> "-peer"
+
+-- | The tag the peer's firewall rule targets.
+peerTag :: Spec -> Text
+peerTag spec = spec.prefix <> "-peer"
+
+peerStartupScriptPath :: Spec -> FilePath
+peerStartupScriptPath spec = spec.workDir <> "/peer-startup-script.sh"
 
 sshTag :: Spec -> Text
 sshTag spec = spec.prefix <> "-ssh"

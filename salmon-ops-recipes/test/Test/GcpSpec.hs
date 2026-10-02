@@ -146,7 +146,8 @@ instanceTests =
             , Compute.instanceServiceAccount = Nothing
             , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
             , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
-            , Compute.instanceAddress = Just "toy-ip"
+            , Compute.instanceExternalAddress = Compute.ReservedExternal "toy-ip"
+            , Compute.instanceInternalAddress = Compute.EphemeralInternal
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             }
@@ -666,10 +667,45 @@ vmTests =
             (["--metadata-from-file", "startup-script=/tmp/w/startup-script.sh"] `isSubsequenceOf` args)
     , testCase "the instance claims the reserved address by name" $
         assertBool "" (["--address", "toy-ip"] `isSubsequenceOf` args)
+    , testCase "an instance left to GCP names neither address" $ do
+        let plain = createArgs inst{Compute.instanceExternalAddress = Compute.EphemeralExternal}
+        assertBool (show plain) (not (any (`elem` ["--address", "--no-address", "--private-network-ip"]) plain))
+    , testCase "a pinned internal address is passed as --private-network-ip" $
+        assertBool
+            ""
+            (["--private-network-ip", "10.132.0.10"] `isSubsequenceOf` createArgs inst{Compute.instanceInternalAddress = Compute.PinnedInternal "10.132.0.10"})
+    , testCase "an instance with no external address says so, and can still be pinned" $ do
+        let private =
+                createArgs
+                    inst
+                        { Compute.instanceExternalAddress = Compute.NoExternalAddress
+                        , Compute.instanceInternalAddress = Compute.PinnedInternal "10.132.0.11"
+                        }
+        assertBool (show private) ("--no-address" `elem` private && "--address" `notElem` private)
+        assertBool (show private) (["--private-network-ip", "10.132.0.11"] `isSubsequenceOf` private)
+    , testCase "an internal address is reserved in its subnet, at the declared literal" $ do
+        assertEqual
+            "pinned"
+            ["compute", "addresses", "create", "toy-int", "--region", "europe-west1", "--project", "p", "--subnet", "default", "--addresses", "10.132.0.10"]
+            (processArgs (prepare Compute.computeCommand (Compute.AddressesCreate (internal (Just "10.132.0.10")))))
+        assertEqual
+            "left to GCP"
+            ["compute", "addresses", "create", "toy-int", "--region", "europe-west1", "--project", "p", "--subnet", "default"]
+            (processArgs (prepare Compute.computeCommand (Compute.AddressesCreate (internal Nothing))))
+    , testCase "an internal address reserved at the declared literal is satisfied" $
+        assertEqual "" Success (Compute.interpretAddress (internal (Just "10.132.0.10")) ExitSuccess "10.132.0.10")
+    , testCase "an internal address reserved at another literal is not" $
+        assertBool "" (isFailure (Compute.interpretAddress (internal (Just "10.132.0.10")) ExitSuccess "10.132.0.99"))
+    , testCase "an address with no declared literal is satisfied by whatever was reserved" $ do
+        assertEqual "internal" Success (Compute.interpretAddress (internal Nothing) ExitSuccess "10.132.0.99")
+        assertEqual "external" Success (Compute.interpretAddress addr ExitSuccess "34.1.2.3")
+        assertBool "absent" (isFailure (Compute.interpretAddress (internal (Just "10.132.0.10")) (ExitFailure 1) ""))
     ]
   where
-    args = processArgs (prepare Compute.computeCommand (Compute.InstancesCreate inst))
-    addr = Compute.Address "toy-ip" (Core.Project "p") (Core.Region "europe-west1")
+    args = createArgs inst
+    createArgs i = processArgs (prepare Compute.computeCommand (Compute.InstancesCreate i))
+    addr = Compute.Address "toy-ip" (Core.Project "p") (Core.Region "europe-west1") Compute.ExternalAddress
+    internal ip = Compute.Address "toy-int" (Core.Project "p") (Core.Region "europe-west1") (Compute.InternalAddress "default" ip)
     fw =
         Compute.FirewallRule
             { Compute.firewallName = "toy-ssh"
@@ -691,7 +727,8 @@ vmTests =
             , Compute.instanceServiceAccount = Nothing
             , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
             , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
-            , Compute.instanceAddress = Just "toy-ip"
+            , Compute.instanceExternalAddress = Compute.ReservedExternal "toy-ip"
+            , Compute.instanceInternalAddress = Compute.EphemeralInternal
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             }
