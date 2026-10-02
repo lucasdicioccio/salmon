@@ -201,6 +201,27 @@ address is the controller's route and nothing else: no script sent to any
 machine contains it, and reports, refs and the standby's upstream comparison
 all keep naming the member by `--a`/`--b`.
 
+The controller need not log in as root either. Every script the pair sends —
+the member and seed scripts, each step, the bouncer's setup and probe, and the
+prerequisite nodes — was written to be run by root: it appends to
+`pg_hba.conf`, calls `pg_ctlcluster`, installs into `/etc/pgbouncer`, restarts
+units. Stock cloud images refuse root logins, so name the login instead:
+
+```
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --ssh-user ops ...
+```
+
+(`member_ssh_user` / `bouncer_ssh_user` in the directive, per machine;
+`--ssh-user` sets all three, default `root`.) A login that is not `root` has
+the *whole* script run under one `sudo -n bash -c ...`, so the scripts are the
+same text whoever logs in and no line can be missed. That login needs
+passwordless sudo: `-n` means a sudo that wants a password fails at once with
+sudo's own message, as a failed node, rather than waiting on a prompt nobody
+will answer. `root` is sent what it always was, with no `sudo` in front, so a
+machine with no sudo for root to go through is unaffected — though the scripts
+themselves have always used `sudo -u postgres`, so sudo is installed either
+way.
+
 ## What a switchover actually does
 
 ```
