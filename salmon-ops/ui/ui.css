@@ -481,3 +481,10 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
   background: var(--bg);
   color: var(--fg);
 }
+
+/* a Conflicting pair, side by side ---------------------------------- */
+#panel .conflict { display: grid; grid-template-columns: auto 1fr 1fr; gap: 4px 6px; align-items: start; }
+#panel .conflict .chead, #panel .conflict .clabel { font-size: 10px; text-transform: uppercase; color: var(--muted); }
+#panel .conflict pre { background: var(--bg); padding: 4px; border-radius: 4px; min-width: 0; }
+#panel .conflict pre.differs { outline: 1px solid var(--accent); }
+.node.conflict rect { stroke: var(--accent); stroke-dasharray: 2 2; stroke-width: 2; }

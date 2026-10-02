@@ -732,7 +732,7 @@ function paintNode(n) {
   const cls = stateClass(n);
   if (n.el) {
     const g = n.el;
-    g.setAttribute("class", `node ${cls}${n.touched ? " touched" : ""}${state.selected === n.ref.full ? " selected" : ""}`);
+    g.setAttribute("class", `node ${cls}${n.touched ? " touched" : ""}${n.conflict ? " conflict" : ""}${state.selected === n.ref.full ? " selected" : ""}`);
     g.querySelector(".state").textContent = clip(stateLine(n), 26);
     g.querySelector(".last").textContent = clip(lastLine(n), 30);
     if (n.pulse) {
@@ -837,6 +837,7 @@ function renderPanel() {
   actions.appendChild(tail);
   body.appendChild(actions);
 
+  if (n.conflict) conflictView(body, n.conflict);
   section(body, "help", n.help);
   section(body, "notes", n.notes);
   if (n.dynamics && n.dynamics.length) list(body, "dynamics", n.dynamics.map(String));
@@ -898,6 +899,36 @@ function renderPanel() {
     row.append(words, b);
     body.appendChild(row);
   }
+}
+
+// Two declarations collided on one ref: kept (the last writer) and replaced,
+// each {shorthand, help, notes, dynamics}, side by side, differing rows marked.
+function conflictView(body, c) {
+  body.appendChild(sectionTitle("conflict: kept vs replaced"));
+  const grid = document.createElement("div");
+  grid.className = "conflict";
+  const show = (v) => (v == null || v === "" ? "–" : Array.isArray(v) ? (v.length ? v.map(String).join("\n") : "–") : String(v));
+  for (const t of ["", "kept", "replaced"]) {
+    const h = document.createElement("div");
+    h.className = "chead";
+    h.textContent = t;
+    grid.appendChild(h);
+  }
+  for (const f of ["shorthand", "help", "notes", "dynamics"]) {
+    const a = show((c.kept || {})[f]);
+    const b = show((c.replaced || {})[f]);
+    const l = document.createElement("div");
+    l.className = "clabel";
+    l.textContent = f;
+    grid.appendChild(l);
+    for (const v of [a, b]) {
+      const pre = document.createElement("pre");
+      if (a !== b) pre.className = "differs";
+      pre.textContent = v;
+      grid.appendChild(pre);
+    }
+  }
+  body.appendChild(grid);
 }
 
 function sectionTitle(t) {
