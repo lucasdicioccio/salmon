@@ -133,6 +133,17 @@ A `Haproxy` builtin would have the same shape as `Nginx`: a config value, a
 renderer, and a systemd unit. Unlike pgbouncer, HAProxy needs no reload on
 failover: its health checks move the traffic.
 
+**Done** as `Salmon.Builtin.Nodes.Haproxy` (`setup`, `renderConfig`,
+`patroniRouter`): every member is listed under every listener and only the
+check path differs (`/primary`, `/replica`, `/replica?lag=N`, `/read-only`),
+so the file is the same text before and after a failover, which is T3 for the
+router. `on-marked-down shutdown-sessions` closes a demoted leader's sessions
+so its clients reconnect to the new one. A member's traffic port is its own
+field, so the upstream can be Postgres or a PgBouncer on the member. Changing
+the member *set* rewrites the file and restarts HAProxy, dropping connections;
+a graceful reload (`-sf`) is not done. Not done either: a recipe placing it
+beside `patroniMember`, TLS, and T1/T2/T6 through it (Layer 3).
+
 ## Reaching the leader
 
 Admin nodes need a way to reach whichever member is the leader right now,

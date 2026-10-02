@@ -880,6 +880,18 @@ them on captured output (the no-device and not-an-IGD ones are real; the IGD lis
 format, never seen on a live IGD). NAT-PMP/PCP and a gateway-address `Dynamic` are not done
 (`gatewayExternalAddress` is the IO accessor instead).
 
+`Nodes/Haproxy.hs` is HAProxy as a TCP router in front of a Patroni cluster (`specs/pg-patroni.md`, "Routing to
+the leader", option 3), in `Nginx.hs`'s shape with `PgBouncer.setup`'s unit: a config value, the pure `renderConfig`,
+and salmon's own `haproxy.service` (`-W -db`, as `haproxy_user`) through `Systemd.systemdServiceWatching` on
+`haproxy.cfg`. Load-bearing: **the config names members, never a primary** — every `Member` is rendered under every
+`Listener`, and a listener's `Role` only picks the `option httpchk` path on each member's Patroni REST port
+(`/primary`, `/replica`, `/replica?lag=N`, `/read-only`), so a failover is HAProxy's checks moving traffic with no
+reload and a `run up` after one changes nothing; `on-marked-down shutdown-sessions` is what makes a demoted leader's
+clients reconnect. A changed member list *is* a config change and so a restart (connections dropped). `validate`
+collects what HAProxy would refuse (duplicate names/ports, names or hosts that split into words, empty lists) and
+`configFiles` throws them rather than write the file. `patroniRouter` is the usual 5000/5001 pair. No `check` beyond
+the unit's, no TLS, no recipe or binary wiring it to `patroniMember` yet; see `Test/HaproxySpec.hs` (Layer 0 only).
+
 Template databases: `Postgres.cloneDatabase` (a `CREATE DATABASE … TEMPLATE` node, whose
 `Retention` says whether `down` drops it — `retainedClone` for an open PR's environment,
 `disposableClone` for a test fixture or a merged PR) and
