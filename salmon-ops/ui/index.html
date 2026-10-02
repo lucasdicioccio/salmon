@@ -58,10 +58,7 @@
       </form>
       <h3>history <span id="history-elided" class="muted"></span></h3>
       <p id="history-empty" class="muted" hidden>no seed declared yet</p>
-      <table id="history">
-        <thead><tr><th>epoch</th><th>declared</th><th>seed</th><th>origin</th><th>state</th><th></th></tr></thead>
-        <tbody id="history-rows"></tbody>
-      </table>
+      <ol id="history" class="timeline" aria-label="seed history, newest first"></ol>
     </section>
     <p id="empty" hidden>Nothing declared yet. Declare a seed (the <em>seeds</em> button above, or <code>POST /command</code> with <code>up …</code>) and it appears here.</p>
     <div id="graph-viewport">

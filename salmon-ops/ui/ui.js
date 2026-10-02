@@ -1196,48 +1196,61 @@ function originText(o) {
 }
 
 function renderHistory() {
-  const rows = $("history-rows");
-  rows.replaceChildren();
+  const list = $("history");
+  list.replaceChildren();
   const h = state.history;
   if (!h) return;
-  $("history-elided").textContent = h.elided ? `(${h.elided} older entries elided)` : "";
+  $("history-elided").textContent = "";
   $("history-empty").hidden = h.seeds.length > 0;
-  $("history").hidden = h.seeds.length === 0;
+  list.hidden = h.seeds.length === 0;
+  // a timeline, newest first; the elided count is its tail
   for (const s of [...h.seeds].reverse()) {
-    const tr = document.createElement("tr");
-    tr.className = s.active ? "active" : "retired";
-    const words = s.args.map(quote).join(" ");
-    const cells = [String(s.epoch), s.declaration, words, originText(s.origin)];
-    cells.forEach((c, i) => {
-      const td = document.createElement("td");
-      td.textContent = c;
-      if (i === 2) {
-        td.className = "words";
-        td.title = "put these words in the form";
-        td.addEventListener("click", () => {
-          $("seed-words").value = words;
-          $("seed-words").focus();
-        });
-      }
-      tr.appendChild(td);
-    });
-    const st = document.createElement("td");
+    const li = document.createElement("li");
+    li.className = `tl-item ${s.active ? "active" : "retired"}`;
+    const head = document.createElement("div");
+    head.className = "tl-head";
+    const ep = document.createElement("span");
+    ep.className = "tl-epoch";
+    ep.textContent = `#${s.epoch}`;
+    const decl = document.createElement("span");
+    decl.className = "muted";
+    decl.textContent = s.declaration;
     const badge = document.createElement("span");
     badge.className = `badge${s.active ? " active" : ""}`;
     badge.textContent = s.active ? "active" : "retired";
-    st.appendChild(badge);
-    tr.appendChild(st);
-    const act = document.createElement("td");
+    head.append(ep, decl, badge);
+    li.appendChild(head);
+    const words = s.args.map(quote).join(" ");
+    const w = document.createElement("div");
+    w.className = "words";
+    w.textContent = words;
+    w.title = "put these words in the form";
+    w.addEventListener("click", () => {
+      $("seed-words").value = words;
+      $("seed-words").focus();
+    });
+    li.appendChild(w);
+    const foot = document.createElement("div");
+    foot.className = "tl-foot muted";
+    const o = document.createElement("span");
+    o.textContent = originText(s.origin);
+    foot.appendChild(o);
     if (s.active) {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = "down";
       b.title = `down ${words}`;
       b.addEventListener("click", () => post(`down ${words}`));
-      act.appendChild(b);
+      foot.appendChild(b);
     }
-    tr.appendChild(act);
-    rows.appendChild(tr);
+    li.appendChild(foot);
+    list.appendChild(li);
+  }
+  if (h.elided) {
+    const li = document.createElement("li");
+    li.className = "tl-item muted";
+    li.textContent = `${h.elided} older entries elided`;
+    list.appendChild(li);
   }
 }
 

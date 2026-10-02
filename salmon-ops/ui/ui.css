@@ -372,12 +372,16 @@ input[type="text"] {
 
 input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-#history { border-collapse: collapse; width: 100%; font-size: 12px; }
-#history th { text-align: left; font-weight: 500; color: var(--muted); padding: 2px 8px 2px 0; border-bottom: 1px solid var(--line); }
-#history td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-#history td.words { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; cursor: pointer; }
-#history td.words:hover { color: var(--accent); }
-#history tr.retired td { color: var(--muted); }
+#history { list-style: none; margin: 0; padding: 0 0 0 12px; border-left: 2px solid var(--line); font-size: 12px; }
+#history[hidden] { display: none; }
+#history .tl-item { position: relative; padding: 4px 0 8px 10px; }
+#history .tl-item::before { content: ""; position: absolute; left: -18px; top: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--pending-fg); }
+#history .tl-item.active::before { background: var(--converged-fg); }
+#history .tl-head, #history .tl-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#history .tl-epoch { font-weight: 600; }
+#history .words { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; cursor: pointer; }
+#history .words:hover { color: var(--accent); }
+#history .retired .words { color: var(--muted); }
 #history .badge { display: inline-block; padding: 0 6px; border-radius: 3px; border: 1px solid var(--line); background: var(--pending); color: var(--pending-fg); }
 #history .badge.active { background: var(--converged); color: var(--converged-fg); }
 
@@ -441,7 +445,6 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
   #panel { width: auto; border-left: 0; border-top: 1px solid var(--line); max-height: 50vh; }
   #graph-wrap { padding: 16px; }
   #actions { margin-left: 0; }
-  #history th:nth-child(4), #history td:nth-child(4) { display: none; }
 }
 
 /* live tails: a strip of small terminals above the command line */
