@@ -305,6 +305,18 @@ if [[ $TIER -ge 3 ]]; then
                 --format='value(status.healthStatus[].healthState)' 2>&1 | sed 's/^/   backend health: /' || true
             VERDICT+=("lb: NOT SERVING (last response: ${body:0:120})")
         fi
+        # With --dns-zone the toy points lb.DNS_NAME at the balancer. What the
+        # zone holds is read here, not resolved: nothing resolves through a
+        # zone the registrar does not delegate to.
+        if [[ -n $DNS_ZONE && $DNS_ZONE != null ]]; then
+            recorded=$(gcloud dns record-sets describe "lb.$DNS_ZONE." --zone "$PREFIX-zone" --type A --project "$PROJECT" --format='value(rrdatas)' 2>/dev/null || true)
+            echo "   lb.$DNS_ZONE. A: ${recorded:-nothing}"
+            if [[ $recorded == "$LB_IP" ]]; then
+                VERDICT+=("dns: lb.$DNS_ZONE points at the balancer ($LB_IP)")
+            else
+                VERDICT+=("dns: lb.$DNS_ZONE DOES NOT POINT AT THE BALANCER (holds: ${recorded:-nothing})")
+            fi
+        fi
     fi
 fi
 
