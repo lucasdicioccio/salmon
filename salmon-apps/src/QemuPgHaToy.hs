@@ -361,6 +361,7 @@ theBouncer root =
         , Pair.bouncer_console_passfile = "/etc/pgbouncer/console.pgpass"
         , Pair.bouncer_alias = "app"
         , Pair.bouncer_dbname = "app"
+        , Pair.bouncer_more_databases = Nothing
         , Pair.bouncer_routing_path = "/etc/pgbouncer/routing.ini"
         , Pair.bouncer_config_dir = "/etc/pgbouncer"
         , Pair.bouncer_listen_port = 6432

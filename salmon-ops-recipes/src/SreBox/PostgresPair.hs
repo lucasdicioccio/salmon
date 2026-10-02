@@ -48,6 +48,9 @@ module SreBox.PostgresPair (
     Member (..),
     Pair (..),
     Bouncer (..),
+    RoutedDatabase (..),
+    routedDatabases,
+    bouncerProblems,
     memberOn,
     memberSshHost,
     sshLogin,
@@ -76,6 +79,7 @@ module SreBox.PostgresPair (
     BouncerState (..),
     bouncerProbeScript,
     parseBouncerState,
+    parseBouncerStates,
 
     -- * What to do about it
     Step (..),
@@ -107,6 +111,7 @@ module SreBox.PostgresPair (
 import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.List (nub, (\\))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -214,11 +219,68 @@ data Bouncer
     -- leaves authentication to whoever put that file there.
     , bouncer_listen_port :: Postgres.Port
     -- ^ what clients connect to, as opposed to 'bouncer_console_port'.
+    , bouncer_more_databases :: Maybe [RoutedDatabase]
+    -- ^ the pair's other databases this bouncer routes, beside
+    -- 'bouncer_alias'. Absent (also from a directive written before this
+    -- field existed) there are none, and the bouncer routes the one database
+    -- it always did. Read them all through 'routedDatabases'.
     }
     deriving (Eq, Show, Generic)
 
 instance FromJSON Bouncer
 instance ToJSON Bouncer
+
+{- | One database of the pair as a bouncer's clients see it: the name they
+connect to, and the database it resolves to on whichever member is the
+primary.
+-}
+data RoutedDatabase
+    = RoutedDatabase
+    { routed_alias :: Text
+    , routed_dbname :: Text
+    }
+    deriving (Eq, Show, Generic)
+
+instance FromJSON RoutedDatabase
+instance ToJSON RoutedDatabase
+
+{- | Every database a bouncer routes, 'bouncer_alias' first.
+
+They live in /one/ routing file and move in /one/ pause, rewrite, reload and
+resume, which is the point of declaring them on one bouncer rather than on
+several: two @Bouncer@s on one machine would each write the same
+@pgbouncer.ini@ and own the same service.
+-}
+routedDatabases :: Bouncer -> [RoutedDatabase]
+routedDatabases b =
+    RoutedDatabase b.bouncer_alias b.bouncer_dbname : fromMaybe [] b.bouncer_more_databases
+
+{- | Everything wrong with the declared bouncers, not the first thing.
+
+One alias twice in a routing file is one key twice in an ini section: the
+bouncer keeps one of them and the probe reads whichever row it kept, so the
+declaration could never be observed to hold. And a name that is not a plain
+word would be read as something else by the routing file, by the console's
+@PAUSE@, or by the shell carrying both -- checked only for the databases
+beyond the first, so that a directive written before there could be several
+is refused nothing it was not refused before.
+-}
+bouncerProblems :: Pair -> [Text]
+bouncerProblems pair =
+    concat
+        [ [ "bouncer " <> b.bouncer_name <> ": the database " <> alias <> " is routed more than once"
+          | alias <- nub (aliases \\ nub aliases)
+          ]
+            <> [ "bouncer " <> b.bouncer_name <> ": \"" <> name <> "\" is not a database name made of plain characters"
+               | d <- fromMaybe [] b.bouncer_more_databases
+               , name <- [d.routed_alias, d.routed_dbname]
+               , Text.null name || Text.any (not . plain) name
+               ]
+        | b <- pair.pair_bouncers
+        , let aliases = map routed_alias (routedDatabases b)
+        ]
+  where
+    plain c = c `elem` ("_-." :: String) || c `elem` ['a' .. 'z'] || c `elem` ['A' .. 'Z'] || c `elem` ['0' .. '9']
 
 data Pair
     = Pair
@@ -772,9 +834,26 @@ between pgbouncer versions, and counting them is a way to read the wrong one.
 bouncerProbeScript :: Bouncer -> String
 bouncerProbeScript b = consoleCommand b "-AX" "SHOW DATABASES"
 
--- | Reads 'bouncerProbeScript''s output, for the one database this pair owns.
+{- | Reads 'bouncerProbeScript''s output: one state per database the bouncer
+routes, in 'routedDatabases'' order.
+
+One per /database/ rather than one per bouncer, because 'nextStep' reads
+these as a set and asks the same two things of each -- is it held, is it
+pointed at the primary -- and a bouncer summed up as one state has to lie
+about one of them whenever its databases disagree: a bouncer with one alias
+moved and one left behind is neither at the primary nor at the peer, and one
+with a single alias still paused is an outage for that alias's clients.
+Every alias has to agree before a pair has arrived.
+-}
+parseBouncerStates :: Bouncer -> Text -> [BouncerState]
+parseBouncerStates b out = [parseDatabaseState d.routed_alias out | d <- routedDatabases b]
+
+-- | 'parseBouncerStates' for 'bouncer_alias' alone.
 parseBouncerState :: Bouncer -> Text -> BouncerState
-parseBouncerState b out =
+parseBouncerState b = parseDatabaseState b.bouncer_alias
+
+parseDatabaseState :: Text -> Text -> BouncerState
+parseDatabaseState alias out =
     case (header, row) of
         (Just hs, Just r) ->
             BouncerState
@@ -789,7 +868,7 @@ parseBouncerState b out =
     row = do
         hs <- header
         i <- lookupIndex hs "name"
-        case [r | r <- rows, atIndex r i == Just b.bouncer_alias] of
+        case [r | r <- rows, atIndex r i == Just alias] of
             (r : _) -> Just r
             _ -> Nothing
 
@@ -1130,13 +1209,19 @@ stepCommand pair = go
     one -- and because "did the clients actually stop" is the question this
     step exists to answer, not "did a command exit zero". -}
     pauseScript b =
+        unlines ["set -e"]
+            <> concatMap (pauseOne b . Text.unpack . routed_alias) (routedDatabases b)
+
+    {- Every database the bouncer routes, one after the other and each
+    checked before the next: the step is over only once all of them are
+    held, and 'nextStep' does not stop the old primary before that. -}
+    pauseOne b alias =
         unlines
-            [ "set -e"
-            , -- kept, rather than discarded: "it did not pause" is a
+            [ -- kept, rather than discarded: "it did not pause" is a
               -- symptom, and what the console said about it is the cause.
-              "said=$(" <> consoleCommand b "-tAX" ("PAUSE " <> Text.unpack b.bouncer_alias) <> " 2>&1)" <> " || true"
-            , "paused=$(" <> showDatabasesColumn b "paused" <> ")"
-            , "[ \"$paused\" = 1 ] || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " did not pause " <> Text.unpack b.bouncer_alias <> ", and said:") <> " \"$said\" >&2; "
+              "said=$(" <> consoleCommand b "-tAX" ("PAUSE " <> alias) <> " 2>&1)" <> " || true"
+            , "paused=$(" <> showDatabasesColumn b alias "paused" <> ")"
+            , "[ \"$paused\" = 1 ] || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " did not pause " <> alias <> ", and said:") <> " \"$said\" >&2; "
                 <> consoleCommand b "-AX" "SHOW DATABASES" <> " >&2 2>&1 || true; exit 1; }"
             ]
 
@@ -1144,29 +1229,34 @@ stepCommand pair = go
     bouncer reads it, RESUME so the clients it has been holding go to the new
     primary. The file is written here rather than reloaded from a
     declaration, because between those two things there is a moment when the
-    bouncer would send clients to a machine that is not the primary yet. -}
+    bouncer would send clients to a machine that is not the primary yet.
+
+    One file and one RELOAD whatever number of databases the bouncer routes,
+    so they move together; then each is resumed and checked. A database that
+    fails its check leaves the ones after it held, which the next pass sees
+    (not every alias is ready) and repoints again. -}
     repointScript side b =
         unlines
-            [ "set -e"
-            , "cat > " <> shQuote b.bouncer_routing_path <> " <<'SALMON_ROUTING'"
-            , "[databases]"
-            , Text.unpack b.bouncer_alias
-                <> " = host="
-                <> Text.unpack (on side).member_host
-                <> " port="
-                <> port side
-                <> " dbname="
-                <> Text.unpack b.bouncer_dbname
-            , "SALMON_ROUTING"
-            , consoleCommand b "-tAX" "RELOAD" <> " >/dev/null"
-            , "said=$(" <> consoleCommand b "-tAX" ("RESUME " <> Text.unpack b.bouncer_alias) <> " 2>&1)" <> " || true"
-            , "host=$(" <> showDatabasesColumn b "host" <> ")"
-            , "paused=$(" <> showDatabasesColumn b "paused" <> ")"
+            ( [ "set -e"
+              , "cat > " <> shQuote b.bouncer_routing_path <> " <<'SALMON_ROUTING'"
+              ]
+                <> routingLines (on side) b
+                <> [ "SALMON_ROUTING"
+                   , consoleCommand b "-tAX" "RELOAD" <> " >/dev/null"
+                   ]
+            )
+            <> concatMap (resumeOne side b . Text.unpack . routed_alias) (routedDatabases b)
+
+    resumeOne side b alias =
+        unlines
+            [ "said=$(" <> consoleCommand b "-tAX" ("RESUME " <> alias) <> " 2>&1)" <> " || true"
+            , "host=$(" <> showDatabasesColumn b alias "host" <> ")"
+            , "paused=$(" <> showDatabasesColumn b alias "paused" <> ")"
             , "[ \"$host\" = " <> shQuote (Text.unpack (on side).member_host) <> " ] && [ \"$paused\" = 0 ]"
-                <> " || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " is still sending clients to $host (paused=$paused), and said:") <> " \"$said\" >&2; exit 1; }"
+                <> " || { echo " <> shQuote ("bouncer " <> Text.unpack b.bouncer_name <> " is still sending clients of " <> alias <> " to $host (paused=$paused), and said:") <> " \"$said\" >&2; exit 1; }"
             ]
 
-    {- One column of this pair's row of SHOW DATABASES, found by column
+    {- One column of one database's row of SHOW DATABASES, found by column
     /name/: the columns have changed between pgbouncer versions, and
     counting them reads the wrong one.
 
@@ -1174,13 +1264,29 @@ stepCommand pair = go
     program, because a shell-quoted string spliced into a single-quoted awk
     program stops being a string: the shell eats the quotes, awk reads a bare
     word, and a bare word in awk is an empty variable that equals nothing. -}
-    showDatabasesColumn b col =
+    showDatabasesColumn b alias col =
         consoleCommand b "-AX" "SHOW DATABASES"
             <> " | awk -F'|' -v col="
             <> shQuote col
             <> " -v want="
-            <> shQuote (Text.unpack b.bouncer_alias)
+            <> shQuote alias
             <> " 'NR==1 { for (i=1;i<=NF;i++) { if ($i==\"name\") n=i; if ($i==col) c=i } } NR>1 && $n==want { print $c }'"
+
+{- The routing file's contents: one line per database the bouncer routes,
+all sent to the same member. Shared by the two writers of that file so that
+they cannot come to disagree about its shape. -}
+routingLines :: Member -> Bouncer -> [String]
+routingLines m b =
+    "[databases]"
+        : [ Text.unpack d.routed_alias
+            <> " = host="
+            <> Text.unpack m.member_host
+            <> " port="
+            <> show m.member_port
+            <> " dbname="
+            <> Text.unpack d.routed_dbname
+          | d <- routedDatabases b
+          ]
 
 {- Everything that makes a member /this pair's/ standby, whatever brought
 it here -- a rewind, or a clone from nothing. It writes the recovery
@@ -1502,7 +1608,7 @@ bouncerSetup r pair b =
             { ref = mkRef "pg-pair-bouncer" (pair.pair_name <> "@" <> b.bouncer_ssh_host)
             , help = Text.unwords ["pgbouncer", b.bouncer_name, "in front of", pair.pair_name]
             , notes =
-                [ "clients reach " <> b.bouncer_alias <> " on port " <> Text.pack (show b.bouncer_listen_port)
+                [ "clients reach " <> Text.intercalate ", " (map routed_alias (routedDatabases b)) <> " on port " <> Text.pack (show b.bouncer_listen_port)
                 , "routing is " <> Text.pack b.bouncer_routing_path <> ", which the role node owns"
                 ]
             , up = do
@@ -1525,22 +1631,17 @@ bouncerSetupScript pair b =
         , -- written only if absent: after that it is the role node's, and a
           -- pass that rewrote it here would move clients without pausing them
           "[ -e " <> shQuote b.bouncer_routing_path <> " ] || cat > " <> shQuote b.bouncer_routing_path <> " <<'SALMON_ROUTING'"
-        , "[databases]"
-        , Text.unpack b.bouncer_alias
-            <> " = host="
-            <> Text.unpack primary.member_host
-            <> " port="
-            <> show primary.member_port
-            <> " dbname="
-            <> Text.unpack b.bouncer_dbname
-        , "SALMON_ROUTING"
-        , "if ! cmp -s /tmp/salmon-pgbouncer.ini " <> shQuote ini <> "; then"
-        , "  install -m 0644 /tmp/salmon-pgbouncer.ini " <> shQuote ini <> ""
-        , "  systemctl restart pgbouncer"
-        , "fi"
-        , "rm -f /tmp/salmon-pgbouncer.ini"
-        , "systemctl is-active --quiet pgbouncer || systemctl start pgbouncer"
         ]
+        <> unlines (routingLines primary b)
+        <> unlines
+            [ "SALMON_ROUTING"
+            , "if ! cmp -s /tmp/salmon-pgbouncer.ini " <> shQuote ini <> "; then"
+            , "  install -m 0644 /tmp/salmon-pgbouncer.ini " <> shQuote ini <> ""
+            , "  systemctl restart pgbouncer"
+            , "fi"
+            , "rm -f /tmp/salmon-pgbouncer.ini"
+            , "systemctl is-active --quiet pgbouncer || systemctl start pgbouncer"
+            ]
   where
     primary = memberOn pair pair.pair_primary
     ini = b.bouncer_config_dir <> "/pgbouncer.ini"
@@ -1568,9 +1669,11 @@ runs nothing at all, and says everything that is wrong with it.
 -}
 refuseBadSecurity :: Pair -> IO ()
 refuseBadSecurity pair =
-    case securityProblems pair of
-        [] -> pure ()
-        problems ->
+    case (securityProblems pair, bouncerProblems pair) of
+        ([], []) -> pure ()
+        ([], problems) ->
+            throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": pair_bouncers: " <> Text.intercalate "; " problems)))
+        (problems, _) ->
             throwIO (userError (Text.unpack ("pair " <> pair.pair_name <> ": pair_conn_security: " <> Text.intercalate "; " problems)))
 
 -- | The choice in words, for a node's @notes@: paths, never contents.
@@ -1831,7 +1934,7 @@ decide pair = do
     obsA <- observe pair A
     obsB <- observe pair B
     bouncers <- traverse (observeBouncer pair) pair.pair_bouncers
-    pure (nextStep pair obsA obsB bouncers)
+    pure (nextStep pair obsA obsB (concat bouncers))
 
 {- | Asks a bouncer where it is sending clients, and whether it is holding
 them.
@@ -1841,12 +1944,12 @@ not 'Done' -- so a pass will try to repoint it, and say so loudly when it
 cannot. That is the right way round: a pair whose clients are going somewhere
 unknown has not arrived.
 -}
-observeBouncer :: Pair -> Bouncer -> IO BouncerState
+observeBouncer :: Pair -> Bouncer -> IO [BouncerState]
 observeBouncer pair b = do
     (code, out, _) <- sshToTarget pair (OnBouncer b) (bouncerProbeScript b)
     pure $ case code of
-        ExitSuccess -> parseBouncerState b out
-        ExitFailure _ -> BouncerState Nothing False
+        ExitSuccess -> parseBouncerStates b out
+        ExitFailure _ -> [BouncerState Nothing False | _ <- routedDatabases b]
 
 -- | Runs 'probeScript' on a member and reads what comes back.
 observe :: Pair -> Side -> IO Observed
