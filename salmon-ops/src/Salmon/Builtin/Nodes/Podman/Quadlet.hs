@@ -65,6 +65,7 @@ import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -74,6 +75,7 @@ import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import Salmon.Op.OpGraph (OpGraph (..))
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -276,7 +278,9 @@ running (the generated service is @Type=notify@) and therefore /includes the
 pull/ the first time an image is used; a failed pull is a failed @up@. @down@
 stops the service, which removes the container, and the file's own @down@
 removes the file and reloads so that the generated unit goes with it. The
-image is left on the machine.
+image is left on the machine, and so is 'containerUnitDir': the node creates
+it if it is missing but never removes it, since every quadlet on the machine
+lives there.
 -}
 quadletContainer ::
     Reporter Systemd.Report ->
@@ -319,9 +323,29 @@ quadletContainer r systemctl t c =
     declared :: Text
     declared = FS.hashBytes (Text.encodeUtf8 (renderContainer c))
 
+    -- 'FS.filecontents' with two changes, both to what it stands on rather
+    -- than to the file. 'ownFile' is applied to the file node alone: an
+    -- 'fmap' over the 'Op' reaches every node of its graph, and once reached
+    -- the enclosing directory, which then carried this container's notes (two
+    -- quadlets sharing the directory were a 'Conflicting' pair) and its
+    -- reload. And the directory is 'unitDir', not 'FS.dir', whose @down@
+    -- refuses a non-empty directory: the generator's directory holds every
+    -- quadlet on the machine, so tearing one down failed whenever another
+    -- was there.
     quadletFile :: Op
     quadletFile =
-        fmap (fmap ownFile) (FS.filecontents (FS.FileContents path (renderContainerWatching c)))
+        let file = FS.filecontents (FS.FileContents path (renderContainerWatching c))
+         in file{node = fmap ownFile file.node, predecessors = deps [unitDir]}
+
+    unitDir :: Op
+    unitDir =
+        op "podman-quadlet-dir" nodeps $ \actions ->
+            actions
+                { help = "ensures " <> Text.pack c.containerUnitDir <> " exists"
+                , notes = ["the generator's directory, shared by every quadlet: down leaves it"]
+                , ref = mkRef "podman-quadlet-dir" c.containerUnitDir
+                , up = createDirectoryIfMissing True c.containerUnitDir
+                }
 
     ownFile :: Extension -> Extension
     ownFile ext =
