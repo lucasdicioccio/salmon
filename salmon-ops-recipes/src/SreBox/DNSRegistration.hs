@@ -57,7 +57,10 @@ setupRegistration ::
     (RegisteredMachineSetup -> directive) ->
     Op
 setupRegistration r mkRemote simulate selfpath selfRemote dns cfg toSpec =
-    op "registration" (deps [trackedGraph remoteRegistration, uploadPem, uploadToken]) id
+    -- The uploads are injected onto the remote call rather than listed beside
+    -- it: the call reads both files, and nodes listed side by side are
+    -- unordered.
+    op "registration" (deps [trackedGraph remoteRegistration `inject` uploadPem `inject` uploadToken]) id
   where
     rsyncRemote :: Rsync.Remote
     rsyncRemote = (\(Self.Remote a b) -> Rsync.Remote a b) selfRemote
