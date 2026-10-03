@@ -25,6 +25,7 @@ module SreBox.Gcp.VmProvision (
     VmProvisionConfig (..),
     provisionedVm,
     provisionedVmReadingHost,
+    handOff,
     Report (..),
 
     -- * Making the instance trust the CA
@@ -332,7 +333,14 @@ machine r gcloudTrack keygenTrack cfg = (vm, signedClient)
             cfg.vmp_clientIdentity
 
 {- | The half that names the host ('vmp_sshHost'): the ssh probe, standing on
-the nodes given, then every 'vmp_beforeCall' node, then the remote call.
+the nodes given, then the upload of the self binary and every
+'vmp_beforeCall' node (each waiting for the probe), then the remote call,
+which waits for all of them.
+
+The node returned is the call itself, so these are edges of the call and not
+of something beside it: a probe that never answers blocks the upload and the
+call, and under @run serve@ the call cannot start while an upload is still in
+flight. Exported for the test that says so (@Test.DeferredSpec@).
 -}
 handOff ::
     forall directive.
@@ -341,7 +349,7 @@ handOff ::
     VmProvisionConfig directive ->
     [Op] ->
     Op
-handOff r cfg sshNeeds = foldl inject (trackedGraph call) (sshReady : beforeCall)
+handOff r cfg sshNeeds = foldl inject (trackedGraph call) (uploaded : sshReady : beforeCall)
   where
     rSshAccess = contramap RunSshAccess r
     rSelf = contramap RunSelf r
@@ -359,18 +367,28 @@ handOff r cfg sshNeeds = foldl inject (trackedGraph call) (sshReady : beforeCall
     beforeCall :: [Op]
     beforeCall = [step `inject` sshReady | step <- cfg.vmp_beforeCall (clientOpts cfg)]
 
-    call :: Tracked' (Self.RemoteCall directive)
-    call =
-        -- The key this recipe just had signed lives at a path of its own
-        -- choosing, which ssh has no reason to offer otherwise.
-        Self.uploadAndCallSelfAsSudoWith
+    -- The key this recipe just had signed lives at a path of its own
+    -- choosing, which ssh has no reason to offer otherwise: hence the
+    -- client options on both the upload and the call.
+    upload :: Tracked' Self.RemoteSelf
+    upload =
+        Self.uploadSelfWith
             (clientOpts cfg)
-            rSelf
             rSelf
             cfg.vmp_remoteDir
             (Self.Remote cfg.vmp_sshUser cfg.vmp_sshHost)
             cfg.vmp_selfPath
+
+    uploaded :: Op
+    uploaded = trackedGraph upload `inject` sshReady
+
+    call :: Tracked' (Self.RemoteCall directive)
+    call =
+        Self.callSelfAsSudoWith
+            (clientOpts cfg)
+            rSelf
             Ssh.preExistingRemoteMachine
+            upload.obj
             cfg.vmp_directiveTrack
             CLI.Up
             cfg.vmp_directive

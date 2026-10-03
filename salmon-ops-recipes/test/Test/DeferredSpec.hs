@@ -13,10 +13,12 @@ module Test.DeferredSpec (tests) where
 import Control.Exception (throwIO)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
+import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension (Extension, Op, down, dynamics, evalDeps, help, ignoreTrack, nodeps, notes, op, realNoop, ref, up)
 import qualified Salmon.Builtin.Nodes.Deferred as Deferred
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
@@ -27,7 +29,7 @@ import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref (mkRef)
-import Salmon.Op.Track (Track (..))
+import Salmon.Op.Track (Track (..), trackedGraph)
 import Salmon.Reporter (silent)
 import qualified SreBox.Gcp.VmProvision as VmProvision
 
@@ -47,6 +49,14 @@ tests =
             "VmProvision.provisionedVmReadingHost"
             [ testCase "declares the machine, not what names it" readingHostShape
             , testCase "provisionedVm still declares the hand-off as nodes" knownHostShape
+            , testCase "provisionedVm: the remote call stands on the upload, the probe and vmp_beforeCall" knownHostOrdering
+            , testCase "the deferred hand-off has the same ordering" handOffOrdering
+            ]
+        , testGroup
+            "Self: the remote call is the node an injection lands on"
+            [ testCase "uploadAndCallSelf: the call depends on the upload" selfCallAfterUpload
+            , testCase "uploadAndCallSelfAsSudo: the call depends on the upload" selfSudoCallAfterUpload
+            , testCase "what a recipe injects onto the call precedes the call" selfCallAfterInjected
             ]
         ]
 
@@ -179,6 +189,87 @@ knownHostShape = do
     let names = shorthands (VmProvision.provisionedVm silent ignoreTrack ignoreTrack (vmConfig "198.51.100.7"))
     assertBool "the ssh probe is a declared node" ("gcp-ssh-available" `elem` names)
     assertBool "nothing is deferred" ("deferred" `notElem` names)
+
+{- | The edges of the declared graph, by shorthand: whether every node called
+@from@ reaches (transitively, along 'Dag.dagDependencies') some node called
+@to@. 'Nothing' when no node is called @from@.
+-}
+dependsOn :: Op -> Text -> Text -> Maybe Bool
+dependsOn o from to =
+    case named from of
+        [] -> Nothing
+        starts -> Just (all reachesTarget starts)
+  where
+    dag = Dag.foldDag Dag.sameRepresentative (evalDeps o) :: Dag.Dag Extension
+    named name = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == name]
+    targets = Set.fromList (named to)
+    reachesTarget start = not (Set.null (Set.intersection targets (closure Set.empty (direct start))))
+    direct r = Map.findWithDefault [] r (Dag.dagDependencies dag)
+    closure seen [] = seen
+    closure seen (r : rs)
+        | r `Set.member` seen = closure seen rs
+        | otherwise = closure (Set.insert r seen) (direct r <> rs)
+
+assertDependsOn :: Op -> Text -> Text -> IO ()
+assertDependsOn o from to =
+    assertEqual (show from <> " depends on " <> show to) (Just True) (dependsOn o from to)
+
+-- | A stand-in for a 'vmp_beforeCall' upload, or for a recipe's own.
+marker :: Text -> Op
+marker name = op name nodeps $ \a -> a{ref = mkRef "ordering-marker" name}
+
+{- | What the hand-off promises, whichever way it is declared: the binary is
+copied once ssh answers, every 'vmp_beforeCall' node waits for ssh too, and
+the call runs after all three. An edge to a wrapper beside the call is not
+that: siblings are unordered, a failed one does not block the call in a
+one-shot pass, and @run serve@ converges them concurrently.
+-}
+assertHandOffOrdering :: Op -> IO ()
+assertHandOffOrdering o = do
+    assertDependsOn o "ssh:call" "rsync:sendfile"
+    assertDependsOn o "ssh:call" "gcp-ssh-available"
+    assertDependsOn o "ssh:call" "before-call"
+    assertDependsOn o "rsync:sendfile" "gcp-ssh-available"
+    assertDependsOn o "before-call" "gcp-ssh-available"
+
+withBeforeCall :: VmProvision.VmProvisionConfig () -> VmProvision.VmProvisionConfig ()
+withBeforeCall cfg = cfg{VmProvision.vmp_beforeCall = const [marker "before-call"]}
+
+knownHostOrdering :: IO ()
+knownHostOrdering = do
+    let o = VmProvision.provisionedVm silent ignoreTrack ignoreTrack (withBeforeCall (vmConfig "198.51.100.7"))
+    assertHandOffOrdering o
+    assertDependsOn o "gcp-ssh-available" "gcp-instance"
+
+{- | 'VmProvision.provisionedVmReadingHost' builds this graph inside its
+deferred node's @up@, where a declared-shape test cannot see it; it is the
+same function, given no nodes for the probe to stand on.
+-}
+handOffOrdering :: IO ()
+handOffOrdering =
+    assertHandOffOrdering (VmProvision.handOff silent (withBeforeCall (vmConfig "198.51.100.7")) [])
+
+selfRemote :: Self.Remote
+selfRemote = Self.Remote "deployer" "198.51.100.7"
+
+selfCallAfterUpload :: IO ()
+selfCallAfterUpload =
+    assertDependsOn
+        (trackedGraph (Self.uploadAndCallSelf silent silent "tmp" selfRemote (Self.SelfPath "/tmp/w/self") ignoreTrack ignoreTrack CLI.Up ()))
+        "ssh:call"
+        "rsync:sendfile"
+
+sudoCall :: Op
+sudoCall =
+    trackedGraph (Self.uploadAndCallSelfAsSudo silent silent "tmp" selfRemote (Self.SelfPath "/tmp/w/self") ignoreTrack ignoreTrack CLI.Up ())
+
+selfSudoCallAfterUpload :: IO ()
+selfSudoCallAfterUpload = assertDependsOn sudoCall "ssh:call" "rsync:sendfile"
+
+-- | The shape of @remoteInit \`inject\` uploadSecrets@ in the recipes.
+selfCallAfterInjected :: IO ()
+selfCallAfterInjected =
+    assertDependsOn (sudoCall `inject` marker "uploaded-secrets") "ssh:call" "uploaded-secrets"
 
 vmConfig :: Text -> VmProvision.VmProvisionConfig ()
 vmConfig host =
