@@ -2451,9 +2451,16 @@ recordWith decl ep dag w =
         , worldEpochs = ep : w.worldEpochs
         , worldLog = kept
         , worldLogDropped = w.worldLogDropped + length dropped
-        , -- left-biased: this declaration's representatives win, which is
-          -- 'Salmon.Op.Dag''s last-writer-wins across declarations.
-          worldMagma = Map.union (Dag.dagNodes dag) w.worldMagma
+        , worldMagma = case decl of
+            -- a retraction says who no longer wants a node, not what the
+            -- node is: the magma keeps what it has (what was applied, and
+            -- what any other live declaration describes), and only gains
+            -- the nodes it had never heard of, which a `down` of something
+            -- never declared still has to be able to walk.
+            Remove -> Map.union w.worldMagma (Dag.dagNodes dag)
+            -- left-biased: this declaration's representatives win, which is
+            -- 'Salmon.Op.Dag''s last-writer-wins across declarations.
+            _ -> Map.union (Dag.dagNodes dag) w.worldMagma
         , worldLedger = ledger'
         , worldConflicts = Map.union collisions (Map.withoutKeys w.worldConflicts described)
         , -- (I6): a 'Ref' this declaration redescribes goes 'Stale' rather
@@ -2525,9 +2532,21 @@ recordWith decl ep dag w =
     again" case. A brand-new 'Ref' (absent from 'worldMagma') is not
     "changed": it has nothing to differ from, and 'retune' already gives it
     a fresh 'Pending' on its own.
+
+    A retraction redescribes nothing. Without that, retiring the older of
+    two declarations that describe one node differently -- the way to
+    replace a declaration without @only@: declare the new one, then retire
+    the old -- put the retired description back in the magma, marked the
+    node 'Stale', and had the next pass re-apply it as the declaration that
+    had just been withdrawn.
     -}
     changed :: Set Ref
-    changed =
+    changed
+        | Remove <- decl = Set.empty
+        | otherwise = redescribed
+
+    redescribed :: Set Ref
+    redescribed =
         Set.fromList
             [ rf
             | (rf, newAct) <- Map.toList (Dag.dagNodes dag)

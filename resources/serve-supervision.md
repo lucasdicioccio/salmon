@@ -1237,6 +1237,15 @@ library — so the three files are readable as they are served.
   therefore the only thing that can fire a `RestForOne` demotion.** A config
   node with no `check` never notices its own file changing, and nothing
   standing on it is ever bounced, however that node is decorated otherwise.
+- **Replacing a seed without `only` is `up` the new one, then `down` the old
+  one.** A seed is identified by its directive, so a changed seed is a second
+  declaration, not an edit: for a moment both are live, any node they
+  describe differently is reported `conflicting` and the newer description
+  wins. Retiring the older one then only says who no longer wants those
+  nodes — it does not put its description back. (Retiring the *newer* one
+  leaves the node described as the newer one described it, still wanted by
+  the older: declare the survivor again if that matters.) `only` does the
+  same in one line, and retires every other seed with it.
 
 ## 16. Where to read more
 
