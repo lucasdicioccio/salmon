@@ -56,6 +56,26 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   and everything after it is an unprivileged user with two capabilities granted once. Splitting
   them is also what makes the demo a demo: `prereqs` is slow and rarely changes, `up` is the one
   you re-run, and re-running it with one word changed is the whole show.
+  It is also the one VM harness meant to be **driven live through `run serve --http`**
+  (`salmon-apps/scripts/qemu-pg-ha-serve.sh`, `resources/postgres-pair.md` "Driving it live"): guests
+  booted once and held, the next step of a scenario one `POST /command`. Four seeds exist for that:
+  `guests` (the machines without the pair — the same nodes `up` declares, so a second holder that
+  keeps them booted while the pair is retired), `writer` (the client as a `managed` action, since a
+  one-shot client's `up` would hold the pass that is meant to move the primary under it; its tally
+  is the `output` stream), and two faults as declarations whose `up` injects and `down` heals:
+  `frozen --machine M` (`Qemu.pause`/`resume`, checked with `Qemu.runState`) and `partition --machine
+  M --from N` (a blackhole route over ssh; never from the host, whose heal would travel the cut
+  path). Load-bearing: moving the primary under `serve` is `up` of the new declaration *then* `down`
+  of the old (a seed is its directive, so the two are briefly both live and the role node is
+  `Conflicting`, newest wins) — `only` would retire guests, writer and faults too; the two
+  declarations differ in the role node's representative alone, which `Test/QemuPgHaToySpec.hs` (in
+  `salmon-apps`' test suite) asserts along with the overlap of the other seeds; the "answers ssh"
+  node asks the monitor and fails at once for a paused guest, because `stopTending` waits for an
+  `up` in flight and two minutes of polling would hold the line that resumes it; and a
+  `--may-discard` left declared is a standing licence the tending loop will use. `Qemu.runState`
+  reads `info status` off the human monitor (`interpretStatus`, pure; `Test/QemuShutdownSpec.hs`
+  runs it and `pause`/`resume` against a real qemu process with no guest). **Not run with guests
+  booted**: the session, the route inside a guest, the writer against a live pair.
 
 `SreBox.WireGuardMesh` (in `salmon-ops-recipes`) is a WireGuard mesh declared once (`MeshSeed`: peers with declared
 addresses, inline public keys, optional endpoints, groups; policies; routers) and unfolded by the pure `genHost`/`genAll`
@@ -437,7 +457,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   node's `Ref` but changes what `Dag.sameRepresentative` can see about it (`help`/`notes`/
   `dynamics`) resets it to `Stale` instead of leaving it silently `Converged` — `record` compares
   the incoming declaration's representative against whatever was already in `worldMagma` for that
-  `Ref`. `Stale` is read exactly like `Pending` by `gateFor` (anything but `Converged` gets a
+  `Ref`. **A retraction (`down`) redescribes nothing**: it neither overwrites the magma's
+  representative nor makes anything `Stale`, and only adds nodes the magma had never heard of. Before
+  that, `up A`, `up B`, `down A` on two seeds describing one node differently — the way to replace a
+  declaration without `only` — put A's description back and re-applied the node as the declaration
+  just withdrawn (`ServeSpec`'s "retiring the older of two declarations"). Retiring the *newer* one
+  leaves the node as the newer described it. `Stale` is read exactly like `Pending` by `gateFor` (anything but `Converged` gets a
   pass's attention, and the node's own `check` decides from there, same as ever) but is kept as
   its own constructor rather than folded into `Pending` so `status` can tell "never touched" from
   "was up, now re-verifying". This is `Dag.sameRepresentative`'s usual blind spot — content baked

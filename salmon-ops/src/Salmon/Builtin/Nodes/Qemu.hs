@@ -68,6 +68,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, bracket, throwIO, try)
 import Control.Monad (filterM, void)
 import qualified Data.ByteString as BS
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -305,6 +306,64 @@ monitorCommand sock cmd = withMonitor sock $ \s -> do
     drain s = do
         bs <- SocketBS.recv s 4096
         if BS.null bs then pure () else drain s
+
+{- | Whether the guest's CPUs are running, as qemu's monitor says it
+(@info status@). 'Paused' is what 'pause' leaves behind: qemu is still there,
+its unit is still active and its monitor still answers, and the guest does
+nothing at all -- no packet answered, no clock advanced.
+-}
+data RunState = Running | Paused | OtherState Text
+    deriving (Eq, Show)
+
+-- | Stops the guest's CPUs (@stop@). The machine a peer sees is one that went silent mid-sentence. 'False' if the monitor could not be talked to.
+pause :: MonitorSocket -> IO Bool
+pause sock = monitorCommand sock "stop"
+
+-- | Resumes a paused guest (@cont@): it carries on from the instruction it was stopped at. 'False' if the monitor could not be talked to.
+resume :: MonitorSocket -> IO Bool
+resume sock = monitorCommand sock "cont"
+
+{- | Asks the monitor @info status@. 'Nothing' when the monitor could not be
+talked to or said nothing 'interpretStatus' recognises within two seconds:
+"cannot tell", which is not the same as "not running".
+-}
+runState :: MonitorSocket -> IO (Maybe RunState)
+runState sock = do
+    answer <- newIORef Nothing
+    _ <- withMonitor sock $ \s -> do
+        SocketBS.sendAll s (Text.encodeUtf8 "info status\n")
+        _ <- timeout 2000000 (collect answer s BS.empty)
+        pure ()
+    readIORef answer
+  where
+    -- the monitor is a terminal: a banner, a prompt and an echo of the
+    -- command come before the answer, in as many reads as qemu likes.
+    collect answer s acc = do
+        bs <- SocketBS.recv s 4096
+        let acc' = acc <> bs
+        case interpretStatus acc' of
+            Just st -> writeIORef answer (Just st)
+            Nothing -> if BS.null bs then pure () else collect answer s acc'
+
+{- | Reads @VM status: running@ \/ @VM status: paused (...)@ out of whatever
+the monitor printed around it. 'Nothing' until a whole status line is there,
+so a partial read is not mistaken for an answer.
+-}
+interpretStatus :: BS.ByteString -> Maybe RunState
+interpretStatus bytes =
+    case [Text.drop (Text.length marker) found | l <- completeLines, let found = snd (Text.breakOn marker l), not (Text.null found)] of
+        [] -> Nothing
+        (rest : _) -> Just $ case Text.words rest of
+            ("running" : _) -> Running
+            ("paused" : _) -> Paused
+            _ -> OtherState (Text.strip rest)
+  where
+    marker = "VM status: "
+    txt = Text.decodeUtf8With (\_ _ -> Just '?') bytes
+    -- the last piece is only a line once its newline has arrived
+    completeLines = case Text.splitOn "\n" txt of
+        [] -> []
+        pieces -> init pieces
 
 -- | Is something accepting connections on the monitor socket?
 listening :: MonitorSocket -> IO Bool

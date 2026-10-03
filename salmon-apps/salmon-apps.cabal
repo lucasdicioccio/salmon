@@ -166,13 +166,17 @@ test-suite salmon-apps-test
     main-is:          Main.hs
     hs-source-dirs:   test
     other-modules:    Test.FleetSpec
+                    , Test.QemuPgHaToySpec
                     , Test.ReportSpec
     build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , bytestring
                     , directory
                     , filepath
+                    , containers
                     , salmon-apps
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops-recipes ^>=0.1.0.0
                     , salmon-ops ^>=0.1.0.0
                     , tasty
                     , tasty-hunit

@@ -42,9 +42,10 @@ import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), W
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.Upkeep as Upkeep
-import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, managed, nodeps, op, opAct, ref, up)
+import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, managed, nodeps, notes, op, opAct, ref, up)
 import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
+import Salmon.Op.Actions (Act (..))
 import Salmon.Op.Configure (Configure (..))
 import qualified Salmon.Op.Ledger as Ledger
 import qualified Salmon.Op.Mailbox as Mailbox
@@ -67,6 +68,7 @@ tests =
         , testCase "retiring a seed tears its nodes down" retireTearsDown
         , testCase "retiring a multi-file bundle removes its shared directory cleanly" retireMultiFileBundle
         , testCase "`only` retires the previous seed but keeps shared nodes" onlySupersedes
+        , testCase "retiring the older of two declarations of one node leaves the newer one's description in force" retiringTheLoserChangesNothing
         , testCase "a node whose up threw is retried by the next pass" failedNodeIsRetried
         , testCase "a retired declaration survives a failed down" retiredContributionSurvives
         , testCase "re-declaring a seed does not accumulate graphs" reDeclareDoesNotAccumulate
@@ -280,6 +282,40 @@ onlySupersedes =
         -- the retired seed's graph has nothing left to describe: the node it
         -- alone held is down, and the shared directory belongs to `b` now.
         assertEqual "only the surviving seed's graph is retained" 1 (length w.worldEpochs)
+
+{- | One node, keyed on the directory alone, whose description (and what its
+@up@ does) is the first name of the seed: two seeds, one effect site,
+described differently -- a role node declared with a different primary.
+-}
+described :: IORef [String] -> Track' Spec
+described applied = Track $ \spec ->
+    let who = concat (take 1 spec.specNames)
+     in op "described" nodeps $ \actions ->
+            actions
+                { ref = mkRef "described" spec.specDir
+                , notes = [Text.pack who]
+                , up = atomicModifyIORef' applied (\xs -> (xs <> [who], ()))
+                }
+
+{- | Replacing a declaration without `only`: declare the new one, then retire
+the old. In between the two collide and the newer wins; retiring the older
+must then be a statement about who wants the node and nothing else. If the
+retired declaration's description went back into the magma, the node would
+be re-applied as the declaration that was just withdrawn.
+-}
+retiringTheLoserChangesNothing :: IO ()
+retiringTheLoserChangesNothing =
+    withTempDir $ \root -> do
+        applied <- newIORef []
+        (w, _, _) <- runServe (described applied) root ["up a", "up b", "down a"]
+        assertEqual "applied as a, then as b, and not as a again" ["a", "b"] =<< readIORef applied
+        assertEqual "one live declaration" 1 (Ledger.liveCount w.worldLedger)
+        assertEqual
+            "the node is described as the surviving declaration describes it"
+            [["b" :: Text]]
+            [act.extension.notes | act <- Map.elems w.worldMagma]
+        assertAllConverged TurnUp w
+        assertBool "no collision is left standing" (Map.null w.worldConflicts)
 
 failedNodeIsRetried :: IO ()
 failedNodeIsRetried =

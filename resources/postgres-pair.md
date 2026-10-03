@@ -449,6 +449,85 @@ After the demo B is the primary: pause machine B's guest, declare
 `up --primary A`, and it refuses; add `--may-discard B` and the refusal turns
 into a failover.
 
+## Driving it live
+
+Each line above is a process that starts from nothing: it asks every node
+again, does its one thing and exits, and to try the next thing somebody types
+the next line. For working on a scenario — a person with a terminal, or a
+program with a socket — the toy is better kept up. `run serve --http` boots
+the guests once, holds them, and takes what is wanted of them a line at a
+time, with every report on `/events`:
+
+```
+s=salmon-apps/scripts/qemu-pg-ha-serve.sh
+
+$s serve &                 # the server: a unix socket in $XDG_RUNTIME_DIR, a web UI on 127.0.0.1:9081
+$s guests                  # the bridge and three guests, answering ssh
+$s pair A --seed B         # the pair on top of them
+$s writer                  # a client the server holds, writing through the bouncer
+$s tail &                  # its lines, live
+$s pair B                  # move the primary
+$s freeze b                # pause B's guest (qemu's monitor) ...
+$s pair A                  # ... a failover is refused ...
+$s pair A --may-discard B  # ... until somebody says what may be lost
+$s thaw b                  # B carries on, finds it is no longer the primary, and is rewound
+$s pair A                  # drop the licence again (see below)
+$s down                    # clear everything, stop the guests, quit
+```
+
+Nothing in the script is more than a `POST /command` with one line of the
+serve language (`resources/serve-supervision.md` §14); `$s cmd '...'` sends
+any other, `$s status`/`dag`/`events`/`tui` read. An agent holding the socket
+needs none of it: `GET /help/seed` is the vocabulary, `GET /dag` the state,
+`GET /events?since=N` what happened, and `POST /command?async` returns at
+once with the sequence number to read from.
+
+Four seeds exist for this, beside `up`:
+
+| seed | what it declares |
+|---|---|
+| `guests` | the bridge and the three machines, without the pair. Every one of its nodes is one `up` declares too, so the two merge; what it adds is a second holder, so `unpair` takes the pair down and leaves three machines booted |
+| `writer` | the client as a process the server *holds* (`managed`). The one-shot `client` cannot be this: its `up` returns when its time is up and a pass waits for it, so the line that moves the primary would wait for the client it was meant to move it under. Its lines — a tally every five seconds, and one each time inserts start or stop failing — are the `output` stream and the node's ring in `/dag` |
+| `frozen --machine M` | a fault: M's CPUs are stopped. Its peers see a machine that went silent without closing anything. `down` resumes it |
+| `partition --machine M --from N` | a fault: M has a blackhole route for N's address, which cuts both directions. `down` removes it |
+
+Things worth knowing before a session:
+
+- **Moving the primary is two lines**, the new declaration and then `down` of
+  the old one, and `pair` does both. A seed is identified by the directive it
+  configures to, so `up --primary B` does not replace `up --primary A`: for a
+  moment both are live, the role node is reported `conflicting`, the newer one
+  wins and the pass that follows is the switchover. The two declarations name
+  the same nodes and describe all but the role node identically
+  (`Test.QemuPgHaToySpec` asserts it), so nothing is booted or provisioned
+  again and retiring the old one takes nothing down. `only` would also move
+  it, and would retire the guests, the writer and every fault with it.
+- **A fault is a declaration, so it is state**: `/dag` shows which are in
+  force, the loop re-applies one that went away by itself (a guest rebooted
+  out of its blackhole route), and `clear` heals them before anything they
+  stand on is stopped.
+- **The server tends what it declared.** Between commands every node with a
+  check is asked again — the role node included, over ssh to both members —
+  so a pair broken by a fault is noticed and, where the declaration allows,
+  repaired with nobody typing. That is the point, and also the reason to take
+  `--may-discard` off again once a failover is done: left declared, it is a
+  standing licence that the next pass will use. `supervise off` makes passes
+  the only thing that acts.
+- **A paused guest is reported, repeatedly.** Its "answers ssh" node fails
+  its check and its `up` fails at once (it asks the monitor, rather than hold
+  every later command behind two minutes of polling); the loop retries with
+  backoff until the guest is resumed.
+- A guest killed outright needs no seed: `systemctl --user kill -s KILL
+  salmon-vm-salmon-toy-a` is a machine losing power, the unit is
+  `Restart=on-failure`, and the nodes standing on it are tended as it boots.
+
+What has been run: the declarations' shapes (Layer 0), qemu's pause, resume
+and run state against a real qemu process with no guest, and the server, the
+script and the held writer against a machine with no guests on it (the writer
+reporting that it cannot reach the bouncer). **Not run: any of it with the
+guests booted** — the session above, the blackhole route inside a guest, and
+the writer against a live pair are as written, not as observed.
+
 ## What is tested, and what that is worth
 
 `Test.PostgresPairSpec` covers the decision table at Layer 0 — every state two
