@@ -80,7 +80,17 @@ data InstanceGroupLocation
     | InstanceGroupRegion Text
     deriving (Eq, Show)
 
--- | Backend kinds supported by the high-level recipe.
+{- | Backend kinds supported by the high-level recipe.
+
+An instance group's ports are the ones the backend service naming it sends
+to: the first is where the service's traffic goes, under a named port that
+is the service's own (its resource name; any further port is that name with
+@-1@, @-2@, ...). Several backend services may name one group, each with its
+own port -- a VM backs a balancer through one group only, however many
+services it runs. With no port at all the group is left alone and the
+service keeps GCP's default port name, @http@, which is then the caller's to
+have set.
+-}
 data Backend
     = InstanceGroupBackend Text InstanceGroupLocation [Int]
     | CloudRunBackend Text
@@ -198,7 +208,8 @@ instance Exception InvalidLoadBalancer
 {- | What is wrong with a declaration, all of it rather than the first: a
 rule naming a service nobody declared, two services under one name, a host
 in two rules, a rule with no host or no path, the two certificate kinds
-mixed, a managed certificate with no domain, a timeout that is not positive.
+mixed, a managed certificate with no domain, a timeout that is not positive,
+one backend service sending to two different ports of one instance group.
 -}
 albProblems :: ApplicationLoadBalancer -> [Text]
 albProblems alb =
@@ -220,6 +231,12 @@ albProblems alb =
            ]
         <> [ "managed certificate " <> n <> " names no domain"
            | ManagedCertificate n [] <- alb.albCertificates
+           ]
+        <> [ "instance group " <> ig <> ": named port " <> n <> " declared on several ports: " <> Text.unwords (map (Text.pack . show) ps)
+           | ((ig, _), named) <- groupNamedPorts alb
+           , n <- nub (map fst named)
+           , let ps = nub [p | (n', p) <- named, n' == n]
+           , length ps > 1
            ]
         <> [ "timeout must be positive: " <> Text.pack (show t)
            | Just t <- alb.albTimeoutSec : map backendServiceTimeoutSec alb.albServices
@@ -268,8 +285,8 @@ applicationLoadBalancer r gcloudTrack alb =
             pure $ interpretLbCheck code (Text.decodeUtf8With TextErr.lenientDecode out)
 
 {- | What a re-declaration can be seen to change: the hosts served, the
-named services, the timeouts, the certificates. Empty for a plain balancer,
-so one declared before these existed describes itself as it always did.
+named services, the timeouts, the port each service sends to, the
+certificates. Empty for a balancer with none of those.
 -}
 albNotes :: ApplicationLoadBalancer -> [Text]
 albNotes alb =
@@ -279,6 +296,10 @@ albNotes alb =
         <> [ "service " <> svc.svcResource <> maybe "" (\t -> " timeout " <> Text.pack (show t) <> "s") svc.svcTimeout
            | svc <- services alb
            , svc.svcLabel /= "backend" || svc.svcTimeout /= Nothing
+           ]
+        <> [ "named port " <> n <> ":" <> Text.pack (show p) <> " on " <> ig
+           | ((ig, _), named) <- groupNamedPorts alb
+           , (n, p) <- nub named
            ]
         <> map certNote alb.albCertificates
   where
@@ -361,7 +382,8 @@ interpretLbDescribe (ExitFailure n) = Failure ("load balancer not found (exit " 
 {- | The verdict drawn from 'renderLbCheckScript''s exit code and stdout.
 
 The script prints @MISSING <what>@ for each absent sub-resource, unattached
-backend, unrouted host or wrong timeout, @HEALTH <service> <state>@ per
+backend, unrouted host, wrong timeout, wrong port name or named port absent
+from its instance group, @HEALTH <service> <state>@ per
 backend instance of an instance-group backend, and @CERT <name> <state>@ per
 managed certificate. A missing piece is a 'Failure' (the node's @up@ is
 idempotent and will create it), and so is a certificate GCP reports
@@ -485,6 +507,38 @@ serviceResource alb = \case
 healthChecks :: ApplicationLoadBalancer -> [HealthCheck]
 healthChecks alb = nub [hc | Just hc <- map svcHealthCheck (services alb)]
 
+{- | The named port a backend service sends to, when it has an instance
+group to send to and a port declared on it: the service's own resource name.
+
+It used to be GCP's default, @http@, for every service -- so two services on
+one instance group both sent to whichever port @http@ was last set to, with
+healthy backends and no error anywhere. A name per service is what lets one
+group carry a port for each.
+-}
+svcPortName :: Svc -> Maybe Text
+svcPortName svc
+    | null [() | InstanceGroupBackend _ _ (_ : _) <- svc.svcBackends] = Nothing
+    | otherwise = Just svc.svcResource
+
+{- | The named ports this balancer wants on each instance group: the union
+over every backend service naming the group, in declaration order. One entry
+per group, because @set-named-ports@ replaces a group's whole set and so
+cannot be called once per service.
+-}
+groupNamedPorts :: ApplicationLoadBalancer -> [((Text, InstanceGroupLocation), [(Text, Int)])]
+groupNamedPorts alb =
+    [ (g, concat [named | (g', named) <- perBackend, g' == g])
+    | g <- nub (map fst perBackend)
+    ]
+  where
+    perBackend =
+        [ ((ig, loc), zipWith (portName svc.svcResource) [0 :: Int ..] ports)
+        | svc <- services alb
+        , InstanceGroupBackend ig loc ports@(_ : _) <- svc.svcBackends
+        ]
+    portName base 0 p = (base, p)
+    portName base i p = (base <> "-" <> Text.pack (show i), p)
+
 isInstanceGroup :: Backend -> Bool
 isInstanceGroup = \case
     InstanceGroupBackend{} -> True
@@ -547,10 +601,19 @@ misconfigured balancer was reported as successfully brought up. Under
 @set -e@ a failing create now fails the node, as the node-author conventions
 require.
 
-Two things are /set/ on every run rather than guarded, because they are
+Some things are /set/ on every run rather than guarded, because they are
 declarations that can change under a resource that already exists: a
-backend service's timeout (@update --timeout@) and, when there are host
-rules, the whole URL map (@url-maps import@, which replaces it).
+backend service's timeout and port name (@update --timeout@,
+@update --port-name@), an instance group's named ports and, when there are
+host rules, the whole URL map (@url-maps import@, which replaces it).
+
+An instance group's named ports are set once per group, before any backend
+service is pointed at one of them, and /merged/ with what the group already
+carries: @set-named-ports@ replaces the whole set, and the group is the
+caller's -- another balancer, or the caller, may have named ports on it.
+Only the names this balancer declares are overwritten. Nothing removes a
+name: one this balancer stopped declaring stays on the group, where it does
+no harm, and so does everything on @down@.
 
 The balancer is a /regional external/ Application Load Balancer
 (@EXTERNAL_MANAGED@), which GCP only accepts in a VPC network that already
@@ -572,6 +635,7 @@ renderLbScript alb =
           "exists() { \"$@\" >/dev/null 2>&1; }"
         ]
             <> healthCheckLines
+            <> concatMap namedPortsLines (groupNamedPorts alb)
             <> concatMap backendLines (services alb)
             <> urlMapLines
             <> certificateLines
@@ -604,7 +668,9 @@ renderLbScript alb =
             ("gcloud compute backend-services describe " <> shellQuote svc.svcResource <> regional)
             ( "gcloud compute backend-services create " <> shellQuote svc.svcResource
                 <> regional
-                <> " --protocol=HTTP --load-balancing-scheme=EXTERNAL_MANAGED"
+                <> " --protocol=HTTP"
+                <> maybe "" ((" --port-name=" <>) . shellQuote) (svcPortName svc)
+                <> " --load-balancing-scheme=EXTERNAL_MANAGED"
                 <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> " --health-checks-region=\"$REGION\"") (instanceGroupHealthCheck svc)
             )
 
@@ -619,6 +685,17 @@ renderLbScript alb =
                 <> " --timeout="
                 <> Text.pack (show t)
             ]
+
+    -- a set too: a backend service made before it had a port name of its
+    -- own is still on @http@
+    portNameLines :: Svc -> [Text]
+    portNameLines svc =
+        [ "gcloud compute backend-services update " <> shellQuote svc.svcResource
+            <> regional
+            <> " --port-name="
+            <> shellQuote n
+        | Just n <- [svcPortName svc]
+        ]
 
     instanceGroupHealthCheck :: Svc -> Maybe HealthCheck
     instanceGroupHealthCheck svc =
@@ -637,21 +714,20 @@ renderLbScript alb =
 
     backendLines :: Svc -> [Text]
     backendLines svc =
-        createBackendService svc : timeoutLines svc <> concatMap (attachLines svc) svc.svcBackends
+        createBackendService svc : portNameLines svc <> timeoutLines svc <> concatMap (attachLines svc) svc.svcBackends
 
     attachLines :: Svc -> Backend -> [Text]
     attachLines svc = \case
-        InstanceGroupBackend ig loc ports ->
-            namedPortsLine ig loc ports
-                <> [ attachUnlessPresent
-                        svc
-                        ("/instanceGroups/" <> ig)
-                        ( "gcloud compute backend-services add-backend " <> shellQuote svc.svcResource
-                            <> regional
-                            <> " --instance-group=" <> shellQuote ig
-                            <> groupBackendFlag loc
-                        )
-                   ]
+        InstanceGroupBackend ig loc _ ->
+            [ attachUnlessPresent
+                svc
+                ("/instanceGroups/" <> ig)
+                ( "gcloud compute backend-services add-backend " <> shellQuote svc.svcResource
+                    <> regional
+                    <> " --instance-group=" <> shellQuote ig
+                    <> groupBackendFlag loc
+                )
+            ]
         CloudRunBackend cr ->
             [ ensure
                 ("gcloud compute network-endpoint-groups describe " <> shellQuote svc.svcNeg <> regional)
@@ -669,18 +745,25 @@ renderLbScript alb =
                 )
             ]
 
-    -- set-named-ports replaces the whole set, so one call carrying every
-    -- port (the first one named @http@, the backend service's default
-    -- @--port-name@) rather than one call per port, each erasing the last.
-    namedPortsLine _ _ [] = []
-    namedPortsLine ig loc ports =
-        [ "gcloud compute instance-groups set-named-ports " <> shellQuote ig
+    -- set-named-ports replaces the whole set, so: one call per group,
+    -- carrying every port of every service naming it, after whatever the
+    -- group already has under names that are not ours. The read is an
+    -- assignment on a line of its own so that its failing fails the script
+    -- (a command substitution inside an argument would not).
+    namedPortsLines :: ((Text, InstanceGroupLocation), [(Text, Int)]) -> [Text]
+    namedPortsLines ((ig, loc), named) =
+        [ "keep=$(gcloud compute instance-groups get-named-ports " <> shellQuote ig
             <> groupLocation loc
-            <> " --named-ports="
-            <> Text.intercalate "," (zipWith namedPort [0 :: Int ..] ports)
+            <> " --format='value(name,port)' | awk -v ours="
+            <> shellQuote (Text.unwords (map fst named))
+            <> " "
+            <> shellQuote "BEGIN{n=split(ours,x,\" \");for(i=1;i<=n;i++)o[x[i]]=1} NF==2&&!($1 in o){printf \"%s:%s,\",$1,$2}"
+            <> ")"
+        , "gcloud compute instance-groups set-named-ports " <> shellQuote ig
+            <> groupLocation loc
+            <> " --named-ports=\"${keep}\""
+            <> shellQuote (Text.intercalate "," [n <> ":" <> Text.pack (show p) | (n, p) <- nub named])
         ]
-    namedPort 0 p = "http:" <> Text.pack (show p)
-    namedPort i p = "http-" <> Text.pack (show i) <> ":" <> Text.pack (show p)
 
     -- With rules the map is imported whole on every run: `import` creates
     -- or replaces, which is the only "set" verb a URL map has
@@ -796,7 +879,9 @@ always exits 0 unless the script itself breaks; findings are lines on stdout
 (see 'interpretLbCheck').
 
 What it does not see: a path rule, or which service a host is sent to. A
-host rule is checked by its hosts being in the map, no further.
+host rule is checked by its hosts being in the map, no further. Which port a
+service reaches it does see: the service's port name, and that name on each
+instance group it sends to.
 -}
 renderLbCheckScript :: ApplicationLoadBalancer -> Text
 renderLbCheckScript alb =
@@ -815,6 +900,8 @@ renderLbCheckScript alb =
                ]
             <> httpsLines
             <> concatMap timeoutLines svcs
+            <> concatMap portNameLines svcs
+            <> concatMap namedPortLines (groupNamedPorts alb)
             <> hostLines
             <> concatMap (\svc -> concatMap (backendLines svc) svc.svcBackends) svcs
             <> [healthLines svc | svc <- svcs, any isInstanceGroup svc.svcBackends]
@@ -864,6 +951,29 @@ renderLbCheckScript alb =
                 <> " ] || echo "
                 <> shellQuote ("MISSING timeout " <> Text.pack (show t) <> "s on " <> svc.svcResource)
             ]
+    -- a service on another port name sends to another port, or to none
+    portNameLines :: Svc -> [Text]
+    portNameLines svc =
+        [ "[ \"$(gcloud compute backend-services describe " <> shellQuote svc.svcResource <> regional
+            <> " --format='value(portName)' 2>/dev/null)\" = "
+            <> shellQuote n
+            <> " ] || echo "
+            <> shellQuote ("MISSING port-name " <> n <> " on " <> svc.svcResource)
+        | Just n <- [svcPortName svc]
+        ]
+    namedPortLines :: ((Text, InstanceGroupLocation), [(Text, Int)]) -> [Text]
+    namedPortLines ((ig, loc), named) =
+        [ "gcloud compute instance-groups get-named-ports " <> shellQuote ig <> groupLocation loc
+            <> " --format='value(name,port)' 2>/dev/null | awk -v n="
+            <> shellQuote n
+            <> " -v p="
+            <> shellQuote (Text.pack (show p))
+            <> " "
+            <> shellQuote "$1==n&&$2==p{f=1} END{exit !f}"
+            <> " || echo "
+            <> shellQuote ("MISSING named-port " <> n <> ":" <> Text.pack (show p) <> " on instance-group " <> ig)
+        | (n, p) <- nub named
+        ]
     -- every host of every rule, one per line, whatever separators gcloud
     -- flattens the nested lists with
     hostLines :: [Text]

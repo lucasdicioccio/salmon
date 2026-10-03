@@ -545,9 +545,14 @@ leftover.
   `--quiet`; how `value(hostRules[].hosts)`, `value(timeoutSec)`,
   `value(managed.state)` and the three-field `dnsResourceRecord` read print;
   that a reserved regional address in the default tier is accepted by an
-  `EXTERNAL_MANAGED` forwarding rule; and that one instance group can back
-  two backend services of one balancer. "The HTTPS run" above is the run
-  that settles these.
+  `EXTERNAL_MANAGED` forwarding rule; that one instance group can back
+  two backend services of one balancer; and the named-port handling that
+  makes that useful -- each backend service sends to a named port of its own
+  (`--port-name`, its resource name), and a group's named ports are set once
+  per group, merged with what `instance-groups get-named-ports
+  --format='value(name,port)'` prints -- of which the two-column output and
+  `value(portName)` are assumed, not recorded. "The HTTPS run" above is the
+  run that settles these.
 - **The balancer's check does not see path rules**, nor which service a host
   is sent to: only that each declared host is in the map, and each declared
   timeout on its service. A path rule changed behind salmon is put back by
