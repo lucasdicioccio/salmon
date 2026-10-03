@@ -31,6 +31,34 @@ pair does not need it). @--may-discard B@ is the other flag worth trying,
 with machine B's guest paused or killed: it is what turns a refusal into a
 failover.
 
+= The same thing, kept up and driven live
+
+Each line above is a process that boots nothing twice but still starts from
+nothing: it asks every node again, does its one thing and exits. Under
+@run serve@ the guests are booted once and stay, and what is wanted of them
+is changed a line at a time, by a person or by a program holding the socket:
+
+> $t run serve --http $XDG_RUNTIME_DIR/salmon-toy.http < /dev/null &
+> post() { curl -s --unix-socket $XDG_RUNTIME_DIR/salmon-toy.http -X POST --data-binary "$1" http://x/command; }
+> post 'up guests'                       # the bridge and three guests, answering ssh
+> post 'up up --primary A --seed B'      # the pair on top of them
+> post 'up writer'                       # a client that never stops; its lines are /events?stream=output
+> post 'up up --primary B'               # the demo ...
+> post 'down up --primary A --seed B'    # ... and the declaration it replaced
+> post 'up frozen --machine b'           # a fault: B's guest stops mid-sentence
+> post 'down frozen --machine b'         # and carries on
+
+@salmon-apps\/scripts\/qemu-pg-ha-serve.sh@ is those lines with names, and
+@resources\/postgres-pair.md@ ("Driving it live") says what to expect of each.
+Four seeds exist for this and mean little to a one-shot @run up@:
+
+* @guests@ is the machines without the pair, so that the pair can be
+  retired and declared again without a boot in between.
+* @writer@ is the client as a process the server /holds/ ('managed'), which
+  is the only kind that can keep writing across somebody else's command.
+* @frozen@ and @partition@ are faults as declarations: @up@ injects one,
+  @down@ heals it, and the loop's own state says which are in force.
+
 = What this needs of the host
 
 Two capabilities, granted once, and no root after @prereqs@:
@@ -68,11 +96,31 @@ when its auth file changed, give the application a role, a database and a
 @pg_hba.conf@ line -- is "SreBox.PostgresPairPrereqs", exactly as a
 deployment would use it.
 -}
-module QemuPgHaToy (main) where
+module QemuPgHaToy (
+    main,
+    Seed (..),
+    Side (..),
+    Spec (..),
+    Host (..),
+    Machine (..),
+    program,
+    thePair,
+    machines,
+    machineName,
+    machineAddr,
+    blackholeScript,
+    healScript,
+    WriterTally (..),
+    emptyTally,
+    tallyLine,
+) where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (forM_, unless, when)
+import Control.Exception (throwIO)
+import Control.Monad (forM_, unless, void, when)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Char (toLower)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
@@ -80,7 +128,7 @@ import Options.Applicative (auto, command, execParser, fullDesc, header, helper,
 import qualified Options.Applicative as Opt
 import Options.Generic (ParseRecord (..))
 import System.Exit (ExitCode (..))
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, addUTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getXdgDirectory, XdgDirectory (XdgConfig))
 import System.FilePath ((</>))
 import System.IO (hFlush, stdout)
@@ -91,6 +139,7 @@ import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode,
 import qualified Salmon.Builtin.CommandLine as CLI
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Binary as Binary
+import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Debian.Debootstrap as Debootstrap
 import Salmon.Builtin.Nodes.Debian.Package (Package (..))
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -129,6 +178,14 @@ data Seed
         , seedDiscard :: Maybe Side
         }
     | SeedClient {seedRoot :: FilePath, seedSeconds :: Int}
+    | -- | the machines alone: what `up` stands on, declared by itself
+      SeedGuests {seedRoot :: FilePath}
+    | -- | the client as a process `run serve` holds
+      SeedWriter {seedRoot :: FilePath}
+    | -- | a guest whose CPUs are stopped, for as long as this is declared
+      SeedFrozen {seedRoot :: FilePath, seedMachine :: Machine}
+    | -- | a guest that cannot reach another, for as long as this is declared
+      SeedPartition {seedRoot :: FilePath, seedMachine :: Machine, seedFrom :: Machine}
 
 -- | @--primary A@ is what it looks like.
 newtype Side = Side {unSide :: Pair.Side}
@@ -155,7 +212,22 @@ instance ParseRecord Seed where
                             (progDesc "the bridge, the three guests, and the pair -- re-run with a different --primary to move it")
                         )
                     , command "client" (info (SeedClient <$> rootOpt <*> secondsOpt) (progDesc "write through the bouncer until interrupted, then say what happened"))
+                    , command "guests" (info (SeedGuests <$> rootOpt) (progDesc "the bridge and the three guests, without the pair -- under `run serve`, what keeps them booted while the pair is retired and declared again"))
+                    , command "writer" (info (SeedWriter <$> rootOpt) (progDesc "(run serve only) a client the server holds: writes through the bouncer for as long as it is declared, and reports on the output stream"))
+                    , command
+                        "frozen"
+                        ( info
+                            (SeedFrozen <$> rootOpt <*> machineOpt "machine" "the guest to pause: a, b or bouncer")
+                            (progDesc "a fault: this guest's CPUs are stopped (qemu's monitor) -- `down` resumes it")
+                        )
+                    , command
+                        "partition"
+                        ( info
+                            (SeedPartition <$> rootOpt <*> machineOpt "machine" "the guest that stops answering: a, b or bouncer" <*> machineOpt "from" "the guest it stops answering")
+                            (progDesc "a fault: --machine drops everything it would send to --from, which cuts both directions -- `down` heals it")
+                        )
                     ]
+        machineOpt name what = option (Opt.maybeReader readMachine) (long name <> Opt.help what)
         rootOpt = strOption (long "root" <> Opt.help "where the guests' root filesystems live" <> value "/var/lib/salmon-toy-pg-ha")
         primaryOpt = option auto (long "primary" <> Opt.help "which guest should be the primary: A or B")
         cloneOpt = optional (option auto (long "seed" <> Opt.help "build this side's cluster from the other one (the first time, and after a standby falls too far behind)"))
@@ -202,20 +274,37 @@ data Spec
         { specPair :: Pair.Pair
         , specSeconds :: Int
         }
+    | Guests {specHost :: Host}
+    | Writer {specPair :: Pair.Pair}
+    | Frozen {specHost :: Host, specMachine :: Machine}
+    | Partition {specHost :: Host, specMachine :: Machine, specFrom :: Machine}
     deriving (Generic)
 
 instance FromJSON Spec
 instance ToJSON Spec
+
+{- | What booting a guest needs to know about /this/ machine: the same facts
+'Up' carries, as one value for the seeds that boot guests and declare no
+pair.
+-}
+data Host = Host
+    { hostRoot :: FilePath
+    , hostUser :: Text
+    , hostUnitDir :: FilePath
+    , hostRuntimeDir :: FilePath
+    , hostBoot :: [(Text, FilePath, FilePath)]
+    }
+    deriving (Generic)
+
+instance FromJSON Host
+instance ToJSON Host
 
 configure :: Configure IO Seed Spec
 configure = Configure $ \seed -> case seed of
     SeedPrereqs root -> Prereqs root <$> unprivilegedUser
     SeedClient root secs -> pure (RunClient (thePair root) secs)
     SeedUp root primary clone discard -> do
-        user <- Text.pack <$> getEffectiveUserName
-        unitDir <- getXdgDirectory XdgConfig "systemd/user"
-        runtimeDir <- maybe "/tmp" id <$> lookupEnv "XDG_RUNTIME_DIR"
-        boots <- traverse (resolveBoot root) machines
+        host <- hostFacts root
         pure
             ( Up
                 { specRoot = root
@@ -225,13 +314,27 @@ configure = Configure $ \seed -> case seed of
                         , Pair.pair_seed = fmap unSide clone
                         , Pair.pair_may_discard = fmap unSide discard
                         }
-                , specUser = user
-                , specUnitDir = unitDir
-                , specRuntimeDir = runtimeDir
-                , specBoot = boots
+                , specUser = host.hostUser
+                , specUnitDir = host.hostUnitDir
+                , specRuntimeDir = host.hostRuntimeDir
+                , specBoot = host.hostBoot
                 }
             )
+    SeedGuests root -> Guests <$> hostFacts root
+    SeedWriter root -> pure (Writer (thePair root))
+    SeedFrozen root m -> (\h -> Frozen h m) <$> hostFacts root
+    SeedPartition root m from -> do
+        when (m == from) $
+            fail "a partition is between two machines: --machine and --from name the same one"
+        (\h -> Partition h m from) <$> hostFacts root
   where
+    hostFacts root = do
+        user <- Text.pack <$> getEffectiveUserName
+        unitDir <- getXdgDirectory XdgConfig "systemd/user"
+        runtimeDir <- maybe "/tmp" id <$> lookupEnv "XDG_RUNTIME_DIR"
+        boots <- traverse (resolveBoot root) machines
+        pure (Host root user unitDir runtimeDir boots)
+
     resolveBoot root m = do
         there <- doesFileExist (rootfsOf root m </> "etc/issue")
         unless there $
@@ -259,14 +362,27 @@ unprivilegedUser = do
 program :: Track' Spec
 program = Track $ \spec -> case spec of
     Prereqs root owner -> prereqs root owner
-    Up root pair user unitDir runtimeDir boots -> demo root pair user unitDir runtimeDir boots
+    Up root pair user unitDir runtimeDir boots -> demo (Host root user unitDir runtimeDir boots) pair
     RunClient pair secs -> clientOp pair secs
+    Guests host -> guests host
+    Writer pair -> writerOp pair
+    Frozen host m -> frozen host m
+    Partition host m from -> partition host m from
 
 -------------------------------------------------------------------------------
 -- What the toy is made of: three guests on one bridge.
 
 data Machine = MachineA | MachineB | MachineBouncer
-    deriving (Eq, Show)
+    deriving (Eq, Show, Generic)
+
+instance FromJSON Machine
+instance ToJSON Machine
+
+-- | @--machine a@, by the name the guest is known by everywhere else.
+readMachine :: String -> Maybe Machine
+readMachine s = case [m | m <- machines, Text.unpack (machineName m) == map toLower s] of
+    (m : _) -> Just m
+    [] -> Nothing
 
 machines :: [Machine]
 machines = [MachineA, MachineB, MachineBouncer]
@@ -416,10 +532,12 @@ prereqs root owner =
 -------------------------------------------------------------------------------
 -- up: a bridge, three guests, and the pair on top of them.
 
-demo :: FilePath -> Pair.Pair -> Text -> FilePath -> FilePath -> [(Text, FilePath, FilePath)] -> Op
-demo root pair user unitDir runtimeDir boots =
+demo :: Host -> Pair.Pair -> Op
+demo host pair =
     canary root pair `inject` foldl inject (Prereqs.pairWithPrereqs reportPrint pair toyPrereqs) provisioned
   where
+    root = host.hostRoot
+
     {- Each machine's prerequisites wait for that machine's secrets, which
     wait for the machine. Said by naming the recipe's node again with one
     more dependency: it is the same node, so the walk merges the two. -}
@@ -431,19 +549,37 @@ demo root pair user unitDir runtimeDir boots =
                | b <- pair.pair_bouncers
                ]
 
-    secretsOn m = inventSecrets root m `inject` reachable root m
+    secretsOn m = inventSecrets root m `inject` guestUp host m
 
-    reachable r m = guestUp r m
+{- | The machines, and nothing on them: what 'demo' stands on, as a
+declaration of its own.
 
-    guestUp r m =
-        awaitSsh r m
-            `inject` ( Qemu.setup reportPrint silent systemctlTrack qemuTrack ipTrack (vmConfig r m user unitDir runtimeDir boots)
-                        `inject` trustsTheCa r m
-                        `inject` LinuxBridge.bridgeAddr silent ipTrack (LinuxBridge.Bridge bridgeName) bridgeCidr
-                     )
+Every node here is one 'demo' declares too, described the same way, so the
+two merge rather than collide. What it buys under @run serve@ is a second
+holder: with @guests@ declared, retiring the pair takes the pair down and
+leaves three machines booted for the next one.
+-}
+guests :: Host -> Op
+guests host =
+    op "toy-guests" (deps [guestUp host m | m <- machines]) $ \actions ->
+        actions
+            { help = "the toy's three guests, booted and answering"
+            , ref = mkRef "toy-guests" host.hostRoot
+            }
 
-vmConfig :: FilePath -> Machine -> Text -> FilePath -> FilePath -> [(Text, FilePath, FilePath)] -> Qemu.VmConfig
-vmConfig root m user unitDir runtimeDir boots =
+-- | A guest that answers ssh, on top of 'vmUnit'.
+guestUp :: Host -> Machine -> Op
+guestUp host m = awaitSsh host m `inject` vmUnit host m
+
+-- | The guest as a unit of the user's systemd: its tap, its bridge, and an sshd that trusts the toy's CA.
+vmUnit :: Host -> Machine -> Op
+vmUnit host m =
+    Qemu.setup reportPrint silent systemctlTrack qemuTrack ipTrack (vmConfig host m)
+        `inject` trustsTheCa host.hostRoot m
+        `inject` LinuxBridge.bridgeAddr silent ipTrack (LinuxBridge.Bridge bridgeName) bridgeCidr
+
+vmConfig :: Host -> Machine -> Qemu.VmConfig
+vmConfig (Host root user unitDir runtimeDir boots) m =
     Qemu.VmConfig
         { Qemu.vm_name = "salmon-toy-" <> machineName m
         , Qemu.vm_memory_mb = 512
@@ -503,23 +639,120 @@ trustsTheCa root m =
             `inject` Keys.sshKey silent keygenTrack (clientKey root)
             `inject` Keys.sshKey silent keygenTrack (caKey root)
 
--- | A guest is not up when qemu is running; it is up when it answers.
-awaitSsh :: FilePath -> Machine -> Op
-awaitSsh root m =
+{- | A guest is not up when qemu is running; it is up when it answers.
+
+A guest that is /paused/ ('frozen') will not answer however long anyone
+waits, and waiting is not free under @run serve@: every command stands the
+tending machines down first, and standing down waits for an @up@ in flight.
+So a paused guest fails this at once, saying why, rather than holding the
+line that would resume it behind two minutes of polling.
+-}
+awaitSsh :: Host -> Machine -> Op
+awaitSsh host m =
     op "toy-guest-up" nodeps $ \actions ->
         actions
             { help = machineName m <> " answers ssh"
             , ref = mkRef "toy-guest-up" (machineName m)
             , check = do
-                (code, _, _) <- sshToGuest root m "true"
-                pure (if code == ExitSuccess then Success else Failure (machineName m <> " is not answering yet"))
+                paused <- isPaused
+                if paused
+                    then pure (Failure (machineName m <> " is paused"))
+                    else do
+                        (code, _, _) <- sshToGuest root m "true"
+                        pure (if code == ExitSuccess then Success else Failure (machineName m <> " is not answering yet"))
             , up = poll (60 :: Int)
             }
   where
+    root = host.hostRoot
+    isPaused = (== Just Qemu.Paused) <$> Qemu.runState (vmConfig host m).vm_monitor_socket
     poll 0 = fail (Text.unpack (machineName m) <> " never answered ssh")
     poll n = do
+        paused <- isPaused
+        when paused $
+            fail (Text.unpack (machineName m) <> " is paused (see `frozen`): it will not answer until it is resumed")
         (code, _, _) <- sshToGuest root m "true"
         unless (code == ExitSuccess) (threadDelay 2000000 >> poll (n - 1))
+
+-------------------------------------------------------------------------------
+-- Faults, as declarations: `up` injects one, `down` heals it.
+
+{- | This guest's CPUs are stopped, through qemu's monitor.
+
+The machine its peers see is one that went silent without closing anything:
+no FIN, no RST, a replication connection that is simply never written to
+again. Resumed, it carries on from the instruction it stopped at -- which,
+for a primary whose standby was promoted in the meantime, is the only way
+this toy has of producing two primaries.
+
+It depends on the unit and not on the guest answering: the monitor is
+qemu's, and a guest that is about to be paused does not need to have booted.
+-}
+frozen :: Host -> Machine -> Op
+frozen host m =
+    op "toy-frozen" (deps [vmUnit host m]) $ \actions ->
+        actions
+            { help = machineName m <> " is paused"
+            , notes = ["a fault, for as long as it is declared: retiring it resumes the guest"]
+            , ref = mkRef "toy-frozen" (machineName m)
+            , check = do
+                st <- Qemu.runState sock
+                pure $ case st of
+                    Just Qemu.Paused -> Success
+                    Just _ -> Failure (machineName m <> " is running")
+                    Nothing -> Unknown
+            , up = do
+                ok <- Qemu.pause sock
+                unless ok (fail ("could not reach the monitor of " <> Text.unpack (machineName m) <> " at " <> sock))
+            , -- a monitor nobody answers is a guest that is not running, and
+              -- a guest that is not running is not paused: nothing to undo,
+              -- and failing here would hold up the unit's own teardown.
+              down = void (Qemu.resume sock)
+            }
+  where
+    sock = (vmConfig host m).vm_monitor_socket
+
+{- | @machine@ sends nothing to @from@: a blackhole route for that one
+address, which cuts both directions since no answer leaves either.
+
+A route rather than a firewall rule because @ip@ is in every rootfs and
+@nft@ is not, and because @ip route replace@ is a set: applying it twice is
+applying it once. It is not persistent, so a guest that reboots comes back
+healed -- and this node's check is what says so.
+
+The host is not a thing a guest can be cut off from here: the command that
+would heal it has to travel the path it cut.
+-}
+partition :: Host -> Machine -> Machine -> Op
+partition host m from =
+    op "toy-partition" (deps [guestUp host m]) $ \actions ->
+        actions
+            { help = machineName m <> " cannot reach " <> machineName from
+            , notes = ["a fault, for as long as it is declared: retiring it removes the route"]
+            , ref = mkRef "toy-partition" (machineName m, machineName from)
+            , check = do
+                (code, _, _) <- sshToGuest root m (blackholeProbe from)
+                pure $ case code of
+                    ExitSuccess -> Success
+                    ExitFailure 255 -> Unknown
+                    ExitFailure _ -> Failure (machineName m <> " can reach " <> machineName from)
+            , up = do
+                (code, out, err) <- sshToGuest root m (blackholeScript from)
+                unless (code == ExitSuccess) $
+                    fail ("cutting " <> Text.unpack (machineName m) <> " off: " <> out <> err)
+            , down = do
+                (code, out, err) <- sshToGuest root m (healScript from)
+                -- 255 is ssh not connecting: a machine that is gone has no
+                -- routes left to remove, and must not block its own teardown.
+                unless (code == ExitSuccess || code == ExitFailure 255) $
+                    fail ("healing " <> Text.unpack (machineName m) <> ": " <> out <> err)
+            }
+  where
+    root = host.hostRoot
+
+blackholeScript, healScript, blackholeProbe :: Machine -> String
+blackholeScript from = "ip route replace blackhole " <> Text.unpack (machineAddr from) <> "/32"
+healScript from = "ip route del blackhole " <> Text.unpack (machineAddr from) <> "/32 2>/dev/null || true"
+blackholeProbe from = "ip -o route show type blackhole | grep -qw " <> Text.unpack (machineAddr from)
 
 -------------------------------------------------------------------------------
 -- The secrets a deployment would have provisioned, and this toy invents.
@@ -683,6 +916,118 @@ runClient pair seconds = do
                     (if acked then failed else i : failed)
                     (if acked then firstError else maybe (Just err) Just firstError)
 
+{- | The client as something @run serve@ holds: it writes for as long as it
+is declared, and says how it is going on the node's output.
+
+'clientOp' cannot be this. Its @up@ returns when its time is up, and a pass
+waits for it -- so under @serve@ the line that would move the primary sits
+in the inbox until the client it was meant to move it under has finished. A
+'managed' action is the other kind: the loop keeps it running across
+commands and across passes, and every line it writes is an @output@ event
+(@GET \/events?stream=output@) beside the node's own ring in @\/dag@.
+
+It says something every 'tallyEvery' seconds, and at once when inserts
+start failing or stop failing, since those two lines are what a switchover
+looks like from a client. There is no final count, because there is no end.
+-}
+writerOp :: Pair.Pair -> Op
+writerOp pair =
+    op "toy-writer" nodeps $ \actions ->
+        actions
+            { help = "keeps writing through the bouncer, and says how it is going"
+            , notes = ["held by `run serve`; its lines are the output stream"]
+            , ref = mkRef "toy-writer" pair.pair_name
+            , managed = Just (runWriter pair)
+            , up = throwIO (Daemon.NeedsSupervisor "the toy's writer")
+            , -- nothing holds it once its machine is gone
+              down = pure ()
+            }
+
+-- | What the writer has seen so far.
+data WriterTally = WriterTally
+    { tallyAcked :: !Int
+    , tallyFailed :: !Int
+    , tallyMissing :: !(Maybe Int)
+    -- ^ acknowledged rows not there at the last audit; 'Nothing' when the audit could not be run
+    , tallyLast :: !Int
+    -- ^ the last row number tried
+    }
+    deriving (Eq, Show)
+
+emptyTally :: WriterTally
+emptyTally = WriterTally 0 0 (Just 0) 0
+
+-- | The three numbers the one-shot client prints at the end, as one line.
+tallyLine :: WriterTally -> Text
+tallyLine t =
+    Text.pack $
+        "acknowledged "
+            <> show t.tallyAcked
+            <> ", errors "
+            <> show t.tallyFailed
+            <> ", acknowledged rows missing "
+            <> maybe "unknown (the audit could not read the table)" show t.tallyMissing
+            <> " (last row "
+            <> show t.tallyLast
+            <> ")"
+
+-- | Seconds between two tally lines. By the clock and not by the insert: a failing insert can take seconds to fail.
+tallyEvery :: NominalDiffTime
+tallyEvery = 5
+
+runWriter :: Pair.Pair -> Output -> IO ExitCode
+runWriter pair out = do
+    start <- highestSoFar bouncer
+    out (Text.pack ("writing through " <> Text.unpack bouncer.bouncer_ssh_host <> ":" <> show bouncer.bouncer_listen_port <> ", from row " <> show (start + 1)))
+    now <- getCurrentTime
+    go start Set.empty emptyTally{tallyLast = start} True now
+  where
+    bouncer = case pair.pair_bouncers of
+        (b : _) -> b
+        [] -> error "the toy always declares a bouncer"
+
+    go n acked tally healthy lastLine = do
+        let i = n + 1
+        (ok, err) <- insertOne bouncer i
+        let acked' = if ok then Set.insert i acked else acked
+            tally' =
+                tally
+                    { tallyAcked = tally.tallyAcked + (if ok then 1 else 0)
+                    , tallyFailed = tally.tallyFailed + (if ok then 0 else 1)
+                    , tallyLast = i
+                    }
+        when (healthy && not ok) $
+            out (Text.pack ("insert " <> show i <> " failed: " <> takeWhile (/= '\n') err))
+        when (not healthy && ok) $
+            out (Text.pack ("insert " <> show i <> " acknowledged: writing again"))
+        -- a table that came back with rows this run never wrote (an earlier
+        -- run's, behind a bouncer that was not there when this one started)
+        -- would otherwise be one duplicate-key error per such row.
+        next <- if ok then pure i else max i <$> highestSoFar bouncer
+        now <- getCurrentTime
+        (tally'', lastLine') <-
+            if diffUTCTime now lastLine >= tallyEvery
+                then do
+                    audited <- audit acked' tally'
+                    out (tallyLine audited)
+                    pure (audited, now)
+                else pure (tally', lastLine)
+        threadDelay 200000
+        go next acked' tally'' ok lastLine'
+
+    audit acked tally = do
+        present <- rowsAmong bouncer
+        pure tally{tallyMissing = fmap (\there -> Set.size (Set.difference acked there)) present}
+
+-- | The rows that are there, or 'Nothing' if nobody could be asked.
+rowsAmong :: Pair.Bouncer -> IO (Maybe (Set.Set Int))
+rowsAmong b = do
+    (code, out, _) <- psqlThroughBouncer b ["-tAXc", "SELECT n FROM canary"]
+    pure $
+        if code /= ExitSuccess
+            then Nothing
+            else Just (Set.fromList [n | w <- words out, [(n, _)] <- [reads w]])
+
 insertOne :: Pair.Bouncer -> Int -> IO (Bool, String)
 insertOne b i = do
     (code, _, err) <-
@@ -706,7 +1051,15 @@ psqlThroughBouncer b args = do
     environment <- getEnvironment
     let cp =
             (proc "psql" (connArgs <> args))
-                { env = Just (("PGPASSWORD", Text.unpack appPassword) : filter ((/= "PGPASSWORD") . fst) environment)
+                { env =
+                    Just
+                        ( ("PGPASSWORD", Text.unpack appPassword)
+                            -- a bouncer whose machine is paused or gone answers
+                            -- nothing at all, and libpq would wait out the
+                            -- kernel's two minutes of SYN retries per insert.
+                            : ("PGCONNECT_TIMEOUT", "3")
+                            : filter ((`notElem` ["PGPASSWORD", "PGCONNECT_TIMEOUT"]) . fst) environment
+                        )
                 }
     readCreateProcessWithExitCode cp ""
   where
