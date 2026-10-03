@@ -823,6 +823,28 @@ lbTests =
         mapM_
             (\w -> assertBool (w <> "\n" <> problems) (w `isInfixOf` problems))
             ["declared twice: slow", "undeclared backend service: nope", "names no host", "names no path", "two rules: app.example.org", "cannot share a proxy", "c names no domain", "must be positive: 0"]
+    , testCase "a group's named ports are set once, as the union over the services naming it" $ do
+        let sc = createScript shared
+        let sets = [l | l <- lines sc, "set-named-ports" `isInfixOf` l]
+        assertEqual sc 1 (length sets)
+        mapM_ (\w -> assertBool (w <> "\n" <> unlines sets) (any (w `isInfixOf`) sets)) ["web-a-backend:4272", "web-b-backend:4273"]
+        -- and each service is created on, and kept on, its own port name
+        mapM_
+            (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+            [ "backend-services create 'web-a-backend' --project=\"$PROJECT\" --region=\"$REGION\" --protocol=HTTP --port-name='web-a-backend'"
+            , "backend-services update 'web-a-backend' --project=\"$PROJECT\" --region=\"$REGION\" --port-name='web-a-backend'"
+            , "backend-services update 'web-b-backend' --project=\"$PROJECT\" --region=\"$REGION\" --port-name='web-b-backend'"
+            ]
+        assertBool sc (["set-named-ports 'ig'", "backend-services update 'web-a-backend'"] `inOrder` sc)
+    , testCase "a Cloud Run service is given no port name" $ do
+        let sc = createScript full
+        assertBool sc (not ("--port-name='web-api-backend'" `isInfixOf` sc))
+    , testCase "one port name on two ports of a group is a problem" $ do
+        let twice = LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b")
+        let bad = alb{LoadBalancing.albBackends = [twice [8080], twice [8081]]}
+        let problems = unlines (map Text.unpack (LoadBalancing.albProblems bad))
+        assertBool problems ("named port web-backend" `isInfixOf` problems)
+        assertEqual "" [] (LoadBalancing.albProblems shared)
     , testCase "httpLoadBalancer is the plain balancer" $
         assertEqual
             ""
@@ -883,6 +905,44 @@ lbTests =
                 assertEqual "" "" out
                 made <- mutations
                 assertBool (unlines made) (not (any ("instance-groups delete" `isInfixOf`) made))
+        , testCase "two services on one instance group each reach their own port" $
+            -- The bug this pins: every backend service used the default port
+            -- name, http, and every attach reset the group's http to its own
+            -- port, so all of them sent to whichever service came last.
+            withFakeGcloud $ \run _ -> do
+                (code, _, err) <- run (createScript shared)
+                assertEqual err ExitSuccess code
+                let portOf svc =
+                        run
+                            ( "n=$(gcloud compute backend-services describe "
+                                <> svc
+                                <> " --format='value(portName)'); gcloud compute instance-groups get-named-ports ig | awk -v n=\"$n\" '$1==n{print $2}'"
+                            )
+                (_, a, _) <- portOf "web-a-backend"
+                (_, b, _) <- portOf "web-b-backend"
+                assertEqual "a" "4272\n" a
+                assertEqual "b" "4273\n" b
+                (code1, out1, err1) <- run (Text.unpack (LoadBalancing.renderLbCheckScript shared))
+                assertEqual (out1 <> err1) Success (LoadBalancing.interpretLbCheck code1 (Text.pack out1))
+        , testCase "a group's named ports somebody else set survive, and a second up changes nothing" $
+            withFakeGcloud $ \run _ -> do
+                _ <- run "gcloud compute instance-groups set-named-ports ig --named-ports=other:9000,web-a-backend:1"
+                _ <- run (createScript shared)
+                _ <- run (createScript shared)
+                (_, out, _) <- run "gcloud compute instance-groups get-named-ports ig | tr '\\t' ':' | sort"
+                assertEqual "" ["other:9000", "web-a-backend:4272", "web-b-backend:4273"] (lines out)
+        , testCase "the check names a backend service on the wrong port name and a group missing a named port" $
+            withFakeGcloud $ \run _ -> do
+                _ <- run (createScript shared)
+                _ <- run "gcloud compute backend-services update web-a-backend --port-name=http"
+                _ <- run "gcloud compute instance-groups set-named-ports ig --named-ports=web-a-backend:4272,web-b-backend:9999"
+                (code, out, _) <- run (Text.unpack (LoadBalancing.renderLbCheckScript shared))
+                case LoadBalancing.interpretLbCheck code (Text.pack out) of
+                    Failure t -> do
+                        assertBool (Text.unpack t) ("port-name web-a-backend on web-a-backend" `isInfixOf` Text.unpack t)
+                        assertBool (Text.unpack t) ("named-port web-b-backend:4273 on instance-group ig" `isInfixOf` Text.unpack t)
+                        assertBool (Text.unpack t) (not ("named-port web-a-backend:4272" `isInfixOf` Text.unpack t))
+                    other -> assertBool (show other) False
         , testCase "a plain balancer goes up, checks and comes down the same way" $
             withFakeGcloud $ \run _ -> do
                 (code, _, err) <- run (createScript alb)
@@ -931,6 +991,19 @@ lbTests =
                             }
                         ""
             body run (lines <$> (readFile logFile >>= \c -> length c `seq` pure c))
+    -- one VM, one instance group, two services on two ports
+    shared =
+        alb
+            { LoadBalancing.albBackends = []
+            , LoadBalancing.albServices =
+                [ LoadBalancing.BackendService n [LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b") [p]] (Just (LoadBalancing.HealthCheck ("hc-" <> n) p)) Nothing
+                | (n, p) <- [("a", 4272), ("b", 4273)]
+                ]
+            , LoadBalancing.albHostRules =
+                [ LoadBalancing.HostRule [n <> ".example.org"] (LoadBalancing.NamedService n) []
+                | n <- ["a", "b"]
+                ]
+            }
     full =
         alb
             { LoadBalancing.albBackends = [LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b") [8080]]
@@ -990,12 +1063,14 @@ fakeGcloud =
         , "S=\"$FAKE_GCLOUD_STATE\""
         , "coll=\"$2\"; verb=\"$3\"; name=\"$4\""
         , "if [ \"$verb\" = create ] && [ \"$name\" = tcp ]; then name=\"$5\"; fi"
-        , "format=''; group=''; timeout=''"
+        , "format=''; group=''; timeout=''; portname=''; namedports=''"
         , "for a in \"$@\"; do case \"$a\" in"
         , "  --format=*) format=\"${a#--format=}\";;"
         , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
         , "  --network-endpoint-group=*) group=\"/networkEndpointGroups/${a#--network-endpoint-group=}\";;"
         , "  --timeout=*) timeout=\"${a#--timeout=}\";;"
+        , "  --port-name=*) portname=\"${a#--port-name=}\";;"
+        , "  --named-ports=*) namedports=\"${a#--named-ports=}\";;"
         , "esac; done"
         , "f=\"$S/$coll.$name\""
         , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
@@ -1006,17 +1081,20 @@ fakeGcloud =
         , "    case \"$format\" in"
         , "      'value(backends[].group)') paste -sd';' \"$f.backends\" 2>/dev/null || true;;"
         , "      'value(timeoutSec)') cat \"$f.timeout\" 2>/dev/null || echo 30;;"
+        , "      'value(portName)') cat \"$f.portname\" 2>/dev/null || echo http;;"
         , "      'value(managed.state)') echo ACTIVE;;"
         , "      'value(hostRules[].hosts)') grep -o '\"hosts\":\\[[^]]*\\]' \"$f\" | sed -e 's/\"hosts\"://' -e 's/[]\\[\"]//g' | paste -sd';' || true;;"
         , "      'value(IPAddress)') echo 203.0.113.7;;"
         , "    esac;;"
-        , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\";;"
+        , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\"; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi;;"
         , "  import) mutate; cat > \"$f\";;"
-        , "  update) [ -e \"$f\" ] || exit 1; mutate; echo \"$timeout\" > \"$f.timeout\";;"
+        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi;;"
         , "  add-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" 2>/dev/null && { echo 'already a backend' >&2; exit 1; }; mutate; echo \"$group\" >> \"$f.backends\";;"
-        , "  set-named-ports) mutate;;"
+        , -- like the real one, it replaces the group's whole set
+          "  set-named-ports) mutate; printf '%s\\n' \"$namedports\" | tr ',' '\\n' | tr ':' '\\t' > \"$FAKE_GCLOUD_LOG.ports.$name\";;"
+        , "  get-named-ports) cat \"$FAKE_GCLOUD_LOG.ports.$name\" 2>/dev/null || true;;"
         , "  get-health) echo 'HEALTHY;HEALTHY';;"
-        , "  delete) [ -e \"$f\" ] || exit 1; mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\";;"
+        , "  delete) [ -e \"$f\" ] || exit 1; mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\";;"
         , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
         , "esac"
         ]
