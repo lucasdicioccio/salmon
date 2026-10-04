@@ -3460,6 +3460,39 @@
         ],
         "description": ""
       },
+      "Node_log": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "output"
+          },
+          "kind": {
+            "const": "log"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "stdout",
+              "stderr",
+              "message"
+            ]
+          },
+          "line": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "channel",
+          "line"
+        ],
+        "description": "One line a node said while working: a line of the output of a command it runs with streaming chosen (`stdout`, `stderr`), or a progress message of its own (`message`). Emitted while the node's `up` is still running, during a pass or under tending; filed on the `output` stream beside a held action's lines, names its node by `ref` alone, and carries no `origin`."
+      },
       "Report": {
         "oneOf": [
           {
@@ -3473,9 +3506,12 @@
           },
           {
             "$ref": "#/components/schemas/FollowReport"
+          },
+          {
+            "$ref": "#/components/schemas/Node_log"
           }
         ],
-        "description": "One report, tagged by `stream` (who reported: `serve` the loop, `updown` a convergence pass, `upkeep` a tending machine, `follow` the pull-mode fetcher) and `kind` (the constructor, kebab-cased). Exactly what `--json` prints, one object per line. Report text is public and carried verbatim.",
+        "description": "One report, tagged by `stream` (who reported: `serve` the loop, `updown` a convergence pass, `upkeep` a tending machine, `follow` the pull-mode fetcher, `output` a node itself: a held action's lines and what any node says while it works) and `kind` (the constructor, kebab-cased). Exactly what `--json` prints, one object per line. Report text is public and carried verbatim.",
         "discriminator": {
           "propertyName": "stream"
         }

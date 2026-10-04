@@ -4,6 +4,7 @@ import qualified Test.AptRepositorySpec as AptRepositorySpec
 import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
+import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
@@ -116,6 +117,7 @@ main =
             , ClientModelSpec.tests
             , ConcurrentSpec.tests
             , DaemonSpec.tests
+            , BinaryOutputSpec.tests
             , DagSpec.tests
             , AptRepositorySpec.tests
             , DebianPackageSpec.tests

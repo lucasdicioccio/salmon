@@ -157,16 +157,22 @@ the tag. 'defaultBuildOptions' is what 'buildImage' has always done.
 * 'buildTarget': the stage of a multi-stage Containerfile to stop at
   (@--target@). 'Nothing' builds the last stage. Several images built from
   one file are several nodes, one 'TagName' each.
+* 'buildOutput': where the build's output goes while it runs (see
+  'Binary.Routing'). 'Binary.captured', the default, holds it until the build
+  ends, as before; 'Binary.streamed' reports it line by line under the node,
+  which is what makes a long build something to follow. It changes nothing
+  about the command, so it is not part of the node's description.
 -}
 data BuildOptions
     = BuildOptions
     { buildContext :: Maybe FilePath
     , buildTarget :: Maybe Text
+    , buildOutput :: Binary.Routing
     }
     deriving (Eq, Ord, Show)
 
 defaultBuildOptions :: BuildOptions
-defaultBuildOptions = BuildOptions Nothing Nothing
+defaultBuildOptions = BuildOptions Nothing Nothing Binary.captured
 
 {- | Builds an image from a Containerfile, with that file's own directory as
 the build context and no @--target@: 'buildImageWith' 'defaultBuildOptions'.
@@ -187,7 +193,7 @@ seen as a differing representative.
 buildImageWith :: Reporter Report -> Track' (Binary "podman") -> BuildOptions -> FS.File "containerfile" -> TagName -> Op
 buildImageWith r podman opts containerfile tagname =
     FS.withFile containerfile $ \containerfilepath ->
-        withBinary podman podmanCommand (BuildWith opts containerfilepath tagname) $ \build ->
+        Binary.withBinaryWith opts.buildOutput podman podmanCommand (BuildWith opts containerfilepath tagname) $ \build ->
             op "podman-build" (deps []) $ \actions ->
                 actions
                     { help = "builds a podman image in container path and tag it"

@@ -167,7 +167,7 @@ withHost root host sinkPath labels body = do
                 , Follow.followVerify = Follow.noVerifier
                 }
         followed = Follow.followed pk modeVar appliedVar
-        own = Tagged.reportTexts serveReporter nodeReporter silent followReporter
+        own = Tagged.reportTexts serveReporter nodeReporter silent followReporter silent
         cfg = StatusSink.Config{StatusSink.configPath = sinkPath, StatusSink.configInterval = 1000000, StatusSink.configHost = host}
         driver =
             Driver

@@ -53,6 +53,7 @@ library
                    , Salmon.Builtin.Helpers
                    , Salmon.Builtin.Migrations
                    , Salmon.Builtin.Nodes.Bash
+                   , Salmon.Builtin.NodeLog
                    , Salmon.Builtin.Nodes.Binary
                    , Salmon.Builtin.Nodes.Cabal
                    , Salmon.Builtin.Nodes.Daemon

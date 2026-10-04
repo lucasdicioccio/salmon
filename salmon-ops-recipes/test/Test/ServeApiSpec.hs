@@ -7,7 +7,7 @@ serves at @GET \/openapi.json@.
 Three things are compared with the document, none of them by hand:
 
 * every golden of "Test.ReportJsonSpec" (one per constructor of all four
-  report streams), as the object @--json@ prints and as the @data:@ of an
+  report streams, and a node's own lines), as the object @--json@ prints and as the @data:@ of an
   event, and the status sink's document;
 * the set of @(stream, kind)@ the document lists, with the set the goldens
   cover, both ways: a report constructor with no schema, or a schema for one
@@ -115,7 +115,7 @@ documentKinds =
     nub . sort $
         [ (s, k)
         | (name, schema) <- schemaNames
-        , any (`Text.isPrefixOf` name) ["UpDown_", "Upkeep_", "Serve_", "Follow_"]
+        , any (`Text.isPrefixOf` name) ["UpDown_", "Upkeep_", "Serve_", "Follow_", "Node_"]
         , Just props <- [field "properties" schema]
         , Just (String s) <- [field "stream" props >>= field "const"]
         , Just (String k) <- [field "kind" props >>= field "const"]

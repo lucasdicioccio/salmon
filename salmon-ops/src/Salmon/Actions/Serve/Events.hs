@@ -296,6 +296,7 @@ streamOf body = case body of
     Reported (FromUpkeep (Upkeep.Output _ _)) -> "output"
     Reported (FromUpkeep _) -> "upkeep"
     Reported (FromFollow _) -> "follow"
+    Reported (FromNode _) -> "output"
     Enqueued _ -> "server"
 
 -------------------------------------------------------------------------------

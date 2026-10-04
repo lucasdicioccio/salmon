@@ -674,7 +674,10 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   that filters to `upkeep` never reads a line. Not printed as text on a terminal. The web UI's dock
   (`ui.js`: `toggleTail`, `applyOutput`) pins up to four windows, remembers the pinned refs in
   `localStorage`, seeds a window from the ring only while it is empty, and closes one whose node is
-  gone from the next `/dag`. Only held actions produce lines: a one-shot `up`'s narration is not output.
+  gone from the next `/dag`. The same stream carries a second kind, `log` (`{stream: "output", kind: "log",
+  ref, channel, line}`, `Tagged.FromNode`): a line any node said while its `up` was running, see
+  `Builtin/NodeLog.hs` below. Those have no `node` object, no `origin`, are never collected by a sync
+  `POST`, and are not in the ring `/dag` seeds a window from (the ring is a held action's).
   Test/ServeEventsSpec.hs`: a
   seeded (`SALMON_EVENTS_SEED`) mid-pass disconnect-and-`?since=` equals an uninterrupted
   subscription; strictly increasing numbers across the three streams with `supervise on` and
@@ -946,6 +949,39 @@ effect site; and the upload's `down` does not throw on ssh exit 255, because a f
 teardown of the machine the file is on. `salmon-gcp-toy` tier 2 uses the upload through `vmp_beforeCall`.
 `Test/SecretDeliverySpec.hs` runs the remote scripts under a local `sh`; neither transport has been run against a
 real machine.
+
+`Builtin/NodeLog.hs` is the per-node logging event: a `Line` (the node's `Ref`, a `Channel` — `Stdout`, `Stderr`,
+`Message` — and one line of text) that a node `emit`s, or `say`s for a progress message of its own, *while its `up` is
+still running*. `Extension.up` is `IO ()` and a recipe is a `directive -> Op` that does not know which driver will run
+it, so the listener is found through one process-wide registry (`withSink`, several at once, each seeing every line,
+removed on the way out) rather than threaded through 106 `up` sites; with no sink registered `emit` does nothing.
+`CommandLine` registers one for `run up`/`run down` (the pass's own `Reporter Tagged`, so text or `--json`) and for
+`run serve` (that, plus `Http.serverNodeLogReporter` onto `/events`). On the wire it is `Tagged.FromNode`: stream
+`output`, kind `log`; as text, `  [<short ref>] out| line` (`err|`, `msg|`). Lines are handed to sinks under one lock
+but are not serialised against the drivers' own reports, so a sink writes each line in one call. What is said is public
+like report text: never a secret. `run up`/`run down`/`run serve` also set stdout to line buffering, since a pass
+redirected to a file otherwise reported in 8k blocks. Not done: `--listen` clients do not receive these lines, and the
+line carries no shorthand (only the ref).
+
+`Binary.Routing` is where a command's stdout and stderr go, a `Sink` each, chosen per command by the node author:
+`Capture` (whole, in memory, until exit: the default, and what `withBinary`/`withBinaryStdin`/`untrackedExec` still
+do, through the same `readCreateProcessWithExitCode`), `Stream n` (each line reported as it is read *and* the last `n`
+bytes of whole lines kept for the final report, `tailOf`), `Discard` (`/dev/null`) and `AppendTo FILE`. `captured`,
+`streamed` (64 KiB tails), `streamedKeeping`, `discarded`, `appendedTo` are the usual values; `withBinaryWith`,
+`withBinaryStdinWith`, `untrackedExecWith` take one, and `runRouted` is the process runner under them (both pipes
+drained while the process runs, a command that never reads its stdin is not a failure, cancellation terminates it
+through `withCreateProcess`). Load-bearing: **there is no global switch**, because a command whose output can hold a
+secret (a CLI printing a token, a `psql` echoing a statement) must stay `captured` and only its author knows; a streamed
+line is a `CommandOutput` report from `untrackedExecWith`, but under `withBinary*With` it goes to `NodeLog` under the
+enclosing node's ref and is **not** handed to the recipe's reporter as well (which still gets `CommandStart` and a
+`CommandStopped` carrying the tail), so a printing reporter does not print each line twice; a streamed tail always
+ends in a newline and drops `\r`, so a caller parsing output should not stream it; `AppendTo` the same file for both
+streams opens it once. No existing node changed what it does; the one opt-in so far is `Podman.BuildOptions.buildOutput`
+(default `captured`, not part of `notes`). `CommandIO`/`withBinaryIO` is untouched: its caller already owns the
+`CreateProcess` streams. `Test/BinaryOutputSpec.hs` runs it against `/bin/sh` (a line arriving while the command is
+held open, a 1.4 MB stream kept as 64 bytes, each sink, a node's lines reaching a sink under its ref) and
+`Test/ServeEventsSpec.hs` reads a node's lines off `/events`; the `CommandLine` wiring itself (the text line under
+`run up`, a real long build under `serve`) has not been run by a test.
 
 `Podman.buildImage` builds with the Containerfile's own directory as context (the build runs *in* that directory, no
 context argument) and no `--target`; `Podman.buildImageWith` takes a `BuildOptions` for the two cases that does not
@@ -1508,8 +1544,10 @@ about one node, and named fields; a nested report (`Upkeep.Acted`, `Serve.Tended
 inner instance under `report`. Report text is public and encoded verbatim, per the spec's
 decision. `Test/ReportJsonSpec.hs` holds a golden object per constructor of all four streams, and one for
 the status sink document.
+A fifth constructor, `FromNode`, carries what a node says while it works (`Builtin/NodeLog.hs`), on the `output` stream.
 Not covered: a node's own `Binary.Report`s (handed a `reportPrint` by the recipe, printed as
-text regardless), and sequence numbers (a later milestone).
+text regardless; the lines of a *streamed* command are the exception, they are `FromNode`), and sequence numbers
+(a later milestone).
 
 `run serve` is the odd one out: it reads *seeds* (not a directive) as command lines, one
 declaration per line, and keeps converging a `Salmon.Actions.Serve.World` across all of them —

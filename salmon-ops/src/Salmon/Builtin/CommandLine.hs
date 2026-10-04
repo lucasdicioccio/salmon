@@ -21,7 +21,7 @@ import Options.Applicative
 import qualified Options.Applicative
 import Options.Generic
 import System.Exit (exitFailure)
-import System.IO (hPutStrLn, stderr, stdin, stdout)
+import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, stderr, stdin, stdout)
 
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Concurrency as Concurrency
@@ -54,6 +54,7 @@ import Salmon.Actions.UpDown as UpDown hiding (Failure, Success)
 import Salmon.Builtin.Extension
 import qualified Salmon.Op.Window as Window
 import Salmon.Reporter
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import qualified Salmon.Reporter.Tagged as Tagged
 
 data Command seed
@@ -748,10 +749,10 @@ execCommandOrSeedWithRewrites ::
 execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     case cmd of
         (Run (RunUp Nothing _ fmt wins override)) -> do
-            result <- withGraph (runUp (updownFor fmt) (windowsFor wins override) Set.empty)
+            result <- listening fmt $ withGraph (runUp (updownFor fmt) (windowsFor wins override) Set.empty)
             when (result == Just False) exitFailure
         (Run (RunUp (Just planPath) forceStale fmt wins override)) -> do
-            result <- withGraphAndBytes $ \dirBytes op -> do
+            result <- listening fmt $ withGraphAndBytes $ \dirBytes op -> do
                 planBytes <- LBysteString.readFile planPath
                 case eitherDecode planBytes of
                     Left err -> do
@@ -781,7 +782,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                         exitFailure
             when (result == Just False) exitFailure
         (Run (RunDown fmt)) -> do
-            result <- withGraph (runDown (updownFor fmt))
+            result <- listening fmt $ withGraph (runDown (updownFor fmt))
             when (result == Just False) exitFailure
         (Run RunTree) -> do
             -- (R4): the computed 'Dag' is what @run up@ would actually walk
@@ -792,6 +793,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
         (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions)) -> do
+            reportByLine
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let own = taggedFor fmt
             -- the network listener is refused before anything is bound or
@@ -925,7 +927,11 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                             traverse_ (`Http.serverObserver` acc) mserver
                             traverse_ (`StatusSink.sinkObserver` acc) msink
                         more = foldMap (pure . Socket.listenerProducer) mlistener <> foldMap (pure . Http.serverProducer) mserver
-                    void $
+                        -- what a node says while it works: to the loop's own
+                        -- reporter (text or JSON, as `fmt` says) and, with a
+                        -- server, to /events on the `output` stream
+                        nodeLogR = maybe id (\srv nr -> reportBoth nr (Http.serverNodeLogReporter srv)) mserver (Tagged.nodeLogStream tagged)
+                    void . NodeLog.withSink nodeLogR $
                         Serve.serveObserved
                             observe
                             rewrites
@@ -983,7 +989,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     that @--json@ covers it and a status sink can watch it. -}
     taggedFor :: ReportFormat -> Reporter Tagged.Tagged
     taggedFor fmt = case fmt of
-        ReportText -> Tagged.reportTexts serveR r silent Follow.reportText
+        ReportText -> Tagged.reportTexts serveR r silent Follow.reportText (Tagged.reportNodeLogText stdout)
         ReportJson -> Tagged.reportJSONLines stdout
 
     -- | The tagged reporter split contravariantly into the two the drivers take.
@@ -992,6 +998,21 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
 
     updownFor :: ReportFormat -> Reporter (UpDown.Report Extension)
     updownFor = snd . reportersOver . taggedFor
+
+    {- | Standard output flushed at every line whatever it is attached to. A
+    terminal already is; a file or a pipe is block-buffered by default, so
+    the text reports of a pass redirected to a log arrived in 8k chunks,
+    long after the nodes they are about. -}
+    reportByLine :: IO ()
+    reportByLine = hSetBuffering stdout LineBuffering
+
+    {- | A one-shot pass with a listener for what its nodes say while they
+    work ("Salmon.Builtin.NodeLog"), printed or JSON-encoded like every
+    other report of the pass. -}
+    listening :: ReportFormat -> IO a -> IO a
+    listening fmt act = do
+        reportByLine
+        NodeLog.withSink (Tagged.nodeLogStream (taggedFor fmt)) act
 
     {- | @run up@: everything in this one directive's graph is wanted up, so
     that is the rewrites' 'phaseDesired'. @excluded@ (a plan's skipped

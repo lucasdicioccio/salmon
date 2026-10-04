@@ -37,6 +37,7 @@ import qualified Salmon.Actions.Follow.Scheduler as Scheduler
 import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 import qualified Salmon.Actions.UpDown as UpDown
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Extension (..), Op, nodeps, op)
 import Salmon.Op.Actions (Act (..), Actions (..))
@@ -137,7 +138,16 @@ golden tagged expectedText = do
 -------------------------------------------------------------------------------
 
 goldens :: [(String, Tagged.Tagged, Text)]
-goldens = updownGoldens ++ upkeepGoldens ++ serveGoldens ++ followGoldens
+goldens = updownGoldens ++ upkeepGoldens ++ serveGoldens ++ followGoldens ++ nodeGoldens
+
+-- | What a node says while it works ("Salmon.Builtin.NodeLog"): one object
+-- shape, one golden per channel.
+nodeGoldens :: [(String, Tagged.Tagged, Text)]
+nodeGoldens =
+    [ ("NodeLog.Line stdout", Tagged.FromNode (NodeLog.Line fixtureRef NodeLog.Stdout "STEP 2/5: RUN make"), "{\"kind\":\"log\",\"ref\":" <> refJson <> ",\"channel\":\"stdout\",\"line\":\"STEP 2/5: RUN make\"}")
+    , ("NodeLog.Line stderr", Tagged.FromNode (NodeLog.Line fixtureRef NodeLog.Stderr "warning: deprecated"), "{\"kind\":\"log\",\"ref\":" <> refJson <> ",\"channel\":\"stderr\",\"line\":\"warning: deprecated\"}")
+    , ("NodeLog.Line message", Tagged.FromNode (NodeLog.Line fixtureRef NodeLog.Message "waiting for ssh"), "{\"kind\":\"log\",\"ref\":" <> refJson <> ",\"channel\":\"message\",\"line\":\"waiting for ssh\"}")
+    ]
 
 updownGoldens :: [(String, Tagged.Tagged, Text)]
 updownGoldens =
@@ -344,6 +354,9 @@ taggedOrigin = do
     assertEqual "updown" (Just (String "updown")) (originOf (Tagged.FromUpDown (UpDown.Done fixtureAct)))
     assertEqual "upkeep" (Just (String "upkeep")) (originOf (Tagged.FromUpkeep (Upkeep.Holding 1)))
     assertEqual "follow" (Just (String "follow")) (originOf (Tagged.FromFollow (Follow.Backoff 1 1)))
+    -- a node's own lines are filed with a held action's, so one tail reads both
+    assertEqual "node log" (Just (String "output")) (originOf (Tagged.FromNode (NodeLog.Line fixtureRef NodeLog.Message "hi")))
+    assertEqual "held action" (Just (String "output")) (originOf (Tagged.FromUpkeep (Upkeep.Output fixtureAct "hi")))
     -- the inner object is carried whole: removing the stream gives it back
     let inner = toJSON (UpDown.Done fixtureAct)
     case toJSON (Tagged.FromUpDown (UpDown.Done fixtureAct)) of
@@ -391,7 +404,7 @@ textUnchangedBesideJson = do
     let serveText ref = ReporterM $ \rep -> modifyIORef' ref (++ Serve.renderReport rep)
         updownText ref = ReporterM $ \rep -> modifyIORef' ref (++ [Text.pack (show rep)])
         jsonR = ReporterM $ \tagged -> modifyIORef' jsonSeen (++ [encode tagged])
-        composed = reportBoth (Tagged.reportTexts (serveText besideServe) (updownText besideUpdown) silent silent) jsonR
+        composed = reportBoth (Tagged.reportTexts (serveText besideServe) (updownText besideUpdown) silent silent silent) jsonR
         serveReports = [Serve.Started, Serve.ConvergeStart 0 2, Serve.Tended (Upkeep.Wedged fixtureAct (Micros 5)), Serve.ConvergeStop True 0]
         updownReports = [UpDown.Eval fixtureAct, UpDown.Done fixtureAct, UpDown.Failed otherAct (toException boom)]
     mapM_ (runReporter (serveText aloneServe)) serveReports
