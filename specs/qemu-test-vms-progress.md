@@ -275,21 +275,30 @@ not yet run for real (see its row above).
   confirmed passing under `sudo`, boot+SSH completing in single-digit
   seconds in the two runs measured so far, vs. ~80–140s for the earlier
   TCG-only runs.
-- The smoke rootfs lives at `/var/lib/salmon-test-vms/smoke/root`, built
-  via (see §0 item 2 for why `ensureVm9pBoot`'s initramfs fix also needs
-  applying — the rootfs on disk currently has that fix hand-applied via
-  chroot, *not* yet re-derived by actually running the new
-  `Debootstrap.ensureVm9pBoot` op against it):
+- The smoke rootfs lives at `/var/lib/salmon-test-vms/smoke/root`. It was
+  first built by a hand-typed `debootstrap --include=linux-image-amd64,openssh-server
+  stable ...` and then had `ensureVm9pBoot`'s initramfs fix applied by hand
+  in a chroot (§0 item 2). **As of 2026-10-04 it has a derivation as ops**:
+  `salmon-qemu-smoke-rootfs-fixture`
+  (`salmon-ops/fixtures/QemuSmokeRootfsFixture.hs`) is `Debootstrap.rootTree`
+  with `vmEssentials`, then `Debootstrap.ensureVm9pBoot`, then a recursive
+  `User.chown` of `etc/ssh` to the user who runs the tests — the shape of
+  `salmon-toy-qemu-pg-ha prereqs` and `salmon-patroni-rootfs`:
   ```sh
-  sudo debootstrap --include=linux-image-amd64,openssh-server stable /var/lib/salmon-test-vms/smoke/root
+  sudo $(cabal list-bin salmon-qemu-smoke-rootfs-fixture) "$USER"
   ```
-  No `authorized_keys` provisioning needed any more (§0 item 5) —
-  `withVm` handles its own access.
+  Both Debootstrap nodes have a `check`, so the binary leaves an existing
+  tree alone (and says so): rebuilding means moving the old tree aside
+  first. **The tree on this machine is still the hand-made one** — the
+  rebuild needs root and has not been run; until it is, `QemuSmokeSpec`
+  passing says nothing about the fixture. No `authorized_keys` provisioning
+  is needed (§0 item 5) — `withVm` handles its own access.
 - A second rootfs, `/var/lib/salmon-test-vms/debootstrap-op-smoke/root`,
   built *by `Debootstrap.rootTree`/`Debootstrap.ensureVm9pBoot` themselves*
   (via `Test.DebootstrapSpec`, see §1) rather than by hand — this is the
   one that actually proves those ops work, as opposed to the smoke rootfs
-  above which still carries a hand-applied 9p fix.
+  above which, until rebuilt with its fixture, still carries a hand-applied
+  9p fix.
 - `/var/lib/salmon-test-vms/pg-primary/root` and
   `/var/lib/salmon-test-vms/pg-standby/root` (§1) **built 2026-08-21** —
   postgres is baked in at debootstrap time rather than apt-installed inside
