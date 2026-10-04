@@ -8,14 +8,19 @@ Needs either root or the one-time capability setup described in
 'Test.Harness.hasVmPrivileges' (bridge/tap + a systemd unit running qemu,
 matching this whole VM tier's documented privilege assumption — see
 "Salmon.Builtin.Nodes.Qemu"'s haddock) and a pre-built VM rootfs at
-'smokeRootfs', with
-'Salmon.Builtin.Nodes.Debian.Debootstrap.vmEssentials' and
-'Salmon.Builtin.Nodes.Debian.Debootstrap.ensureVm9pBoot' already applied
-(this test does not run debootstrap itself, same stance as
-'Test.Harness.withVm') — no SSH key pre-provisioning needed, 'withVm'
-generates and trusts its own per-boot CA-signed key:
+'smokeRootfs' (this test does not run debootstrap itself, same stance as
+'Test.Harness.withVm'). That rootfs is
+built by ops, not by hand: @salmon-qemu-smoke-rootfs-fixture@
+(@salmon-ops\/fixtures\/QemuSmokeRootfsFixture.hs@) is
+'Salmon.Builtin.Nodes.Debian.Debootstrap.rootTree' with
+'Salmon.Builtin.Nodes.Debian.Debootstrap.vmEssentials', then
+'Salmon.Builtin.Nodes.Debian.Debootstrap.ensureVm9pBoot', then @etc\/ssh@
+handed to the user who runs the tests. It is the one step that needs root:
 
-> sudo debootstrap --include=linux-image-amd64,openssh-server stable /var/lib/salmon-test-vms/smoke/root
+> sudo $(cabal list-bin salmon-qemu-smoke-rootfs-fixture) "$USER"
+
+No SSH key pre-provisioning is needed, 'withVm' generates and trusts its
+own per-boot CA-signed key.
 
 Both preconditions are checked and skipped loudly (not failed) if unmet,
 same "skip/fail loudly, don't hang" spirit as 'Test.Harness.requireExecutable'.
@@ -50,7 +55,7 @@ bootsAndAnswersSsh = do
                 then skip "qemu-system-x86_64 not found on PATH"
                 else
                     if not hasRootfs
-                        then skip ("no VM rootfs at " <> smokeRootfs <> " (run debootstrap by hand first, see this module's haddock)")
+                        then skip ("no VM rootfs at " <> smokeRootfs <> " (build it with salmon-qemu-smoke-rootfs-fixture, see this module's haddock)")
                         else
                             withVm smokeRootfs $ \access -> do
                                 (code, out, _err) <- sshToVm access ["echo smoke-ok"]

@@ -223,6 +223,22 @@ executable salmon-qemu-host-setup-fixture
                       , OverloadedRecordDot
                       , ScopedTypeVariables
 
+executable salmon-qemu-smoke-rootfs-fixture
+    main-is:          QemuSmokeRootfsFixture.hs
+    hs-source-dirs:   fixtures
+    build-depends:    base >=4.16.3.0 && <4.22
+                    , directory
+                    , mtl
+                    , filepath
+                    , salmon-core ^>=0.1.0.0
+                    , salmon-ops ^>=0.1.0.0
+                    , text
+    ghc-options:      -threaded
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , ScopedTypeVariables
+
 executable salmon-ops-serve-fixture
     main-is:          ServeFixture.hs
     hs-source-dirs:   fixtures
