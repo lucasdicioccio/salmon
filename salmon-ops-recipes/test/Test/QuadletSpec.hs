@@ -17,7 +17,8 @@ module Test.QuadletSpec (tests) where
 
 import qualified Data.ByteString.Lazy.Char8 as LC8
 import qualified Data.Map.Strict as Map
-import Data.List (isInfixOf)
+import Data.IORef (modifyIORef, newIORef, readIORef)
+import Data.List (isInfixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -288,6 +289,33 @@ loginTests =
         assertBool "" (isFailure (ArtifactRegistry.interpretTokenStamp now (Just "soon")))
     , testCase "the stamp sits beside the auth file" $
         assertEqual "" "/etc/app/auth.json.expires" (ArtifactRegistry.tokenStampPath (Podman.AuthFile "/etc/app/auth.json"))
+    , testCase "the stamp's check and write are the login node's alone" $
+        -- the enclosing directory is a predecessor: carrying them, it renewed
+        -- the stamp without logging in, and the login was then skipped
+        withTempDir $ \tmp -> do
+            asked <- newIORef (0 :: Int)
+            let authfile = Podman.AuthFile (tmp </> "auth" </> "auth.json")
+                stamp = ArtifactRegistry.tokenStampPath authfile
+                token = modifyIORef asked (+ 1) >> pure (ArtifactRegistry.InstanceToken "ya29.abc" 3599)
+                login = ArtifactRegistry.instanceLoginWith token silent ignoreTrack authfile (Core.Region "europe-west1")
+                dag = Dag.foldDag Dag.sameRepresentative (evalDeps login)
+                acts = Map.elems (Dag.dagNodes dag)
+            assertEqual "the graph is not the login and its directory" ["directory", "podman-login"] (sort (map (\act -> act.shorthand) acts))
+            dirAct <- case [act | act <- acts, act.shorthand == "directory"] of
+                [act] -> pure act
+                _ -> assertFailure "not exactly one directory node"
+            -- a login from hours ago: credentials, and a stamp long expired
+            dirAct.extension.up
+            writeFile (Podman.getAuthFile authfile) "{\"auths\":{}}"
+            writeFile stamp "1700000000\n"
+            dirCheck <- dirAct.extension.check
+            assertEqual "the directory answers for the stamp" Immaterial dirCheck
+            dirAct.extension.up
+            after <- readFile stamp
+            assertEqual "the directory's up renewed the stamp" "1700000000\n" after
+            readIORef asked >>= assertEqual "the directory's up asked for a token" 0
+            loginCheck <- maybe (assertFailure "no login node") (\act -> act.extension.check) (opAct login)
+            assertBool "an expired stamp does not ask for a login" (isFailure loginCheck)
     ]
   where
     now = posixSecondsToUTCTime 1700000000
