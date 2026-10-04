@@ -208,7 +208,12 @@ appService tag =
 systemd and restarts `app.service` when that file changed: a new tag, or new
 bytes in the env file, whose hash is folded into the quadlet. The env file is
 somebody else's node (see the pattern above); here it is only read.
-Otherwise the service is checked (`systemctl show`) and left alone.
+Otherwise the service is checked and left alone. The check asks systemd
+(`systemctl show`) and then the running container: the file carries a
+`Label=salmon.quadlet=<fingerprint>` line, and a container whose label is not
+the declared fingerprint is restarted, even when something else has already
+run the `daemon-reload` that made systemd forget the file changed. A quadlet
+written before that label existed is restarted once.
 
 `instanceLogin` is for a GCE instance: it asks the metadata server for the
 instance's service account's token and logs podman in with it, into an auth

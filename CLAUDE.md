@@ -996,7 +996,13 @@ described as before. `Test/PodmanCommandSpec.hs` holds the argv, `Test/PodmanSpe
 `systemdService` for that file and reuses its mechanism: written through `filecontents`, checked with the same
 `systemctl show` (`Systemd.checkUnit`), and systemd answers `NeedDaemonReload=yes` for a generated unit whose *source*
 file changed, so a new image reference or a changed env file (hashed in, as `systemdServiceWatching` does) is a reload and
-restart. Load-bearing: a generated unit's `UnitFileState` is `generated` and it cannot be `enable`d (`[Install]` is the
+restart. Load-bearing: **the check also asks the running container** (`checkContainer`): `daemon-reload` is
+machine-wide, so once anything else has run one (a sibling quadlet's `up`, a pass interrupted between writing the files
+and restarting) systemd reads `NeedDaemonReload=no` for a unit still running the container it was started with. The
+written file (`renderQuadlet`) therefore carries `Label=salmon.quadlet=<quadletFingerprint>` (a hash of the declaration
+plus the watched files' fingerprint), and after the unit reads `Success` the check compares the label `podman container
+inspect` prints with the declared fingerprint (`interpretRunning`; a podman that cannot answer is `Unknown`). A quadlet
+written before the label existed is restarted once; a generated unit's `UnitFileState` is `generated` and it cannot be `enable`d (`[Install]` is the
 generator's, so `up` is reload + restart); the file node's `down` reloads after removing, or the unit outlives its file;
 the pull happens *inside the service's start* (`containerStartTimeout`); credentials go through
 `PodmanArgs=--authfile=`, since podman 4.9's generator refuses the `AuthFile=` key; the `ref` is `"systemd-unit"
@@ -1011,7 +1017,7 @@ the metadata server's token for the instance's own service account, plus a `chec
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/
-down; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
+down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
 test, the metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
 `Nodes/Deferred.hs` (`deferred`) is a sub-graph built at `up` from a value another node of the same pass produced: the
