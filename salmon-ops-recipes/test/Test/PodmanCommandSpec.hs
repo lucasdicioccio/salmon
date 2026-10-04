@@ -62,7 +62,7 @@ buildContextAndTarget =
     assertEqual
         ""
         (RawCommand "podman" ["build", "-t", "img:1", "-f", "/repo/deploy/Containerfile", "--target", "api", "/repo"], Nothing)
-        (build (Podman.BuildOptions (Just "/repo") (Just "api")))
+        (build Podman.defaultBuildOptions{Podman.buildContext = Just "/repo", Podman.buildTarget = Just "api"})
 
 pushRendersTagNoAuth :: IO ()
 pushRendersTagNoAuth =

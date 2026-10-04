@@ -56,7 +56,7 @@ buildContextAndTarget = requireExecutable "podman" $
                 , "COPY marker.txt /second.txt"
                 ]
         (reporter, _) <- capture
-        let opts = Podman.BuildOptions{Podman.buildContext = Just root, Podman.buildTarget = Just "first"}
+        let opts = Podman.defaultBuildOptions{Podman.buildContext = Just root, Podman.buildTarget = Just "first"}
             built = Podman.buildImageWith reporter podmanTrack opts (FS.PreExisting containerfile) tag
             imageExists = (\(code, _, _) -> code) <$> readProcessWithExitCode "podman" ["image", "exists", Text.unpack tag] ""
         ( do

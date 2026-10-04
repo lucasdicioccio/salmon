@@ -175,6 +175,7 @@ module Salmon.Actions.Serve.Http (
     serverProducer,
     serverReporters,
     serverFollowReporter,
+    serverNodeLogReporter,
 
     -- * The command body
     renderStructured,
@@ -236,6 +237,7 @@ import Salmon.Actions.Serve.Events (Events)
 import qualified Salmon.Actions.Serve.Socket as Socket
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension (Extension (..))
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Actions (Act (..))
 import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
@@ -849,6 +851,18 @@ serverFollowReporter :: Server -> Reporter Follow.Report
 serverFollowReporter server =
     ReporterM $ \rep ->
         runReporter (Events.eventsReporter (serverEvents server)) (Attributed Nothing (FromFollow rep))
+
+{- | The reporter that puts a node's own lines ("Salmon.Builtin.NodeLog") on
+the event stream, filed on @output@ beside a held action's lines. Like the
+fetcher's, they are nobody's command: a line is said by a node whenever it
+has something to say, during a pass or while being tended, so the events
+carry no @origin@ and no synchronous @POST /command@ collects them (a build's
+whole output in a response body is what the tail is there to avoid).
+-}
+serverNodeLogReporter :: Server -> Reporter NodeLog.Line
+serverNodeLogReporter server =
+    ReporterM $ \line ->
+        runReporter (Events.eventsReporter (serverEvents server)) (Attributed Nothing (FromNode line))
 
 -------------------------------------------------------------------------------
 -- the read model

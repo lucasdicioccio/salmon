@@ -67,8 +67,9 @@ import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Track', check, deps, down, help, nodeps, op, opAct, ref, up)
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Configure (Configure (..))
-import Salmon.Op.Ref (mkRef)
+import Salmon.Op.Ref (mkRef, unRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (contramap, runReporter)
 import qualified Salmon.Reporter.Tagged as Tagged
@@ -94,6 +95,7 @@ tests =
             , testCase "/status and /dag carry seq, and ?since= that seq misses nothing after" snapshotSeq
             , testCase "?stream= and ?origin= narrow the stream" filters
             , testCase "the pull-mode fetcher's reports are the follow stream: numbered with the rest, no origin, filterable" followStream
+            , testCase "what a node says while it works is on the output stream: by ref, by channel, no origin" nodeLogStream
             , testCase "an idle stream is kept alive, and a client hanging up drops its subscription" keepAliveAndCleanup
             ]
         ]
@@ -683,6 +685,40 @@ followStream =
         without <- withEvents running "?since=0&stream=serve,updown,upkeep,server" (readUntil (hungUpFrom marker))
         assertBool "and not there when not asked for" (all ((/= Just "follow") . streamOf) without)
         assertBool "the rest is" (not (null without))
+
+{- | A node's own lines ("Salmon.Builtin.NodeLog") reach the ring through a
+sink registered for as long as the loop runs ('Http.serverNodeLogReporter',
+which is what @run serve@ registers). They are filed on @output@, where a
+held action's lines already are, so the client tailing a node reads both;
+they name the node by @ref@ and say which channel the line came from. -}
+nodeLogStream :: IO ()
+nodeLogStream =
+    withRunning $ \running -> do
+        _ <- sync running "supervise off"
+        let node = mkRef "events-spec-node-log" ("builder" :: Text)
+        NodeLog.withSink (Http.serverNodeLogReporter (runningServer running)) $ do
+            NodeLog.emit (NodeLog.Line node NodeLog.Stdout "STEP 1/2: FROM scratch")
+            NodeLog.emit (NodeLog.Line node NodeLog.Stderr "warning: no cache")
+            NodeLog.say node "waiting for ssh"
+        -- the sink is gone: this one is said to nobody
+        NodeLog.say node "after the loop"
+        (_, marker) <- async running "history"
+        everything <- withEvents running "?since=0" (readUntil (hungUpFrom marker))
+        -- other tests in this process may be saying things too: only this node's
+        let mine = [e | e <- everything, textAt ["ref", "full"] (sseData e) == Just (unRef node)]
+        assertEqual "filed on the output stream" [Just "output", Just "output", Just "output"] (fmap streamOf mine)
+        assertEqual "as log lines" ["log", "log", "log"] (fmap (kindOf . sseData) mine)
+        assertEqual
+            "channel and line, in the order they were said"
+            [(Just "stdout", Just "STEP 1/2: FROM scratch"), (Just "stderr", Just "warning: no cache"), (Just "message", Just "waiting for ssh")]
+            [(textAt ["channel"] (sseData e), textAt ["line"] (sseData e)) | e <- mine]
+        assertBool "nobody typed them: no origin" (all ((== Nothing) . originOf) mine)
+        assertNumbered "one counter across a node's lines and the rest" everything
+        -- a tail asks for the output stream and gets them without the rest
+        tailed <- withEvents running "?since=0&stream=output" (readUntil ((== Just "waiting for ssh") . textAt ["line"] . sseData))
+        assertBool "only the output stream" (all ((== Just "output") . streamOf) tailed)
+        without <- withEvents running "?since=0&stream=serve,updown,upkeep,server" (readUntil (hungUpFrom marker))
+        assertBool "and not there when not asked for" (all ((/= Just "output") . streamOf) without)
 
 keepAliveAndCleanup :: IO ()
 keepAliveAndCleanup =

@@ -43,10 +43,12 @@ module Salmon.Reporter.Tagged (
     updownStream,
     upkeepStream,
     followStream,
+    nodeLogStream,
 
     -- * Reporters
     reportJSONLines,
     reportTexts,
+    reportNodeLogText,
 
     -- * Encoding pieces
     refValue,
@@ -70,6 +72,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import System.IO (Handle, hFlush)
 
 import qualified Salmon.Actions.Follow as Follow
@@ -78,6 +81,7 @@ import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Actions.UpDown as UpDown
 import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Extension (..))
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Mailbox as Mailbox
 import qualified Salmon.Op.Dag as Dag
@@ -94,6 +98,11 @@ data Tagged
     | FromUpDown !(UpDown.Report Extension)
     | FromUpkeep !(Upkeep.Report Extension)
     | FromFollow !Follow.Report
+    | {- | A line a node said while working ("Salmon.Builtin.NodeLog"): not a
+      fifth vocabulary of what a driver did but what the node itself has to
+      say, so it is filed on the @output@ stream beside 'Upkeep.Output'.
+      -}
+      FromNode !NodeLog.Line
     deriving (Show)
 
 serveStream :: Reporter Tagged -> Reporter Serve.Report
@@ -108,6 +117,9 @@ upkeepStream = contramap FromUpkeep
 followStream :: Reporter Tagged -> Reporter Follow.Report
 followStream = contramap FromFollow
 
+nodeLogStream :: Reporter Tagged -> Reporter NodeLog.Line
+nodeLogStream = contramap FromNode
+
 {- | The four text reporters, behind one 'Tagged' one. Dispatches and does
 nothing else, so whatever each of the four prints, it prints unchanged —
 this is what a binary's own reporters go through when @--json@ is absent.
@@ -117,13 +129,32 @@ reportTexts ::
     Reporter (UpDown.Report Extension) ->
     Reporter (Upkeep.Report Extension) ->
     Reporter Follow.Report ->
+    Reporter NodeLog.Line ->
     Reporter Tagged
-reportTexts serveR updownR upkeepR followR = ReporterM $ \tagged ->
+reportTexts serveR updownR upkeepR followR nodeR = ReporterM $ \tagged ->
     case tagged of
         FromServe rep -> runReporter serveR rep
         FromUpDown rep -> runReporter updownR rep
         FromUpkeep rep -> runReporter upkeepR rep
         FromFollow rep -> runReporter followR rep
+        FromNode line -> runReporter nodeR line
+
+{- | A node's line as text: the node's short ref, the channel, the line. One
+write per line, so lines from two nodes working at once do not interleave
+inside one another.
+-}
+reportNodeLogText :: Handle -> Reporter NodeLog.Line
+reportNodeLogText h = ReporterM $ \line ->
+    Text.hPutStrLn h (renderNodeLogLine line)
+
+renderNodeLogLine :: NodeLog.Line -> Text
+renderNodeLogLine line =
+    mconcat ["  [", shortRef line.lineRef, "] ", channel, "| ", line.lineText]
+  where
+    channel = case line.lineChannel of
+        NodeLog.Stdout -> "out"
+        NodeLog.Stderr -> "err"
+        NodeLog.Message -> "msg"
 
 {- | One JSON object per line, flushed as it is written so a consumer on the
 other end of a pipe (@| jq@) sees each report when it happens rather than
@@ -150,6 +181,7 @@ instance ToJSON Tagged where
             FromUpkeep rep@(Upkeep.Output _ _) -> withOrigin "output" (toJSON rep)
             FromUpkeep rep -> withOrigin "upkeep" (toJSON rep)
             FromFollow rep -> withOrigin "follow" (toJSON rep)
+            FromNode line -> withOrigin "output" (toJSON line)
       where
         withOrigin :: Text -> Value -> Value
         withOrigin origin (Object o) = Object (KeyMap.insert "stream" (String origin) o)
@@ -260,6 +292,21 @@ envelope), so it is encoded once, here, beside the other orphans.
 -}
 instance ToJSON Serve.Mode where
     toJSON = String . Serve.renderMode
+
+-------------------------------------------------------------------------------
+
+{- | @{kind: "log", ref, channel, line}@. No @node@: a line is said many
+times a second and names its node by @ref@ alone, which is what a client
+tailing it already holds.
+-}
+instance ToJSON NodeLog.Line where
+    toJSON line =
+        object
+            [ kind "log"
+            , "ref" .= refValue line.lineRef
+            , "channel" .= NodeLog.renderChannel line.lineChannel
+            , "line" .= line.lineText
+            ]
 
 -------------------------------------------------------------------------------
 

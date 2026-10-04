@@ -238,8 +238,13 @@ function toggleTail(ref) {
   renderPanel();
 }
 
+// The `output` stream carries two kinds: `output`, a line a held (`managed`)
+// action wrote, and `log`, a line any node said while its `up` was running:
+// a streamed command's stdout or stderr, or a progress message of its own.
 function applyOutput(e) {
-  if (e.ref && typeof e.line === "string") pushTailLine(e.ref.full, e.line);
+  if (!e.ref || typeof e.line !== "string") return;
+  const mark = e.kind === "log" && e.channel === "stderr" ? "err| " : e.kind === "log" && e.channel === "message" ? "msg| " : "";
+  pushTailLine(e.ref.full, mark + e.line);
 }
 
 // Shared by a managed action's raw output and by the formatted updown/upkeep
