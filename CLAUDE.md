@@ -1013,7 +1013,10 @@ the file node only — an `fmap` over the `Op` reaches its dependencies too, whi
 `Conflicting` pair).
 `Gcp.ArtifactRegistry.instanceLogin` is the other half for a GCE instance: `Podman.login` as `oauth2accesstoken` with
 the metadata server's token for the instance's own service account, plus a `check` on the token's recorded expiry
-(`AUTHFILE.expires`), so the credential is renewed by `run up` only when needed and tended under `serve`.
+(`AUTHFILE.expires`), so the credential is renewed by `run up` only when needed and tended under `serve`. The check
+and the stamp are put on the login node alone (`login{node = fmap tended login.node}`): an `fmap` over the `Op` also
+reached the auth file's enclosing directory, a predecessor, which then renewed the stamp without logging in, so an
+expired login was skipped (`instanceLoginWith` takes the token's source, for the test that holds this).
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/

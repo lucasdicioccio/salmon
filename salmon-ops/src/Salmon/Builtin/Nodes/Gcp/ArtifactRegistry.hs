@@ -13,6 +13,7 @@ module Salmon.Builtin.Nodes.Gcp.ArtifactRegistry (
     -- * Pulling from a GCE instance
     dockerRegistry,
     instanceLogin,
+    instanceLoginWith,
     InstanceToken (..),
     parseInstanceToken,
     instanceToken,
@@ -48,6 +49,7 @@ import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject)
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
+import Salmon.Op.OpGraph (OpGraph (..))
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -168,8 +170,23 @@ account, and an instance whose access scopes allow it (@cloud-platform@, or
 the read-only storage scope).
 -}
 instanceLogin :: Reporter Podman.Report -> Track' (Binary "podman") -> Podman.AuthFile -> Region -> Op
-instanceLogin r podman authfile region =
-    fmap (fmap tended) (Podman.login r podman authfile (dockerRegistry region) (Podman.Username "oauth2accesstoken") (tokenValue <$> instanceToken))
+instanceLogin = instanceLoginWith instanceToken
+
+{- | 'instanceLogin' with the token's source as an argument, so that a test
+can stand in for the metadata server.
+
+The check and the stamp go on the login node /alone/. An 'fmap' over the
+'Op' reaches every node of its graph, the enclosing directory of the auth
+file included, and that directory is a predecessor: carrying the stamp's
+check and the stamp's write, it went first, found the stamp expired, and
+wrote a fresh one without logging in -- after which the login's own check
+read the fresh stamp and the login was skipped, leaving expired credentials
+in the auth file under a stamp vouching for them.
+-}
+instanceLoginWith :: IO InstanceToken -> Reporter Podman.Report -> Track' (Binary "podman") -> Podman.AuthFile -> Region -> Op
+instanceLoginWith getToken r podman authfile region =
+    let login = Podman.login r podman authfile (dockerRegistry region) (Podman.Username "oauth2accesstoken") (tokenValue <$> getToken)
+     in login{node = fmap tended login.node}
   where
     stamp = tokenStampPath authfile
 
@@ -185,8 +202,9 @@ instanceLogin r podman authfile region =
                 ext.up
                 -- asked again rather than remembered from the login: the
                 -- metadata server caches, so this is the same token, and a
-                -- stamp is only ever written after a login that worked.
-                token <- instanceToken
+                -- stamp is only ever written after a login that worked
+                -- (@ext.up@ throws otherwise), in this very @up@.
+                token <- getToken
                 now <- getCurrentTime
                 writeFile stamp (show (round (utcTimeToPOSIXSeconds (addUTCTime token.tokenLifetime now)) :: Integer) <> "\n")
             , down = FS.removeFileIfPresent stamp >> ext.down
