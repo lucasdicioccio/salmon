@@ -9,6 +9,7 @@ what makes it testable without a real GCP project.
 -}
 module Test.GcpSpec (tests) where
 
+import Control.Exception (try)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -20,6 +21,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Foldable (toList)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import GHC.IO.Exception (ExitCode (..))
 import System.Directory (createDirectory)
 import System.Environment (getEnv)
@@ -31,6 +33,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
 import Salmon.Actions.UpDown (CheckResult (..))
+import Salmon.Builtin.Extension (Extension (..), Op, evalDeps, ignoreTrack, nodeps, op)
 import Salmon.Builtin.Nodes.Binary (prepare)
 import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
 import qualified Salmon.Builtin.Nodes.Gcp.Billing as Billing
@@ -47,6 +50,11 @@ import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 import qualified Salmon.Builtin.Nodes.Rsync as Rsync
 import qualified Salmon.Builtin.Nodes.Ssh as Ssh
+import Salmon.Op.Actions (Act (..))
+import qualified Salmon.Op.Dag as Dag
+import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Ref (mkRef)
+import Salmon.Reporter (silent)
 import qualified SreBox.Gcp.CloudRunAlerts as CloudRunAlerts
 import qualified SreBox.Gcp.VmProvision as VmProvision
 
@@ -753,7 +761,7 @@ lbTests =
             , "get-health 'web-slow-backend'"
             , "backend-services describe 'web-api-backend'"
             ]
-    , testCase "teardown takes dependants first: rules, proxies, address, map, services, certificate, authorizations" $ do
+    , testCase "teardown takes dependants first: rules, proxies, address, certificate, authorizations, map, backends, services, health checks" $ do
         let sc = deleteScript full
         assertBool
             sc
@@ -762,14 +770,17 @@ lbTests =
               , "target-https-proxies delete 'web-https-proxy'"
               , "target-http-proxies delete 'web-proxy'"
               , "addresses delete 'web-ip'"
-              , "url-maps delete 'web-url-map'"
-              , "backend-services delete 'web-backend'"
-              , "backend-services delete 'web-slow-backend'"
-              , "backend-services delete 'web-api-backend'"
-              , "network-endpoint-groups delete 'web-api-neg'"
-              , "health-checks delete 'hc'"
               , "certificate-manager certificates delete 'web-cert'"
               , "certificate-manager dns-authorizations delete 'web-cert-app-example-org'"
+              , "url-maps delete 'web-url-map'"
+              , -- a NEG still attached cannot be deleted
+                "backend-services remove-backend 'web-api-backend'"
+              , "network-endpoint-groups delete 'web-api-neg'"
+              , "backend-services delete 'web-api-backend'"
+              , "backend-services delete 'web-slow-backend'"
+              , "backend-services remove-backend 'web-backend'"
+              , "backend-services delete 'web-backend'"
+              , "health-checks delete 'hc'"
               ]
                 `inOrder` sc
             )
@@ -858,6 +869,7 @@ lbTests =
                 assertEqual err ExitSuccess code
             )
             scripts
+    , testGroup "a node per resource" nodeTests
     , testGroup "against a stand-in gcloud" $
         -- Not GCP: a shell script that keeps "resources" as files and answers
         -- describe/create/delete the way these scripts assume gcloud does.
@@ -943,6 +955,52 @@ lbTests =
                         assertBool (Text.unpack t) ("named-port web-b-backend:4273 on instance-group ig" `isInfixOf` Text.unpack t)
                         assertBool (Text.unpack t) (not ("named-port web-a-backend:4272" `isInfixOf` Text.unpack t))
                     other -> assertBool (show other) False
+        , testCase "resource by resource: each up makes its own, each check answers for its own, each down removes its own" $
+            withFakeGcloud $ \run _ -> do
+                let parts = LoadBalancing.lbParts full
+                let verdict part = do
+                        (code, out, _) <- run (Text.unpack (LoadBalancing.renderPartCheckScript full part))
+                        pure (LoadBalancing.interpretLbCheck code (Text.pack out))
+                before <- mapM verdict parts
+                assertBool (show before) (all isFailure before)
+                mapM_
+                    ( \part -> do
+                        (code, _, err) <- run (Text.unpack (LoadBalancing.renderPartUpScript full part))
+                        assertEqual (show part.partId <> ": " <> err) ExitSuccess code
+                        v <- verdict part
+                        assertEqual (show part.partId) Success v
+                    )
+                    parts
+                -- one resource removed behind the balancer is one node's Failure
+                _ <- run "gcloud compute url-maps delete web-url-map"
+                after <- mapM verdict parts
+                assertEqual
+                    ""
+                    [LoadBalancing.UrlMapPart]
+                    [part.partId | (part, v) <- zip parts after, v /= Success]
+                mapM_ (run . Text.unpack . LoadBalancing.renderPartUpScript full) [p | p <- parts, p.partId == LoadBalancing.UrlMapPart]
+                (codeH, outH, _) <- run (Text.unpack (LoadBalancing.renderLbHealthScript full))
+                assertEqual outH Success (LoadBalancing.interpretLbCheck codeH (Text.pack outH))
+                assertBool outH ("HEALTH slow HEALTHY" `isInfixOf` outH)
+                mapM_
+                    ( \part -> do
+                        (code, _, err) <- run (Text.unpack (LoadBalancing.renderPartDownScript full part))
+                        assertEqual (show part.partId <> ": " <> err) ExitSuccess code
+                    )
+                    (reverse parts)
+                (_, out, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" out
+        , testCase "a certificate that is somebody else's and absent fails its own node's up" $
+            withFakeGcloud $ \run _ -> do
+                let own = full{LoadBalancing.albCertificates = [LoadBalancing.ComputeCertificate "own"]}
+                results <- mapM (run . Text.unpack . LoadBalancing.renderPartUpScript own) [p | p <- LoadBalancing.lbParts own, p.partId == LoadBalancing.CertificatePart "own"]
+                assertEqual "" 1 (length results)
+                mapM_
+                    ( \(code, _, err) -> do
+                        assertBool err (code /= ExitSuccess)
+                        assertBool err ("certificate own does not exist" `isInfixOf` err)
+                    )
+                    results
         , testCase "a plain balancer goes up, checks and comes down the same way" $
             withFakeGcloud $ \run _ -> do
                 (code, _, err) <- run (createScript alb)
@@ -956,6 +1014,136 @@ lbTests =
         ]
     ]
   where
+    dagOf :: Op -> Dag.Dag Extension
+    dagOf = Dag.foldDag Dag.sameRepresentative . evalDeps
+    depsOf a part = concat [p.partDeps | p <- LoadBalancing.lbParts a, p.partId == part]
+    nodeTests =
+        [ testCase "every resource comes after the ones it depends on, and names only resources that exist" $
+            mapM_
+                ( \a -> do
+                    let parts = LoadBalancing.lbParts a
+                    let ids = map LoadBalancing.partId parts
+                    assertEqual "no resource twice" (nub ids) ids
+                    mapM_
+                        ( \(i, part) ->
+                            mapM_
+                                (\d -> assertBool (show part.partId <> " after " <> show d) (d `elem` take i ids))
+                                part.partDeps
+                        )
+                        (zip [0 :: Int ..] parts)
+                )
+                [alb, full, shared]
+        , testCase "the declared resources of a balancer with every feature" $
+            assertEqual
+                ""
+                [ LoadBalancing.HealthCheckPart "hc"
+                , LoadBalancing.NamedPortsPart "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b")
+                , LoadBalancing.NamedPortsPart "ig-slow" (LoadBalancing.InstanceGroupZone "europe-west1-c")
+                , LoadBalancing.BackendServicePart "web-backend"
+                , LoadBalancing.BackendPart "web-backend" "ig"
+                , LoadBalancing.BackendServicePart "web-slow-backend"
+                , LoadBalancing.BackendPart "web-slow-backend" "ig-slow"
+                , LoadBalancing.BackendServicePart "web-api-backend"
+                , LoadBalancing.NetworkEndpointGroupPart "web-api-neg"
+                , LoadBalancing.BackendPart "web-api-backend" "web-api-neg"
+                , LoadBalancing.UrlMapPart
+                , LoadBalancing.DnsAuthorizationPart "web-cert-app-example-org"
+                , LoadBalancing.DnsAuthorizationPart "web-cert-api-example-org"
+                , LoadBalancing.CertificatePart "web-cert"
+                , LoadBalancing.AddressPart
+                , LoadBalancing.HttpProxyPart
+                , LoadBalancing.HttpsProxyPart
+                , LoadBalancing.ForwardingRulePart
+                , LoadBalancing.HttpsForwardingRulePart
+                ]
+                (map LoadBalancing.partId (LoadBalancing.lbParts full))
+        , testCase "the edges between resources" $ do
+            assertEqual "a backend service needs its health check" [LoadBalancing.HealthCheckPart "hc"] (depsOf full (LoadBalancing.BackendServicePart "web-slow-backend"))
+            assertEqual "a Cloud Run service has none" [] (depsOf full (LoadBalancing.BackendServicePart "web-api-backend"))
+            assertEqual
+                "an attachment needs its service and the group's named ports"
+                [LoadBalancing.BackendServicePart "web-backend", LoadBalancing.NamedPortsPart "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b")]
+                (depsOf full (LoadBalancing.BackendPart "web-backend" "ig"))
+            assertEqual
+                "a second attachment on one service waits for the first"
+                [LoadBalancing.BackendServicePart "web-backend", LoadBalancing.NetworkEndpointGroupPart "web-neg", LoadBalancing.BackendPart "web-backend" "ig"]
+                (depsOf alb (LoadBalancing.BackendPart "web-backend" "web-neg"))
+            assertEqual
+                "the URL map needs every service it names"
+                (map LoadBalancing.BackendServicePart ["web-backend", "web-slow-backend", "web-api-backend"])
+                (depsOf full LoadBalancing.UrlMapPart)
+            assertEqual
+                "a certificate needs its authorizations"
+                (map LoadBalancing.DnsAuthorizationPart ["web-cert-app-example-org", "web-cert-api-example-org"])
+                (depsOf full (LoadBalancing.CertificatePart "web-cert"))
+            assertEqual "the HTTPS proxy needs the map and the certificate" [LoadBalancing.UrlMapPart, LoadBalancing.CertificatePart "web-cert"] (depsOf full LoadBalancing.HttpsProxyPart)
+            assertEqual "a rule needs its proxy and the address" [LoadBalancing.HttpsProxyPart, LoadBalancing.AddressPart] (depsOf full LoadBalancing.HttpsForwardingRulePart)
+            assertEqual "without HTTPS there is no address to need" [LoadBalancing.HttpProxyPart] (depsOf alb LoadBalancing.ForwardingRulePart)
+        , testCase "the balancer is a root over one node per resource, with the declared edges" $ do
+            let dag = dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack full)
+            let parts = LoadBalancing.lbParts full
+            assertEqual "one node per resource, and the root" (length parts + 1) (Map.size (Dag.dagNodes dag))
+            let byHelp = Map.fromList [(act.extension.help, r) | (r, act) <- Map.toList (Dag.dagNodes dag)]
+            let refsOf ps = Set.fromList [r | p <- ps, Just r <- [Map.lookup (LoadBalancing.partHelp p) byHelp]]
+            let dependencies r = Set.fromList (Map.findWithDefault [] r (Dag.dagDependencies dag))
+            assertEqual "helps tell the nodes apart" (length parts + 1) (Map.size byHelp)
+            assertEqual "every resource is a node" (length parts) (Set.size (refsOf parts))
+            mapM_
+                ( \part ->
+                    assertEqual
+                        (show part.partId)
+                        [refsOf [p | p <- parts, p.partId `elem` part.partDeps]]
+                        (map dependencies (Set.toList (refsOf [part])))
+                )
+                parts
+            assertEqual
+                "the root depends on every resource"
+                (Just (refsOf parts))
+                (dependencies <$> Map.lookup "application load balancer web" byHelp)
+        , testCase "prerequisites go under every resource, not only under the root" $ do
+            let beforeRef = mkRef "test-before" ("x" :: Text.Text)
+            let before = op "before" nodeps (\actions -> actions{help = "before", ref = beforeRef})
+            let dag = dagOf (LoadBalancing.applicationLoadBalancerAfter [before] silent ignoreTrack alb)
+            mapM_
+                ( \(r, act) ->
+                    assertBool
+                        (Text.unpack act.extension.help)
+                        (r == beforeRef || beforeRef `elem` Map.findWithDefault [] r (Dag.dagDependencies dag))
+                )
+                (Map.toList (Dag.dagNodes dag))
+        , testCase "one resource's node is the balancer's own" $ do
+            let part = LoadBalancing.applicationLoadBalancerPart [] silent ignoreTrack full (LoadBalancing.DnsAuthorizationPart "web-cert-app-example-org")
+            case part of
+                Nothing -> assertBool "no such node" False
+                Just o -> do
+                    let dag = dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack full `inject` o)
+                    assertEqual "nothing new" (length (LoadBalancing.lbParts full) + 1) (Map.size (Dag.dagNodes dag))
+                    assertEqual "nothing conflicting" 0 (length (Dag.dagConflicts dag))
+                    assertEqual "an authorization stands alone" 1 (Map.size (Dag.dagNodes (dagOf o)))
+            assertBool
+                "a resource the declaration does not have"
+                (null (LoadBalancing.applicationLoadBalancerPart [] silent ignoreTrack alb LoadBalancing.AddressPart))
+        , testCase "an invalid declaration is every node's Failure and every node's refusal, before any call" $ do
+            let bad = alb{LoadBalancing.albHostRules = [LoadBalancing.HostRule ["x.example.org"] (LoadBalancing.NamedService "nope") []]}
+            mapM_
+                ( \act -> do
+                    v <- act.extension.check
+                    assertBool (Text.unpack act.extension.help <> ": " <> show v) (isFailure v)
+                    r <- try act.extension.up :: IO (Either LoadBalancing.InvalidLoadBalancer ())
+                    assertBool (Text.unpack act.extension.help) (either (const True) (const False) r)
+                )
+                (Map.elems (Dag.dagNodes (dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack bad))))
+        , testCase "each resource's scripts parse as bash" $
+            mapM_
+                ( \sc -> do
+                    (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", Text.unpack sc] ""
+                    assertEqual err ExitSuccess code
+                )
+                [ render full part
+                | part <- LoadBalancing.lbParts full
+                , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
+                ]
+        ]
     svcUrl :: Text.Text -> Text.Text
     svcUrl n = "https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/backendServices/" <> n
     inOrder :: [String] -> String -> Bool
@@ -1090,6 +1278,7 @@ fakeGcloud =
         , "  import) mutate; cat > \"$f\";;"
         , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi;;"
         , "  add-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" 2>/dev/null && { echo 'already a backend' >&2; exit 1; }; mutate; echo \"$group\" >> \"$f.backends\";;"
+        , "  remove-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" || { echo 'not a backend' >&2; exit 1; }; mutate; { grep -vxF \"$group\" \"$f.backends\" || true; } > \"$f.backends.new\"; mv \"$f.backends.new\" \"$f.backends\";;"
         , -- like the real one, it replaces the group's whole set
           "  set-named-ports) mutate; printf '%s\\n' \"$namedports\" | tr ',' '\\n' | tr ':' '\\t' > \"$FAKE_GCLOUD_LOG.ports.$name\";;"
         , "  get-named-ports) cat \"$FAKE_GCLOUD_LOG.ports.$name\" 2>/dev/null || true;;"
