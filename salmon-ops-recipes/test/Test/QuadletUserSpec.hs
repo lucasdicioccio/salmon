@@ -24,9 +24,10 @@ whatever the case did.
 module Test.QuadletUserSpec (tests) where
 
 import Control.Exception (bracket, finally)
-import Control.Monad (unless, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import Numeric (showHex)
 import System.Directory (XdgDirectory (XdgConfig), createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getXdgDirectory, listDirectory, removeDirectory, removeFile)
 import System.Exit (ExitCode (..))
@@ -60,6 +61,9 @@ tests =
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> lifecycle step c
         , testCaseSteps "a new image or env file restarts it, the same ones do not" $ \step ->
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> restarts step c
+        , testCaseSteps "two changed quadlets, one reload: the one not restarted is not skipped" $ \step ->
+            withUserQuadlets $ \unitDir ->
+                withFreshContainer unitDir $ \a -> withFreshContainer unitDir $ \b -> sharedReload step a b
         ]
 
 -- | Small, long-running with no arguments, no published port, no login.
@@ -172,6 +176,48 @@ restarts step c0 = withTempDir $ \dir -> withLocalTag $ \alias -> do
         act alias `finally` void (readProcessWithExitCode "podman" ["untag", Text.unpack alias, Text.unpack alias] "")
 
     identity c = (,) <$> showProperty c "InvocationID" <*> containerId c
+
+{- | What an interrupted pass leaves behind: both quadlet files rewritten, and
+a @daemon-reload@ run on behalf of one of them. systemd then reads
+@NeedDaemonReload=no@ for /both/ units, and only the running container can
+say that the second one was never restarted.
+-}
+sharedReload :: (String -> IO ()) -> Quadlet.Container -> Quadlet.Container -> IO ()
+sharedReload step a0 b0 = do
+    step "both up"
+    assertUp =<< runUpCapturing (node a0)
+    assertUp =<< runUpCapturing (node b0)
+    invocation <- showProperty b0 "InvocationID"
+    container <- containerId b0
+
+    step "both files changed, one daemon-reload, neither service restarted"
+    let a = a0{Quadlet.containerDescription = "changed (a)"}
+        b = b0{Quadlet.containerDescription = "changed (b)"}
+    Text.writeFile (Quadlet.quadletPath a) =<< Quadlet.renderQuadlet a
+    Text.writeFile (Quadlet.quadletPath b) =<< Quadlet.renderQuadlet b
+    (code, _, err) <- readProcessWithExitCode "systemctl" ["--user", "daemon-reload"] ""
+    unless (code == ExitSuccess) $ assertFailure ("daemon-reload failed: " <> err)
+    assertEqual "systemd still remembers the file changed; the case is not the one it means to be" "no" =<< showProperty b "NeedDaemonReload"
+    assertEqual "the service was restarted by the reload" invocation =<< showProperty b "InvocationID"
+
+    step "the check"
+    verdict <- Quadlet.checkContainer b
+    case verdict of
+        UpDown.Failure _ -> pure ()
+        other -> assertFailure ("a quadlet whose service was never restarted reads " <> show other)
+
+    step "up"
+    reports <- runUpCapturing (node b)
+    assertUp reports
+    assertEqual "the changed quadlet was skipped" (1, 0) (count isEval reports, count isSkip reports)
+    assertBool "the service was not restarted" . (/= invocation) =<< showProperty b "InvocationID"
+    assertBool "the old container is still the one running" . (/= container) =<< containerId b
+    assertEqual "the restarted service is not satisfied" UpDown.Success =<< Quadlet.checkContainer b
+
+    step "down"
+    forM_ [a, b] $ \c -> do
+        down <- runDownCapturing (node c)
+        assertBool ("down failed: " <> show (failures down)) (null (failures down))
 
 -------------------------------------------------------------------------------
 

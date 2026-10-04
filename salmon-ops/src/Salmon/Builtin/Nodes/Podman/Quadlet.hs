@@ -16,10 +16,14 @@ file, and reuses its mechanism rather than adding one:
 
 * the file is written through 'Salmon.Builtin.Nodes.Filesystem.filecontents',
   so identical bytes leave its mtime alone;
-* the @check@ is the same @systemctl show@, because systemd answers
+* the @check@ starts with the same @systemctl show@, because systemd answers
   @NeedDaemonReload=yes@ for a generated unit whose /source/ file changed
   (the generator writes @SourcePath=@) -- so a new image reference is a
   changed file, a stale unit, and a reload and restart;
+* and then asks the /running container/ which quadlet it was started from
+  (see 'quadletLabel'), because @daemon-reload@ is machine-wide: once
+  anything else has run one, systemd no longer remembers that this file
+  changed, and a unit still running the old container reads as current;
 * the env file (and anything else the caller names in 'containerWatched') is
   hashed into a trailing comment, as
   'Salmon.Builtin.Nodes.Systemd.systemdServiceWatching' does, so a changed
@@ -33,7 +37,7 @@ not remove the unit until the next reload, so the file node's @down@ reloads
 after removing. And the image is pulled /by the service's start/, so a slow
 pull is a start timeout: see 'containerStartTimeout'.
 
-What "changed" means is "the file changed". An image reference that stays
+What "changed" means is "the declaration or a watched file changed". An image reference that stays
 the same while the registry moves what it points at (@:latest@) is not a
 change this node can see; name images by a tag that moves with the content,
 or by digest.
@@ -53,9 +57,14 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     systemQuadletDir,
     renderContainer,
     renderContainerWatching,
+    renderQuadlet,
+    quadletFingerprint,
+    quadletLabel,
     watchedFiles,
     containerProblems,
     interpretShow,
+    interpretRunning,
+    checkContainer,
     InvalidContainer (..),
 ) where
 
@@ -66,7 +75,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import System.Directory (createDirectoryIfMissing)
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Process (proc, readCreateProcessWithExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
@@ -175,7 +186,11 @@ watchedFiles c = maybeToList c.containerEnvFile <> c.containerWatched
 the declaration alone decides.
 -}
 renderContainer :: Container -> Text
-renderContainer c =
+renderContainer = renderLabelled Nothing
+
+-- | 'renderContainer', with a @Label=@ line when there is a fingerprint to carry.
+renderLabelled :: Maybe Text -> Container -> Text
+renderLabelled fingerprint c =
     Text.unlines $
         mconcat
             [ ["[Unit]", "Description=" <> c.containerDescription]
@@ -183,6 +198,7 @@ renderContainer c =
             , ["", "[Container]"]
             , ["ContainerName=" <> Podman.getContainerName c.containerName]
             , ["Image=" <> c.containerImage]
+            , ["Label=" <> quadletLabel <> "=" <> f | f <- maybeToList fingerprint]
             , ["EnvironmentFile=" <> Text.pack f | f <- maybeToList c.containerEnvFile]
             , ["PublishPort=" <> port p | p <- c.containerPorts]
             , ["Volume=" <> volume v | v <- c.containerVolumes]
@@ -222,13 +238,38 @@ renderContainer c =
     restart RestartOnFailure = "on-failure"
     restart RestartAlways = "always"
 
-{- | 'renderContainer' plus the fingerprint of the watched files, which is what
-is written. With nothing watched it is 'renderContainer' exactly.
+{- | 'renderContainer' plus the fingerprint of the watched files: everything
+that decides what the container should be. With nothing watched it is
+'renderContainer' exactly.
 -}
 renderContainerWatching :: Container -> IO Text
-renderContainerWatching c = case watchedFiles c of
-    [] -> pure (renderContainer c)
-    files -> Systemd.withWatchedFingerprint files (renderContainer c)
+renderContainerWatching = renderWatching Nothing
+
+renderWatching :: Maybe Text -> Container -> IO Text
+renderWatching fingerprint c = case watchedFiles c of
+    [] -> pure (renderLabelled fingerprint c)
+    files -> Systemd.withWatchedFingerprint files (renderLabelled fingerprint c)
+
+{- | The container label that says which quadlet a container was started
+from: its value is 'quadletFingerprint' at the time the file was written.
+-}
+quadletLabel :: Text
+quadletLabel = "salmon.quadlet"
+
+{- | A hash of 'renderContainerWatching': the declaration and the watched
+files' contents, and nothing that depends on when it is asked.
+-}
+quadletFingerprint :: Container -> IO Text
+quadletFingerprint c = FS.hashBytes . Text.encodeUtf8 <$> renderContainerWatching c
+
+{- | The file as written: 'renderContainerWatching' with one more line,
+@Label=salmon.quadlet=FINGERPRINT@, so that a container started from this
+file says so and 'checkContainer' can ask it.
+-}
+renderQuadlet :: Container -> IO Text
+renderQuadlet c = do
+    fingerprint <- quadletFingerprint c
+    renderWatching (Just fingerprint) c
 
 {- | Why this container cannot be written, if it cannot.
 
@@ -300,7 +341,7 @@ quadletContainer r systemctl t c =
                             , "quadlet: " <> declared
                             ]
                         , ref = mkRef "systemd-unit" target
-                        , check = Systemd.checkUnit interpretShow c.containerScope target
+                        , check = checkContainer c
                         , up = reload >> restart
                         , down = stop
                         }
@@ -334,7 +375,7 @@ quadletContainer r systemctl t c =
     -- was there.
     quadletFile :: Op
     quadletFile =
-        let file = FS.filecontents (FS.FileContents path (renderContainerWatching c))
+        let file = FS.filecontents (FS.FileContents path (renderQuadlet c))
          in file{node = fmap ownFile file.node, predecessors = deps [unitDir]}
 
     unitDir :: Op
@@ -372,3 +413,60 @@ a transition being 'Unknown', a stopped unit -- reads as it does there.
 -}
 interpretShow :: [Text] -> CheckResult
 interpretShow = Systemd.interpretShowAccepting ("generated" : Systemd.installedStates)
+
+{- | Is the service running, as written, /the container this declaration
+describes/?
+
+The unit is asked first ('interpretShow'), and anything but 'Success' is the
+answer. But systemd only knows whether it has re-read its files, and
+@daemon-reload@ is machine-wide: with two quadlets changed and one of them
+brought up, the other's unit reads @NeedDaemonReload=no@ while still running
+the container it was started with -- which is how a pass interrupted between
+writing the files and restarting the services was followed by one that
+skipped them, converged, and left the old image running. So the running
+container is asked for its 'quadletLabel' and that is compared with
+'quadletFingerprint' ('interpretRunning'). A @podman@ that cannot answer is
+'Unknown', as a @systemctl@ that cannot is in 'Systemd.checkUnit'.
+
+@podman@ is run as whoever runs salmon, which is the store the service's
+container is in for both scopes: root for 'Systemd.System', the user for
+'Systemd.User'.
+-}
+checkContainer :: Container -> IO CheckResult
+checkContainer c = do
+    unit <- Systemd.checkUnit interpretShow c.containerScope (serviceTarget c)
+    case unit of
+        Success -> do
+            declared <- quadletFingerprint c
+            (code, out, _err) <-
+                readCreateProcessWithExitCode
+                    ( proc
+                        "podman"
+                        [ "container"
+                        , "inspect"
+                        , "--format"
+                        , "{{index .Config.Labels \"" <> Text.unpack quadletLabel <> "\"}}"
+                        , Text.unpack (Podman.getContainerName c.containerName)
+                        ]
+                    )
+                    ""
+            pure $ case code of
+                ExitSuccess -> interpretRunning declared (Text.pack out)
+                ExitFailure _ -> Unknown
+        other -> pure other
+
+{- | The verdict on a running container's 'quadletLabel' (as @podman
+container inspect@ printed it) against the declared 'quadletFingerprint'.
+A container with no such label was started from a file written before the
+label existed, or by something else under this name: either way not from
+this declaration.
+-}
+interpretRunning :: Text -> Text -> CheckResult
+interpretRunning declared printed
+    | running == declared = Success
+    | Text.null running || running == "<no value>" =
+        Failure "the running container does not say which quadlet it was started from"
+    | otherwise =
+        Failure ("the running container was started from quadlet " <> running <> ", the declared one is " <> declared)
+  where
+    running = Text.strip printed

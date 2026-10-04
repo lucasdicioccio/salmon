@@ -159,6 +159,28 @@ watchedTests =
         let c = app{Quadlet.containerEnvFile = Nothing}
         rendered <- Quadlet.renderContainerWatching c
         assertEqual "" (Quadlet.renderContainer c) rendered
+    , testCase "the written file is the declaration plus the label naming it" $ do
+        let c = app{Quadlet.containerEnvFile = Nothing}
+        fingerprint <- Quadlet.quadletFingerprint c
+        written <- Quadlet.renderQuadlet c
+        let label = "Label=" <> Quadlet.quadletLabel <> "=" <> fingerprint
+        assertEqual "not exactly one label line" [label] (filter ("Label=" `Text.isPrefixOf`) (Text.lines written))
+        assertEqual "the label is not the only difference" (Text.lines (Quadlet.renderContainer c)) (filter (/= label) (Text.lines written))
+        assertBool "the label is not in the [Container] section" $
+            "[Container]" `elem` takeWhile (/= label) (Text.lines written)
+                && "[Service]" `notElem` takeWhile (/= label) (Text.lines written)
+    , testCase "the fingerprint moves with the image and with the env file, and not otherwise" $ withTempDir $ \dir -> do
+        let env = dir </> "env"
+            c = app{Quadlet.containerEnvFile = Just env}
+        writeFile env "PORT=80\n"
+        before <- Quadlet.quadletFingerprint c
+        again <- Quadlet.quadletFingerprint c
+        moved <- Quadlet.quadletFingerprint c{Quadlet.containerImage = "europe-west1-docker.pkg.dev/acme/repo/app:v4"}
+        writeFile env "PORT=81\n"
+        after <- Quadlet.quadletFingerprint c
+        assertEqual "" before again
+        assertBool "a new image left the fingerprint alone" (before /= moved)
+        assertBool "a new env file left the fingerprint alone" (before /= after)
     ]
 
 problemTests :: [TestTree]
@@ -190,6 +212,15 @@ checkTests =
         assertBool "" (isFailure (Quadlet.interpretShow ["ActiveState=failed", "UnitFileState=generated", "NeedDaemonReload=no"]))
     , testCase "a container still starting (pulling) is Unknown, not Failure" $
         assertEqual "" Unknown (Quadlet.interpretShow ["ActiveState=activating", "UnitFileState=generated", "NeedDaemonReload=no"])
+    , testCase "a container started from the declared quadlet is satisfied" $
+        assertEqual "" Success (Quadlet.interpretRunning "abc123" "abc123\n")
+    , testCase "a container started from another quadlet needs bringing up" $
+        -- the unit reads active, generated and reloaded: something else ran
+        -- the daemon-reload, and nothing restarted this service
+        assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "def456\n"))
+    , testCase "a container that does not say what it was started from needs bringing up" $ do
+        assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "\n"))
+        assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "<no value>\n"))
     ]
   where
     isFailure (Failure _) = True
@@ -232,7 +263,8 @@ generatorTests =
         let envFile = dir </> "env"
             c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just envFile}
         writeFile envFile "PORT=80\n"
-        Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderContainerWatching c
+        Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderQuadlet c
+        fingerprint <- Quadlet.quadletFingerprint c
         environment <- getEnvironment
         (code, out, err) <-
             readCreateProcessWithExitCode
@@ -247,6 +279,7 @@ generatorTests =
         assertBool said ("--authfile=/etc/app/auth.json" `isInfixOf` said)
         assertBool said (("--env-file " <> envFile) `isInfixOf` said)
         assertBool said ("--publish 8080:80/tcp" `isInfixOf` said)
+        assertBool said (("--label " <> Text.unpack (Quadlet.quadletLabel <> "=" <> fingerprint)) `isInfixOf` said)
         assertBool said ("europe-west1-docker.pkg.dev/acme/repo/app:v3" `isInfixOf` said)
         assertBool said (("SourcePath=" <> Quadlet.quadletPath c) `isInfixOf` said)
     ]
