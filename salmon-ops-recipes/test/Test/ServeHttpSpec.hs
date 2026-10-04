@@ -55,12 +55,14 @@ import qualified Salmon.Actions.Help as Help
 import qualified Test.ServeApi as Api
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Convergence (..), Direction (..), NodeState (..), World (..))
+import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve.Http as Http
-import Salmon.Builtin.Extension (Track', deps, down, help, nodeps, op, ref, up)
+import qualified Salmon.Actions.Serve.StatusSink as StatusSink
+import Salmon.Builtin.Extension (Op, Track', deps, down, help, nodeps, op, ref, up)
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (contramap)
+import Salmon.Reporter (contramap, silent)
 import qualified Salmon.Reporter.Tagged as Tagged
 
 import Test.Harness (capture, privatePipe, withTempDir)
@@ -82,6 +84,7 @@ tests =
         , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
         , testCase "GET / is the web UI's page, /ui/* its files, and a missing one is 404" theWebUi
         , testCase "two seeds colliding on one ref: /dag carries the kept and replaced pair while both are wanted" conflictingPairOnDag
+        , testCase "a chain of diamonds: /dag, /status, status, a --select and a status-sink write all answer" diamondChainAnswers
         ]
 
 -------------------------------------------------------------------------------
@@ -113,6 +116,7 @@ spyProgram slow upsRef downsRef = Track $ \spec ->
     op "http-root" (deps (fmap nodeOp spec.specNames)) $ \actions ->
         actions{ref = mkRef "http-root" spec.specNames, help = "the root of " <> Text.pack (unwords spec.specNames)}
   where
+    nodeOp name | name == diamondsName = diamondChain diamondCount
     -- @NAME:VARIANT@ is the same node (ref keyed on @NAME@) described
     -- differently (help carries the whole word): two seeds colliding on
     -- one ref, for the /dag conflict case
@@ -128,6 +132,34 @@ spyProgram slow upsRef downsRef = Track $ \spec ->
                 , down = bump downsRef name
                 }
     bump r name = atomicModifyIORef' r (\m -> (Map.insertWith (+) name 1 m, ()))
+
+-- | The name of the seed word that declares 'diamondChain'.
+diamondsName :: String
+diamondsName = "diamonds"
+
+{- | How many diamonds: 49 nodes under the root, 2^16 paths to the last.
+
+No more than that because declaring a seed still walks every occurrence
+once ('Salmon.Op.Dag.foldDag'): four more diamonds make the declaration
+seconds of allocation, during which the suite's timing-sensitive cases,
+sharing this process and its collector, miss their windows.
+'Test.QuerySpec' has sixty diamonds without a loop around them.
+-}
+diamondCount :: Int
+diamondCount = 16
+
+{- | Diamonds on top of one another: each @top@ stands on a @left@ and a
+@right@ that both stand on the next @top@ down, and the last on @bottom@. The
+number of paths to a node doubles with every diamond above it, which is the
+shape a listing of every path cannot survive.
+-}
+diamondChain :: Int -> Op
+diamondChain 0 = op "bottom" nodeps $ \actions -> actions{ref = mkRef "http-diamond" ("bottom" :: String)}
+diamondChain i =
+    op "top" (deps [side "left", side "right"]) $ \actions -> actions{ref = mkRef "http-diamond" ("top" :: String, i)}
+  where
+    below = diamondChain (i - 1)
+    side name = op (Text.pack name) (deps [below]) $ \actions -> actions{ref = mkRef "http-diamond" (name, i)}
 
 -------------------------------------------------------------------------------
 -- a running loop with an HTTP server
@@ -413,6 +445,78 @@ conflictingPairOnDag =
         (_, v'') <- get running "/dag"
         nodes'' <- dagNodes v''
         forM_ nodes'' $ \n -> assertEqual ("no conflict left on " <> show (textAt ["help"] n)) Nothing (field "conflict" n)
+
+{- | A graph whose paths are not to be listed: 'diamondCount' diamonds, 65536
+paths to the last node and a quarter of a million in all. Everything that
+shows a node's paths or resolves a pattern against them answers within
+'exchange'\'s ten seconds, and what it answers is bounded: at most
+'Query.pathLimit' paths per node, the shortest first. A pattern still
+selects by any path, listed or not.
+-}
+diamondChainAnswers :: IO ()
+diamondChainAnswers =
+    withRunning $ \running -> do
+        _ <- sync running "supervise off"
+        _ <- sync running "autoconverge off"
+        declared <- sync running ("up " <> diamondsName)
+        assertBool ("declared: " <> show declared) ("declared" `elem` declared)
+        let total = 3 * diamondCount + 2
+        -- /dag
+        (dagCode, dag) <- get running "/dag"
+        assertEqual "/dag status" 200 dagCode
+        nodes <- dagNodes dag
+        let pathsOf n = [p | String p <- maybe [] arrayOf (field "paths" n)]
+            bottoms = [n | n <- nodes, textAt ["shorthand"] n == Just "bottom"]
+        assertEqual "one node per ref, the root included" total (length nodes)
+        forM_ nodes $ \n -> do
+            assertBool ("a path to " <> show (textAt ["ref", "short"] n)) (not (null (pathsOf n)))
+            assertBool ("no more than the limit for " <> show (textAt ["ref", "short"] n)) (length (pathsOf n) <= Query.pathLimit)
+        assertEqual "the last node lists the limit" [Query.pathLimit] (fmap (length . pathsOf) bottoms)
+        assertEqual
+            "its shortest path first: left all the way down"
+            [Just ("http-root/" <> Text.concat (replicate diamondCount "top/left/") <> "bottom")]
+            (fmap (headMay . pathsOf) bottoms)
+        -- /status, and the typed status
+        (statusCode, status) <- get running "/status"
+        assertEqual "/status status" 200 statusCode
+        assertEqual "/status lists every node" total (length (maybe [] arrayOf (field "nodes" status)))
+        typed <- sync running "status"
+        assertEqual "the typed status answers" ["status"] typed
+        -- a selector: everything under the first right, by whatever path
+        (_, q) <- post running "/command" "query --select /http-root/top/right/**"
+        let selectedIn v = [n | r <- arrayOf v, n <- maybe [] arrayOf (field "nodes" r), field "selected" n == Just (Bool True)]
+        assertEqual "all but the root, the first top and its left" (total - 3) (length (selectedIn q))
+        -- by a path that is not among the ones listed
+        (_, q') <- post running "/command" ("query --select /http-root" <> concat (replicate diamondCount "/top/right") <> "/bottom")
+        assertEqual "the longest path still selects its node" [Just "bottom"] (fmap (textAt ["shorthand"]) (selectedIn q'))
+        -- a restricted pass
+        _ <- sync running "converge --select /http-root/top/left/**"
+        ups <- readIORef (runningUps running)
+        assertEqual "no counter node is in this graph" Map.empty ups
+        (_, dag') <- get running "/dag"
+        nodes' <- dagNodes dag'
+        assertEqual
+            "the pass converged what the pattern selected and nothing else"
+            (total - 3)
+            (length [() | n <- nodes', textAt ["convergence"] n == Just "converged"])
+        -- the status sink writes the same object
+        w <- finish running
+        withTempDir $ \dir -> do
+            let path = dir </> "status.json"
+                cfg = StatusSink.Config{StatusSink.configPath = path, StatusSink.configInterval = 60 * 1000000, StatusSink.configHost = "diamonds"}
+            written <- timeout (10 * 1000000) $
+                StatusSink.withSink cfg Nothing silent $ \sink -> do
+                    StatusSink.sinkObserver sink (pure w)
+                    StatusSink.writeNow sink
+                    eitherDecode <$> LChar8.readFile path
+            case written of
+                Nothing -> assertFailure "the status sink did not write within 10s"
+                Just (Left err) -> assertFailure ("the sink's document does not parse: " <> err)
+                Just (Right (doc :: StatusSink.Document)) ->
+                    assertEqual "the sink's status lists every node" total (length (maybe [] arrayOf (field "nodes" (StatusSink.docStatus doc))))
+  where
+    headMay (x : _) = Just x
+    headMay [] = Nothing
 
 dagBeforeAnyPass :: IO ()
 dagBeforeAnyPass =

@@ -12,6 +12,7 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
@@ -39,6 +40,9 @@ tests =
         , testCase "forceSkip makes upTree report Skip for the excluded node, Eval for the rest" forceSkipSkipsOnlyExcluded
         , testCase "pathedNodes carries each node's help text alongside its path/Ref" pathedNodesCarriesHelp
         , testCase "renderAnnotated tags same-path, distinct-Ref siblings with a stable shortRef so they aren't mistaken for duplicates" renderAnnotatedDisambiguatesSameTextSiblings
+        , testCase "outline: selectors, first paths and shortest paths are what the full path listing gives" outlineAgreesWithTheListing
+        , testCase "outline: a node declared again with one more dependency has that dependency" outlineMergesALaterOccurrence
+        , testCase "outline: sixty diamonds resolve a selector and list paths without listing 2^60 of them" outlineOnADiamondChain
         , testCase "resolveRewrittenSelectors: a plain path selector behaves exactly as resolveSelectors" rewrittenPathSelectorUnchanged
         , testCase "resolveRewrittenSelectors: a #ref selector addresses a declared node directly" rewrittenRefSelectorAddressesDeclaredNode
         , testCase "resolveRewrittenSelectors: a #ref selector addressing a batch expands to its declared members" rewrittenRefSelectorExpandsABatch
@@ -162,6 +166,107 @@ renderAnnotatedDisambiguatesSameTextSiblings = do
     assertBool "each sibling's own description follows its own tagged line" ("  # runs a" `elem` rendered && "  # runs b" `elem` rendered)
     assertEqual "no plain, untagged occurrence of the colliding path remains" 0 (length (Prelude.filter (== "/root/pg-script") rendered))
     assertBool "the non-colliding root path itself is left untagged" ("/root" `elem` rendered)
+
+-------------------------------------------------------------------------------
+-- the outline: one entry per Ref instead of one per path
+
+{- | @n@ diamonds on top of one another: each @top@ stands on a @left@ and a
+@right@ that both stand on the next @top@ down, and the last on @bottom@. The
+number of paths to a node doubles with every diamond above it.
+-}
+diamondChain :: Int -> Op
+diamondChain n = go n
+  where
+    go :: Int -> Op
+    go 0 = op "bottom" nodeps $ \x -> x{ref = mkRef "diamond" ("bottom" :: Text)}
+    go i =
+        let below = go (i - 1)
+            side name = op name (deps [below]) $ \x -> x{ref = mkRef "diamond" (name, i)}
+         in op "top" (deps [side "left", side "right"]) $ \x -> x{ref = mkRef "diamond" ("top" :: Text, i)}
+
+{- | On graphs small enough to list every path: a pattern selects exactly the
+'Ref's found at a matching path, the first path per 'Ref' is the first in
+the listing, and the paths kept are the head of the listing sorted.
+-}
+outlineAgreesWithTheListing :: IO ()
+outlineAgreesWithTheListing =
+    mapM_ agrees [("shared", sharedGraph), ("four diamonds", diamondChain 4)]
+  where
+    patterns =
+        [ "/**"
+        , "/root/a/**"
+        , "/root/*/shared"
+        , "/top"
+        , "/top/**/bottom"
+        , "/top/left/top/right/**"
+        , "/**/right/*"
+        , "/**/left/**/right/top/**"
+        , "/*/*/*"
+        , "/top/right/top/right/top/right/top/right/bottom"
+        , "/nothing/**"
+        , ""
+        ]
+    agrees :: (String, Op) -> IO ()
+    agrees (name, graph) = do
+        let cograph = runIdentity (expand graph)
+            entries = Query.pathedRefs cograph
+            o = Query.outline cograph
+        assertEqual (name <> ": every node") (Set.fromList (map snd entries)) (Query.outlineRefs o)
+        mapM_
+            ( \pat ->
+                assertEqual
+                    (name <> ": " <> show pat)
+                    (Set.fromList [r | (path, r) <- entries, Query.matchPattern (Query.parsePattern pat) path])
+                    (Query.matchOutline (Query.parsePattern pat) o)
+            )
+            patterns
+        assertEqual
+            (name <> ": first paths")
+            (Map.fromListWith (\_ old -> old) [(r, path) | (path, r) <- entries])
+            (Map.fromList [(r, path) | (path, r, _) <- Query.outlineFirstPaths o])
+        assertEqual (name <> ": one first path per node") (Set.size (Query.outlineRefs o)) (length (Query.outlineFirstPaths o))
+        let width path = sum (map Text.length path) + length path
+            listed = Map.map (take 3 . map snd . Set.toAscList) (Map.fromListWith Set.union [(r, Set.singleton (width path, path)) | (path, r) <- entries])
+        assertEqual (name <> ": the three shortest paths per node") listed (Query.outlinePaths 3 o)
+
+{- | The shape 'SreBox.PostgresPairPrereqs' relies on: a node named a second
+time, same 'Ref', with one more dependency. The first occurrence is the one
+walked; the second must still contribute what is new under it.
+-}
+outlineMergesALaterOccurrence :: IO ()
+outlineMergesALaterOccurrence = do
+    let extra = op "extra" nodeps $ \x -> x{ref = mkRef "leaf" ("extra" :: Text)}
+        base = op "base" nodeps $ \x -> x{ref = mkRef "leaf" ("base" :: Text)}
+        member ds = op "member" (deps ds) $ \x -> x{ref = mkRef "mid" ("member" :: Text)}
+        root = op "root" (deps [member [base], member [base, extra]]) $ \x -> x{ref = mkRef "root" ()}
+        cograph = runIdentity (expand root)
+        (everything, _) = Query.resolveSelectors cograph [] []
+        (selected, _) = Query.resolveSelectors cograph ["/root/member/extra"] []
+    assertBool "the later occurrence's dependency is a node" (mkRef "leaf" ("extra" :: Text) `Set.member` everything)
+    assertEqual "and is selected by its path" (Set.singleton (mkRef "leaf" ("extra" :: Text))) selected
+
+{- | Sixty diamonds: 181 nodes, 2^60 paths to the bottom one. Listing them is
+not an option, so everything below is only reachable if nothing lists them.
+-}
+outlineOnADiamondChain :: IO ()
+outlineOnADiamondChain = do
+    let cograph = runIdentity (expand (diamondChain 60))
+        o = Query.outline cograph
+        bottom = mkRef "diamond" ("bottom" :: Text)
+        (everything, _) = Query.resolveSelectors cograph [] []
+        (underTheFirstRight, _) = Query.resolveSelectors cograph ["/top/right/**"] []
+        (byALongPath, _) = Query.resolveSelectors cograph [Text.concat (replicate 60 "/top/right") <> "/bottom"] []
+        paths = Query.outlinePaths Query.pathLimit o
+    assertEqual "every node, once" 181 (Set.size everything)
+    assertEqual "everything but the first top and its left" 179 (Set.size underTheFirstRight)
+    assertEqual "a path that is the longest of 2^60 still selects its node" (Set.singleton bottom) byALongPath
+    assertEqual "a path per node at least" 181 (Map.size (Map.filter (not . null) paths))
+    assertEqual "and no more than the limit" Query.pathLimit (maximum (map length (Map.elems paths)))
+    assertEqual
+        "the shortest path to the bottom goes left all the way"
+        (Just (concat (replicate 60 ["top", "left"]) <> ["bottom"]))
+        (fmap head (Map.lookup bottom paths))
+    assertEqual "deduped rendering is one line per node" 181 (length (Query.renderAnnotated cograph Set.empty Set.empty True False))
 
 -------------------------------------------------------------------------------
 -- resolveRewrittenSelectors (R4)
