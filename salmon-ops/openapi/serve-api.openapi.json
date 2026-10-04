@@ -621,7 +621,7 @@
           "status",
           "paths"
         ],
-        "description": "A node as `status` lists it. `selected` and `excluded` are present in a `query` report only."
+        "description": "A node as `status` lists it. `selected` and `excluded` are present in a `query` report only. `paths` is at most 8 of the paths a `--select`/`--exclude` pattern can name the node by, the shortest first: a node under shared dependencies has more than can be listed, and a pattern built from one that is not listed still selects it."
       },
       "Representative": {
         "type": "object",
@@ -740,7 +740,7 @@
           "dependencies",
           "dependants"
         ],
-        "description": "One node of the computed DAG. `conflict` is present while two live declarations disagree about the node."
+        "description": "One node of the computed DAG. `conflict` is present while two live declarations disagree about the node. `paths` is at most 8 paths, the shortest first, as in a `status` node."
       },
       "NodeDescription": {
         "type": "object",

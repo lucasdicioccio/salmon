@@ -695,7 +695,7 @@ data Report
     | -- | everything applied cleanly, nodes still not converged
       ConvergeStop !Bool !Int
     | -- | the loop's 'Mode', then nodes, plus every live declaration's
-      -- path(s) to each one (see 'worldPaths') — the thing a
+      -- shortest path(s) to each one (see 'worldPaths') — the thing a
       -- @--select@\/@--exclude@ pattern is actually built from.
       StatusReport !Mode ![(Ref, NodeState)] !(Map Ref [Text])
     | -- | epoch, declaration, still active, who declared it, argv
@@ -2765,7 +2765,7 @@ fragment of the text 'status'\/'query' now print on every node's line (either
 the short, disambiguating tag or the full 'Ref'). This is what makes a node
 addressable at all when two of them share every path — a recipe that reuses
 the same shorthand (\"directory\", \"file-contents\", ...) at each position
-gives 'Query.pathedRefs' no way to tell them apart by path, and printing the
+gives a path pattern no way to tell them apart, and printing the
 paths in 'worldPaths' cannot invent a distinction that was never there.
 -}
 resolveWorldSelectors :: World seed directive -> Selection -> (Set Ref, Set Ref)
@@ -2775,11 +2775,14 @@ resolveWorldSelectors w sel =
     (selRefPats, selPathPats) = List.partition isRefFragment sel.selSelect
     (excRefPats, excPathPats) = List.partition isRefFragment sel.selExclude
 
-    allRefs = Set.unions [Set.fromList (map snd (Query.pathedRefs ep.epochGraph)) | ep <- w.worldEpochs]
+    -- one entry per node and never the list of paths, whose length is
+    -- exponential in the shared dependencies (see 'Query.Outline').
+    outlines = [Query.outline ep.epochGraph | ep <- w.worldEpochs]
+
+    allRefs = Set.unions (map Query.outlineRefs outlines)
 
     pathMatches :: [Text] -> Set Ref
-    pathMatches [] = Set.empty
-    pathMatches pats = Set.unions [fst (Query.resolveSelectors ep.epochGraph pats []) | ep <- w.worldEpochs]
+    pathMatches pats = Set.unions [Query.matchOutline (Query.parsePattern pat) o | pat <- pats, o <- outlines]
 
     refMatches :: [Text] -> Set Ref
     refMatches pats = Set.fromList [rf | rf <- Set.toList allRefs, pat <- pats, matchesRefFragment pat rf]
@@ -2805,15 +2808,19 @@ the only source of truth for what is declared up.
 activeEpochIds :: World seed directive -> Set EpochId
 activeEpochIds w = Set.fromList (fmap epochId w.worldEpochs)
 
-{- | Every path (rendered @\/@-separated, root-to-node, exactly the shape
+{- | Paths (rendered @\/@-separated, root-to-node, exactly the shape
 @--select@\/@--exclude@ patterns match against) at which a live declaration's
 graph reaches each 'Ref' — the thing @status@\/@query@ never showed despite
 being the only practical way to /build/ a selector pattern in the first
 place: without this, a node was nameable only by its 'Ref' (opaque) or by
 guessing the path back from its 'nodeShorthand' and hoping there is exactly
 one node with that shorthand. A node reached by more than one seed, or twice
-within one seed's graph, can have more than one path; all of them are shown,
-since any one is a valid selector. Sourced from 'worldEpochs' only, same as
+within one seed's graph, can have more than one path, and any one is a valid
+selector. __At most 'Query.pathLimit' are listed__, the shortest: a shared
+dependency is a path again under each node standing on it, so the number of
+paths doubles with every diamond above a node, and listing them all is what
+kept @\/dag@ and @\/status@ from ever answering on a 138-node graph. A
+pattern built from a path that is not listed still selects the node. Sourced from 'worldEpochs' only, same as
 'resolveWorldSelectors' — a retired seed's graph is gone, and a node with no
 entry here (nothing in it, or absent from the map) is one no /live/
 declaration's graph currently reaches by path at all, addressable only by its
@@ -2821,10 +2828,9 @@ declaration's graph currently reaches by path at all, addressable only by its
 -}
 worldPaths :: World seed directive -> Map Ref [Text]
 worldPaths w =
-    Map.map (nub . sortOn Text.length) $
-        Map.fromListWith
+    Map.map (take Query.pathLimit . nub . sortOn Text.length) $
+        Map.unionsWith
             (++)
-            [ (ref, [Text.intercalate "/" path])
+            [ Map.map (map (Text.intercalate "/")) (Query.outlinePaths Query.pathLimit (Query.outline ep.epochGraph))
             | ep <- w.worldEpochs
-            , (path, ref) <- Query.pathedRefs ep.epochGraph
             ]

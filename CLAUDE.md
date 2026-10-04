@@ -447,6 +447,20 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   both keyed that way), so addressing a batch by ref is equivalent to excluding every declared node
   that went into it. See milestone 5, (R4) in
   `specs/per-node-state-machines-remaining.md`, and `Test/QuerySpec.hs`.
+  **Paths are matched, never listed.** The declared graph is a tree, so a shared dependency is a
+  subtree again under each parent and the number of paths to a node doubles with every diamond
+  above it; `pathedNodes`/`pathedRefs` list one entry per occurrence and are for `query show
+  --no-dedupe` alone. Everything else goes through `Query.Outline` (`outline`: the same graph with
+  one entry per `Ref`, descending into a `Ref` the first time it is met): `matchOutline` runs a
+  pattern as an automaton over (node, pattern suffix) pairs, so a glob still selects a node by *any*
+  of its paths; `outlinePaths` keeps the `pathLimit` (8) shortest per node, which is all
+  `Serve.worldPaths` — `status`, `query`, `/dag`, `/status`, the status sink — now shows; and
+  `outlineFirstPaths` is the deduped rendering. Two limits: a later occurrence of a `Ref` is looked
+  at one level deep (what is new directly under it is merged, which covers a node named again with
+  one more dependency; a difference further down is not seen), and a `Ref` met under two shorthands
+  keeps the first. `Dag.foldDag` still walks every occurrence at declaration, so a declaration is
+  still exponential in stacked diamonds (about 7s for a 61-node chain, which is why `ServeHttpSpec`'s
+  diamond chain stops at 49 nodes and `QuerySpec`'s 181-node one has no loop around it).
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
   `World` — a `worldLedger` of who's asked for what, a `worldMagma` of one representative per
   `Ref` (what each node *is*), a `NodeState` per node (a `Direction` it's wanted in plus whether

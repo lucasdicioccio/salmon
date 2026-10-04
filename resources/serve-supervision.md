@@ -921,7 +921,9 @@ What to know:
   per `Ref`, with `dependencies` and `dependants` as ref lists both ways,
   the node's `shorthand`/`help`/`notes`/`dynamics` (the fields §8's
   `Stale` detection compares), and its `direction`/`convergence`/`status`/
-  `paths` as `status` lists them. It is populated the moment something is
+  `paths` as `status` lists them (at most 8 per node, the shortest first:
+  a node under shared dependencies has more paths than can be listed, and a
+  pattern built from any of them selects it, listed or not). It is populated the moment something is
   declared — under `autoconverge off` every node reads `pending` with its
   edges already in place — and a retired seed's nodes stay in it with
   `direction: "down"` until their teardown is done. A node whose current
