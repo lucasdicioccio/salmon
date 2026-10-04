@@ -171,7 +171,7 @@ nothing about that VM.
 | `Gcp.Compute.instanceGroup` | an unmanaged, zonal group, `<prefix>-ig` |
 | `Gcp.Compute.instanceGroupMember` | the tier-2 VM, put in it |
 | `Gcp.Compute.firewallRule` | `tcp:<--lb-port>` from the proxy range **and** the health-check ranges, to instances tagged `<prefix>-lb` |
-| `Gcp.LoadBalancing.applicationLoadBalancer` | health check, backend service, named ports, URL map, target proxy, forwarding rule |
+| `Gcp.LoadBalancing.applicationLoadBalancer` | health check, backend service, named ports, URL map, target proxy, forwarding rule (a node each, under one root) |
 | `Systemd.systemdService` (on the VM) | `salmon-toy-web.service`, a `python3 -m http.server` over a page salmon wrote |
 
 With `--dns-zone DNS_NAME`, tier 3 also declares

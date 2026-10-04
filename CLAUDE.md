@@ -1073,9 +1073,21 @@ rule, and the GCP toy uses both to point `lb.DNS_NAME` at its balancer (`--dns-z
 record-set command has been run against a real project, so the `describe` JSON shape, the `^DELIM^` escaping, how Cloud
 DNS spells back a `TXT` or an `AAAA`, and the toy's tier 3 record are unverified.
 
-`Gcp.LoadBalancing.applicationLoadBalancer` is one node for a whole *regional external* Application Load Balancer: a
-bash script of `describe`-guarded creates, a read-only check script whose lines `interpretLbCheck` judges, a delete
-script. Beyond the default backend service (`albBackends`, `<name>-backend`) it takes named ones (`albServices`,
+`Gcp.LoadBalancing.applicationLoadBalancer` is one *declaration* for a whole *regional external* Application Load
+Balancer, unfolded into a node per resource under a root that keeps the old `ref` (`gcp-application-lb`): `lbParts` is
+the pure list (a `PartSpec` per health check, per group's named ports, per backend service, per NEG, per backend
+attachment, the URL map, per DNS authorization, per certificate, the address, the proxies, the forwarding rules), each
+with its dependencies and the bash lines of its `up` (`describe`-guarded creates), its read-only check (lines
+`interpretLbCheck` judges) and its `down`. So progress, concurrency under `serve`, failure and retry are per resource,
+and teardown is the edges backwards. Load-bearing: **`inject` on the returned node orders nothing among the
+resources** (they are the root's dependencies too), so prerequisites (APIs, the proxy-only subnet, the instance
+groups) go to `applicationLoadBalancerAfter`, which puts them under every resource node; attachments on one backend
+service are chained, since two `add-backend` on one service must not run at once; an attachment's `down` is a
+`remove-backend`, because a NEG still attached cannot be deleted; a `ComputeCertificate` is a node whose `up` only
+fails when it is absent; the root's `up` does nothing and its `check` is the backends' health (`Unknown` while not
+`HEALTHY`); `albProblems` is every node's `Failure`/throw. `applicationLoadBalancerPart` hands back one resource's
+node (the toy hangs each authorization's DNS record on its `DnsAuthorizationPart`, not on the balancer).
+`renderLbScript`/`renderLbCheckScript`/`renderLbDeleteScript` are the same lines concatenated, run by no node. Beyond the default backend service (`albBackends`, `<name>-backend`) it takes named ones (`albServices`,
 `<name>-<service>-backend`, each with its own backends, health check and `--timeout`), `albHostRules` (hosts to a
 `ServiceRef`, with `PathRule`s) and `albCertificates`. Load-bearing: a regional balancer cannot use the classic
 Google-managed `compute ssl-certificates`, so `ManagedCertificate` is a regional **Certificate Manager** certificate
@@ -1088,8 +1100,9 @@ map a whole-map `url-maps import` (JSON on stdin, `renderUrlMap`) on every `up`,
 `up`: those are the two "set" verbs, everything else is created once. `albProblems` (undeclared or duplicate service,
 host in two rules, mixed certificate kinds, ...) is a `Failure`/throw before any call. The check sees declared hosts
 and timeouts, not path rules. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of it. **Layer 0 only**:
-`Test/GcpSpec.hs` runs the scripts against a stand-in `gcloud` (a shell function, not a recording), so none of the
-HTTPS, rule or timeout calls has met a real project; `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
+`Test/GcpSpec.hs` asserts the graph's shape and runs the scripts, whole and resource by resource, against a stand-in
+`gcloud` (a shell function, not a recording), so none of the HTTPS, rule or timeout calls has met a real project, and
+neither has `remove-backend` or the unfolded graph (in particular concurrent gcloud calls under `serve`); `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
 commands and what is unverified.
 
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`

@@ -13,6 +13,11 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     ApplicationLoadBalancer (..),
     httpLoadBalancer,
     applicationLoadBalancer,
+    applicationLoadBalancerAfter,
+    applicationLoadBalancerPart,
+    Part (..),
+    PartSpec (..),
+    lbParts,
     InvalidLoadBalancer (..),
     albProblems,
     certificateManagerApi,
@@ -25,6 +30,10 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     interpretLbDescribe,
     interpretLbCheck,
     renderLbCheckScript,
+    renderLbHealthScript,
+    renderPartUpScript,
+    renderPartCheckScript,
+    renderPartDownScript,
     shellQuote,
     Report (..),
     LoadBalancingCommand (..),
@@ -35,7 +44,10 @@ import Control.Exception (Exception, throwIO)
 import Control.Monad (unless)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LByteString
-import Data.List (nub, (\\))
+import Data.Function (on)
+import Data.List (nub, nubBy, (\\))
+import qualified Data.Map as Map
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -78,7 +90,7 @@ an unmanaged group holding VMs that already exist.
 data InstanceGroupLocation
     = InstanceGroupZone Text
     | InstanceGroupRegion Text
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 {- | Backend kinds supported by the high-level recipe.
 
@@ -251,38 +263,140 @@ albProblems alb =
             | r <- alb.albHostRules
             ]
 
--- | Creates the load-balancer sub-resources. This is intentionally a single
--- recipe node rather than forcing users to wire every component manually.
-applicationLoadBalancer :: Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Op
-applicationLoadBalancer r gcloudTrack alb =
-    withBinary gcloudTrack loadBalancingCommand (LbCreate alb) $ \create ->
-        withBinary gcloudTrack loadBalancingCommand (LbDelete alb) $ \delete ->
-            op "gcp-application-lb" nodeps $ \actions ->
-                actions
-                    { help = Text.unwords ["creates application load balancer", alb.albName]
-                    , notes = albNotes alb
-                    , ref = mkRef "gcp-application-lb" (alb.albProject.projectId, alb.albRegion.regionName, alb.albName)
-                    , up = refuseInvalid >> create r'
-                    , down = delete r'
-                    , check = checkLb
-                    }
-  where
-    r' = contramap (RunLoadBalancingCommand (LbCreate alb)) r
+{- | The balancer, declared once and unfolded into a node per resource.
 
+The node returned is the one callers depend on (same @ref@ as when the
+balancer was a single node running one script): a root over a node per
+health check, per instance group's named ports, per backend service, per
+serverless NEG, per backend attachment, the URL map, a node per DNS
+authorization, per certificate, the address, the proxies and the forwarding
+rules. See 'lbParts' for the edges between them. Each has its own @check@
+(its own @describe@), @up@ and @down@, so progress, concurrency, failure and
+retry are per resource, and teardown is the edges read backwards.
+
+The root's own @up@ creates nothing; its @check@ asks the backend services
+for their backends' health ('Unknown' while some are not @HEALTHY@), which
+is a statement about the balancer as a whole and not about any one resource.
+
+Nothing here runs before the resources' prerequisites unless they are named:
+a dependency @inject@ed into the returned node is a dependency of the /root/,
+and the resource nodes are the root's dependencies too, so they would not
+wait for it. Use 'applicationLoadBalancerAfter' for what has to exist first
+(the APIs, the proxy-only subnet, the instance groups).
+-}
+applicationLoadBalancer :: Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Op
+applicationLoadBalancer = applicationLoadBalancerAfter []
+
+{- | 'applicationLoadBalancer' with prerequisites: nodes every resource node
+of the balancer depends on.
+-}
+applicationLoadBalancerAfter :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Op
+applicationLoadBalancerAfter prereqs r gcloudTrack alb =
+    op "gcp-application-lb" (deps (prereqs <> ordered)) $ \actions ->
+        actions
+            { help = Text.unwords ["application load balancer", alb.albName]
+            , notes = albNotes alb
+            , ref = mkRef "gcp-application-lb" (alb.albProject.projectId, alb.albRegion.regionName, alb.albName)
+            , up = unless (null problems) $ throwIO (InvalidLoadBalancer problems)
+            , check = checkHealth
+            }
+  where
+    nodes = partOps prereqs r gcloudTrack alb
+    ordered = mapMaybe ((`Map.lookup` nodes) . partId) (lbParts alb)
     problems = albProblems alb
 
-    refuseInvalid :: IO ()
-    refuseInvalid = unless (null problems) $ throwIO (InvalidLoadBalancer problems)
+    checkHealth :: IO CheckResult
+    checkHealth
+        | not (null problems) = pure (invalid problems)
+        | otherwise = runCheck (LbHealth alb)
 
-    checkLb :: IO CheckResult
-    checkLb
-        | not (null problems) = pure (Failure ("invalid load balancer: " <> Text.intercalate "; " problems))
-        | otherwise = do
-            (code, out, _err) <-
-                readCreateProcessWithExitCode
-                    (prepare loadBalancingCommand (LbCheck alb))
-                    ""
-            pure $ interpretLbCheck code (Text.decodeUtf8With TextErr.lenientDecode out)
+{- | One resource node of the balancer, to hang something on that needs that
+resource and not the whole balancer -- the DNS record of one authorization,
+say ('DnsAuthorizationPart', named as 'dnsAuthorizations' names it).
+'Nothing' when the declaration has no such resource.
+
+Given the prerequisites, reporter and declaration the balancer itself was
+made with, this is the very node the balancer's root depends on.
+-}
+applicationLoadBalancerPart :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Part -> Maybe Op
+applicationLoadBalancerPart prereqs r gcloudTrack alb part =
+    Map.lookup part (partOps prereqs r gcloudTrack alb)
+
+partOps :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Map.Map Part Op
+partOps prereqs r gcloudTrack alb = nodes
+  where
+    problems = albProblems alb
+
+    -- lazily: a node's dependencies are looked up in the map being built
+    nodes :: Map.Map Part Op
+    nodes = Map.fromList [(s.partId, mk s) | s <- lbParts alb]
+
+    mk :: PartSpec -> Op
+    mk s =
+        withBinary gcloudTrack loadBalancingCommand (LbPartUp alb s) $ \create ->
+            withBinary gcloudTrack loadBalancingCommand (LbPartDown alb s) $ \delete ->
+                op (partKind s.partId) (deps (prereqs <> mapMaybe (`Map.lookup` nodes) s.partDeps)) $ \actions ->
+                    actions
+                        { help = s.partHelp
+                        , notes = s.partNotes
+                        , ref = partRef alb s.partId
+                        , up = do
+                            -- the declaration's refusals, before anything runs
+                            unless (null problems) $ throwIO (InvalidLoadBalancer problems)
+                            create (contramap (RunLoadBalancingCommand (LbPartUp alb s)) r)
+                        , down =
+                            unless (null s.partDown) $
+                                delete (contramap (RunLoadBalancingCommand (LbPartDown alb s)) r)
+                        , check =
+                            if null problems
+                                then runCheck (LbPartCheck alb s)
+                                else pure (invalid problems)
+                        }
+
+invalid :: [Text] -> CheckResult
+invalid problems = Failure ("invalid load balancer: " <> Text.intercalate "; " problems)
+
+runCheck :: LoadBalancingCommand -> IO CheckResult
+runCheck cmd = do
+    (code, out, _err) <- readCreateProcessWithExitCode (prepare loadBalancingCommand cmd) ""
+    pure $ interpretLbCheck code (Text.decodeUtf8With TextErr.lenientDecode out)
+
+-- | The kind tag of a resource node: its shorthand and its @ref@'s.
+partKind :: Part -> Text
+partKind = \case
+    HealthCheckPart _ -> "gcp-lb-health-check"
+    NamedPortsPart _ _ -> "gcp-lb-named-ports"
+    BackendServicePart _ -> "gcp-lb-backend-service"
+    NetworkEndpointGroupPart _ -> "gcp-lb-neg"
+    BackendPart _ _ -> "gcp-lb-backend"
+    UrlMapPart -> "gcp-lb-url-map"
+    DnsAuthorizationPart _ -> "gcp-lb-dns-authorization"
+    CertificatePart _ -> "gcp-lb-certificate"
+    AddressPart -> "gcp-lb-address"
+    HttpProxyPart -> "gcp-lb-http-proxy"
+    HttpsProxyPart -> "gcp-lb-https-proxy"
+    ForwardingRulePart -> "gcp-lb-forwarding-rule"
+    HttpsForwardingRulePart -> "gcp-lb-https-forwarding-rule"
+
+{- | The effect site of a resource node: the resource's own name where it has
+one that is not the balancer's (a health check, a certificate), the
+balancer's where the resource is named after it. An instance group's named
+ports are keyed on the balancer /and/ the group, since each balancer sets
+only its own names there.
+-}
+partRef :: ApplicationLoadBalancer -> Part -> Ref
+partRef alb part = mkRef (partKind part) (alb.albProject.projectId, alb.albRegion.regionName, key)
+  where
+    key :: [Text]
+    key = case part of
+        HealthCheckPart n -> [n]
+        NamedPortsPart ig loc -> [alb.albName, ig, Text.pack (show loc)]
+        BackendServicePart n -> [n]
+        NetworkEndpointGroupPart n -> [n]
+        BackendPart svc g -> [svc, g]
+        DnsAuthorizationPart n -> [n]
+        CertificatePart n -> [n]
+        _ -> [alb.albName]
 
 {- | What a re-declaration can be seen to change: the hosts served, the
 named services, the timeouts, the port each service sends to, the
@@ -412,6 +526,10 @@ interpretLbCheck ExitSuccess out
 data LoadBalancingCommand
     = LbCreate ApplicationLoadBalancer
     | LbCheck ApplicationLoadBalancer
+    | LbHealth ApplicationLoadBalancer
+    | LbPartUp ApplicationLoadBalancer PartSpec
+    | LbPartCheck ApplicationLoadBalancer PartSpec
+    | LbPartDown ApplicationLoadBalancer PartSpec
     | LbDescribe ApplicationLoadBalancer
     | LbDelete ApplicationLoadBalancer
     | LbAddressDescribe ApplicationLoadBalancer
@@ -438,6 +556,14 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
                 )
     LbCheck alb ->
         proc "bash" ["-c", Text.unpack (renderLbCheckScript alb)]
+    LbHealth alb ->
+        proc "bash" ["-c", Text.unpack (renderLbHealthScript alb)]
+    LbPartUp alb part ->
+        proc "bash" ["-c", Text.unpack (renderPartUpScript alb part)]
+    LbPartCheck alb part ->
+        proc "bash" ["-c", Text.unpack (renderPartCheckScript alb part)]
+    LbPartDown alb part ->
+        proc "bash" ["-c", Text.unpack (renderPartDownScript alb part)]
     LbAddressDescribe alb ->
         gcloudProc $
             withProject alb.albProject
@@ -592,57 +718,110 @@ tenant name in a multi-tenant recipe), not just author-typed literals.
 shellQuote :: Text -> Text
 shellQuote t = "'" <> Text.replace "'" "'\\''" t <> "'"
 
-{- | Renders a bash script that idempotently creates the LB components.
+-- | One resource of a balancer, as 'lbParts' and the node graph name it.
+data Part
+    = HealthCheckPart Text
+    | -- | the named ports this balancer wants on one instance group
+      NamedPortsPart Text InstanceGroupLocation
+    | -- | by resource name (@\<balancer\>-backend@, @\<balancer\>-\<name\>-backend@)
+      BackendServicePart Text
+    | NetworkEndpointGroupPart Text
+    | -- | a backend service's resource name, and the instance group or NEG attached to it
+      BackendPart Text Text
+    | UrlMapPart
+    | -- | by authorization name, see 'dnsAuthorizations'
+      DnsAuthorizationPart Text
+    | CertificatePart Text
+    | AddressPart
+    | HttpProxyPart
+    | HttpsProxyPart
+    | ForwardingRulePart
+    | HttpsForwardingRulePart
+    deriving (Eq, Ord, Show)
 
-Every step is guarded by a @describe@ (or, for backend attachment, a look at
-the backend service's current backends) rather than suffixed with
-@|| true@: the latter made the script exit 0 whatever happened, so a
-misconfigured balancer was reported as successfully brought up. Under
-@set -e@ a failing create now fails the node, as the node-author conventions
-require.
+{- | A resource, the resources it needs first, and the lines of bash that
+create it, ask after it and remove it. The lines read @$PROJECT@ and
+@$REGION@ and the helpers the scripts' headers define, so they only run
+inside 'renderPartUpScript' and friends (or the whole-balancer scripts,
+which are these lines concatenated).
+-}
+data PartSpec = PartSpec
+    { partId :: Part
+    , partDeps :: [Part]
+    , partHelp :: Text
+    , partNotes :: [Text]
+    -- ^ what a re-declaration can be seen to change about this resource
+    , partUp :: [Text]
+    , partCheck :: [Text]
+    -- ^ read-only; findings are @MISSING@\/@CERT@ lines, see 'interpretLbCheck'
+    , partDown :: [Text]
+    -- ^ empty for what this recipe sets but does not own (a group's named ports)
+    }
+    deriving (Eq, Show)
 
-Some things are /set/ on every run rather than guarded, because they are
-declarations that can change under a resource that already exists: a
-backend service's timeout and port name (@update --timeout@,
+{- | The balancer as resources, in an order in which every resource comes
+after the ones it depends on.
+
+The edges:
+
+* a backend service depends on its health check;
+* a backend attachment depends on its backend service, on the NEG or on the
+  instance group's named ports it sends to, and on the attachment declared
+  before it on the same service -- two @add-backend@ calls on one backend
+  service must not run at once, and an edge is the only thing that says so;
+* the URL map depends on every backend service it names;
+* a managed certificate depends on its DNS authorizations;
+* the HTTP proxy depends on the URL map, the HTTPS one on the certificates
+  too;
+* a forwarding rule depends on its proxy, and on the reserved address when
+  there is one.
+
+Some things are /set/ on every @up@ of their node rather than guarded,
+because they are declarations that can change under a resource that already
+exists: a backend service's timeout and port name (@update --timeout@,
 @update --port-name@), an instance group's named ports and, when there are
 host rules, the whole URL map (@url-maps import@, which replaces it).
+Everything else is guarded by a @describe@ (or, for an attachment, a look at
+the backend service's current backends) and never suffixed with @|| true@:
+a failing create fails its node.
 
-An instance group's named ports are set once per group, before any backend
-service is pointed at one of them, and /merged/ with what the group already
-carries: @set-named-ports@ replaces the whole set, and the group is the
-caller's -- another balancer, or the caller, may have named ports on it.
-Only the names this balancer declares are overwritten. Nothing removes a
-name: one this balancer stopped declaring stays on the group, where it does
-no harm, and so does everything on @down@.
+An instance group's named ports are set once per group, the union over the
+services naming it, and /merged/ with what the group already carries:
+@set-named-ports@ replaces the whole set, and the group is the caller's --
+another balancer, or the caller, may have named ports on it. Only the names
+this balancer declares are overwritten. Nothing removes a name: one this
+balancer stopped declaring stays on the group, where it does no harm, and so
+does everything on @down@.
+
+On the way down an attachment is /detached/ (@remove-backend@) rather than
+left to the backend service's deletion, because a NEG still attached cannot
+be deleted and the NEG's node knows nothing of the service's. An instance
+group is never deleted (it is the caller's), nor is a 'ComputeCertificate'.
 
 The balancer is a /regional external/ Application Load Balancer
 (@EXTERNAL_MANAGED@), which GCP only accepts in a VPC network that already
-has a proxy-only subnet in the region. This script does not create one --
-see "Salmon.Builtin.Nodes.Gcp.Compute".@subnet@ with
-'Salmon.Builtin.Nodes.Gcp.Compute.RegionalManagedProxy', which is the node to
-put underneath this one.
+has a proxy-only subnet in the region. Nothing here creates one -- see
+"Salmon.Builtin.Nodes.Gcp.Compute".@subnet@ with
+'Salmon.Builtin.Nodes.Gcp.Compute.RegionalManagedProxy', which is a
+prerequisite to hand 'applicationLoadBalancerAfter'.
 -}
-renderLbScript :: ApplicationLoadBalancer -> Text
-renderLbScript alb =
-    Text.unlines $
-        [ "set -euo pipefail"
-        , "PROJECT=" <> shellQuote alb.albProject.projectId
-        , "REGION=" <> shellQuote alb.albRegion.regionName
-        , -- A bare predicate: every caller appends its own location flags,
-          -- because not every resource named here is regional (an unmanaged
-          -- instance group is zonal) and this used to append --region to all
-          -- of them.
-          "exists() { \"$@\" >/dev/null 2>&1; }"
-        ]
-            <> healthCheckLines
-            <> concatMap namedPortsLines (groupNamedPorts alb)
-            <> concatMap backendLines (services alb)
-            <> urlMapLines
-            <> certificateLines
-            <> addressLines
-            <> proxyLines
-            <> forwardingRuleLines
+lbParts :: ApplicationLoadBalancer -> [PartSpec]
+lbParts alb =
+    nubBy ((==) `on` partId) $
+        map healthCheckPart (healthChecks alb)
+            <> map namedPortsPart groups
+            <> concatMap serviceParts (services alb)
+            <> [urlMapPart]
+            <> concatMap certificateParts alb.albCertificates
+            <> [addressPart | https]
+            <> [httpProxyPart]
+            <> [httpsProxyPart | https]
+            <> [forwardingRulePart]
+            <> [httpsForwardingRulePart | https]
   where
+    https = serveHttps alb
+    groups = groupNamedPorts alb
+
     resourceName :: Text -> Text
     resourceName suffix = shellQuote (alb.albName <> suffix)
 
@@ -650,233 +829,490 @@ renderLbScript alb =
     ensure describeCmd createCmd =
         "exists " <> describeCmd <> " || " <> createCmd
 
-    -- attaching the same backend twice is an error, so look first
-    attachUnlessPresent :: Svc -> Text -> Text -> Text
-    attachUnlessPresent svc groupPathSuffix addCmd =
-        "gcloud compute backend-services describe "
-            <> shellQuote svc.svcResource
-            <> regional
-            <> " --format='value(backends[].group)'"
-            <> " | tr ';' '\\n' | grep -q -- "
-            <> shellQuote (groupPathSuffix <> "$")
-            <> " || "
-            <> addCmd
+    need :: Text -> Text -> Text
+    need what describeCmd = "need " <> shellQuote what <> " " <> describeCmd
 
-    createBackendService :: Svc -> Text
-    createBackendService svc =
-        ensure
-            ("gcloud compute backend-services describe " <> shellQuote svc.svcResource <> regional)
-            ( "gcloud compute backend-services create " <> shellQuote svc.svcResource
-                <> regional
-                <> " --protocol=HTTP"
-                <> maybe "" ((" --port-name=" <>) . shellQuote) (svcPortName svc)
-                <> " --load-balancing-scheme=EXTERNAL_MANAGED"
-                <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> " --health-checks-region=\"$REGION\"") (instanceGroupHealthCheck svc)
-            )
+    describeCompute :: Text -> Text -> Text
+    describeCompute coll name = "gcloud compute " <> coll <> " describe " <> shellQuote name <> regional
 
-    -- a set, not a create flag: the declared timeout has to reach a
-    -- backend service that already exists too
-    timeoutLines :: Svc -> [Text]
-    timeoutLines svc = case svc.svcTimeout of
-        Nothing -> []
-        Just t ->
-            [ "gcloud compute backend-services update " <> shellQuote svc.svcResource
-                <> regional
-                <> " --timeout="
-                <> Text.pack (show t)
-            ]
+    deleteCompute :: Text -> Text -> Text
+    deleteCompute coll name =
+        "if exists " <> describeCompute coll name
+            <> "; then gcloud compute " <> coll <> " delete " <> shellQuote name
+            <> regional <> " --quiet; fi"
 
-    -- a set too: a backend service made before it had a port name of its
-    -- own is still on @http@
-    portNameLines :: Svc -> [Text]
-    portNameLines svc =
-        [ "gcloud compute backend-services update " <> shellQuote svc.svcResource
-            <> regional
-            <> " --port-name="
-            <> shellQuote n
-        | Just n <- [svcPortName svc]
-        ]
+    describeLocated :: Text -> Text -> Text
+    describeLocated coll name = "gcloud certificate-manager " <> coll <> " describe " <> shellQuote name <> located
 
-    instanceGroupHealthCheck :: Svc -> Maybe HealthCheck
-    instanceGroupHealthCheck svc =
-        if any isInstanceGroup svc.svcBackends then svc.svcHealthCheck else Nothing
+    deleteLocated :: Text -> Text -> Text
+    deleteLocated coll name =
+        "if exists " <> describeLocated coll name
+            <> "; then gcloud certificate-manager " <> coll <> " delete " <> shellQuote name
+            <> located <> " --quiet; fi"
 
-    healthCheckLines =
-        [ ensure
-            ("gcloud compute health-checks describe " <> shellQuote hc.healthCheckName <> regional)
-            ( "gcloud compute health-checks create tcp " <> shellQuote hc.healthCheckName
-                <> regional
-                <> " --port="
-                <> Text.pack (show hc.healthCheckPort)
-            )
-        | hc <- healthChecks alb
-        ]
+    -- A resource that is created once and has nothing to set afterwards.
+    simple :: Part -> [Part] -> Text -> Text -> Text -> Text -> PartSpec
+    simple part needs what coll name createFlags =
+        PartSpec
+            { partId = part
+            , partDeps = needs
+            , partHelp = Text.unwords [what, name]
+            , partNotes = []
+            , partUp =
+                [ ensure
+                    (describeCompute coll name)
+                    ("gcloud compute " <> coll <> " create " <> shellQuote name <> regional <> createFlags)
+                ]
+            , partCheck = [need (coll <> " " <> name) (describeCompute coll name)]
+            , partDown = [deleteCompute coll name]
+            }
 
-    backendLines :: Svc -> [Text]
-    backendLines svc =
-        createBackendService svc : portNameLines svc <> timeoutLines svc <> concatMap (attachLines svc) svc.svcBackends
-
-    attachLines :: Svc -> Backend -> [Text]
-    attachLines svc = \case
-        InstanceGroupBackend ig loc _ ->
-            [ attachUnlessPresent
-                svc
-                ("/instanceGroups/" <> ig)
-                ( "gcloud compute backend-services add-backend " <> shellQuote svc.svcResource
-                    <> regional
-                    <> " --instance-group=" <> shellQuote ig
-                    <> groupBackendFlag loc
-                )
-            ]
-        CloudRunBackend cr ->
-            [ ensure
-                ("gcloud compute network-endpoint-groups describe " <> shellQuote svc.svcNeg <> regional)
-                ( "gcloud compute network-endpoint-groups create " <> shellQuote svc.svcNeg
-                    <> regional
-                    <> " --network-endpoint-type=serverless --cloud-run-service=" <> shellQuote cr
-                )
-            , attachUnlessPresent
-                svc
-                ("/networkEndpointGroups/" <> svc.svcNeg)
-                ( "gcloud compute backend-services add-backend " <> shellQuote svc.svcResource
-                    <> regional
-                    <> " --network-endpoint-group=" <> shellQuote svc.svcNeg
-                    <> " --network-endpoint-group-region=\"$REGION\""
-                )
-            ]
+    healthCheckPart :: HealthCheck -> PartSpec
+    healthCheckPart hc =
+        ( simple
+            (HealthCheckPart hc.healthCheckName)
+            []
+            "health check"
+            "health-checks"
+            hc.healthCheckName
+            ""
+        )
+            { partNotes = ["tcp port " <> Text.pack (show hc.healthCheckPort)]
+            , partUp =
+                [ ensure
+                    (describeCompute "health-checks" hc.healthCheckName)
+                    ( "gcloud compute health-checks create tcp " <> shellQuote hc.healthCheckName
+                        <> regional
+                        <> " --port="
+                        <> Text.pack (show hc.healthCheckPort)
+                    )
+                ]
+            }
 
     -- set-named-ports replaces the whole set, so: one call per group,
     -- carrying every port of every service naming it, after whatever the
     -- group already has under names that are not ours. The read is an
     -- assignment on a line of its own so that its failing fails the script
     -- (a command substitution inside an argument would not).
-    namedPortsLines :: ((Text, InstanceGroupLocation), [(Text, Int)]) -> [Text]
-    namedPortsLines ((ig, loc), named) =
-        [ "keep=$(gcloud compute instance-groups get-named-ports " <> shellQuote ig
-            <> groupLocation loc
-            <> " --format='value(name,port)' | awk -v ours="
-            <> shellQuote (Text.unwords (map fst named))
-            <> " "
-            <> shellQuote "BEGIN{n=split(ours,x,\" \");for(i=1;i<=n;i++)o[x[i]]=1} NF==2&&!($1 in o){printf \"%s:%s,\",$1,$2}"
-            <> ")"
-        , "gcloud compute instance-groups set-named-ports " <> shellQuote ig
-            <> groupLocation loc
-            <> " --named-ports=\"${keep}\""
-            <> shellQuote (Text.intercalate "," [n <> ":" <> Text.pack (show p) | (n, p) <- nub named])
-        ]
+    namedPortsPart :: ((Text, InstanceGroupLocation), [(Text, Int)]) -> PartSpec
+    namedPortsPart ((ig, loc), named) =
+        PartSpec
+            { partId = NamedPortsPart ig loc
+            , partDeps = []
+            , partHelp = Text.unwords ["named ports of load balancer", alb.albName, "on instance group", ig]
+            , partNotes = [n <> ":" <> Text.pack (show p) | (n, p) <- nub named]
+            , partUp =
+                [ "keep=$(gcloud compute instance-groups get-named-ports " <> shellQuote ig
+                    <> groupLocation loc
+                    <> " --format='value(name,port)' | awk -v ours="
+                    <> shellQuote (Text.unwords (map fst named))
+                    <> " "
+                    <> shellQuote "BEGIN{n=split(ours,x,\" \");for(i=1;i<=n;i++)o[x[i]]=1} NF==2&&!($1 in o){printf \"%s:%s,\",$1,$2}"
+                    <> ")"
+                , "gcloud compute instance-groups set-named-ports " <> shellQuote ig
+                    <> groupLocation loc
+                    <> " --named-ports=\"${keep}\""
+                    <> shellQuote (Text.intercalate "," [n <> ":" <> Text.pack (show p) | (n, p) <- nub named])
+                ]
+            , partCheck =
+                [ "gcloud compute instance-groups get-named-ports " <> shellQuote ig <> groupLocation loc
+                    <> " --format='value(name,port)' 2>/dev/null | awk -v n="
+                    <> shellQuote n
+                    <> " -v p="
+                    <> shellQuote (Text.pack (show p))
+                    <> " "
+                    <> shellQuote "$1==n&&$2==p{f=1} END{exit !f}"
+                    <> " || echo "
+                    <> shellQuote ("MISSING named-port " <> n <> ":" <> Text.pack (show p) <> " on instance-group " <> ig)
+                | (n, p) <- nub named
+                ]
+            , partDown = []
+            }
+
+    instanceGroupHealthCheck :: Svc -> Maybe HealthCheck
+    instanceGroupHealthCheck svc =
+        if any isInstanceGroup svc.svcBackends then svc.svcHealthCheck else Nothing
+
+    serviceParts :: Svc -> [PartSpec]
+    serviceParts svc = servicePart svc : attachments Nothing backends
+      where
+        -- one attachment per group or NEG, whatever number of times it is listed
+        backends = nubBy ((==) `on` backendKey svc) svc.svcBackends
+        attachments _ [] = []
+        attachments previous (b : bs) =
+            let (neg, attachment) = backendParts svc previous b
+             in neg <> [attachment] <> attachments (Just attachment.partId) bs
+
+    servicePart :: Svc -> PartSpec
+    servicePart svc =
+        PartSpec
+            { partId = BackendServicePart svc.svcResource
+            , partDeps = [HealthCheckPart hc.healthCheckName | Just hc <- [instanceGroupHealthCheck svc]]
+            , partHelp = Text.unwords ["backend service", svc.svcResource]
+            , partNotes =
+                ["timeout " <> Text.pack (show t) <> "s" | Just t <- [svc.svcTimeout]]
+                    <> ["port name " <> n | Just n <- [svcPortName svc]]
+                    <> ["health check " <> hc.healthCheckName | Just hc <- [instanceGroupHealthCheck svc]]
+            , partUp =
+                [ ensure
+                    (describeCompute "backend-services" svc.svcResource)
+                    ( "gcloud compute backend-services create " <> shellQuote svc.svcResource
+                        <> regional
+                        <> " --protocol=HTTP"
+                        <> maybe "" ((" --port-name=" <>) . shellQuote) (svcPortName svc)
+                        <> " --load-balancing-scheme=EXTERNAL_MANAGED"
+                        <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> " --health-checks-region=\"$REGION\"") (instanceGroupHealthCheck svc)
+                    )
+                ]
+                    -- a set: a backend service made before it had a port
+                    -- name of its own is still on @http@
+                    <> [ "gcloud compute backend-services update " <> shellQuote svc.svcResource
+                            <> regional
+                            <> " --port-name="
+                            <> shellQuote n
+                       | Just n <- [svcPortName svc]
+                       ]
+                    -- a set, not a create flag: the declared timeout has to
+                    -- reach a backend service that already exists too
+                    <> [ "gcloud compute backend-services update " <> shellQuote svc.svcResource
+                            <> regional
+                            <> " --timeout="
+                            <> Text.pack (show t)
+                       | Just t <- [svc.svcTimeout]
+                       ]
+            , partCheck =
+                [need ("backend-services " <> svc.svcResource) (describeCompute "backend-services" svc.svcResource)]
+                    <> [ "[ \"$(" <> describeCompute "backend-services" svc.svcResource
+                            <> " --format='value(timeoutSec)' 2>/dev/null)\" = "
+                            <> shellQuote (Text.pack (show t))
+                            <> " ] || echo "
+                            <> shellQuote ("MISSING timeout " <> Text.pack (show t) <> "s on " <> svc.svcResource)
+                       | Just t <- [svc.svcTimeout]
+                       ]
+                    -- a service on another port name sends to another port, or to none
+                    <> [ "[ \"$(" <> describeCompute "backend-services" svc.svcResource
+                            <> " --format='value(portName)' 2>/dev/null)\" = "
+                            <> shellQuote n
+                            <> " ] || echo "
+                            <> shellQuote ("MISSING port-name " <> n <> " on " <> svc.svcResource)
+                       | Just n <- [svcPortName svc]
+                       ]
+            , partDown = [deleteCompute "backend-services" svc.svcResource]
+            }
+
+    -- what a backend service's @backends[].group@ ends with for this backend
+    attachedTo :: Svc -> Text -> Text
+    attachedTo svc groupPathSuffix =
+        describeCompute "backend-services" svc.svcResource
+            <> " --format='value(backends[].group)' 2>/dev/null | tr ';' '\\n' | grep -q -- "
+            <> shellQuote (groupPathSuffix <> "$")
+
+    -- The NEG a Cloud Run backend needs (if any), and the attachment.
+    -- Attaching the same backend twice is an error, so look first.
+    backendParts :: Svc -> Maybe Part -> Backend -> ([PartSpec], PartSpec)
+    backendParts svc previous backend = case backend of
+        InstanceGroupBackend ig loc _ ->
+            ( []
+            , attachment
+                ig
+                [NamedPortsPart ig loc | (ig, loc) `elem` map fst groups]
+                ("instance group " <> ig)
+                ("/instanceGroups/" <> ig)
+                (" --instance-group=" <> shellQuote ig <> groupBackendFlag loc)
+                [ need ("instance-group " <> ig) ("gcloud compute instance-groups describe " <> shellQuote ig <> groupLocation loc)
+                ]
+                ("instance-group " <> ig)
+            )
+        CloudRunBackend cr ->
+            ( [ simple
+                    (NetworkEndpointGroupPart svc.svcNeg)
+                    []
+                    "serverless network endpoint group"
+                    "network-endpoint-groups"
+                    svc.svcNeg
+                    (" --network-endpoint-type=serverless --cloud-run-service=" <> shellQuote cr)
+              ]
+            , attachment
+                svc.svcNeg
+                [NetworkEndpointGroupPart svc.svcNeg]
+                ("network endpoint group " <> svc.svcNeg)
+                ("/networkEndpointGroups/" <> svc.svcNeg)
+                (" --network-endpoint-group=" <> shellQuote svc.svcNeg <> " --network-endpoint-group-region=\"$REGION\"")
+                []
+                ("neg " <> svc.svcNeg)
+            )
+      where
+        attachment key needs what suffix flags checks missing =
+            PartSpec
+                { partId = BackendPart svc.svcResource key
+                , partDeps = BackendServicePart svc.svcResource : needs <> maybe [] pure previous
+                , partHelp = Text.unwords ["attaches", what, "to backend service", svc.svcResource]
+                , partNotes = []
+                , partUp =
+                    [ attachedTo svc suffix
+                        <> " || gcloud compute backend-services add-backend " <> shellQuote svc.svcResource
+                        <> regional
+                        <> flags
+                    ]
+                , partCheck =
+                    checks
+                        <> [attachedTo svc suffix <> " || echo " <> shellQuote ("MISSING backend " <> missing)]
+                , partDown =
+                    [ "if " <> attachedTo svc suffix
+                        <> "; then gcloud compute backend-services remove-backend " <> shellQuote svc.svcResource
+                        <> regional
+                        <> flags
+                        <> " --quiet; fi"
+                    ]
+                }
 
     -- With rules the map is imported whole on every run: `import` creates
     -- or replaces, which is the only "set" verb a URL map has
     -- (`add-path-matcher` appends, and fails the second time). Without
-    -- rules it is created once with its default service, as before.
-    urlMapLines
-        | null alb.albHostRules =
-            [ ensure
-                ("gcloud compute url-maps describe " <> resourceName "-url-map" <> regional)
-                ( "gcloud compute url-maps create " <> resourceName "-url-map"
-                    <> regional
-                    <> " --default-service=" <> resourceName "-backend"
-                )
-            ]
-        | otherwise =
-            [ "printf '%s\\n' " <> shellQuote (urlMapText alb)
-                <> " | gcloud compute url-maps import " <> resourceName "-url-map"
-                <> regional
-                <> " --quiet"
-            ]
+    -- rules it is created once with its default service.
+    urlMapPart :: PartSpec
+    urlMapPart =
+        PartSpec
+            { partId = UrlMapPart
+            , partDeps =
+                nub
+                    [ BackendServicePart (serviceResource alb sref)
+                    | sref <- DefaultService : concat [r.hostRuleService : map pathRuleService r.hostRulePaths | r <- alb.albHostRules]
+                    ]
+            , partHelp = Text.unwords ["URL map", urlMap]
+            , partNotes =
+                concat
+                    [ ("hosts " <> Text.unwords r.hostRuleHosts <> " to " <> serviceResource alb r.hostRuleService)
+                        : [ "paths " <> Text.unwords p.pathRulePaths <> " to " <> serviceResource alb p.pathRuleService
+                          | p <- r.hostRulePaths
+                          ]
+                    | r <- alb.albHostRules
+                    ]
+            , partUp =
+                if null alb.albHostRules
+                    then
+                        [ ensure
+                            (describeCompute "url-maps" urlMap)
+                            ( "gcloud compute url-maps create " <> shellQuote urlMap
+                                <> regional
+                                <> " --default-service=" <> resourceName "-backend"
+                            )
+                        ]
+                    else
+                        [ "printf '%s\\n' " <> shellQuote (urlMapText alb)
+                            <> " | gcloud compute url-maps import " <> shellQuote urlMap
+                            <> regional
+                            <> " --quiet"
+                        ]
+            , partCheck =
+                need ("url-maps " <> urlMap) (describeCompute "url-maps" urlMap)
+                    -- every host of every rule, one per line, whatever
+                    -- separators gcloud flattens the nested lists with
+                    : [ describeCompute "url-maps" urlMap
+                            <> " --format='value(hostRules[].hosts)' 2>/dev/null | tr \";,[]' \\t\" '\\n' | grep -qxF -- "
+                            <> shellQuote h
+                            <> " || echo "
+                            <> shellQuote ("MISSING host-rule " <> h)
+                      | h <- concatMap hostRuleHosts alb.albHostRules
+                      ]
+            , partDown = [deleteCompute "url-maps" urlMap]
+            }
+      where
+        urlMap = alb.albName <> "-url-map"
 
-    certificateLines = flip concatMap alb.albCertificates $ \case
-        ComputeCertificate _ -> []
-        ManagedCertificate n ds ->
-            [ ensure
-                ("gcloud certificate-manager dns-authorizations describe " <> shellQuote (authorizationName n d) <> located)
-                ( "gcloud certificate-manager dns-authorizations create " <> shellQuote (authorizationName n d)
-                    <> located
-                    <> " --domain=" <> shellQuote d
-                    <> " --type=PER_PROJECT_RECORD"
-                )
-            | d <- ds
+    certificateParts :: Certificate -> [PartSpec]
+    certificateParts = \case
+        -- Somebody else's: asked after, never created or deleted. Its @up@
+        -- fails when it is not there, so that the failure names the
+        -- certificate rather than the proxy that could not find it.
+        ComputeCertificate n ->
+            [ PartSpec
+                { partId = CertificatePart n
+                , partDeps = []
+                , partHelp = Text.unwords ["certificate", n, "(not managed here)"]
+                , partNotes = []
+                , partUp =
+                    [ "exists " <> describeCompute "ssl-certificates" n
+                        <> " || { echo "
+                        <> shellQuote ("certificate " <> n <> " does not exist, and is not this balancer's to create")
+                        <> " >&2; exit 1; }"
+                    ]
+                , partCheck = [need ("ssl-certificates " <> n) (describeCompute "ssl-certificates" n)]
+                , partDown = []
+                }
             ]
-                <> [ ensure
-                        ("gcloud certificate-manager certificates describe " <> shellQuote n <> located)
-                        ( "gcloud certificate-manager certificates create " <> shellQuote n
+        ManagedCertificate n ds ->
+            [ PartSpec
+                { partId = DnsAuthorizationPart authz
+                , partDeps = []
+                , partHelp = Text.unwords ["DNS authorization", authz, "for", d]
+                , partNotes = []
+                , partUp =
+                    [ ensure
+                        (describeLocated "dns-authorizations" authz)
+                        ( "gcloud certificate-manager dns-authorizations create " <> shellQuote authz
                             <> located
-                            <> " --domains=" <> shellQuote (Text.intercalate "," ds)
-                            <> " --dns-authorizations=" <> shellQuote (Text.intercalate "," (map (authorizationName n) ds))
+                            <> " --domain=" <> shellQuote d
+                            <> " --type=PER_PROJECT_RECORD"
                         )
+                    ]
+                , partCheck = [need ("dns-authorization " <> authz) (describeLocated "dns-authorizations" authz)]
+                , partDown = [deleteLocated "dns-authorizations" authz]
+                }
+            | d <- ds
+            , let authz = authorizationName n d
+            ]
+                <> [ PartSpec
+                        { partId = CertificatePart n
+                        , -- and, going down, the certificate first: an
+                          -- authorization in use cannot be deleted
+                          partDeps = map (DnsAuthorizationPart . authorizationName n) ds
+                        , partHelp = Text.unwords ["managed certificate", n]
+                        , partNotes = ["for " <> Text.unwords ds]
+                        , partUp =
+                            [ ensure
+                                (describeLocated "certificates" n)
+                                ( "gcloud certificate-manager certificates create " <> shellQuote n
+                                    <> located
+                                    <> " --domains=" <> shellQuote (Text.intercalate "," ds)
+                                    <> " --dns-authorizations=" <> shellQuote (Text.intercalate "," (map (authorizationName n) ds))
+                                )
+                            ]
+                        , partCheck =
+                            [ need ("certificate " <> n) (describeLocated "certificates" n)
+                            , "st=$(" <> describeLocated "certificates" n
+                                <> " --format='value(managed.state)' 2>/dev/null); [ -n \"$st\" ] && echo "
+                                <> shellQuote ("CERT " <> n)
+                                <> "\" $st\"; true"
+                            ]
+                        , partDown = [deleteLocated "certificates" n]
+                        }
                    ]
 
     -- Two forwarding rules can only share an address that is reserved.
-    addressLines =
-        [ ensure
-            ("gcloud compute addresses describe " <> resourceName "-ip" <> regional)
-            ("gcloud compute addresses create " <> resourceName "-ip" <> regional)
-        | serveHttps alb
-        ]
+    addressPart :: PartSpec
+    addressPart = simple AddressPart [] "reserved address" "addresses" (alb.albName <> "-ip") ""
 
     addressFlag
-        | serveHttps alb = " --address=" <> resourceName "-ip" <> " --address-region=\"$REGION\""
+        | https = " --address=" <> resourceName "-ip" <> " --address-region=\"$REGION\""
         | otherwise = ""
 
-    proxyLines =
-        [ ensure
-            ("gcloud compute target-http-proxies describe " <> resourceName "-proxy" <> regional)
-            ( "gcloud compute target-http-proxies create " <> resourceName "-proxy"
-                <> regional
-                <> " --url-map=" <> resourceName "-url-map"
-                <> " --url-map-region=\"$REGION\""
-            )
-        ]
-            <> [ ensure
-                    ("gcloud compute target-https-proxies describe " <> resourceName "-https-proxy" <> regional)
-                    ( "gcloud compute target-https-proxies create " <> resourceName "-https-proxy"
-                        <> regional
-                        <> " --url-map=" <> resourceName "-url-map"
-                        <> " --url-map-region=\"$REGION\""
-                        <> certificateFlags
-                    )
-               | serveHttps alb
-               ]
+    httpProxyPart :: PartSpec
+    httpProxyPart =
+        simple
+            HttpProxyPart
+            [UrlMapPart]
+            "HTTP proxy"
+            "target-http-proxies"
+            (alb.albName <> "-proxy")
+            (" --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\"")
 
-    certificateFlags =
-        case ([n | ManagedCertificate n _ <- alb.albCertificates], [n | ComputeCertificate n <- alb.albCertificates]) of
-            (ms@(_ : _), _) -> " --certificate-manager-certificates=" <> shellQuote (Text.intercalate "," ms)
-            ([], cs) -> " --ssl-certificates=" <> shellQuote (Text.intercalate "," cs) <> " --ssl-certificates-region=\"$REGION\""
+    httpsProxyPart :: PartSpec
+    httpsProxyPart =
+        simple
+            HttpsProxyPart
+            (UrlMapPart : map CertificatePart (managed <> compute))
+            "HTTPS proxy"
+            "target-https-proxies"
+            (alb.albName <> "-https-proxy")
+            (" --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\"" <> certificateFlags)
+      where
+        managed = [n | ManagedCertificate n _ <- alb.albCertificates]
+        compute = [n | ComputeCertificate n <- alb.albCertificates]
+        certificateFlags = case managed of
+            (_ : _) -> " --certificate-manager-certificates=" <> shellQuote (Text.intercalate "," managed)
+            [] -> " --ssl-certificates=" <> shellQuote (Text.intercalate "," compute) <> " --ssl-certificates-region=\"$REGION\""
 
-    forwardingRuleLines =
-        [ ensure
-            ("gcloud compute forwarding-rules describe " <> resourceName "-fw" <> regional)
-            ( "gcloud compute forwarding-rules create " <> resourceName "-fw"
-                <> regional
-                <> " --load-balancing-scheme=EXTERNAL_MANAGED"
+    forwardingRulePart :: PartSpec
+    forwardingRulePart =
+        simple
+            ForwardingRulePart
+            (HttpProxyPart : [AddressPart | https])
+            "forwarding rule"
+            "forwarding-rules"
+            (alb.albName <> "-fw")
+            ( " --load-balancing-scheme=EXTERNAL_MANAGED"
                 <> maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
                 <> addressFlag
                 <> " --target-http-proxy=" <> resourceName "-proxy"
                 <> " --target-http-proxy-region=\"$REGION\""
                 <> " --ports=80"
             )
-        ]
-            <> [ ensure
-                    ("gcloud compute forwarding-rules describe " <> resourceName "-https-fw" <> regional)
-                    ( "gcloud compute forwarding-rules create " <> resourceName "-https-fw"
-                        <> regional
-                        <> " --load-balancing-scheme=EXTERNAL_MANAGED"
-                        <> maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
-                        <> addressFlag
-                        <> " --target-https-proxy=" <> resourceName "-https-proxy"
-                        <> " --target-https-proxy-region=\"$REGION\""
-                        <> " --ports=443"
-                    )
-               | serveHttps alb
-               ]
+
+    httpsForwardingRulePart :: PartSpec
+    httpsForwardingRulePart =
+        simple
+            HttpsForwardingRulePart
+            [HttpsProxyPart, AddressPart]
+            "HTTPS forwarding rule"
+            "forwarding-rules"
+            (alb.albName <> "-https-fw")
+            ( " --load-balancing-scheme=EXTERNAL_MANAGED"
+                <> maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
+                <> addressFlag
+                <> " --target-https-proxy=" <> resourceName "-https-proxy"
+                <> " --target-https-proxy-region=\"$REGION\""
+                <> " --ports=443"
+            )
+
+-- | What identifies a backend among one service's: its group, or the service's NEG.
+backendKey :: Svc -> Backend -> Text
+backendKey svc = \case
+    InstanceGroupBackend ig _ _ -> ig
+    CloudRunBackend _ -> svc.svcNeg
 
 urlMapText :: ApplicationLoadBalancer -> Text
 urlMapText = Text.decodeUtf8With TextErr.lenientDecode . LByteString.toStrict . Aeson.encode . renderUrlMap
 
-{- | Renders a read-only bash script that describes every sub-resource the
-create script makes and asks the backend services for their health. It
-always exits 0 unless the script itself breaks; findings are lines on stdout
-(see 'interpretLbCheck').
+{- | What every creating or deleting script starts with. @exists@ is a bare
+predicate: every caller appends its own location flags, because not every
+resource named here is regional (an unmanaged instance group is zonal).
+-}
+mutatingHeader :: ApplicationLoadBalancer -> [Text]
+mutatingHeader alb =
+    [ "set -euo pipefail"
+    , "PROJECT=" <> shellQuote alb.albProject.projectId
+    , "REGION=" <> shellQuote alb.albRegion.regionName
+    , "exists() { \"$@\" >/dev/null 2>&1; }"
+    ]
+
+-- | What every read-only script starts with: no @-e@, findings are lines.
+checkHeader :: ApplicationLoadBalancer -> [Text]
+checkHeader alb =
+    [ "set -uo pipefail"
+    , "PROJECT=" <> shellQuote alb.albProject.projectId
+    , "REGION=" <> shellQuote alb.albRegion.regionName
+    , "exists() { \"$@\" >/dev/null 2>&1; }"
+    , "need() { local what=\"$1\"; shift; exists \"$@\" || echo \"MISSING $what\"; }"
+    ]
+
+-- | The script one resource node's @up@ runs.
+renderPartUpScript :: ApplicationLoadBalancer -> PartSpec -> Text
+renderPartUpScript alb part = Text.unlines (mutatingHeader alb <> part.partUp)
+
+{- | The script one resource node's @check@ runs, read by 'interpretLbCheck':
+it always exits 0 unless the script itself breaks.
+-}
+renderPartCheckScript :: ApplicationLoadBalancer -> PartSpec -> Text
+renderPartCheckScript alb part = Text.unlines (checkHeader alb <> part.partCheck)
+
+{- | The script one resource node's @down@ runs: a resource that is already
+gone is skipped, one that exists and fails to delete fails the script.
+-}
+renderPartDownScript :: ApplicationLoadBalancer -> PartSpec -> Text
+renderPartDownScript alb part = Text.unlines (mutatingHeader alb <> part.partDown)
+
+{- | Every resource's @up@ in one script, in 'lbParts'' order: what the
+balancer's node ran when it was a single node. No node runs it any more; it
+is the same lines, kept for running a balancer up by hand and for tests that
+exercise the lines together.
+-}
+renderLbScript :: ApplicationLoadBalancer -> Text
+renderLbScript alb = Text.unlines (mutatingHeader alb <> concatMap partUp (lbParts alb))
+
+{- | Every resource's check in one read-only script, then the backends'
+health ('renderLbHealthScript''s lines). Findings are lines on stdout (see
+'interpretLbCheck').
 
 What it does not see: a path rule, or which service a host is sent to. A
 host rule is checked by its hosts being in the map, no further. Which port a
@@ -885,130 +1321,32 @@ instance group it sends to.
 -}
 renderLbCheckScript :: ApplicationLoadBalancer -> Text
 renderLbCheckScript alb =
-    Text.unlines $
-        [ "set -uo pipefail"
-        , "PROJECT=" <> shellQuote alb.albProject.projectId
-        , "REGION=" <> shellQuote alb.albRegion.regionName
-        , "exists() { \"$@\" >/dev/null 2>&1; }"
-        , "need() { local what=\"$1\"; shift; exists \"$@\" || echo \"MISSING $what\"; }"
-        ]
-            <> map hcLine (healthChecks alb)
-            <> map (needNamed "backend-services" . svcResource) svcs
-            <> [ need' "url-maps" "-url-map"
-               , need' "target-http-proxies" "-proxy"
-               , need' "forwarding-rules" "-fw"
-               ]
-            <> httpsLines
-            <> concatMap timeoutLines svcs
-            <> concatMap portNameLines svcs
-            <> concatMap namedPortLines (groupNamedPorts alb)
-            <> hostLines
-            <> concatMap (\svc -> concatMap (backendLines svc) svc.svcBackends) svcs
-            <> [healthLines svc | svc <- svcs, any isInstanceGroup svc.svcBackends]
-  where
-    svcs = services alb
-    q :: Text -> Text
-    q suffix = shellQuote (alb.albName <> suffix)
-    need' :: Text -> Text -> Text
-    need' coll suffix = needNamed coll (alb.albName <> suffix)
-    needNamed :: Text -> Text -> Text
-    needNamed coll name =
-        "need " <> shellQuote (coll <> " " <> name)
-            <> " gcloud compute " <> coll <> " describe " <> shellQuote name <> regional
-    hcLine :: HealthCheck -> Text
-    hcLine hc = needNamed "health-checks" hc.healthCheckName
-    httpsLines :: [Text]
-    httpsLines
-        | not (serveHttps alb) = []
-        | otherwise =
-            [ need' "addresses" "-ip"
-            , need' "target-https-proxies" "-https-proxy"
-            , need' "forwarding-rules" "-https-fw"
-            ]
-                <> concatMap certLines alb.albCertificates
-    certLines :: Certificate -> [Text]
-    certLines = \case
-        ComputeCertificate n -> [needNamed "ssl-certificates" n]
-        ManagedCertificate n ds ->
-            [ "need " <> shellQuote ("dns-authorization " <> authorizationName n d)
-                <> " gcloud certificate-manager dns-authorizations describe " <> shellQuote (authorizationName n d) <> located
-            | d <- ds
-            ]
-                <> [ "need " <> shellQuote ("certificate " <> n)
-                        <> " gcloud certificate-manager certificates describe " <> shellQuote n <> located
-                   , "st=$(gcloud certificate-manager certificates describe " <> shellQuote n <> located
-                        <> " --format='value(managed.state)' 2>/dev/null); [ -n \"$st\" ] && echo "
-                        <> shellQuote ("CERT " <> n)
-                        <> "\" $st\"; true"
-                   ]
-    timeoutLines :: Svc -> [Text]
-    timeoutLines svc = case svc.svcTimeout of
-        Nothing -> []
-        Just t ->
-            [ "[ \"$(gcloud compute backend-services describe " <> shellQuote svc.svcResource <> regional
-                <> " --format='value(timeoutSec)' 2>/dev/null)\" = "
-                <> shellQuote (Text.pack (show t))
-                <> " ] || echo "
-                <> shellQuote ("MISSING timeout " <> Text.pack (show t) <> "s on " <> svc.svcResource)
-            ]
-    -- a service on another port name sends to another port, or to none
-    portNameLines :: Svc -> [Text]
-    portNameLines svc =
-        [ "[ \"$(gcloud compute backend-services describe " <> shellQuote svc.svcResource <> regional
-            <> " --format='value(portName)' 2>/dev/null)\" = "
-            <> shellQuote n
-            <> " ] || echo "
-            <> shellQuote ("MISSING port-name " <> n <> " on " <> svc.svcResource)
-        | Just n <- [svcPortName svc]
-        ]
-    namedPortLines :: ((Text, InstanceGroupLocation), [(Text, Int)]) -> [Text]
-    namedPortLines ((ig, loc), named) =
-        [ "gcloud compute instance-groups get-named-ports " <> shellQuote ig <> groupLocation loc
-            <> " --format='value(name,port)' 2>/dev/null | awk -v n="
-            <> shellQuote n
-            <> " -v p="
-            <> shellQuote (Text.pack (show p))
-            <> " "
-            <> shellQuote "$1==n&&$2==p{f=1} END{exit !f}"
-            <> " || echo "
-            <> shellQuote ("MISSING named-port " <> n <> ":" <> Text.pack (show p) <> " on instance-group " <> ig)
-        | (n, p) <- nub named
-        ]
-    -- every host of every rule, one per line, whatever separators gcloud
-    -- flattens the nested lists with
-    hostLines :: [Text]
-    hostLines =
-        [ "gcloud compute url-maps describe " <> q "-url-map" <> regional
-            <> " --format='value(hostRules[].hosts)' 2>/dev/null | tr \";,[]' \\t\" '\\n' | grep -qxF -- "
-            <> shellQuote h
-            <> " || echo "
-            <> shellQuote ("MISSING host-rule " <> h)
-        | h <- concatMap hostRuleHosts alb.albHostRules
-        ]
-    attached :: Svc -> Text -> Text -> Text
-    attached svc suffix what =
-        "gcloud compute backend-services describe " <> shellQuote svc.svcResource <> regional
-            <> " --format='value(backends[].group)' 2>/dev/null | tr ';' '\\n' | grep -q -- "
-            <> shellQuote (suffix <> "$") <> " || echo " <> shellQuote ("MISSING backend " <> what)
-    backendLines :: Svc -> Backend -> [Text]
-    backendLines svc = \case
-        InstanceGroupBackend ig loc _ ->
-            [ "need " <> shellQuote ("instance-group " <> ig)
-                <> " gcloud compute instance-groups describe " <> shellQuote ig <> groupLocation loc
-            , attached svc ("/instanceGroups/" <> ig) ("instance-group " <> ig)
-            ]
-        CloudRunBackend _ ->
-            [ needNamed "network-endpoint-groups" svc.svcNeg
-            , attached svc ("/networkEndpointGroups/" <> svc.svcNeg) ("neg " <> svc.svcNeg)
-            ]
-    -- one state per backend instance; ';' separates a backend's instances
-    healthLines :: Svc -> Text
-    healthLines svc =
-        "gcloud compute backend-services get-health " <> shellQuote svc.svcResource <> regional
-            <> " --format='value(status.healthStatus[].healthState)' 2>/dev/null"
-            <> " | tr ';' '\\n' | while read -r st; do [ -n \"$st\" ] && echo "
-            <> shellQuote ("HEALTH " <> svc.svcLabel)
-            <> "\" $st\"; done; true"
+    Text.unlines (checkHeader alb <> concatMap partCheck (lbParts alb) <> healthLines alb)
+
+{- | What the balancer's root node checks: the health of each instance-group
+backend, one @HEALTH \<service\> \<state\>@ line per backend instance. A
+Cloud Run (NEG) backend has no health to ask for.
+-}
+renderLbHealthScript :: ApplicationLoadBalancer -> Text
+renderLbHealthScript alb = Text.unlines (checkHeader alb <> healthLines alb)
+
+-- one state per backend instance; ';' separates a backend's instances
+healthLines :: ApplicationLoadBalancer -> [Text]
+healthLines alb =
+    [ "gcloud compute backend-services get-health " <> shellQuote svc.svcResource <> regional
+        <> " --format='value(status.healthStatus[].healthState)' 2>/dev/null"
+        <> " | tr ';' '\\n' | while read -r st; do [ -n \"$st\" ] && echo "
+        <> shellQuote ("HEALTH " <> svc.svcLabel)
+        <> "\" $st\"; done; true"
+    | svc <- services alb
+    , any isInstanceGroup svc.svcBackends
+    ]
+
+{- | Every resource's @down@ in one script, dependants first ('lbParts''
+order reversed).
+-}
+renderLbDeleteScript :: ApplicationLoadBalancer -> Text
+renderLbDeleteScript alb = Text.unlines (mutatingHeader alb <> concatMap partDown (reverse (lbParts alb)))
 
 -- | The @--project@\/@--region@ pair every regional resource in these scripts
 -- is addressed by, reading the variables the script sets up front.
@@ -1028,58 +1366,3 @@ groupLocation (InstanceGroupRegion rg) = " --project=\"$PROJECT\" --region=" <> 
 groupBackendFlag :: InstanceGroupLocation -> Text
 groupBackendFlag (InstanceGroupZone z) = " --instance-group-zone=" <> shellQuote z
 groupBackendFlag (InstanceGroupRegion rg) = " --instance-group-region=" <> shellQuote rg
-
-{- | Renders a bash script that deletes the LB components, dependants first.
-A component that is already gone is skipped; one that exists and fails to
-delete fails the script.
-
-A 'ComputeCertificate' is not deleted: this recipe did not create it.
--}
-renderLbDeleteScript :: ApplicationLoadBalancer -> Text
-renderLbDeleteScript alb =
-    Text.unlines $
-        [ "set -euo pipefail"
-        , "PROJECT=" <> shellQuote alb.albProject.projectId
-        , "REGION=" <> shellQuote alb.albRegion.regionName
-        , "exists() { \"$@\" >/dev/null 2>&1; }"
-        ]
-            <> [deleteIfPresent "forwarding-rules" (resourceName "-https-fw") | serveHttps alb]
-            <> [deleteIfPresent "forwarding-rules" (resourceName "-fw")]
-            <> [deleteIfPresent "target-https-proxies" (resourceName "-https-proxy") | serveHttps alb]
-            <> [deleteIfPresent "target-http-proxies" (resourceName "-proxy")]
-            <> [deleteIfPresent "addresses" (resourceName "-ip") | serveHttps alb]
-            <> [deleteIfPresent "url-maps" (resourceName "-url-map")]
-            <> [deleteIfPresent "backend-services" (shellQuote svc.svcResource) | svc <- services alb]
-            <> concatMap deleteBackendSpecificLines (services alb)
-            <> [deleteIfPresent "health-checks" (shellQuote hc.healthCheckName) | hc <- healthChecks alb]
-            <> concatMap deleteCertificateLines alb.albCertificates
-  where
-    resourceName :: Text -> Text
-    resourceName suffix = shellQuote (alb.albName <> suffix)
-
-    deleteIfPresent :: Text -> Text -> Text
-    deleteIfPresent collection name =
-        "if exists gcloud compute " <> collection <> " describe " <> name <> regional
-            <> "; then gcloud compute " <> collection <> " delete " <> name
-            <> regional <> " --quiet; fi"
-
-    deleteLocatedIfPresent :: Text -> Text -> Text
-    deleteLocatedIfPresent collection name =
-        "if exists gcloud certificate-manager " <> collection <> " describe " <> name <> located
-            <> "; then gcloud certificate-manager " <> collection <> " delete " <> name
-            <> located <> " --quiet; fi"
-
-    -- the certificate first: an authorization in use cannot be deleted
-    deleteCertificateLines = \case
-        ComputeCertificate _ -> []
-        ManagedCertificate n ds ->
-            deleteLocatedIfPresent "certificates" (shellQuote n)
-                : [deleteLocatedIfPresent "dns-authorizations" (shellQuote (authorizationName n d)) | d <- ds]
-
-    -- The instance group is not deleted here: this recipe did not create it
-    -- (it is the caller's, and may well outlive the balancer). Detaching is
-    -- implicit in deleting the backend service.
-    deleteBackendSpecificLines :: Svc -> [Text]
-    deleteBackendSpecificLines svc = flip concatMap svc.svcBackends $ \case
-        InstanceGroupBackend{} -> []
-        CloudRunBackend _ -> [deleteIfPresent "network-endpoint-groups" (shellQuote svc.svcNeg)]

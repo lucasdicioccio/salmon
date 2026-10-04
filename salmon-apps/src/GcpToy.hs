@@ -1043,18 +1043,18 @@ before it issues the balancer's certificate.
 GCP picks the record's /name/ as well as its data (a per-project
 authorization is @_acme-challenge_\<hash\>.lb.DNS_NAME@), so this cannot be
 a 'CloudDns.resolvedRecordSet', whose identity is the name. It is a node
-that reads the authorization once the balancer's @up@ has made it and runs
-'CloudDns.recordSet' for what it read as a nested walk -- checking the
+that reads the authorization once its node (one of the balancer's) has made
+it and runs 'CloudDns.recordSet' for what it read as a nested walk -- checking the
 returned 'Bool', since nothing else tells this pass the nested one failed.
 No @check@: the nested node has one, so a second pass costs a @describe@.
 
 On the way down the authorization is still there (this node goes before the
-balancer does), so the same read finds the record to delete; if it is
+authorization's does), so the same read finds the record to delete; if it is
 already gone there is no name left to delete by, and nothing is done.
 -}
 certificateAuthorizationRecord :: Spec -> VmConfig -> LbConfig -> CloudDns.ManagedZone -> Text -> Op
 certificateAuthorizationRecord spec vm lb zone authz =
-    op "gcp-toy-cert-authorization-record" (deps [dnsZoneNode spec zone, balancer spec vm lb]) $ \actions ->
+    op "gcp-toy-cert-authorization-record" (deps (dnsZoneNode spec zone : authorization)) $ \actions ->
         actions
             { help = Text.unwords ["publishes the DNS record of certificate authorization", authz]
             , ref = mkRef "gcp-toy-cert-authorization-record" (spec.project, zone.zoneName, authz)
@@ -1070,6 +1070,19 @@ certificateAuthorizationRecord spec vm lb zone authz =
                     Just rs -> nested "down" (UpDown.downTree silent (pure . runIdentity) (CloudDns.recordSet reportPrint Core.gcloud rs))
             }
   where
+    -- the authorization alone, not the whole balancer: the record can be
+    -- published while the rest of the balancer is still being made, which is
+    -- also when the certificate starts waiting for it
+    authorization :: [Op]
+    authorization =
+        maybe [balancer spec vm lb] pure $
+            LoadBalancing.applicationLoadBalancerPart
+                (balancerPrerequisites spec vm lb)
+                reportPrint
+                Core.gcloud
+                (albSpec spec vm lb)
+                (LoadBalancing.DnsAuthorizationPart authz)
+
     readRecord :: IO (Maybe CloudDns.RecordSet)
     readRecord = (>>= toRecordSet) <$> LoadBalancing.readDnsAuthorizationRecord (albSpec spec vm lb) authz
 
@@ -1162,18 +1175,20 @@ albSpec spec vm lb =
 
 balancer :: Spec -> VmConfig -> LbConfig -> Op
 balancer spec vm lb =
-    foldl
-        inject
-        (LoadBalancing.applicationLoadBalancer reportPrint Core.gcloud alb)
-        ( [proxySubnet, membership, backendFirewall]
-            <> [api spec LoadBalancing.certificateManagerApi | _ <- maybe [] pure (httpsHost spec lb)]
-            <> served
-        )
+    LoadBalancing.applicationLoadBalancerAfter (balancerPrerequisites spec vm lb) reportPrint Core.gcloud (albSpec spec vm lb)
+
+{- | What has to be there before any of the balancer's resources is made.
+Handed to the balancer rather than @inject@ed into it: the balancer is a
+node per resource under a root, and a dependency of the root alone would
+order nothing.
+-}
+balancerPrerequisites :: Spec -> VmConfig -> LbConfig -> [Op]
+balancerPrerequisites spec vm lb =
+    [proxySubnet, membership, backendFirewall]
+        <> [api spec LoadBalancing.certificateManagerApi | _ <- maybe [] pure (httpsHost spec lb)]
+        <> served
   where
     computeApi = api spec "compute.googleapis.com"
-
-    alb :: LoadBalancing.ApplicationLoadBalancer
-    alb = albSpec spec vm lb
 
     proxySubnet :: Op
     proxySubnet =
