@@ -17,6 +17,7 @@ module Test.QuadletSpec (tests) where
 
 import qualified Data.ByteString.Lazy.Char8 as LC8
 import qualified Data.Map.Strict as Map
+import Data.Foldable (toList)
 import Data.IORef (modifyIORef, newIORef, readIORef)
 import Data.List (isInfixOf, sort)
 import Data.Text (Text)
@@ -42,6 +43,8 @@ import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Dag as Dag
+import Salmon.Op.Ref (mkRef)
+import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (silent)
 import Test.Harness (withTempDir)
 
@@ -249,8 +252,84 @@ nodeTests =
         assertEqual "not exactly one directory node" 1 (length dirs)
         assertBool "the directory carries the container's notes" $
             not (any (Text.isPrefixOf "quadlet:") (concatMap (\act -> act.extension.notes) dirs))
+    , testCase "the image is asked for, and pulled with the container's credentials" $ do
+        assertEqual "" ["image", "exists", "europe-west1-docker.pkg.dev/acme/repo/app:v3"] (Quadlet.imagePresentArgs app)
+        assertEqual
+            ""
+            ["pull", "--quiet", "--authfile=/etc/app/auth.json", "europe-west1-docker.pkg.dev/acme/repo/app:v3"]
+            (Quadlet.imagePullArgs app)
+        assertEqual
+            "a public image is pulled with no auth file"
+            ["pull", "--quiet", "docker.io/library/nginx:alpine"]
+            (Quadlet.imagePullArgs (Quadlet.container (Podman.ContainerName "web") "docker.io/library/nginx:alpine"))
+    , testCase "an image on the machine is a skip, a missing one is pulled, a podman that cannot say is unknown" $ do
+        assertEqual "" Success (Quadlet.interpretImagePresent "app:v3" ExitSuccess)
+        assertEqual "" (Failure "the image app:v3 is not on the machine") (Quadlet.interpretImagePresent "app:v3" (ExitFailure 1))
+        assertEqual "" Unknown (Quadlet.interpretImagePresent "app:v3" (ExitFailure 125))
+    , testCase "the quadlet file stands on the image, so a failed pull blocks the rewrite and the restart" $ do
+        let dag = Dag.foldDag Dag.sameRepresentative (evalDeps (node app))
+            refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+        image <- one "image node" (refsOf "podman-quadlet-image")
+        unit <- one "quadlet node" (refsOf "podman-quadlet")
+        let dependants = Map.findWithDefault mempty image (Dag.dagDependants dag)
+            files = [r | r <- toList dependants, r /= unit]
+        file <- one "dependant of the image other than the unit" files
+        assertBool "the unit does not stand on the file that stands on the image" $
+            file `elem` toList (Map.findWithDefault mempty unit (Dag.dagDependencies dag))
+    , testCase "what the caller's track declares comes before the pull" $ do
+        let login = op "the-login" nodeps (\ext -> ext{ref = mkRef "test-login" ("x" :: Text)})
+            tracked = Quadlet.quadletContainer silent ignoreTrack (Track (const login)) app
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps tracked)
+            refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+        image <- one "image node" (refsOf "podman-quadlet-image")
+        loginRef <- one "login node" (refsOf "the-login")
+        assertBool "the pull does not wait for the login" $
+            loginRef `elem` toList (Map.findWithDefault mempty image (Dag.dagDependencies dag))
+    , testCase "what the caller's track declares comes before the file, so a failed one leaves the old quadlet" $ do
+        let migration = op "the-migration" nodeps (\ext -> ext{ref = mkRef "test-migration" ("x" :: Text)})
+            tracked = Quadlet.quadletContainer silent ignoreTrack (Track (const migration)) app
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps tracked)
+            refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+            dependenciesOf r = toList (Map.findWithDefault mempty r (Dag.dagDependencies dag))
+        migrationRef <- one "migration node" (refsOf "the-migration")
+        file <- one "file node" (refsOf "file-contents")
+        unit <- one "quadlet node" (refsOf "podman-quadlet")
+        assertBool "the file does not wait for the track" (migrationRef `elem` dependenciesOf file)
+        assertBool "the unit stopped standing on the track" (migrationRef `elem` dependenciesOf unit)
+        assertEqual "the track made a cycle" [] (toList (Dag.stuck (\d r -> toList (Map.findWithDefault mempty r (Dag.dagDependencies d))) dag))
+    , testCase "a job's file waits for the caller's track too" $ do
+        let migration = op "the-migration" nodeps (\ext -> ext{ref = mkRef "test-migration" ("x" :: Text)})
+            job = Quadlet.quadletJob silent ignoreTrack (Track (const migration)) (Quadlet.containerJob (Podman.ContainerName "job") "app:v3" ["run"])
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps job)
+            refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+        migrationRef <- one "migration node" (refsOf "the-migration")
+        file <- one "file node" (refsOf "file-contents")
+        assertBool "the file does not wait for the track" $
+            migrationRef `elem` toList (Map.findWithDefault mempty file (Dag.dagDependencies dag))
+    , testCase "the track changes nothing about how the file and the unit are described" $ do
+        let migration = op "the-migration" nodeps (\ext -> ext{ref = mkRef "test-migration" ("x" :: Text)})
+            described o =
+                let dag = Dag.foldDag Dag.sameRepresentative (evalDeps o)
+                 in sort
+                        [ (show r, act.extension.help, act.extension.notes)
+                        | (r, act) <- Map.toList (Dag.dagNodes dag)
+                        , act.shorthand /= "the-migration"
+                        ]
+        assertEqual "" (described (node app)) (described (Quadlet.quadletContainer silent ignoreTrack (Track (const migration)) app))
+    , testCase "two containers of one image share the pull without a conflict" $ do
+        let other = app{Quadlet.containerName = Podman.ContainerName "other", Quadlet.containerDescription = "another"}
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [node app, node other]) id))
+        assertEqual "" 1 (length [() | act <- Map.elems (Dag.dagNodes dag), act.shorthand == "podman-quadlet-image"])
+        assertEqual "the shared image was described two ways" 0 (length (Dag.dagConflicts dag))
+    , testCase "a job's file does not stand on a pull" $ do
+        let job = Quadlet.quadletJob silent ignoreTrack ignoreTrack (Quadlet.containerJob (Podman.ContainerName "job") "app:v3" ["run"])
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps job)
+        assertEqual "" 0 (length [() | act <- Map.elems (Dag.dagNodes dag), act.shorthand == "podman-quadlet-image"])
     ]
   where
+    one :: String -> [a] -> IO a
+    one _ [x] = pure x
+    one what xs = assertFailure ("not exactly one " <> what <> ": " <> show (length xs))
     node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack
     refOf o = fmap (\act -> act.extension.ref) (opAct o)
     notesOf o = fmap (\act -> act.extension.notes) (opAct o)

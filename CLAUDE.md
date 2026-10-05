@@ -1030,7 +1030,18 @@ plus the watched files' fingerprint), and after the unit reads `Success` the che
 inspect` prints with the declared fingerprint (`interpretRunning`; a podman that cannot answer is `Unknown`). A quadlet
 written before the label existed is restarted once; a generated unit's `UnitFileState` is `generated` and it cannot be `enable`d (`[Install]` is the
 generator's, so `up` is reload + restart); the file node's `down` reloads after removing, or the unit outlives its file;
-the pull happens *inside the service's start* (`containerStartTimeout`); credentials go through
+left alone the pull happens *inside the service's start*, which on a restart is after the old container was stopped,
+so `quadletContainer` pulls first: `imageNode` (`podman-quadlet-image`, keyed on the reference and the auth file, shared
+by containers of one image) is a dependency of the *file*, with the caller's `Track'` injected ahead of it. The `Track'` is also a dependency of
+the file itself (for `quadletJob` too), not only its sibling under the unit node: a failed precondition (a migration)
+then leaves the file `Blocked` and the old image declared, where it used to leave the new image written under the old
+container. An `inject` on the returned `Op` is still a sibling of the file, so preconditions go in the track (Layer 0
+graph shape only; the failing-precondition pass has not been run against a real unit). Its `check`
+is `podman image exists` (present is a skip and never reaches a registry; an exit other than 0/1 is `Unknown`), its
+`up` is `podman pull [--authfile]` throwing `ImageUnavailable`, its `down` nothing. An unpullable reference therefore
+fails there with the file and node `Blocked`: the old file, unit and container stay as they were. The rendered file is
+unchanged by this. Not covered: `quadletJob` (its first run still pulls), a tag moved at the registry, an image removed
+after the pass (`containerStartTimeout` still bounds that start's pull); credentials go through
 `PodmanArgs=--authfile=`, since podman 4.9's generator refuses the `AuthFile=` key; the `ref` is `"systemd-unit"
 NAME.service`, the same site as an authored unit; a moving tag (`:latest`) is not a change it can see; the quadlet
 directory is its own node (`podman-quadlet-dir`), created if missing and never removed, since `Filesystem.dir`'s `down`
@@ -1046,8 +1057,9 @@ expired login was skipped (`instanceLoginWith` takes the token's source, for the
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/
-down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
-test, the metadata path has not been run on an instance, and the GCP toy does not use either yet.
+down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped, and that a healthy container re-declared onto an unpullable image (a refused
+local port) fails at the pull with its service, container and file untouched; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
+test, nor has a successful pull from a registry or one through an auth file (the tests' images are already local), the metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
 `Nodes/Systemd/Job.hs` is jobs under systemd, which `systemdService` cannot declare: its check wants `ActiveState=active`
 and its `up` restarts, so an idle oneshot unit reads as broken and is run at every pass. Three nodes, separate on
