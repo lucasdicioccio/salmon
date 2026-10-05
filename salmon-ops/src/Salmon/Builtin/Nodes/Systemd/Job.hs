@@ -29,10 +29,25 @@ with the new schedule at @daemon-reload@ (seen on systemd 255: the next
 elapse moves without a restart), so it does not matter which node's reload
 got there first.
 
-What is not here: a verdict on how the last run /went/. A failed run leaves
-the job's unit @failed@, which @systemctl@ and the journal show, but no node
-reads it: re-installing a job does not un-fail it, and a check that said
-otherwise would have a supervisor reload systemd forever.
+How the last run /went/ is a fourth node's question, not 'jobService''s
+(re-installing a job does not un-fail it, and a check that said otherwise
+would have a supervisor reload systemd forever). 'completedRun' is 'runJob'
+with a check: it reads the unit's last run from systemd ('interpretLastRun')
+and answers 'Completed' when that run succeeded and started after everything
+the job stands on was last written, a 'Failure' when it failed, never
+happened or predates a write. Its @up@ is 'runJob''s, so a job that fails
+fails the pass. 'completedJob' and 'completedScheduledJob' are that node
+standing on the job.
+
+What systemd remembers is the limit of it, and it is less than one would
+think (all seen on systemd 255). A /failed/ run is remembered until the unit
+is started again, @reset-failed@ or the machine reboots. A /successful/ run
+is remembered only while something keeps the unit loaded: a waiting timer
+that triggers it does, and with nothing referring to it the unit is
+collected the moment the run ends and reads exactly like one never run. And
+nothing survives a reboot. 'jobStamp' is for the cases that leaves (a job
+with no timer; a verdict that must hold across a reboot): the unit then
+records its own runs in two files the check reads beside systemd's answer.
 -}
 module Salmon.Builtin.Nodes.Systemd.Job (
     -- * a job
@@ -60,6 +75,20 @@ module Salmon.Builtin.Nodes.Systemd.Job (
     -- * running one now
     runJob,
 
+    -- * a run that succeeded, and since when
+    Completion (..),
+    jobCompletion,
+    stampRunning,
+    RunEvidence (..),
+    noEvidence,
+    interpretLastRun,
+    parseTimestamp,
+    lastRunProperties,
+    checkLastRun,
+    completedRun,
+    completedJob,
+    completedScheduledJob,
+
     -- * shared with other unit-writing nodes
     unitDirectory,
     unitFile,
@@ -71,14 +100,17 @@ module Salmon.Builtin.Nodes.Systemd.Job (
 ) where
 
 import Control.Exception (Exception, throwIO)
-import Control.Monad (unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Char (isAlphaNum, isAscii)
-import Data.Maybe (maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath (takeDirectory, (</>))
+import Data.Time (UTCTime, defaultTimeLocale, parseTimeM)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getModificationTime, removeFile)
+import System.Exit (ExitCode (..))
+import System.FilePath (isAbsolute, takeDirectory, (</>))
+import System.Process (proc, readCreateProcessWithExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
@@ -86,7 +118,7 @@ import Salmon.Builtin.Nodes.Binary (Binary, withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
-import Salmon.Op.OpGraph (OpGraph (..))
+import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -122,6 +154,16 @@ data Job
     , jobTimeout :: Maybe Int
     -- ^ @TimeoutStartSec=@ in seconds: how long one run may take. systemd's
     -- default for a oneshot unit is no limit at all.
+    , jobStamp :: Maybe FilePath
+    -- ^ a file the unit keeps as the record of its last successful run, for
+    -- 'completedRun' to read where systemd's own memory does not reach (see
+    -- the module's header). Each run touches @STAMP.running@ before the
+    -- command and renames it to @STAMP@ after the command succeeded, so
+    -- @STAMP@'s time is when the last successful run /started/, and a
+    -- @STAMP.running@ newer than it is a run that did not succeed. The
+    -- directory is the caller's: it has to exist and be writable by whoever
+    -- runs the job. @touch@ and @mv@ are found by systemd on its own search
+    -- path.
     }
     deriving (Eq, Show)
 
@@ -145,6 +187,7 @@ job name command =
         , jobEnvironment = []
         , jobEnvFile = Nothing
         , jobTimeout = Nothing
+        , jobStamp = Nothing
         }
 
 jobServiceTarget :: Job -> Systemd.UnitTarget
@@ -171,9 +214,15 @@ renderJobService j =
             , ["Environment=" <> assignment k v | (k, v) <- j.jobEnvironment]
             , ["EnvironmentFile=" <> Text.pack f | f <- maybeToList j.jobEnvFile]
             , ["TimeoutStartSec=" <> Text.pack (show t) | t <- maybeToList j.jobTimeout]
-            , ["ExecStart=" <> Text.unwords (map Systemd.literalArg j.jobCommand)]
+            , ["ExecStartPre=" <> command ["touch", Text.pack (stampRunning s)] | s <- maybeToList j.jobStamp]
+            , ["ExecStart=" <> command j.jobCommand]
+            , -- only reached when every ExecStart= exited 0
+              ["ExecStartPost=" <> command ["mv", "-f", Text.pack (stampRunning s), Text.pack s] | s <- maybeToList j.jobStamp]
             ]
   where
+    command :: [Text] -> Text
+    command = Text.unwords . map Systemd.literalArg
+
     -- specifiers are expanded in @Environment=@, variables are not
     assignment :: Text -> Text -> Text
     assignment k v = Systemd.quoteArg (k <> "=" <> Text.replace "%" "%%" v)
@@ -194,6 +243,7 @@ jobProblems j =
         , ["an environment variable with no name" | (k, _) <- j.jobEnvironment, Text.null k]
         , ["not an environment variable name: " <> k | (k, _) <- j.jobEnvironment, Text.any (`elem` ("= \t" :: String)) k]
         , ["the timeout is not positive" | Just t <- [j.jobTimeout], t <= 0]
+        , ["the stamp is not an absolute path: " <> Text.pack s | s <- maybeToList j.jobStamp, not (isAbsolute s)]
         , lineBreaks fields
         ]
   where
@@ -208,7 +258,12 @@ jobProblems j =
             , [("working directory", Text.pack d) | d <- maybeToList j.jobWorkingDir]
             , [("environment", k <> v) | (k, v) <- j.jobEnvironment]
             , [("environment file", Text.pack f) | f <- maybeToList j.jobEnvFile]
+            , [("stamp", Text.pack s) | s <- maybeToList j.jobStamp]
             ]
+
+-- | The file a run touches when it starts; see 'jobStamp'.
+stampRunning :: FilePath -> FilePath
+stampRunning stamp = stamp <> ".running"
 
 lineBreaks :: [(Text, Text)] -> [Text]
 lineBreaks fields = ["a line break in the " <> what | (what, value) <- fields, Text.any (`elem` ("\n\r" :: String)) value]
@@ -547,3 +602,222 @@ runJob r systemctl scope target =
                 , ref = mkRef "systemd-job-run" target
                 , up = start
                 }
+
+-------------------------------------------------------------------------------
+
+{- | What 'completedRun' asks about: a unit, the files a run of it has to be
+newer than, and the stamp its runs leave, if it leaves one.
+-}
+data Completion
+    = Completion
+    { completionScope :: Systemd.Scope
+    , completionUnit :: Systemd.UnitTarget
+    , completionWritten :: [FilePath]
+    -- ^ a run that started before any of these was last written does not
+    -- count: the unit file, its configuration, its script. A file that is
+    -- not there is not counted; it was not written.
+    , completionStamp :: Maybe FilePath
+    -- ^ the 'jobStamp' of the unit, which has to be the same path
+    }
+    deriving (Eq, Show)
+
+{- | The question for a 'Job': a run newer than its unit file and its
+environment file, read from its stamp if it has one. The program is not in
+the list (for most jobs it is @\/bin\/sh@ or a packaged binary, whose upgrade
+is not a reason to run a backup); a script or a configuration file the
+command reads is the caller's to add.
+-}
+jobCompletion :: Job -> Completion
+jobCompletion j =
+    Completion
+        { completionScope = j.jobScope
+        , completionUnit = jobServiceTarget j
+        , completionWritten = jobServicePath j : maybeToList j.jobEnvFile
+        , completionStamp = j.jobStamp
+        }
+
+-- | What is known about a unit's runs besides what systemd says.
+data RunEvidence
+    = RunEvidence
+    { evidenceWritten :: [(FilePath, UTCTime)]
+    -- ^ when each file the job stands on was last written
+    , evidenceSucceeded :: Maybe UTCTime
+    -- ^ the stamp's time: when the last successful run started
+    , evidenceStarted :: Maybe UTCTime
+    -- ^ the running stamp's time: when the last run started, if it has not
+    -- succeeded
+    }
+    deriving (Eq, Show)
+
+-- | No file to be newer than and no stamp: systemd's answer alone.
+noEvidence :: RunEvidence
+noEvidence = RunEvidence [] Nothing Nothing
+
+-- | The properties 'checkLastRun' asks @systemctl show@ for.
+lastRunProperties :: [String]
+lastRunProperties = ["LoadState", "ActiveState", "Result", "ExecMainStatus", "ExecMainStartTimestamp"]
+
+{- | The verdict on a job's last run, from @systemctl show
+--timestamp=us+utc@'s lines and the 'RunEvidence', pure.
+
+In the order asked:
+
+* a unit systemd does not hold is a 'Failure' (there is nothing to have run);
+* a unit on its way somewhere (@activating@ is a oneshot unit /running/) is
+  'Unknown': the run under way has not gone either way yet;
+* @ActiveState=failed@, or a @Result@ other than @success@, is a 'Failure'
+  naming the result and the exit status. This is the last run, since a
+  failed unit stays loaded;
+* a running stamp newer than the stamp is a run that started and did not
+  succeed, a 'Failure'. This is what is left of a failure after a reboot;
+* the last successful run is the later of systemd's @ExecMainStartTimestamp@
+  (only there while the unit stayed loaded) and the stamp. None is a
+  'Failure': the job never ran, or ran and was forgotten, and the two cannot
+  be told apart;
+* a file written after that run started is a 'Failure' naming the file;
+* otherwise 'Completed'.
+
+A timestamp that is there and cannot be read is 'Unknown' rather than a
+missing run.
+-}
+interpretLastRun :: RunEvidence -> [Text] -> CheckResult
+interpretLastRun evidence ls
+    | loadState /= Just "loaded" =
+        Failure (maybe "systemctl said nothing about the unit's load state" ("the unit is " <>) loadState)
+    | activeState `elem` map Just ["activating", "deactivating", "reloading"] = Unknown
+    | activeState == Just "failed" || maybe False (/= "success") result =
+        Failure
+            ( "the last run failed: Result="
+                <> fromMaybe "?" result
+                <> maybe "" (", exit status " <>) (property "ExecMainStatus")
+            )
+    | unsucceeded = Failure "the last run that started did not succeed"
+    | otherwise = case systemdStarted of
+        Nothing -> Unknown
+        Just started -> case catMaybes [started, evidence.evidenceSucceeded] of
+            [] -> Failure "there is no record of a successful run"
+            runs ->
+                let lastSuccess = maximum runs
+                 in case [path | (path, written) <- evidence.evidenceWritten, written > lastSuccess] of
+                        (path : _) -> Failure ("no run has succeeded since " <> Text.pack path <> " was written")
+                        [] -> Completed
+  where
+    loadState = property "LoadState"
+    activeState = property "ActiveState"
+    result = property "Result"
+
+    unsucceeded :: Bool
+    unsucceeded = case (evidence.evidenceStarted, evidence.evidenceSucceeded) of
+        (Just started, Just succeeded) -> started > succeeded
+        (Just _, Nothing) -> True
+        (Nothing, _) -> False
+
+    -- 'Nothing' is a timestamp that could not be read, @Just Nothing@ none
+    systemdStarted :: Maybe (Maybe UTCTime)
+    systemdStarted = case property "ExecMainStartTimestamp" of
+        Nothing -> Just Nothing
+        Just "n/a" -> Just Nothing
+        Just raw -> Just <$> parseTimestamp raw
+
+    property :: Text -> Maybe Text
+    property name =
+        case [Text.strip (Text.drop 1 v) | l <- ls, let (k, v) = Text.breakOn "=" l, k == name] of
+            (x : _) | not (Text.null x) -> Just x
+            _ -> Nothing
+
+-- | A timestamp as @--timestamp=us+utc@ prints it: @Mon 2026-10-05 09:56:02.675581 UTC@.
+parseTimestamp :: Text -> Maybe UTCTime
+parseTimestamp raw = parseTimeM True defaultTimeLocale "%a %Y-%m-%d %H:%M:%S%Q UTC" (Text.unpack raw)
+
+{- | Asks systemd and the filesystem, then 'interpretLastRun'. @systemctl@
+not answering (or not knowing @--timestamp@, which is systemd 247's) is
+'Unknown'.
+-}
+checkLastRun :: Completion -> IO CheckResult
+checkLastRun c = do
+    written <- fmap catMaybes (forM c.completionWritten (\path -> fmap (fmap ((,) path)) (modified path)))
+    succeeded <- maybe (pure Nothing) modified c.completionStamp
+    started <- maybe (pure Nothing) (modified . stampRunning) c.completionStamp
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            ( proc
+                "systemctl"
+                ( Systemd.scopeArgs c.completionScope
+                    <> ["show", Text.unpack c.completionUnit, "--timestamp=us+utc"]
+                    <> map ("--property=" <>) lastRunProperties
+                )
+            )
+            ""
+    pure $ case code of
+        ExitSuccess ->
+            interpretLastRun
+                (RunEvidence written succeeded started)
+                (Text.lines (Text.pack out))
+        ExitFailure _ -> Unknown
+  where
+    modified :: FilePath -> IO (Maybe UTCTime)
+    modified path = do
+        present <- doesFileExist path
+        if present then Just <$> getModificationTime path else pure Nothing
+
+{- | A job that has run: 'runJob' with 'checkLastRun' as its check. A pass
+skips it when the last run succeeded after everything in 'completionWritten'
+was written, runs it otherwise, and fails when that run fails, so a job
+whose last run failed (the timer's or anybody's) fails every pass until a
+run succeeds. Under @run serve@ the verdict of a job at rest is 'Completed'.
+
+It is keyed like 'runJob' (@"systemd-job-run"@ and the unit): the two are
+one effect site. It has no dependency: the caller injects what installs the
+unit, or uses 'completedJob'. Without a timer keeping the unit loaded and
+without a stamp, a successful run is not remembered and the job runs at
+every pass, as 'runJob' does (see the module's header).
+
+@down@ removes the stamp files, the one thing a run leaves that is this
+node's.
+-}
+completedRun ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Completion ->
+    Op
+completedRun r systemctl c =
+    withSystemctl r systemctl (Systemd.StartUnit c.completionScope target) $ \start ->
+        op "systemd-job-completed" nodeps $ \actions ->
+            actions
+                { help = "has " <> target <> " run to completion since it was last changed"
+                , notes =
+                    ["newer than: " <> Text.pack path | path <- c.completionWritten]
+                        <> ["stamp: " <> Text.pack s | s <- maybeToList c.completionStamp]
+                , ref = mkRef "systemd-job-run" target
+                , check = checkLastRun c
+                , up = start
+                , down = forM_ c.completionStamp $ \s ->
+                    forM_ [s, stampRunning s] $ \path -> do
+                        present <- doesFileExist path
+                        when present (removeFile path)
+                }
+  where
+    target = c.completionUnit
+
+-- | 'completedRun' for a 'Job', standing on its 'jobService'.
+completedJob ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' Job ->
+    Job ->
+    Op
+completedJob r systemctl t j =
+    completedRun r systemctl (jobCompletion j) `inject` jobService r systemctl t j
+
+{- | 'completedRun' for a 'Job', standing on its 'scheduledJob': the timer is
+waiting before the first run, so systemd keeps that run's outcome.
+-}
+completedScheduledJob ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' Job ->
+    Job ->
+    [Schedule] ->
+    Op
+completedScheduledJob r systemctl t j schedules =
+    completedRun r systemctl (jobCompletion j) `inject` scheduledJob r systemctl t j schedules

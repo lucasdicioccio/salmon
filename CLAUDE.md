@@ -1050,7 +1050,7 @@ words go through `Systemd.literalArg` (`$` as `$$`, `%` as `%%`, since systemd s
 `quoteArg`, now top-level, is unchanged for authored services); the unit directory is `unitDirectory`, created and never
 removed (`Filesystem.dir`'s `down` refuses a non-empty one); a changed schedule needs no restart, since systemd re-arms
 a waiting timer at `daemon-reload` (seen on 255); a calendar expression is not judged by `timerProblems`, a timer
-systemd cannot read fails to start; nothing reads how the last run went. The container equivalent is
+systemd cannot read fails to start; `jobService` does not read how the last run went. The container equivalent is
 `Quadlet.quadletJob` over `Quadlet.containerJob` (`containerExec` renders `Exec=`, `containerLifetime = RunToCompletion`
 renders `Type=oneshot`, for which podman 4.9's generator runs the container in the foreground): same install-only
 shape, and a `timerUnit` or `runJob` names its `serviceTarget`. `Test/SystemdJobSpec.hs` is Layer 0 plus
@@ -1058,6 +1058,27 @@ shape, and a `timerUnit` or `runJob` names its `serviceTarget`. `Test/SystemdJob
 `userTests` run the nodes against this user's systemd in user scope (install without running, skip, re-arm, re-install,
 run, failing run, down twice). Not run: system scope, a timer actually firing, a container job actually running, and
 `serve` tending any of it.
+
+`Job.completedRun` is `runJob` with a check, the node that reads how the last run went (`completedJob` /
+`completedScheduledJob` are it standing on the job; same `Ref` as `runJob`, `"systemd-job-run"` and the unit).
+`checkLastRun` asks `systemctl show --timestamp=us+utc` (systemd 247+) for `LoadState`/`ActiveState`/`Result`/
+`ExecMainStatus`/`ExecMainStartTimestamp` and the mtimes of `completionWritten` (for a `Job`: its unit file and
+`EnvironmentFile`; a script or config is the caller's to add; a missing file is not counted), and `interpretLastRun`
+(pure) answers `Completed` when the last run succeeded and *started* after every such write, a `Failure` when it failed
+(naming `Result` and the exit status), never ran, or predates a write, `Unknown` while a run is under way. `up` is
+`systemctl start`, so a job whose last run failed fails every pass until a run succeeds. Load-bearing, all seen on
+systemd 255: **systemd forgets a successful run** unless something keeps the unit loaded (a waiting timer triggering it
+does; with nothing referring to it the unit is collected as the run ends and reads like one never run), it forgets a
+failed one at `reset-failed`, and everything at a reboot. `jobStamp` (off by default, so existing units render as
+before) is for those cases: `ExecStartPre=touch STAMP.running` and `ExecStartPost=mv -f STAMP.running STAMP`, so
+`STAMP`'s mtime is when the last successful run started and a `STAMP.running` newer than it is a run that did not
+succeed; the check takes the later of systemd's record and the stamp, and `down` removes both files. The stamp's
+directory is the caller's (existing, writable by the job's user). Without a timer and without a stamp the node runs at
+every pass, as `runJob` does. `Test/SystemdJobSpec.hs`: Layer 0 on `show` lines captured from 255, and two `userTests`
+cases (stamped job: run, skip, re-run after a watched file is written, failing every pass also after `reset-failed`,
+cleared by a success, down; timer and no stamp: run then skip). Those user-scope cases sit in the serialized tier and
+were run on their own from a repl. Not run: system scope (root, `User=`), an actual reboot, a `Persistent=true` timer
+firing, a `quadletJob` under `completedRun`, and `serve` tending it.
 
 `Nodes/Deferred.hs` (`deferred`) is a sub-graph built at `up` from a value another node of the same pass produced: the
 node holds a read (`IO (Maybe a)`) and a recipe (`a -> Op`), and its `up` reads, builds and runs a nested `upTree`

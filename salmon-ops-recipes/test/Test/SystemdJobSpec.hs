@@ -17,9 +17,14 @@ changed schedule re-arms it, a changed command is re-installed without
 being run, 'Job.runJob' runs the command with its words
 unexpanded and fails when the command does, and @down@ removes all of it and
 can be run twice. Every unit gets a random name and a bracket that removes it
-whatever the case did.
+whatever the case did. The last two cases are 'Job.completedRun': a job with
+a stamp is run once and then skipped, run again when a file it stands on is
+written, fails every pass while its last run failed (also once systemd has
+forgotten the failure), and a job with a waiting timer and no stamp is
+remembered by systemd alone.
 
-Not run anywhere: system scope, a timer actually firing, and a container job
+Not run anywhere: system scope, a timer actually firing, a reboot (what
+systemd forgets at one is imitated with @reset-failed@), and a container job
 actually running (the generator's output is as far as that goes).
 -}
 module Test.SystemdJobSpec (tests, userTests) where
@@ -31,7 +36,8 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Time (UTCTime, addUTCTime)
+import Data.Time.Clock.POSIX (getPOSIXTime, posixSecondsToUTCTime)
 import Numeric (showHex)
 import System.Directory (XdgDirectory (XdgConfig), doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, getXdgDirectory, removeFile)
 import System.Environment (getEnvironment)
@@ -67,6 +73,7 @@ tests =
         , testGroup "timer rendering" timerRenderTests
         , testGroup "refusals" problemTests
         , testGroup "check" checkTests
+        , testGroup "last run" lastRunTests
         , testGroup "nodes" nodeTests
         , testGroup "container job" containerTests
         , testGroup "systemd-analyze" verifyTests
@@ -258,6 +265,122 @@ checkTests =
         RawCommand _ args -> args
         ShellCommand line -> [line]
 
+{- | @systemctl --user show --timestamp=us+utc@ on systemd 255, for the
+properties 'Job.lastRunProperties' names: a oneshot unit a waiting timer
+keeps loaded after a successful run, one whose run exited 1, and one with
+nothing referring to it after a successful run (the same lines as one never
+run).
+-}
+ranOk, ranBadly, forgotten :: [Text]
+ranOk =
+    [ "Result=success"
+    , "ExecMainStartTimestamp=Mon 2026-10-05 09:56:02.675581 UTC"
+    , "ExecMainStatus=0"
+    , "LoadState=loaded"
+    , "ActiveState=inactive"
+    ]
+ranBadly =
+    [ "Result=exit-code"
+    , "ExecMainStartTimestamp=Mon 2026-10-05 09:56:02.744529 UTC"
+    , "ExecMainStatus=1"
+    , "LoadState=loaded"
+    , "ActiveState=failed"
+    ]
+forgotten =
+    [ "Result=success"
+    , "ExecMainStartTimestamp="
+    , "ExecMainStatus=0"
+    , "LoadState=loaded"
+    , "ActiveState=inactive"
+    ]
+
+-- | When 'ranOk' started, and that many seconds from it.
+ranAt :: UTCTime
+ranAt = posixSecondsToUTCTime 1791194162.675581
+
+after, before :: Double -> UTCTime
+after seconds = addUTCTime (realToFrac seconds) ranAt
+before seconds = after (negate seconds)
+
+lastRunTests :: [TestTree]
+lastRunTests =
+    [ testCase "the timestamp systemd prints is read to the microsecond" $
+        assertEqual "" (Just ranAt) (Job.parseTimestamp "Mon 2026-10-05 09:56:02.675581 UTC")
+    , testCase "a run that succeeded is a completed job, not a stopped service" $
+        assertEqual "" Completed (Job.interpretLastRun Job.noEvidence ranOk)
+    , testCase "a run that failed is a failure naming how" $
+        case Job.interpretLastRun Job.noEvidence ranBadly of
+            Failure why -> do
+                assertBool (Text.unpack why) ("exit-code" `Text.isInfixOf` why)
+                assertBool (Text.unpack why) ("exit status 1" `Text.isInfixOf` why)
+            other -> assertFailure (show other)
+    , testCase "a failed run is not excused by an older success" $
+        assertBool "" (isFailure (Job.interpretLastRun Job.noEvidence{Job.evidenceSucceeded = Just (before 60)} ranBadly))
+    , testCase "a result other than success fails whatever the active state" $
+        assertBool "" (isFailure (Job.interpretLastRun Job.noEvidence (map (Text.replace "Result=success" "Result=timeout") ranOk)))
+    , testCase "a job systemd has no run of has not run" $
+        assertBool "" (isFailure (Job.interpretLastRun Job.noEvidence forgotten))
+    , testCase "a run under way is neither" $
+        assertEqual "" Unknown (Job.interpretLastRun Job.noEvidence (map (Text.replace "ActiveState=inactive" "ActiveState=activating") ranOk))
+    , testCase "a unit systemd does not hold has not run" $ do
+        assertBool "" (isFailure (Job.interpretLastRun Job.noEvidence (map (Text.replace "LoadState=loaded" "LoadState=not-found") forgotten)))
+        assertBool "" (isFailure (Job.interpretLastRun Job.noEvidence []))
+    , testCase "a run older than a file it stands on does not count, and the file is named" $ do
+        let evidence = Job.noEvidence{Job.evidenceWritten = [("/etc/backup/env", before 5), ("/usr/local/bin/backup", after 0.5)]}
+        case Job.interpretLastRun evidence ranOk of
+            Failure why -> assertBool (Text.unpack why) ("/usr/local/bin/backup" `Text.isInfixOf` why)
+            other -> assertFailure (show other)
+    , testCase "a run newer than every file counts" $
+        assertEqual "" Completed (Job.interpretLastRun Job.noEvidence{Job.evidenceWritten = [("/etc/backup/env", before 5), ("/x", before 0.001)]} ranOk)
+    , testCase "the stamp stands in for what systemd forgot" $ do
+        assertEqual "" Completed (Job.interpretLastRun Job.noEvidence{Job.evidenceSucceeded = Just ranAt} forgotten)
+        assertEqual "" Completed (Job.interpretLastRun (Job.RunEvidence [("/x", before 1)] (Just ranAt) Nothing) forgotten)
+        assertBool "" (isFailure (Job.interpretLastRun (Job.RunEvidence [("/x", after 1)] (Just ranAt) Nothing) forgotten))
+    , testCase "the later of systemd's run and the stamp's is the last one" $ do
+        assertEqual "" Completed (Job.interpretLastRun (Job.RunEvidence [("/x", before 1)] (Just (before 3600)) Nothing) ranOk)
+        assertEqual "" Completed (Job.interpretLastRun (Job.RunEvidence [("/x", after 1)] (Just (after 2)) Nothing) ranOk)
+    , testCase "a run that started and left no stamp failed, though systemd forgot it" $ do
+        assertBool "" (isFailure (Job.interpretLastRun (Job.RunEvidence [] (Just ranAt) (Just (after 60))) forgotten))
+        assertBool "" (isFailure (Job.interpretLastRun (Job.RunEvidence [] Nothing (Just ranAt)) forgotten))
+    , testCase "a running stamp left by an older failure does not undo a later success" $
+        assertEqual "" Completed (Job.interpretLastRun (Job.RunEvidence [] (Just ranAt) (Just (before 60))) forgotten)
+    , testCase "a timestamp that cannot be read is not a missing run" $
+        assertEqual "" Unknown (Job.interpretLastRun Job.noEvidence (map (Text.replace "Mon 2026-10-05 09:56:02.675581 UTC" "lundi matin") ranOk))
+    , testCase "a stamped job records its runs around the command" $ do
+        let ls = Text.lines (Job.renderJobService backup{Job.jobStamp = Just "/var/lib/backup/last run"})
+            execs = [l | l <- ls, "Exec" `Text.isPrefixOf` l]
+        assertEqual
+            ""
+            [ "ExecStartPre=touch \"/var/lib/backup/last run.running\""
+            , "ExecStart=/usr/local/bin/backup --to /srv/backups \"two words\""
+            , "ExecStartPost=mv -f \"/var/lib/backup/last run.running\" \"/var/lib/backup/last run\""
+            ]
+            execs
+    , testCase "a job with no stamp is rendered as before" $
+        assertBool "" (not ("ExecStartP" `Text.isInfixOf` Job.renderJobService backup))
+    , testCase "a stamp that is not an absolute path, or holds a line break, is refused" $ do
+        assertBool "" (not (null (Job.jobProblems backup{Job.jobStamp = Just "stamp"})))
+        assertBool "" (not (null (Job.jobProblems backup{Job.jobStamp = Just "/a\nExecStart=/bin/evil"})))
+        assertEqual "" [] (Job.jobProblems backup{Job.jobStamp = Just "/var/lib/backup/stamp"})
+    , testCase "a job's run is judged against its unit file, its environment file and its stamp" $
+        assertEqual
+            ""
+            (Job.Completion Systemd.System "backup.service" ["/etc/systemd/system/backup.service", "/etc/backup/env"] (Just "/s"))
+            (Job.jobCompletion backup{Job.jobStamp = Just "/s"})
+    , testCase "a completed job is the run's effect site, standing on the installed job" $ do
+        assertEqual "" (refOf (runNode backup)) (refOf (completedNode backup))
+        let dag = Dag.foldDag Dag.sameRepresentative (evalDeps (completedNode backup))
+        assertEqual "" ["file-contents", "systemd-job", "systemd-job-completed", "systemd-unit-dir"] (sort [act.shorthand | act <- Map.elems (Dag.dagNodes dag)])
+    , testCase "what a run is compared with is visible in the node's description" $
+        assertBool "" (notesOf (completedNode backup) /= notesOf (completedNode backup{Job.jobEnvFile = Nothing}))
+    ]
+  where
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+
+completedNode :: Job.Job -> Op
+completedNode = Job.completedJob silent ignoreTrack ignoreTrack
+
 nodeTests :: [TestTree]
 nodeTests =
     [ testCase "a job is keyed on its unit, not on its command" $ do
@@ -422,6 +545,10 @@ userTests =
             withUserUnits $ \unitDir -> withTempDir $ \tmp -> withFreshJob unitDir (tmp </> "out") $ \j -> lifecycle step (tmp </> "out") j
         , testCaseSteps "a run waits for the command and fails when it does" $ \step ->
             withUserUnits $ \unitDir -> withTempDir $ \tmp -> withFreshJob unitDir (tmp </> "out") $ \j -> running step (tmp </> "out") j
+        , testCaseSteps "a stamped job runs once, again after a change, and fails while its last run did" $ \step ->
+            withUserUnits $ \unitDir -> withTempDir $ \tmp -> withFreshJob unitDir (tmp </> "out") $ \j -> completing step tmp j
+        , testCaseSteps "a job with a waiting timer is remembered by systemd alone" $ \step ->
+            withUserUnits $ \unitDir -> withTempDir $ \tmp -> withFreshJob unitDir (tmp </> "out") $ \j -> remembered step (tmp </> "out") j
         ]
 
 lifecycle :: (String -> IO ()) -> FilePath -> Job.Job -> IO ()
@@ -522,6 +649,102 @@ running step out j = do
 
     step "down"
     down <- runDownCapturing (run failing)
+    assertBool ("down failed: " <> show (failures down)) (null (failures down))
+    assertEqual "" "not-found" =<< showProperty (Job.jobServiceTarget j) "LoadState"
+
+completing :: (String -> IO ()) -> FilePath -> Job.Job -> IO ()
+completing step tmp j0 = do
+    let out = tmp </> "out"
+        conf = tmp </> "conf"
+        stamp = tmp </> "stamp"
+        j = j0{Job.jobStamp = Just stamp}
+        completion job' = let c = Job.jobCompletion job' in c{Job.completionWritten = c.completionWritten <> [conf]}
+        node job' = Job.completedRun silent ignoreTrack (completion job') `inject` jobNode job'
+        ran = "systemd-job-completed"
+    Text.writeFile conf "v1"
+
+    step "first up runs it"
+    reports <- runUpCapturing (node j)
+    assertUp reports
+    assertEqual "the job was not run once" 1 (count ran isEval reports)
+    assertBool "the job did not run" =<< doesFileExist out
+    assertBool "the run left no stamp" =<< doesFileExist stamp
+    assertBool "the run left its running stamp" . not =<< doesFileExist (Job.stampRunning stamp)
+    -- with nothing referring to the unit systemd has already forgotten the run
+    assertEqual "" "" =<< showProperty (Job.jobServiceTarget j) "ExecMainStartTimestamp"
+    assertEqual "" Completed =<< Job.checkLastRun (completion j)
+
+    step "second up skips it"
+    removeFile out
+    again <- runUpCapturing (node j)
+    assertUp again
+    assertEqual "the job was not skipped" (1, 0) (count ran isSkip again, count ran isEval again)
+    assertBool "a completed job was run again" . not =<< doesFileExist out
+
+    step "a file it stands on is written"
+    Text.writeFile conf "v2"
+    assertBool "a run older than its configuration counted" . isFailure =<< Job.checkLastRun (completion j)
+    rerun <- runUpCapturing (node j)
+    assertUp rerun
+    assertEqual "the job was not run again" 1 (count ran isEval rerun)
+    assertBool "the job did not run" =<< doesFileExist out
+    assertEqual "" Completed =<< Job.checkLastRun (completion j)
+
+    step "a failing command fails the pass"
+    void (readProcessWithExitCode "sleep" ["1.1"] "")
+    let failing = j{Job.jobCommand = ["/bin/sh", "-c", "exit 3"]}
+    failed <- runUpCapturing (node failing)
+    assertEqual "the failed run was not a failed up" [ran] [act.shorthand | UpDown.Failed act _ <- failed]
+    verdict <- Job.checkLastRun (completion failing)
+    case verdict of
+        Failure why -> assertBool (Text.unpack why) ("exit status 3" `Text.isInfixOf` why)
+        other -> assertFailure ("a failed job reads as " <> show other)
+
+    step "and every pass after it"
+    stillFailed <- runUpCapturing (node failing)
+    assertEqual "a failed job was reported done" [ran] [act.shorthand | UpDown.Failed act _ <- stillFailed]
+
+    step "also once systemd has forgotten the failure"
+    void (readProcessWithExitCode "systemctl" ["--user", "reset-failed", Text.unpack (Job.jobServiceTarget j)] "")
+    assertEqual "" "success" =<< showProperty (Job.jobServiceTarget j) "Result"
+    assertBool "the failure was forgotten with systemd's record of it" . isFailure =<< Job.checkLastRun (completion failing)
+
+    step "a run that succeeds clears it"
+    void (readProcessWithExitCode "sleep" ["1.1"] "")
+    fixed <- runUpCapturing (node j)
+    assertUp fixed
+    assertEqual "" Completed =<< Job.checkLastRun (completion j)
+
+    step "down"
+    down <- runDownCapturing (node j)
+    assertBool ("down failed: " <> show (failures down)) (null (failures down))
+    assertBool "the stamp is still there" . not =<< doesFileExist stamp
+    assertEqual "" "not-found" =<< showProperty (Job.jobServiceTarget j) "LoadState"
+    assertBool "a job that is gone reads as run" . isFailure =<< Job.checkLastRun (completion j)
+
+remembered :: (String -> IO ()) -> FilePath -> Job.Job -> IO ()
+remembered step out j = do
+    let node = Job.completedScheduledJob silent ignoreTrack ignoreTrack j [Job.OnCalendar "*-*-* 03:00:00"]
+        ran = "systemd-job-completed"
+
+    step "first up runs it"
+    reports <- runUpCapturing node
+    assertUp reports
+    assertEqual "the job was not run once" 1 (count ran isEval reports)
+    assertBool "the job did not run" =<< doesFileExist out
+    started <- showProperty (Job.jobServiceTarget j) "ExecMainStartTimestamp"
+    assertBool "systemd forgot a run its timer refers to" (not (Text.null started))
+    assertEqual "" Completed =<< Job.checkLastRun (Job.jobCompletion j)
+
+    step "second up skips it"
+    removeFile out
+    again <- runUpCapturing node
+    assertUp again
+    assertEqual "the job was not skipped" (1, 0) (count ran isSkip again, count ran isEval again)
+    assertBool "a completed job was run again" . not =<< doesFileExist out
+
+    step "down"
+    down <- runDownCapturing node
     assertBool ("down failed: " <> show (failures down)) (null (failures down))
     assertEqual "" "not-found" =<< showProperty (Job.jobServiceTarget j) "LoadState"
 
