@@ -1215,13 +1215,21 @@ certificate is `PROVISIONING`, and the check `Unknown`, until that resolves publ
 map a whole-map `url-maps import` (JSON on stdin, `renderUrlMap`) on every `up`, and a timeout an `update` on every
 `up`: those are the two "set" verbs, everything else is created once — except the HTTPS proxy's certificate list,
 which is *compared* and moved (`target-https-proxies update`) only when it differs and every declared managed
-certificate is `ACTIVE`; until then the proxy's `up` fails naming the one that is not, the proxy keeps what it serves,
-and its check is `Unknown`. That is half of replacing a certificate on a live balancer; the other half is
+certificate is `ACTIVE`; until then the proxy keeps what it serves and its check is `Unknown`. What its `up` does
+meanwhile: in a declaration with a `DomainSetCertificate`, a certificate still being issued is a **pending swap, not a
+failure** — `up` names it and prints `PENDING certificate swap` on stderr, touches nothing and succeeds, so the pass
+exits 0 and the root (and what hangs on it) is not `Blocked` for the minutes-to-an-hour of issuance; a later pass, or
+the tending loop when the check turns to `Failure`, moves the proxy. A `FAILED` or absent certificate still fails the
+node, and a declaration with no `DomainSetCertificate` renders the script it did (the proxy's `up` fails on any
+certificate not `ACTIVE`; pinned as a literal in `Test/GcpSpec.hs`). The exit status therefore no longer says whether
+a swap is done: the proxy's check, or the `PENDING` line, does. **A DNS authorization's record goes on that
+authorization's node** (`applicationLoadBalancerPart` with `DnsAuthorizationPart`), never on the root, which sits
+behind the certificates the records are needed to issue. That is half of replacing a certificate on a live balancer; the other half is
 `DomainSetCertificate base domains`, whose resource is `base-<domainSetTag>` (`certificateResource`), so a changed
 set is a *new* certificate node beside the old (Certificate Manager certificates are immutable), with authorizations
 still named after the base so shared names reuse theirs. Each base gets a `SupersededCertificatesPart` node after the
 proxy that lists the base's certificates (bare `base`, or `base-<8 hex>`) and deletes those neither declared nor on
-the proxy; a managed certificate's own `down` refuses while the proxy lists it, since `serve` tears down before it
+the proxy (one still on the proxy is skipped and said, a `WAITING` line and so `Unknown` for the check); a managed certificate's own `down` refuses while the proxy lists it, since `serve` tears down before it
 brings up. A `ManagedCertificate` keeps its declared name, and one whose domains differ from the declared ones is now
 a `PROBLEM` line (a `Failure`) and a failing `up` instead of nothing; an `ACTIVE` certificate with a `FAILED`
 authorization attempt or a past `expireTime` is a `PROBLEM` too. The proxy's URL map is named at creation only.
