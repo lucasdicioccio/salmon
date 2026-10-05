@@ -11,7 +11,10 @@ file, reloads and leaves the generated service running a container; a second
 pass is a 'Skip'; a changed image reference and a changed env file each
 restart the service (a new @InvocationID@ and a new container) and an
 unchanged one does not; an env file rotated under a pass that rewrote the
-quadlet without restarting the service is still a restart at the next pass; @down@ stops the service, removes the file and the
+quadlet without restarting the service is still a restart at the next pass; a
+container started from a quadlet written before the watched files' digest was
+keyed is reloaded and /not/ restarted by the pass that keys it, and is
+restarted by a rotated env file afterwards; @down@ stops the service, removes the file and the
 generated unit goes with it; and a declaration moved onto an image that
 cannot be pulled fails at the pull, with the running container, its unit and
 its file as they were.
@@ -75,6 +78,8 @@ tests =
         , testCaseSteps "a rotated env file behind a failed predecessor, reloaded by a sibling, is not skipped" $ \step ->
             withUserQuadlets $ \unitDir ->
                 withFreshContainer unitDir $ \a -> withFreshContainer unitDir $ \b -> rotatedEnv step a b
+        , testCaseSteps "a quadlet from before the watched files' key is rewritten without a restart" $ \step ->
+            withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> keying step c
         , testCaseSteps "an image that cannot be pulled leaves the running container alone" $ \step ->
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> unpullable step c
         , testCaseSteps "a stamped container job runs once, again after a change, and fails while its last run did" $ \step ->
@@ -311,6 +316,84 @@ rotatedEnv step a0 b0 = withTempDir $ \dir -> do
         down <- runDownCapturing (node c)
         assertBool ("down failed: " <> show (failures down)) (null (failures down))
 
+{- | What an upgrade meets: a service running from a quadlet whose trailing
+comment is a plain hash of its env file and whose label was made from it.
+The file has to be rewritten (that hash is what must go) and the service has
+no reason to restart: it runs this declaration with this env file.
+
+The old file is spelled here as it was written then, from
+'Quadlet.renderContainer' and 'Systemd.withWatchedFingerprint'.
+-}
+keying :: (String -> IO ()) -> Quadlet.Container -> IO ()
+keying step c0 = withTempDir $ \dir -> do
+    let envFile = dir </> "env"
+        c = c0{Quadlet.containerEnvFile = Just envFile}
+        labelled fingerprint = "Label=" <> Quadlet.quadletLabel <> "=" <> fingerprint
+        identity = (,) <$> showProperty c "InvocationID" <*> containerId c
+        label = podmanInspect c ("{{index .Config.Labels \"" <> Text.unpack Quadlet.quadletLabel <> "\"}}")
+    writeFile envFile "SALMON_QUADLET_TEST=one\n"
+
+    step "a service started from a quadlet written before the key"
+    unkeyed <- Quadlet.unkeyedFingerprint c
+    plain <- Text.strip <$> Systemd.withWatchedFingerprint [envFile] ""
+    let old =
+            Text.unlines $
+                concat
+                    [ [labelled unkeyed | "EnvironmentFile=" `Text.isPrefixOf` l] <> [l]
+                    | l <- Text.lines (Quadlet.renderContainer c)
+                    ]
+                    <> [plain]
+        target = Text.unpack (Quadlet.serviceTarget c)
+    Text.writeFile (Quadlet.quadletPath c) old
+    (reloaded, _, reloadErr) <- readProcessWithExitCode "systemctl" ["--user", "daemon-reload"] ""
+    unless (reloaded == ExitSuccess) $ assertFailure ("daemon-reload failed: " <> reloadErr)
+    (started, _, startErr) <- readProcessWithExitCode "systemctl" ["--user", "start", target] ""
+    unless (started == ExitSuccess) $ assertFailure ("the old quadlet did not start: " <> startErr)
+    assertEqual "" "one" =<< containerEnv c
+    assertEqual "the container does not carry the old label" (Just unkeyed) =<< label
+    before <- identity
+
+    step "the pass that keys the digest"
+    reports <- runUpCapturing (node c)
+    assertUp reports
+    assertEqual "the rewritten quadlet was not reloaded" 1 (count isEval reports)
+    assertEqual "the service was restarted, or its container replaced" before =<< identity
+    written <- Text.readFile (Quadlet.quadletPath c)
+    declared <- Quadlet.quadletFingerprint c
+    assertBool "the keyed fingerprint is the old one" (declared /= unkeyed)
+    assertEqual "the file is not the keyed one" written =<< Quadlet.renderQuadlet c
+    assertBool "the plain hash is still in the file" (not (plain `Text.isInfixOf` written))
+    assertBool "the old label is still in the file" (not (unkeyed `Text.isInfixOf` written))
+    execStart <- showProperty c "ExecStart"
+    assertBool "the generated unit was not made from the keyed file" ((Quadlet.quadletLabel <> "=" <> declared) `Text.isInfixOf` execStart)
+    assertBool "the generated unit still carries the old label" (not (unkeyed `Text.isInfixOf` execStart))
+    assertEqual "" "no" =<< showProperty c "NeedDaemonReload"
+    assertEqual "the adopted container is not satisfied" UpDown.Success =<< Quadlet.checkContainer c
+
+    step "and then it is left alone"
+    settled <- runUpCapturing (node c)
+    assertUp settled
+    assertEqual "a settled quadlet was applied again" (0, 1) (count isEval settled, count isSkip settled)
+    assertEqual "a settled quadlet was restarted" before =<< identity
+
+    step "a rotated env file still restarts it"
+    writeFile envFile "SALMON_QUADLET_TEST=two\n"
+    rotated <- runUpCapturing (node c)
+    assertUp rotated
+    assertEqual "a changed env file was not applied" 1 (count isEval rotated)
+    after <- identity
+    assertBool "a changed env file did not restart the service" (fst after /= fst before)
+    assertBool "a changed env file left the old container" (snd after /= snd before)
+    assertEqual "" "two" =<< containerEnv c
+    now <- Quadlet.quadletFingerprint c
+    assertEqual "the restarted container does not carry the keyed label" (Just now) =<< label
+
+    step "down"
+    down <- runDownCapturing (node c)
+    assertBool ("down failed: " <> show (failures down)) (null (failures down))
+    stillRunning <- containerRunning c
+    assertBool "the container is still there" (not stillRunning)
+
 {- | A healthy container re-declared onto an image no registry will hand
 over. Left to the service's start, the pull came after the stop and the
 restart took the container down; the pull is a node ahead of the file now,
@@ -507,7 +590,8 @@ userGenerator = "/usr/lib/systemd/user-generators/podman-user-generator"
 {- | Runs the action with the user's quadlet directory, or skips loudly when
 something it needs is missing. Creates the directory (and its parents under
 @~\/.config@) if it is not there, and removes what it created again if it is
-empty afterwards.
+empty afterwards, along with the key of the watched files' digest if a case
+made it.
 -}
 withUserQuadlets :: (FilePath -> IO ()) -> IO ()
 withUserQuadlets act = do
@@ -531,7 +615,15 @@ withUserQuadlets act = do
                 dir <- getXdgDirectory XdgConfig ("containers" </> "systemd")
                 created <- missingAncestors dir
                 createDirectoryIfMissing True dir
-                act dir `finally` mapM_ removeIfEmpty created
+                -- the key of the watched files' digest is the directory's and
+                -- outlives every `down`: one made here is removed here
+                let key = Quadlet.watchKeyPath (Quadlet.container (Podman.ContainerName "any") image){Quadlet.containerUnitDir = dir}
+                keyed <- doesFileExist key
+                act dir `finally` do
+                    unless keyed $ do
+                        made <- doesFileExist key
+                        when made (removeFile key)
+                    mapM_ removeIfEmpty created
   where
     skip why = hPutStrLn stderr ("SKIPPED: " <> why <> "; the quadlet node was not run against a real systemd")
 

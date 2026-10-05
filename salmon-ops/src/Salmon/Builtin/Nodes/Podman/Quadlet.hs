@@ -27,7 +27,8 @@ file, and reuses its mechanism rather than adding one:
 * the env file (and anything else the caller names in 'containerWatched') is
   hashed into a trailing comment, as
   'Salmon.Builtin.Nodes.Systemd.systemdServiceWatching' does, so a changed
-  env file is a changed quadlet too.
+  env file is a changed quadlet too. Unlike there, the hash is /keyed/ (see
+  "The watched files' digest" below).
 
 Three differences from an authored unit, each of which was a surprise first.
 A generated unit's @UnitFileState@ is @generated@ and it cannot be
@@ -44,6 +45,35 @@ What "changed" means is "the declaration or a watched file changed". An image re
 the same while the registry moves what it points at (@:latest@) is not a
 change this node can see; name images by a tag that moves with the content,
 or by digest.
+
+= The watched files' digest
+
+The quadlet file is world-readable, the unit generated from it
+(@\/run\/systemd\/generator@) is too, and @systemctl show@ prints its
+@ExecStart=@, label included, to any local user. The env file is usually
+@0600@ and holds secrets. A plain hash of it in any of those places lets
+whoever reads them check guesses at its contents offline, which is all it
+takes when the only unknown in the file is a short or human-chosen value. It
+is the reason "Salmon.Builtin.Nodes.SecretDelivery" puts no digest of a
+secret anywhere.
+
+So the trailing comment is an HMAC-SHA256 of the watched files under a key
+only the owner of the quadlet directory can read ('watchKeyPath', made once
+by 'watchKeyNode', 32 random bytes, @0600@), and 'quadletFingerprint', which
+hashes that comment in, says nothing either without the key. The change
+detection is what it was: same files, same key, same line. The key never
+leaves the machine and is never removed by @down@, since a new key is a new
+fingerprint for every quadlet in the directory. A declaration that watches
+nothing has no secret to digest, needs no key, and is the file and the nodes
+it always was.
+
+Containers started before the key existed carry a label made from the plain
+hash ('unkeyedFingerprint'). They are not restarted for it: the check accepts
+that label as long as it is the one the /current/ declaration and files would
+have had, and @up@, finding the file rewritten for the key alone, reloads
+without restarting ('interpretAdoptable'). The old label stays on that
+container, where only its owner's @podman inspect@ reads it, until its next
+restart for a reason of its own.
 
 = Jobs
 
@@ -135,11 +165,20 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     renderContainerWatching,
     renderQuadlet,
     quadletFingerprint,
+    unkeyedFingerprint,
     quadletLabel,
+    watchKeyPath,
+    watchKeyNode,
+    ensureWatchKey,
+    interpretWatchKey,
+    keyedWatchLine,
+    WatchKeyUnusable (..),
     watchedFiles,
     containerProblems,
     interpretShow,
     interpretRunning,
+    interpretStarted,
+    interpretAdoptable,
     checkJobInstalled,
     interpretGenerated,
     imageNode,
@@ -152,8 +191,14 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, SomeException, bracket, onException, throwIO, try)
+import Control.Exception (Exception, IOException, SomeException, bracket, finally, onException, throwIO, try)
 import Control.Monad (unless, when)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Crypto.Random (getRandomBytes)
+import Data.Bits ((.&.))
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Char8 as C8
 import Data.Char (isOctDigit, isSpace)
 import Data.List (find)
 import Data.Maybe (maybeToList)
@@ -163,10 +208,14 @@ import qualified Data.Text.Encoding as Text
 import GHC.Clock (getMonotonicTimeNSec)
 import Numeric (readOct)
 import qualified Network.Socket as Net
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesPathExist, removeDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, removeDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
-import System.Posix.Files (setFileMode)
+import System.IO (hClose)
+import System.IO.Error (isAlreadyExistsError)
+import System.Posix.Files (createLink, fileMode, fileSize, getFileStatus, setFileMode)
+import System.Posix.IO (createFile, fdToHandle)
+import System.Posix.Types (FileMode)
 import System.Process (proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
@@ -560,9 +609,14 @@ renderLabelled fingerprint c =
     restart RestartOnFailure = "on-failure"
     restart RestartAlways = "always"
 
-{- | 'renderContainer' plus the fingerprint of the watched files: everything
+{- | 'renderContainer' plus the keyed digest of the watched files: everything
 that decides what the container should be. With nothing watched it is
-'renderContainer' exactly.
+'renderContainer' exactly, and no key is read.
+
+Throws 'WatchKeyUnusable' when something is watched and the key cannot be
+read: there is no fallback to a plain hash, which is the thing the key is
+there to avoid. In a graph the key is a node the file stands on
+('watchKeyNode'); outside one, 'ensureWatchKey' first.
 -}
 renderContainerWatching :: Container -> IO Text
 renderContainerWatching = renderWatching Nothing
@@ -570,7 +624,118 @@ renderContainerWatching = renderWatching Nothing
 renderWatching :: Maybe Text -> Container -> IO Text
 renderWatching fingerprint c = case watchedFiles c of
     [] -> pure (renderLabelled fingerprint c)
-    files -> Systemd.withWatchedFingerprint files (renderLabelled fingerprint c)
+    files -> do
+        key <- readWatchKey c
+        frames <- Systemd.watchedFrames files
+        pure (renderLabelled fingerprint c <> keyedWatchLine key frames)
+
+{- | The trailing comment: @# salmon-watches: hmac-sha256:BASE64@, the
+HMAC-SHA256 under the key of what 'Systemd.watchedFrames' read. Pure, and
+the whole of what the watched files leave in the quadlet.
+-}
+keyedWatchLine :: ByteString.ByteString -> [ByteString.ByteString] -> Text
+keyedWatchLine key frames =
+    "# salmon-watches: hmac-sha256:" <> Text.decodeUtf8 (Base64.encode (SHA256.hmac key (ByteString.concat frames))) <> "\n"
+
+{- | Where the key of this container's directory is: beside the quadlets, so
+it has the directory's owner (root for 'systemQuadletDir', the user for a
+user's) and its lifetime. The generator reads only the extensions it knows
+and leaves this file alone.
+-}
+watchKeyPath :: Container -> FilePath
+watchKeyPath c = c.containerUnitDir </> ".salmon-watch.key"
+
+-- | The key is missing, unreadable or empty: its path, and which.
+data WatchKeyUnusable = WatchKeyUnusable !FilePath !Text
+    deriving (Show)
+
+instance Exception WatchKeyUnusable
+
+readWatchKey :: Container -> IO ByteString.ByteString
+readWatchKey c = do
+    let path = watchKeyPath c
+    read_ <- try (ByteString.readFile path) :: IO (Either IOException ByteString.ByteString)
+    case read_ of
+        Left _ -> throwIO (WatchKeyUnusable path "the key of the watched files' digest cannot be read")
+        Right bytes
+            | ByteString.null (C8.strip bytes) -> throwIO (WatchKeyUnusable path "the key of the watched files' digest is empty")
+            | otherwise -> pure (C8.strip bytes)
+
+{- | Makes the key if there is none, and makes it owner-only whatever it was.
+
+A key that exists is never replaced: a new key is a new fingerprint, and so a
+restart, for every quadlet in the directory. It is written to a temporary
+file created @0600@ and put in place with @link(2)@, which refuses an
+existing name, so of two processes making it at once one wins and both read
+the winner's.
+-}
+ensureWatchKey :: Container -> IO ()
+ensureWatchKey c = do
+    present <- doesFileExist path
+    unless present $ do
+        secret <- getRandomBytes 32 :: IO ByteString.ByteString
+        suffix <- getRandomBytes 6 :: IO ByteString.ByteString
+        let tmp = path <> ".tmp-" <> concatMap hex (ByteString.unpack suffix)
+        ( do
+                h <- fdToHandle =<< createFile tmp 0o600
+                ByteString.hPut h (Base64.encode secret <> "\n") `finally` hClose h
+                placed <- try (createLink tmp path)
+                case placed of
+                    Right () -> pure ()
+                    Left e
+                        | isAlreadyExistsError e -> pure ()
+                        | otherwise -> throwIO e
+            )
+            `finally` removeFile tmp
+    setFileMode path 0o600
+  where
+    path = watchKeyPath c
+    hex w = [digits !! fromIntegral (w `div` 16), digits !! fromIntegral (w `mod` 16)]
+    digits = "0123456789abcdef" :: String
+
+{- | The verdict on the key file's mode and size, 'Nothing' for no file. A
+key others can read is a 'Failure' ('ensureWatchKey' then closes it; it does
+not make a new one, see there).
+-}
+interpretWatchKey :: FilePath -> Maybe (FileMode, Integer) -> CheckResult
+interpretWatchKey path Nothing = Failure ("no key at " <> Text.pack path)
+interpretWatchKey path (Just (mode, size))
+    | size <= 0 = Failure ("the key at " <> Text.pack path <> " is empty")
+    | mode .&. 0o077 /= 0 = Failure ("the key at " <> Text.pack path <> " is readable by others than its owner")
+    | otherwise = Success
+
+{- | The key of 'containerUnitDir', one node for every quadlet there that
+watches a file. It stands on the directory and, like it, is never removed.
+-}
+watchKeyNode :: Container -> Op
+watchKeyNode c =
+    op "podman-quadlet-key" (deps [unitDirNode c]) $ \actions ->
+        actions
+            { help = "ensures " <> Text.pack path <> " exists, readable by its owner alone"
+            , notes = ["keys the digest of the files the quadlets watch, shared by every quadlet there: down leaves it"]
+            , ref = mkRef "podman-quadlet-key" path
+            , check = do
+                present <- doesFileExist path
+                if present
+                    then do
+                        st <- getFileStatus path
+                        pure (interpretWatchKey path (Just (fileMode st, fromIntegral (fileSize st))))
+                    else pure (interpretWatchKey path Nothing)
+            , up = ensureWatchKey c
+            }
+  where
+    path = watchKeyPath c
+
+-- | The generator's directory: created if missing, never removed.
+unitDirNode :: Container -> Op
+unitDirNode c =
+    op "podman-quadlet-dir" nodeps $ \actions ->
+        actions
+            { help = "ensures " <> Text.pack c.containerUnitDir <> " exists"
+            , notes = ["the generator's directory, shared by every quadlet: down leaves it"]
+            , ref = mkRef "podman-quadlet-dir" c.containerUnitDir
+            , up = createDirectoryIfMissing True c.containerUnitDir
+            }
 
 {- | The container label that says which quadlet a container was started
 from: its value is 'quadletFingerprint' at the time the file was written.
@@ -579,10 +744,22 @@ quadletLabel :: Text
 quadletLabel = "salmon.quadlet"
 
 {- | A hash of 'renderContainerWatching': the declaration and the watched
-files' contents, and nothing that depends on when it is asked.
+files' keyed digest, and nothing that depends on when it is asked. Without
+the key it says nothing about the watched files.
 -}
 quadletFingerprint :: Container -> IO Text
 quadletFingerprint c = FS.hashBytes . Text.encodeUtf8 <$> renderContainerWatching c
+
+{- | What 'quadletFingerprint' was before the digest was keyed: the label of
+a container started from a file written then. It is computed to be compared
+with a running container's label and for nothing else: never written, never
+reported. With nothing watched it is 'quadletFingerprint'.
+-}
+unkeyedFingerprint :: Container -> IO Text
+unkeyedFingerprint c =
+    FS.hashBytes . Text.encodeUtf8 <$> case watchedFiles c of
+        [] -> pure (renderContainer c)
+        files -> Systemd.withWatchedFingerprint files (renderContainer c)
 
 {- | The file as written: 'renderContainerWatching' with one more line,
 @Label=salmon.quadlet=FINGERPRINT@, so that a container started from this
@@ -683,7 +860,9 @@ returned here adds a predecessor of /this/ node, beside the file and in no
 order with it; a precondition of the new declaration belongs in the track.
 
 @up@ is @daemon-reload@ then @restart@, which returns once the container is
-running (the generated service is @Type=notify@). The restart stops the old
+running (the generated service is @Type=notify@). The one case with no
+restart is a container started before the watched files' digest was keyed
+and otherwise current ('interpretAdoptable'): the reload is all it needs. The restart stops the old
 container before the start would pull the new image, so the image is pulled
 before any of that, by 'imageNode', which the quadlet file depends on: a pull
 that fails is that node's failed @up@, the file and this node are @Blocked@,
@@ -726,12 +905,19 @@ quadletContainer r systemctl t c =
                                 <> ["ready: " <> describeReadiness rd | rd <- maybeToList c.containerReady]
                         , ref = mkRef "systemd-unit" target
                         , check = checkContainer c
-                        , up = case c.containerReady of
-                            Nothing -> reload >> restart
-                            Just rd -> do
-                                reload >> restart
-                                verdict <- awaitReady (systemWaiting c) rd
-                                either (throwIO . NotReady target) pure verdict
+                        , up = do
+                            reload
+                            -- a container started from this declaration and
+                            -- these files, before the digest was keyed: the
+                            -- file changed and what should run did not
+                            adopted <- startedUnkeyed c
+                            unless adopted $ do
+                                restart
+                                case c.containerReady of
+                                    Nothing -> pure ()
+                                    Just rd -> do
+                                        verdict <- awaitReady (systemWaiting c) rd
+                                        either (throwIO . NotReady target) pure verdict
                         , down = stop
                         }
   where
@@ -891,26 +1077,22 @@ what it stands on rather than to the file. 'ownFile' is applied to the file
 node alone: an 'fmap' over the 'Op' reaches every node of its graph, and once
 reached the enclosing directory, which then carried this container's notes
 (two quadlets sharing the directory were a 'Conflicting' pair) and its
-reload. And the directory is 'unitDir', not 'FS.dir', whose @down@ refuses a
+reload. And the directory is 'unitDirNode', not 'FS.dir', whose @down@ refuses a
 non-empty directory: the generator's directory holds every quadlet on the
-machine, so tearing one down failed whenever another was there.
+machine, so tearing one down failed whenever another was there. A quadlet
+that watches a file also stands on 'watchKeyNode', since its contents cannot
+be rendered without the key.
 -}
 quadletFile :: Reporter Systemd.Report -> [Op] -> Container -> Op
 quadletFile r before c =
     let file = FS.filecontents (FS.FileContents path (renderQuadlet c))
-     in file{node = fmap ownFile file.node, predecessors = deps (unitDir : before)}
+     in file{node = fmap ownFile file.node, predecessors = deps (unitDirNode c : key <> before)}
   where
     path = quadletPath c
 
-    unitDir :: Op
-    unitDir =
-        op "podman-quadlet-dir" nodeps $ \actions ->
-            actions
-                { help = "ensures " <> Text.pack c.containerUnitDir <> " exists"
-                , notes = ["the generator's directory, shared by every quadlet: down leaves it"]
-                , ref = mkRef "podman-quadlet-dir" c.containerUnitDir
-                , up = createDirectoryIfMissing True c.containerUnitDir
-                }
+    -- only a quadlet that watches something digests anything
+    key :: [Op]
+    key = [watchKeyNode c | not (null (watchedFiles c))]
 
     ownFile :: Extension -> Extension
     ownFile ext =
@@ -1110,7 +1292,7 @@ the container it was started with -- which is how a pass interrupted between
 writing the files and restarting the services was followed by one that
 skipped them, converged, and left the old image running. So the running
 container is asked for its 'quadletLabel' and that is compared with
-'quadletFingerprint' ('interpretRunning'). A @podman@ that cannot answer is
+'quadletFingerprint' ('interpretStarted'). A @podman@ that cannot answer is
 'Unknown', as a @systemctl@ that cannot is in 'Systemd.checkUnit'.
 
 @podman@ is run as whoever runs salmon, which is the store the service's
@@ -1123,22 +1305,58 @@ checkContainer c = do
     case unit of
         Success -> do
             declared <- quadletFingerprint c
-            (code, out, _err) <-
-                readCreateProcessWithExitCode
-                    ( proc
-                        "podman"
-                        [ "container"
-                        , "inspect"
-                        , "--format"
-                        , "{{index .Config.Labels \"" <> Text.unpack quadletLabel <> "\"}}"
-                        , Text.unpack (Podman.getContainerName c.containerName)
-                        ]
-                    )
-                    ""
-            pure $ case code of
-                ExitSuccess -> interpretRunning declared (Text.pack out)
-                ExitFailure _ -> Unknown
+            unkeyed <- unkeyedFingerprint c
+            maybe Unknown (interpretStarted declared unkeyed) <$> runningLabel c
         other -> pure other
+
+-- | The running container's 'quadletLabel' as podman prints it, if podman answers.
+runningLabel :: Container -> IO (Maybe Text)
+runningLabel c = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            ( proc
+                "podman"
+                [ "container"
+                , "inspect"
+                , "--format"
+                , "{{index .Config.Labels \"" <> Text.unpack quadletLabel <> "\"}}"
+                , Text.unpack (Podman.getContainerName c.containerName)
+                ]
+            )
+            ""
+    pure $ case code of
+        ExitSuccess -> Just (Text.pack out)
+        ExitFailure _ -> Nothing
+
+{- | 'interpretRunning', also satisfied by a container whose label is the
+'unkeyedFingerprint' of the declaration: one started before the digest was
+keyed, from this declaration and these watched files. That fingerprint moves
+with the declaration and the files exactly as the keyed one does, so a
+container started before an env file was rotated is still not satisfied.
+-}
+interpretStarted :: Text -> Text -> Text -> CheckResult
+interpretStarted declared unkeyed printed
+    | Text.strip printed == unkeyed = Success
+    | otherwise = interpretRunning declared printed
+
+{- | Is this unit's container one a file rewritten for the key alone leaves
+as it is? Asked by @up@ after its reload, of the unit and of the running
+container's label: yes when the unit is @active@ and the label is the
+'unkeyedFingerprint' of the declaration, which is not the declared one (so
+something is watched). Anything not known is no, and the restart happens.
+-}
+interpretAdoptable :: Text -> Text -> Maybe UnitSample -> Maybe Text -> Bool
+interpretAdoptable declared unkeyed (Just s) (Just printed) =
+    s.sampleActive == "active" && unkeyed /= declared && Text.strip printed == unkeyed
+interpretAdoptable _ _ _ _ = False
+
+startedUnkeyed :: Container -> IO Bool
+startedUnkeyed c
+    | null (watchedFiles c) = pure False
+    | otherwise = do
+        declared <- quadletFingerprint c
+        unkeyed <- unkeyedFingerprint c
+        interpretAdoptable declared unkeyed <$> sampleUnit c <*> runningLabel c
 
 {- | The verdict on a running container's 'quadletLabel' (as @podman
 container inspect@ printed it) against the declared 'quadletFingerprint'.
@@ -1152,7 +1370,9 @@ interpretRunning declared printed
     | Text.null running || running == "<no value>" =
         Failure "the running container does not say which quadlet it was started from"
     | otherwise =
-        Failure ("the running container was started from quadlet " <> running <> ", the declared one is " <> declared)
+        -- the running label is not quoted: it may date from before the
+        -- digest was keyed, and failure text goes into reports
+        Failure ("the running container was not started from the declared quadlet " <> declared)
   where
     running = Text.strip printed
 

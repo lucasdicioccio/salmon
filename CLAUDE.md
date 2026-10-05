@@ -1027,7 +1027,7 @@ machine-wide, so once anything else has run one (a sibling quadlet's `up`, a pas
 and restarting) systemd reads `NeedDaemonReload=no` for a unit still running the container it was started with. The
 written file (`renderQuadlet`) therefore carries `Label=salmon.quadlet=<quadletFingerprint>` (a hash of the declaration
 plus the watched files' fingerprint), and after the unit reads `Success` the check compares the label `podman container
-inspect` prints with the declared fingerprint (`interpretRunning`; a podman that cannot answer is `Unknown`). A quadlet
+inspect` prints with the declared fingerprint (`interpretStarted`; a podman that cannot answer is `Unknown`). A quadlet
 written before the label existed is restarted once; a generated unit's `UnitFileState` is `generated` and it cannot be `enable`d (`[Install]` is the
 generator's, so `up` is reload + restart); the file node's `down` reloads after removing, or the unit outlives its file;
 left alone the pull happens *inside the service's start*, which on a restart is after the old container was stopped,
@@ -1048,6 +1048,25 @@ directory is its own node (`podman-quadlet-dir`), created if missing and never r
 refuses a non-empty directory and that one holds every quadlet on the machine (and the file node's extras are applied to
 the file node only — an `fmap` over the `Op` reaches its dependencies too, which made two quadlets' shared directory a
 `Conflicting` pair).
+**The watched files' digest is keyed.** The quadlet file is world-readable, so is the unit generated from it, and
+`systemctl show` prints its `ExecStart` (label included) to any local user, while the env file is usually `0600`: a
+plain hash of it in any of those is an offline guessing aid for a low-entropy secret, which is why `SecretDelivery`
+puts no digest anywhere. So the trailing comment is `# salmon-watches: hmac-sha256:...` (`keyedWatchLine`) under a
+per-directory key, `<containerUnitDir>/.salmon-watch.key` (`watchKeyNode`, `podman-quadlet-key`: 32 random bytes,
+`0600`, made once with `link(2)`, never replaced and never removed by `down`, since a new key is a new fingerprint for
+every quadlet there), and `quadletFingerprint` (which hashes that line in) says nothing without the key. Only a quadlet
+that watches something stands on the key; one that watches nothing is the file and nodes it was. Rendering without a
+readable key throws `WatchKeyUnusable`, with no fallback to a plain hash (outside a graph: `ensureWatchKey` first).
+**The upgrade restarts no service**: `checkContainer` also accepts a running container whose label is
+`unkeyedFingerprint` (the pre-key fingerprint of the *current* declaration and files, pinned in `QuadletSpec`), and
+`up`, after its reload, skips the restart for exactly that case (`interpretAdoptable`), so the pass after an upgrade
+rewrites each watching quadlet and reloads once. The old label stays on such a container (its owner's `podman inspect`
+only) until its next restart; `interpretRunning`'s failure text no longer quotes the running label. Costs: a container
+*job* that watches a file has its quadlet rewritten too, so `completedQuadletJob` runs it once more;
+`Systemd.systemdServiceWatching` still writes a plain hash into its (world-readable) unit file, not changed here; the
+threat is a local user or a copy of those files, not root or the owner. `QuadletUserSpec` runs the upgrade in user
+scope (an old-style file, started, then the node: same `InvocationID` and container, then a rotated env file restarts
+it); system scope has not been run.
 `Gcp.ArtifactRegistry.instanceLogin` is the other half for a GCE instance: `Podman.login` as `oauth2accesstoken` with
 the metadata server's token for the instance's own service account, plus a `check` on the token's recorded expiry
 (`AUTHFILE.expires`), so the credential is renewed by `run up` only when needed and tended under `serve`. The check
