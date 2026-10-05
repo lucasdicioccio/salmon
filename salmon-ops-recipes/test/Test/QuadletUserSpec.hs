@@ -29,6 +29,7 @@ whatever the case did.
 -}
 module Test.QuadletUserSpec (tests) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, finally, throwIO)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -40,6 +41,7 @@ import System.Directory (XdgDirectory (XdgConfig), createDirectoryIfMissing, doe
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
+import System.Posix.Files (fileOwner, fileSize, getFileStatus)
 import System.Posix.User (getRealUserID)
 import System.Process (readProcessWithExitCode)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -84,6 +86,8 @@ tests =
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> unpullable step c
         , testCaseSteps "a stamped container job runs once, again after a change, and fails while its last run did" $ \step ->
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> withTempDir $ \tmp -> completing step tmp c
+        , testCaseSteps "under keep-id, what the container writes into a bind is the user's own" $ \step ->
+            withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> withTempDir $ \tmp -> keepingId step tmp c
         ]
 
 -- | Small, long-running with no arguments, no published port, no login.
@@ -516,6 +520,63 @@ completing step tmp c0 = do
     assertBool "the stamp is still there" . not =<< doesFileExist stamp
     assertBool "the quadlet file is still there" . not =<< doesFileExist (Quadlet.quadletPath c)
     assertEqual "" "not-found" =<< showProperty c "LoadState"
+
+{- | 'Quadlet.containerKeepId' on a real rootless container: a process running
+as the image's unprivileged uid (101, nginx's) writes into a bind this module
+created, and the file is this user's on the host, where the default mapping
+would have made it a subordinate uid's.
+
+The data directory is under the case's temporary directory and holds nothing
+but files of this user, so the harness removes it as it removes any other.
+-}
+keepingId :: (String -> IO ()) -> FilePath -> Quadlet.Container -> IO ()
+keepingId step tmp c0 = do
+    let dataDir = tmp </> "data"
+        written = dataDir </> "who"
+        c =
+            c0
+                { Quadlet.containerKeepId = Just (Quadlet.keepIdAs 101 101)
+                , Quadlet.containerBinds = [Quadlet.bind dataDir "/data"]
+                , Quadlet.containerExec = ["sh", "-c", "id -u > /data/who && exec sleep 600"]
+                }
+    me <- getRealUserID
+
+    step "up"
+    assertUp =<< runUpCapturing (node c)
+    assertEqual "the generated service is not running" "active" =<< showProperty c "ActiveState"
+
+    step "the host user lists and reads what the container wrote"
+    awaitFile written
+    entries <- listDirectory dataDir
+    assertEqual "" ["who"] entries
+    inside <- Text.strip <$> Text.readFile written
+    assertEqual "the container's process did not run as the mapped uid" "101" inside
+    owner <- fileOwner <$> getFileStatus written
+    assertEqual "what the container wrote is not this user's on the host" me owner
+    dirOwner <- fileOwner <$> getFileStatus dataDir
+    assertEqual "the bind's directory changed hands" me dirOwner
+
+    step "second up"
+    again <- runUpCapturing (node c)
+    assertUp again
+    assertEqual "the second pass was not a skip" (1, 0) (count isSkip again, count isEval again)
+
+    step "down"
+    down <- runDownCapturing (node c)
+    assertBool ("down failed: " <> show (failures down)) (null (failures down))
+    kept <- doesFileExist written
+    assertBool "down removed the container's data" kept
+  where
+    -- the unit is started once the container exists, which is before its
+    -- command has run
+    awaitFile :: FilePath -> IO ()
+    awaitFile path = go (50 :: Int)
+      where
+        go 0 = assertFailure ("the container never wrote " <> path)
+        go n = do
+            there <- doesFileExist path
+            size <- if there then fileSize <$> getFileStatus path else pure 0
+            unless (size > 0) (threadDelay 200000 >> go (n - 1))
 
 -------------------------------------------------------------------------------
 

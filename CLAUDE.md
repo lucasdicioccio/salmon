@@ -1096,10 +1096,22 @@ removes the directory just made, so the next pass does not read it as satisfied;
 directory holds the container's data and `Filesystem.dir`'s `down` would block the file's teardown on a non-empty
 one; owner and mode are in the directory node's `notes`, never in the quadlet, so stating them restarts nothing; an
 empty `containerBinds` (the default) renders nothing and adds no node, pinned in `QuadletSpec`. `bindProblems` refuses
-a relative path, a colon, an owner beside `:U`, a non-octal mode. Not done: `UserNS=keep-id`, which is what would make
-a rootless container's data owned by the operator on the host (`:U` makes it a subordinate uid); a named volume.
-Layer 0 only (the node against a scratch directory, the options through the generator's dry-run): no container has
-been started on a bind declared this way, and a chown to another user, which needs root, has not been run.
+a relative path, a colon, an owner beside `:U`, a non-octal mode. Not done: a named volume. A chown to another user,
+which needs root, has not been run.
+`containerKeepId` (`Maybe KeepId`; `keepId`, `keepIdAs UID GID`) renders `UserNS=keep-id[:uid=N,gid=N]` (a key 4.9's
+generator accepts, and passes through unchecked): the user running a rootless container is mapped to one uid inside it
+and **the container's process runs as that uid**, so what it writes into a bind is the operator's on the host, where
+`:U` alone makes it a subordinate uid's. Load-bearing: `Nothing` renders nothing (text, label, `ref`/`help`/`notes`
+of existing declarations unchanged, pinned in `QuadletSpec`), and setting it is a changed quadlet, so one restart of
+that container; it is **refused in `Systemd.System` scope** (`keepIdProblems`, with ids outside 0..65535), since
+rootful podman refuses it at the start, after the old container was stopped; the process no longer starts as the
+container's root, so an entrypoint that needs root does not get it; and data already written under the default mapping
+belongs to a subordinate uid the new mapping reads as a stranger's, for which `bindChown` (`:U`) beside it is the
+migration (podman chowns to the container's user, now the operator), so the two are not refused together. Run: Layer
+0, the generator's dry-run, and one `QuadletUserSpec` case from a repl (a rootless `nginx:alpine` as uid 101 writing
+into a created bind, the file owned by the host user). The `:U` migration was done by hand with `podman run`, not by a
+test; no real image with a root-needing entrypoint (postgres) has been run under it; the first start under a new
+mapping took about ten seconds here (podman re-maps the image's layers), inside `TimeoutStartSec`.
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/

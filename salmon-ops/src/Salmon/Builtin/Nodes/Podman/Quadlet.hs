@@ -119,6 +119,19 @@ are stated. @down@ never removes such a directory: it holds what the
 container wrote. A declaration with no binds is the file, the fingerprint and
 the nodes it always was.
 
+= Whose files they are
+
+Rootless, the container's uids are the operator's subordinate ones: what a
+server running as uid 70 writes into a bind belongs, on the host, to something
+like uid 100069, and the operator can neither list nor back up the directory
+without @podman unshare@. @:U@ ('bindChown') does not change that; it chowns
+to that same subordinate uid. 'containerKeepId' does: @UserNS=keep-id@ maps
+the operator to one uid /inside/ the container (their own, or the one the
+image runs as, 'keepIdAs'), and the container's process runs as it, so what it
+writes is the operator's on the host. It is a user-scope option, refused for
+'Systemd.System' (rootful podman refuses it too), and 'Nothing' renders
+nothing.
+
 Needs podman 4.4 or later (quadlet's first release). Only keys that 4.9
 understands are rendered -- the registry credentials go through
 @PodmanArgs=--authfile=@ rather than the @AuthFile=@ key, which 4.9's
@@ -128,6 +141,11 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     Container (..),
     Bind (..),
     Relabel (..),
+    KeepId (..),
+    keepId,
+    keepIdAs,
+    renderKeepId,
+    keepIdProblems,
     HostDir (..),
     bind,
     hostDir,
@@ -412,6 +430,68 @@ bindProblems b =
     host = Text.pack b.bindHostPath
     guest = Text.pack b.bindGuestPath
 
+{- | @UserNS=keep-id@: the user namespace of a rootless container, with the
+user running podman mapped to one uid and gid inside it instead of to the
+container's root, and the container's process run as that uid and gid.
+
+Without the fields, the uid and gid inside are the user's own on the host
+(1000 is 1000): right for an image that runs as whoever it is started as.
+With them, they are the stated ones: 'keepIdAs' 70 70 for an image whose
+server is uid 70, which then finds its data directory its own while the host
+sees the operator's files. Either way the process no longer starts as the
+container's root, so an entrypoint that needs root to prepare something
+(chown its data directory, bind a port under 1024) does not get to.
+
+A directory the container already wrote under the default mapping belongs to
+a subordinate uid, which the new mapping reads as some other user's: the
+container cannot open its own data. 'bindChown' on that bind (@:U@) is the
+migration: podman chowns the path to the container's user at start, which
+under @keep-id@ is the operator.
+-}
+data KeepId
+    = KeepId
+    { keepIdUid :: Maybe Int
+    -- ^ @uid=@: the uid inside the container the user is mapped to
+    , keepIdGid :: Maybe Int
+    -- ^ @gid=@, likewise. Stating the uid alone leaves the gid the user's own.
+    }
+    deriving (Eq, Ord, Show)
+
+-- | @keep-id@: the user is the same uid and gid inside as outside.
+keepId :: KeepId
+keepId = KeepId{keepIdUid = Nothing, keepIdGid = Nothing}
+
+-- | @keep-id:uid=UID,gid=GID@: the user is this uid and gid inside.
+keepIdAs :: Int -> Int -> KeepId
+keepIdAs uid gid = KeepId{keepIdUid = Just uid, keepIdGid = Just gid}
+
+-- | The value of the @UserNS=@ line.
+renderKeepId :: KeepId -> Text
+renderKeepId k = case options of
+    [] -> "keep-id"
+    _ -> "keep-id:" <> Text.intercalate "," options
+  where
+    options =
+        [ key <> "=" <> Text.pack (show n)
+        | (key, Just n) <- [("uid" :: Text, k.keepIdUid), ("gid", k.keepIdGid)]
+        ]
+
+{- | Why this mapping cannot be declared in this scope, if it cannot. Rootful
+podman answers that keep-id is only supported in rootless mode, at the start,
+which is after the old container was stopped; it is said here instead.
+-}
+keepIdProblems :: Systemd.Scope -> KeepId -> [Text]
+keepIdProblems scope k =
+    mconcat
+        [ [ "keep-id maps the user running a rootless container, and a system-scope container is root's: state the owner with the bind instead"
+          | Systemd.System <- [scope]
+          ]
+        , [ "the keep-id " <> what <> " is not an id: " <> Text.pack (show n)
+          | (what, Just n) <- [("uid" :: Text, k.keepIdUid), ("gid", k.keepIdGid)]
+          , n < 0 || n > 65535
+          ]
+        ]
+
 {- | One container run as a service. 'container' is the starting point; set
 the rest with record update.
 -}
@@ -447,6 +527,12 @@ data Container
     -- when the bind says so ('hostDirNode'). Rendered after
     -- 'containerVolumes'; empty renders nothing and adds no node, so a
     -- declaration without any is the file it always was.
+    , containerKeepId :: Maybe KeepId
+    -- ^ @UserNS=keep-id@, for 'Systemd.User' scope only (refused otherwise):
+    -- what the container writes into a bind is the operator's on the host.
+    -- 'Nothing' renders nothing, so a declaration without it is the file it
+    -- always was; setting it on a running container is a changed quadlet,
+    -- and so one restart.
     , containerNetwork :: Maybe Text
     , containerAuthFile :: Maybe Podman.AuthFile
     -- ^ the credentials the start's pull uses, the file 'Podman.login' wrote
@@ -504,6 +590,7 @@ container name image =
         , containerPorts = []
         , containerVolumes = []
         , containerBinds = []
+        , containerKeepId = Nothing
         , containerNetwork = Nothing
         , containerAuthFile = Nothing
         , containerRestart = RestartOnFailure
@@ -562,6 +649,7 @@ renderLabelled fingerprint c =
             , ["PublishPort=" <> port p | p <- c.containerPorts]
             , ["Volume=" <> volume v | v <- c.containerVolumes]
             , ["Volume=" <> renderBind b | b <- c.containerBinds]
+            , ["UserNS=" <> renderKeepId k | k <- maybeToList c.containerKeepId]
             , ["Network=" <> n | n <- maybeToList c.containerNetwork]
             , ["PodmanArgs=--authfile=" <> Text.pack (Podman.getAuthFile a) | a <- maybeToList c.containerAuthFile]
             , ["", "[Service]"]
@@ -805,6 +893,7 @@ containerProblems c =
           , a.bindHostPath == b.bindHostPath
           , a.bindCreate /= b.bindCreate
           ]
+        , concat [keepIdProblems c.containerScope k | k <- maybeToList c.containerKeepId]
         , ["a line break in the " <> what | (what, value) <- fields, Text.any (`elem` ("\n\r" :: String)) value]
         ]
   where
