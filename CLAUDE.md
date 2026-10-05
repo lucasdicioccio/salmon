@@ -1279,7 +1279,30 @@ aside), so a live condition the module has no field for is a difference; a rule 
 Both read `describe --raw --format json` and look under the API's member name and gcloud's own (`lifecycle` /
 `lifecycle_config`, `website` / `website_config`). **Layer 0 only** (`Test/GcpSpec.hs`, on JSON written from the API's
 resource shape, not captured): no command here has met a real project, so `--raw`, the described shapes and how the API
-spells back a rule are unverified. Not done: a node publishing a directory to a bucket (`gcloud storage rsync`).
+spells back a rule are unverified.
+
+`Gcp.Storage.bucketContents` publishes a local directory under a bucket (or a prefix) with `gcloud storage rsync`,
+keyed `"gcp-bucket-contents" (bucket, prefix)`, the bucket being the caller's dependency. `rsync` takes one
+`--cache-control` per invocation and narrows only by an `--exclude` regex, so a directory is published in
+`contentsPasses`: one pass per `CacheRule` (a glob and a header, first match wins; `*`/`?` within a segment, `**`
+across, a glob with no slash matching a file name at any depth), each excluding everything that is not its own
+(`globRegex`, a negative lookahead), then one for the rest. Excluded destination objects are not removed by
+`--delete-unmatched-destination-objects` (`contentsDeleteExtraneous`), so the passes' removals add up to the whole
+destination's. `check` is the same passes with `--dry-run`, read by the pure `parseDryRun`/`interpretContentsDryRun`
+off **stderr** (stdout is empty, and the exit code is 0 with or without differences): `Would copy`/`Would remove` are
+a `Failure`, `Would set mtime` is not (with `--checksums-only`, which every invocation passes, it is all a file with
+the same bytes and a newer mtime gives, so another checkout is not a difference), another `Would` line is `Unknown`,
+a non-zero exit a `Failure` with gcloud's `ERROR` line. The directory is read at `check`/`up` time only; a missing or
+*empty* one is a `Failure`/throw, since publishing nothing over a site is what a failed build would ask for. `down` is
+declared (`contentsOnDown`): `LeaveObjects` does nothing, and then a `bucket` node underneath cannot go down in the
+same pass (GCS refuses to delete a non-empty bucket); `EmptyDestination` syncs an empty temp directory over the
+destination, removing everything under it whoever put it there, and does nothing if the bucket is gone. The dry-run
+tests in `Test/GcpSpec.hs` are on output captured from a real gcloud (573.0.0), `--exclude` case included. **Not
+verified**: any non-dry run; that `--cache-control` is stored on the objects a pass copies; that `--exclude` is matched
+against the path relative to the directory for every regex generated here (they were checked against Python's `re`,
+and one of that shape was in the capture); the emptying `down`. Known gap: the dry-run compares content, so a
+`Cache-Control` declared differently for bytes already published is not a difference and reaches an object only when
+its content next changes. Each check costs one listing of both sides per pass.
 
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
