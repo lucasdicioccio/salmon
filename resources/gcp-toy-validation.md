@@ -587,7 +587,14 @@ leftover.
   project.** A `DomainSetCertificate` is named after its domain set, so a
   changed set is a new certificate beside the old one; the HTTPS proxy is
   moved to it (`target-https-proxies update`) only once it is `ACTIVE`, and
-  the superseded one is deleted after. All of that is exercised against the
+  the superseded one is deleted after. While the new one is being issued a
+  pass exits 0: the proxy's `up` prints `PENDING certificate swap` and leaves
+  the proxy alone, the cleanup skips the certificate still served, and both
+  checks read `Unknown`; only a `FAILED` or absent certificate fails the
+  pass. So a release script cannot read "swap done" off the exit status, and
+  a pass has to be run again (or `serve` left tending) after issuance. The
+  records of the new authorizations belong on the `gcp-lb-dns-authorization`
+  nodes, not on the balancer's root. All of that is exercised against the
   stand-in `gcloud` only, and the toy still declares a `ManagedCertificate`
   (fixed name, one host). What the scripts assume and nobody recorded: that
   a regional proxy lists Certificate Manager certificates under

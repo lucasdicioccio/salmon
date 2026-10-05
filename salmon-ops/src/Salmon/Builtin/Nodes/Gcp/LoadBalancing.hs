@@ -482,6 +482,16 @@ a dependency @inject@ed into the returned node is a dependency of the /root/,
 and the resource nodes are the root's dependencies too, so they would not
 wait for it. Use 'applicationLoadBalancerAfter' for what has to exist first
 (the APIs, the proxy-only subnet, the instance groups).
+
+The DNS record of a certificate's authorization goes on that authorization's
+own node ('applicationLoadBalancerPart' with a 'DnsAuthorizationPart'), __never
+on the returned root__. The root comes after the certificates, the proxies and
+the forwarding rules, so a record waiting for it is published last, behind
+everything that can fail on the way; and since a certificate is only issued
+once its records resolve, a record behind a root that waits for the
+certificate is a cycle no pass gets out of. A pending certificate swap no
+longer blocks the root (see 'lbParts'), but a failed backend, a @FAILED@
+certificate or a refused declaration still would.
 -}
 applicationLoadBalancer :: Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Op
 applicationLoadBalancer = applicationLoadBalancerAfter []
@@ -728,7 +738,9 @@ ones, one whose renewal failed, an expired one). A missing piece is a
 problem and a certificate GCP reports @FAILED@. Backends that are not (yet) @HEALTHY@ are 'Unknown': a freshly
 brought-up balancer reports @UNHEALTHY@ for roughly two minutes, and
 re-running @up@ would not shorten that; a certificate still @PROVISIONING@
-is 'Unknown' for the same reason. A Cloud Run (NEG) backend has no health to
+is 'Unknown' for the same reason, and so is @WAITING <what>@, something no
+@up@ would do yet (a superseded certificate the proxy has not moved off). A
+Cloud Run (NEG) backend has no health to
 ask for, so its presence and attachment is the whole check.
 -}
 interpretLbCheck :: ExitCode -> Text -> CheckResult
@@ -737,10 +749,11 @@ interpretLbCheck ExitSuccess out
     | not (null missing) = Failure ("load balancer incomplete: missing " <> Text.intercalate ", " missing)
     | not (null problems) = Failure ("load balancer: " <> Text.intercalate "; " problems)
     | not (null failedCerts) = Failure ("certificate provisioning failed: " <> Text.intercalate ", " failedCerts)
-    | not (null unhealthy) || not (null pendingCerts) = Unknown
+    | not (null unhealthy) || not (null pendingCerts) || waiting = Unknown
     | otherwise = Success
   where
     ls = map Text.words (Text.lines out)
+    waiting = not (null [() | ("WAITING" : _) <- ls])
     missing = [Text.unwords rest | ("MISSING" : rest) <- ls]
     problems = [Text.unwords rest | ("PROBLEM" : rest) <- ls]
     unhealthy = [st | ["HEALTH", _, st] <- ls, st /= "HEALTHY"]
@@ -1146,15 +1159,27 @@ does everything on @down@.
 The HTTPS proxy's certificate list is the one declaration that is neither
 created once nor set on every @up@: it is compared, and updated
 (@target-https-proxies update@) only when it differs /and/ every declared
-managed certificate is @ACTIVE@. Until then the proxy's @up@ fails naming the
-certificate that is not, the proxy serves what it served, and its check reads
-'Unknown' (the certificate's state) rather than a 'Failure' no @up@ would
-fix. That, with a 'DomainSetCertificate' being a new resource whenever its
+managed certificate is @ACTIVE@. Until then the proxy serves what it served
+and its check reads 'Unknown' (the certificate's state) rather than a
+'Failure' no @up@ would fix. What its @up@ does in the meantime depends on
+the declaration. With a 'DomainSetCertificate' in it, a certificate still
+being issued is the expected middle of a swap, which takes minutes to an
+hour: @up@ names the certificate on stderr, prints a @PENDING certificate
+swap@ line, touches nothing and /succeeds/, so the pass exits 0 with TLS
+served on the old certificate and neither the root nor anything hung on it is
+'Blocked'; a later pass (or the tending loop, whose check turns to a
+'Failure' once the certificate is @ACTIVE@) makes the move. A certificate
+that is @FAILED@ or absent will never be @ACTIVE@ and still fails the node.
+Without a 'DomainSetCertificate' (a certificate added or renamed under a
+'ManagedCertificate') @up@ fails as it always did, naming the certificate
+that is not @ACTIVE@. That, with a 'DomainSetCertificate' being a new resource whenever its
 domain set changes, is how a certificate is replaced on a live balancer:
 create beside, wait, move the proxy, and only then delete -- the last by a
 node of its own per base ('SupersededCertificatesPart'), which depends on the
 proxy, lists the base's certificates, and deletes those that are not the
-declared one and that the proxy does not serve. A managed certificate's own
+declared one and that the proxy does not serve; one the proxy still serves is
+left and said (not a failure of @up@, and @WAITING@, so 'Unknown', for the
+check) until the swap is made. A managed certificate's own
 @down@ refuses the same way while the proxy still lists it, so a retired
 declaration's teardown cannot pull a certificate out from under a proxy that
 has not moved yet. The proxy's URL map is named at creation and never set
@@ -1204,6 +1229,8 @@ lbParts alb =
   where
     https = serveHttps alb
     http = alb.albHttp /= NoHttp
+    -- whether a certificate here is replaced by a swap (see 'httpsProxyPart')
+    domainSets = not (null [() | DomainSetCertificate _ _ <- alb.albCertificates])
     groups = groupNamedPorts alb
 
     resourceName :: Text -> Text
@@ -1747,14 +1774,19 @@ lbParts alb =
             , partUp =
                 [ "stale=$(" <> listSuperseded <> ")"
                 , "for c in $stale; do"
-                , "  if " <> servedByProxy "\"$c\"" <> "; then echo \"certificate $c is still served by \""
+                , -- one the proxy still serves is the swap not made yet (see
+                  -- 'httpsProxyPart'): left, said, and not a failure
+                  "  if " <> servedByProxy "\"$c\"" <> "; then echo \"certificate $c is still served by \""
                     <> shellQuote httpsProxy
-                    <> "\": not deleted\" >&2; exit 1; fi"
+                    <> "\": not deleted\" >&2; continue; fi"
                 , "  gcloud certificate-manager certificates delete \"$c\"" <> located <> " --quiet"
                 , "done"
                 ]
             , partCheck =
-                [ listSuperseded <> " 2>/dev/null | while read -r c; do echo \"MISSING removal of superseded certificate $c\"; done; true"
+                [ listSuperseded <> " 2>/dev/null | while read -r c; do if " <> servedByProxy "\"$c\""
+                    <> "; then echo \"WAITING removal of superseded certificate $c, still served by \""
+                    <> shellQuote httpsProxy
+                    <> "; else echo \"MISSING removal of superseded certificate $c\"; fi; done; true"
                 ]
             , -- the declared certificate's own node removes it; a superseded
               -- one still around at teardown is left (see 'lbParts')
@@ -1828,8 +1860,9 @@ lbParts alb =
     -- as it differs: a managed certificate is issued over minutes to an
     -- hour, and a proxy moved onto one that is not ACTIVE serves no
     -- certificate at all for its names. So the list is updated only once
-    -- every declared managed certificate is ACTIVE; until then @up@ fails,
-    -- saying which is not, and the proxy keeps serving what it has.
+    -- every declared managed certificate is ACTIVE; until then @up@ says
+    -- which is not and the proxy keeps serving what it has (see 'lbParts'
+    -- for when that is a failed @up@ and when a pending swap).
     httpsProxyPart :: PartSpec
     httpsProxyPart =
         PartSpec
@@ -1842,18 +1875,8 @@ lbParts alb =
                 , "  have=$(" <> proxyCertificates <> ")"
                 , "  if [ \"$have\" != " <> shellQuote (setText declared) <> " ]; then"
                 ]
-                    <> concat
-                        [ [ "    st=$(" <> describeLocated "certificates" n <> " --format='value(managed.state)' 2>/dev/null) || st=''"
-                          , "    [ \"$st\" = ACTIVE ] || { echo "
-                                <> shellQuote ("certificate " <> n <> " is not ACTIVE yet:")
-                                <> "\" ${st:-absent}\""
-                                <> shellQuote ("; " <> httpsProxy <> " keeps the certificates it serves until it is. Run again then.")
-                                <> " >&2; exit 1; }"
-                          ]
-                        | n <- managed
-                        ]
-                    <> [ "    gcloud compute target-https-proxies update " <> shellQuote httpsProxy <> regional <> certificateFlags
-                       , "  fi"
+                    <> swap
+                    <> [ "  fi"
                        , "else"
                        , "  gcloud compute target-https-proxies create " <> shellQuote httpsProxy
                             <> regional
@@ -1887,6 +1910,50 @@ lbParts alb =
         managed = [n | (n, _, _) <- managedCertificates alb]
         compute = [n | ComputeCertificate n <- alb.albCertificates]
         declared = managed <> compute
+        update = "gcloud compute target-https-proxies update " <> shellQuote httpsProxy <> regional <> certificateFlags
+        notActive n =
+            "echo "
+                <> shellQuote ("certificate " <> n <> " is not ACTIVE yet:")
+                <> "\" ${st:-absent}\""
+                <> shellQuote ("; " <> httpsProxy <> " keeps the certificates it serves until it is. Run again then.")
+                <> " >&2"
+        stateOf n = "    st=$(" <> describeLocated "certificates" n <> " --format='value(managed.state)' 2>/dev/null) || st=''"
+        -- The move onto the declared certificates, inside "the proxy exists
+        -- and serves another list". Under a 'DomainSetCertificate' a
+        -- certificate still being issued is the expected middle of a swap:
+        -- said on stderr, the proxy left alone, and the node's up /done/ --
+        -- no line here may @exit 0@, the lines also run inside
+        -- 'renderLbScript'. One that is FAILED or absent will never be
+        -- ACTIVE, and fails as before.
+        swap
+            | domainSets =
+                ["    pending=''"]
+                    <> concat
+                        [ [ stateOf n
+                          , "    case \"$st\" in"
+                          , "      ACTIVE) ;;"
+                          , "      ''|FAILED) " <> notActive n <> "; exit 1 ;;"
+                          , "      *) " <> notActive n <> "; pending=1 ;;"
+                          , "    esac"
+                          ]
+                        | n <- managed
+                        ]
+                    <> [ "    if [ -z \"$pending\" ]; then"
+                       , "      " <> update
+                       , "    else"
+                       , "      echo "
+                            <> shellQuote ("PENDING certificate swap on " <> httpsProxy <> ": it serves")
+                            <> "\" $have\" >&2"
+                       , "    fi"
+                       ]
+            | otherwise =
+                concat
+                    [ [ stateOf n
+                      , "    [ \"$st\" = ACTIVE ] || { " <> notActive n <> "; exit 1; }"
+                      ]
+                    | n <- managed
+                    ]
+                    <> ["    " <> update]
         certificateFlags = case managed of
             (_ : _) -> " --certificate-manager-certificates=" <> shellQuote (Text.intercalate "," managed)
             [] -> " --ssl-certificates=" <> shellQuote (Text.intercalate "," compute) <> " --ssl-certificates-region=\"$REGION\""

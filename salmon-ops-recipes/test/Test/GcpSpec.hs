@@ -1041,6 +1041,8 @@ lbTests =
         assertEqual "" Nothing (LoadBalancing.parseDnsAuthorizationRecord "a\tCNAME\n")
     , testCase "a certificate still provisioning is Unknown, an active one Success, a failed one a Failure naming it" $ do
         assertEqual "" Unknown (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nCERT web-cert PROVISIONING\n")
+        assertEqual "waiting" Unknown (LoadBalancing.interpretLbCheck ExitSuccess "WAITING removal of superseded certificate web-cert-0123abcd, still served by web-https-proxy\n")
+        assertBool "waiting beside missing" (isFailure (LoadBalancing.interpretLbCheck ExitSuccess "WAITING removal of a\nMISSING removal of b\n"))
         assertEqual "" Success (LoadBalancing.interpretLbCheck ExitSuccess "HEALTH backend HEALTHY\nCERT web-cert ACTIVE\n")
         case LoadBalancing.interpretLbCheck ExitSuccess "CERT web-cert FAILED\n" of
             Failure t -> assertBool (Text.unpack t) ("web-cert" `isInfixOf` Text.unpack t)
@@ -1156,7 +1158,8 @@ lbTests =
             [ ("plain", 17410649785801445793)
             , ("every feature", 8942311775860119767)
             , ("two services on one group", 17068412453506542601)
-            , ("a domain-set certificate", 17815722262085902745)
+            , -- moved once, on purpose: a pending swap is no longer a failed up
+              ("a domain-set certificate", 12823996824954190641)
             ]
             [ (what :: String, fnv1a (pinned a) :: Word64)
             | (what, a) <- [("plain", alb), ("every feature", full), ("two services on one group", shared), ("a domain-set certificate", rotated)]
@@ -1473,9 +1476,13 @@ lbTests =
                 assertEqual err ExitSuccess code
                 first <- mutations
                 -- the new certificate is created and is not issued yet
+                -- which is a swap pending, not a failed pass: said, exit 0, and
+                -- the lines after the proxy's (the cleanup, the rules) still run
                 (code1, _, err1) <- run ("export FAKE_GCLOUD_NEW_CERT_STATE=PROVISIONING\n" <> createScript rotated)
-                assertBool err1 (code1 /= ExitSuccess)
+                assertEqual err1 ExitSuccess code1
                 assertBool err1 (("certificate " <> Text.unpack certV2 <> " is not ACTIVE yet: PROVISIONING") `isInfixOf` err1)
+                assertBool err1 ("PENDING certificate swap on web-https-proxy" `isInfixOf` err1)
+                assertBool err1 (("certificate " <> Text.unpack certV1 <> " is still served by web-https-proxy: not deleted") `isInfixOf` err1)
                 waiting <- drop (length first) <$> mutations
                 assertBool (unlines waiting) (("certificates create " <> Text.unpack certV2) `elem` waiting)
                 -- only the name the old set did not cover gets an authorization
@@ -1486,6 +1493,18 @@ lbTests =
                 -- which the proxy's check reads as waiting, not as something up would fix
                 proxyBefore <- partVerdict run rotated LoadBalancing.HttpsProxyPart
                 assertEqual "" [Unknown] proxyBefore
+                -- and so does the cleanup's, of the certificate still in service
+                sweepBefore <- partVerdict run rotated (LoadBalancing.SupersededCertificatesPart "web-cert")
+                assertEqual "" [Unknown] sweepBefore
+                -- every part's own up succeeds meanwhile: nothing blocks the root
+                mapM_
+                    ( \spec -> do
+                        (code, _, err) <- run (Text.unpack (LoadBalancing.renderPartUpScript rotated spec))
+                        assertEqual (show spec.partId <> ": " <> err) ExitSuccess code
+                    )
+                    (LoadBalancing.lbParts rotated)
+                stillWaiting <- drop (length first) <$> mutations
+                assertBool (unlines stillWaiting) (not (any (\l -> "target-https-proxies" `isInfixOf` l || " delete " `isInfixOf` l) stillWaiting))
                 -- issued: the check wants the move, and up makes it, then cleans up
                 _ <- run ("echo ACTIVE > \"$FAKE_GCLOUD_STATE\"/certificates." <> Text.unpack certV2 <> ".state")
                 proxyReady <- partVerdict run rotated LoadBalancing.HttpsProxyPart
@@ -1510,6 +1529,41 @@ lbTests =
                 assertEqual err4 ExitSuccess code4
                 (_, left, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
                 assertEqual "" "" left
+        , testCase "a new certificate that FAILED fails the proxy's up, and the proxy stays where it is" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- run (createScript rotating)
+                before <- length <$> mutations
+                (code, _, err) <- run ("export FAKE_GCLOUD_NEW_CERT_STATE=FAILED\n" <> createScript rotated)
+                assertBool err (code /= ExitSuccess)
+                assertBool err (("certificate " <> Text.unpack certV2 <> " is not ACTIVE yet: FAILED") `isInfixOf` err)
+                assertBool err (not ("PENDING" `isInfixOf` err))
+                after <- drop before <$> mutations
+                assertBool (unlines after) (not (any (\l -> "target-https-proxies" `isInfixOf` l || " delete " `isInfixOf` l) after))
+        , testCase "without a domain-set certificate a certificate not ACTIVE yet fails the proxy's up, as before" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- run (createScript full)
+                let renamed = full{LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert-next" ["app.example.org", "api.example.org"]]}
+                before <- length <$> mutations
+                (code, _, err) <- run ("export FAKE_GCLOUD_NEW_CERT_STATE=PROVISIONING\n" <> createScript renamed)
+                assertBool err (code /= ExitSuccess)
+                assertBool err ("certificate web-cert-next is not ACTIVE yet: PROVISIONING" `isInfixOf` err)
+                after <- drop before <$> mutations
+                assertBool (unlines after) (not (any ("target-https-proxies" `isInfixOf`) after))
+        , testCase "without a domain-set certificate the HTTPS proxy's up is the script it was" $
+            assertEqual
+                ""
+                [ "if exists gcloud compute target-https-proxies describe 'web-https-proxy' --project=\"$PROJECT\" --region=\"$REGION\"; then"
+                , "  have=$(gcloud compute target-https-proxies describe 'web-https-proxy' --project=\"$PROJECT\" --region=\"$REGION\" --format='value(sslCertificates)' 2>/dev/null | tr \";,[]' \\t\" '\\n' | sed -e 's|.*/||' -e '/^$/d' | tr 'A-Z' 'a-z' | LC_ALL=C sort -u | tr '\\n' ' ')"
+                , "  if [ \"$have\" != 'web-cert ' ]; then"
+                , "    st=$(gcloud certificate-manager certificates describe 'web-cert' --project=\"$PROJECT\" --location=\"$REGION\" --format='value(managed.state)' 2>/dev/null) || st=''"
+                , "    [ \"$st\" = ACTIVE ] || { echo 'certificate web-cert is not ACTIVE yet:'\" ${st:-absent}\"'; web-https-proxy keeps the certificates it serves until it is. Run again then.' >&2; exit 1; }"
+                , "    gcloud compute target-https-proxies update 'web-https-proxy' --project=\"$PROJECT\" --region=\"$REGION\" --certificate-manager-certificates='web-cert'"
+                , "  fi"
+                , "else"
+                , "  gcloud compute target-https-proxies create 'web-https-proxy' --project=\"$PROJECT\" --region=\"$REGION\" --url-map='web-url-map' --url-map-region=\"$REGION\" --certificate-manager-certificates='web-cert'"
+                , "fi"
+                ]
+                (concat [map Text.unpack spec.partUp | spec <- LoadBalancing.lbParts full, spec.partId == LoadBalancing.HttpsProxyPart])
         , testCase "a certificate under a fixed name is superseded by the domain-set one of that base" $
             withFakeGcloud $ \run mutations -> do
                 _ <- run (createScript full)
@@ -1556,9 +1610,11 @@ lbTests =
                 _ <- run "gcloud certificate-manager certificates create web-cert-00000000 --domains=x.example.org"
                 swept <- mapM (run . Text.unpack . LoadBalancing.renderPartUpScript rotated) [p | p <- LoadBalancing.lbParts rotated, p.partId == LoadBalancing.SupersededCertificatesPart "web-cert"]
                 assertEqual "" 1 (length swept)
-                mapM_ (\(code, _, err) -> assertBool err (code /= ExitSuccess && "still served by" `isInfixOf` err)) swept
+                -- left and said, the rest of the base's swept: a swap in progress, not a failure
+                mapM_ (\(code, _, err) -> assertBool err (code == ExitSuccess && ("certificate " <> Text.unpack certV1 <> " is still served by") `isInfixOf` err)) swept
                 made <- mutations
                 assertBool (unlines made) (("certificates delete " <> Text.unpack certV1) `notElem` made)
+                assertBool (unlines made) ("certificates delete web-cert-00000000" `elem` made)
         , testCase "the cleanup removes only its base's certificates, and its check names what is left" $
             withFakeGcloud $ \run _ -> do
                 _ <- run (createScript rotated)
