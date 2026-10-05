@@ -61,6 +61,7 @@ import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Reporter (silent)
 import Test.Harness (runDownCapturing, runUpCapturing, withTempDir)
 
@@ -461,7 +462,61 @@ containerTests =
         assertEqual "" [] (Quadlet.containerProblems report{Quadlet.containerRestart = Quadlet.RestartOnFailure})
     , testCase "a line break in the command is refused" $
         assertBool "" (not (null (Quadlet.containerProblems report{Quadlet.containerExec = ["sh", "-c", "a\nImage=evil"]})))
+    , testCase "a generated unit that would run the declared quadlet is installed, one made from another is not" $ do
+        -- the shape `systemctl show --property=ExecStart --value` prints,
+        -- written out by hand; the user-scope case reads the real one
+        let shown fp = "{ path=/usr/bin/podman ; argv[]=/usr/bin/podman run --name=report --cidfile=/run/user/1000/report.cid --replace --rm --cgroups=split --label salmon.quadlet=" <> fp <> " docker.io/library/alpine:3 /bin/sh -c exit 0 ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+        assertEqual "" Success (Quadlet.interpretGenerated "ztmC9FbSzVMf" (shown "ztmC9FbSzVMf"))
+        assertBool "" (isFailure (Quadlet.interpretGenerated "ztmC9FbSzVMf" (shown "aTe0H65oUH_B")))
+        assertBool "" (isFailure (Quadlet.interpretGenerated "ztmC9FbSzVMf" ""))
+    , testCase "a stamped container job records its runs around the container, on the host" $
+        assertEqual
+            ""
+            ( Text.unlines
+                [ "[Unit]"
+                , "Description=job report (salmon)"
+                , ""
+                , "[Container]"
+                , "ContainerName=report"
+                , "Image=docker.io/library/alpine:3"
+                , "Exec=/bin/sh -c \"echo $$HOME 100%%\""
+                , ""
+                , "[Service]"
+                , "Type=oneshot"
+                , "Restart=no"
+                , "ExecStartPre=touch \"/var/lib/report/last run.running\""
+                , "ExecStartPost=mv -f \"/var/lib/report/last run.running\" \"/var/lib/report/last run\""
+                ]
+            )
+            (Quadlet.renderContainer report{Quadlet.containerStamp = Just "/var/lib/report/last run"})
+    , testCase "a container job with no stamp is described and keyed as before" $ do
+        -- the hash of the text "a container job, key by key" pins, worked
+        -- out outside this code
+        assertEqual "" (Just ["image: docker.io/library/alpine:3", "quadlet: ztmC9FbSzVMf"]) (notesOf (containerNode report))
+        assertEqual "" (Just (mkRef "systemd-unit" ("report.service" :: Text))) (refOf (containerNode report))
+        assertEqual "" (refOf (containerNode report)) (refOf (containerNode stamped))
+        assertBool "a stamp is not visible in the job's description" (notesOf (containerNode report) /= notesOf (containerNode stamped))
+    , testCase "a stamp that is not an absolute path, or holds a line break, is refused" $ do
+        assertEqual "" [] (Quadlet.containerProblems stamped)
+        assertBool "" (not (null (Quadlet.containerProblems report{Quadlet.containerStamp = Just "stamp"})))
+        assertBool "" (not (null (Quadlet.containerProblems report{Quadlet.containerStamp = Just "/a\nExecStart=/bin/evil"})))
+    , testCase "a container job's run is judged against its quadlet, what it reads at start and its stamp" $
+        assertEqual
+            ""
+            (Job.Completion Systemd.System "report.service" ["/etc/containers/systemd/report.container", "/etc/report/env", "/etc/report/conf"] (Just "/s"))
+            (Quadlet.containerCompletion stamped{Quadlet.containerEnvFile = Just "/etc/report/env", Quadlet.containerWatched = ["/etc/report/conf"]})
+    , testCase "a completed container job is the run's effect site, standing on the installed job" $ do
+        let completed = Quadlet.completedQuadletJob silent ignoreTrack ignoreTrack stamped
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps completed)
+        assertEqual "" (refOf (Job.runJob silent ignoreTrack Systemd.System "report.service")) (refOf completed)
+        assertEqual "" ["file-contents", "podman-quadlet-dir", "podman-quadlet-job", "systemd-job-completed"] (sort [act.shorthand | act <- Map.elems (Dag.dagNodes dag)])
+        assertEqual "" 0 (length (Dag.dagConflicts dag))
+        assertEqual "" (Just ["newer than: /etc/containers/systemd/report.container", "stamp: /s"]) (notesOf completed)
     ]
+  where
+    stamped = report{Quadlet.containerStamp = Just "/s"}
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
 
 -------------------------------------------------------------------------------
 
@@ -518,6 +573,21 @@ generatorTests =
                 assertBool l (not (" -d " `isInfixOf` l))
                 assertBool l ("docker.io/library/alpine:3 /bin/sh -c \"echo $$HOME 100%%\"" `isInfixOf` l)
             other -> assertFailure ("not exactly one ExecStart: " <> show other)
+    , testCase "podman's generator keeps the stamp's two commands around its own" $ withGenerator $ withTempDir $ \dir -> do
+        let c = report{Quadlet.containerUnitDir = dir, Quadlet.containerStamp = Just (dir </> "last run")}
+        Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderQuadlet c
+        environment <- getEnvironment
+        (code, out, err) <-
+            readCreateProcessWithExitCode
+                (proc generatorPath ["--user", "--dryrun"]){env = Just (("QUADLET_UNIT_DIRS", dir) : environment)}
+                ""
+        let said = out <> err
+            execs = [takeWhile (/= '=') l | l <- lines said, "ExecStart" `isInfixOf` l]
+        assertEqual said ExitSuccess code
+        assertBool said (not ("unsupported key" `isInfixOf` said))
+        assertEqual said ["ExecStart", "ExecStartPost", "ExecStartPre"] (sort execs)
+        assertBool said (("ExecStartPre=touch \"" <> dir </> "last run.running\"") `elem` lines said)
+        assertBool said (("ExecStartPost=mv -f \"" <> dir </> "last run.running\" \"" <> dir </> "last run\"") `elem` lines said)
     ]
   where
     withGenerator :: IO () -> IO ()

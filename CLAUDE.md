@@ -1102,7 +1102,25 @@ every pass, as `runJob` does. `Test/SystemdJobSpec.hs`: Layer 0 on `show` lines 
 cases (stamped job: run, skip, re-run after a watched file is written, failing every pass also after `reset-failed`,
 cleared by a success, down; timer and no stamp: run then skip). Those user-scope cases sit in the serialized tier and
 were run on their own from a repl. Not run: system scope (root, `User=`), an actual reboot, a `Persistent=true` timer
-firing, a `quadletJob` under `completedRun`, and `serve` tending it.
+firing, and `serve` tending it.
+
+The container job has the same two halves. `Quadlet.containerStamp` (off by default; refused by `containerProblems` on
+a `LongRunning` container, where `ExecStartPost` would mean "ready", not "finished") renders the same two lines in the
+quadlet's `[Service]`, which podman's generator keeps around its own `ExecStart=`; they run on the *host*, as whoever
+the unit runs as. `containerCompletion` is the `Completion` (the quadlet file, `watchedFiles`, the stamp) and
+`completedQuadletJob` is `completedRun` standing on `quadletJob`. A container job with a timer is the caller's
+composition (`completedRun (containerCompletion c)` injected with the `timerUnit`); with neither timer nor stamp it
+runs at every pass. With the stamp unset the rendered file, the `ref`, `help` and `notes` are what they were, which
+`QuadletSpec`/`SystemdJobSpec` pin against hashes worked out outside the code: a long-running quadlet must not restart
+because of this. Load-bearing, found by the first real run: **`quadletJob`'s check is `checkJobInstalled`, not
+`checkLoaded` alone.** systemd unloads a job nothing refers to as its run ends, and asking about it loads it again from
+the generator's *last output* with `NeedDaemonReload=no`, so a rewritten quadlet read as installed and the old command
+ran (and succeeded). The check now also wants the unit's `ExecStart` to carry `salmon.quadlet=<quadletFingerprint>`
+(`interpretGenerated`), the label `renderQuadlet` already wrote; a job file from before the label is reloaded once,
+which starts nothing. Run: Layer 0, the generator's dry-run, and one `QuadletUserSpec` case in user scope from a repl
+(stamped container job: run, skip, re-install and re-run on a changed command, failing also after `reset-failed`,
+cleared by a success, down). Not run: system scope, a container job behind a timer, a watched file changing, a
+reboot, `serve`.
 
 `Nodes/Deferred.hs` (`deferred`) is a sub-graph built at `up` from a value another node of the same pass produced: the
 node holds a read (`IO (Maybe a)`) and a recipe (`a -> Op`), and its `up` reads, builds and runs a nested `upTree`
