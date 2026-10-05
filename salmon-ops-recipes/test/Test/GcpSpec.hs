@@ -69,6 +69,7 @@ tests =
         , testGroup "Compute.interpretInstanceStatus" instanceTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
         , testGroup "Storage bucket settings" bucketSettingsTests
+        , testGroup "Storage bucket contents" bucketContentsTests
         , testGroup "ArtifactRegistry.interpretRepoDescribe" repoTests
         , testGroup "CloudRun.interpretServiceDescribe" cloudRunTests
         , testGroup "Iam" iamTests
@@ -447,6 +448,294 @@ bucketSettingsTests =
     websiteVerdict w = Storage.interpretWebsiteDescribe w ExitSuccess
     describedWith member value =
         "{\"kind\": \"storage#bucket\", \"name\": \"site-bucket\", \"location\": \"EUROPE-WEST1\", \"" <> member <> "\": " <> value <> "}"
+
+-------------------------------------------------------------------------------
+
+{- | The node publishing a directory. The dry-run output is what Google Cloud
+SDK 573.0.0 wrote on standard error for a real bucket (its name replaced by
+@BUCKET@, nothing else edited); standard output was empty and the exit code 0
+in every case but the last.
+-}
+bucketContentsTests :: [TestTree]
+bucketContentsTests =
+    [ testGroup
+        "node"
+        [ testCase "it is keyed on the destination, what is declared riding in the notes" $ do
+            let act c = only (Storage.bucketContents silent ignoreTrack c)
+            assertEqual "" (mkRef "gcp-bucket-contents" ("BUCKET" :: Text.Text, "" :: Text.Text)) (act site).extension.ref
+            assertEqual "" "publishes directory site to gs://BUCKET" (act site).extension.help
+            assertEqual "" (act site).extension.ref (act site{Storage.contentsSource = "other", Storage.contentsCacheRules = []}).extension.ref
+            assertBool "" ((act site).extension.notes /= (act site{Storage.contentsCacheRules = []}).extension.notes)
+            assertBool "" ((act site).extension.notes /= (act site{Storage.contentsOnDown = Storage.EmptyDestination}).extension.notes)
+            assertBool "" ((act site).extension.ref /= (act site{Storage.contentsPrefix = "docs"}).extension.ref)
+            assertEqual "" (act site{Storage.contentsPrefix = "docs"}).extension.ref (act site{Storage.contentsPrefix = "/docs/"}).extension.ref
+            assertBool "" ((act site).extension.ref /= (only (Storage.bucket silent ignoreTrack siteBucket)).extension.ref)
+        , testCase "the notes say which header each share of the directory gets" $
+            assertEqual
+                ""
+                [ "source: site"
+                , "extraneous objects: removed"
+                , "on down: objects left"
+                , "cache-control *.html: no-cache"
+                , "cache-control assets/**: public, max-age=31536000, immutable"
+                , "cache-control (other objects): (unset)"
+                ]
+                (only (Storage.bucketContents silent ignoreTrack site)).extension.notes
+        , testCase "declaring the node reads nothing: a directory that does not exist is only a failed check" $
+            withSystemTempDirectory "salmon-contents" $ \tmp -> do
+                let act = only (Storage.bucketContents silent ignoreTrack site{Storage.contentsSource = tmp </> "absent"})
+                verdict <- act.extension.check
+                case verdict of
+                    Failure why -> assertBool (Text.unpack why) ("does not exist" `Text.isInfixOf` why)
+                    other -> assertBool ("expected a Failure, got " <> show other) False
+        , testCase "up refuses a missing directory, and an empty one, before anything is run" $
+            withSystemTempDirectory "salmon-contents" $ \tmp -> do
+                let upOf dir = try ((only (Storage.bucketContents silent ignoreTrack site{Storage.contentsSource = dir})).extension.up)
+                missing <- upOf (tmp </> "absent")
+                case missing of
+                    Left (e :: IOError) -> assertBool (show e) ("does not exist" `isInfixOf` show e)
+                    Right () -> assertBool "expected a refusal" False
+                empty <- upOf tmp
+                case empty of
+                    Left (e :: IOError) -> assertBool (show e) ("is empty" `isInfixOf` show e)
+                    Right () -> assertBool "expected a refusal" False
+                verdict <- (only (Storage.bucketContents silent ignoreTrack site{Storage.contentsSource = tmp})).extension.check
+                assertBool (show verdict) (isFailure verdict)
+        , testCase "up refuses a declaration with a problem" $ do
+            r <- try ((only (Storage.bucketContents silent ignoreTrack site{Storage.contentsPrefix = "a/../b"})).extension.up)
+            case r of
+                Left (e :: IOError) -> assertBool (show e) ("dotted segment" `isInfixOf` show e)
+                Right () -> assertBool "expected a refusal" False
+        , testCase "down leaves the objects unless told otherwise" $
+            -- nothing is run: there is no gcloud to run here
+            (only (Storage.bucketContents silent ignoreTrack site{Storage.contentsSource = "/nonexistent"})).extension.down
+        ]
+    , testGroup
+        "passes"
+        [ testCase "with no rule the directory is one unrestricted pass" $
+            assertEqual
+                ""
+                [Storage.RsyncPass "(every object)" Nothing (Just "no-store")]
+                (Storage.contentsPasses site{Storage.contentsCacheRules = [], Storage.contentsDefaultCacheControl = Just " no-store "})
+        , testCase "one pass per rule, each excluding what is not its own, then one for the rest" $
+            assertEqual
+                ""
+                [ Storage.RsyncPass "*.html" (Just "^(?!(?:(?:.*/)?[^/]*\\.html)$).*$") (Just "no-cache")
+                , Storage.RsyncPass
+                    "assets/**"
+                    (Just "^(?!(?=(?:assets/.*)$)(?!(?:(?:(?:.*/)?[^/]*\\.html))$)).*$")
+                    (Just "public, max-age=31536000, immutable")
+                , Storage.RsyncPass "(other objects)" (Just "^(?:(?:(?:.*/)?[^/]*\\.html)|(?:assets/.*))$") Nothing
+                ]
+                (Storage.contentsPasses site)
+        , testCase "a glob is a regex over the relative path" $ do
+            assertEqual "" "(?:(?:.*/)?[^/]*\\.html)" (Storage.globRegex "*.html")
+            assertEqual "" "(?:(?:.*/)?[^/]*\\.html)" (Storage.globRegex " *.html ")
+            assertEqual "" "(?:index\\.html)" (Storage.globRegex "/index.html")
+            assertEqual "" "(?:assets/.*)" (Storage.globRegex "assets/**")
+            assertEqual "" "(?:(?:.*/)?img/[^/]\\.png)" (Storage.globRegex "**/img/?.png")
+            assertEqual "" "(?:(?:.*/)?a\\+b\\x2c\\(c\\)\\ d_e-f)" (Storage.globRegex "a+b,(c) d_e-f")
+        , testCase "the invocation is the one the dry-run was captured from" $ do
+            let htmlPass = head (Storage.contentsPasses site)
+            assertEqual
+                ""
+                [ "storage"
+                , "rsync"
+                , "site"
+                , "gs://BUCKET"
+                , "--recursive"
+                , "--delete-unmatched-destination-objects"
+                , "--checksums-only"
+                , "--cache-control=no-cache"
+                , "--exclude=^(?!(?:(?:.*/)?[^/]*\\.html)$).*$"
+                , "--dry-run"
+                , "--project"
+                , "my-project"
+                ]
+                (args (Storage.BucketsRsync (Storage.contentsRsync site htmlPass){Storage.rsyncDryRun = True}))
+        , testCase "up runs what the check dry-ran" $
+            mapM_
+                ( \p ->
+                    assertEqual
+                        ""
+                        (filter (/= "--dry-run") (args (Storage.BucketsRsync (Storage.contentsRsync site p){Storage.rsyncDryRun = True})))
+                        (args (Storage.BucketsRsync (Storage.contentsRsync site p)))
+                )
+                (Storage.contentsPasses site)
+        , testCase "extraneous objects are left when not asked for, and the header is omitted when unset" $
+            assertEqual
+                ""
+                ["storage", "rsync", "out/site", "gs://BUCKET/docs/v1", "--recursive", "--checksums-only", "--project", "my-project"]
+                ( map
+                    (args . Storage.BucketsRsync . Storage.contentsRsync plain)
+                    (Storage.contentsPasses plain)
+                    !! 0
+                )
+        , testCase "emptying a destination is an empty directory synced over it" $
+            assertEqual
+                ""
+                ["storage", "rsync", "/tmp/empty", "gs://BUCKET/docs/v1", "--recursive", "--delete-unmatched-destination-objects", "--checksums-only", "--project", "my-project"]
+                (args (Storage.BucketsRsync (Storage.emptyingRsync plain "/tmp/empty")))
+        ]
+    , testGroup
+        "dry-run"
+        [ testCase "nothing changed: the listing lines are not differences" $ do
+            assertEqual "" [] (Storage.parseDryRun unchanged)
+            assertEqual "" Success (verdict [unchanged, unchanged, unchanged])
+        , testCase "a touched file is an mtime update, which is not a difference" $ do
+            assertEqual "" [Storage.WouldSetMtime "gs://BUCKET/assets/keep.txt"] (Storage.parseDryRun touched)
+            assertEqual "" Success (verdict [unchanged, touched, unchanged])
+        , testCase "a changed, a deleted and an added file are read, generations dropped" $
+            assertEqual
+                ""
+                [ Storage.WouldRemove "gs://BUCKET/404.html"
+                , Storage.WouldSetMtime "gs://BUCKET/assets/keep.txt"
+                , Storage.WouldCopy "file://site/assets/new.txt" "gs://BUCKET/assets/new.txt"
+                , Storage.WouldCopy "file://site/index.html" "gs://BUCKET/index.html"
+                ]
+                (Storage.parseDryRun changed)
+        , testCase "differences are a failure counting and naming the objects" $
+            assertEqual
+                ""
+                (Failure "the contents of gs://BUCKET differ from site: 2 to copy (assets/new.txt index.html), 1 to remove (404.html)")
+                (verdict [changed])
+        , testCase "differences in any pass are a failure" $ do
+            assertEqual
+                ""
+                (Failure "the contents of gs://BUCKET differ from site: 1 to copy (index.html), 1 to remove (404.html)")
+                (verdict [htmlOnly, unchanged, touched])
+            assertBool "" (isFailure (verdict [unchanged, unchanged, htmlOnly]))
+        , testCase "without --checksums-only the touched file would have been a copy" $
+            assertEqual
+                ""
+                (Failure "the contents of gs://BUCKET differ from site: 3 to copy (assets/keep.txt assets/new.txt index.html), 1 to remove (404.html)")
+                (verdict [byMtime])
+        , testCase "more than three objects are counted, not all named" $
+            assertEqual
+                ""
+                (Failure "the contents of gs://BUCKET differ from site: 6 to copy (assets/keep.txt assets/new.txt index.html ...), 2 to remove (404.html 404.html)")
+                (verdict [byMtime, byMtime])
+        , testCase "a non-zero exit is a failure carrying gcloud's error" $
+            assertEqual
+                ""
+                (Failure "could not compare the contents of gs://BUCKET (exit 1): (gcloud.storage.rsync) Did not find existing container at: nosuchdir")
+                (Storage.interpretContentsDryRun site [(ExitSuccess, unchanged), (ExitFailure 1, noSuchDir), (ExitSuccess, unchanged)])
+        , testCase "an error wins over differences read in another pass" $
+            assertBool
+                ""
+                ( case Storage.interpretContentsDryRun site [(ExitSuccess, changed), (ExitFailure 1, noSuchDir)] of
+                    Failure why -> "could not compare" `Text.isPrefixOf` why
+                    _ -> False
+                )
+        , testCase "a planned action of an unknown kind cannot be judged, unless something else already differs" $ do
+            let novel = unchanged <> "Would patch gs://BUCKET/index.html#1791198677028920\n"
+            assertEqual "" [Storage.WouldOther "Would patch gs://BUCKET/index.html#1791198677028920"] (Storage.parseDryRun novel)
+            assertEqual "" Unknown (verdict [unchanged, novel])
+            assertBool "" (isFailure (verdict [changed, novel]))
+        , testCase "an object whose name holds a hash or the word to is read whole" $
+            assertEqual
+                ""
+                [ Storage.WouldCopy "file://site/how to/a#b" "gs://BUCKET/how to/a#b"
+                , Storage.WouldRemove "gs://BUCKET/c#d"
+                ]
+                (Storage.parseDryRun "Would copy file://site/how to/a#b to gs://BUCKET/how to/a#b\r\nWould remove gs://BUCKET/c#d#1791198677019384\n")
+        , testCase "objects under a prefix are named relative to it" $
+            assertEqual
+                ""
+                (Failure "the contents of gs://BUCKET/docs/v1 differ from out/site: 1 to remove (old.html)")
+                (Storage.interpretContentsDryRun plain [(ExitSuccess, "Would remove gs://BUCKET/docs/v1/old.html#1\n")])
+        ]
+    , testGroup
+        "refusals"
+        [ testCase "the declarations used here have no problem" $ do
+            assertEqual "" [] (Storage.contentsProblems site)
+            assertEqual "" [] (Storage.contentsProblems plain)
+        , testCase "no directory, a dotted prefix, an empty or repeated glob and an empty header are refused" $ do
+            let problems = Storage.contentsProblems
+                rule = Storage.CacheRule
+            assertBool "" (not (null (problems site{Storage.contentsSource = ""})))
+            assertBool "" (not (null (problems site{Storage.contentsPrefix = "a/../b"})))
+            assertBool "" (not (null (problems site{Storage.contentsPrefix = "a//b"})))
+            assertBool "" (not (null (problems site{Storage.contentsCacheRules = [rule " " "no-cache"]})))
+            assertEqual
+                ""
+                ["the glob *.html is in two rules"]
+                (problems site{Storage.contentsCacheRules = [rule "*.html" "no-cache", rule "*.css" "no-cache", rule " *.html" "no-store"]})
+            assertBool "" (not (null (problems site{Storage.contentsCacheRules = [rule "*.html" " "]})))
+            assertBool "" (not (null (problems site{Storage.contentsCacheRules = [rule "*.html" "no-cache\nX-Other: 1"]})))
+            assertBool "" (not (null (problems site{Storage.contentsDefaultCacheControl = Just ""})))
+        , testCase "a declaration with a problem fails its check whatever the dry-run said" $
+            assertBool "" (isFailure (Storage.interpretContentsDryRun site{Storage.contentsPrefix = ".."} [(ExitSuccess, unchanged)]))
+        ]
+    ]
+  where
+    args = processArgs . prepare Storage.storageCommand
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    siteBucket = Storage.Bucket "BUCKET" (Core.Project "my-project") (Core.Region "europe-west1") True
+    site =
+        Storage.BucketContents
+            { Storage.contentsBucket = siteBucket
+            , Storage.contentsPrefix = ""
+            , Storage.contentsSource = "site"
+            , Storage.contentsCacheRules =
+                [ Storage.CacheRule "*.html" "no-cache"
+                , Storage.CacheRule "assets/**" "public, max-age=31536000, immutable"
+                ]
+            , Storage.contentsDefaultCacheControl = Nothing
+            , Storage.contentsDeleteExtraneous = True
+            , Storage.contentsOnDown = Storage.LeaveObjects
+            }
+    plain =
+        Storage.BucketContents
+            { Storage.contentsBucket = siteBucket
+            , Storage.contentsPrefix = "docs/v1/"
+            , Storage.contentsSource = "out/site"
+            , Storage.contentsCacheRules = []
+            , Storage.contentsDefaultCacheControl = Nothing
+            , Storage.contentsDeleteExtraneous = False
+            , Storage.contentsOnDown = Storage.EmptyDestination
+            }
+    verdict = Storage.interpretContentsDryRun site . map (\err -> (ExitSuccess, err))
+    -- 1. nothing changed
+    unchanged =
+        "At file://site/**, worker process 743548 thread 137918706894656 listed 4...\n\
+        \At gs://BUCKET/**, worker process 743548 thread 137918706894656 listed 4...\n\
+        \  \n"
+    -- 2. one file touched (same bytes, newer mtime)
+    touched =
+        "At file://site/**, worker process 743680 thread 126006568441664 listed 4...\n\
+        \At gs://BUCKET/**, worker process 743680 thread 126006568441664 listed 4...\n\
+        \Would set mtime for gs://BUCKET/assets/keep.txt#1791198677004703\n\
+        \  \n"
+    -- 3. index.html changed, 404.html deleted locally, assets/new.txt added, keep.txt touched
+    changed =
+        "At file://site/**, worker process 743808 thread 128960133023552 listed 4...\n\
+        \At gs://BUCKET/**, worker process 743808 thread 128960133023552 listed 4...\n\
+        \Would remove gs://BUCKET/404.html#1791198677019384\n\
+        \Would set mtime for gs://BUCKET/assets/keep.txt#1791198677004703\n\
+        \Would copy file://site/assets/new.txt to gs://BUCKET/assets/new.txt\n\
+        \Would copy file://site/index.html to gs://BUCKET/index.html#1791198677028920\n\
+        \  \n"
+    -- 4. same state, without --checksums-only
+    byMtime =
+        "At file://site/**, worker process 743939 thread 127683618424640 listed 4...\n\
+        \At gs://BUCKET/**, worker process 743939 thread 127683618424640 listed 4...\n\
+        \Would remove gs://BUCKET/404.html#1791198677019384\n\
+        \Would copy file://site/assets/keep.txt to gs://BUCKET/assets/keep.txt#1791198677004703\n\
+        \Would copy file://site/assets/new.txt to gs://BUCKET/assets/new.txt\n\
+        \Would copy file://site/index.html to gs://BUCKET/index.html#1791198677028920\n\
+        \  \n"
+    -- 5. same state, restricted to HTML with a cache header (everything else excluded)
+    htmlOnly =
+        "At file://site/**, worker process 744065 thread 139602817214272 listed 1...\n\
+        \At gs://BUCKET/**, worker process 744065 thread 139602817214272 listed 2...\n\
+        \Would remove gs://BUCKET/404.html#1791198677019384\n\
+        \Would copy file://site/index.html to gs://BUCKET/index.html#1791198677028920\n\
+        \  \n"
+    -- 6. source directory missing (exit 1)
+    noSuchDir = "ERROR: (gcloud.storage.rsync) Did not find existing container at: nosuchdir\n"
 
 -------------------------------------------------------------------------------
 
