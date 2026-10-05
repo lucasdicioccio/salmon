@@ -285,6 +285,37 @@ nodeTests =
         loginRef <- one "login node" (refsOf "the-login")
         assertBool "the pull does not wait for the login" $
             loginRef `elem` toList (Map.findWithDefault mempty image (Dag.dagDependencies dag))
+    , testCase "what the caller's track declares comes before the file, so a failed one leaves the old quadlet" $ do
+        let migration = op "the-migration" nodeps (\ext -> ext{ref = mkRef "test-migration" ("x" :: Text)})
+            tracked = Quadlet.quadletContainer silent ignoreTrack (Track (const migration)) app
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps tracked)
+            refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+            dependenciesOf r = toList (Map.findWithDefault mempty r (Dag.dagDependencies dag))
+        migrationRef <- one "migration node" (refsOf "the-migration")
+        file <- one "file node" (refsOf "file-contents")
+        unit <- one "quadlet node" (refsOf "podman-quadlet")
+        assertBool "the file does not wait for the track" (migrationRef `elem` dependenciesOf file)
+        assertBool "the unit stopped standing on the track" (migrationRef `elem` dependenciesOf unit)
+        assertEqual "the track made a cycle" [] (toList (Dag.stuck (\d r -> toList (Map.findWithDefault mempty r (Dag.dagDependencies d))) dag))
+    , testCase "a job's file waits for the caller's track too" $ do
+        let migration = op "the-migration" nodeps (\ext -> ext{ref = mkRef "test-migration" ("x" :: Text)})
+            job = Quadlet.quadletJob silent ignoreTrack (Track (const migration)) (Quadlet.containerJob (Podman.ContainerName "job") "app:v3" ["run"])
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps job)
+            refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+        migrationRef <- one "migration node" (refsOf "the-migration")
+        file <- one "file node" (refsOf "file-contents")
+        assertBool "the file does not wait for the track" $
+            migrationRef `elem` toList (Map.findWithDefault mempty file (Dag.dagDependencies dag))
+    , testCase "the track changes nothing about how the file and the unit are described" $ do
+        let migration = op "the-migration" nodeps (\ext -> ext{ref = mkRef "test-migration" ("x" :: Text)})
+            described o =
+                let dag = Dag.foldDag Dag.sameRepresentative (evalDeps o)
+                 in sort
+                        [ (show r, act.extension.help, act.extension.notes)
+                        | (r, act) <- Map.toList (Dag.dagNodes dag)
+                        , act.shorthand /= "the-migration"
+                        ]
+        assertEqual "" (described (node app)) (described (Quadlet.quadletContainer silent ignoreTrack (Track (const migration)) app))
     , testCase "two containers of one image share the pull without a conflict" $ do
         let other = app{Quadlet.containerName = Podman.ContainerName "other", Quadlet.containerDescription = "another"}
             dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [node app, node other]) id))
