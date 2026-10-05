@@ -907,7 +907,10 @@ lbTests =
     , testCase "a plain balancer renders none of the HTTPS, rule or timeout steps" $ do
         mapM_
             (\w -> assertBool (w <> "\n" <> script) (not (w `isInfixOf` script)))
-            ["target-https-proxies", "certificate-manager", "addresses", "--address", "url-maps import", "--timeout", "ssl-certificates"]
+            ["target-https-proxies", "certificate-manager", "addresses", "--address", "--timeout", "ssl-certificates"]
+        -- the one import is behind a look at the map: only over one that has host rules
+        assertEqual "" 1 (length [() | l <- lines script, "url-maps import" `isInfixOf` l])
+        assertBool script (all ("if [ -n \"$ruled\" ]; then " `isPrefixOf`) [l | l <- lines script, "url-maps import" `isInfixOf` l])
         assertBool script ("gcloud compute url-maps create 'web-url-map' --project=\"$PROJECT\" --region=\"$REGION\" --default-service='web-backend'" `isInfixOf` script)
     , testCase "a managed certificate is an authorization per domain, a certificate over them, an HTTPS proxy and a :443 rule" $ do
         let sc = createScript full
@@ -961,7 +964,14 @@ lbTests =
                        ]
                 ]
             )
-            (LoadBalancing.renderUrlMap full)
+            (case LoadBalancing.renderUrlMap full of Object o -> Object (KeyMap.delete "description" o); other -> other)
+    , testCase "a URL map with no rule is its name and default service, and is imported only over a map that has rules" $ do
+        assertEqual
+            ""
+            (object ["name" .= ("web-url-map" :: Text.Text), "defaultService" .= svcUrl "web-backend"])
+            (LoadBalancing.renderUrlMap alb)
+        assertEqual "" Nothing (LoadBalancing.urlMapStamp alb)
+        assertBool script ("if [ -n \"$ruled\" ]; then printf '%s\\n' '{\"defaultService\"" `isInfixOf` script)
     , testCase "a named backend service has its own resource, NEG and backends" $ do
         let sc = createScript full
         mapM_
@@ -1155,11 +1165,16 @@ lbTests =
         -- HTTP proxy is created once and its URL map never set again.
         assertEqual
             ""
-            [ ("plain", 17410649785801445793)
-            , ("every feature", 8942311775860119767)
-            , ("two services on one group", 17068412453506542601)
-            , -- moved once, on purpose: a pending swap is no longer a failed up
-              ("a domain-set certificate", 12823996824954190641)
+            -- All four moved once more, on purpose and in the URL map's part
+            -- alone: its check compares hosts as a set, a map with no rule
+            -- is imported over one that has rules (and is rendered without
+            -- empty rule lists), and a map of services carries a
+            -- description. (The last also moved earlier: a pending swap is
+            -- no longer a failed up.)
+            [ ("plain", 2724328492292246434)
+            , ("every feature", 6369177876073630455)
+            , ("two services on one group", 15231005713454579927)
+            , ("a domain-set certificate", 10048840134320661561)
             ]
             [ (what :: String, fnv1a (pinned a) :: Word64)
             | (what, a) <- [("plain", alb), ("every feature", full), ("two services on one group", shared), ("a domain-set certificate", rotated)]
@@ -1221,15 +1236,19 @@ lbTests =
         case stamp of
             Just (String t) -> assertBool (Text.unpack t) ("salmon:" `Text.isPrefixOf` t && Text.length t == 23)
             other -> assertBool (show other) False
-    , testCase "the map's fingerprint follows the declaration, and a map of services only has none" $ do
+    , testCase "the map's fingerprint follows the declaration; it is required of a map naming a bucket or a redirect only" $ do
         let stampOf a = case LoadBalancing.renderUrlMap a of
                 Object o -> KeyMap.lookup "description" o
                 _ -> Nothing
-        assertEqual "" Nothing (stampOf full)
+        assertEqual "" (String <$> LoadBalancing.urlMapStamp full) (stampOf full)
+        assertBool "" (stampOf full /= Nothing && stampOf full /= stampOf site)
         assertEqual "" (stampOf site) (stampOf site)
         assertBool "" (stampOf site /= stampOf (siteTo "web.example.org"))
-        assertBool "the check compares it" ("--format='value(description)'" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript site))
-        assertBool "and only then" (not ("value(description)" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript full)))
+        let required a = "--format='value(description)' 2>/dev/null)\" = 'salmon:" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript a)
+        let refused a = "--format='value(description)' 2>/dev/null)\" in 'salmon:" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript a)
+        assertEqual "a bucket or a redirect: the live map must carry it" (True, False) (required site, refused site)
+        assertEqual "services only: only another fingerprint speaks against the map" (False, True) (required full, refused full)
+        assertEqual "no rule: no fingerprint at all" (False, False) (required alb, refused alb)
     , testCase "a backend bucket is a regional resource of its own that the URL map waits for; a redirect is no resource" $ do
         let sc = createScript site
         assertBool sc ("exists gcloud compute backend-buckets describe 'web-site-bucket' --project=\"$PROJECT\" --region=\"$REGION\" || gcloud compute backend-buckets create 'web-site-bucket' --project=\"$PROJECT\" --region=\"$REGION\" --gcs-bucket-name='example-site' --load-balancing-scheme=EXTERNAL_MANAGED" `isInfixOf` sc)
@@ -1358,6 +1377,81 @@ lbTests =
                 -- the "set" verbs run again by design; nothing is created or attached twice
                 assertBool (unlines second) (not (any (\l -> " create " `isInfixOf` l || "add-backend" `isInfixOf` l) second))
                 assertBool (unlines second) (any ("url-maps import" `isInfixOf`) second)
+        , testCase "a host rule taken out of the declaration is seen by the check and imported away" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                let fewer = full{LoadBalancing.albHostRules = take 1 full.albHostRules}
+                stale <- partVerdict run fewer LoadBalancing.UrlMapPart
+                case stale of
+                    [Failure t] -> assertBool (Text.unpack t) ("removal of undeclared host-rule api.example.org" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                moved <- upPart run mutations fewer LoadBalancing.UrlMapPart
+                assertEqual "" ["url-maps import web-url-map"] moved
+                fresh <- partVerdict run fewer LoadBalancing.UrlMapPart
+                assertEqual "" [Success] fresh
+                (_, hosts, _) <- run "gcloud compute url-maps describe web-url-map --format='value(hostRules[].hosts)'"
+                assertEqual "" "app.example.org,www.example.org\n" hosts
+        , testCase "the last host rule taken away is one import of the rule-less map, and none after" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                let none = full{LoadBalancing.albHostRules = []}
+                stale <- partVerdict run none LoadBalancing.UrlMapPart
+                case stale of
+                    [Failure t] ->
+                        mapM_
+                            (\h -> assertBool (Text.unpack t) (("removal of undeclared host-rule " <> h) `isInfixOf` Text.unpack t))
+                            ["app.example.org", "www.example.org", "api.example.org"]
+                    other -> assertBool (show other) False
+                moved <- upPart run mutations none LoadBalancing.UrlMapPart
+                assertEqual "" ["url-maps import web-url-map"] moved
+                fresh <- partVerdict run none LoadBalancing.UrlMapPart
+                assertEqual "" [Success] fresh
+                again <- upPart run mutations none LoadBalancing.UrlMapPart
+                assertEqual "nothing is set on a map that has no rule" [] again
+        , testCase "a map with no rule that never had one is created once and never imported" $
+            withFakeGcloud $ \run mutations -> do
+                first <- upPart run mutations alb LoadBalancing.UrlMapPart
+                assertEqual "" ["url-maps create web-url-map"] first
+                second <- upPart run mutations alb LoadBalancing.UrlMapPart
+                assertEqual "" [] second
+                v <- partVerdict run alb LoadBalancing.UrlMapPart
+                assertEqual "" [Success] v
+        , testCase "a bucket route turned off again is seen and imported away, with no command by hand" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript site)
+                stale <- partVerdict run full LoadBalancing.UrlMapPart
+                case stale of
+                    [Failure t] -> do
+                        assertBool (Text.unpack t) ("removal of undeclared host-rule static.example.org" `isInfixOf` Text.unpack t)
+                        assertBool (Text.unpack t) ("declared rules on web-url-map" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                moved <- upPart run mutations full LoadBalancing.UrlMapPart
+                assertEqual "" ["url-maps import web-url-map"] moved
+                fresh <- partVerdict run full LoadBalancing.UrlMapPart
+                assertEqual "" [Success] fresh
+        , testCase "a host sent to another service is seen on a map salmon stamped, and not on one written before maps of services were" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                let swapped =
+                        full
+                            { LoadBalancing.albHostRules =
+                                [ LoadBalancing.HostRule ["app.example.org", "www.example.org"] (LoadBalancing.NamedService "api") []
+                                , LoadBalancing.HostRule ["api.example.org"] LoadBalancing.DefaultService []
+                                ]
+                            }
+                stale <- partVerdict run swapped LoadBalancing.UrlMapPart
+                case stale of
+                    [Failure t] -> assertBool (Text.unpack t) ("declared rules on web-url-map" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                -- the map as a version before this one left it: no description
+                (code, _, err) <- run "sed -i 's/\"description\":\"[^\"]*\",//' \"$FAKE_GCLOUD_STATE/url-maps.web-url-map\""
+                assertEqual err ExitSuccess code
+                (_, desc, _) <- run "gcloud compute url-maps describe web-url-map --format='value(description)'"
+                assertEqual "" "" desc
+                same <- partVerdict run full LoadBalancing.UrlMapPart
+                assertEqual "an unstamped map with the declared hosts is left alone" [Success] same
+                blind <- partVerdict run swapped LoadBalancing.UrlMapPart
+                assertEqual "and its services are not seen" [Success] blind
         , testCase "the check of what up made is Success, and of nothing at all a Failure" $
             withFakeGcloud $ \run _ -> do
                 let checkScript = Text.unpack (LoadBalancing.renderLbCheckScript full)
@@ -2021,6 +2115,12 @@ lbTests =
     rotated = full{LoadBalancing.albCertificates = [LoadBalancing.DomainSetCertificate "web-cert" ["app.example.org", "api.example.org", "www.example.org"]]}
     certV1 = "web-cert-" <> LoadBalancing.domainSetTag ["app.example.org", "api.example.org"]
     certV2 = "web-cert-" <> LoadBalancing.domainSetTag ["app.example.org", "api.example.org", "www.example.org"]
+    -- one part's up, and the mutating calls it made
+    upPart run mutations a part =
+        concat
+            <$> mapM
+                (mutationsOf run mutations . Text.unpack . LoadBalancing.renderPartUpScript a)
+                [spec | spec <- LoadBalancing.lbParts a, spec.partId == part]
     partVerdict run a part =
         mapM
             ( \spec -> do

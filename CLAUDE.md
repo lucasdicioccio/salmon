@@ -1234,21 +1234,30 @@ brings up. A `ManagedCertificate` keeps its declared name, and one whose domains
 a `PROBLEM` line (a `Failure`) and a failing `up` instead of nothing; an `ACTIVE` certificate with a `FAILED`
 authorization attempt or a past `expireTime` is a `PROBLEM` too. The proxy's URL map is named at creation only.
 `albProblems` (undeclared or duplicate service,
-host in two rules, mixed certificate kinds, ...) is a `Failure`/throw before any call. The check sees declared hosts
-and timeouts, not path rules. A rule's target (`ServiceRef`) may also be a **backend bucket** (`NamedBucket n` of
+host in two rules, mixed certificate kinds, ...) is a `Failure`/throw before any call. The URL map's check compares
+hosts **as a set** (a declared host the map lacks, and a host of the map no rule declares, so a removed rule is
+imported away; a map with no rule is imported only when the live one has hosts, otherwise created once and never set).
+A host rule added by hand to `<name>-url-map` is therefore removed by the next `up`. Services and path rules are seen
+only through the map's fingerprint (below). A rule's target (`ServiceRef`) may also be a **backend bucket** (`NamedBucket n` of
 `albBuckets`: a regional `backend-buckets` resource `<name>-<n>-bucket` over a Cloud Storage bucket that is the
 caller's, its `--gcs-bucket-name` compared and updated) or a **redirect** the balancer answers itself (`RedirectTo
 Redirect{host, path, https, code}`, `redirectToHost` for an apex to its `www`; `urlRedirect`/`defaultUrlRedirect` in
-the map). A map naming either carries a fingerprint of its declaration as `description` (`urlMapStamp`), which the
-check compares, so a changed target is re-imported; a map of services only is rendered and checked as before.
+the map). Every map with host rules carries a fingerprint of its declaration as `description` (`urlMapStamp`). For a
+map naming a bucket or a redirect the check **requires** it, so a changed target is re-imported; for a map of
+services only it is a finding only when the live description is *another* `salmon:` fingerprint, so a map written
+before those were stamped (no description) is left alone on upgrade and its host-to-service moves stay unseen until
+something else imports it. That leniency is also the hedge on an unverified assumption: nobody has checked that
+`description` survives `url-maps import` on a real project. `bucketResource` is exported (the backend bucket's name).
 `albHttp` is what port 80 does and is **opt-in**: `HttpCreatedOnce` (the default) is the proxy created on the
 balancer's map and never set again, so a proxy another writer repointed stays put; `ServeHttp` and `RedirectToHttps
 code` make this node the writer of the HTTP proxy's map (compared, `target-http-proxies update` when it differs), the
 latter onto a second redirect-only map `<name>-http-redirect-url-map` (`renderHttpRedirectUrlMap`); `NoHttp` is no
 proxy and no `:80` rule plus a node whose `up` deletes the ones there. The last two are refused without a
 certificate. `Test/GcpSpec.hs` pins by checksum that a declaration using none of this renders every script and part
-as it did before. Not done: a default (unmatched-host) redirect, removal of a redirect map or backend bucket no
-longer declared, the bucket itself, a toy flag. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of
+as it did before (the pins moved with the set comparison: the check scripts, the rule-less map's `up`, and the
+description on a map of services). Not done: a default (unmatched-host) redirect, removal of a redirect map, backend
+bucket, `DomainSetCertificate` or DNS authorization no longer declared, a path rewrite in a rule, a dependency hook
+on a bucket's node, the bucket itself, a toy flag. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of
 the rest. **Layer 0 only**:
 `Test/GcpSpec.hs` asserts the graph's shape and runs the scripts, whole and resource by resource, against a stand-in
 `gcloud` (a shell function, not a recording), so none of the HTTPS, rule or timeout calls has met a real project, and
