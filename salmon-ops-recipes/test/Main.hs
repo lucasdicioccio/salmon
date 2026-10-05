@@ -64,6 +64,7 @@ import qualified Test.ServeTlsSpec as ServeTlsSpec
 import qualified Test.StatusSinkSpec as StatusSinkSpec
 import qualified Test.QuadletSpec as QuadletSpec
 import qualified Test.QuadletUserSpec as QuadletUserSpec
+import qualified Test.SystemdJobSpec as SystemdJobSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
@@ -112,6 +113,7 @@ main =
                 , PatroniHarnessSpec.tests
                 , -- the user's own systemd manager and podman
                   QuadletUserSpec.tests
+                , SystemdJobSpec.userTests
                 ]
             , CheckSpec.tests
             , ClientModelSpec.tests
@@ -167,6 +169,7 @@ main =
             , ServeTlsSpec.tests
             , StatusSinkSpec.tests
             , QuadletSpec.tests
+            , SystemdJobSpec.tests
             , SystemdSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests

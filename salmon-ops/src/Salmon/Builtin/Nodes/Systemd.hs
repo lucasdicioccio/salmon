@@ -282,6 +282,12 @@ data SystemCtlCall
     | Enable Scope UnitTarget
     | Up Scope UnitTarget
     | Stop Scope UnitTarget
+    | -- | @start@: for a @Type=oneshot@ unit, returns when the command has
+      -- exited and fails if it did; a unit already running is joined, where
+      -- 'Up' (@restart@) would kill it first
+      StartUnit Scope UnitTarget
+    | -- | @disable --now@: stops the unit and removes what 'Enable' linked
+      Disable Scope UnitTarget
     | -- | @mask --now@: stops the unit and points it at @\/dev\/null@
       Mask Scope UnitTarget
     | Unmask Scope UnitTarget
@@ -294,6 +300,8 @@ callSystemctl = Command go
     go (Enable sc u) = proc "systemctl" (scopeArgs sc <> ["enable", Text.unpack u])
     go (Up sc u) = proc "systemctl" (scopeArgs sc <> ["restart", Text.unpack u])
     go (Stop sc u) = proc "systemctl" (scopeArgs sc <> ["stop", Text.unpack u])
+    go (StartUnit sc u) = proc "systemctl" (scopeArgs sc <> ["start", Text.unpack u])
+    go (Disable sc u) = proc "systemctl" (scopeArgs sc <> ["disable", "--now", Text.unpack u])
     go (Mask sc u) = proc "systemctl" (scopeArgs sc <> ["mask", "--now", Text.unpack u])
     go (Unmask sc u) = proc "systemctl" (scopeArgs sc <> ["unmask", Text.unpack u])
 
@@ -456,17 +464,76 @@ render_service scope s =
     render_start :: Start -> Text
     render_start s = Text.unwords (Text.pack s.start_path : map quoteArg s.start_args)
 
-    quoteArg :: Text -> Text
-    quoteArg a
-        | Text.any (`elem` (" \t\"'$`\\" :: String)) a =
-            "\"" <> Text.replace "\"" "\\\"" (Text.replace "\\" "\\\\" a) <> "\""
-        | otherwise = a
-
     render_restart :: RestartDirective -> Text
     render_restart OnFailure = "on-failure"
 
     render_killmode :: KillMode -> Text
     render_killmode Process = "process"
+
+{- | One word of a command line as systemd splits it: quoted when it holds
+whitespace or a character the splitter reads, left alone otherwise. It does
+not touch @$@ or @%@, which systemd expands inside quotes too; see
+'literalArg' for a word that must arrive as written.
+-}
+quoteArg :: Text -> Text
+quoteArg a
+    | Text.any (`elem` (" \t\"'$`\\" :: String)) a =
+        "\"" <> Text.replace "\"" "\\\"" (Text.replace "\\" "\\\\" a) <> "\""
+    | otherwise = a
+
+{- | 'quoteArg' for a word the process must receive exactly as declared:
+@$@ is written @$$@ and @%@ is written @%%@, the two characters systemd
+substitutes in a command line (environment variables and unit specifiers)
+whatever the quoting. Without it a @sh -c@ script naming @$HOME@ is handed
+to the shell with systemd's idea of @HOME@ already spliced in, or nothing
+at all for a variable only the script sets. An empty word is kept as one.
+-}
+literalArg :: Text -> Text
+literalArg a
+    -- an empty word is a word, and a bare @;@ would end the command
+    | Text.null a = "\"\""
+    | a == ";" = "\";\""
+    | otherwise = quoteArg (Text.replace "%" "%%" (Text.replace "$" "$$" a))
+
+{- | Is this unit known to systemd as its file is now written, whether or not
+it is running? The question for a unit nothing starts at install time: a
+@Type=oneshot@ job a timer triggers.
+
+@LoadState=loaded@ and @NeedDaemonReload=no@. A unit file systemd has not
+been told about reads @loaded@ already when it sits in a directory systemd
+searches (@show@ loads it on demand), and @not-found@ when it is made by a
+generator that has not run since; @bad-setting@ and @error@ are a file
+systemd refuses, which a reload does not cure.
+-}
+checkLoaded :: Scope -> UnitTarget -> IO CheckResult
+checkLoaded scope target = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            ( proc
+                "systemctl"
+                (scopeArgs scope <> ["show", Text.unpack target, "--property=LoadState", "--property=NeedDaemonReload"])
+            )
+            ""
+    pure $ case code of
+        ExitSuccess -> interpretLoaded (Text.lines (Text.decodeUtf8With TextError.lenientDecode out))
+        ExitFailure _ -> Unknown
+
+-- | The verdict 'checkLoaded' draws from @systemctl show@'s output, pure.
+interpretLoaded :: [Text] -> CheckResult
+interpretLoaded ls
+    | property "NeedDaemonReload" == Just "yes" =
+        Failure "the unit file on disk has changed since systemd loaded it"
+    | otherwise = case property "LoadState" of
+        Just "loaded" -> Success
+        Just "not-found" -> Failure "systemd does not know the unit"
+        Just other -> Failure ("the unit is " <> other)
+        Nothing -> Failure "systemctl said nothing about the unit's load state"
+  where
+    property :: Text -> Maybe Text
+    property name =
+        case [Text.drop 1 v | l <- ls, let (k, v) = Text.breakOn "=" l, k == name, not (Text.null v)] of
+            (x : _) -> Just (Text.strip x)
+            [] -> Nothing
 
 data Install
     = Install
