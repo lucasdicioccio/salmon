@@ -64,6 +64,7 @@ tests =
         , testGroup "check" checkTests
         , testGroup "node" nodeTests
         , testGroup "bind volumes" bindTests
+        , testGroup "keep-id" keepIdTests
         , testGroup "readiness" readinessTests
         , testGroup "generator" generatorTests
         , testGroup "instance login" loginTests
@@ -705,6 +706,87 @@ bindTests =
             [o] -> maybe (assertFailure "the directory node has no actions") pure (opAct o)
             os -> assertFailure ("not exactly one directory node: " <> show (length os))
 
+{- | 'Quadlet.containerKeepId': what is rendered, what is refused, and what
+a declaration that does not set it is.
+-}
+keepIdTests :: [TestTree]
+keepIdTests =
+    [ testCase "a declaration that does not set it has no UserNS line" $ do
+        -- "a full container, key by key" pins the text and "a declaration
+        -- that sets no stamp" its hash, help, notes and ref
+        assertEqual "" Nothing app.containerKeepId
+        assertBool "" (not ("UserNS" `Text.isInfixOf` Quadlet.renderContainer app))
+        assertBool "" (not ("userns" `Text.isInfixOf` Text.toLower (Quadlet.renderContainer rootless)))
+    , testCase "the mapping is spelled as podman spells it" $ do
+        assertEqual "" "keep-id" (Quadlet.renderKeepId Quadlet.keepId)
+        assertEqual "" "keep-id:uid=70,gid=70" (Quadlet.renderKeepId (Quadlet.keepIdAs 70 70))
+        assertEqual "" "keep-id:uid=70" (Quadlet.renderKeepId Quadlet.keepId{Quadlet.keepIdUid = Just 70})
+        assertEqual "" "keep-id:gid=70" (Quadlet.renderKeepId Quadlet.keepId{Quadlet.keepIdGid = Just 70})
+    , testCase "it is one more line of the [Container] section, and the only difference" $ do
+        let c = rootless{Quadlet.containerKeepId = Just (Quadlet.keepIdAs 70 70)}
+            line = "UserNS=keep-id:uid=70,gid=70"
+            rendered = Text.lines (Quadlet.renderContainer c)
+        assertEqual "" (Text.lines (Quadlet.renderContainer rootless)) (filter (/= line) rendered)
+        assertEqual "" 1 (length (filter (== line) rendered))
+        assertBool "the line is not in the [Container] section" $
+            "[Container]" `elem` takeWhile (/= line) rendered && "[Service]" `notElem` takeWhile (/= line) rendered
+    , testCase "setting it is a changed quadlet on the same node" $ do
+        let c = rootless{Quadlet.containerKeepId = Just Quadlet.keepId}
+        assertEqual "the mapping declared a second node" (refOf (node rootless)) (refOf (node c))
+        assertEqual "" (helpOf (node rootless)) (helpOf (node c))
+        -- so `run serve` sees the re-declaration, and the pass restarts once
+        assertBool "" (notesOf (node rootless) /= notesOf (node c))
+        assertBool "" (notesOf (node c) /= notesOf (node c{Quadlet.containerKeepId = Just (Quadlet.keepIdAs 70 70)}))
+        before <- Quadlet.quadletFingerprint rootless{Quadlet.containerEnvFile = Nothing}
+        after <- Quadlet.quadletFingerprint c{Quadlet.containerEnvFile = Nothing}
+        assertBool "the running container's label would still read as current" (before /= after)
+    , testCase "a user-scope container may keep its id, with or without :U on a bind" $ do
+        assertEqual "" [] (Quadlet.containerProblems rootless{Quadlet.containerKeepId = Just Quadlet.keepId})
+        assertEqual
+            ""
+            []
+            ( Quadlet.containerProblems
+                rootless
+                    { Quadlet.containerKeepId = Just (Quadlet.keepIdAs 70 70)
+                    , Quadlet.containerBinds = [(Quadlet.bind "/home/op/pg" "/var/lib/postgresql/data"){Quadlet.bindChown = True}]
+                    }
+            )
+    , testCase "a system-scope container is refused it, whatever else it says" $ do
+        let refused c = case Quadlet.containerProblems c of
+                [why] -> assertBool (Text.unpack why) ("keep-id" `Text.isInfixOf` why)
+                other -> assertFailure ("not exactly one problem: " <> show other)
+        refused app{Quadlet.containerKeepId = Just Quadlet.keepId}
+        refused app{Quadlet.containerKeepId = Just (Quadlet.keepIdAs 70 70)}
+        refused (Quadlet.containerJob (Podman.ContainerName "job") "app:v3" ["run"]){Quadlet.containerKeepId = Just Quadlet.keepId}
+    , testCase "an id that is not one is refused" $ do
+        let problems k = Quadlet.keepIdProblems Systemd.User k
+        assertEqual "" [] (problems (Quadlet.keepIdAs 0 0))
+        assertEqual "" [] (problems (Quadlet.keepIdAs 65535 65535))
+        assertEqual "" 1 (length (problems (Quadlet.keepIdAs (-1) 70)))
+        assertEqual "" 1 (length (problems (Quadlet.keepIdAs 70 65536)))
+        assertEqual "" 2 (length (problems (Quadlet.keepIdAs (-1) (-1))))
+    , testCase "a refused mapping writes no file and makes no directory" $ withTempDir $ \tmp -> do
+        let c =
+                app
+                    { Quadlet.containerUnitDir = tmp </> "units"
+                    , Quadlet.containerEnvFile = Nothing
+                    , Quadlet.containerKeepId = Just Quadlet.keepId
+                    , Quadlet.containerBinds = [Quadlet.bind (tmp </> "data") "/data"]
+                    }
+        [dirNode] <- pure (Quadlet.hostDirNodes c)
+        act <- maybe (assertFailure "no directory node") pure (opAct dirNode)
+        outcome <- try act.extension.up :: IO (Either SomeException ())
+        assertBool "up did not throw" (either (const True) (const False) outcome)
+        doesPathExist (tmp </> "data") >>= assertBool "a directory was made for a refused declaration" . not
+    ]
+  where
+    -- `app`, as a user would declare it for their own manager
+    rootless = app{Quadlet.containerScope = Systemd.User, Quadlet.containerUnitDir = "/home/op/.config/containers/systemd"}
+    node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+    helpOf o = fmap (\act -> act.extension.help) (opAct o)
+
 generatorPath :: FilePath
 generatorPath = "/usr/libexec/podman/quadlet"
 
@@ -754,6 +836,31 @@ generatorTests =
         assertBool said (("-v " <> hostPath <> ":/var/lib/postgresql/data:rw,U,Z") `isInfixOf` said)
         assertBool said ("-v /srv/app:/data:ro" `isInfixOf` said)
         doesPathExist hostPath >>= assertBool "the generator made the directory" . not
+    , testCase "podman's own generator takes the keep-id mapping as a user namespace" $ withGenerator $ withTempDir $ \dir -> do
+        let hostPath = dir </> "pg"
+            c =
+                app
+                    { Quadlet.containerScope = Systemd.User
+                    , Quadlet.containerUnitDir = dir
+                    , Quadlet.containerEnvFile = Nothing
+                    , Quadlet.containerKeepId = Just (Quadlet.keepIdAs 70 70)
+                    , Quadlet.containerBinds = [(Quadlet.bind hostPath "/var/lib/postgresql/data"){Quadlet.bindChown = True}]
+                    }
+        assertEqual "" [] (Quadlet.containerProblems c)
+        Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderQuadlet c
+        environment <- getEnvironment
+        (code, out, err) <-
+            readCreateProcessWithExitCode
+                (proc generatorPath ["--user", "--dryrun"]){env = Just (("QUADLET_UNIT_DIRS", dir) : environment)}
+                ""
+        let said = out <> err
+        case code of
+            ExitSuccess -> pure ()
+            ExitFailure n -> assertFailure ("the generator exited " <> show n <> ": " <> said)
+        assertBool said ("---app.service---" `isInfixOf` said)
+        assertBool said (not ("unsupported key" `isInfixOf` said))
+        assertBool said ("--userns keep-id:uid=70,gid=70" `isInfixOf` said)
+        assertBool said (("-v " <> hostPath <> ":/var/lib/postgresql/data:rw,U") `isInfixOf` said)
     ]
   where
     withGenerator :: IO () -> IO ()
