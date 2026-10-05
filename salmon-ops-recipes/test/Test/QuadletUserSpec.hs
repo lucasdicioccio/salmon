@@ -11,7 +11,9 @@ file, reloads and leaves the generated service running a container; a second
 pass is a 'Skip'; a changed image reference and a changed env file each
 restart the service (a new @InvocationID@ and a new container) and an
 unchanged one does not; @down@ stops the service, removes the file and the
-generated unit goes with it.
+generated unit goes with it; and a declaration moved onto an image that
+cannot be pulled fails at the pull, with the running container, its unit and
+its file as they were.
 
 Skipped loudly when @podman@, @podman-user-generator@, a running
 @systemd --user@ or the image is missing. The image is one that needs no
@@ -64,6 +66,8 @@ tests =
         , testCaseSteps "two changed quadlets, one reload: the one not restarted is not skipped" $ \step ->
             withUserQuadlets $ \unitDir ->
                 withFreshContainer unitDir $ \a -> withFreshContainer unitDir $ \b -> sharedReload step a b
+        , testCaseSteps "an image that cannot be pulled leaves the running container alone" $ \step ->
+            withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> unpullable step c
         ]
 
 -- | Small, long-running with no arguments, no published port, no login.
@@ -218,6 +222,49 @@ sharedReload step a0 b0 = do
     forM_ [a, b] $ \c -> do
         down <- runDownCapturing (node c)
         assertBool ("down failed: " <> show (failures down)) (null (failures down))
+
+{- | A healthy container re-declared onto an image no registry will hand
+over. Left to the service's start, the pull came after the stop and the
+restart took the container down; the pull is a node ahead of the file now,
+so the pass fails there and nothing that was running or written changes.
+
+The reference is on a port of this machine nothing listens on, so the pull
+is refused at once and reaches nothing outside.
+-}
+unpullable :: (String -> IO ()) -> Quadlet.Container -> IO ()
+unpullable step c = do
+    step "first up"
+    assertUp =<< runUpCapturing (node c)
+    before <- identity
+    written <- Text.readFile (Quadlet.quadletPath c)
+
+    step "up onto an image that cannot be pulled"
+    let moved = c{Quadlet.containerImage = "localhost:1/salmon-quadlet-test/unpullable:v1"}
+    reports <- runUpCapturing (node moved)
+    assertEqual
+        "the pull is not what failed"
+        ["podman-quadlet-image"]
+        [act.shorthand | UpDown.Failed act _ <- reports]
+    assertEqual "the quadlet node was not blocked" 1 (length [() | UpDown.Blocked act <- reports, act.shorthand == "podman-quadlet"])
+    assertEqual "the quadlet node was applied" 0 (count isEval reports)
+    assertEqual "the quadlet file was rewritten" written =<< Text.readFile (Quadlet.quadletPath c)
+    assertEqual "the service is not running any more" "active" =<< showProperty c "ActiveState"
+    assertEqual "the service was restarted, or its container replaced" before =<< identity
+    assertEqual "systemd was told the unit changed" "no" =<< showProperty c "NeedDaemonReload"
+
+    step "the previous declaration is still satisfied"
+    again <- runUpCapturing (node c)
+    assertUp again
+    assertEqual "the previous declaration was applied again" 0 (count isEval again)
+    assertEqual "the previous declaration restarted it" before =<< identity
+
+    step "down"
+    down <- runDownCapturing (node c)
+    assertBool ("down failed: " <> show (failures down)) (null (failures down))
+    stillRunning <- containerRunning c
+    assertBool "the container is still there" (not stillRunning)
+  where
+    identity = (,) <$> showProperty c "InvocationID" <*> containerId c
 
 -------------------------------------------------------------------------------
 

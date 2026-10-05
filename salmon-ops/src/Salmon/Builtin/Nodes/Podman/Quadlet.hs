@@ -34,8 +34,11 @@ A generated unit's @UnitFileState@ is @generated@ and it cannot be
 @systemctl enable@d: the @[Install]@ section is honoured by the generator
 itself, so @up@ is reload and restart, with no enable. Removing the file does
 not remove the unit until the next reload, so the file node's @down@ reloads
-after removing. And the image is pulled /by the service's start/, so a slow
-pull is a start timeout: see 'containerStartTimeout'.
+after removing. And an image that is not on the machine is pulled /by the
+service's start/ -- which, on a restart, is after the old container was
+stopped. So 'quadletContainer' pulls it first, as a node of its own that the
+file stands on ('imageNode'): an image that cannot be pulled fails there,
+with the old file, the old unit and the old container untouched.
 
 What "changed" means is "the declaration or a watched file changed". An image reference that stays
 the same while the registry moves what it points at (@:latest@) is not a
@@ -79,6 +82,11 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     containerProblems,
     interpretShow,
     interpretRunning,
+    imageNode,
+    imagePresentArgs,
+    imagePullArgs,
+    interpretImagePresent,
+    ImageUnavailable (..),
     checkContainer,
     InvalidContainer (..),
 ) where
@@ -102,7 +110,7 @@ import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
-import Salmon.Op.OpGraph (OpGraph (..))
+import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -161,7 +169,9 @@ data Container
     , containerStartTimeout :: Maybe Int
     -- ^ @TimeoutStartSec=@, in seconds. The start includes the pull when the
     -- image is not on the machine yet, and systemd's default (90s) is short
-    -- for a large image on a small machine.
+    -- for a large image on a small machine. 'quadletContainer' pulls ahead
+    -- of the start ('imageNode'), outside this timeout; a job's first run
+    -- ('quadletJob') and a start at boot after the image was removed do not.
     , containerWantedBy :: Maybe Systemd.UnitTarget
     -- ^ what starts it at boot; 'Nothing' for a service that is only ever
     -- started by hand or by salmon
@@ -367,8 +377,12 @@ itself, the 'Podman.login' whose 'Podman.AuthFile' the pull reads, whatever
 delivers the env file. They are applied before the file is written.
 
 @up@ is @daemon-reload@ then @restart@, which returns once the container is
-running (the generated service is @Type=notify@) and therefore /includes the
-pull/ the first time an image is used; a failed pull is a failed @up@. @down@
+running (the generated service is @Type=notify@). The restart stops the old
+container before the start would pull the new image, so the image is pulled
+before any of that, by 'imageNode', which the quadlet file depends on: a pull
+that fails is that node's failed @up@, the file and this node are @Blocked@,
+and whatever was running keeps running from the file it was started from.
+@down@
 stops the service, which removes the container, and the file's own @down@
 removes the file and reloads so that the generated unit goes with it. The
 image is left on the machine, and so is 'containerUnitDir': the node creates
@@ -385,7 +399,7 @@ quadletContainer r systemctl t c =
     withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
         withCommand r systemctl (Systemd.Up c.containerScope target) $ \restart ->
             withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
-                op "podman-quadlet" (deps [quadletFile r c, run t c]) $ \actions ->
+                op "podman-quadlet" (deps [quadletFile r [imageNode c `inject` run t c] c, run t c]) $ \actions ->
                     actions
                         { help = "runs " <> c.containerImage <> " as " <> target
                         , notes =
@@ -423,7 +437,7 @@ quadletJob ::
 quadletJob r systemctl t c =
     withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
         withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
-            op "podman-quadlet-job" (deps [quadletFile r c, run t c]) $ \actions ->
+            op "podman-quadlet-job" (deps [quadletFile r [] c, run t c]) $ \actions ->
                 actions
                     { help = "installs the job " <> target <> " running " <> c.containerImage <> ", without running it"
                     , notes =
@@ -468,10 +482,10 @@ reload. And the directory is 'unitDir', not 'FS.dir', whose @down@ refuses a
 non-empty directory: the generator's directory holds every quadlet on the
 machine, so tearing one down failed whenever another was there.
 -}
-quadletFile :: Reporter Systemd.Report -> Container -> Op
-quadletFile r c =
+quadletFile :: Reporter Systemd.Report -> [Op] -> Container -> Op
+quadletFile r before c =
     let file = FS.filecontents (FS.FileContents path (renderQuadlet c))
-     in file{node = fmap ownFile file.node, predecessors = deps [unitDir]}
+     in file{node = fmap ownFile file.node, predecessors = deps (unitDir : before)}
   where
     path = quadletPath c
 
@@ -503,6 +517,81 @@ quadletFile r c =
                     ""
                     (contramap (Systemd.CallSystemCtl (Systemd.DaemonReload c.containerScope)) r)
             }
+
+-------------------------------------------------------------------------------
+
+{- | The container's image, on the machine before its quadlet is written.
+
+Left to itself the image is pulled by the service's start, and on a restart
+the start comes after the stop: a reference that cannot be pulled (a typo, a
+registry that does not answer, a credential that expired) then takes a
+healthy container down and leaves the unit failing to start. With this node
+ahead of the file, such a pass fails here instead and changes nothing: the
+file still says the old image, so a reboot or a crash restarts the old
+container too.
+
+The @check@ is @podman image exists@, so an image already on the machine --
+every unchanged declaration, and a locally built or tagged image -- is a
+skip and never reaches a registry; the @up@ is @podman pull@ with the
+container's 'containerAuthFile', which throws 'ImageUnavailable' when it
+fails. Like the check on the running container, podman is run as whoever
+runs salmon, whose store is the service's in both scopes. @down@ is nothing:
+the image is left on the machine.
+
+Keyed on the reference and the auth file, and described by nothing else, so
+several containers of one image share the node. It has no dependencies of
+its own; 'quadletContainer' injects what the caller's 'Track'' declares (the
+login the pull reads).
+
+What it does not cover: a tag that moved at the registry (the image exists,
+nothing is pulled), and an image removed from the machine after the pass.
+-}
+imageNode :: Container -> Op
+imageNode c =
+    op "podman-quadlet-image" nodeps $ \actions ->
+        actions
+            { help = "pulls " <> c.containerImage <> " unless it is on the machine"
+            , notes = ["auth file: " <> Text.pack (Podman.getAuthFile a) | a <- maybeToList c.containerAuthFile]
+            , ref = mkRef "podman-quadlet-image" (c.containerImage, fmap Podman.getAuthFile c.containerAuthFile)
+            , check = do
+                (code, _out, _err) <- readCreateProcessWithExitCode (proc "podman" (imagePresentArgs c)) ""
+                pure (interpretImagePresent c.containerImage code)
+            , up = do
+                let problems = containerProblems c
+                unless (null problems) $ throwIO (InvalidContainer (quadletPath c) problems)
+                (code, _out, err) <- readCreateProcessWithExitCode (proc "podman" (imagePullArgs c)) ""
+                case code of
+                    ExitSuccess -> pure ()
+                    ExitFailure n -> throwIO (ImageUnavailable c.containerImage n (Text.strip (Text.pack err)))
+            }
+
+-- | @podman image exists IMAGE@: exits 0 when the local store has it, 1 when not.
+imagePresentArgs :: Container -> [String]
+imagePresentArgs c = ["image", "exists", Text.unpack c.containerImage]
+
+-- | @podman pull [--authfile FILE] IMAGE@, the credentials being the ones the start would use.
+imagePullArgs :: Container -> [String]
+imagePullArgs c =
+    mconcat
+        [ ["pull", "--quiet"]
+        , ["--authfile=" <> Podman.getAuthFile a | a <- maybeToList c.containerAuthFile]
+        , [Text.unpack c.containerImage]
+        ]
+
+{- | The verdict on @podman image exists@'s exit code. Anything but 0 and 1
+is podman failing to answer (125, a broken store), which is 'Unknown' and
+not "missing": under @serve@ that must not read as an effect that went away.
+-}
+interpretImagePresent :: Text -> ExitCode -> CheckResult
+interpretImagePresent _ ExitSuccess = Success
+interpretImagePresent image (ExitFailure 1) = Failure ("the image " <> image <> " is not on the machine")
+interpretImagePresent _ (ExitFailure _) = Unknown
+
+-- | A pull that failed: the reference, podman's exit code and what it said.
+data ImageUnavailable = ImageUnavailable !Text !Int !Text
+    deriving (Show)
+
+instance Exception ImageUnavailable
 
 {- | 'Systemd.interpretShow' for a generated unit: @generated@ is the only
 install state such a unit ever has. Everything else -- a changed source file,
