@@ -16,7 +16,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Char (isAsciiLower, isDigit)
-import Data.List (isInfixOf, isPrefixOf, isSubsequenceOf, nub, tails)
+import Data.List (isInfixOf, isPrefixOf, isSubsequenceOf, nub, sort, tails)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Foldable (toList)
@@ -834,6 +834,49 @@ lbTests =
         mapM_
             (\w -> assertBool (w <> "\n" <> problems) (w `isInfixOf` problems))
             ["declared twice: slow", "undeclared backend service: nope", "names no host", "names no path", "two rules: app.example.org", "cannot share a proxy", "c names no domain", "must be positive: 0"]
+    , testCase "a domain-set certificate is named after its set: order and case do not move it, one more name does" $ do
+        let name ds = LoadBalancing.certificateResource (LoadBalancing.DomainSetCertificate "web-cert" ds)
+        assertEqual "" (name ["app.example.org", "api.example.org"]) (name ["API.example.org", "app.example.org", "app.example.org"])
+        assertBool "" (name ["app.example.org", "api.example.org"] /= name ["app.example.org", "api.example.org", "www.example.org"])
+        assertEqual "" ("web-cert-" <> LoadBalancing.domainSetTag ["app.example.org"]) (name ["app.example.org"])
+        assertEqual "eight hex digits" 8 (Text.length (LoadBalancing.domainSetTag ["app.example.org"]))
+        assertEqual "a managed certificate keeps its declared name" "web-cert" (LoadBalancing.certificateResource (LoadBalancing.ManagedCertificate "web-cert" ["app.example.org"]))
+    , testCase "a domain-set certificate's authorizations are named after its base, so a changed set reuses them" $ do
+        assertEqual "" (LoadBalancing.dnsAuthorizations full) (LoadBalancing.dnsAuthorizations rotating)
+        assertEqual
+            ""
+            (LoadBalancing.dnsAuthorizations rotating <> [("www.example.org", "web-cert-www-example-org")])
+            (LoadBalancing.dnsAuthorizations rotated)
+    , testCase "a changed domain set is another certificate node, the same proxy node and one cleanup node per base" $ do
+        let ids a = map LoadBalancing.partId (LoadBalancing.lbParts a)
+        assertBool "" (LoadBalancing.CertificatePart certV1 `elem` ids rotating)
+        assertBool "" (LoadBalancing.CertificatePart certV2 `elem` ids rotated)
+        assertBool "" (LoadBalancing.CertificatePart certV1 `notElem` ids rotated)
+        assertBool "" (LoadBalancing.SupersededCertificatesPart "web-cert" `elem` ids rotated)
+        assertBool "none for a certificate under a fixed name" (LoadBalancing.SupersededCertificatesPart "web-cert" `notElem` ids full)
+        assertEqual "" [LoadBalancing.HttpsProxyPart, LoadBalancing.CertificatePart certV2] (depsOf rotated (LoadBalancing.SupersededCertificatesPart "web-cert"))
+        assertBool "" (LoadBalancing.CertificatePart certV2 `elem` depsOf rotated LoadBalancing.HttpsProxyPart)
+    , testCase "a problem line is a Failure naming it" $
+        case LoadBalancing.interpretLbCheck ExitSuccess "CERT web-cert ACTIVE\nPROBLEM certificate web-cert expired 2026-01-01T00:00:00Z\n" of
+            Failure t -> assertBool (Text.unpack t) ("certificate web-cert expired" `isInfixOf` Text.unpack t)
+            other -> assertBool (show other) False
+    , testCase "one name for two certificates is a problem" $ do
+        let bad = full{LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["a.example.org"], LoadBalancing.DomainSetCertificate "web-cert" ["b.example.org"]]}
+        let problems = unlines (map Text.unpack (LoadBalancing.albProblems bad))
+        assertBool problems ("certificate declared twice: web-cert" `isInfixOf` problems)
+        assertEqual "" [] (LoadBalancing.albProblems rotated)
+    , testCase "the HTTPS proxy's URL map is named at creation only" $ do
+        let ups = unlines [Text.unpack l | part <- LoadBalancing.lbParts rotated, part.partId == LoadBalancing.HttpsProxyPart, l <- part.partUp]
+        assertEqual ups 1 (length [() | l <- lines ups, "--url-map=" `isInfixOf` l])
+        assertBool ups (not (any (\l -> "update" `isInfixOf` l && "--url-map" `isInfixOf` l) (lines ups)))
+    , testCase "rendered scripts with a domain-set certificate parse as bash" $ do
+        let scripts = [s' | cmd <- [LoadBalancing.LbCreate rotated, LoadBalancing.LbCheck rotated, LoadBalancing.LbDelete rotated], (_ : s' : _) <- [processArgs (prepare LoadBalancing.loadBalancingCommand cmd)]]
+        mapM_
+            ( \sc -> do
+                (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", sc] ""
+                assertEqual err ExitSuccess code
+            )
+            scripts
     , testCase "a group's named ports are set once, as the union over the services naming it" $ do
         let sc = createScript shared
         let sets = [l | l <- lines sc, "set-named-ports" `isInfixOf` l]
@@ -1001,6 +1044,147 @@ lbTests =
                         assertBool err ("certificate own does not exist" `isInfixOf` err)
                     )
                     results
+        , testCase "a changed domain set: the proxy keeps the old certificate until the new one is ACTIVE, then moves, then the old one is deleted" $
+            withFakeGcloud $ \run mutations -> do
+                (code, _, err) <- run (createScript rotating)
+                assertEqual err ExitSuccess code
+                first <- mutations
+                -- the new certificate is created and is not issued yet
+                (code1, _, err1) <- run ("export FAKE_GCLOUD_NEW_CERT_STATE=PROVISIONING\n" <> createScript rotated)
+                assertBool err1 (code1 /= ExitSuccess)
+                assertBool err1 (("certificate " <> Text.unpack certV2 <> " is not ACTIVE yet: PROVISIONING") `isInfixOf` err1)
+                waiting <- drop (length first) <$> mutations
+                assertBool (unlines waiting) (("certificates create " <> Text.unpack certV2) `elem` waiting)
+                -- only the name the old set did not cover gets an authorization
+                assertEqual (unlines waiting) ["dns-authorizations create web-cert-www-example-org"] (filter ("dns-authorizations" `isInfixOf`) waiting)
+                assertBool (unlines waiting) (not (any (\l -> "target-https-proxies" `isInfixOf` l || " delete " `isInfixOf` l) waiting))
+                (_, served, _) <- run "gcloud compute target-https-proxies describe web-https-proxy --format='value(sslCertificates)'"
+                assertBool served (Text.unpack certV1 `isInfixOf` served)
+                -- which the proxy's check reads as waiting, not as something up would fix
+                proxyBefore <- partVerdict run rotated LoadBalancing.HttpsProxyPart
+                assertEqual "" [Unknown] proxyBefore
+                -- issued: the check wants the move, and up makes it, then cleans up
+                _ <- run ("echo ACTIVE > \"$FAKE_GCLOUD_STATE\"/certificates." <> Text.unpack certV2 <> ".state")
+                proxyReady <- partVerdict run rotated LoadBalancing.HttpsProxyPart
+                assertBool (show proxyReady) (all isFailure proxyReady)
+                before <- length <$> mutations
+                (code2, _, err2) <- run (createScript rotated)
+                assertEqual err2 ExitSuccess code2
+                moved <- drop before <$> mutations
+                assertEqual
+                    (unlines moved)
+                    ["target-https-proxies update web-https-proxy", "certificates delete " <> Text.unpack certV1]
+                    (filter (\l -> "target-https-proxies" `isInfixOf` l || "certificates" `isInfixOf` l) moved)
+                (code3, out3, err3) <- run (Text.unpack (LoadBalancing.renderLbCheckScript rotated))
+                assertEqual (out3 <> err3) Success (LoadBalancing.interpretLbCheck code3 (Text.pack out3))
+                -- and nothing more the next time
+                before' <- length <$> mutations
+                _ <- run (createScript rotated)
+                again <- drop before' <$> mutations
+                assertBool (unlines again) (not (any (\l -> "target-https-proxies" `isInfixOf` l || "certificates" `isInfixOf` l) again))
+                -- down leaves nothing
+                (code4, _, err4) <- run (deleteScript rotated)
+                assertEqual err4 ExitSuccess code4
+                (_, left, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" left
+        , testCase "a certificate under a fixed name is superseded by the domain-set one of that base" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- run (createScript full)
+                before <- length <$> mutations
+                (code, _, err) <- run (createScript rotated)
+                assertEqual err ExitSuccess code
+                moved <- drop before <$> mutations
+                assertEqual
+                    (unlines moved)
+                    ["certificates create " <> Text.unpack certV2, "target-https-proxies update web-https-proxy", "certificates delete web-cert"]
+                    (filter (\l -> "target-https-proxies" `isInfixOf` l || "certificates" `isInfixOf` l) moved)
+        , testCase "a certificate under a fixed name whose domains changed is refused, by its up and by its check" $
+            withFakeGcloud $ \run _ -> do
+                _ <- run (createScript full)
+                let more = full{LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["app.example.org", "api.example.org", "www.example.org"]]}
+                results <- mapM (run . Text.unpack . LoadBalancing.renderPartUpScript more) [p | p <- LoadBalancing.lbParts more, p.partId == LoadBalancing.CertificatePart "web-cert"]
+                assertEqual "" 1 (length results)
+                mapM_
+                    ( \(code, _, err) -> do
+                        assertBool err (code /= ExitSuccess)
+                        assertBool err ("covers other names than the declared ones" `isInfixOf` err)
+                        assertBool err ("DomainSetCertificate" `isInfixOf` err)
+                    )
+                    results
+                verdicts <- partVerdict run more (LoadBalancing.CertificatePart "web-cert")
+                case verdicts of
+                    [Failure t] -> assertBool (Text.unpack t) ("covers other names" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                -- the same names in another order and case are the same certificate
+                let same = full{LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["API.example.org", "app.example.org"]]}
+                sameVerdicts <- partVerdict run same (LoadBalancing.CertificatePart "web-cert")
+                assertEqual "" [Success] sameVerdicts
+        , testCase "a certificate the proxy still serves is not deleted: not by its own down, not as superseded" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- run (createScript rotating)
+                results <- mapM (run . Text.unpack . LoadBalancing.renderPartDownScript rotating) [p | p <- LoadBalancing.lbParts rotating, p.partId == LoadBalancing.CertificatePart certV1]
+                mapM_
+                    ( \(code, _, err) -> do
+                        assertBool err (code /= ExitSuccess)
+                        assertBool err ("still served by web-https-proxy" `isInfixOf` err)
+                    )
+                    results
+                -- the cleanup of the next declaration, run before the proxy has moved
+                _ <- run "gcloud certificate-manager certificates create web-cert-00000000 --domains=x.example.org"
+                swept <- mapM (run . Text.unpack . LoadBalancing.renderPartUpScript rotated) [p | p <- LoadBalancing.lbParts rotated, p.partId == LoadBalancing.SupersededCertificatesPart "web-cert"]
+                assertEqual "" 1 (length swept)
+                mapM_ (\(code, _, err) -> assertBool err (code /= ExitSuccess && "still served by" `isInfixOf` err)) swept
+                made <- mutations
+                assertBool (unlines made) (("certificates delete " <> Text.unpack certV1) `notElem` made)
+        , testCase "the cleanup removes only its base's certificates, and its check names what is left" $
+            withFakeGcloud $ \run _ -> do
+                _ <- run (createScript rotated)
+                mapM_
+                    (\n -> run ("gcloud certificate-manager certificates create " <> n <> " --domains=x.example.org"))
+                    ["web-cert-0123abcd", "web-cert", "web-cert-other", "web-certificate", "other-cert-0123abcd", "web-cert-0123abcdef"]
+                verdicts <- partVerdict run rotated (LoadBalancing.SupersededCertificatesPart "web-cert")
+                case verdicts of
+                    [Failure t] -> assertBool (Text.unpack t) ("superseded certificate web-cert-0123abcd" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                swept <- mapM (run . Text.unpack . LoadBalancing.renderPartUpScript rotated) [p | p <- LoadBalancing.lbParts rotated, p.partId == LoadBalancing.SupersededCertificatesPart "web-cert"]
+                mapM_ (\(code, _, err) -> assertEqual err ExitSuccess code) swept
+                (_, out, _) <- run "gcloud certificate-manager certificates list --format='value(name)' | sed 's|.*/||' | sort"
+                assertEqual "" (sort [Text.unpack certV2, "web-cert-other", "web-certificate", "other-cert-0123abcd", "web-cert-0123abcdef"]) (lines out)
+                after <- partVerdict run rotated (LoadBalancing.SupersededCertificatesPart "web-cert")
+                assertEqual "" [Success] after
+        , testCase "an ACTIVE certificate whose renewal failed, or that expired, is a Failure" $
+            withFakeGcloud $ \run _ -> do
+                _ <- run (createScript rotated)
+                healthy <- partVerdict run rotated (LoadBalancing.CertificatePart certV2)
+                assertEqual "" [Success] healthy
+                let stateFile suffix = "\"$FAKE_GCLOUD_STATE\"/certificates." <> Text.unpack certV2 <> suffix
+                _ <- run ("echo 'AUTHORIZED;FAILED' > " <> stateFile ".attempts")
+                failed <- partVerdict run rotated (LoadBalancing.CertificatePart certV2)
+                case failed of
+                    [Failure t] -> assertBool (Text.unpack t) ("authorization attempt FAILED" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                _ <- run ("rm " <> stateFile ".attempts; echo 2001-01-01T00:00:00Z > " <> stateFile ".expire")
+                expired <- partVerdict run rotated (LoadBalancing.CertificatePart certV2)
+                case expired of
+                    [Failure t] -> assertBool (Text.unpack t) ("expired 2001-01-01T00:00:00Z" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                _ <- run ("echo 2999-01-01T00:00:00Z > " <> stateFile ".expire")
+                later <- partVerdict run rotated (LoadBalancing.CertificatePart certV2)
+                assertEqual "" [Success] later
+        , testCase "a compute certificate swapped for another is an update of the proxy, with nothing to wait for" $
+            withFakeGcloud $ \run mutations -> do
+                let own n = full{LoadBalancing.albCertificates = [LoadBalancing.ComputeCertificate n]}
+                _ <- run "gcloud compute ssl-certificates create own-1; gcloud compute ssl-certificates create own-2"
+                _ <- run (createScript (own "own-1"))
+                stale <- partVerdict run (own "own-2") LoadBalancing.HttpsProxyPart
+                assertBool (show stale) (all isFailure stale)
+                before <- length <$> mutations
+                (code, _, err) <- run (createScript (own "own-2"))
+                assertEqual err ExitSuccess code
+                moved <- drop before <$> mutations
+                assertEqual (unlines moved) ["target-https-proxies update web-https-proxy"] (filter (\l -> "target-https-proxies" `isInfixOf` l || "certificates" `isInfixOf` l) moved)
+                fresh <- partVerdict run (own "own-2") LoadBalancing.HttpsProxyPart
+                assertEqual "" [Success] fresh
         , testCase "a plain balancer goes up, checks and comes down the same way" $
             withFakeGcloud $ \run _ -> do
                 (code, _, err) <- run (createScript alb)
@@ -1213,6 +1397,18 @@ lbTests =
                 ]
             , LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["app.example.org", "api.example.org"]]
             }
+    -- the same balancer with its certificate named after its domain set, before and after one more host
+    rotating = full{LoadBalancing.albCertificates = [LoadBalancing.DomainSetCertificate "web-cert" ["app.example.org", "api.example.org"]]}
+    rotated = full{LoadBalancing.albCertificates = [LoadBalancing.DomainSetCertificate "web-cert" ["app.example.org", "api.example.org", "www.example.org"]]}
+    certV1 = "web-cert-" <> LoadBalancing.domainSetTag ["app.example.org", "api.example.org"]
+    certV2 = "web-cert-" <> LoadBalancing.domainSetTag ["app.example.org", "api.example.org", "www.example.org"]
+    partVerdict run a part =
+        mapM
+            ( \spec -> do
+                (code, out, _) <- run (Text.unpack (LoadBalancing.renderPartCheckScript a spec))
+                pure (LoadBalancing.interpretLbCheck code (Text.pack out))
+            )
+            [spec | spec <- LoadBalancing.lbParts a, spec.partId == part]
     isBash p = case cmdspec p of
         RawCommand "bash" ("-c" : _) -> True
         _ -> False
@@ -1251,7 +1447,7 @@ fakeGcloud =
         , "S=\"$FAKE_GCLOUD_STATE\""
         , "coll=\"$2\"; verb=\"$3\"; name=\"$4\""
         , "if [ \"$verb\" = create ] && [ \"$name\" = tcp ]; then name=\"$5\"; fi"
-        , "format=''; group=''; timeout=''; portname=''; namedports=''"
+        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''"
         , "for a in \"$@\"; do case \"$a\" in"
         , "  --format=*) format=\"${a#--format=}\";;"
         , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
@@ -1259,9 +1455,14 @@ fakeGcloud =
         , "  --timeout=*) timeout=\"${a#--timeout=}\";;"
         , "  --port-name=*) portname=\"${a#--port-name=}\";;"
         , "  --named-ports=*) namedports=\"${a#--named-ports=}\";;"
+        , "  --domains=*) domains=\"${a#--domains=}\";;"
+        , "  --certificate-manager-certificates=*) certs=\"${a#--certificate-manager-certificates=}\";;"
+        , "  --ssl-certificates=*) certs=\"${a#--ssl-certificates=}\";;"
         , "esac; done"
         , "f=\"$S/$coll.$name\""
         , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
+        , -- a proxy lists its certificates by path, as (it is assumed) the real one does
+          "served() { for p in \"$S\"/target-https-proxies.*.certs; do [ -e \"$p\" ] && tr ',' '\\n' < \"$p\"; done; true; }"
         , "case \"$verb\" in"
         , "  describe)"
         , "    [ \"$coll\" = instance-groups ] && exit 0"
@@ -1270,20 +1471,30 @@ fakeGcloud =
         , "      'value(backends[].group)') paste -sd';' \"$f.backends\" 2>/dev/null || true;;"
         , "      'value(timeoutSec)') cat \"$f.timeout\" 2>/dev/null || echo 30;;"
         , "      'value(portName)') cat \"$f.portname\" 2>/dev/null || echo http;;"
-        , "      'value(managed.state)') echo ACTIVE;;"
+        , "      'value(managed.state)') cat \"$f.state\" 2>/dev/null || echo ACTIVE;;"
+        , "      'value(managed.domains)') tr ',' ';' < \"$f.domains\" 2>/dev/null || true;;"
+        , "      'value(managed.authorizationAttemptInfo[].state)') cat \"$f.attempts\" 2>/dev/null || echo AUTHORIZED;;"
+        , "      'value(expireTime)') cat \"$f.expire\" 2>/dev/null || true;;"
+        , "      'value(sslCertificates)') tr ',' '\\n' < \"$f.certs\" 2>/dev/null | sed 's|^|//certificatemanager.googleapis.com/projects/p/locations/r/certificates/|' | paste -sd';' || true;;"
         , "      'value(hostRules[].hosts)') grep -o '\"hosts\":\\[[^]]*\\]' \"$f\" | sed -e 's/\"hosts\"://' -e 's/[]\\[\"]//g' | paste -sd';' || true;;"
         , "      'value(IPAddress)') echo 203.0.113.7;;"
         , "    esac;;"
-        , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\"; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi;;"
+        , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\"; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi"
+        , "    if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi"
+        , -- a new certificate is not issued at once, when the test says so
+          "    if [ -n \"$domains\" ]; then echo \"$domains\" > \"$f.domains\"; echo \"${FAKE_GCLOUD_NEW_CERT_STATE:-ACTIVE}\" > \"$f.state\"; fi;;"
+        , "  list) for c in \"$S\"/\"$coll\".*; do n=\"${c##*/}\"; n=\"${n#\"$coll\".}\"; case \"$n\" in *.*|'*') ;; *) echo \"projects/p/locations/r/$coll/$n\";; esac; done;;"
         , "  import) mutate; cat > \"$f\";;"
-        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi;;"
+        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi; if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi;;"
         , "  add-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" 2>/dev/null && { echo 'already a backend' >&2; exit 1; }; mutate; echo \"$group\" >> \"$f.backends\";;"
         , "  remove-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" || { echo 'not a backend' >&2; exit 1; }; mutate; { grep -vxF \"$group\" \"$f.backends\" || true; } > \"$f.backends.new\"; mv \"$f.backends.new\" \"$f.backends\";;"
         , -- like the real one, it replaces the group's whole set
           "  set-named-ports) mutate; printf '%s\\n' \"$namedports\" | tr ',' '\\n' | tr ':' '\\t' > \"$FAKE_GCLOUD_LOG.ports.$name\";;"
         , "  get-named-ports) cat \"$FAKE_GCLOUD_LOG.ports.$name\" 2>/dev/null || true;;"
         , "  get-health) echo 'HEALTHY;HEALTHY';;"
-        , "  delete) [ -e \"$f\" ] || exit 1; mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\";;"
+        , "  delete) [ -e \"$f\" ] || exit 1"
+        , "    if [ \"$coll\" = certificates ] && served | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
+        , "    mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\";;"
         , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
         , "esac"
         ]

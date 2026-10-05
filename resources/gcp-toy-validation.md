@@ -560,6 +560,25 @@ leftover.
 - **No HTTP-to-HTTPS redirect, no client-facing TLS policy, no self-managed
   certificate upload.** `:80` serves the same map as `:443`;
   `ComputeCertificate` names a regional certificate somebody else made.
+- **Replacing a certificate on a live balancer has never met a real
+  project.** A `DomainSetCertificate` is named after its domain set, so a
+  changed set is a new certificate beside the old one; the HTTPS proxy is
+  moved to it (`target-https-proxies update`) only once it is `ACTIVE`, and
+  the superseded one is deleted after. All of that is exercised against the
+  stand-in `gcloud` only, and the toy still declares a `ManagedCertificate`
+  (fixed name, one host). What the scripts assume and nobody recorded: that
+  a regional proxy lists Certificate Manager certificates under
+  `sslCertificates` (by path, last segment the name); that `update` takes
+  `--certificate-manager-certificates`; that `value(managed.domains)`,
+  `value(managed.authorizationAttemptInfo[].state)` and `value(expireTime)`
+  read as they are parsed; that `certificates list --format='value(name)'`
+  ends each line with the certificate's name; that one DNS authorization can
+  back two certificates at once (the swap relies on it for the names both
+  sets cover); and that GCP refuses to delete a certificate a proxy still
+  serves (the scripts look first, and do not rely on it). If
+  `managed.domains` reads differently from what is assumed, a
+  `ManagedCertificate` whose list never changed would be reported as
+  covering other names: that is the first thing to look at on a real run.
 - **The `--network`-carrying form of the forwarding rule** is still
   rendered-but-unrun.
 - **Two credentials; only the one that acts is pinned.** `gcp-adc` validates

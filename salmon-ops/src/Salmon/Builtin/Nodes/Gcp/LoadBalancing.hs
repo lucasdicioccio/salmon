@@ -10,6 +10,8 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     HostRule (..),
     PathRule (..),
     Certificate (..),
+    certificateResource,
+    domainSetTag,
     ApplicationLoadBalancer (..),
     httpLoadBalancer,
     applicationLoadBalancer,
@@ -42,10 +44,12 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
 
 import Control.Exception (Exception, throwIO)
 import Control.Monad (unless)
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Function (on)
-import Data.List (nub, nubBy, (\\))
+import Data.List (nub, nubBy, sort, (\\))
 import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -53,6 +57,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextErr
 import GHC.IO.Exception (ExitCode (..))
+import Numeric (showHex)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (proc)
 
@@ -161,14 +166,74 @@ domain and the certificate over them; publishing the records is the
 caller's (see 'readDnsAuthorizationRecord'), and until they resolve the
 certificate stays @PROVISIONING@ and the node's check says 'Unknown'.
 
+A Certificate Manager certificate's names are __immutable__: nothing edits
+the domain list of one that exists. So a 'ManagedCertificate', whose
+resource is named exactly as declared, cannot follow a changed list -- its
+node says so (a @PROBLEM@ line in the check, a failing @up@) instead of
+reporting a certificate that silently covers other names than the declared
+ones.
+
+'DomainSetCertificate' is the one that can change on a live balancer. Its
+resource is named after its /domain set/ (@\<base\>-\<tag\>@, see
+'certificateResource'), so a changed set is a new certificate beside the one
+in service: it is created, the HTTPS proxy keeps the old one until the new
+one is @ACTIVE@ and is only then updated to it, and the superseded
+certificates of that base are deleted after (see 'lbParts'). Its DNS
+authorizations are named after the base and the domain, not the set, so the
+names both sets cover reuse the authorization (and the published record)
+they already have.
+
 'ComputeCertificate' names a regional @compute ssl-certificates@ resource
-somebody else made (a self-managed one). The two kinds do not mix on one
-proxy.
+somebody else made (a self-managed one). It does not mix with the other two
+kinds on one proxy.
 -}
 data Certificate
     = ManagedCertificate Text [Text]
+    | -- | a base name and the domains; the resource is 'certificateResource'
+      DomainSetCertificate Text [Text]
     | ComputeCertificate Text
     deriving (Eq, Show)
+
+{- | The name of the resource a certificate is: the declared name, except for
+a 'DomainSetCertificate', which is its base name and 'domainSetTag' of its
+domains.
+-}
+certificateResource :: Certificate -> Text
+certificateResource = \case
+    ManagedCertificate n _ -> n
+    DomainSetCertificate base ds -> base <> "-" <> domainSetTag ds
+    ComputeCertificate n -> n
+
+{- | Eight hex digits naming a set of domains: of the SHA-256 of the names,
+lower-cased, sorted and without duplicates. Order and case do not make a new
+certificate; one more name, or one fewer, does.
+-}
+domainSetTag :: [Text] -> Text
+domainSetTag ds =
+    Text.pack
+        . concatMap hex
+        . ByteString.unpack
+        . ByteString.take 4
+        . SHA256.hash
+        . Text.encodeUtf8
+        $ Text.intercalate "," (normalDomains ds)
+  where
+    hex w = let h = showHex w "" in if length h < 2 then '0' : h else h
+
+-- | A domain list as a set: what two certificates are compared by.
+normalDomains :: [Text] -> [Text]
+normalDomains = sort . nub . map Text.toLower
+
+-- | The Certificate Manager certificates of a declaration: (resource, authorization base, domains).
+managedCertificates :: ApplicationLoadBalancer -> [(Text, Text, [Text])]
+managedCertificates alb =
+    concatMap
+        ( \c -> case c of
+            ManagedCertificate n ds -> [(n, n, ds)]
+            DomainSetCertificate base ds -> [(certificateResource c, base, ds)]
+            ComputeCertificate _ -> []
+        )
+        alb.albCertificates
 
 -- | A high-level HTTP(S) load balancer.
 data ApplicationLoadBalancer = ApplicationLoadBalancer
@@ -238,11 +303,16 @@ albProblems alb =
            | h <- nub (hosts \\ nub hosts)
            ]
         <> [ "Certificate Manager and compute certificates cannot share a proxy"
-           | not (null [() | ManagedCertificate{} <- alb.albCertificates])
+           | not (null (managedCertificates alb))
            , not (null [() | ComputeCertificate{} <- alb.albCertificates])
            ]
-        <> [ "managed certificate " <> n <> " names no domain"
-           | ManagedCertificate n [] <- alb.albCertificates
+        <> [ "managed certificate " <> base <> " names no domain"
+           | (_, base, []) <- managedCertificates alb
+           ]
+        -- a base is a lineage the balancer deletes superseded certificates
+        -- of, and names its authorizations after: one declaration each
+        <> [ "certificate declared twice: " <> n
+           | n <- nub (certNames \\ nub certNames)
            ]
         <> [ "instance group " <> ig <> ": named port " <> n <> " declared on several ports: " <> Text.unwords (map (Text.pack . show) ps)
            | ((ig, _), named) <- groupNamedPorts alb
@@ -256,6 +326,9 @@ albProblems alb =
            ]
   where
     names = map backendServiceName alb.albServices
+    certNames =
+        [base | (_, base, _) <- managedCertificates alb]
+            <> [n | ComputeCertificate n <- alb.albCertificates]
     hosts = concatMap hostRuleHosts alb.albHostRules
     refs =
         concat
@@ -372,6 +445,7 @@ partKind = \case
     UrlMapPart -> "gcp-lb-url-map"
     DnsAuthorizationPart _ -> "gcp-lb-dns-authorization"
     CertificatePart _ -> "gcp-lb-certificate"
+    SupersededCertificatesPart _ -> "gcp-lb-superseded-certificates"
     AddressPart -> "gcp-lb-address"
     HttpProxyPart -> "gcp-lb-http-proxy"
     HttpsProxyPart -> "gcp-lb-https-proxy"
@@ -396,6 +470,7 @@ partRef alb part = mkRef (partKind part) (alb.albProject.projectId, alb.albRegio
         BackendPart svc g -> [svc, g]
         DnsAuthorizationPart n -> [n]
         CertificatePart n -> [n]
+        SupersededCertificatesPart base -> [base]
         _ -> [alb.albName]
 
 {- | What a re-declaration can be seen to change: the hosts served, the
@@ -419,6 +494,7 @@ albNotes alb =
   where
     certNote = \case
         ManagedCertificate n ds -> "managed certificate " <> n <> " for " <> Text.unwords ds
+        c@(DomainSetCertificate _ ds) -> "managed certificate " <> certificateResource c <> " for " <> Text.unwords ds
         ComputeCertificate n -> "certificate " <> n
 
 {- | The address GCP gave the balancer's forwarding rule. 'Nothing' when the
@@ -448,13 +524,14 @@ data DnsAuthorizationRecord = DnsAuthorizationRecord
 
 {- | The DNS authorizations a balancer's managed certificates need, as
 @(domain, authorization name)@. The name is derived from the certificate's
-and the domain's, so the node that creates one and the reader that asks for
-its record compute the same thing.
+(a 'DomainSetCertificate''s base, so it does not move with the set) and the
+domain's, so the node that creates one and the reader that asks for its
+record compute the same thing.
 -}
 dnsAuthorizations :: ApplicationLoadBalancer -> [(Text, Text)]
 dnsAuthorizations alb =
-    [ (d, authorizationName n d)
-    | ManagedCertificate n ds <- alb.albCertificates
+    [ (d, authorizationName base d)
+    | (_, base, ds) <- managedCertificates alb
     , d <- ds
     ]
 
@@ -498,10 +575,12 @@ interpretLbDescribe (ExitFailure n) = Failure ("load balancer not found (exit " 
 The script prints @MISSING <what>@ for each absent sub-resource, unattached
 backend, unrouted host, wrong timeout, wrong port name or named port absent
 from its instance group, @HEALTH <service> <state>@ per
-backend instance of an instance-group backend, and @CERT <name> <state>@ per
-managed certificate. A missing piece is a 'Failure' (the node's @up@ is
-idempotent and will create it), and so is a certificate GCP reports
-@FAILED@. Backends that are not (yet) @HEALTHY@ are 'Unknown': a freshly
+backend instance of an instance-group backend, @CERT <name> <state>@ per
+managed certificate, and @PROBLEM <what>@ for what is there and wrong in a
+way no create fixes (a certificate covering other names than the declared
+ones, one whose renewal failed, an expired one). A missing piece is a
+'Failure' (the node's @up@ is idempotent and will create it), and so is a
+problem and a certificate GCP reports @FAILED@. Backends that are not (yet) @HEALTHY@ are 'Unknown': a freshly
 brought-up balancer reports @UNHEALTHY@ for roughly two minutes, and
 re-running @up@ would not shorten that; a certificate still @PROVISIONING@
 is 'Unknown' for the same reason. A Cloud Run (NEG) backend has no health to
@@ -511,12 +590,14 @@ interpretLbCheck :: ExitCode -> Text -> CheckResult
 interpretLbCheck (ExitFailure n) _ = Failure ("load balancer check failed (exit " <> Text.pack (show n) <> ")")
 interpretLbCheck ExitSuccess out
     | not (null missing) = Failure ("load balancer incomplete: missing " <> Text.intercalate ", " missing)
+    | not (null problems) = Failure ("load balancer: " <> Text.intercalate "; " problems)
     | not (null failedCerts) = Failure ("certificate provisioning failed: " <> Text.intercalate ", " failedCerts)
     | not (null unhealthy) || not (null pendingCerts) = Unknown
     | otherwise = Success
   where
     ls = map Text.words (Text.lines out)
     missing = [Text.unwords rest | ("MISSING" : rest) <- ls]
+    problems = [Text.unwords rest | ("PROBLEM" : rest) <- ls]
     unhealthy = [st | ["HEALTH", _, st] <- ls, st /= "HEALTHY"]
     failedCerts = [n | ["CERT", n, "FAILED"] <- ls]
     pendingCerts = [n | ["CERT", n, st] <- ls, st /= "ACTIVE", st /= "FAILED"]
@@ -731,7 +812,11 @@ data Part
     | UrlMapPart
     | -- | by authorization name, see 'dnsAuthorizations'
       DnsAuthorizationPart Text
-    | CertificatePart Text
+    | -- | by resource name, see 'certificateResource'
+      CertificatePart Text
+    | -- | by a 'DomainSetCertificate''s base name: the deletion of the
+      -- certificates of that base the proxy no longer serves
+      SupersededCertificatesPart Text
     | AddressPart
     | HttpProxyPart
     | HttpsProxyPart
@@ -793,6 +878,27 @@ this balancer declares are overwritten. Nothing removes a name: one this
 balancer stopped declaring stays on the group, where it does no harm, and so
 does everything on @down@.
 
+The HTTPS proxy's certificate list is the one declaration that is neither
+created once nor set on every @up@: it is compared, and updated
+(@target-https-proxies update@) only when it differs /and/ every declared
+managed certificate is @ACTIVE@. Until then the proxy's @up@ fails naming the
+certificate that is not, the proxy serves what it served, and its check reads
+'Unknown' (the certificate's state) rather than a 'Failure' no @up@ would
+fix. That, with a 'DomainSetCertificate' being a new resource whenever its
+domain set changes, is how a certificate is replaced on a live balancer:
+create beside, wait, move the proxy, and only then delete -- the last by a
+node of its own per base ('SupersededCertificatesPart'), which depends on the
+proxy, lists the base's certificates, and deletes those that are not the
+declared one and that the proxy does not serve. A managed certificate's own
+@down@ refuses the same way while the proxy still lists it, so a retired
+declaration's teardown cannot pull a certificate out from under a proxy that
+has not moved yet. The proxy's URL map is named at creation and never set
+again.
+
+Not done: a superseded certificate still present at teardown (a swap that
+never completed) is left behind, as is the DNS authorization of a name a set
+no longer covers.
+
 On the way down an attachment is /detached/ (@remove-backend@) rather than
 left to the backend service's deletion, because a NEG still attached cannot
 be deleted and the NEG's node knows nothing of the service's. An instance
@@ -816,6 +922,7 @@ lbParts alb =
             <> [addressPart | https]
             <> [httpProxyPart]
             <> [httpsProxyPart | https]
+            <> [supersededPart base (certificateResource c) | c@(DomainSetCertificate base _) <- alb.albCertificates]
             <> [forwardingRulePart]
             <> [httpsForwardingRulePart | https]
   where
@@ -1141,53 +1248,159 @@ lbParts alb =
                 , partDown = []
                 }
             ]
-        ManagedCertificate n ds ->
-            [ PartSpec
-                { partId = DnsAuthorizationPart authz
-                , partDeps = []
-                , partHelp = Text.unwords ["DNS authorization", authz, "for", d]
-                , partNotes = []
-                , partUp =
-                    [ ensure
-                        (describeLocated "dns-authorizations" authz)
-                        ( "gcloud certificate-manager dns-authorizations create " <> shellQuote authz
-                            <> located
-                            <> " --domain=" <> shellQuote d
-                            <> " --type=PER_PROJECT_RECORD"
-                        )
-                    ]
-                , partCheck = [need ("dns-authorization " <> authz) (describeLocated "dns-authorizations" authz)]
-                , partDown = [deleteLocated "dns-authorizations" authz]
-                }
-            | d <- ds
-            , let authz = authorizationName n d
-            ]
-                <> [ PartSpec
-                        { partId = CertificatePart n
-                        , -- and, going down, the certificate first: an
-                          -- authorization in use cannot be deleted
-                          partDeps = map (DnsAuthorizationPart . authorizationName n) ds
-                        , partHelp = Text.unwords ["managed certificate", n]
-                        , partNotes = ["for " <> Text.unwords ds]
-                        , partUp =
-                            [ ensure
-                                (describeLocated "certificates" n)
-                                ( "gcloud certificate-manager certificates create " <> shellQuote n
-                                    <> located
-                                    <> " --domains=" <> shellQuote (Text.intercalate "," ds)
-                                    <> " --dns-authorizations=" <> shellQuote (Text.intercalate "," (map (authorizationName n) ds))
-                                )
-                            ]
-                        , partCheck =
-                            [ need ("certificate " <> n) (describeLocated "certificates" n)
-                            , "st=$(" <> describeLocated "certificates" n
-                                <> " --format='value(managed.state)' 2>/dev/null); [ -n \"$st\" ] && echo "
-                                <> shellQuote ("CERT " <> n)
-                                <> "\" $st\"; true"
-                            ]
-                        , partDown = [deleteLocated "certificates" n]
-                        }
-                   ]
+        c@(ManagedCertificate n ds) -> managedParts (certificateResource c) n ds
+        c@(DomainSetCertificate base ds) -> managedParts (certificateResource c) base ds
+
+    -- One line per name, lower-cased and sorted, then joined with a space
+    -- after each: how a list read back from gcloud is compared with a
+    -- declared one, whatever separators @value()@ flattened it with.
+    asSet :: Text
+    asSet = " | tr \";,[]' \\t\" '\\n' | sed -e 's|.*/||' -e '/^$/d' | tr 'A-Z' 'a-z' | LC_ALL=C sort -u | tr '\\n' ' '"
+
+    setText :: [Text] -> Text
+    setText = Text.concat . map (<> " ") . normalDomains
+
+    httpsProxy :: Text
+    httpsProxy = alb.albName <> "-https-proxy"
+
+    -- The names of the certificates the HTTPS proxy serves now, 'asSet'.
+    -- A Certificate Manager certificate is listed there by its full
+    -- resource path, a compute one by its URL: the last segment either way.
+    proxyCertificates :: Text
+    proxyCertificates =
+        describeCompute "target-https-proxies" httpsProxy
+            <> " --format='value(sslCertificates)' 2>/dev/null"
+            <> asSet
+
+    -- The DNS authorizations (named after @base@) and the certificate
+    -- @cert@ over them.
+    managedParts :: Text -> Text -> [Text] -> [PartSpec]
+    managedParts cert base ds =
+        [ PartSpec
+            { partId = DnsAuthorizationPart authz
+            , partDeps = []
+            , partHelp = Text.unwords ["DNS authorization", authz, "for", d]
+            , partNotes = []
+            , partUp =
+                [ ensure
+                    (describeLocated "dns-authorizations" authz)
+                    ( "gcloud certificate-manager dns-authorizations create " <> shellQuote authz
+                        <> located
+                        <> " --domain=" <> shellQuote d
+                        <> " --type=PER_PROJECT_RECORD"
+                    )
+                ]
+            , partCheck = [need ("dns-authorization " <> authz) (describeLocated "dns-authorizations" authz)]
+            , partDown = [deleteLocated "dns-authorizations" authz]
+            }
+        | d <- ds
+        , let authz = authorizationName base d
+        ]
+            <> [ PartSpec
+                    { partId = CertificatePart cert
+                    , -- and, going down, the certificate first: an
+                      -- authorization in use cannot be deleted
+                      partDeps = map (DnsAuthorizationPart . authorizationName base) ds
+                    , partHelp = Text.unwords ["managed certificate", cert]
+                    , partNotes = ["for " <> Text.unwords ds]
+                    , partUp =
+                        [ ensure
+                            (describeLocated "certificates" cert)
+                            ( "gcloud certificate-manager certificates create " <> shellQuote cert
+                                <> located
+                                <> " --domains=" <> shellQuote (Text.intercalate "," ds)
+                                <> " --dns-authorizations=" <> shellQuote (Text.intercalate "," (map (authorizationName base) ds))
+                            )
+                        , -- a certificate's names cannot be edited: one that
+                          -- covers other names than the declared ones is not
+                          -- this declaration's, and saying nothing is how a
+                          -- host added to the list never got a certificate
+                          "got=$(" <> describeLocated "certificates" cert <> " --format='value(managed.domains)'" <> asSet <> ")"
+                        , "[ -z \"$got\" ] || [ \"$got\" = " <> shellQuote (setText ds) <> " ] || { echo "
+                            <> shellQuote ("certificate " <> cert <> " exists and covers other names than the declared ones (" <> Text.unwords (normalDomains ds) <> "):")
+                            <> "\" $got\""
+                            <> shellQuote "-- a certificate's names cannot be edited; declare it as a DomainSetCertificate, or under a new name"
+                            <> " >&2; exit 1; }"
+                        ]
+                    , partCheck =
+                        [ need ("certificate " <> cert) (describeLocated "certificates" cert)
+                        , "st=$(" <> describeLocated "certificates" cert
+                            <> " --format='value(managed.state)' 2>/dev/null); [ -n \"$st\" ] && echo "
+                            <> shellQuote ("CERT " <> cert)
+                            <> "\" $st\"; true"
+                        , "got=$(" <> describeLocated "certificates" cert <> " --format='value(managed.domains)' 2>/dev/null" <> asSet <> ")"
+                        , "[ -z \"$got\" ] || [ \"$got\" = " <> shellQuote (setText ds) <> " ] || echo "
+                            <> shellQuote ("PROBLEM certificate " <> cert <> " covers other names than the declared ones (immutable): has")
+                            <> "\" $got\""
+                        , -- a certificate whose renewal failed stays ACTIVE,
+                          -- until the day it expires
+                          "if [ \"$st\" = ACTIVE ]; then"
+                        , "  if " <> describeLocated "certificates" cert
+                            <> " --format='value(managed.authorizationAttemptInfo[].state)' 2>/dev/null | tr \";,[]' \\t\" '\\n' | grep -qxF FAILED; then echo "
+                            <> shellQuote ("PROBLEM certificate " <> cert <> " is ACTIVE but an authorization attempt FAILED (it will not renew)")
+                            <> "; fi"
+                        , "  exp=$(" <> describeLocated "certificates" cert <> " --format='value(expireTime)' 2>/dev/null)"
+                        , "  if [ -n \"$exp\" ] && t=$(date -d \"$exp\" +%s 2>/dev/null) && [ \"$t\" -le \"$(date +%s)\" ]; then echo "
+                            <> shellQuote ("PROBLEM certificate " <> cert <> " expired")
+                            <> "\" $exp\"; fi"
+                        , "fi"
+                        ]
+                    , -- never from under the proxy: a certificate the HTTPS
+                      -- proxy still serves is left, and its node fails, until
+                      -- the proxy is gone or has been moved off it
+                      partDown =
+                        [ "if exists " <> describeLocated "certificates" cert <> "; then"
+                        , "  if " <> servedByProxy (shellQuote cert) <> "; then echo "
+                            <> shellQuote ("certificate " <> cert <> " is still served by " <> httpsProxy <> ": not deleted")
+                            <> " >&2; exit 1; fi"
+                        , "  gcloud certificate-manager certificates delete " <> shellQuote cert <> located <> " --quiet"
+                        , "fi"
+                        ]
+                    }
+               ]
+
+    -- whether the HTTPS proxy lists a certificate (a shell word naming it)
+    servedByProxy :: Text -> Text
+    servedByProxy word =
+        describeCompute "target-https-proxies" httpsProxy
+            <> " --format='value(sslCertificates)' 2>/dev/null | tr \";,[]' \\t\" '\\n' | sed 's|.*/||' | grep -qxF -- "
+            <> word
+
+    -- The certificates of one base that are not the declared one: the bare
+    -- base name (what a 'ManagedCertificate' of that name was) and the base
+    -- with another set's tag. Asked of Certificate Manager, since nothing in
+    -- a declaration remembers the sets it used to name.
+    supersededPart :: Text -> Text -> PartSpec
+    supersededPart base current =
+        PartSpec
+            { partId = SupersededCertificatesPart base
+            , -- after the proxy: it is the proxy's update that supersedes
+              partDeps = [HttpsProxyPart, CertificatePart current]
+            , partHelp = Text.unwords ["superseded certificates of", base]
+            , partNotes = ["keeps " <> current]
+            , partUp =
+                [ "stale=$(" <> listSuperseded <> ")"
+                , "for c in $stale; do"
+                , "  if " <> servedByProxy "\"$c\"" <> "; then echo \"certificate $c is still served by \""
+                    <> shellQuote httpsProxy
+                    <> "\": not deleted\" >&2; exit 1; fi"
+                , "  gcloud certificate-manager certificates delete \"$c\"" <> located <> " --quiet"
+                , "done"
+                ]
+            , partCheck =
+                [ listSuperseded <> " 2>/dev/null | while read -r c; do echo \"MISSING removal of superseded certificate $c\"; done; true"
+                ]
+            , -- the declared certificate's own node removes it; a superseded
+              -- one still around at teardown is left (see 'lbParts')
+              partDown = []
+            }
+      where
+        listSuperseded =
+            "gcloud certificate-manager certificates list" <> located <> " --format='value(name)'"
+                <> " | awk -v b=" <> shellQuote base
+                <> " -v cur=" <> shellQuote current
+                <> " "
+                <> shellQuote "{n=$0; sub(/.*\\//,\"\",n); t=substr(n,length(b)+2)} n!=cur && (n==b || (index(n,b\"-\")==1 && length(t)==8 && t ~ /^[0-9a-f]+$/)) {print n}"
 
     -- Two forwarding rules can only share an address that is reserved.
     addressPart :: PartSpec
@@ -1207,18 +1420,71 @@ lbParts alb =
             (alb.albName <> "-proxy")
             (" --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\"")
 
+    -- Created once with its URL map, which is never set again (somebody may
+    -- have repointed it). Its certificate list is a declaration that can
+    -- change under it, and the one thing here that must not be set as soon
+    -- as it differs: a managed certificate is issued over minutes to an
+    -- hour, and a proxy moved onto one that is not ACTIVE serves no
+    -- certificate at all for its names. So the list is updated only once
+    -- every declared managed certificate is ACTIVE; until then @up@ fails,
+    -- saying which is not, and the proxy keeps serving what it has.
     httpsProxyPart :: PartSpec
     httpsProxyPart =
-        simple
-            HttpsProxyPart
-            (UrlMapPart : map CertificatePart (managed <> compute))
-            "HTTPS proxy"
-            "target-https-proxies"
-            (alb.albName <> "-https-proxy")
-            (" --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\"" <> certificateFlags)
+        PartSpec
+            { partId = HttpsProxyPart
+            , partDeps = UrlMapPart : map CertificatePart declared
+            , partHelp = Text.unwords ["HTTPS proxy", httpsProxy]
+            , partNotes = ["certificates " <> Text.unwords declared]
+            , partUp =
+                [ "if exists " <> describeCompute "target-https-proxies" httpsProxy <> "; then"
+                , "  have=$(" <> proxyCertificates <> ")"
+                , "  if [ \"$have\" != " <> shellQuote (setText declared) <> " ]; then"
+                ]
+                    <> concat
+                        [ [ "    st=$(" <> describeLocated "certificates" n <> " --format='value(managed.state)' 2>/dev/null) || st=''"
+                          , "    [ \"$st\" = ACTIVE ] || { echo "
+                                <> shellQuote ("certificate " <> n <> " is not ACTIVE yet:")
+                                <> "\" ${st:-absent}\""
+                                <> shellQuote ("; " <> httpsProxy <> " keeps the certificates it serves until it is. Run again then.")
+                                <> " >&2; exit 1; }"
+                          ]
+                        | n <- managed
+                        ]
+                    <> [ "    gcloud compute target-https-proxies update " <> shellQuote httpsProxy <> regional <> certificateFlags
+                       , "  fi"
+                       , "else"
+                       , "  gcloud compute target-https-proxies create " <> shellQuote httpsProxy
+                            <> regional
+                            <> " --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\""
+                            <> certificateFlags
+                       , "fi"
+                       ]
+            , partCheck =
+                [ need ("target-https-proxies " <> httpsProxy) (describeCompute "target-https-proxies" httpsProxy)
+                , "have=$(" <> proxyCertificates <> ")"
+                , "if exists " <> describeCompute "target-https-proxies" httpsProxy
+                    <> " && [ \"$have\" != " <> shellQuote (setText declared) <> " ]; then"
+                , "  waiting=''"
+                ]
+                    -- not yet swappable is not something up would fix: the
+                    -- certificate's state, which reads as Unknown
+                    <> concat
+                        [ [ "  st=$(" <> describeLocated "certificates" n <> " --format='value(managed.state)' 2>/dev/null) || st=''"
+                          , "  [ \"$st\" = ACTIVE ] || { echo " <> shellQuote ("CERT " <> n) <> "\" ${st:-ABSENT}\"; waiting=1; }"
+                          ]
+                        | n <- managed
+                        ]
+                    <> [ "  [ -n \"$waiting\" ] || echo "
+                            <> shellQuote ("MISSING certificates " <> Text.unwords declared <> " on " <> httpsProxy <> ": it serves")
+                            <> "\" $have\""
+                       , "fi"
+                       ]
+            , partDown = [deleteCompute "target-https-proxies" httpsProxy]
+            }
       where
-        managed = [n | ManagedCertificate n _ <- alb.albCertificates]
+        managed = [n | (n, _, _) <- managedCertificates alb]
         compute = [n | ComputeCertificate n <- alb.albCertificates]
+        declared = managed <> compute
         certificateFlags = case managed of
             (_ : _) -> " --certificate-manager-certificates=" <> shellQuote (Text.intercalate "," managed)
             [] -> " --ssl-certificates=" <> shellQuote (Text.intercalate "," compute) <> " --ssl-certificates-region=\"$REGION\""
