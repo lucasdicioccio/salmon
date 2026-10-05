@@ -229,6 +229,21 @@ checkTests =
         -- the unit reads active, generated and reloaded: something else ran
         -- the daemon-reload, and nothing restarted this service
         assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "def456\n"))
+    , testCase "a container started before its env file was rotated needs bringing up, whatever systemd remembers" $ withTempDir $ \dir -> do
+        -- the image and the declaration are the ones it was started with;
+        -- only the env file moved, and a daemon-reload run for another
+        -- quadlet has already cleared NeedDaemonReload
+        let env = dir </> "env"
+            c = app{Quadlet.containerEnvFile = Just env}
+        writeFile env "TOKEN=one\n"
+        started <- Quadlet.quadletFingerprint c
+        assertEqual "" Success (Quadlet.interpretRunning started (started <> "\n"))
+        writeFile env "TOKEN=two\n"
+        declared <- Quadlet.quadletFingerprint c
+        assertBool "" (isFailure (Quadlet.interpretRunning declared (started <> "\n")))
+        written <- Quadlet.renderQuadlet c
+        assertBool "the rewritten file does not label the container with the new fingerprint" $
+            ("Label=" <> Quadlet.quadletLabel <> "=" <> declared) `elem` Text.lines written
     , testCase "a container that does not say what it was started from needs bringing up" $ do
         assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "\n"))
         assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "<no value>\n"))

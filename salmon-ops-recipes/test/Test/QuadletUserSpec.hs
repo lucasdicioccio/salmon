@@ -10,7 +10,8 @@ What is asserted is what the node claims in its haddock: @up@ writes the
 file, reloads and leaves the generated service running a container; a second
 pass is a 'Skip'; a changed image reference and a changed env file each
 restart the service (a new @InvocationID@ and a new container) and an
-unchanged one does not; @down@ stops the service, removes the file and the
+unchanged one does not; an env file rotated under a pass that rewrote the
+quadlet without restarting the service is still a restart at the next pass; @down@ stops the service, removes the file and the
 generated unit goes with it; and a declaration moved onto an image that
 cannot be pulled fails at the pull, with the running container, its unit and
 its file as they were.
@@ -25,8 +26,9 @@ whatever the case did.
 -}
 module Test.QuadletUserSpec (tests) where
 
-import Control.Exception (bracket, finally)
+import Control.Exception (bracket, finally, throwIO)
 import Control.Monad (forM_, unless, void, when)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -51,6 +53,8 @@ import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
 import Salmon.Op.Actions (Act (..))
+import Salmon.Op.OpGraph (inject)
+import Salmon.Op.Ref (mkRef)
 import Salmon.Reporter (silent)
 import Test.Harness (runDownCapturing, runUpCapturing, withTempDir)
 
@@ -68,6 +72,9 @@ tests =
         , testCaseSteps "two changed quadlets, one reload: the one not restarted is not skipped" $ \step ->
             withUserQuadlets $ \unitDir ->
                 withFreshContainer unitDir $ \a -> withFreshContainer unitDir $ \b -> sharedReload step a b
+        , testCaseSteps "a rotated env file behind a failed predecessor, reloaded by a sibling, is not skipped" $ \step ->
+            withUserQuadlets $ \unitDir ->
+                withFreshContainer unitDir $ \a -> withFreshContainer unitDir $ \b -> rotatedEnv step a b
         , testCaseSteps "an image that cannot be pulled leaves the running container alone" $ \step ->
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> unpullable step c
         , testCaseSteps "a stamped container job runs once, again after a change, and fails while its last run did" $ \step ->
@@ -221,6 +228,83 @@ sharedReload step a0 b0 = do
     assertBool "the service was not restarted" . (/= invocation) =<< showProperty b "InvocationID"
     assertBool "the old container is still the one running" . (/= container) =<< containerId b
     assertEqual "the restarted service is not satisfied" UpDown.Success =<< Quadlet.checkContainer b
+
+    step "down"
+    forM_ [a, b] $ \c -> do
+        down <- runDownCapturing (node c)
+        assertBool ("down failed: " <> show (failures down)) (null (failures down))
+
+{- | 'sharedReload' as it was met in a deployment, with the env file and not
+the declaration as what changed: two quadlets whose env files are rotated,
+the second with a predecessor (a migration, say) that fails. Its quadlet
+file is rewritten all the same -- the predecessor is injected on the node,
+beside the file, not declared in the track -- its service is blocked, and
+the first quadlet's @up@ reloads the machine. systemd then has no memory
+that the second file changed, the image is the one it was, and only the
+running container's label says it was started with the previous env file.
+
+The two quadlets of the failing pass are walked one after the other, the
+blocked one first, so that the order the case depends on is not left to the
+walk.
+-}
+rotatedEnv :: (String -> IO ()) -> Quadlet.Container -> Quadlet.Container -> IO ()
+rotatedEnv step a0 b0 = withTempDir $ \dir -> do
+    let envOf name = dir </> name
+        a = a0{Quadlet.containerEnvFile = Just (envOf "a.env")}
+        b = b0{Quadlet.containerEnvFile = Just (envOf "b.env")}
+        rotate value = forM_ ["a.env", "b.env"] $ \name -> writeFile (envOf name) ("SALMON_QUADLET_TEST=" <> value <> "\n")
+    failing <- newIORef False
+    let predecessor =
+            op "quadlet-test-predecessor" nodeps $ \actions ->
+                actions
+                    { ref = mkRef "quadlet-test-predecessor" (Podman.getContainerName b.containerName)
+                    , up = do
+                        broken <- readIORef failing
+                        when broken (throwIO (userError "the predecessor fails"))
+                    }
+        nodeB = node b `inject` predecessor
+
+    step "both up"
+    rotate "one"
+    assertUp =<< runUpCapturing (node a)
+    assertUp =<< runUpCapturing nodeB
+    assertEqual "" "one" =<< containerEnv b
+    invocation <- showProperty b "InvocationID"
+    container <- containerId b
+
+    step "both env files rotated; b's predecessor fails, a is brought up"
+    rotate "two"
+    writeIORef failing True
+    blocked <- runUpCapturing nodeB
+    assertEqual "the predecessor is not what failed" ["quadlet-test-predecessor"] [act.shorthand | UpDown.Failed act _ <- blocked]
+    assertEqual "b's service was not blocked" 1 (length [() | UpDown.Blocked act <- blocked, act.shorthand == "podman-quadlet"])
+    rotated <- Quadlet.renderQuadlet b
+    assertEqual "b's quadlet was not rewritten; the case is not the one it means to be" rotated =<< Text.readFile (Quadlet.quadletPath b)
+    assertUp =<< runUpCapturing (node a)
+    assertEqual "" "two" =<< containerEnv a
+    assertEqual "systemd still remembers b's file changed; the case is not the one it means to be" "no" =<< showProperty b "NeedDaemonReload"
+    assertEqual "b was restarted by a's pass" invocation =<< showProperty b "InvocationID"
+    assertEqual "" "one" =<< containerEnv b
+
+    step "the check"
+    verdict <- Quadlet.checkContainer b
+    case verdict of
+        UpDown.Failure _ -> pure ()
+        other -> assertFailure ("a container still running on the previous env file reads " <> show other)
+
+    step "the next pass, nothing failing"
+    writeIORef failing False
+    reports <- runUpCapturing nodeB
+    assertUp reports
+    assertEqual "b was skipped" (1, 0) (count isEval reports, count isSkip reports)
+    assertBool "b's service was not restarted" . (/= invocation) =<< showProperty b "InvocationID"
+    assertBool "b's old container is still the one running" . (/= container) =<< containerId b
+    assertEqual "b still presents the previous env file" "two" =<< containerEnv b
+
+    step "and then it is left alone"
+    settled <- runUpCapturing nodeB
+    assertUp settled
+    assertEqual "a settled quadlet was applied again" (0, 1) (count isEval settled, count isSkip settled)
 
     step "down"
     forM_ [a, b] $ \c -> do

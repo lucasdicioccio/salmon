@@ -1057,7 +1057,7 @@ expired login was skipped (`instanceLoginWith` takes the token's source, for the
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/
-down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped, and that a healthy container re-declared onto an unpullable image (a refused
+down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped (also in the form a deployment met it: env files rotated, the image unchanged, one quadlet's file rewritten beside a failed injected predecessor and reloaded by its sibling's `up` — the label carries the watched files' fingerprint, so the next pass restarts it), and that a healthy container re-declared onto an unpullable image (a refused
 local port) fails at the pull with its service, container and file untouched; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
 test, nor has a successful pull from a registry or one through an auth file (the tests' images are already local), the metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
