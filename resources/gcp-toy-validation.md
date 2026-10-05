@@ -576,7 +576,15 @@ leftover.
   default service, and a map with nothing but `defaultUrlRedirect`; that
   `description` survives an import and reads back through
   `value(description)` (the check of a map with a bucket or a redirect
-  compares it, so if it does not, that map reads as never in place); that a
+  requires it, so if it does not, that map reads as never in place; a map
+  of backend services only is now written with one too, but its check only
+  refuses a *different* `salmon:` description, so there a description that
+  does not survive costs the detection of a host moved to another service
+  and nothing else); that `value(hostRules[].hosts)` prints nothing for a
+  map with no host rule and every host otherwise (the check now compares
+  hosts as a set, and the rule-less map's `up` imports over a map for which
+  it prints anything); that `url-maps import` accepts a map of `name` and
+  `defaultService` alone and takes the rules off the one there; that a
   regional proxy prints its map under `value(urlMap)` as a URL ending in the
   map's name; that `target-http-proxies update --url-map` moves a proxy in
   service. On the GCP side, also unknown: whether a regional backend bucket

@@ -33,7 +33,9 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     dnsAuthorizations,
     readDnsAuthorizationRecord,
     parseDnsAuthorizationRecord,
+    bucketResource,
     renderUrlMap,
+    urlMapStamp,
     renderHttpRedirectUrlMap,
     interpretLbDescribe,
     interpretLbCheck,
@@ -967,28 +969,46 @@ isInstanceGroup = \case
 {- | The URL map as the resource @gcloud compute url-maps import@ reads.
 JSON, which is YAML: one path matcher per host rule, named by position.
 
-A map naming a backend bucket or a redirect also carries a @description@:
-a fingerprint of the rest of it ('urlMapStamp'), which is how the check
-tells the map that is there from the declared one. A map of backend services
-only is rendered as it always was, without one.
+A map with host rules carries a @description@: a fingerprint of the rest of
+it ('urlMapStamp'), which is how the check tells the map that is there from
+the declared one beyond its hosts. A map with no rule has none, and neither
+@hostRules@ nor @pathMatchers@: it is what @url-maps create
+--default-service@ makes, and is imported only to take rules off a map that
+has some (see 'lbParts').
 -}
 renderUrlMap :: ApplicationLoadBalancer -> Aeson.Value
 renderUrlMap alb =
     Aeson.object (urlMapFields alb <> ["description" Aeson..= stamp | Just stamp <- [urlMapStamp alb]])
 
-{- | The fingerprint a URL map naming a bucket or a redirect is stamped with
-(its @description@), 'Nothing' for a map of backend services only.
+{- | The fingerprint a URL map with host rules is stamped with (its
+@description@), 'Nothing' for a map with none.
 
-The check of such a map compares this, and not only the hosts: which service
-a host goes to was always invisible to the check, and for a redirect that
-would mean a changed target is never imported by a pass that finds
-everything else in place. It is the /declaration's/ fingerprint: a map
-edited by hand that kept its description still reads as the declared one.
+It is the /declaration's/ fingerprint: a map edited by hand that kept its
+description still reads as the declared one. How much the check leans on it
+depends on what the map names, see 'urlMapStampIsRequired'.
 -}
 urlMapStamp :: ApplicationLoadBalancer -> Maybe Text
 urlMapStamp alb
-    | any novel (targets alb) = Just (stampOf (Aeson.object (urlMapFields alb)))
-    | otherwise = Nothing
+    | null alb.albHostRules = Nothing
+    | otherwise = Just (stampOf (Aeson.object (urlMapFields alb)))
+
+{- | Whether the check /requires/ the live map to carry the declared
+fingerprint, or only refuses a different one.
+
+Required for a map naming a backend bucket or a redirect, as it has been
+since those exist: there, the same hosts can be a different map (a redirect
+sent elsewhere). A map of backend services only was written without a
+description until it got one, and such a map is live under balancers that
+are up: requiring the stamp would re-import every one of them on the first
+pass, and would never settle if @url-maps import@ turned out not to keep a
+@description@ (which nobody has verified on a real project). So for those the
+stamp only ever speaks against a map: a live description that is a
+@salmon:@ fingerprint other than the declared one is a map salmon wrote for
+another declaration, and one with no such description is judged on its host
+set alone.
+-}
+urlMapStampIsRequired :: ApplicationLoadBalancer -> Bool
+urlMapStampIsRequired alb = any novel (targets alb)
   where
     novel = \case
         NamedBucket _ -> True
@@ -1022,9 +1042,13 @@ urlMapFields :: ApplicationLoadBalancer -> [Aeson.Pair]
 urlMapFields alb =
     [ "name" Aeson..= (alb.albName <> "-url-map")
     , "defaultService" Aeson..= serviceUrl DefaultService
-    , "hostRules" Aeson..= map hostRule rules
-    , "pathMatchers" Aeson..= map pathMatcher rules
     ]
+        <> concat
+            [ [ "hostRules" Aeson..= map hostRule rules
+              , "pathMatchers" Aeson..= map pathMatcher rules
+              ]
+            | not (null rules)
+            ]
   where
     rules = zip [0 :: Int ..] alb.albHostRules
     matcher :: Int -> Text
@@ -1143,7 +1167,21 @@ Some things are /set/ on every @up@ of their node rather than guarded,
 because they are declarations that can change under a resource that already
 exists: a backend service's timeout and port name (@update --timeout@,
 @update --port-name@), an instance group's named ports and, when there are
-host rules, the whole URL map (@url-maps import@, which replaces it).
+host rules, the whole URL map (@url-maps import@, which replaces it). A URL
+map with no host rule is created once, and imported only when the map that is
+there has host rules (the last rule of a declaration taken away).
+
+The URL map's check compares hosts as a set: a declared host the map lacks,
+and a host of the map that no rule declares, are both findings, so a rule
+removed from the declaration is imported away. The map is this balancer's by
+its name, and that makes a host rule added to it by hand one the next @up@
+removes (it already did whenever anything else made the map's @up@ run).
+Which service a host is sent to, and its path rules, are seen only through
+the fingerprint in the map's @description@: required of a map naming a
+bucket or a redirect, and for a map of backend services only a finding just
+when the live fingerprint is another declaration's -- a map written before
+maps of services were stamped has none and is left alone until something
+else imports it ('urlMapStampIsRequired').
 Everything else is guarded by a @describe@ (or, for an attachment, a look at
 the backend service's current backends) and never suffixed with @|| true@:
 a failing create fails its node.
@@ -1480,7 +1518,14 @@ lbParts alb =
     -- With rules the map is imported whole on every run: `import` creates
     -- or replaces, which is the only "set" verb a URL map has
     -- (`add-path-matcher` appends, and fails the second time). Without
-    -- rules it is created once with its default service.
+    -- rules it is created once with its default service, and imported
+    -- (as that same rule-less map) only when the one that is there has
+    -- host rules: a declaration whose last rule was taken away.
+    --
+    -- The check compares the hosts as a set, both ways: a declared host
+    -- the map lacks, and a host of the map no rule declares. Which
+    -- service a host goes to, and its paths, are only seen through the
+    -- fingerprint (see 'urlMapStampIsRequired').
     urlMapPart :: PartSpec
     urlMapPart =
         PartSpec
@@ -1504,27 +1549,38 @@ lbParts alb =
                                 <> regional
                                 <> " --default-service=" <> resourceName "-backend"
                             )
+                        , "ruled=$(" <> liveHosts <> ")"
+                        , "if [ -n \"$ruled\" ]; then " <> importMap urlMap (renderUrlMap alb) <> "; fi"
                         ]
                     else
                         [importMap urlMap (renderUrlMap alb)]
             , partCheck =
                 need ("url-maps " <> urlMap) (describeCompute "url-maps" urlMap)
-                    -- every host of every rule, one per line, whatever
-                    -- separators gcloud flattens the nested lists with
-                    : [ describeCompute "url-maps" urlMap
-                            <> " --format='value(hostRules[].hosts)' 2>/dev/null | tr \";,[]' \\t\" '\\n' | grep -qxF -- "
+                    : [ liveHosts
+                            <> " 2>/dev/null | grep -qxF -- "
                             <> shellQuote h
                             <> " || echo "
                             <> shellQuote ("MISSING host-rule " <> h)
-                      | h <- concatMap hostRuleHosts alb.albHostRules
+                      | h <- declaredHosts
                       ]
-                    -- which service a host goes to is not looked at; a map
-                    -- naming a bucket or a redirect is compared as a whole
-                    <> [stampCheck urlMap stamp | Just stamp <- [urlMapStamp alb]]
+                    <> [ liveHosts
+                            <> " 2>/dev/null | while read -r h; do case "
+                            <> shellQuote (" " <> Text.unwords declaredHosts <> " ")
+                            <> " in *\" $h \"*) ;; *) echo \"MISSING removal of undeclared host-rule $h\";; esac; done; true"
+                       ]
+                    <> [ (if urlMapStampIsRequired alb then stampCheck else staleStampCheck) urlMap stamp
+                       | Just stamp <- [urlMapStamp alb]
+                       ]
             , partDown = [deleteCompute "url-maps" urlMap]
             }
       where
         urlMap = alb.albName <> "-url-map"
+        declaredHosts = concatMap hostRuleHosts alb.albHostRules
+        -- every host of every rule of the map that is there, one per
+        -- line, whatever separators gcloud flattens the nested lists with
+        liveHosts =
+            "{ " <> describeCompute "url-maps" urlMap
+                <> " --format='value(hostRules[].hosts)' | tr \";,[]' \\t\" '\\n' | sed '/^$/d'; }"
 
     -- whether the map that is there is the declared one, by its description
     stampCheck :: Text -> Text -> Text
@@ -1534,6 +1590,17 @@ lbParts alb =
             <> shellQuote stamp
             <> " ] || echo "
             <> shellQuote ("MISSING declared rules on " <> urlMap <> " (" <> stamp <> ")")
+
+    -- the same, for a map that may have been written before it was
+    -- stamped: only a fingerprint of another declaration speaks against it
+    staleStampCheck :: Text -> Text -> Text
+    staleStampCheck urlMap stamp =
+        "case \"$(" <> describeCompute "url-maps" urlMap
+            <> " --format='value(description)' 2>/dev/null)\" in "
+            <> shellQuote stamp
+            <> ") ;; salmon:*) echo "
+            <> shellQuote ("MISSING declared rules on " <> urlMap <> " (" <> stamp <> ")")
+            <> ";; esac"
 
     importMap :: Text -> Aeson.Value -> Text
     importMap urlMap v =
@@ -2049,10 +2116,12 @@ renderLbScript alb = Text.unlines (mutatingHeader alb <> concatMap partUp (lbPar
 health ('renderLbHealthScript''s lines). Findings are lines on stdout (see
 'interpretLbCheck').
 
-What it does not see: a path rule, or which service a host is sent to. A
-host rule is checked by its hosts being in the map, no further -- except in
-a map naming a backend bucket or a redirect, which is compared with the
-declared one by the fingerprint in its @description@ ('urlMapStamp'). Which port a
+What it sees of the URL map: its hosts, as a set (a declared host that is
+absent, a host no rule declares), and the fingerprint in its @description@
+('urlMapStamp', 'urlMapStampIsRequired'), which is what covers a path rule
+and which service a host is sent to -- always in a map naming a backend
+bucket or a redirect, and in a map of backend services only once salmon has
+imported it with one. Which port a
 service reaches it does see: the service's port name, and that name on each
 instance group it sends to.
 -}
