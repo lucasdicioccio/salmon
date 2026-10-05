@@ -1166,12 +1166,25 @@ certificate is `PROVISIONING`, and the check `Unknown`, until that resolves publ
 `<name>-https-proxy` and a `:443` rule `<name>-https-fw`, and both forwarding rules then sit on a reserved address
 `<name>-ip` (`readAddress` reads the HTTPS rule's); with none, the scripts are what they were. Host rules make the URL
 map a whole-map `url-maps import` (JSON on stdin, `renderUrlMap`) on every `up`, and a timeout an `update` on every
-`up`: those are the two "set" verbs, everything else is created once. `albProblems` (undeclared or duplicate service,
+`up`: those are the two "set" verbs, everything else is created once — except the HTTPS proxy's certificate list,
+which is *compared* and moved (`target-https-proxies update`) only when it differs and every declared managed
+certificate is `ACTIVE`; until then the proxy's `up` fails naming the one that is not, the proxy keeps what it serves,
+and its check is `Unknown`. That is half of replacing a certificate on a live balancer; the other half is
+`DomainSetCertificate base domains`, whose resource is `base-<domainSetTag>` (`certificateResource`), so a changed
+set is a *new* certificate node beside the old (Certificate Manager certificates are immutable), with authorizations
+still named after the base so shared names reuse theirs. Each base gets a `SupersededCertificatesPart` node after the
+proxy that lists the base's certificates (bare `base`, or `base-<8 hex>`) and deletes those neither declared nor on
+the proxy; a managed certificate's own `down` refuses while the proxy lists it, since `serve` tears down before it
+brings up. A `ManagedCertificate` keeps its declared name, and one whose domains differ from the declared ones is now
+a `PROBLEM` line (a `Failure`) and a failing `up` instead of nothing; an `ACTIVE` certificate with a `FAILED`
+authorization attempt or a past `expireTime` is a `PROBLEM` too. The proxy's URL map is named at creation only.
+`albProblems` (undeclared or duplicate service,
 host in two rules, mixed certificate kinds, ...) is a `Failure`/throw before any call. The check sees declared hosts
 and timeouts, not path rules. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of it. **Layer 0 only**:
 `Test/GcpSpec.hs` asserts the graph's shape and runs the scripts, whole and resource by resource, against a stand-in
 `gcloud` (a shell function, not a recording), so none of the HTTPS, rule or timeout calls has met a real project, and
-neither has `remove-backend` or the unfolded graph (in particular concurrent gcloud calls under `serve`); `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
+neither has `remove-backend`, the certificate swap (how a proxy lists its certificates and how `managed.domains` reads
+are assumed) or the unfolded graph (in particular concurrent gcloud calls under `serve`); `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
 commands and what is unverified.
 
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
