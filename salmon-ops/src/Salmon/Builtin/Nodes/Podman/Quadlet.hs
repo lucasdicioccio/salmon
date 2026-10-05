@@ -57,6 +57,13 @@ from a service: it installs the unit and starts nothing. A
 'Salmon.Builtin.Nodes.Systemd.Job.timerUnit' naming 'serviceTarget' schedules
 it, a 'Salmon.Builtin.Nodes.Systemd.Job.runJob' runs it now.
 
+Whether its last run /succeeded/ is
+'Salmon.Builtin.Nodes.Systemd.Job.completedRun''s question, asked of
+'containerCompletion'; 'completedQuadletJob' is the two together. systemd
+forgets a successful run of a unit nothing keeps loaded, a generated one
+included, so a container job with no timer waiting on it is only skipped by
+the next pass when it leaves a stamp ('containerStamp').
+
 Needs podman 4.4 or later (quadlet's first release). Only keys that 4.9
 understands are rendered -- the registry credentials go through
 @PodmanArgs=--authfile=@ rather than the @AuthFile=@ key, which 4.9's
@@ -70,6 +77,8 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     containerJob,
     quadletContainer,
     quadletJob,
+    containerCompletion,
+    completedQuadletJob,
     serviceTarget,
     quadletPath,
     systemQuadletDir,
@@ -82,6 +91,8 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     containerProblems,
     interpretShow,
     interpretRunning,
+    checkJobInstalled,
+    interpretGenerated,
     imageNode,
     imagePresentArgs,
     imagePullArgs,
@@ -99,7 +110,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, (</>))
 import System.Process (proc, readCreateProcessWithExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -178,6 +189,15 @@ data Container
     , containerWatched :: [FilePath]
     -- ^ other host files the container reads at start (a bind-mounted
     -- config), a change to which should restart it
+    , containerStamp :: Maybe FilePath
+    -- ^ for a job only ('RunToCompletion'; refused otherwise): a file on the
+    -- /host/ the unit keeps as the record of its last successful run, as
+    -- 'Job.jobStamp' does and with the same two lines in @[Service]@. Each
+    -- run touches @STAMP.running@ before the container starts and renames it
+    -- to @STAMP@ once the container's command exited 0. The directory is the
+    -- caller's: existing, and writable by whoever the unit runs as (root in
+    -- 'Systemd.System', the user in 'Systemd.User'). 'Nothing' renders
+    -- nothing, so a declaration without it is the file it always was.
     }
     deriving (Eq, Show)
 
@@ -208,6 +228,7 @@ container name image =
         , containerStartTimeout = Nothing
         , containerWantedBy = Just "multi-user.target"
         , containerWatched = []
+        , containerStamp = Nothing
         }
 
 {- | A system-scope job: this command, run in this image to completion.
@@ -263,9 +284,20 @@ renderLabelled fingerprint c =
             , ["Type=oneshot" | c.containerLifetime == RunToCompletion]
             , ["Restart=" <> restart c.containerRestart]
             , ["TimeoutStartSec=" <> Text.pack (show t) | t <- maybeToList c.containerStartTimeout]
+            , -- systemd runs these on the host, around the generator's own
+              -- ExecStart=; the second only when that one exited 0
+              concat
+                [ [ "ExecStartPre=" <> hostCommand ["touch", Text.pack (Job.stampRunning s)]
+                  , "ExecStartPost=" <> hostCommand ["mv", "-f", Text.pack (Job.stampRunning s), Text.pack s]
+                  ]
+                | s <- maybeToList c.containerStamp
+                ]
             , concat [["", "[Install]", "WantedBy=" <> w] | w <- maybeToList c.containerWantedBy]
             ]
   where
+    hostCommand :: [Text] -> Text
+    hostCommand = Text.unwords . map Systemd.literalArg
+
     port :: Podman.PortMapping -> Text
     port p =
         mconcat
@@ -345,6 +377,11 @@ containerProblems c =
           | c.containerLifetime == RunToCompletion
           , c.containerRestart == RestartAlways
           ]
+        , [ "a stamp records a run that finished, and this container is not a job"
+          | Just _ <- [c.containerStamp]
+          , c.containerLifetime /= RunToCompletion
+          ]
+        , ["the stamp is not an absolute path: " <> Text.pack s | s <- maybeToList c.containerStamp, not (isAbsolute s)]
         , ["a line break in the " <> what | (what, value) <- fields, Text.any (`elem` ("\n\r" :: String)) value]
         ]
   where
@@ -361,6 +398,7 @@ containerProblems c =
             , [("network", n) | n <- maybeToList c.containerNetwork]
             , [("auth file", Text.pack (Podman.getAuthFile a)) | a <- maybeToList c.containerAuthFile]
             , [("wanted-by", w) | w <- maybeToList c.containerWantedBy]
+            , [("stamp", Text.pack s) | s <- maybeToList c.containerStamp]
             ]
 
 data InvalidContainer = InvalidContainer !FilePath ![Text]
@@ -426,9 +464,9 @@ quadletContainer r systemctl t c =
 {- | Installs the quadlet of a job and starts nothing: 'quadletContainer' for
 a container that runs to completion ('containerJob').
 
-The check is 'Systemd.checkLoaded' on the generated service: systemd knows it
-and its source file has not changed since. There is no running container to
-ask, and none is wanted. @up@ is @daemon-reload@, after which a unit systemd
+The check is 'checkJobInstalled': systemd holds the generated service, its
+source file has not changed since, and the unit was generated from this
+declaration. There is no running container to ask, and none is wanted. @up@ is @daemon-reload@, after which a unit systemd
 still does not hold is thrown: the generator drops a file it cannot read
 without failing the reload, so that is the only place a refused quadlet
 shows. @down@ stops a run under way if there is one; the file's @down@
@@ -455,12 +493,101 @@ quadletJob r systemctl t c =
                         , "quadlet: " <> declaredFingerprint c
                         ]
                     , ref = mkRef "systemd-unit" target
-                    , check = Systemd.checkLoaded c.containerScope target
+                    , check = checkJobInstalled c
                     , up = Job.reloadAndRequireLoaded c.containerScope target reload
                     , down = Job.stopIfKnown c.containerScope target stop
                     }
   where
     target = serviceTarget c
+
+{- | Does systemd hold the job's service, /generated from this declaration/?
+
+'Systemd.checkLoaded' is asked first and anything but 'Success' is the
+answer. It is not enough for a generated unit, though. A job at rest that
+nothing refers to is unloaded by systemd as its run ends, and asking about
+it loads it again from the generator's /last output/: the unit then reads
+@loaded@ with @NeedDaemonReload=no@ although the quadlet was rewritten since
+that output was made, and a run of it is a run of the old command (seen on
+systemd 255 with podman 4.9: a job re-declared from @exit 0@ to @exit 3@
+kept succeeding). An authored unit has no such gap, its file being what
+systemd reads.
+
+So the unit is asked what it would run. The written file carries
+'quadletLabel' ('renderQuadlet'), the generator turns it into a @--label@ of
+the unit's @ExecStart=@, and 'interpretGenerated' looks for the declared
+'quadletFingerprint' there. A @systemctl@ that cannot answer is 'Unknown'.
+-}
+checkJobInstalled :: Container -> IO CheckResult
+checkJobInstalled c = do
+    loaded <- Systemd.checkLoaded c.containerScope (serviceTarget c)
+    case loaded of
+        Success -> do
+            declared <- quadletFingerprint c
+            (code, out, _err) <-
+                readCreateProcessWithExitCode
+                    ( proc
+                        "systemctl"
+                        ( Systemd.scopeArgs c.containerScope
+                            <> ["show", Text.unpack (serviceTarget c), "--property=ExecStart", "--value"]
+                        )
+                    )
+                    ""
+            pure $ case code of
+                ExitSuccess -> interpretGenerated declared (Text.pack out)
+                ExitFailure _ -> Unknown
+        other -> pure other
+
+{- | The verdict on a generated unit's @ExecStart=@ (as @systemctl show@
+prints it) against the declared 'quadletFingerprint': the unit was generated
+from this declaration when its command labels the container with it.
+-}
+interpretGenerated :: Text -> Text -> CheckResult
+interpretGenerated declared execStart
+    | (quadletLabel <> "=" <> declared) `Text.isInfixOf` execStart = Success
+    | otherwise = Failure ("the generated unit was not made from the declared quadlet " <> declared)
+
+{- | What 'Job.completedRun' asks about a container job: a run of its
+generated service newer than the quadlet file and than every file the
+container reads at start ('watchedFiles': the env file and
+'containerWatched'), read from 'containerStamp' if it has one.
+
+The quadlet file is written through 'FS.filecontents', which leaves
+identical bytes alone, so its time is when the declaration (or a watched
+file's content) last changed. A watched file is counted by its own time as
+well: one rewritten with the same content is a reason to run again here,
+though not a changed quadlet.
+
+The image is not in the list: a tag moved at the registry is not a change
+this can see, as for 'quadletContainer'.
+-}
+containerCompletion :: Container -> Job.Completion
+containerCompletion c =
+    Job.Completion
+        { Job.completionScope = c.containerScope
+        , Job.completionUnit = serviceTarget c
+        , Job.completionWritten = quadletPath c : watchedFiles c
+        , Job.completionStamp = c.containerStamp
+        }
+
+{- | A container job that has run: 'Job.completedRun' over
+'containerCompletion', standing on its 'quadletJob'. A pass runs the job
+when no run has succeeded since the quadlet or a watched file was last
+written, skips it otherwise, and fails when the run fails.
+
+Keyed like a 'Job.runJob' of the same service. As for any
+'Job.completedRun', what remembers a successful run is either something
+keeping the unit loaded (a 'Job.timerUnit' triggering it, which the caller
+declares and injects) or 'containerStamp'; with neither, the job runs at
+every pass. The 'Track'' is the job's.
+-}
+completedQuadletJob ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' Container ->
+    Container ->
+    Op
+completedQuadletJob r systemctl t c =
+    Job.completedRun r systemctl (containerCompletion c) `inject` quadletJob r systemctl t c
 
 withCommand ::
     Reporter Systemd.Report ->

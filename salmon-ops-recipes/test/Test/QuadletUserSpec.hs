@@ -31,7 +31,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Numeric (showHex)
-import System.Directory (XdgDirectory (XdgConfig), createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getXdgDirectory, listDirectory, removeDirectory, removeFile)
+import System.Directory (XdgDirectory (XdgConfig), createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getModificationTime, getXdgDirectory, listDirectory, removeDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
@@ -43,11 +43,13 @@ import System.Posix.Process (getProcessID)
 import Test.Tasty (DependencyType (..), TestTree, sequentialTestGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCaseSteps)
 
+import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
 import Salmon.Op.Actions (Act (..))
 import Salmon.Reporter (silent)
 import Test.Harness (runDownCapturing, runUpCapturing, withTempDir)
@@ -68,6 +70,8 @@ tests =
                 withFreshContainer unitDir $ \a -> withFreshContainer unitDir $ \b -> sharedReload step a b
         , testCaseSteps "an image that cannot be pulled leaves the running container alone" $ \step ->
             withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> unpullable step c
+        , testCaseSteps "a stamped container job runs once, again after a change, and fails while its last run did" $ \step ->
+            withUserQuadlets $ \unitDir -> withFreshContainer unitDir $ \c -> withTempDir $ \tmp -> completing step tmp c
         ]
 
 -- | Small, long-running with no arguments, no published port, no login.
@@ -265,6 +269,86 @@ unpullable step c = do
     assertBool "the container is still there" (not stillRunning)
   where
     identity = (,) <$> showProperty c "InvocationID" <*> containerId c
+
+{- | A container /job/ that leaves a stamp, under 'Quadlet.completedQuadletJob':
+nothing keeps its generated unit loaded, so the stamp is all that remembers
+a successful run.
+-}
+completing :: (String -> IO ()) -> FilePath -> Quadlet.Container -> IO ()
+completing step tmp c0 = do
+    let stamp = tmp </> "stamp"
+        jobOf command =
+            c0
+                { Quadlet.containerExec = ["/bin/sh", "-c", command]
+                , Quadlet.containerLifetime = Quadlet.RunToCompletion
+                , Quadlet.containerStamp = Just stamp
+                }
+        c = jobOf "exit 0"
+        completed = Quadlet.completedQuadletJob silent ignoreTrack ignoreTrack
+        ran = "systemd-job-completed"
+        countOf :: (UpDown.Report Extension -> Maybe (Act Extension)) -> [UpDown.Report Extension] -> Int
+        countOf which reports = length [() | Just act <- map which reports, act.shorthand == ran]
+        verdict = Job.checkLastRun . Quadlet.containerCompletion
+
+    step "first up runs it"
+    reports <- runUpCapturing (completed c)
+    assertUp reports
+    assertEqual "the job was not run once" 1 (countOf isEval reports)
+    assertBool "the run left no stamp" =<< doesFileExist stamp
+    assertBool "the run left its running stamp" . not =<< doesFileExist (Job.stampRunning stamp)
+    assertBool "the job's container outlived its run" . not =<< containerRunning c
+    -- nothing refers to the generated unit, so systemd has forgotten the run
+    assertEqual "" "" =<< showProperty c "ExecMainStartTimestamp"
+    assertEqual "" Completed =<< verdict c
+    firstRun <- getModificationTime stamp
+
+    step "second up skips it"
+    again <- runUpCapturing (completed c)
+    assertUp again
+    assertEqual "the job was not skipped" (1, 0) (countOf isSkip again, countOf isEval again)
+    assertEqual "a completed job was run again" firstRun =<< getModificationTime stamp
+
+    step "a changed declaration runs it again"
+    let changed = jobOf "true"
+    rerun <- runUpCapturing (completed changed)
+    assertUp rerun
+    assertEqual "the job was not run again" 1 (countOf isEval rerun)
+    assertEqual "the changed job was not installed again" 1 (length [() | UpDown.Eval act <- rerun, act.shorthand == "podman-quadlet-job"])
+    secondRun <- getModificationTime stamp
+    assertBool "the stamp did not move" (secondRun > firstRun)
+    assertEqual "" Completed =<< verdict changed
+
+    step "a failing command fails the pass"
+    let failing = jobOf "exit 3"
+    failed <- runUpCapturing (completed failing)
+    -- systemd unloaded the unit when its last run ended; were the job not
+    -- installed again, this would run the previous command and succeed
+    assertEqual "the changed job was not installed again" 1 (length [() | UpDown.Eval act <- failed, act.shorthand == "podman-quadlet-job"])
+    assertEqual "the failed run was not a failed up" [ran] [act.shorthand | UpDown.Failed act _ <- failed]
+    said <- verdict failing
+    case said of
+        Failure why -> assertBool (Text.unpack why) ("exit status 3" `Text.isInfixOf` why)
+        other -> assertFailure ("a failed job reads as " <> show other)
+    assertEqual "a failed run moved the stamp" secondRun =<< getModificationTime stamp
+
+    step "also once systemd has forgotten the failure"
+    void (readProcessWithExitCode "systemctl" ["--user", "reset-failed", Text.unpack (Quadlet.serviceTarget c)] "")
+    forgotten <- verdict failing
+    case forgotten of
+        Failure _ -> pure ()
+        other -> assertFailure ("the failure was forgotten with systemd's record of it: " <> show other)
+
+    step "a run that succeeds clears it"
+    fixed <- runUpCapturing (completed c)
+    assertUp fixed
+    assertEqual "" Completed =<< verdict c
+
+    step "down"
+    down <- runDownCapturing (completed c)
+    assertBool ("down failed: " <> show (failures down)) (null (failures down))
+    assertBool "the stamp is still there" . not =<< doesFileExist stamp
+    assertBool "the quadlet file is still there" . not =<< doesFileExist (Quadlet.quadletPath c)
+    assertEqual "" "not-found" =<< showProperty c "LoadState"
 
 -------------------------------------------------------------------------------
 

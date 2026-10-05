@@ -198,6 +198,13 @@ problemTests =
         assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerName = Podman.ContainerName ""})))
     , testCase "a name that is a path is refused" $
         assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerName = Podman.ContainerName "../x"})))
+    , testCase "a stamp on a container that stays up is refused" $
+        -- its ExecStartPost would run when the container is ready, not when
+        -- it finished, and there is no run to record
+        assertEqual
+            ""
+            ["a stamp records a run that finished, and this container is not a job"]
+            (Quadlet.containerProblems app{Quadlet.containerStamp = Just "/var/lib/app/stamp"})
     ]
 
 checkTests :: [TestTree]
@@ -242,6 +249,19 @@ nodeTests =
         assertBool "" (notesOf (node app) /= notesOf (node app{Quadlet.containerImage = "europe-west1-docker.pkg.dev/acme/repo/app:v4"}))
     , testCase "the same declaration describes itself the same way" $
         assertEqual "" (notesOf (node app)) (notesOf (node app))
+    , testCase "a declaration that sets no stamp is described, keyed and rendered as it was before there was one" $ do
+        -- the hash is that of the text "a full container, key by key" pins,
+        -- worked out outside this code (sha256, base64url, 12 characters): a
+        -- long-running container whose file or description moved would be
+        -- restarted by the pass after an upgrade
+        assertEqual "" Nothing app.containerStamp
+        assertEqual
+            ""
+            (Just ["image: europe-west1-docker.pkg.dev/acme/repo/app:v3", "quadlet: aTe0H65oUH_B"])
+            (notesOf (node app))
+        assertEqual "" (Just "runs europe-west1-docker.pkg.dev/acme/repo/app:v3 as app.service") (helpOf (node app))
+        assertEqual "" (Just (mkRef "systemd-unit" ("app.service" :: Text))) (refOf (node app))
+        assertBool "" (not ("ExecStart" `Text.isInfixOf` Quadlet.renderContainer app))
     , testCase "two quadlets in one directory share it without a conflict" $ do
         let other = app{Quadlet.containerName = Podman.ContainerName "other"}
             dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [node app, node other]) id))
@@ -333,6 +353,7 @@ nodeTests =
     node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack
     refOf o = fmap (\act -> act.extension.ref) (opAct o)
     notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+    helpOf o = fmap (\act -> act.extension.help) (opAct o)
 
 generatorPath :: FilePath
 generatorPath = "/usr/libexec/podman/quadlet"
