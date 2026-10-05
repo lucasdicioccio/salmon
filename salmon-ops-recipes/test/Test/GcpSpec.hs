@@ -66,6 +66,7 @@ tests =
         , testGroup "Core.declaredAccount" accountTests
         , testGroup "Compute.interpretInstanceStatus" instanceTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
+        , testGroup "Storage bucket settings" bucketSettingsTests
         , testGroup "ArtifactRegistry.interpretRepoDescribe" repoTests
         , testGroup "CloudRun.interpretServiceDescribe" cloudRunTests
         , testGroup "Iam" iamTests
@@ -213,6 +214,237 @@ bucketTests =
     , testCase "describe failing means the bucket is absent" $
         assertBool "" (isFailure (Storage.interpretBucketDescribe "my-bucket" (ExitFailure 1)))
     ]
+
+-- | The bucket's settings nodes: access, lifecycle, website. The JSON here is
+-- written from the storage API's resource shape, not captured from gcloud.
+bucketSettingsTests :: [TestTree]
+bucketSettingsTests =
+    [ testGroup
+        "nodes"
+        [ testCase "the bucket node is described as it was" $ do
+            let act = only (Storage.bucket silent ignoreTrack bkt)
+            assertEqual "" (mkRef "gcp-bucket" ("site-bucket" :: Text.Text)) act.extension.ref
+            assertEqual "" "creates GCS bucket site-bucket" act.extension.help
+            assertEqual "" [] act.extension.notes
+        , testCase "each setting is its own effect site" $ do
+            let refsOf = map (\a -> a.extension.ref)
+                acts =
+                    [ only (Storage.bucket silent ignoreTrack bkt)
+                    , only (Storage.bucketIamBinding silent ignoreTrack public)
+                    , only (Storage.bucketIamBinding silent ignoreTrack writer)
+                    , only (Storage.bucketLifecycle silent ignoreTrack expiry)
+                    , only (Storage.bucketWebsite silent ignoreTrack site)
+                    ]
+            assertEqual "" (length acts) (length (nub (refsOf acts)))
+        , testCase "a binding is keyed on bucket, role and member" $
+            assertEqual
+                ""
+                (mkRef "gcp-bucket-iam-binding" ("site-bucket" :: Text.Text, "roles/storage.legacyObjectReader" :: Text.Text, "allUsers" :: Text.Text))
+                (only (Storage.bucketIamBinding silent ignoreTrack public)).extension.ref
+        , testCase "lifecycle and website are keyed on the bucket alone, what is declared riding in the notes" $ do
+            let lc rules = only (Storage.bucketLifecycle silent ignoreTrack expiry{Storage.lifecycleRules = rules})
+                ws w = only (Storage.bucketWebsite silent ignoreTrack w)
+            assertEqual "" (lc []).extension.ref (lc [Storage.expireAfterDays 7]).extension.ref
+            assertBool "" ((lc []).extension.notes /= (lc [Storage.expireAfterDays 7]).extension.notes)
+            assertEqual "" (ws site).extension.ref (ws site{Storage.websiteNotFoundPage = Nothing}).extension.ref
+            assertBool "" ((ws site).extension.notes /= (ws site{Storage.websiteNotFoundPage = Nothing}).extension.notes)
+        , testCase "up refuses a declaration with a problem before anything is run" $ do
+            r <- try ((only (Storage.bucketLifecycle silent ignoreTrack expiry{Storage.lifecycleRules = [unconditional]})).extension.up)
+            case r of
+                Left (e :: IOError) -> assertBool (show e) ("no condition" `isInfixOf` show e)
+                Right () -> assertBool "expected a refusal" False
+        ]
+    , testGroup
+        "access"
+        [ testCase "members are spelled as IAM spells them" $
+            assertEqual
+                ""
+                ["allUsers", "allAuthenticatedUsers", "serviceAccount:sa@p.iam.gserviceaccount.com", "user:a@example.org", "group:g@example.org", "domain:example.org"]
+                ( map
+                    Storage.renderMember
+                    [ Storage.AllUsers
+                    , Storage.AllAuthenticatedUsers
+                    , Storage.ServiceAccountMember "sa@p.iam.gserviceaccount.com"
+                    , Storage.UserMember "a@example.org"
+                    , Storage.GroupMember "g@example.org"
+                    , Storage.OtherMember "domain:example.org"
+                    ]
+                )
+        , testCase "the policy is read as JSON" $
+            assertEqual
+                ""
+                ["storage", "buckets", "get-iam-policy", "gs://site-bucket", "--format", "json", "--project", "my-project"]
+                (args (Storage.BucketsGetIamPolicy bkt))
+        , testCase "add names the bucket, member and role" $
+            assertEqual
+                ""
+                ["storage", "buckets", "add-iam-policy-binding", "gs://site-bucket", "--member", "allUsers", "--role", "roles/storage.legacyObjectReader", "--project", "my-project"]
+                (args (Storage.BucketsAddIamBinding public))
+        , testCase "remove differs from add by its verb only" $
+            assertEqual
+                ""
+                (map (\w -> if w == "add-iam-policy-binding" then "remove-iam-policy-binding" else w) (args (Storage.BucketsAddIamBinding writer)))
+                (args (Storage.BucketsRemoveIamBinding writer))
+        , testCase "the member under the role is satisfied" $ do
+            assertEqual "" Success (Storage.interpretBucketPolicy public ExitSuccess policy)
+            assertEqual "" Success (Storage.interpretBucketPolicy writer ExitSuccess policy)
+        , testCase "the member under another role only is a failure naming role and member" $
+            case Storage.interpretBucketPolicy public{Storage.bindingRole = "roles/storage.objectViewer"} ExitSuccess policy of
+                Failure why -> assertBool (Text.unpack why) ("roles/storage.objectViewer" `Text.isInfixOf` why && "allUsers" `Text.isInfixOf` why)
+                other -> assertBool ("expected a Failure, got " <> show other) False
+        , testCase "a member that merely contains the declared one is not it" $
+            assertBool "" (isFailure (Storage.interpretBucketPolicy writer{Storage.bindingMember = Storage.ServiceAccountMember "p.iam.gserviceaccount.com"} ExitSuccess policy))
+        , testCase "a conditional binding is not the declared one" $
+            assertBool "" (isFailure (Storage.interpretBucketPolicy conditional ExitSuccess policy))
+        , testCase "a policy with no bindings grants nothing" $
+            assertBool "" (isFailure (Storage.interpretBucketPolicy public ExitSuccess "{\"etag\": \"CAE=\"}"))
+        , testCase "the policy not being readable is a failure, and not being a policy cannot be judged" $ do
+            assertBool "" (isFailure (Storage.interpretBucketPolicy public (ExitFailure 1) ""))
+            assertEqual "" Unknown (Storage.interpretBucketPolicy public ExitSuccess "bindings:\n- role: x\n")
+        , testCase "a binding with no role or no member is refused" $ do
+            assertBool "" (not (null (Storage.bindingProblems public{Storage.bindingRole = " "})))
+            assertBool "" (not (null (Storage.bindingProblems public{Storage.bindingMember = Storage.ServiceAccountMember ""})))
+            assertBool "" (isFailure (Storage.interpretBucketPolicy public{Storage.bindingRole = ""} ExitSuccess policy))
+            assertEqual "" [] (Storage.bindingProblems public)
+        ]
+    , testGroup
+        "lifecycle"
+        [ testCase "the rules render as the API's lifecycle document" $
+            assertEqual
+                ""
+                "{\"rule\":[{\"action\":{\"type\":\"Delete\"},\"condition\":{\"age\":30}},{\"action\":{\"storageClass\":\"NEARLINE\",\"type\":\"SetStorageClass\"},\"condition\":{\"age\":7,\"matchesPrefix\":[\"daily/\"]}}]}"
+                (Storage.renderLifecycle [Storage.expireAfterDays 30, tiering])
+        , testCase "no rule renders as an empty list" $
+            assertEqual "" "{\"rule\":[]}" (Storage.renderLifecycle [])
+        , testCase "set names the bucket and the file, clear the bucket alone" $ do
+            assertEqual
+                ""
+                ["storage", "buckets", "update", "gs://site-bucket", "--lifecycle-file", "/tmp/rules.json", "--project", "my-project"]
+                (args (Storage.BucketsSetLifecycle bkt "/tmp/rules.json"))
+            assertEqual
+                ""
+                ["storage", "buckets", "update", "gs://site-bucket", "--clear-lifecycle", "--project", "my-project"]
+                (args (Storage.BucketsClearLifecycle bkt))
+        , testCase "the bucket is described raw, as JSON" $
+            assertEqual
+                ""
+                ["storage", "buckets", "describe", "gs://site-bucket", "--raw", "--format", "json", "--project", "my-project"]
+                (args (Storage.BucketsDescribeJson bkt))
+        , testCase "the declared rules in any order are satisfied" $
+            assertEqual "" Success (lifecycleVerdict [tiering, Storage.expireAfterDays 30] (describedWith "lifecycle" twoRules))
+        , testCase "gcloud's own name for the configuration is read too" $
+            assertEqual "" Success (lifecycleVerdict [Storage.expireAfterDays 30, tiering] (describedWith "lifecycle_config" twoRules))
+        , testCase "null members and empty lists in a live rule are not a difference" $
+            assertEqual
+                ""
+                Success
+                ( lifecycleVerdict
+                    [Storage.expireAfterDays 30]
+                    (describedWith "lifecycle" "{\"rule\": [{\"action\": {\"type\": \"Delete\", \"storageClass\": null}, \"condition\": {\"age\": 30, \"matchesPrefix\": []}}]}")
+                )
+        , testCase "another age is a failure" $
+            assertBool "" (isFailure (lifecycleVerdict [Storage.expireAfterDays 31, tiering] (describedWith "lifecycle" twoRules)))
+        , testCase "a rule too many, or too few, is a failure" $ do
+            assertBool "" (isFailure (lifecycleVerdict [Storage.expireAfterDays 30] (describedWith "lifecycle" twoRules)))
+            assertBool "" (isFailure (lifecycleVerdict [Storage.expireAfterDays 30] "{\"name\": \"site-bucket\"}"))
+        , testCase "a live condition this module has no field for is a difference" $
+            assertBool
+                ""
+                ( isFailure
+                    ( lifecycleVerdict
+                        [Storage.expireAfterDays 30]
+                        (describedWith "lifecycle" "{\"rule\": [{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 30, \"daysSinceCustomTime\": 2}}]}")
+                    )
+                )
+        , testCase "no rule declared is satisfied by a bucket with none, however it says so" $ do
+            assertEqual "" Success (lifecycleVerdict [] "{\"name\": \"site-bucket\"}")
+            assertEqual "" Success (lifecycleVerdict [] (describedWith "lifecycle" "{\"rule\": []}"))
+            assertEqual "" Success (lifecycleVerdict [] (describedWith "lifecycle" "null"))
+            assertBool "" (isFailure (lifecycleVerdict [] (describedWith "lifecycle" twoRules)))
+        , testCase "describe failing means the bucket is absent, and output that is not JSON cannot be judged" $ do
+            assertBool "" (isFailure (Storage.interpretLifecycleDescribe expiry (ExitFailure 1) ""))
+            assertEqual "" Unknown (Storage.interpretLifecycleDescribe expiry ExitSuccess "name: site-bucket\n")
+        , testCase "a rule with no condition, a negative count or no storage class is refused" $ do
+            let problems rules = Storage.lifecycleProblems expiry{Storage.lifecycleRules = rules}
+            assertEqual "" [] (problems [Storage.expireAfterDays 30, tiering])
+            assertBool "" (any ("rule 2 has no condition" `Text.isPrefixOf`) (problems [Storage.expireAfterDays 30, unconditional]))
+            assertBool "" (not (null (problems [Storage.expireAfterDays (-1)])))
+            assertBool "" (not (null (problems [tiering{Storage.ruleAction = Storage.SetStorageClass ""}])))
+            assertBool "" (isFailure (lifecycleVerdict [unconditional] (describedWith "lifecycle" twoRules)))
+        ]
+    , testGroup
+        "website"
+        [ testCase "both settings are set" $
+            assertEqual
+                ""
+                ["storage", "buckets", "update", "gs://site-bucket", "--web-main-page-suffix", "index.html", "--web-error-page", "404.html", "--project", "my-project"]
+                (args (Storage.BucketsSetWebsite site))
+        , testCase "a setting not declared is cleared" $ do
+            assertEqual
+                ""
+                ["storage", "buckets", "update", "gs://site-bucket", "--web-main-page-suffix", "index.html", "--clear-web-error-page", "--project", "my-project"]
+                (args (Storage.BucketsSetWebsite site{Storage.websiteNotFoundPage = Nothing}))
+            assertEqual
+                ""
+                ["storage", "buckets", "update", "gs://site-bucket", "--clear-web-main-page-suffix", "--clear-web-error-page", "--project", "my-project"]
+                (args (Storage.BucketsSetWebsite (Storage.BucketWebsite bkt Nothing (Just " "))))
+        , testCase "the declared settings are satisfied, under either name" $ do
+            assertEqual "" Success (websiteVerdict site (describedWith "website" bothPages))
+            assertEqual "" Success (websiteVerdict site (describedWith "website_config" bothPages))
+        , testCase "another page is a failure naming both" $
+            case websiteVerdict site (describedWith "website" "{\"mainPageSuffix\": \"index.html\", \"notFoundPage\": \"missing.html\"}") of
+                Failure why -> do
+                    assertBool (Text.unpack why) ("missing.html" `Text.isInfixOf` why && "404.html" `Text.isInfixOf` why)
+                    assertBool (Text.unpack why) (not ("main page" `Text.isInfixOf` why))
+                other -> assertBool ("expected a Failure, got " <> show other) False
+        , testCase "a bucket with no website settings does not have the declared ones" $
+            assertBool "" (isFailure (websiteVerdict site "{\"name\": \"site-bucket\"}"))
+        , testCase "a setting left on a bucket declared without it is a failure" $
+            assertBool "" (isFailure (websiteVerdict site{Storage.websiteNotFoundPage = Nothing} (describedWith "website" bothPages)))
+        , testCase "nothing declared is satisfied by a bucket with nothing set" $
+            assertEqual "" Success (websiteVerdict (Storage.BucketWebsite bkt Nothing Nothing) "{\"name\": \"site-bucket\"}")
+        , testCase "describe failing means the bucket is absent, and output that is not JSON cannot be judged" $ do
+            assertBool "" (isFailure (Storage.interpretWebsiteDescribe site (ExitFailure 1) ""))
+            assertEqual "" Unknown (websiteVerdict site "name: site-bucket\n")
+        , testCase "a main page suffix with a slash is refused" $ do
+            assertEqual "" [] (Storage.websiteProblems site)
+            assertBool "" (not (null (Storage.websiteProblems site{Storage.websiteMainPageSuffix = Just "pages/index.html"})))
+            assertBool "" (isFailure (websiteVerdict site{Storage.websiteMainPageSuffix = Just "pages/index.html"} (describedWith "website" bothPages)))
+        ]
+    ]
+  where
+    args = processArgs . prepare Storage.storageCommand
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    bkt = Storage.Bucket "site-bucket" (Core.Project "my-project") (Core.Region "europe-west1") True
+    public = Storage.BucketIamBinding bkt "roles/storage.legacyObjectReader" Storage.AllUsers
+    writer = Storage.BucketIamBinding bkt "roles/storage.objectCreator" (Storage.ServiceAccountMember "backup@my-project.iam.gserviceaccount.com")
+    conditional = Storage.BucketIamBinding bkt "roles/storage.objectAdmin" (Storage.UserMember "temp@example.org")
+    policy =
+        "{\"bindings\": [\
+        \{\"members\": [\"projectOwner:my-project\"], \"role\": \"roles/storage.legacyBucketOwner\"},\
+        \{\"members\": [\"allUsers\"], \"role\": \"roles/storage.legacyObjectReader\"},\
+        \{\"members\": [\"user:someone@example.org\", \"serviceAccount:Backup@my-project.iam.gserviceaccount.com\"], \"role\": \"roles/storage.objectCreator\"},\
+        \{\"members\": [\"user:temp@example.org\"], \"role\": \"roles/storage.objectAdmin\", \"condition\": {\"title\": \"until\", \"expression\": \"request.time < timestamp('2030-01-01T00:00:00Z')\"}}\
+        \], \"etag\": \"CAI=\"}"
+    expiry = Storage.BucketLifecycle bkt [Storage.expireAfterDays 30]
+    tiering =
+        Storage.LifecycleRule
+            (Storage.SetStorageClass "NEARLINE")
+            Storage.noCondition{Storage.conditionAge = Just 7, Storage.conditionMatchesPrefix = ["daily/"]}
+    unconditional = Storage.LifecycleRule Storage.Delete Storage.noCondition
+    twoRules =
+        "{\"rule\": [\
+        \{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 30}},\
+        \{\"action\": {\"type\": \"SetStorageClass\", \"storageClass\": \"NEARLINE\"}, \"condition\": {\"age\": 7, \"matchesPrefix\": [\"daily/\"]}}\
+        \]}"
+    lifecycleVerdict rules = Storage.interpretLifecycleDescribe expiry{Storage.lifecycleRules = rules} ExitSuccess
+    site = Storage.BucketWebsite bkt (Just "index.html") (Just "404.html")
+    bothPages = "{\"mainPageSuffix\": \"index.html\", \"notFoundPage\": \"404.html\"}"
+    websiteVerdict w = Storage.interpretWebsiteDescribe w ExitSuccess
+    describedWith member value =
+        "{\"kind\": \"storage#bucket\", \"name\": \"site-bucket\", \"location\": \"EUROPE-WEST1\", \"" <> member <> "\": " <> value <> "}"
 
 -------------------------------------------------------------------------------
 

@@ -1199,6 +1199,22 @@ neither has `remove-backend`, the certificate swap (how a proxy lists its certif
 are assumed) or the unfolded graph (in particular concurrent gcloud calls under `serve`); `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
 commands and what is unverified.
 
+`Gcp.Storage` has three settings nodes beside `bucket` (whose `ref`/`help`/`notes` are unchanged), each with no
+dependency of its own, so the caller injects the bucket. `bucketIamBinding` is one unconditional binding on the bucket's
+policy, keyed `"gcp-bucket-iam-binding" (bucket, role, member)`: `check` reads `get-iam-policy --format json`
+(`interpretBucketPolicy`; a binding with a `condition` does not count), `up` is `add-iam-policy-binding`, `down` removes
+it only if the check finds it. `Member` has `AllUsers` (with `roles/storage.legacyObjectReader`: public read without
+listing). `bucketLifecycle` takes the rules as data (`LifecycleRule`, `expireAfterDays`) and is keyed
+`"gcp-bucket-lifecycle" bucket`: a bucket has one lifecycle configuration, so the declared rules **replace** whatever is
+there, hand-made rules included, and `[]` clears; `up` writes `renderLifecycle` to a temp file for `update
+--lifecycle-file`; the check compares live and declared rules as JSON values (nulls and empty lists pruned, order
+aside), so a live condition the module has no field for is a difference; a rule with no condition is refused.
+`bucketWebsite` (main page suffix, not-found page; `"gcp-bucket-website" bucket`) sets both, a `Nothing` clearing.
+Both read `describe --raw --format json` and look under the API's member name and gcloud's own (`lifecycle` /
+`lifecycle_config`, `website` / `website_config`). **Layer 0 only** (`Test/GcpSpec.hs`, on JSON written from the API's
+resource shape, not captured): no command here has met a real project, so `--raw`, the described shapes and how the API
+spells back a rule are unverified. Not done: a node publishing a directory to a bucket (`gcloud storage rsync`).
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port
