@@ -15,13 +15,15 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
+import Data.Bits (xor)
 import Data.Char (isAsciiLower, isDigit)
-import Data.List (isInfixOf, isPrefixOf, isSubsequenceOf, nub, sort, tails)
+import Data.List (foldl', isInfixOf, isPrefixOf, isSubsequenceOf, nub, sort, tails)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Foldable (toList)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Data.Word (Word64)
 import GHC.IO.Exception (ExitCode (..))
 import System.Directory (createDirectory)
 import System.Environment (getEnv)
@@ -1144,6 +1146,195 @@ lbTests =
                 assertEqual err ExitSuccess code
             )
             scripts
+    , testCase "a declaration with no bucket, redirect or HTTP listener option renders what it rendered before those existed" $
+        -- Checksums of every script (and the URL map) taken before backend
+        -- buckets, redirects and the HTTP listener option were added. A
+        -- balancer already up was made by these words; in particular its
+        -- HTTP proxy is created once and its URL map never set again.
+        assertEqual
+            ""
+            [ ("plain", 17410649785801445793)
+            , ("every feature", 8942311775860119767)
+            , ("two services on one group", 17068412453506542601)
+            , ("a domain-set certificate", 17815722262085902745)
+            ]
+            [ (what :: String, fnv1a (pinned a) :: Word64)
+            | (what, a) <- [("plain", alb), ("every feature", full), ("two services on one group", shared), ("a domain-set certificate", rotated)]
+            ]
+    , testCase "a host sent to a backend bucket, a path and a host answered with a redirect" $ do
+        let rendered = LoadBalancing.renderUrlMap site
+        let (stamp, rest) = case rendered of
+                Object o -> (KeyMap.lookup "description" o, Object (KeyMap.delete "description" o))
+                other -> (Nothing, other)
+        let bucketUrl = "https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/backendBuckets/web-site-bucket" :: Text.Text
+        assertEqual
+            ""
+            ( object
+                [ "name" .= ("web-url-map" :: Text.Text)
+                , "defaultService" .= svcUrl "web-backend"
+                , "hostRules"
+                    .= [ object ["hosts" .= (["app.example.org", "www.example.org"] :: [Text.Text]), "pathMatcher" .= ("m0" :: Text.Text)]
+                       , object ["hosts" .= (["api.example.org"] :: [Text.Text]), "pathMatcher" .= ("m1" :: Text.Text)]
+                       , object ["hosts" .= (["static.example.org"] :: [Text.Text]), "pathMatcher" .= ("m2" :: Text.Text)]
+                       , object ["hosts" .= (["example.org"] :: [Text.Text]), "pathMatcher" .= ("m3" :: Text.Text)]
+                       ]
+                , "pathMatchers"
+                    .= [ object
+                            [ "name" .= ("m0" :: Text.Text)
+                            , "defaultService" .= svcUrl "web-backend"
+                            , "pathRules" .= [object ["paths" .= (["/events/*", "/poll"] :: [Text.Text]), "service" .= svcUrl "web-slow-backend"]]
+                            ]
+                       , object ["name" .= ("m1" :: Text.Text), "defaultService" .= svcUrl "web-api-backend"]
+                       , object
+                            [ "name" .= ("m2" :: Text.Text)
+                            , "defaultService" .= bucketUrl
+                            , "pathRules"
+                                .= [ object
+                                        [ "paths" .= (["/old/*"] :: [Text.Text])
+                                        , "urlRedirect"
+                                            .= object
+                                                [ "pathRedirect" .= ("/new" :: Text.Text)
+                                                , "httpsRedirect" .= False
+                                                , "redirectResponseCode" .= ("FOUND" :: Text.Text)
+                                                , "stripQuery" .= False
+                                                ]
+                                        ]
+                                   ]
+                            ]
+                       , object
+                            [ "name" .= ("m3" :: Text.Text)
+                            , "defaultUrlRedirect"
+                                .= object
+                                    [ "hostRedirect" .= ("www.example.org" :: Text.Text)
+                                    , "httpsRedirect" .= True
+                                    , "redirectResponseCode" .= ("MOVED_PERMANENTLY_DEFAULT" :: Text.Text)
+                                    , "stripQuery" .= False
+                                    ]
+                            ]
+                       ]
+                ]
+            )
+            rest
+        case stamp of
+            Just (String t) -> assertBool (Text.unpack t) ("salmon:" `Text.isPrefixOf` t && Text.length t == 23)
+            other -> assertBool (show other) False
+    , testCase "the map's fingerprint follows the declaration, and a map of services only has none" $ do
+        let stampOf a = case LoadBalancing.renderUrlMap a of
+                Object o -> KeyMap.lookup "description" o
+                _ -> Nothing
+        assertEqual "" Nothing (stampOf full)
+        assertEqual "" (stampOf site) (stampOf site)
+        assertBool "" (stampOf site /= stampOf (siteTo "web.example.org"))
+        assertBool "the check compares it" ("--format='value(description)'" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript site))
+        assertBool "and only then" (not ("value(description)" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript full)))
+    , testCase "a backend bucket is a regional resource of its own that the URL map waits for; a redirect is no resource" $ do
+        let sc = createScript site
+        assertBool sc ("exists gcloud compute backend-buckets describe 'web-site-bucket' --project=\"$PROJECT\" --region=\"$REGION\" || gcloud compute backend-buckets create 'web-site-bucket' --project=\"$PROJECT\" --region=\"$REGION\" --gcs-bucket-name='example-site' --load-balancing-scheme=EXTERNAL_MANAGED" `isInfixOf` sc)
+        assertBool sc (["backend-buckets create 'web-site-bucket'", "url-maps import"] `inOrder` sc)
+        assertEqual
+            ""
+            (map LoadBalancing.BackendServicePart ["web-backend", "web-slow-backend", "web-api-backend"] <> [LoadBalancing.BackendBucketPart "web-site-bucket"])
+            (depsOf site LoadBalancing.UrlMapPart)
+        assertEqual
+            "one more resource than without"
+            [LoadBalancing.BackendBucketPart "web-site-bucket"]
+            (filter (`notElem` map LoadBalancing.partId (LoadBalancing.lbParts full)) (map LoadBalancing.partId (LoadBalancing.lbParts site)))
+        assertEqual "" [] (LoadBalancing.albProblems site)
+    , testCase "what is wrong with a bucket, a redirect or a listener option is refused" $ do
+        let redirect h path https = LoadBalancing.RedirectTo (LoadBalancing.Redirect h path https LoadBalancing.MovedPermanently)
+        let bad =
+                alb
+                    { LoadBalancing.albBuckets = [LoadBalancing.BackendBucket "site" "a", LoadBalancing.BackendBucket "site" ""]
+                    , LoadBalancing.albHostRules =
+                        [ LoadBalancing.HostRule ["a.example.org"] (LoadBalancing.NamedBucket "nope") [LoadBalancing.PathRule ["/x"] (redirect Nothing (Just "x") False)]
+                        , LoadBalancing.HostRule ["b.example.org"] (redirect Nothing Nothing False) []
+                        , LoadBalancing.HostRule ["c.example.org"] (redirect (Just "") Nothing True) []
+                        ]
+                    , LoadBalancing.albHttp = LoadBalancing.RedirectToHttps LoadBalancing.MovedPermanently
+                    }
+        let problems = unlines (map Text.unpack (LoadBalancing.albProblems bad))
+        mapM_
+            (\w -> assertBool (w <> "\n" <> problems) (w `isInfixOf` problems))
+            [ "backend bucket declared twice: site"
+            , "backend bucket site names no Cloud Storage bucket"
+            , "rule names an undeclared backend bucket: nope"
+            , "a redirect names neither a host, a path nor HTTPS"
+            , "a redirect's path must start with /: x"
+            , "a redirect names an empty host"
+            , "redirecting HTTP to HTTPS needs a certificate"
+            ]
+        assertBool "" (any ("no HTTP listener needs a certificate" `Text.isInfixOf`) (LoadBalancing.albProblems alb{LoadBalancing.albHttp = LoadBalancing.NoHttp}))
+        mapM_ (\how -> assertEqual (show how) [] (LoadBalancing.albProblems (listening how))) [LoadBalancing.HttpCreatedOnce, LoadBalancing.ServeHttp, LoadBalancing.RedirectToHttps LoadBalancing.PermanentRedirect, LoadBalancing.NoHttp]
+    , testCase "by default the HTTP proxy is created once and its URL map never set" $ do
+        let ups a = unlines [Text.unpack l | part <- LoadBalancing.lbParts a, part.partId == LoadBalancing.HttpProxyPart, l <- part.partUp]
+        assertEqual
+            ""
+            "exists gcloud compute target-http-proxies describe 'web-proxy' --project=\"$PROJECT\" --region=\"$REGION\" || gcloud compute target-http-proxies create 'web-proxy' --project=\"$PROJECT\" --region=\"$REGION\" --url-map='web-url-map' --url-map-region=\"$REGION\"\n"
+            (ups full)
+        assertEqual "a bucket and a redirect do not make it a declaration about port 80" (ups full) (ups site)
+        mapM_ (\a -> assertBool "" (not ("target-http-proxies update" `isInfixOf` createScript a))) [alb, full, site]
+        assertBool "" ("target-http-proxies update 'web-proxy'" `isInfixOf` createScript (listening LoadBalancing.ServeHttp))
+    , testCase "redirecting HTTP is a second, redirect-only URL map the HTTP proxy is set on" $ do
+        let ids = map LoadBalancing.partId (LoadBalancing.lbParts toHttps)
+        assertEqual
+            "one more resource"
+            [LoadBalancing.HttpRedirectUrlMapPart]
+            (filter (`notElem` map LoadBalancing.partId (LoadBalancing.lbParts full)) ids)
+        assertEqual "" [LoadBalancing.HttpRedirectUrlMapPart] (depsOf toHttps LoadBalancing.HttpProxyPart)
+        assertEqual "the HTTPS proxy stays on the balancer's map" [LoadBalancing.UrlMapPart, LoadBalancing.CertificatePart "web-cert"] (depsOf toHttps LoadBalancing.HttpsProxyPart)
+        let rendered = LoadBalancing.renderHttpRedirectUrlMap toHttps LoadBalancing.MovedPermanently
+        assertEqual
+            ""
+            ( object
+                [ "name" .= ("web-http-redirect-url-map" :: Text.Text)
+                , "defaultUrlRedirect"
+                    .= object
+                        [ "httpsRedirect" .= True
+                        , "redirectResponseCode" .= ("MOVED_PERMANENTLY_DEFAULT" :: Text.Text)
+                        , "stripQuery" .= False
+                        ]
+                ]
+            )
+            (case rendered of Object o -> Object (KeyMap.delete "description" o); other -> other)
+        let sc = createScript toHttps
+        assertBool sc (["url-maps import 'web-http-redirect-url-map'", "target-http-proxies create 'web-proxy' --project=\"$PROJECT\" --region=\"$REGION\" --url-map='web-http-redirect-url-map'"] `inOrder` sc)
+        -- the balancer's own map is the one it was
+        assertEqual "" (LoadBalancing.renderUrlMap full) (LoadBalancing.renderUrlMap toHttps)
+    , testCase "no HTTP listener is no proxy and no :80 rule, and a node that removes the ones there" $ do
+        let none = listening LoadBalancing.NoHttp
+        let ids = map LoadBalancing.partId (LoadBalancing.lbParts none)
+        assertBool "" (LoadBalancing.HttpProxyPart `notElem` ids && LoadBalancing.ForwardingRulePart `notElem` ids)
+        assertBool "" (LoadBalancing.NoHttpPart `elem` ids)
+        assertBool "" (LoadBalancing.HttpsForwardingRulePart `elem` ids)
+        let sc = createScript none
+        assertBool sc (not ("target-http-proxies create" `isInfixOf` sc) && not ("--ports=80" `isInfixOf` sc))
+        assertBool sc (["forwarding-rules delete 'web-fw'", "target-http-proxies delete 'web-proxy'"] `inOrder` sc)
+        assertBool "the address is read off the HTTPS rule" ("web-https-fw" `elem` processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbAddressDescribe none)))
+    , testCase "the new resources come after what they depend on, and their scripts parse as bash" $ do
+        let declarations = [site, toHttps, listening LoadBalancing.ServeHttp, listening LoadBalancing.NoHttp]
+        mapM_
+            ( \a -> do
+                let parts = LoadBalancing.lbParts a
+                let ids = map LoadBalancing.partId parts
+                assertEqual "no resource twice" (nub ids) ids
+                mapM_
+                    (\(i, part) -> mapM_ (\d -> assertBool (show part.partId <> " after " <> show d) (d `elem` take i ids)) part.partDeps)
+                    (zip [0 :: Int ..] parts)
+                let dag = dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack a)
+                assertEqual "one node per resource, and the root" (length parts + 1) (Map.size (Dag.dagNodes dag))
+                assertEqual "nothing conflicting" 0 (length (Dag.dagConflicts dag))
+            )
+            declarations
+        mapM_
+            ( \sc -> do
+                (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", Text.unpack sc] ""
+                assertEqual err ExitSuccess code
+            )
+            [ render a part
+            | a <- declarations
+            , part <- LoadBalancing.lbParts a
+            , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
+            ]
     , testGroup "a node per resource" nodeTests
     , testGroup "against a stand-in gcloud" $
         -- Not GCP: a shell script that keeps "resources" as files and answers
@@ -1417,6 +1608,106 @@ lbTests =
                 assertEqual (unlines moved) ["target-https-proxies update web-https-proxy"] (filter (\l -> "target-https-proxies" `isInfixOf` l || "certificates" `isInfixOf` l) moved)
                 fresh <- partVerdict run (own "own-2") LoadBalancing.HttpsProxyPart
                 assertEqual "" [Success] fresh
+        , testCase "a bucket and redirects go up once, check, follow a changed redirect and a changed bucket, and come down" $
+            withFakeGcloud $ \run mutations -> do
+                first <- mutationsOf run mutations (createScript site)
+                assertBool (unlines first) ("backend-buckets create web-site-bucket" `elem` first)
+                (said, v) <- wholeVerdict run site
+                assertEqual said Success v
+                second <- mutationsOf run mutations (createScript site)
+                assertBool (unlines second) (not (any (\l -> " create " `isInfixOf` l || "backend-buckets" `isInfixOf` l || "target-http-proxies" `isInfixOf` l) second))
+                -- a redirect sent elsewhere is the same hosts, and still a different map
+                let moved = siteTo "web.example.org"
+                stale <- partVerdict run moved LoadBalancing.UrlMapPart
+                case stale of
+                    [Failure t] -> assertBool (Text.unpack t) ("declared rules on web-url-map" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                _ <- mutationsOf run mutations (createScript moved)
+                fresh <- partVerdict run moved LoadBalancing.UrlMapPart
+                assertEqual "" [Success] fresh
+                -- another Cloud Storage bucket behind the same backend bucket
+                let other = moved{LoadBalancing.albBuckets = [LoadBalancing.BackendBucket "site" "example-site-2"]}
+                wrong <- partVerdict run other (LoadBalancing.BackendBucketPart "web-site-bucket")
+                case wrong of
+                    [Failure t] -> assertBool (Text.unpack t) ("gcs-bucket example-site-2 on web-site-bucket" `isInfixOf` Text.unpack t)
+                    o -> assertBool (show o) False
+                third <- mutationsOf run mutations (createScript other)
+                assertBool (unlines third) ("backend-buckets update web-site-bucket" `elem` third)
+                (said', v') <- wholeVerdict run other
+                assertEqual said' Success v'
+                _ <- mutationsOf run mutations (deleteScript other)
+                (_, left, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" left
+        , testCase "an HTTP proxy somebody repointed is left where they put it, pass after pass" $
+            -- The second writer this pins: a deployment that points the HTTP
+            -- proxy at a redirect-only map of its own. Nothing declared about
+            -- port 80 means the proxy's map is not this balancer's to set.
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                _ <- run "gcloud compute target-http-proxies update web-proxy --url-map=theirs"
+                mapM_
+                    ( \a -> do
+                        again <- mutationsOf run mutations (createScript a)
+                        assertBool (unlines again) (not (any ("target-http-proxies" `isInfixOf`) again))
+                        on <- proxyMap run
+                        assertEqual "" "theirs\n" on
+                        (said, v) <- wholeVerdict run a
+                        assertEqual said Success v
+                    )
+                    [full, site]
+        , testCase "redirecting HTTP to HTTPS takes the proxy over, once; serving HTTP puts it back" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                _ <- run "gcloud compute target-http-proxies update web-proxy --url-map=theirs"
+                before <- partVerdict run toHttps LoadBalancing.HttpProxyPart
+                assertBool (show before) (all isFailure before)
+                taken <- mutationsOf run mutations (createScript toHttps)
+                assertEqual
+                    (unlines taken)
+                    ["url-maps import web-http-redirect-url-map", "target-http-proxies update web-proxy"]
+                    (filter (\l -> "target-http-proxies" `isInfixOf` l || "http-redirect" `isInfixOf` l) taken)
+                on <- proxyMap run
+                assertEqual "" "web-http-redirect-url-map\n" on
+                (said, v) <- wholeVerdict run toHttps
+                assertEqual said Success v
+                again <- mutationsOf run mutations (createScript toHttps)
+                assertBool (unlines again) (not (any ("target-http-proxies" `isInfixOf`) again))
+                -- the other declaration about port 80
+                let serving = listening LoadBalancing.ServeHttp
+                stale <- partVerdict run serving LoadBalancing.HttpProxyPart
+                case stale of
+                    [Failure t] -> assertBool (Text.unpack t) ("url-map web-url-map on web-proxy" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                back <- mutationsOf run mutations (createScript serving)
+                assertEqual (unlines back) ["target-http-proxies update web-proxy"] (filter ("target-http-proxies" `isInfixOf`) back)
+                on' <- proxyMap run
+                assertEqual "" "web-url-map\n" on'
+        , testCase "a balancer that redirects HTTP from the start goes up, checks and comes down" $
+            withFakeGcloud $ \run mutations -> do
+                made <- mutationsOf run mutations (createScript toHttps)
+                assertBool (unlines made) ("target-http-proxies create web-proxy" `elem` made && "target-http-proxies update web-proxy" `notElem` made)
+                on <- proxyMap run
+                assertEqual "" "web-http-redirect-url-map\n" on
+                (said, v) <- wholeVerdict run toHttps
+                assertEqual said Success v
+                _ <- mutationsOf run mutations (deleteScript toHttps)
+                (_, left, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" left
+        , testCase "no HTTP listener removes the :80 rule and then the proxy, and nothing else" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                let none = listening LoadBalancing.NoHttp
+                before <- partVerdict run none LoadBalancing.NoHttpPart
+                case before of
+                    [Failure t] -> assertBool (Text.unpack t) ("removal of forwarding-rules web-fw" `isInfixOf` Text.unpack t && "removal of target-http-proxies web-proxy" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                gone <- mutationsOf run mutations (createScript none)
+                assertEqual (unlines gone) ["forwarding-rules delete web-fw", "target-http-proxies delete web-proxy"] (filter (\l -> " delete " `isInfixOf` l || " create " `isInfixOf` l) gone)
+                (said, v) <- wholeVerdict run none
+                assertEqual said Success v
+                _ <- mutationsOf run mutations (deleteScript none)
+                (_, left, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
+                assertEqual "" "" left
         , testCase "a plain balancer goes up, checks and comes down the same way" $
             withFakeGcloud $ \run _ -> do
                 (code, _, err) <- run (createScript alb)
@@ -1560,6 +1851,19 @@ lbTests =
                 , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
                 ]
         ]
+    -- everything a declaration renders, part by part and as a whole
+    pinned :: LoadBalancing.ApplicationLoadBalancer -> String
+    pinned a =
+        unlines
+            ( [createScript a, Text.unpack (LoadBalancing.renderLbCheckScript a), deleteScript a, show (encode (LoadBalancing.renderUrlMap a))]
+                <> concat
+                    [ [show p.partId, show p.partDeps, Text.unpack p.partHelp, show p.partNotes]
+                        <> map Text.unpack (p.partUp <> p.partCheck <> p.partDown)
+                    | p <- LoadBalancing.lbParts a
+                    ]
+            )
+    fnv1a :: String -> Word64
+    fnv1a = foldl' (\h c -> (h `xor` fromIntegral (fromEnum c)) * 1099511628211) 14695981039346656037
     svcUrl :: Text.Text -> Text.Text
     svcUrl n = "https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/backendServices/" <> n
     inOrder :: [String] -> String -> Bool
@@ -1629,6 +1933,33 @@ lbTests =
                 ]
             , LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["app.example.org", "api.example.org"]]
             }
+    -- the same balancer serving a bucket on one host, redirecting a path of it, and its apex to www
+    site = siteTo "www.example.org"
+    siteTo www =
+        full
+            { LoadBalancing.albBuckets = [LoadBalancing.BackendBucket "site" "example-site"]
+            , LoadBalancing.albHostRules =
+                full.albHostRules
+                    <> [ LoadBalancing.HostRule
+                            ["static.example.org"]
+                            (LoadBalancing.NamedBucket "site")
+                            [LoadBalancing.PathRule ["/old/*"] (LoadBalancing.RedirectTo (LoadBalancing.Redirect Nothing (Just "/new") False LoadBalancing.Found))]
+                       , LoadBalancing.HostRule ["example.org"] (LoadBalancing.RedirectTo (LoadBalancing.redirectToHost www)) []
+                       ]
+            }
+    listening how = full{LoadBalancing.albHttp = how}
+    toHttps = listening (LoadBalancing.RedirectToHttps LoadBalancing.MovedPermanently)
+    mutationsOf run mutations sc = do
+        before <- length <$> mutations
+        (code, _, err) <- run sc
+        assertEqual err ExitSuccess code
+        drop before <$> mutations
+    wholeVerdict run a = do
+        (code, out, err) <- run (Text.unpack (LoadBalancing.renderLbCheckScript a))
+        pure (out <> err, LoadBalancing.interpretLbCheck code (Text.pack out))
+    proxyMap run = do
+        (_, out, _) <- run "gcloud compute target-http-proxies describe web-proxy --format='value(urlMap)' | sed 's|.*/||'"
+        pure out
     -- the same balancer with its certificate named after its domain set, before and after one more host
     rotating = full{LoadBalancing.albCertificates = [LoadBalancing.DomainSetCertificate "web-cert" ["app.example.org", "api.example.org"]]}
     rotated = full{LoadBalancing.albCertificates = [LoadBalancing.DomainSetCertificate "web-cert" ["app.example.org", "api.example.org", "www.example.org"]]}
@@ -1663,6 +1994,8 @@ lbTests =
             , LoadBalancing.albServices = []
             , LoadBalancing.albHostRules = []
             , LoadBalancing.albCertificates = []
+            , LoadBalancing.albBuckets = []
+            , LoadBalancing.albHttp = LoadBalancing.HttpCreatedOnce
             }
 
 {- | A stand-in for @gcloud@: resources are files named
@@ -1679,7 +2012,7 @@ fakeGcloud =
         , "S=\"$FAKE_GCLOUD_STATE\""
         , "coll=\"$2\"; verb=\"$3\"; name=\"$4\""
         , "if [ \"$verb\" = create ] && [ \"$name\" = tcp ]; then name=\"$5\"; fi"
-        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''"
+        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''"
         , "for a in \"$@\"; do case \"$a\" in"
         , "  --format=*) format=\"${a#--format=}\";;"
         , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
@@ -1690,6 +2023,8 @@ fakeGcloud =
         , "  --domains=*) domains=\"${a#--domains=}\";;"
         , "  --certificate-manager-certificates=*) certs=\"${a#--certificate-manager-certificates=}\";;"
         , "  --ssl-certificates=*) certs=\"${a#--ssl-certificates=}\";;"
+        , "  --gcs-bucket-name=*) gcs=\"${a#--gcs-bucket-name=}\";;"
+        , "  --url-map=*) urlmap=\"${a#--url-map=}\";;"
         , "esac; done"
         , "f=\"$S/$coll.$name\""
         , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
@@ -1710,14 +2045,20 @@ fakeGcloud =
         , "      'value(sslCertificates)') tr ',' '\\n' < \"$f.certs\" 2>/dev/null | sed 's|^|//certificatemanager.googleapis.com/projects/p/locations/r/certificates/|' | paste -sd';' || true;;"
         , "      'value(hostRules[].hosts)') grep -o '\"hosts\":\\[[^]]*\\]' \"$f\" | sed -e 's/\"hosts\"://' -e 's/[]\\[\"]//g' | paste -sd';' || true;;"
         , "      'value(IPAddress)') echo 203.0.113.7;;"
+        , "      'value(bucketName)') cat \"$f.gcs\" 2>/dev/null || true;;"
+        , -- a proxy names its map by URL, as (it is assumed) the real one does
+          "      'value(urlMap)') echo \"https://www.googleapis.com/compute/v1/projects/p/regions/r/urlMaps/$(cat \"$f.urlmap\" 2>/dev/null)\";;"
+        , "      'value(description)') grep -o '\"description\":\"[^\"]*\"' \"$f\" | sed -e 's/\"description\"://' -e 's/\"//g' || true;;"
         , "    esac;;"
         , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\"; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi"
         , "    if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi"
+        , "    if [ -n \"$gcs\" ]; then echo \"$gcs\" > \"$f.gcs\"; fi"
+        , "    if [ -n \"$urlmap\" ]; then echo \"$urlmap\" > \"$f.urlmap\"; fi"
         , -- a new certificate is not issued at once, when the test says so
           "    if [ -n \"$domains\" ]; then echo \"$domains\" > \"$f.domains\"; echo \"${FAKE_GCLOUD_NEW_CERT_STATE:-ACTIVE}\" > \"$f.state\"; fi;;"
         , "  list) for c in \"$S\"/\"$coll\".*; do n=\"${c##*/}\"; n=\"${n#\"$coll\".}\"; case \"$n\" in *.*|'*') ;; *) echo \"projects/p/locations/r/$coll/$n\";; esac; done;;"
         , "  import) mutate; cat > \"$f\";;"
-        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi; if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi;;"
+        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi; if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi; if [ -n \"$gcs\" ]; then echo \"$gcs\" > \"$f.gcs\"; fi; if [ -n \"$urlmap\" ]; then echo \"$urlmap\" > \"$f.urlmap\"; fi;;"
         , "  add-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" 2>/dev/null && { echo 'already a backend' >&2; exit 1; }; mutate; echo \"$group\" >> \"$f.backends\";;"
         , "  remove-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" || { echo 'not a backend' >&2; exit 1; }; mutate; { grep -vxF \"$group\" \"$f.backends\" || true; } > \"$f.backends.new\"; mv \"$f.backends.new\" \"$f.backends\";;"
         , -- like the real one, it replaces the group's whole set
@@ -1726,7 +2067,7 @@ fakeGcloud =
         , "  get-health) echo 'HEALTHY;HEALTHY';;"
         , "  delete) [ -e \"$f\" ] || exit 1"
         , "    if [ \"$coll\" = certificates ] && served | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
-        , "    mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\";;"
+        , "    mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\";;"
         , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
         , "esac"
         ]

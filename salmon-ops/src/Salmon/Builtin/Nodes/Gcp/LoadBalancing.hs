@@ -7,6 +7,11 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     HealthCheck (..),
     BackendService (..),
     ServiceRef (..),
+    BackendBucket (..),
+    Redirect (..),
+    RedirectCode (..),
+    redirectToHost,
+    HttpListener (..),
     HostRule (..),
     PathRule (..),
     Certificate (..),
@@ -29,6 +34,7 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     readDnsAuthorizationRecord,
     parseDnsAuthorizationRecord,
     renderUrlMap,
+    renderHttpRedirectUrlMap,
     interpretLbDescribe,
     interpretLbCheck,
     renderLbCheckScript,
@@ -46,12 +52,14 @@ import Control.Exception (Exception, throwIO)
 import Control.Monad (unless)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Types as Aeson (Pair)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Function (on)
 import Data.List (nub, nubBy, sort, (\\))
 import qualified Data.Map as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -130,16 +138,98 @@ data BackendService = BackendService
     }
     deriving (Eq, Show)
 
--- | Which backend service a rule sends to.
+{- | A backend bucket: a Cloud Storage bucket the balancer serves objects
+from, reachable only through a 'HostRule' or 'PathRule' that names it
+('NamedBucket'). Its resource is @\<balancer\>-\<name\>-bucket@, a /regional/
+backend bucket (@EXTERNAL_MANAGED@), which is what a regional balancer's URL
+map can name.
+
+The Cloud Storage bucket is the caller's, and is neither created nor removed
+here. GCP's documented limits for this kind are the caller's to meet too: a
+bucket in the balancer's region, readable by @allUsers@, no Cloud CDN, @GET@
+only.
+-}
+data BackendBucket = BackendBucket
+    { backendBucketName :: Text
+    , backendBucketGcsBucket :: Text
+    -- ^ the Cloud Storage bucket's name, without @gs:\/\/@
+    }
+    deriving (Eq, Show)
+
+{- | Where a rule sends: a backend service, a backend bucket, or nowhere --
+a redirect the balancer answers itself.
+-}
 data ServiceRef
     = DefaultService
     | NamedService Text
+    | -- | a 'BackendBucket' of 'albBuckets', by its name
+      NamedBucket Text
+    | RedirectTo Redirect
+    deriving (Eq, Show)
+
+{- | A redirect answered by the balancer (the URL map's @urlRedirect@). What
+is 'Nothing' is kept from the request: the host, the path. The query string
+is always kept.
+-}
+data Redirect = Redirect
+    { redirectHost :: Maybe Text
+    , redirectPath :: Maybe Text
+    -- ^ the whole path of the answer, starting with @\/@
+    , redirectHttps :: Bool
+    -- ^ answer with @https:\/\/@ whatever the request came in on; 'False'
+    -- keeps the request's scheme
+    , redirectCode :: RedirectCode
+    }
+    deriving (Eq, Show)
+
+data RedirectCode
+    = -- | 301
+      MovedPermanently
+    | -- | 302
+      Found
+    | -- | 303
+      SeeOther
+    | -- | 307, the method kept
+      TemporaryRedirect
+    | -- | 308, the method kept
+      PermanentRedirect
+    deriving (Eq, Show)
+
+-- | A permanent redirect to another host over HTTPS, path kept: an apex to its @www@.
+redirectToHost :: Text -> Redirect
+redirectToHost h = Redirect (Just h) Nothing True MovedPermanently
+
+{- | What the balancer does on port 80.
+
+'HttpCreatedOnce' is what this module always did and is the default: an HTTP
+proxy and a @:80@ rule, the proxy __created__ pointing at the balancer's URL
+map and never set again, so a proxy somebody repointed (at a redirect-only
+map of their own, say) stays where they put it. The other three are
+declarations about the listener, and make this module the writer of the
+proxy's URL map:
+
+* 'ServeHttp': the proxy is on the balancer's URL map, and is put back on it
+  when it is found on another;
+* 'RedirectToHttps': the proxy is on a second, redirect-only URL map
+  (@\<balancer\>-http-redirect-url-map@, see 'renderHttpRedirectUrlMap'), so
+  every request on port 80 is answered with a redirect to HTTPS;
+* 'NoHttp': no HTTP proxy and no @:80@ rule, and the ones a previous
+  declaration made are removed.
+
+The last two need a certificate, or the balancer serves nothing.
+-}
+data HttpListener
+    = HttpCreatedOnce
+    | ServeHttp
+    | RedirectToHttps RedirectCode
+    | NoHttp
     deriving (Eq, Show)
 
 -- | Requests whose path matches one of these patterns (@\/api\/*@) go there.
 data PathRule = PathRule
     { pathRulePaths :: [Text]
     , pathRuleService :: ServiceRef
+    -- ^ a service, a bucket or a redirect
     }
     deriving (Eq, Show)
 
@@ -251,6 +341,9 @@ data ApplicationLoadBalancer = ApplicationLoadBalancer
     , albCertificates :: [Certificate]
     -- ^ non-empty: also serve HTTPS on :443, with both forwarding rules on
     -- one reserved address (@\<balancer\>-ip@)
+    , albBuckets :: [BackendBucket]
+    , albHttp :: HttpListener
+    -- ^ 'HttpCreatedOnce' unless something else is wanted of port 80
     }
     deriving (Eq, Show)
 
@@ -270,6 +363,8 @@ httpLoadBalancer name project region backends hc =
         , albServices = []
         , albHostRules = []
         , albCertificates = []
+        , albBuckets = []
+        , albHttp = HttpCreatedOnce
         }
 
 -- | The API a 'ManagedCertificate' needs enabled (the caller's dependency).
@@ -283,8 +378,9 @@ newtype InvalidLoadBalancer = InvalidLoadBalancer [Text]
 instance Exception InvalidLoadBalancer
 
 {- | What is wrong with a declaration, all of it rather than the first: a
-rule naming a service nobody declared, two services under one name, a host
-in two rules, a rule with no host or no path, the two certificate kinds
+rule naming a service or a bucket nobody declared, two services or two
+buckets under one name, a redirect that redirects to the request itself, an
+HTTP listener option that leaves no listener, a host in two rules, a rule with no host or no path, the two certificate kinds
 mixed, a managed certificate with no domain, a timeout that is not positive,
 one backend service sending to two different ports of one instance group.
 -}
@@ -324,8 +420,38 @@ albProblems alb =
            | Just t <- alb.albTimeoutSec : map backendServiceTimeoutSec alb.albServices
            , t <= 0
            ]
+        <> [ "backend bucket declared twice: " <> n
+           | n <- nub (buckets \\ nub buckets)
+           ]
+        <> [ "backend bucket " <> b.backendBucketName <> " names no Cloud Storage bucket"
+           | b <- alb.albBuckets
+           , Text.null b.backendBucketGcsBucket
+           ]
+        <> [ "rule names an undeclared backend bucket: " <> n
+           | NamedBucket n <- nub refs
+           , n `notElem` buckets
+           ]
+        -- one that changes nothing answers every request with itself
+        <> [ "a redirect names neither a host, a path nor HTTPS"
+           | RedirectTo (Redirect Nothing Nothing False _) <- nub refs
+           ]
+        <> [ "a redirect's path must start with /: " <> path
+           | RedirectTo Redirect{redirectPath = Just path} <- nub refs
+           , not ("/" `Text.isPrefixOf` path)
+           ]
+        <> [ "a redirect names an empty host"
+           | RedirectTo Redirect{redirectHost = Just ""} <- nub refs
+           ]
+        <> [ what <> " needs a certificate: without one the balancer serves nothing"
+           | null alb.albCertificates
+           , what <- case alb.albHttp of
+                RedirectToHttps _ -> ["redirecting HTTP to HTTPS"]
+                NoHttp -> ["no HTTP listener"]
+                _ -> []
+           ]
   where
     names = map backendServiceName alb.albServices
+    buckets = map backendBucketName alb.albBuckets
     certNames =
         [base | (_, base, _) <- managedCertificates alb]
             <> [n | ComputeCertificate n <- alb.albCertificates]
@@ -442,7 +568,10 @@ partKind = \case
     BackendServicePart _ -> "gcp-lb-backend-service"
     NetworkEndpointGroupPart _ -> "gcp-lb-neg"
     BackendPart _ _ -> "gcp-lb-backend"
+    BackendBucketPart _ -> "gcp-lb-backend-bucket"
     UrlMapPart -> "gcp-lb-url-map"
+    HttpRedirectUrlMapPart -> "gcp-lb-http-redirect-url-map"
+    NoHttpPart -> "gcp-lb-no-http"
     DnsAuthorizationPart _ -> "gcp-lb-dns-authorization"
     CertificatePart _ -> "gcp-lb-certificate"
     SupersededCertificatesPart _ -> "gcp-lb-superseded-certificates"
@@ -468,6 +597,7 @@ partRef alb part = mkRef (partKind part) (alb.albProject.projectId, alb.albRegio
         BackendServicePart n -> [n]
         NetworkEndpointGroupPart n -> [n]
         BackendPart svc g -> [svc, g]
+        BackendBucketPart n -> [n]
         DnsAuthorizationPart n -> [n]
         CertificatePart n -> [n]
         SupersededCertificatesPart base -> [base]
@@ -491,7 +621,22 @@ albNotes alb =
            , (n, p) <- nub named
            ]
         <> map certNote alb.albCertificates
+        <> [ "backend bucket " <> bucketResource alb b.backendBucketName <> " on " <> b.backendBucketGcsBucket
+           | b <- alb.albBuckets
+           ]
+        <> [ "hosts " <> Text.unwords r.hostRuleHosts <> ": " <> targetText alb r.hostRuleService
+           | r <- alb.albHostRules
+           , isRedirect r.hostRuleService
+           ]
+        <> case alb.albHttp of
+            HttpCreatedOnce -> []
+            ServeHttp -> ["http served"]
+            RedirectToHttps code -> ["http redirects to https (" <> redirectCodeText code <> ")"]
+            NoHttp -> ["no http listener"]
   where
+    isRedirect = \case
+        RedirectTo _ -> True
+        _ -> False
     certNote = \case
         ManagedCertificate n ds -> "managed certificate " <> n <> " for " <> Text.unwords ds
         c@(DomainSetCertificate _ ds) -> "managed certificate " <> certificateResource c <> " for " <> Text.unwords ds
@@ -706,10 +851,65 @@ services alb =
             s.backendServiceHealthCheck
             s.backendServiceTimeoutSec
 
+{- | The resource a rule's target is: a backend service's name, a backend
+bucket's. A redirect is no resource, and is described instead.
+-}
 serviceResource :: ApplicationLoadBalancer -> ServiceRef -> Text
 serviceResource alb = \case
     DefaultService -> alb.albName <> "-backend"
     NamedService n -> alb.albName <> "-" <> n <> "-backend"
+    NamedBucket n -> bucketResource alb n
+    RedirectTo r -> redirectText r
+
+bucketResource :: ApplicationLoadBalancer -> Text -> Text
+bucketResource alb n = alb.albName <> "-" <> n <> "-bucket"
+
+-- | A rule's target as a note says it: a backend service by its bare name, as before.
+targetText :: ApplicationLoadBalancer -> ServiceRef -> Text
+targetText alb = \case
+    NamedBucket n -> "backend bucket " <> bucketResource alb n
+    sref -> serviceResource alb sref
+
+-- | The resource node a rule's target needs first, when it is a resource.
+targetPart :: ApplicationLoadBalancer -> ServiceRef -> Maybe Part
+targetPart alb = \case
+    RedirectTo _ -> Nothing
+    NamedBucket n -> Just (BackendBucketPart (bucketResource alb n))
+    sref -> Just (BackendServicePart (serviceResource alb sref))
+
+-- | Every target a declaration's rules name, the default service first.
+targets :: ApplicationLoadBalancer -> [ServiceRef]
+targets alb =
+    DefaultService : concat [r.hostRuleService : map pathRuleService r.hostRulePaths | r <- alb.albHostRules]
+
+redirectCodeText :: RedirectCode -> Text
+redirectCodeText = \case
+    MovedPermanently -> "MOVED_PERMANENTLY_DEFAULT"
+    Found -> "FOUND"
+    SeeOther -> "SEE_OTHER"
+    TemporaryRedirect -> "TEMPORARY_REDIRECT"
+    PermanentRedirect -> "PERMANENT_REDIRECT"
+
+redirectText :: Redirect -> Text
+redirectText r =
+    Text.unwords
+        [ "redirect"
+        , redirectCodeText r.redirectCode
+        , (if r.redirectHttps then "https://" else "")
+            <> fromMaybe "{host}" r.redirectHost
+            <> fromMaybe "{path}" r.redirectPath
+        ]
+
+-- | A redirect as a URL map's @urlRedirect@.
+renderRedirect :: Redirect -> Aeson.Value
+renderRedirect r =
+    Aeson.object $
+        ["hostRedirect" Aeson..= h | Just h <- [r.redirectHost]]
+            <> ["pathRedirect" Aeson..= path | Just path <- [r.redirectPath]]
+            <> [ "httpsRedirect" Aeson..= r.redirectHttps
+               , "redirectResponseCode" Aeson..= redirectCodeText r.redirectCode
+               , "stripQuery" Aeson..= False
+               ]
 
 healthChecks :: ApplicationLoadBalancer -> [HealthCheck]
 healthChecks alb = nub [hc | Just hc <- map svcHealthCheck (services alb)]
@@ -753,15 +953,65 @@ isInstanceGroup = \case
 
 {- | The URL map as the resource @gcloud compute url-maps import@ reads.
 JSON, which is YAML: one path matcher per host rule, named by position.
+
+A map naming a backend bucket or a redirect also carries a @description@:
+a fingerprint of the rest of it ('urlMapStamp'), which is how the check
+tells the map that is there from the declared one. A map of backend services
+only is rendered as it always was, without one.
 -}
 renderUrlMap :: ApplicationLoadBalancer -> Aeson.Value
 renderUrlMap alb =
-    Aeson.object
-        [ "name" Aeson..= (alb.albName <> "-url-map")
-        , "defaultService" Aeson..= serviceUrl DefaultService
-        , "hostRules" Aeson..= map hostRule rules
-        , "pathMatchers" Aeson..= map pathMatcher rules
+    Aeson.object (urlMapFields alb <> ["description" Aeson..= stamp | Just stamp <- [urlMapStamp alb]])
+
+{- | The fingerprint a URL map naming a bucket or a redirect is stamped with
+(its @description@), 'Nothing' for a map of backend services only.
+
+The check of such a map compares this, and not only the hosts: which service
+a host goes to was always invisible to the check, and for a redirect that
+would mean a changed target is never imported by a pass that finds
+everything else in place. It is the /declaration's/ fingerprint: a map
+edited by hand that kept its description still reads as the declared one.
+-}
+urlMapStamp :: ApplicationLoadBalancer -> Maybe Text
+urlMapStamp alb
+    | any novel (targets alb) = Just (stampOf (Aeson.object (urlMapFields alb)))
+    | otherwise = Nothing
+  where
+    novel = \case
+        NamedBucket _ -> True
+        RedirectTo _ -> True
+        _ -> False
+
+stampOf :: Aeson.Value -> Text
+stampOf v =
+    "salmon:"
+        <> Text.pack (concatMap hex (ByteString.unpack (ByteString.take 8 (SHA256.hash (LByteString.toStrict (Aeson.encode v))))))
+  where
+    hex w = let h = showHex w "" in if length h < 2 then '0' : h else h
+
+httpRedirectUrlMapName :: ApplicationLoadBalancer -> Text
+httpRedirectUrlMapName alb = alb.albName <> "-http-redirect-url-map"
+
+{- | The second URL map of 'RedirectToHttps': no host rule, no service, every
+request answered with a redirect to the same host and path over HTTPS. It
+carries its own fingerprint as @description@, like a stamped 'renderUrlMap'.
+-}
+renderHttpRedirectUrlMap :: ApplicationLoadBalancer -> RedirectCode -> Aeson.Value
+renderHttpRedirectUrlMap alb code =
+    Aeson.object (fields <> ["description" Aeson..= stampOf (Aeson.object fields)])
+  where
+    fields =
+        [ "name" Aeson..= httpRedirectUrlMapName alb
+        , "defaultUrlRedirect" Aeson..= renderRedirect (Redirect Nothing Nothing True code)
         ]
+
+urlMapFields :: ApplicationLoadBalancer -> [Aeson.Pair]
+urlMapFields alb =
+    [ "name" Aeson..= (alb.albName <> "-url-map")
+    , "defaultService" Aeson..= serviceUrl DefaultService
+    , "hostRules" Aeson..= map hostRule rules
+    , "pathMatchers" Aeson..= map pathMatcher rules
+    ]
   where
     rules = zip [0 :: Int ..] alb.albHostRules
     matcher :: Int -> Text
@@ -773,20 +1023,29 @@ renderUrlMap alb =
     pathMatcher (i, r) =
         Aeson.object $
             [ "name" Aeson..= matcher i
-            , "defaultService" Aeson..= serviceUrl r.hostRuleService
+            , target "defaultService" "defaultUrlRedirect" r.hostRuleService
             ]
                 <> ["pathRules" Aeson..= map pathRule r.hostRulePaths | not (null r.hostRulePaths)]
     pathRule :: PathRule -> Aeson.Value
     pathRule p =
-        Aeson.object ["paths" Aeson..= p.pathRulePaths, "service" Aeson..= serviceUrl p.pathRuleService]
+        Aeson.object ["paths" Aeson..= p.pathRulePaths, target "service" "urlRedirect" p.pathRuleService]
+    -- a backend bucket goes where a backend service does; a redirect has a key of its own
+    target :: Aeson.Key -> Aeson.Key -> ServiceRef -> Aeson.Pair
+    target serviceKey redirectKey = \case
+        RedirectTo r -> redirectKey Aeson..= renderRedirect r
+        sref -> serviceKey Aeson..= serviceUrl sref
     serviceUrl :: ServiceRef -> Text
     serviceUrl sref =
         "https://www.googleapis.com/compute/v1/projects/"
             <> alb.albProject.projectId
             <> "/regions/"
             <> alb.albRegion.regionName
-            <> "/backendServices/"
+            <> collection
             <> serviceResource alb sref
+      where
+        collection = case sref of
+            NamedBucket _ -> "/backendBuckets/"
+            _ -> "/backendServices/"
 
 {- | Single-quotes a value for safe interpolation into the generated bash
 script (POSIX shell quoting: wrap in single quotes, escape embedded single
@@ -809,7 +1068,13 @@ data Part
     | NetworkEndpointGroupPart Text
     | -- | a backend service's resource name, and the instance group or NEG attached to it
       BackendPart Text Text
+    | -- | by resource name (@\<balancer\>-\<name\>-bucket@)
+      BackendBucketPart Text
     | UrlMapPart
+    | -- | the redirect-only URL map of 'RedirectToHttps'
+      HttpRedirectUrlMapPart
+    | -- | 'NoHttp': the removal of the HTTP proxy and the @:80@ rule
+      NoHttpPart
     | -- | by authorization name, see 'dnsAuthorizations'
       DnsAuthorizationPart Text
     | -- | by resource name, see 'certificateResource'
@@ -854,10 +1119,10 @@ The edges:
   instance group's named ports it sends to, and on the attachment declared
   before it on the same service -- two @add-backend@ calls on one backend
   service must not run at once, and an edge is the only thing that says so;
-* the URL map depends on every backend service it names;
+* the URL map depends on every backend service and backend bucket it names;
 * a managed certificate depends on its DNS authorizations;
-* the HTTP proxy depends on the URL map, the HTTPS one on the certificates
-  too;
+* the HTTP proxy depends on the URL map (on the redirect-only one under
+  'RedirectToHttps'), the HTTPS one on the certificates too;
 * a forwarding rule depends on its proxy, and on the reserved address when
   there is one.
 
@@ -895,6 +1160,14 @@ declaration's teardown cannot pull a certificate out from under a proxy that
 has not moved yet. The proxy's URL map is named at creation and never set
 again.
 
+The HTTP proxy's URL map is the same by default ('HttpCreatedOnce'): named
+at creation, never set again. Under 'ServeHttp' and 'RedirectToHttps' it is
+compared and updated when it differs. A redirect-only map a declaration no
+longer names (after going back from 'RedirectToHttps') is left behind, as is
+a backend bucket no longer declared: nothing in a declaration remembers what
+it used to name. 'NoHttp' is the exception, a node whose @up@ removes the
+@:80@ rule and the HTTP proxy.
+
 Not done: a superseded certificate still present at teardown (a swap that
 never completed) is left behind, as is the DNS authorization of a name a set
 no longer covers.
@@ -917,16 +1190,20 @@ lbParts alb =
         map healthCheckPart (healthChecks alb)
             <> map namedPortsPart groups
             <> concatMap serviceParts (services alb)
+            <> map bucketPart alb.albBuckets
             <> [urlMapPart]
             <> concatMap certificateParts alb.albCertificates
             <> [addressPart | https]
-            <> [httpProxyPart]
+            <> [httpRedirectUrlMapPart code | RedirectToHttps code <- [alb.albHttp]]
+            <> [httpProxyPart | http]
             <> [httpsProxyPart | https]
             <> [supersededPart base (certificateResource c) | c@(DomainSetCertificate base _) <- alb.albCertificates]
-            <> [forwardingRulePart]
+            <> [forwardingRulePart | http]
             <> [httpsForwardingRulePart | https]
+            <> [noHttpPart | not http]
   where
     https = serveHttps alb
+    http = alb.albHttp /= NoHttp
     groups = groupNamedPorts alb
 
     resourceName :: Text -> Text
@@ -1181,16 +1458,12 @@ lbParts alb =
     urlMapPart =
         PartSpec
             { partId = UrlMapPart
-            , partDeps =
-                nub
-                    [ BackendServicePart (serviceResource alb sref)
-                    | sref <- DefaultService : concat [r.hostRuleService : map pathRuleService r.hostRulePaths | r <- alb.albHostRules]
-                    ]
+            , partDeps = nub (mapMaybe (targetPart alb) (targets alb))
             , partHelp = Text.unwords ["URL map", urlMap]
             , partNotes =
                 concat
-                    [ ("hosts " <> Text.unwords r.hostRuleHosts <> " to " <> serviceResource alb r.hostRuleService)
-                        : [ "paths " <> Text.unwords p.pathRulePaths <> " to " <> serviceResource alb p.pathRuleService
+                    [ ("hosts " <> Text.unwords r.hostRuleHosts <> " to " <> targetText alb r.hostRuleService)
+                        : [ "paths " <> Text.unwords p.pathRulePaths <> " to " <> targetText alb p.pathRuleService
                           | p <- r.hostRulePaths
                           ]
                     | r <- alb.albHostRules
@@ -1206,11 +1479,7 @@ lbParts alb =
                             )
                         ]
                     else
-                        [ "printf '%s\\n' " <> shellQuote (urlMapText alb)
-                            <> " | gcloud compute url-maps import " <> shellQuote urlMap
-                            <> regional
-                            <> " --quiet"
-                        ]
+                        [importMap urlMap (renderUrlMap alb)]
             , partCheck =
                 need ("url-maps " <> urlMap) (describeCompute "url-maps" urlMap)
                     -- every host of every rule, one per line, whatever
@@ -1222,10 +1491,107 @@ lbParts alb =
                             <> shellQuote ("MISSING host-rule " <> h)
                       | h <- concatMap hostRuleHosts alb.albHostRules
                       ]
+                    -- which service a host goes to is not looked at; a map
+                    -- naming a bucket or a redirect is compared as a whole
+                    <> [stampCheck urlMap stamp | Just stamp <- [urlMapStamp alb]]
             , partDown = [deleteCompute "url-maps" urlMap]
             }
       where
         urlMap = alb.albName <> "-url-map"
+
+    -- whether the map that is there is the declared one, by its description
+    stampCheck :: Text -> Text -> Text
+    stampCheck urlMap stamp =
+        "[ \"$(" <> describeCompute "url-maps" urlMap
+            <> " --format='value(description)' 2>/dev/null)\" = "
+            <> shellQuote stamp
+            <> " ] || echo "
+            <> shellQuote ("MISSING declared rules on " <> urlMap <> " (" <> stamp <> ")")
+
+    importMap :: Text -> Aeson.Value -> Text
+    importMap urlMap v =
+        "printf '%s\\n' " <> shellQuote (jsonText v)
+            <> " | gcloud compute url-maps import " <> shellQuote urlMap
+            <> regional
+            <> " --quiet"
+
+    -- The Cloud Storage bucket is a declaration that can change under a
+    -- backend bucket that exists: compared, and updated when it differs.
+    bucketPart :: BackendBucket -> PartSpec
+    bucketPart b =
+        PartSpec
+            { partId = BackendBucketPart res
+            , partDeps = []
+            , partHelp = Text.unwords ["backend bucket", res]
+            , partNotes = ["bucket " <> gcs]
+            , partUp =
+                [ ensure
+                    (describeCompute "backend-buckets" res)
+                    ( "gcloud compute backend-buckets create " <> shellQuote res
+                        <> regional
+                        <> " --gcs-bucket-name=" <> shellQuote gcs
+                        <> " --load-balancing-scheme=EXTERNAL_MANAGED"
+                    )
+                , "have=$(" <> describeCompute "backend-buckets" res <> " --format='value(bucketName)')"
+                , "[ \"$have\" = " <> shellQuote gcs <> " ] || gcloud compute backend-buckets update " <> shellQuote res
+                    <> regional
+                    <> " --gcs-bucket-name=" <> shellQuote gcs
+                ]
+            , partCheck =
+                [ need ("backend-buckets " <> res) (describeCompute "backend-buckets" res)
+                , "[ \"$(" <> describeCompute "backend-buckets" res
+                    <> " --format='value(bucketName)' 2>/dev/null)\" = "
+                    <> shellQuote gcs
+                    <> " ] || echo "
+                    <> shellQuote ("MISSING gcs-bucket " <> gcs <> " on " <> res)
+                ]
+            , partDown = [deleteCompute "backend-buckets" res]
+            }
+      where
+        res = bucketResource alb b.backendBucketName
+        gcs = b.backendBucketGcsBucket
+
+    -- Imported whole on every run, like the balancer's own map with rules.
+    httpRedirectUrlMapPart :: RedirectCode -> PartSpec
+    httpRedirectUrlMapPart code =
+        PartSpec
+            { partId = HttpRedirectUrlMapPart
+            , partDeps = []
+            , partHelp = Text.unwords ["URL map", urlMap, "(HTTP to HTTPS)"]
+            , partNotes = [redirectText (Redirect Nothing Nothing True code)]
+            , partUp = [importMap urlMap rendered]
+            , partCheck =
+                need ("url-maps " <> urlMap) (describeCompute "url-maps" urlMap)
+                    : [stampCheck urlMap stamp | Just (Aeson.String stamp) <- [description rendered]]
+            , partDown = [deleteCompute "url-maps" urlMap]
+            }
+      where
+        urlMap = httpRedirectUrlMapName alb
+        rendered = renderHttpRedirectUrlMap alb code
+        description = \case
+            Aeson.Object o -> KeyMap.lookup "description" o
+            _ -> Nothing
+
+    -- 'NoHttp': what an earlier declaration made for port 80 goes, the rule
+    -- before the proxy it points at. Nothing to do on the way down.
+    noHttpPart :: PartSpec
+    noHttpPart =
+        PartSpec
+            { partId = NoHttpPart
+            , partDeps = []
+            , partHelp = Text.unwords ["no HTTP listener on load balancer", alb.albName]
+            , partNotes = []
+            , partUp = [deleteCompute coll name | (coll, name) <- listener]
+            , partCheck =
+                [ "if exists " <> describeCompute coll name <> "; then echo "
+                    <> shellQuote ("MISSING removal of " <> coll <> " " <> name)
+                    <> "; fi"
+                | (coll, name) <- listener
+                ]
+            , partDown = []
+            }
+      where
+        listener = [("forwarding-rules", alb.albName <> "-fw"), ("target-http-proxies", alb.albName <> "-proxy")]
 
     certificateParts :: Certificate -> [PartSpec]
     certificateParts = \case
@@ -1410,15 +1776,51 @@ lbParts alb =
         | https = " --address=" <> resourceName "-ip" <> " --address-region=\"$REGION\""
         | otherwise = ""
 
+    -- Created once with its URL map, which by default is never set again:
+    -- somebody may have repointed it, and a second writer of one proxy's map
+    -- is a fight every pass. Only a declaration about the listener
+    -- ('ServeHttp', 'RedirectToHttps') makes the map something this node
+    -- sets, and then it is compared and updated when it differs.
     httpProxyPart :: PartSpec
-    httpProxyPart =
-        simple
-            HttpProxyPart
-            [UrlMapPart]
-            "HTTP proxy"
-            "target-http-proxies"
-            (alb.albName <> "-proxy")
-            (" --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\"")
+    httpProxyPart = case alb.albHttp of
+        ServeHttp -> onMap UrlMapPart (alb.albName <> "-url-map")
+        RedirectToHttps _ -> onMap HttpRedirectUrlMapPart (httpRedirectUrlMapName alb)
+        _ -> createdOnce
+      where
+        proxy = alb.albName <> "-proxy"
+        mapFlags urlMap = " --url-map=" <> shellQuote urlMap <> " --url-map-region=\"$REGION\""
+        createdOnce =
+            simple
+                HttpProxyPart
+                [UrlMapPart]
+                "HTTP proxy"
+                "target-http-proxies"
+                proxy
+                (mapFlags (alb.albName <> "-url-map"))
+        -- the proxy's map is listed by URL: the last segment is its name
+        currentMap = describeCompute "target-http-proxies" proxy <> " --format='value(urlMap)'"
+        onMap mapPart urlMap =
+            createdOnce
+                { partDeps = [mapPart]
+                , partNotes = ["on URL map " <> urlMap]
+                , partUp =
+                    [ "if exists " <> describeCompute "target-http-proxies" proxy <> "; then"
+                    , "  have=$(" <> currentMap <> " | sed 's|.*/||')"
+                    , "  [ \"$have\" = " <> shellQuote urlMap <> " ] || gcloud compute target-http-proxies update " <> shellQuote proxy
+                        <> regional
+                        <> mapFlags urlMap
+                    , "else"
+                    , "  gcloud compute target-http-proxies create " <> shellQuote proxy <> regional <> mapFlags urlMap
+                    , "fi"
+                    ]
+                , partCheck =
+                    [ need ("target-http-proxies " <> proxy) (describeCompute "target-http-proxies" proxy)
+                    , "[ \"$(" <> currentMap <> " 2>/dev/null | sed 's|.*/||')\" = "
+                        <> shellQuote urlMap
+                        <> " ] || echo "
+                        <> shellQuote ("MISSING url-map " <> urlMap <> " on " <> proxy)
+                    ]
+                }
 
     -- Created once with its URL map, which is never set again (somebody may
     -- have repointed it). Its certificate list is a declaration that can
@@ -1527,8 +1929,8 @@ backendKey svc = \case
     InstanceGroupBackend ig _ _ -> ig
     CloudRunBackend _ -> svc.svcNeg
 
-urlMapText :: ApplicationLoadBalancer -> Text
-urlMapText = Text.decodeUtf8With TextErr.lenientDecode . LByteString.toStrict . Aeson.encode . renderUrlMap
+jsonText :: Aeson.Value -> Text
+jsonText = Text.decodeUtf8With TextErr.lenientDecode . LByteString.toStrict . Aeson.encode
 
 {- | What every creating or deleting script starts with. @exists@ is a bare
 predicate: every caller appends its own location flags, because not every
@@ -1581,7 +1983,9 @@ health ('renderLbHealthScript''s lines). Findings are lines on stdout (see
 'interpretLbCheck').
 
 What it does not see: a path rule, or which service a host is sent to. A
-host rule is checked by its hosts being in the map, no further. Which port a
+host rule is checked by its hosts being in the map, no further -- except in
+a map naming a backend bucket or a redirect, which is compared with the
+declared one by the fingerprint in its @description@ ('urlMapStamp'). Which port a
 service reaches it does see: the service's port name, and that name on each
 instance group it sends to.
 -}
