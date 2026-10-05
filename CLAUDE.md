@@ -1005,6 +1005,18 @@ and the working directory is left alone, so a relative path is relative to the s
 stays the tag alone, the options go in `notes` only when they are not the default, so a plain `buildImage` node is
 described as before. `Test/PodmanCommandSpec.hs` holds the argv, `Test/PodmanSpec.hs` a real multi-stage build.
 
+`Podman.login` has no `check`: it logs in once per pass and, being `Immaterial`, once per `serve` session, so an
+hour-long registry token is not renewed by it. Two nodes cover the two ways that bites. `Podman.loginExpiring` takes a
+`Credential` (secret and lifetime), writes the expiry to `AUTHFILE.expires` after a login that worked, and its `check`
+(`interpretLoginStamp`) fails once less than `loginRefreshMargin` (120s) is left, so `run up` logs in only when needed
+and `serve` tends the credential; a lifetime not above the margin is refused (`CredentialTooShort`). The check and stamp
+sit on the login node alone (`expiring`, applied inside `loginNode`): put on the whole `Op` they reached the auth file's
+directory, a predecessor, which renewed the stamp without logging in. `Podman.pushLoggingIn` is `push` that logs in
+again in its own `up`, because no check on a login node helps *within* a pass: the pass is past that node when a build
+has taken an hour. It keeps `push`'s `Ref` and still wants a login node declared for the teardown. `CloudRunDeploy`
+uses it (its token's lifetime is not known, so its login stays the plain one). `Test/PodmanCommandSpec.hs` "login
+renewal" is Layer 0 with a stand-in for the authentication; neither node has run `podman login` against a registry.
+
 `Nodes/Podman/Quadlet.hs` (`quadletContainer`) is a container as a systemd service: a `NAME.container` file in
 `/etc/containers/systemd` that podman's generator turns into `NAME.service` at every `daemon-reload`. It is
 `systemdService` for that file and reuses its mechanism: written through `filecontents`, checked with the same
@@ -1028,7 +1040,7 @@ the file node only — an `fmap` over the `Op` reaches its dependencies too, whi
 `Gcp.ArtifactRegistry.instanceLogin` is the other half for a GCE instance: `Podman.login` as `oauth2accesstoken` with
 the metadata server's token for the instance's own service account, plus a `check` on the token's recorded expiry
 (`AUTHFILE.expires`), so the credential is renewed by `run up` only when needed and tended under `serve`. The check
-and the stamp are put on the login node alone (`login{node = fmap tended login.node}`): an `fmap` over the `Op` also
+and the stamp are put on the login node alone (it is `Podman.loginExpiring`, above): an `fmap` over the `Op` also
 reached the auth file's enclosing directory, a predecessor, which then renewed the stamp without logging in, so an
 expired login was skipped (`instanceLoginWith` takes the token's source, for the test that holds this).
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node

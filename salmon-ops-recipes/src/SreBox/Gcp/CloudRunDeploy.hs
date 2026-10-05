@@ -120,7 +120,9 @@ buildPushDeploy r gcloudTrack podmanTrack cfg =
 
     pushed :: Op
     pushed =
-        Podman.push rPodman podmanTrack (Just cfg.crd_authFile) cfg.crd_image
+        -- logs in again itself: the build sits between the login node and
+        -- this one, and an access token lasts an hour
+        Podman.pushLoggingIn rPodman podmanTrack cfg.crd_authFile registry (Podman.Username "oauth2accesstoken") Core.printAccessToken cfg.crd_image
             `inject` built
             `inject` loggedIn
 
