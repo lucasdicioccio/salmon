@@ -29,15 +29,10 @@ import qualified Data.Aeson.Types as Aeson (parseEither)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
-import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
-import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import Data.Time.Clock (NominalDiffTime, UTCTime)
 import GHC.IO.Exception (ExitCode (..))
 import qualified Network.HTTP.Client as Http
 import qualified Network.HTTP.Types.Status as Http
-import System.Directory (doesFileExist)
-import System.IO.Error (catchIOError)
-import Text.Read (readMaybe)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (proc)
 
@@ -45,11 +40,9 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
-import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject)
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
-import Salmon.Op.OpGraph (OpGraph (..))
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -175,63 +168,30 @@ instanceLogin = instanceLoginWith instanceToken
 {- | 'instanceLogin' with the token's source as an argument, so that a test
 can stand in for the metadata server.
 
-The check and the stamp go on the login node /alone/. An 'fmap' over the
-'Op' reaches every node of its graph, the enclosing directory of the auth
-file included, and that directory is a predecessor: carrying the stamp's
-check and the stamp's write, it went first, found the stamp expired, and
-wrote a fresh one without logging in -- after which the login's own check
-read the fresh stamp and the login was skipped, leaving expired credentials
-in the auth file under a stamp vouching for them.
+The check and the expiry stamp are 'Podman.loginExpiring''s, which this is:
+they began here and moved there once a second caller needed them. See
+'Podman.expiring' for why they sit on the login node alone.
 -}
 instanceLoginWith :: IO InstanceToken -> Reporter Podman.Report -> Track' (Binary "podman") -> Podman.AuthFile -> Region -> Op
 instanceLoginWith getToken r podman authfile region =
-    let login = Podman.login r podman authfile (dockerRegistry region) (Podman.Username "oauth2accesstoken") (tokenValue <$> getToken)
-     in login{node = fmap tended login.node}
+    Podman.loginExpiring r podman authfile (dockerRegistry region) (Podman.Username "oauth2accesstoken") (credential <$> getToken)
   where
-    stamp = tokenStampPath authfile
-
-    tended :: Extension -> Extension
-    tended ext =
-        ext
-            { check = do
-                now <- getCurrentTime
-                present <- doesFileExist (Podman.getAuthFile authfile)
-                recorded <- if present then readStamp else pure Nothing
-                pure (interpretTokenStamp now recorded)
-            , up = do
-                ext.up
-                -- asked again rather than remembered from the login: the
-                -- metadata server caches, so this is the same token, and a
-                -- stamp is only ever written after a login that worked
-                -- (@ext.up@ throws otherwise), in this very @up@.
-                token <- getToken
-                now <- getCurrentTime
-                writeFile stamp (show (round (utcTimeToPOSIXSeconds (addUTCTime token.tokenLifetime now)) :: Integer) <> "\n")
-            , down = FS.removeFileIfPresent stamp >> ext.down
-            }
-
-    readStamp :: IO (Maybe Text)
-    readStamp = (Just <$> Text.readFile stamp) `catchIOError` const (pure Nothing)
+    credential :: InstanceToken -> Podman.Credential
+    credential token = Podman.Credential token.tokenValue token.tokenLifetime
 
 -- | Where the expiry of the token in an auth file is recorded.
 tokenStampPath :: Podman.AuthFile -> FilePath
-tokenStampPath authfile = Podman.getAuthFile authfile <> ".expires"
+tokenStampPath = Podman.loginStampPath
 
 -- | How much of a token's life must be left for it to be left alone.
 refreshMargin :: NominalDiffTime
-refreshMargin = 120
+refreshMargin = Podman.loginRefreshMargin
 
 {- | Is the recorded login still good for a pull? The stamp is the expiry in
 seconds since the epoch; 'Nothing' is no stamp, or no auth file to go with it.
 -}
 interpretTokenStamp :: UTCTime -> Maybe Text -> CheckResult
-interpretTokenStamp _ Nothing = Failure "not logged in to the registry"
-interpretTokenStamp now (Just recorded) =
-    case readMaybe (Text.unpack (Text.strip recorded)) :: Maybe Integer of
-        Nothing -> Failure "the recorded token expiry is unreadable"
-        Just seconds
-            | diffUTCTime (posixSecondsToUTCTime (fromInteger seconds)) now > refreshMargin -> Success
-            | otherwise -> Failure "the registry token has expired, or is about to"
+interpretTokenStamp = Podman.interpretLoginStamp
 
 -- | An access token and how long it is good for from when it was handed out.
 data InstanceToken

@@ -16,12 +16,17 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import System.IO.Error (catchIOError)
+import Text.Read (readMaybe)
 
+import Control.Exception (Exception, throwIO)
 import GHC.IO.Exception (ExitCode (..))
 import GHC.IO.Handle (Handle, hClose)
 import System.Directory (doesFileExist, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>))
-import System.Process (StdStream (CreatePipe), waitForProcess)
+import System.Process (ProcessHandle, StdStream (CreatePipe), waitForProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess (..), proc)
 
@@ -229,47 +234,183 @@ There is deliberately no 'check': whether the credential already in
 (and for a short-lived token, "still in the file" and "still valid" are
 different questions anyway), so — like 'push' — this defaults to
 'Salmon.Actions.UpDown.Immaterial' and simply re-authenticates on every
-'up'. 'down' runs @podman logout --authfile@ against the same file (only if that
+'up'. That is once per pass, and once per @run serve@ session: a token that
+lasts an hour is not renewed by this node. 'loginExpiring' is the node for a
+credential that says how long it lasts, and 'pushLoggingIn' the push that
+does not rely on a login made earlier in the pass. 'down' runs @podman logout --authfile@ against the same file (only if that
 file actually holds credentials for this registry -- logging out of nothing
 is an error, and a failing 'down' blocks a whole sub-DAG) and then removes
 the file, which logout itself leaves behind, emptied.
 -}
 login :: Reporter Report -> Track' (Binary "podman") -> AuthFile -> Registry -> Username -> IO Text -> Op
 login r podman authfile reg user getPassword =
+    loginNode r podman authfile reg user $ \authenticate ext ->
+        ext{up = getPassword >>= authenticate}
+
+{- | The node 'login' and 'loginExpiring' share: one effect site (the 'Ref'
+is the auth file, the registry and the username), one @down@. The
+continuation is handed the action that runs @podman login@ with a password
+on its stdin and fills in what differs, which is when to run it.
+-}
+loginNode ::
+    Reporter Report ->
+    Track' (Binary "podman") ->
+    AuthFile ->
+    Registry ->
+    Username ->
+    ((Text -> IO ()) -> Extension -> Extension) ->
+    Op
+loginNode r podman authfile reg user fill =
     withBinaryIO podman logincommand (LoginCmd authfile reg user) $ \mkProc ->
         op "podman-login" (deps [enclosingdir]) $ \actions ->
-            actions
-                { help = Text.unwords ["logs in to", getRegistry reg, "via", Text.pack (getAuthFile authfile)]
-                , ref = mkRef "podman-login" (getAuthFile authfile, getRegistry reg, getUsername user)
-                , up = do
-                    runReporter r (LoginRegistry authfile reg user)
-                    pw <- getPassword
-                    (mStdin, _, _, ph) <- mkProc ()
-                    case mStdin of
-                        Just hin -> Text.hPutStr hin pw >> hClose hin
-                        Nothing -> pure ()
-                    waitForProcess ph >>= checkExitCode "podman login"
-                , down = do
-                    -- `podman logout` is an error ("not logged into ...",
-                    -- exit 125) when there is nothing to log out of, and a
-                    -- failing `down` blocks the teardown of everything this
-                    -- node was declared on top of. So ask first -- the
-                    -- credentials live in this node's own authfile, which
-                    -- makes that a file read.
-                    exists <- doesFileExist (getAuthFile authfile)
-                    when exists $ do
-                        creds <- ByteString.readFile (getAuthFile authfile)
-                        when (ByteString.pack (Text.unpack (getRegistry reg)) `ByteString.isInfixOf` creds) $
-                            Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
-                        -- logout only empties the credentials, leaving the
-                        -- file ({"auths":{}}) behind to block the enclosing
-                        -- Filesystem.dir's own `down`. This node caused the
-                        -- file to exist, so this node removes it.
-                        removeFile (getAuthFile authfile)
-                }
+            fill
+                (authenticateWith r mkProc authfile reg user)
+                actions
+                    { help = Text.unwords ["logs in to", getRegistry reg, "via", Text.pack (getAuthFile authfile)]
+                    , ref = mkRef "podman-login" (getAuthFile authfile, getRegistry reg, getUsername user)
+                    , down = do
+                        -- `podman logout` is an error ("not logged into ...",
+                        -- exit 125) when there is nothing to log out of, and a
+                        -- failing `down` blocks the teardown of everything this
+                        -- node was declared on top of. So ask first -- the
+                        -- credentials live in this node's own authfile, which
+                        -- makes that a file read.
+                        exists <- doesFileExist (getAuthFile authfile)
+                        when exists $ do
+                            creds <- ByteString.readFile (getAuthFile authfile)
+                            when (ByteString.pack (Text.unpack (getRegistry reg)) `ByteString.isInfixOf` creds) $
+                                Binary.untrackedExec podmanCommand (Logout authfile reg) "" r''
+                            -- logout only empties the credentials, leaving the
+                            -- file ({"auths":{}}) behind to block the enclosing
+                            -- Filesystem.dir's own `down`. This node caused the
+                            -- file to exist, so this node removes it.
+                            removeFile (getAuthFile authfile)
+                    }
   where
     r'' = contramap (LogoutRegistry authfile reg) r
     enclosingdir = FS.dir (FS.Directory (takeDirectory (getAuthFile authfile)))
+
+-- | @podman login@ with the password on its stdin; throws if it is refused.
+authenticateWith ::
+    Reporter Report ->
+    (() -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)) ->
+    AuthFile ->
+    Registry ->
+    Username ->
+    Text ->
+    IO ()
+authenticateWith r mkProc authfile reg user pw = do
+    runReporter r (LoginRegistry authfile reg user)
+    (mStdin, _, _, ph) <- mkProc ()
+    case mStdin of
+        Just hin -> Text.hPutStr hin pw >> hClose hin
+        Nothing -> pure ()
+    waitForProcess ph >>= checkExitCode "podman login"
+
+-- | A password and how long it is good for from when it was handed out.
+data Credential
+    = Credential
+    { credentialSecret :: !Text
+    , credentialLifetime :: !NominalDiffTime
+    }
+
+{- | 'login' for a credential that says when it expires (an OAuth access
+token: an hour, typically), which is what makes a @check@ possible.
+
+'login' has none, so it runs once per pass and, under @run serve@, once per
+session: its verdict is 'Salmon.Actions.UpDown.Immaterial', the node is
+parked, the token lapses, and whatever next reads the auth file fails with
+credentials that look present. Here the expiry is written beside the auth
+file after a login that worked ('loginStampPath'), and 'interpretLoginStamp'
+answers 'Success' while more than 'loginRefreshMargin' of it is left. So a
+@run up@ logs in again only when it has to, and under @run serve@ the
+credential is /tended/: the check starts failing two minutes before the
+expiry and the loop logs in again.
+
+What this does not do is renew anything /inside/ one pass: a node is
+applied once, so a push that starts an hour after the login of the same
+pass still reads a lapsed credential. 'pushLoggingIn' is for that.
+
+A credential whose lifetime is not above the margin cannot be tended (the
+check would fail the moment the login succeeded) and @up@ refuses it,
+'CredentialTooShort'; use 'login' for one of those.
+
+The same effect site as 'login', so the same 'Ref'.
+-}
+loginExpiring :: Reporter Report -> Track' (Binary "podman") -> AuthFile -> Registry -> Username -> IO Credential -> Op
+loginExpiring r podman authfile reg user getCredential =
+    loginNode r podman authfile reg user (expiring authfile getCredential)
+
+{- | What 'loginExpiring' adds to the login node, given the action that
+authenticates with a password. Exposed for tests, which have no registry to
+log in to.
+
+It goes on the login node /alone/. An 'fmap' over the 'Op' reaches every
+node of its graph, the enclosing directory of the auth file included, and
+that directory is a predecessor: carrying the stamp's check and the stamp's
+write, it went first, found the stamp expired, and wrote a fresh one without
+logging in -- after which the login's own check read the fresh stamp and the
+login was skipped, leaving expired credentials in the auth file under a
+stamp vouching for them.
+-}
+expiring :: AuthFile -> IO Credential -> (Text -> IO ()) -> Extension -> Extension
+expiring authfile getCredential authenticate ext =
+    ext
+        { notes = ext.notes <> ["renewed before the credential's recorded expiry"]
+        , check = do
+            now <- getCurrentTime
+            present <- doesFileExist (getAuthFile authfile)
+            recorded <- if present then readStamp else pure Nothing
+            pure (interpretLoginStamp now recorded)
+        , up = do
+            -- read before the credential is asked for: its lifetime counts
+            -- from when it was handed out, so this errs on the early side
+            asked <- getCurrentTime
+            credential <- getCredential
+            when (credential.credentialLifetime <= loginRefreshMargin) $
+                throwIO (CredentialTooShort credential.credentialLifetime)
+            authenticate credential.credentialSecret
+            -- only ever written after a login that worked: 'authenticate'
+            -- throws otherwise
+            writeFile stamp (renderLoginStamp (addUTCTime credential.credentialLifetime asked))
+        , down = FS.removeFileIfPresent stamp >> ext.down
+        }
+  where
+    stamp = loginStampPath authfile
+
+    readStamp :: IO (Maybe Text)
+    readStamp = (Just <$> Text.readFile stamp) `catchIOError` const (pure Nothing)
+
+data LoginError
+    = -- | the credential's lifetime, which 'loginRefreshMargin' already covers
+      CredentialTooShort !NominalDiffTime
+    deriving (Show)
+
+instance Exception LoginError
+
+-- | Where the expiry of the credential in an auth file is recorded.
+loginStampPath :: AuthFile -> FilePath
+loginStampPath authfile = getAuthFile authfile <> ".expires"
+
+-- | The stamp: the expiry in whole seconds since the epoch.
+renderLoginStamp :: UTCTime -> String
+renderLoginStamp expiry = show (floor (utcTimeToPOSIXSeconds expiry) :: Integer) <> "\n"
+
+-- | How much of a credential's life must be left for it to be left alone.
+loginRefreshMargin :: NominalDiffTime
+loginRefreshMargin = 120
+
+{- | Is the recorded login still good? 'Nothing' is no stamp, or no auth file
+to go with it.
+-}
+interpretLoginStamp :: UTCTime -> Maybe Text -> CheckResult
+interpretLoginStamp _ Nothing = Failure "not logged in to the registry"
+interpretLoginStamp now (Just recorded) =
+    case readMaybe (Text.unpack (Text.strip recorded)) :: Maybe Integer of
+        Nothing -> Failure "the recorded token expiry is unreadable"
+        Just seconds
+            | diffUTCTime (posixSecondsToUTCTime (fromInteger seconds)) now > loginRefreshMargin -> Success
+            | otherwise -> Failure "the registry token has expired, or is about to"
 
 {- | Pushes a locally-tagged image to whatever registry its tag names.
 
@@ -301,6 +442,44 @@ push r podman mAuthFile tagname =
                 }
   where
     r' = contramap (PushImage mAuthFile tagname) r
+
+{- | 'push' that logs in again first, in the same @up@.
+
+A node is applied once per pass, so a 'login' the push depends on ran when
+the pass reached it -- before the build, if the push also depends on one --
+and an hour-long token can have lapsed by the time the push starts
+(@unauthorized@, with credentials that look present). Nothing about the
+login node can fix that from where it stands, whatever its check says: the
+pass is past it. So the credential is asked for and the registry logged in to
+right before the bytes go, which costs one @podman login@ beside a push.
+
+It does not replace the login node: declare one on the same 'AuthFile' and
+make this depend on it, as with 'push'. That node is what logs out and
+removes the file on the way down; this one's @down@ is a no-op like
+'push''s. Same effect site as @'push' (Just authfile)@, so the same 'Ref'.
+
+Beside a 'loginExpiring' node the stamp is left as it was: it then
+understates the credential in the file, which is the safe direction.
+-}
+pushLoggingIn :: Reporter Report -> Track' (Binary "podman") -> AuthFile -> Registry -> Username -> IO Text -> TagName -> Op
+pushLoggingIn r podman authfile reg user getPassword tagname =
+    withBinaryIO podman logincommand (LoginCmd authfile reg user) $ \mkProc ->
+        withBinary podman podmanCommand (Push (Just authfile) tagname) $ \doPush ->
+            op "podman-push" (deps []) $ \actions ->
+                actions
+                    { help = "pushes " <> tagname <> " to its registry"
+                    , notes = ["logs in to " <> getRegistry reg <> " again before pushing"]
+                    , ref = mkRef "podman-push" (tagname, Just (getAuthFile authfile))
+                    , up = loggingInThen (getPassword >>= authenticateWith r mkProc authfile reg user) (doPush r')
+                    }
+  where
+    r' = contramap (PushImage (Just authfile) tagname) r
+
+{- | Log in, then act; a login that fails is the failure, and the action is
+not attempted with whatever the auth file held before.
+-}
+loggingInThen :: IO () -> IO () -> IO ()
+loggingInThen authenticate act = authenticate >> act
 
 -- | Runs a detached container under a caller-chosen 'ContainerName' (so
 -- 'down' has a stable target to remove), with the given ports/env/volumes/network.
