@@ -1305,6 +1305,23 @@ services only it is a finding only when the live description is *another* `salmo
 before those were stamped (no description) is left alone on upgrade and its host-to-service moves stay unseen until
 something else imports it. That leniency is also the hedge on an unverified assumption: nobody has checked that
 `description` survives `url-maps import` on a real project. `bucketResource` is exported (the backend bucket's name).
+**A rule routing to a backend bucket is refused by default** (`albBucketRoutes = RefuseBucketRoutes`, an `albProblems`
+entry: every node's `Failure` and throw before any call), after an outage on a downstream deployment. Observed, on one
+live regional external balancer (europe-west1, 2026-10-05): a URL map with one path matcher on a regional backend
+bucket made every matcher on a backend service answer 503 (`failed_to_pick_backend`) while the backends were `HEALTHY`
+and the bucket's host served; importing the same map minus that host rule and matcher restored the service hosts in 80
+seconds; a redirect-only matcher stayed in and is cleared. The service rules render identically with and without the
+bucket, so the difference is not in what salmon writes about them; the cause is not known, and neither is whether a
+*global* balancer (which this module does not make, and nobody here has run) mixes the two. The map's default is
+always a backend service, so any bucket route here is such a mixed map. Load-bearing: **`albBuckets` with no rule
+naming it is not refused** — the resource alone serves nothing and was not seen to harm, and keeping it declared is
+what makes "drop the rule" a one-line repair; **the repair is the declaration without the rule and one pass** (the
+map's check finds the undeclared host and `up` re-imports without it, which the refusal's text says; a declaration
+still naming the route changes nothing, live map included, since the map's node refuses with the rest); the bucket
+dropped too is deleted by `LeftoversPart` after the import, but only if a pass ever marked it — one dropped in the
+first pass of a version with that part is left for a command by hand. The opt-in is
+`AllowBucketRoutesKnownToHaveBrokenALiveBalancer`, said in the root's `notes`, changing no script, for a throwaway
+balancer only.
 `albHttp` is what port 80 does and is **opt-in**: `HttpCreatedOnce` (the default) is the proxy created on the
 balancer's map and never set again, so a proxy another writer repointed stays put; `ServeHttp` and `RedirectToHttps
 code` make this node the writer of the HTTP proxy's map (compared, `target-http-proxies update` when it differs), the

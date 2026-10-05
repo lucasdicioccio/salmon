@@ -559,17 +559,56 @@ leftover.
   the next `up` that runs for another reason, not noticed.
 - **No client-facing TLS policy, no self-managed certificate upload.**
   `ComputeCertificate` names a regional certificate somebody else made.
-- **Backend buckets, redirects and the HTTP listener option: not declared by
-  the toy, never run.** A rule may send to a backend bucket (`albBuckets`,
-  `NamedBucket`) or answer with a redirect (`RedirectTo`), and `albHttp` says
+- **A backend bucket route on a regional balancer took every service host
+  down, and is now refused.** Not run by the toy: observed on a downstream
+  deployment's live regional external Application Load Balancer
+  (europe-west1, 2026-10-05, 14:36 to 15:28 UTC). What was seen: with one
+  path matcher on a regional backend bucket in the URL map (`albBuckets` and
+  a host rule to `NamedBucket`), every matcher on a backend service answered
+  503 (`failed_to_pick_backend`) while the backends were `HEALTHY`, and the
+  bucket's own host served. What restored it: `url-maps import` of the same
+  map minus that one host rule and its matcher; the six service hosts served
+  again 80 seconds later. What is cleared: a matcher that only redirects,
+  which stayed in the map. What it implies about the calls, on that
+  deployment's account and with no output recorded here: a regional
+  `backend-buckets` resource was created and a regional URL map accepted it,
+  since the bucket's host served. What is not known: why (the service rules are
+  rendered identically with and without the bucket, so it is not in what
+  salmon writes about them; no cause is claimed), whether it happens on
+  every regional balancer or needed something else this one had, and whether
+  a *global* balancer mixes the two — this module does not make one and
+  nobody here has run one. So `albProblems` refuses a rule routing to a
+  backend bucket (every node's check a `Failure`, every `up` a throw, no
+  call made), naming the above. An `albBuckets` entry no rule names is
+  still accepted. For a balancer already in that state the repair is the
+  declaration without the rule, and one pass: the map's check finds the
+  host no rule declares and its `up` imports the map without it (at
+  `2582343`, the commit that deployment ran, it did not: the check did not
+  see a removed host). That path is tested against the stand-in `gcloud`
+  only. The backend bucket dropped from the declaration as well is deleted
+  after the import, if a pass ever marked it as the balancer's; one that
+  never was is left:
+
+  ```sh
+  gcloud compute backend-buckets delete NAME-N-bucket --project P --region R
+  ```
+
+  `albBucketRoutes = AllowBucketRoutesKnownToHaveBrokenALiveBalancer` is
+  there for whoever wants to show a mixed map working, on a balancer that
+  serves nothing that matters.
+- **Redirects and the HTTP listener option (and what the scripts assume of
+  backend buckets): not declared by the toy, never run by it.** A rule may
+  answer with a redirect (`RedirectTo`) or, under the opt-in above, send to
+  a backend bucket (`albBuckets`, `NamedBucket`), and `albHttp` says
   what port 80 does: by default what it always did (`:80` serves the same map
   as `:443`, through a proxy created once and never set again), or
   `ServeHttp`, `RedirectToHttps code`, `NoHttp`. All of it is exercised
   against the stand-in `gcloud` only. What the scripts assume and nobody
   recorded: that `compute backend-buckets create --region` with
   `--load-balancing-scheme=EXTERNAL_MANAGED` makes something a regional URL
-  map accepts (the flags are in gcloud 573's `--help`; the call was not
-  made), and that such a map names it as
+  map accepts (the flags are in gcloud 573's `--help`; the deployment above
+  had a bucket host serving, so it does, but nobody recorded the call), and
+  that such a map names it as
   `.../regions/R/backendBuckets/NAME`; how `value(bucketName)` reads; that
   `url-maps import` takes `urlRedirect`/`defaultUrlRedirect` with
   `redirectResponseCode` as spelled, a path matcher with a redirect and no
@@ -589,8 +628,9 @@ leftover.
   map's name; that `target-http-proxies update --url-map` moves a proxy in
   service. On the GCP side, also unknown: whether a regional backend bucket
   serves `/` as `index.html` or a custom 404 page, and whether it answers
-  `HEAD`. A throwaway balancer with one bucket route, one redirect and
-  `RedirectToHttps` settles these.
+  `HEAD`. A throwaway balancer with one redirect and `RedirectToHttps`
+  settles the rest; one with a bucket route as well (the opt-in) is the only
+  way to learn more about the outage above.
 - **Replacing a certificate on a live balancer has never met a real
   project.** A `DomainSetCertificate` is named after its domain set, so a
   changed set is a new certificate beside the old one; the HTTPS proxy is
