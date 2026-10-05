@@ -18,6 +18,7 @@ module Test.QuadletSpec (tests) where
 import qualified Data.ByteString.Lazy.Char8 as LC8
 import qualified Data.Map.Strict as Map
 import Control.Exception (SomeException, try)
+import qualified Data.ByteString as ByteString
 import Data.Bits ((.&.))
 import Data.Foldable (toList)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef, newIORef, readIORef)
@@ -27,7 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
-import System.Directory (createDirectory, doesDirectoryExist, doesFileExist, doesPathExist)
+import System.Directory (createDirectory, doesDirectoryExist, doesFileExist, doesPathExist, listDirectory)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -58,6 +59,7 @@ tests =
         "Salmon.Builtin.Nodes.Podman.Quadlet"
         [ testGroup "rendering" renderTests
         , testGroup "watched files" watchedTests
+        , testGroup "watched files' key" keyTests
         , testGroup "refusals" problemTests
         , testGroup "check" checkTests
         , testGroup "node" nodeTests
@@ -151,7 +153,8 @@ watchedTests =
         assertEqual "" ["/etc/app/env", "/etc/app/extra.conf"] (Quadlet.watchedFiles app{Quadlet.containerWatched = ["/etc/app/extra.conf"]})
     , testCase "a changed env file changes the quadlet, an unchanged one does not" $ withTempDir $ \dir -> do
         let env = dir </> "env"
-            c = app{Quadlet.containerEnvFile = Just env}
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just env}
+        Quadlet.ensureWatchKey c
         writeFile env "PORT=80\n"
         before <- Quadlet.renderContainerWatching c
         again <- Quadlet.renderContainerWatching c
@@ -162,8 +165,10 @@ watchedTests =
         assertBool "the fingerprint replaced the declaration" (Quadlet.renderContainer c `Text.isPrefixOf` after)
     , testCase "the env file's contents are not in the quadlet" $ withTempDir $ \dir -> do
         let env = dir </> "env"
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just env}
+        Quadlet.ensureWatchKey c
         writeFile env "API_KEY=hunter2hunter2\n"
-        rendered <- Quadlet.renderContainerWatching app{Quadlet.containerEnvFile = Just env}
+        rendered <- Quadlet.renderContainerWatching c
         assertBool "" (not ("hunter2" `Text.isInfixOf` rendered))
     , testCase "nothing watched renders the declaration exactly" $ do
         let c = app{Quadlet.containerEnvFile = Nothing}
@@ -181,7 +186,8 @@ watchedTests =
                 && "[Service]" `notElem` takeWhile (/= label) (Text.lines written)
     , testCase "the fingerprint moves with the image and with the env file, and not otherwise" $ withTempDir $ \dir -> do
         let env = dir </> "env"
-            c = app{Quadlet.containerEnvFile = Just env}
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just env}
+        Quadlet.ensureWatchKey c
         writeFile env "PORT=80\n"
         before <- Quadlet.quadletFingerprint c
         again <- Quadlet.quadletFingerprint c
@@ -191,6 +197,97 @@ watchedTests =
         assertEqual "" before again
         assertBool "a new image left the fingerprint alone" (before /= moved)
         assertBool "a new env file left the fingerprint alone" (before /= after)
+    ]
+
+{- | The key the watched files' digest is made under: what is in the
+quadlet without it, and the key file itself in a scratch directory.
+-}
+keyTests :: [TestTree]
+keyTests =
+    [ testCase "the quadlet carries no plain hash of the env file, and no fingerprint made from one" $ withTempDir $ \dir -> do
+        let env = dir </> "env"
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just env}
+        Quadlet.ensureWatchKey c
+        writeFile env "PASSWORD=hunter2\n"
+        -- what anybody who can read the env file's path and guess its
+        -- contents can compute: the line as it was written before the key
+        plain <- Systemd.withWatchedFingerprint [env] ""
+        unkeyed <- Quadlet.unkeyedFingerprint c
+        written <- Quadlet.renderQuadlet c
+        assertBool "the file has no watched-files line" (any ("# salmon-watches: hmac-sha256:" `Text.isPrefixOf`) (Text.lines written))
+        assertBool "the plain hash is in the file" (not (Text.strip plain `Text.isInfixOf` written))
+        assertBool "the plain hash's digest is in the file" (not (Text.drop (Text.length "# salmon-watches: ") (Text.strip plain) `Text.isInfixOf` written))
+        assertBool "the label is the fingerprint from before the key" (not (unkeyed `Text.isInfixOf` written))
+    , testCase "the same files under another key are another line, under the same key the same" $ do
+        let frames = ["/etc/app/env:17:", "PASSWORD=hunter2\n"]
+        assertEqual "" (Quadlet.keyedWatchLine "key one" frames) (Quadlet.keyedWatchLine "key one" frames)
+        assertBool "" (Quadlet.keyedWatchLine "key one" frames /= Quadlet.keyedWatchLine "key two" frames)
+        assertBool "" (Quadlet.keyedWatchLine "key one" frames /= Quadlet.keyedWatchLine "key one" ["/etc/app/env:17:", "PASSWORD=hunter3\n"])
+        -- HMAC-SHA256, worked out outside this code (python's hmac): a
+        -- changed construction is a restart of every watching quadlet
+        assertEqual
+            ""
+            "# salmon-watches: hmac-sha256:1gecq1WMRz2R6OrB2pYA4e6aQiTPtJ9JB4aWUWugcz0=\n"
+            (Quadlet.keyedWatchLine "key one" frames)
+    , testCase "two machines' quadlets for one env file do not match" $ withTempDir $ \dir -> do
+        let env = dir </> "env"
+            on name = app{Quadlet.containerUnitDir = dir </> name, Quadlet.containerEnvFile = Just env}
+        writeFile env "PASSWORD=hunter2\n"
+        createDirectory (dir </> "one")
+        createDirectory (dir </> "two")
+        Quadlet.ensureWatchKey (on "one")
+        Quadlet.ensureWatchKey (on "two")
+        one <- Quadlet.renderContainerWatching (on "one")
+        two <- Quadlet.renderContainerWatching (on "two")
+        assertBool "" (one /= two)
+    , testCase "without the key nothing is rendered, and there is no falling back to a plain hash" $ withTempDir $ \dir -> do
+        let c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just (dir </> "env")}
+        rendered <- try (Quadlet.renderQuadlet c)
+        case rendered of
+            Left (Quadlet.WatchKeyUnusable path _) -> assertEqual "" (dir </> ".salmon-watch.key") path
+            Right text -> assertFailure ("rendered without a key: " <> Text.unpack text)
+        writeFile (Quadlet.watchKeyPath c) "\n"
+        empty <- try (Quadlet.renderQuadlet c)
+        case empty of
+            Left (Quadlet.WatchKeyUnusable _ _) -> pure ()
+            Right text -> assertFailure ("rendered under an empty key: " <> Text.unpack text)
+    , testCase "a quadlet that watches nothing reads no key" $ withTempDir $ \dir -> do
+        let c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Nothing}
+        written <- Quadlet.renderQuadlet c
+        assertBool "" (not ("salmon-watches" `Text.isInfixOf` written))
+        assertEqual "" [] =<< listDirectory dir
+    , testCase "the key is made once, owner-only, and never replaced" $ withTempDir $ \dir -> do
+        let c = app{Quadlet.containerUnitDir = dir}
+            path = Quadlet.watchKeyPath c
+        Quadlet.ensureWatchKey c
+        first <- ByteString.readFile path
+        assertBool "a short key" (ByteString.length first >= 32)
+        mode <- fileMode <$> getFileStatus path
+        assertEqual "the key is readable by others" 0o600 (mode .&. 0o777)
+        assertEqual "something was left beside the key" [".salmon-watch.key"] =<< listDirectory dir
+        Quadlet.ensureWatchKey c
+        assertEqual "the key was replaced" first =<< ByteString.readFile path
+        setFileMode path 0o644
+        Quadlet.ensureWatchKey c
+        again <- fileMode <$> getFileStatus path
+        assertEqual "a key opened to others was not closed" 0o600 (again .&. 0o777)
+        assertEqual "closing the key replaced it" first =<< ByteString.readFile path
+    , testCase "the key node: missing, open to others, empty, as it should be" $ do
+        let isFailure r = case r of Failure _ -> True; _ -> False
+        assertBool "" (isFailure (Quadlet.interpretWatchKey "/k" Nothing))
+        assertBool "" (isFailure (Quadlet.interpretWatchKey "/k" (Just (0o100644, 45))))
+        assertBool "" (isFailure (Quadlet.interpretWatchKey "/k" (Just (0o100640, 45))))
+        assertBool "" (isFailure (Quadlet.interpretWatchKey "/k" (Just (0o100600, 0))))
+        assertEqual "" Success (Quadlet.interpretWatchKey "/k" (Just (0o100600, 45)))
+    , testCase "the key node makes the key, then skips; down leaves it" $ withTempDir $ \dir -> do
+        let c = app{Quadlet.containerUnitDir = dir}
+        act <- maybe (assertFailure "no node") pure (opAct (Quadlet.watchKeyNode c))
+        before <- act.extension.check
+        assertBool (show before) (case before of Failure _ -> True; _ -> False)
+        act.extension.up
+        assertEqual "" Success =<< act.extension.check
+        act.extension.down
+        assertBool "down removed the key" =<< doesFileExist (Quadlet.watchKeyPath c)
     ]
 
 problemTests :: [TestTree]
@@ -240,7 +337,8 @@ checkTests =
         -- only the env file moved, and a daemon-reload run for another
         -- quadlet has already cleared NeedDaemonReload
         let env = dir </> "env"
-            c = app{Quadlet.containerEnvFile = Just env}
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just env}
+        Quadlet.ensureWatchKey c
         writeFile env "TOKEN=one\n"
         started <- Quadlet.quadletFingerprint c
         assertEqual "" Success (Quadlet.interpretRunning started (started <> "\n"))
@@ -253,6 +351,46 @@ checkTests =
     , testCase "a container that does not say what it was started from needs bringing up" $ do
         assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "\n"))
         assertBool "" (isFailure (Quadlet.interpretRunning "abc123" "<no value>\n"))
+    , testCase "the verdict on another quadlet's container does not quote its label" $
+        -- it may be a label from before the digest was keyed, and the text is a report
+        case Quadlet.interpretRunning "abc123" "def456\n" of
+            Failure why -> assertBool (Text.unpack why) (not ("def456" `Text.isInfixOf` why))
+            other -> assertFailure (show other)
+    , testCase "a container started before the digest was keyed, from this declaration and these files, is satisfied" $ do
+        assertEqual "" Success (Quadlet.interpretStarted "keyed1" "plain1" "plain1\n")
+        assertEqual "" Success (Quadlet.interpretStarted "keyed1" "plain1" "keyed1\n")
+        assertBool "" (isFailure (Quadlet.interpretStarted "keyed1" "plain1" "plain0\n"))
+        assertBool "" (isFailure (Quadlet.interpretStarted "keyed1" "plain1" "<no value>\n"))
+    , testCase "a container started before the digest was keyed and before its env file was rotated needs bringing up" $ withTempDir $ \dir -> do
+        let env = dir </> "env"
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just env}
+        Quadlet.ensureWatchKey c
+        writeFile env "TOKEN=one\n"
+        started <- Quadlet.unkeyedFingerprint c
+        declaredOne <- Quadlet.quadletFingerprint c
+        assertBool "the keyed fingerprint is the plain one" (started /= declaredOne)
+        assertEqual "" Success (Quadlet.interpretStarted declaredOne started (started <> "\n"))
+        writeFile env "TOKEN=two\n"
+        declared <- Quadlet.quadletFingerprint c
+        unkeyed <- Quadlet.unkeyedFingerprint c
+        assertBool "" (isFailure (Quadlet.interpretStarted declared unkeyed (started <> "\n")))
+    , testCase "the fingerprint from before the key is the one such a container carries" $ do
+        -- worked out outside this code from the text "a full container, key
+        -- by key" pins and the trailing comment as it was written then
+        -- (sha256 of "PATH:0:" for a file that is not there, base64): were it
+        -- to move, every container started before the key would be restarted
+        let c = app{Quadlet.containerEnvFile = Just "/nonexistent/salmon/env"}
+        assertEqual "" "rOdZlNjoUBdb" =<< Quadlet.unkeyedFingerprint c
+    , testCase "a file rewritten for the key alone is a reload and no restart" $ do
+        let active = Just (Quadlet.parseSample ["ActiveState=active", "SubState=running", "NRestarts=0", "Result=success"])
+            stopped = Just (Quadlet.parseSample ["ActiveState=inactive", "SubState=dead", "NRestarts=0", "Result=success"])
+        assertBool "" (Quadlet.interpretAdoptable "keyed1" "plain1" active (Just "plain1\n"))
+        assertBool "a container already on the keyed label was adopted" (not (Quadlet.interpretAdoptable "keyed1" "plain1" active (Just "keyed1\n")))
+        assertBool "a container from another declaration was adopted" (not (Quadlet.interpretAdoptable "keyed1" "plain1" active (Just "plain0\n")))
+        assertBool "a stopped unit was adopted" (not (Quadlet.interpretAdoptable "keyed1" "plain1" stopped (Just "plain1\n")))
+        assertBool "a unit systemd cannot describe was adopted" (not (Quadlet.interpretAdoptable "keyed1" "plain1" Nothing (Just "plain1\n")))
+        assertBool "a container podman cannot describe was adopted" (not (Quadlet.interpretAdoptable "keyed1" "plain1" active Nothing))
+        assertBool "a quadlet watching nothing was adopted" (not (Quadlet.interpretAdoptable "same" "same" active (Just "same\n")))
     ]
   where
     isFailure (Failure _) = True
@@ -293,6 +431,26 @@ nodeTests =
         assertEqual "not exactly one directory node" 1 (length dirs)
         assertBool "the directory carries the container's notes" $
             not (any (Text.isPrefixOf "quadlet:") (concatMap (\act -> act.extension.notes) dirs))
+    , testCase "a quadlet that watches a file stands on the directory's key, and one that watches nothing has none" $ do
+        let dagOf o = Dag.foldDag Dag.sameRepresentative (evalDeps o)
+            refsOf dag short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+            watching = dagOf (node app)
+        key <- one "key node" (refsOf watching "podman-quadlet-key")
+        file <- one "file node" (refsOf watching "file-contents")
+        dir <- one "directory node" (refsOf watching "podman-quadlet-dir")
+        assertEqual "" (mkRef "podman-quadlet-key" ("/etc/containers/systemd/.salmon-watch.key" :: FilePath)) key
+        assertBool "the file does not wait for the key" (key `elem` toList (Map.findWithDefault mempty file (Dag.dagDependencies watching)))
+        assertBool "the key does not wait for the directory" (dir `elem` toList (Map.findWithDefault mempty key (Dag.dagDependencies watching)))
+        assertEqual "" [] (refsOf (dagOf (node app{Quadlet.containerEnvFile = Nothing})) "podman-quadlet-key")
+        let job = Quadlet.containerJob (Podman.ContainerName "job") "app:v3" ["run"]
+            jobNode = Quadlet.quadletJob silent ignoreTrack ignoreTrack
+        assertEqual "" [] (refsOf (dagOf (jobNode job)) "podman-quadlet-key")
+        assertEqual "" 1 (length (refsOf (dagOf (jobNode job{Quadlet.containerWatched = ["/etc/job.conf"]})) "podman-quadlet-key"))
+    , testCase "two quadlets in one directory share its key without a conflict" $ do
+        let other = app{Quadlet.containerName = Podman.ContainerName "other"}
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [node app, node other]) id))
+        assertEqual "" 1 (length [() | act <- Map.elems (Dag.dagNodes dag), act.shorthand == "podman-quadlet-key"])
+        assertEqual "the shared key was described two ways" 0 (length (Dag.dagConflicts dag))
     , testCase "the image is asked for, and pulled with the container's credentials" $ do
         assertEqual "" ["image", "exists", "europe-west1-docker.pkg.dev/acme/repo/app:v3"] (Quadlet.imagePresentArgs app)
         assertEqual
@@ -387,10 +545,15 @@ bindTests =
         -- that sets no stamp" its hash; this is the rest of the graph
         assertEqual "" [] app.containerBinds
         assertEqual "" [] (map shorthandOf (Quadlet.hostDirNodes app))
+        -- the key is there for the env file `app` watches, not for a bind
+        assertEqual
+            ""
+            ["file-contents", "podman-quadlet", "podman-quadlet-dir", "podman-quadlet-image", "podman-quadlet-key"]
+            (sort (shorthands (node app)))
         assertEqual
             ""
             ["file-contents", "podman-quadlet", "podman-quadlet-dir", "podman-quadlet-image"]
-            (sort (shorthands (node app)))
+            (sort (shorthands (node app{Quadlet.containerEnvFile = Nothing})))
         assertEqual "" 1 (length (filter ("Volume=" `Text.isPrefixOf`) (Text.lines (Quadlet.renderContainer app))))
     , testCase "a bind is one more Volume line, after the plain ones, with its options" $ do
         let c = app{Quadlet.containerBinds = [(Quadlet.bind "/srv/pg" "/var/lib/postgresql/data"){Quadlet.bindChown = True, Quadlet.bindRelabel = Just Quadlet.RelabelPrivate}]}
@@ -551,6 +714,8 @@ generatorTests =
         let envFile = dir </> "env"
             c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Just envFile}
         writeFile envFile "PORT=80\n"
+        -- the key sits in the directory the generator reads, which must not mind it
+        Quadlet.ensureWatchKey c
         Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderQuadlet c
         fingerprint <- Quadlet.quadletFingerprint c
         environment <- getEnvironment
@@ -564,6 +729,7 @@ generatorTests =
             ExitFailure n -> assertFailure ("the generator exited " <> show n <> ": " <> said)
         assertBool said ("---app.service---" `isInfixOf` said)
         assertBool said (not ("unsupported key" `isInfixOf` said))
+        assertBool ("the generator said something about the key: " <> said) (not (".salmon-watch.key" `isInfixOf` said))
         assertBool said ("--authfile=/etc/app/auth.json" `isInfixOf` said)
         assertBool said (("--env-file " <> envFile) `isInfixOf` said)
         assertBool said ("--publish 8080:80/tcp" `isInfixOf` said)

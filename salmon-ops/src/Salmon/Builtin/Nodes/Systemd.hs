@@ -107,9 +107,17 @@ is itself a change.
 -}
 withWatchedFingerprint :: [FilePath] -> Text -> IO Text
 withWatchedFingerprint paths unitText = do
-    parts <- concat <$> traverse framed paths
+    parts <- watchedFrames paths
     let digest = SHA256.finalize (SHA256.updates SHA256.init parts)
     pure (unitText <> "# salmon-watches: " <> Text.decodeUtf8 (Base64.encode digest) <> "\n")
+
+{- | What 'withWatchedFingerprint' hashes: each file as its path, its length
+and its bytes, in the order given, a missing file being an empty one. Exposed
+for a caller that digests the same thing another way
+("Salmon.Builtin.Nodes.Podman.Quadlet" keys it).
+-}
+watchedFrames :: [FilePath] -> IO [ByteString.ByteString]
+watchedFrames paths = concat <$> traverse framed paths
   where
     framed :: FilePath -> IO [ByteString.ByteString]
     framed path = do
