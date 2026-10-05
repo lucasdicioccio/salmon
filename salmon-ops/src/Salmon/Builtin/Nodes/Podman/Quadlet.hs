@@ -374,7 +374,16 @@ instance Exception InvalidContainer
 
 The 'Track'' is where the caller says what the container stands on: podman
 itself, the 'Podman.login' whose 'Podman.AuthFile' the pull reads, whatever
-delivers the env file. They are applied before the file is written.
+delivers the env file, a migration the new image needs. They are applied
+before the file is written: the file node depends on them, so one that fails
+leaves the file @Blocked@ as well as this node, and the machine keeps the
+quadlet its running container was started from. (As siblings of the file,
+which they once were, a failed one still let the new image be written under
+the old container.)
+
+That holds for the 'Track'' only. 'Salmon.Op.OpGraph.inject' on the 'Op'
+returned here adds a predecessor of /this/ node, beside the file and in no
+order with it; a precondition of the new declaration belongs in the track.
 
 @up@ is @daemon-reload@ then @restart@, which returns once the container is
 running (the generated service is @Type=notify@). The restart stops the old
@@ -399,7 +408,7 @@ quadletContainer r systemctl t c =
     withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
         withCommand r systemctl (Systemd.Up c.containerScope target) $ \restart ->
             withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
-                op "podman-quadlet" (deps [quadletFile r [imageNode c `inject` run t c] c, run t c]) $ \actions ->
+                op "podman-quadlet" (deps [quadletFile r [imageNode c `inject` run t c, run t c] c, run t c]) $ \actions ->
                     actions
                         { help = "runs " <> c.containerImage <> " as " <> target
                         , notes =
@@ -423,7 +432,8 @@ ask, and none is wanted. @up@ is @daemon-reload@, after which a unit systemd
 still does not hold is thrown: the generator drops a file it cannot read
 without failing the reload, so that is the only place a refused quadlet
 shows. @down@ stops a run under way if there is one; the file's @down@
-removes the file and reloads.
+removes the file and reloads. As for 'quadletContainer', what the 'Track''
+declares is applied before the file is written.
 
 The image is pulled by the first /run/, not here. A job whose first run
 must not wait for a pull stands on a 'Podman.pullImage'.
@@ -437,7 +447,7 @@ quadletJob ::
 quadletJob r systemctl t c =
     withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
         withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
-            op "podman-quadlet-job" (deps [quadletFile r [] c, run t c]) $ \actions ->
+            op "podman-quadlet-job" (deps [quadletFile r [run t c] c, run t c]) $ \actions ->
                 actions
                     { help = "installs the job " <> target <> " running " <> c.containerImage <> ", without running it"
                     , notes =

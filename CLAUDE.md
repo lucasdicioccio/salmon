@@ -1032,7 +1032,11 @@ written before the label existed is restarted once; a generated unit's `UnitFile
 generator's, so `up` is reload + restart); the file node's `down` reloads after removing, or the unit outlives its file;
 left alone the pull happens *inside the service's start*, which on a restart is after the old container was stopped,
 so `quadletContainer` pulls first: `imageNode` (`podman-quadlet-image`, keyed on the reference and the auth file, shared
-by containers of one image) is a dependency of the *file*, with the caller's `Track'` injected ahead of it. Its `check`
+by containers of one image) is a dependency of the *file*, with the caller's `Track'` injected ahead of it. The `Track'` is also a dependency of
+the file itself (for `quadletJob` too), not only its sibling under the unit node: a failed precondition (a migration)
+then leaves the file `Blocked` and the old image declared, where it used to leave the new image written under the old
+container. An `inject` on the returned `Op` is still a sibling of the file, so preconditions go in the track (Layer 0
+graph shape only; the failing-precondition pass has not been run against a real unit). Its `check`
 is `podman image exists` (present is a skip and never reaches a registry; an exit other than 0/1 is `Unknown`), its
 `up` is `podman pull [--authfile]` throwing `ImageUnavailable`, its `down` nothing. An unpullable reference therefore
 fails there with the file and node `Blocked`: the old file, unit and container stay as they were. The rendered file is
