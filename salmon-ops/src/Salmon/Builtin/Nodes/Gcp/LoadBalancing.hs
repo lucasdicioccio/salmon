@@ -36,6 +36,7 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     bucketResource,
     renderUrlMap,
     urlMapStamp,
+    ownershipMarker,
     renderHttpRedirectUrlMap,
     interpretLbDescribe,
     interpretLbCheck,
@@ -592,6 +593,7 @@ partKind = \case
     HttpsProxyPart -> "gcp-lb-https-proxy"
     ForwardingRulePart -> "gcp-lb-forwarding-rule"
     HttpsForwardingRulePart -> "gcp-lb-https-forwarding-rule"
+    LeftoversPart -> "gcp-lb-leftovers"
 
 {- | The effect site of a resource node: the resource's own name where it has
 one that is not the balancer's (a health check, a certificate), the
@@ -1022,6 +1024,16 @@ stampOf v =
   where
     hex w = let h = showHex w "" in if length h < 2 then '0' : h else h
 
+{- | What this balancer writes in the @description@ of the backend buckets,
+Certificate Manager certificates and DNS authorizations it declares, and the
+only thing that makes one of them, once it is no longer declared, this
+balancer's to delete (see 'lbParts'). It names the balancer, because a name
+alone does not: @web-eu-assets-bucket@ is balancer @web@'s by its shape and
+balancer @web-eu@'s in fact.
+-}
+ownershipMarker :: ApplicationLoadBalancer -> Text
+ownershipMarker alb = "salmon:lb:" <> alb.albName
+
 httpRedirectUrlMapName :: ApplicationLoadBalancer -> Text
 httpRedirectUrlMapName alb = alb.albName <> "-http-redirect-url-map"
 
@@ -1037,6 +1049,18 @@ renderHttpRedirectUrlMap alb code =
         [ "name" Aeson..= httpRedirectUrlMapName alb
         , "defaultUrlRedirect" Aeson..= renderRedirect (Redirect Nothing Nothing True code)
         ]
+
+{- | Every @description@ a redirect-only map of this balancer can carry: the
+fingerprint 'renderHttpRedirectUrlMap' writes, for each code there is. A map
+under that name with one of these is one this module wrote.
+-}
+httpRedirectUrlMapStamps :: ApplicationLoadBalancer -> [Text]
+httpRedirectUrlMapStamps alb =
+    [ stamp
+    | code <- [MovedPermanently, Found, SeeOther, TemporaryRedirect, PermanentRedirect]
+    , Aeson.Object o <- [renderHttpRedirectUrlMap alb code]
+    , Just (Aeson.String stamp) <- [KeyMap.lookup "description" o]
+    ]
 
 urlMapFields :: ApplicationLoadBalancer -> [Aeson.Pair]
 urlMapFields alb =
@@ -1124,6 +1148,10 @@ data Part
     | HttpsProxyPart
     | ForwardingRulePart
     | HttpsForwardingRulePart
+    | -- | the removal of what this balancer made and no longer declares: backend
+      -- buckets, Certificate Manager certificates, DNS authorizations and the
+      -- redirect-only URL map (see 'lbParts')
+      LeftoversPart
     deriving (Eq, Ord, Show)
 
 {- | A resource, the resources it needs first, and the lines of bash that
@@ -1225,15 +1253,47 @@ again.
 
 The HTTP proxy's URL map is the same by default ('HttpCreatedOnce'): named
 at creation, never set again. Under 'ServeHttp' and 'RedirectToHttps' it is
-compared and updated when it differs. A redirect-only map a declaration no
-longer names (after going back from 'RedirectToHttps') is left behind, as is
-a backend bucket no longer declared: nothing in a declaration remembers what
-it used to name. 'NoHttp' is the exception, a node whose @up@ removes the
-@:80@ rule and the HTTP proxy.
+compared and updated when it differs. 'NoHttp' is a node whose @up@ removes
+the @:80@ rule and the HTTP proxy.
 
-Not done: a superseded certificate still present at teardown (a swap that
-never completed) is left behind, as is the DNS authorization of a name a set
-no longer covers.
+Nothing in a declaration remembers what it used to name, so what a balancer
+made and no longer declares is found on GCP, by the last node
+('LeftoversPart'), which comes after the URL map, the proxies and the
+superseded certificates. It deletes four kinds of resource and no other, each
+under a proof that this balancer made it, and never one still in use:
+
+* a backend bucket named @\<balancer\>-\<n\>-bucket@ whose @description@ is
+  'ownershipMarker', once no URL map of the project names it;
+* a Certificate Manager certificate whose @description@ is the marker, once
+  no HTTPS proxy of the project serves it (so not the old certificate of a
+  swap still pending, nor one the proxy of a failed pass is still on);
+* a DNS authorization whose @description@ is the marker, once no certificate
+  of the location uses it (the record published for it is the caller's);
+* the redirect-only map @\<balancer\>-http-redirect-url-map@, when the
+  declaration is no longer 'RedirectToHttps', its @description@ is one of the
+  fingerprints this module writes for it and no proxy of the project is on
+  it. Under 'HttpCreatedOnce' the HTTP proxy is never moved off it, so there
+  it stays for as long as that proxy does.
+
+The marker is written by that same node, on the declared resources that
+exist and have no description (@update --description@), so the scripts of the
+resources themselves are what they were. A resource that is no longer
+declared and was never marked -- one dropped from the declaration before the
+marker existed -- is therefore __not__ deleted, and neither is one carrying
+somebody's description: both are left for a command by hand. A listing only
+enumerates candidates; what is deleted is what carries the marker.
+
+What is still in use is said (@WAITING@, so 'Unknown', for the check; a line
+on stderr for @up@) and left. A delete or a marking that fails fails that
+node, and so the pass and the balancer's root: it is the last node, so every
+resource that serves traffic was applied before it. A listing that fails (the
+Certificate Manager API of a balancer that never had a certificate) is said
+and is nothing to clean.
+
+Not done: none of this runs at teardown, where a leftover is left behind (as
+is a superseded certificate of a swap that never completed); a backend
+service, a health check, a NEG, the HTTPS proxy, its rule and the address of
+a declaration that no longer names them are not removed.
 
 On the way down an attachment is /detached/ (@remove-backend@) rather than
 left to the backend service's deletion, because a NEG still attached cannot
@@ -1264,6 +1324,7 @@ lbParts alb =
             <> [forwardingRulePart | http]
             <> [httpsForwardingRulePart | https]
             <> [noHttpPart | not http]
+            <> [leftoversPart]
   where
     https = serveHttps alb
     http = alb.albHttp /= NoHttp
@@ -1866,6 +1927,163 @@ lbParts alb =
                 <> " -v cur=" <> shellQuote current
                 <> " "
                 <> shellQuote "{n=$0; sub(/.*\\//,\"\",n); t=substr(n,length(b)+2)} n!=cur && (n==b || (index(n,b\"-\")==1 && length(t)==8 && t ~ /^[0-9a-f]+$/)) {print n}"
+
+    -- What this balancer made and no longer declares. Each @plan_*@ function
+    -- prints one line per finding and changes nothing: @MARK coll name@ (a
+    -- declared resource with no description), @DELETE coll name@ (ours, not
+    -- declared, not in use), @KEEP coll name why@ (ours, not declared, in
+    -- use) and @NOTE coll name why@ (said by @up@, nothing for the check).
+    -- The check and @up@ read the same lines.
+    --
+    -- A reference is looked for with a here-string, never @printf | grep
+    -- -q@: under @pipefail@ a @grep -q@ that stops reading early can fail
+    -- the pipeline, which here would read as "not in use".
+    leftoversPart :: PartSpec
+    leftoversPart =
+        PartSpec
+            { partId = LeftoversPart
+            , partDeps =
+                nub $
+                    [UrlMapPart]
+                        <> [BackendBucketPart n | n <- declaredBuckets]
+                        <> [CertificatePart n | n <- declaredCertificates]
+                        <> [HttpProxyPart | http]
+                        <> [NoHttpPart | not http]
+                        <> [HttpsProxyPart | https]
+                        <> [SupersededCertificatesPart base | DomainSetCertificate base _ <- alb.albCertificates]
+            , partHelp = Text.unwords ["leftovers of load balancer", alb.albName]
+            , partNotes = []
+            , partUp =
+                plans
+                    <> [ "mark() { case \"$1\" in backend-buckets) gcloud compute \"$1\" update \"$2\"" <> regional
+                            <> " --description=\"$marker\" ;; *) gcloud certificate-manager \"$1\" update \"$2\""
+                            <> located
+                            <> " --description=\"$marker\" ;; esac; }"
+                       , "remove() { case \"$1\" in backend-buckets|url-maps) gcloud compute \"$1\" delete \"$2\"" <> regional
+                            <> " --quiet ;; *) gcloud certificate-manager \"$1\" delete \"$2\""
+                            <> located
+                            <> " --quiet ;; esac; }"
+                       , "apply() {"
+                       , "  local plan what coll n rest"
+                       , "  plan=$(\"$1\")"
+                       , "  while read -r what coll n rest; do"
+                       , "    case \"$what\" in"
+                       , "      MARK) mark \"$coll\" \"$n\" </dev/null ;;"
+                       , "      DELETE) echo \"removing $coll $n: made by load balancer \"" <> shellQuote alb.albName <> "\", no longer declared\" >&2; remove \"$coll\" \"$n\" </dev/null ;;"
+                       , "      KEEP|NOTE) echo \"left: $coll $n ($rest)\" >&2 ;;"
+                       , "    esac"
+                       , "  done <<< \"$plan\""
+                       , "}"
+                       ]
+                    -- certificates before the authorizations they use
+                    <> map ("apply " <>) planNames
+            , partCheck =
+                plans
+                    <> [ "{ " <> Text.concat (map (<> "; ") planNames) <> "} | while read -r what coll n rest; do case \"$what\" in"
+                            <> " MARK) echo \"MISSING ownership mark on $coll $n\";;"
+                            <> " DELETE) echo \"MISSING removal of undeclared $coll $n\";;"
+                            <> " KEEP) echo \"WAITING removal of undeclared $coll $n, $rest\";;"
+                            <> " esac; done; true"
+                       ]
+            , -- a leftover still there at teardown is left (see 'lbParts')
+              partDown = []
+            }
+      where
+        declaredBuckets = map (bucketResource alb . backendBucketName) alb.albBuckets
+        declaredCertificates = [n | (n, _, _) <- managedCertificates alb]
+        declaredAuthorizations = map snd (dnsAuthorizations alb)
+        redirectMap = httpRedirectUrlMapName alb
+        redirecting = case alb.albHttp of
+            RedirectToHttps _ -> True
+            _ -> False
+        planNames =
+            ["plan_buckets", "plan_certificates", "plan_authorizations"]
+                <> ["plan_redirect_map" | not redirecting]
+        declared = shellQuote . Text.unwords
+        unlisted coll = "{ echo " <> shellQuote ("NOTE " <> coll <> " - could not be listed") <> "; return 0; }"
+        -- the last path segment of every name of a flattened list, one per line
+        names = " | tr \";,[]' \\t\" '\\n' | sed 's|.*/||'"
+        plans =
+            [ "marker=" <> shellQuote (ownershipMarker alb)
+            , -- reads a 'value(name,description)' listing; $1 is the declared names
+              "classify() { awk -F'\\t' -v m=\"$marker\" -v declared=\" $1 \" "
+                <> shellQuote "{n=$1; sub(/.*\\//,\"\",n)} n==\"\"{next} index(declared,\" \" n \" \"){if($2==\"\")print \"MARK:\" n; next} $2==m{print \"OURS:\" n}"
+                <> "; }"
+            , "plan_buckets() {"
+            , "  local all maps listed line n d"
+            , "  all=$(gcloud compute backend-buckets list --project=\"$PROJECT\" --format='value(name,description)' 2>/dev/null) || " <> unlisted "backend-buckets"
+            , "  maps=''; listed=''"
+            , "  for line in $(printf '%s\\n' \"$all\" | classify " <> declared declaredBuckets <> "); do"
+            , "    n=${line#*:}"
+            , -- the listing is the project's: only a bucket of this region, read again, counts
+              "    d=$(gcloud compute backend-buckets describe \"$n\"" <> regional <> " --format='value(description)' 2>/dev/null) || continue"
+            , "    case \"$line\" in"
+            , "      MARK:*) [ -n \"$d\" ] || echo \"MARK backend-buckets $n\" ;;"
+            , "      OURS:*)"
+            , "        case \"$n\" in " <> shellQuote (alb.albName <> "-") <> "*-bucket) ;; *) continue ;; esac"
+            , "        [ \"$d\" = \"$marker\" ] || continue"
+            , "        if [ -z \"$listed\" ]; then maps=$(gcloud compute url-maps list --project=\"$PROJECT\" --format=json 2>/dev/null) || { echo \"KEEP backend-buckets $n the URL maps could not be listed\"; continue; }; listed=1; fi"
+            , "        if grep -qF -- \"/regions/$REGION/backendBuckets/$n\\\"\" <<< \"$maps\"; then echo \"KEEP backend-buckets $n a URL map still names it\"; else echo \"DELETE backend-buckets $n\"; fi ;;"
+            , "    esac"
+            , "  done"
+            , "}"
+            , "plan_certificates() {"
+            , "  local all served listed line n"
+            , "  all=$(gcloud certificate-manager certificates list" <> located <> " --format='value(name,description)' 2>/dev/null) || " <> unlisted "certificates"
+            , "  served=''; listed=''"
+            , "  for line in $(printf '%s\\n' \"$all\" | classify " <> declared declaredCertificates <> "); do"
+            , "    n=${line#*:}"
+            , "    case \"$line\" in"
+            , "      MARK:*) echo \"MARK certificates $n\" ;;"
+            , "      OURS:*)"
+            , "        if [ -z \"$listed\" ]; then served=$(gcloud compute target-https-proxies list --project=\"$PROJECT\" --format='value(sslCertificates,certificateManagerCertificates)' 2>/dev/null"
+                <> names
+                <> ") || { echo \"KEEP certificates $n the HTTPS proxies could not be listed\"; continue; }; listed=1; fi"
+            , "        if grep -qxF -- \"$n\" <<< \"$served\"; then echo \"KEEP certificates $n an HTTPS proxy still serves it\"; else echo \"DELETE certificates $n\"; fi ;;"
+            , "    esac"
+            , "  done"
+            , "}"
+            , "plan_authorizations() {"
+            , "  local all used listed line n"
+            , "  all=$(gcloud certificate-manager dns-authorizations list" <> located <> " --format='value(name,description)' 2>/dev/null) || " <> unlisted "dns-authorizations"
+            , "  used=''; listed=''"
+            , "  for line in $(printf '%s\\n' \"$all\" | classify " <> declared declaredAuthorizations <> "); do"
+            , "    n=${line#*:}"
+            , "    case \"$line\" in"
+            , "      MARK:*) echo \"MARK dns-authorizations $n\" ;;"
+            , "      OURS:*)"
+            , "        if [ -z \"$listed\" ]; then used=$(gcloud certificate-manager certificates list" <> located <> " --format='value(managed.dnsAuthorizations)' 2>/dev/null"
+                <> names
+                <> ") || { echo \"KEEP dns-authorizations $n the certificates could not be listed\"; continue; }; listed=1; fi"
+            , "        if grep -qxF -- \"$n\" <<< \"$used\"; then echo \"KEEP dns-authorizations $n a certificate still uses it\"; else echo \"DELETE dns-authorizations $n\"; fi ;;"
+            , "    esac"
+            , "  done"
+            , "}"
+            ]
+                <> if redirecting
+                    then []
+                    else
+                        [ "plan_redirect_map() {"
+                        , "  local d http https"
+                        , "  d=$(" <> describeCompute "url-maps" redirectMap <> " --format='value(description)' 2>/dev/null) || return 0"
+                        , -- only a map this module wrote: its description is the fingerprint of its content
+                          "  case \"$d\" in " <> Text.intercalate "|" (map shellQuote (httpRedirectUrlMapStamps alb)) <> ") ;; *) return 0 ;; esac"
+                        , "  http=$(gcloud compute target-http-proxies list --project=\"$PROJECT\" --format='value(urlMap)' 2>/dev/null) && https=$(gcloud compute target-https-proxies list --project=\"$PROJECT\" --format='value(urlMap)' 2>/dev/null) || { echo "
+                            <> shellQuote ("KEEP url-maps " <> redirectMap <> " the proxies could not be listed")
+                            <> "; return 0; }"
+                        , "  if grep -qE -- \"/regions/$REGION/urlMaps/\"" <> shellQuote redirectMap <> "'[[:space:]]*$' <<< \"$http\"$'\\n'\"$https\"; then echo "
+                            <> shellQuote
+                                ( -- by default the HTTP proxy is never moved, so a map it is on is not waiting for anything
+                                  (if alb.albHttp == HttpCreatedOnce then "NOTE" else "KEEP")
+                                    <> " url-maps "
+                                    <> redirectMap
+                                    <> " a proxy is still on it"
+                                )
+                            <> "; else echo "
+                            <> shellQuote ("DELETE url-maps " <> redirectMap)
+                            <> "; fi"
+                        , "}"
+                        ]
 
     -- Two forwarding rules can only share an address that is reserved.
     addressPart :: PartSpec

@@ -1312,8 +1312,10 @@ lbTests =
             )
             scripts
     , testCase "a plain balancer renders none of the HTTPS, rule or timeout steps" $ do
+        -- of its resources: the leftovers part asks after certificates and
+        -- proxies whatever is declared, since it looks for what used to be
         mapM_
-            (\w -> assertBool (w <> "\n" <> script) (not (w `isInfixOf` script)))
+            (\w -> assertBool (w <> "\n" <> resourceLines alb) (not (w `isInfixOf` resourceLines alb)))
             ["target-https-proxies", "certificate-manager", "addresses", "--address", "--timeout", "ssl-certificates"]
         -- the one import is behind a look at the map: only over one that has host rules
         assertEqual "" 1 (length [() | l <- lines script, "url-maps import" `isInfixOf` l])
@@ -1343,7 +1345,8 @@ lbTests =
         let own = full{LoadBalancing.albCertificates = [LoadBalancing.ComputeCertificate "own"]}
         let sc = createScript own
         assertBool sc ("--ssl-certificates='own' --ssl-certificates-region=\"$REGION\"" `isInfixOf` sc)
-        assertBool sc (not ("certificate-manager" `isInfixOf` sc))
+        assertBool sc (not ("certificate-manager" `isInfixOf` resourceLines own))
+        assertBool sc (not ("ssl-certificates" `isInfixOf` leftoverLines own))
         assertBool "" (not ("ssl-certificates delete" `isInfixOf` deleteScript own))
         assertBool "" ("need 'ssl-certificates own'" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript own))
     , testCase "host rules make the URL map an import of the whole map, every run" $ do
@@ -1932,7 +1935,8 @@ lbTests =
                         (code, out, _) <- run (Text.unpack (LoadBalancing.renderPartCheckScript full part))
                         pure (LoadBalancing.interpretLbCheck code (Text.pack out))
                 before <- mapM verdict parts
-                assertBool (show before) (all isFailure before)
+                -- but for the leftovers: with nothing there, nothing is left over
+                assertBool (show before) (and [isFailure v == (part.partId /= LoadBalancing.LeftoversPart) | (part, v) <- zip parts before])
                 mapM_
                     ( \part -> do
                         (code, _, err) <- run (Text.unpack (LoadBalancing.renderPartUpScript full part))
@@ -1942,7 +1946,7 @@ lbTests =
                     )
                     parts
                 -- one resource removed behind the balancer is one node's Failure
-                _ <- run "gcloud compute url-maps delete web-url-map"
+                _ <- run "rm \"$FAKE_GCLOUD_STATE\"/url-maps.web-url-map"
                 after <- mapM verdict parts
                 assertEqual
                     ""
@@ -1987,7 +1991,8 @@ lbTests =
                 waiting <- drop (length first) <$> mutations
                 assertBool (unlines waiting) (("certificates create " <> Text.unpack certV2) `elem` waiting)
                 -- only the name the old set did not cover gets an authorization
-                assertEqual (unlines waiting) ["dns-authorizations create web-cert-www-example-org"] (filter ("dns-authorizations" `isInfixOf`) waiting)
+                -- (made, and then marked as this balancer's by the leftovers part)
+                assertEqual (unlines waiting) ["dns-authorizations create web-cert-www-example-org", "dns-authorizations update web-cert-www-example-org"] (filter ("dns-authorizations" `isInfixOf`) waiting)
                 assertBool (unlines waiting) (not (any (\l -> "target-https-proxies" `isInfixOf` l || " delete " `isInfixOf` l) waiting))
                 (_, served, _) <- run "gcloud compute target-https-proxies describe web-https-proxy --format='value(sslCertificates)'"
                 assertBool served (Text.unpack certV1 `isInfixOf` served)
@@ -2074,7 +2079,8 @@ lbTests =
                 moved <- drop before <$> mutations
                 assertEqual
                     (unlines moved)
-                    ["certificates create " <> Text.unpack certV2, "target-https-proxies update web-https-proxy", "certificates delete web-cert"]
+                    -- the last is the ownership mark on the new certificate
+                    ["certificates create " <> Text.unpack certV2, "target-https-proxies update web-https-proxy", "certificates delete web-cert", "certificates update " <> Text.unpack certV2]
                     (filter (\l -> "target-https-proxies" `isInfixOf` l || "certificates" `isInfixOf` l) moved)
         , testCase "a certificate under a fixed name whose domains changed is refused, by its up and by its check" $
             withFakeGcloud $ \run _ -> do
@@ -2265,6 +2271,183 @@ lbTests =
                 _ <- mutationsOf run mutations (deleteScript none)
                 (_, left, _) <- run "ls \"$FAKE_GCLOUD_STATE\""
                 assertEqual "" "" left
+        , testCase "leftovers: the part is the last, after the map, the proxies and the superseded certificates, and writes no proxy" $ do
+            let declarations = [alb, full, site, rotated, toHttps, listening LoadBalancing.ServeHttp, listening LoadBalancing.NoHttp]
+            mapM_ (\a -> assertEqual "" [leftovers] (take 1 (reverse (map LoadBalancing.partId (LoadBalancing.lbParts a))))) declarations
+            assertEqual "" [LoadBalancing.UrlMapPart, LoadBalancing.HttpProxyPart] (depsOf alb leftovers)
+            assertEqual
+                ""
+                [LoadBalancing.UrlMapPart, LoadBalancing.BackendBucketPart "web-site-bucket", LoadBalancing.CertificatePart "web-cert", LoadBalancing.HttpProxyPart, LoadBalancing.HttpsProxyPart]
+                (depsOf site leftovers)
+            assertBool "" (LoadBalancing.SupersededCertificatesPart "web-cert" `elem` depsOf rotated leftovers)
+            assertBool "" (LoadBalancing.NoHttpPart `elem` depsOf (listening LoadBalancing.NoHttp) leftovers)
+            assertEqual "nothing of it at teardown" [] (concat [p.partDown | a <- declarations, p <- LoadBalancing.lbParts a, p.partId == leftovers])
+            assertEqual "" "salmon:lb:web" (LoadBalancing.ownershipMarker alb)
+            -- while HTTP is redirected the redirect-only map is declared, and not looked at
+            assertBool "" (not ("plan_redirect_map" `isInfixOf` leftoverLines toHttps))
+            assertBool "" ("plan_redirect_map" `isInfixOf` leftoverLines full)
+            mapM_
+                ( \a ->
+                    mapM_
+                        (\w -> assertBool (w <> "\n" <> leftoverLines a) (not (w `isInfixOf` leftoverLines a)))
+                        ["proxies update", "proxies delete", "proxies create", "url-maps import", "|| true", "ssl-certificates delete"]
+                )
+                declarations
+        , testCase "leftovers, the first pass after an upgrade: what is declared is marked, once, and nothing is deleted" $
+            withFakeGcloud $ \run mutations -> do
+                let live = site{LoadBalancing.albCertificates = rotating.albCertificates}
+                _ <- upBefore run mutations live
+                -- what an earlier declaration left behind before anything was marked, and what is somebody else's
+                _ <- run "gcloud compute backend-buckets create web-old-bucket --gcs-bucket-name=old; gcloud compute backend-buckets create web-eu-assets-bucket --gcs-bucket-name=eu; gcloud certificate-manager certificates create web-cert-gone --domains=gone.example.org; gcloud certificate-manager dns-authorizations create web-cert-gone-example-org"
+                before <- partVerdict run live leftovers
+                case before of
+                    [Failure t] -> do
+                        mapM_
+                            (\w -> assertBool (w <> ": " <> Text.unpack t) (w `isInfixOf` Text.unpack t))
+                            ["ownership mark on backend-buckets web-site-bucket", "ownership mark on certificates " <> Text.unpack certV1, "ownership mark on dns-authorizations web-cert-app-example-org"]
+                        assertBool (Text.unpack t) (not ("removal" `isInfixOf` Text.unpack t))
+                    other -> assertBool (show other) False
+                first <- upPart run mutations live leftovers
+                assertEqual
+                    ""
+                    (sort ["backend-buckets update web-site-bucket", "certificates update " <> Text.unpack certV1, "dns-authorizations update web-cert-api-example-org", "dns-authorizations update web-cert-app-example-org"])
+                    (sort first)
+                after <- partVerdict run live leftovers
+                assertEqual "" [Success] after
+                second <- upPart run mutations live leftovers
+                assertEqual "" [] second
+                (said, v) <- wholeVerdict run live
+                assertEqual said Success v
+                buckets <- listOf run "compute backend-buckets"
+                assertEqual "" ["web-eu-assets-bucket", "web-old-bucket", "web-site-bucket"] buckets
+        , testCase "leftovers: a backend bucket no longer declared goes once the map no longer names it, and only this balancer's" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript site)
+                let others =
+                        [ ("web-hand-bucket", "") -- this balancer's name scheme, no mark
+                        , ("web-eu-assets-bucket", " --description=salmon:lb:web-eu") -- balancer web-eu's
+                        , ("web-kept-bucket", " --description=theirs")
+                        , ("other-site-bucket", " --description=salmon:lb:web") -- the mark, not the name
+                        , ("web-bucket-site", " --description=salmon:lb:web")
+                        ]
+                mapM_ (\(n, d) -> run ("gcloud compute backend-buckets create " <> n <> " --gcs-bucket-name=x" <> d)) others
+                -- the declaration no longer has it, the live map still does
+                early <- partVerdict run full leftovers
+                assertEqual "" [Unknown] early
+                held <- upPart run mutations full leftovers
+                assertEqual "" [] held
+                gone <- mutationsOf run mutations (createScript full)
+                assertEqual
+                    (unlines gone)
+                    ["url-maps import web-url-map", "backend-buckets delete web-site-bucket"]
+                    (filter (\l -> "url-maps import" `isInfixOf` l || " delete " `isInfixOf` l) gone)
+                left <- listOf run "compute backend-buckets"
+                assertEqual "" (sort (map fst others)) left
+                (said, v) <- wholeVerdict run full
+                assertEqual said Success v
+                again <- mutationsOf run mutations (createScript full)
+                assertEqual (unlines again) [] (deletes again)
+        , testCase "leftovers: a host-set certificate given up for one under a fixed name goes after the proxy has moved, then its authorizations" $
+            withFakeGcloud $ \run mutations -> do
+                let fixed = full{LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-fixed" ["app.example.org", "api.example.org"]]}
+                _ <- mutationsOf run mutations (createScript rotating)
+                -- one this balancer's naming would claim and nothing marks, and another balancer's
+                _ <- run "gcloud certificate-manager certificates create web-cert-0123abcd --domains=x.example.org; gcloud certificate-manager certificates create web-other --domains=y.example.org --description=salmon:lb:other; gcloud certificate-manager dns-authorizations create web-cert-x-example-org; gcloud certificate-manager dns-authorizations create other-y --description=salmon:lb:other"
+                -- the new certificate is not issued: the proxy's up fails and it keeps serving the old one
+                (code, _, _) <- run ("export FAKE_GCLOUD_NEW_CERT_STATE=PROVISIONING\n" <> createScript fixed)
+                assertBool "" (code /= ExitSuccess)
+                held <- upPart run mutations fixed leftovers
+                assertEqual (unlines held) [] (deletes held)
+                waiting <- partVerdict run fixed leftovers
+                assertEqual "" [Unknown] waiting
+                (_, served, _) <- run "gcloud compute target-https-proxies describe web-https-proxy --format='value(sslCertificates)'"
+                assertBool served (Text.unpack certV1 `isInfixOf` served)
+                _ <- run "echo ACTIVE > \"$FAKE_GCLOUD_STATE\"/certificates.web-fixed.state"
+                moved <- mutationsOf run mutations (createScript fixed)
+                assertEqual
+                    (unlines moved)
+                    [ "target-https-proxies update web-https-proxy"
+                    , "certificates delete " <> Text.unpack certV1
+                    , "dns-authorizations delete web-cert-api-example-org"
+                    , "dns-authorizations delete web-cert-app-example-org"
+                    ]
+                    (filter (\l -> "target-https-proxies" `isInfixOf` l || " delete " `isInfixOf` l) moved)
+                certs <- listOf run "certificate-manager certificates"
+                assertEqual "" ["web-cert-0123abcd", "web-fixed", "web-other"] certs
+                authz <- listOf run "certificate-manager dns-authorizations"
+                assertEqual "" ["other-y", "web-cert-x-example-org", "web-fixed-api-example-org", "web-fixed-app-example-org"] authz
+                (said, v) <- wholeVerdict run fixed
+                assertEqual said Success v
+        , testCase "leftovers: the authorization of a name a set no longer covers goes once no certificate uses it" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript rotated)
+                -- one name fewer: the new certificate pending, the old one still served and still using the authorization
+                pending <- mutationsOf run mutations ("export FAKE_GCLOUD_NEW_CERT_STATE=PROVISIONING\n" <> createScript rotating)
+                assertEqual (unlines pending) [] (deletes pending)
+                waiting <- partVerdict run rotating leftovers
+                assertEqual "" [Unknown] waiting
+                _ <- run ("echo ACTIVE > \"$FAKE_GCLOUD_STATE\"/certificates." <> Text.unpack certV1 <> ".state")
+                moved <- mutationsOf run mutations (createScript rotating)
+                assertEqual
+                    (unlines moved)
+                    ["target-https-proxies update web-https-proxy", "certificates delete " <> Text.unpack certV2, "dns-authorizations delete web-cert-www-example-org"]
+                    (filter (\l -> "target-https-proxies" `isInfixOf` l || " delete " `isInfixOf` l) moved)
+                (said, v) <- wholeVerdict run rotating
+                assertEqual said Success v
+        , testCase "leftovers: the redirect-only map goes once no proxy is on it, and the HTTP proxy is never moved for it" $
+            withFakeGcloud $ \run mutations -> do
+                let proxiesAndDeletes = filter (\l -> "target-http-proxies" `isInfixOf` l || " delete " `isInfixOf` l)
+                _ <- mutationsOf run mutations (createScript toHttps)
+                -- a declaration that sets the proxy moves it first
+                back <- mutationsOf run mutations (createScript (listening LoadBalancing.ServeHttp))
+                assertEqual (unlines back) ["target-http-proxies update web-proxy", "url-maps delete web-http-redirect-url-map"] (proxiesAndDeletes back)
+                -- the default never sets the proxy: it stays on the redirect map, and so does the map
+                _ <- mutationsOf run mutations (createScript toHttps)
+                kept <- mutationsOf run mutations (createScript full)
+                assertEqual (unlines kept) [] (proxiesAndDeletes kept)
+                on <- proxyMap run
+                assertEqual "" "web-http-redirect-url-map\n" on
+                (said, v) <- wholeVerdict run full
+                assertEqual said Success v
+                -- somebody points the proxy at a map of their own: the map this balancer wrote goes, theirs and the proxy stay
+                _ <- run "printf '%s' '{\"name\":\"theirs\",\"description\":\"redirect\"}' | gcloud compute url-maps import theirs; gcloud compute target-http-proxies update web-proxy --url-map=theirs"
+                stale <- partVerdict run full leftovers
+                assertBool (show stale) (all isFailure stale)
+                swept <- mutationsOf run mutations (createScript full)
+                assertEqual (unlines swept) ["url-maps delete web-http-redirect-url-map"] (proxiesAndDeletes swept)
+                on' <- proxyMap run
+                assertEqual "" "theirs\n" on'
+                maps <- listOf run "compute url-maps"
+                assertEqual "" ["theirs", "web-url-map"] maps
+        , testCase "leftovers: a redirect map of that name somebody else wrote is not this balancer's, on the proxy or off it" $
+            withFakeGcloud $ \run mutations -> do
+                let untouched a = do
+                        again <- mutationsOf run mutations (createScript a)
+                        assertEqual (unlines again) [] (filter (\l -> "target-http-proxies" `isInfixOf` l || " delete " `isInfixOf` l) again)
+                        (said, v) <- wholeVerdict run a
+                        assertEqual said Success v
+                _ <- mutationsOf run mutations (createScript full)
+                _ <- run "printf '%s' '{\"name\":\"web-http-redirect-url-map\",\"description\":\"by hand\"}' | gcloud compute url-maps import web-http-redirect-url-map"
+                mapM_ untouched [full, listening LoadBalancing.ServeHttp]
+                _ <- run "gcloud compute target-http-proxies update web-proxy --url-map=web-http-redirect-url-map"
+                untouched full
+                on <- proxyMap run
+                assertEqual "" "web-http-redirect-url-map\n" on
+        , testCase "leftovers: a delete that fails fails the part's up; a listing that fails is said and is nothing to clean" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript site)
+                _ <- upPart run mutations full LoadBalancing.UrlMapPart
+                let up = concat [Text.unpack (LoadBalancing.renderPartUpScript full spec) | spec <- LoadBalancing.lbParts full, spec.partId == leftovers]
+                (code, _, err) <- run ("export FAKE_GCLOUD_FAIL='backend-buckets delete'\n" <> up)
+                assertBool err (code /= ExitSuccess)
+                assertBool err ("removing backend-buckets web-site-bucket" `isInfixOf` err)
+                still <- partVerdict run full leftovers
+                assertBool (show still) (all isFailure still)
+                (code2, _, err2) <- run ("export FAKE_GCLOUD_FAIL='certificates list'\n" <> up)
+                assertEqual err2 ExitSuccess code2
+                assertBool err2 ("left: certificates - (could not be listed)" `isInfixOf` err2)
+                made <- mutations
+                assertBool (unlines made) ("backend-buckets delete web-site-bucket" `elem` made)
         , testCase "a plain balancer goes up, checks and comes down the same way" $
             withFakeGcloud $ \run _ -> do
                 (code, _, err) <- run (createScript alb)
@@ -2319,6 +2502,7 @@ lbTests =
                 , LoadBalancing.HttpsProxyPart
                 , LoadBalancing.ForwardingRulePart
                 , LoadBalancing.HttpsForwardingRulePart
+                , LoadBalancing.LeftoversPart
                 ]
                 (map LoadBalancing.partId (LoadBalancing.lbParts full))
         , testCase "the edges between resources" $ do
@@ -2410,15 +2594,31 @@ lbTests =
         ]
     -- everything a declaration renders, part by part and as a whole
     pinned :: LoadBalancing.ApplicationLoadBalancer -> String
+    -- ... but for the leftovers part, which has tests of its own: its lines
+    -- are taken out of the whole scripts, so that these checksums are of the
+    -- scripts as they were before that part existed.
     pinned a =
         unlines
-            ( [createScript a, Text.unpack (LoadBalancing.renderLbCheckScript a), deleteScript a, show (encode (LoadBalancing.renderUrlMap a))]
+            ( [ without LoadBalancing.partUp (createScript a)
+              , without LoadBalancing.partCheck (Text.unpack (LoadBalancing.renderLbCheckScript a))
+              , deleteScript a
+              , show (encode (LoadBalancing.renderUrlMap a))
+              ]
                 <> concat
                     [ [show p.partId, show p.partDeps, Text.unpack p.partHelp, show p.partNotes]
                         <> map Text.unpack (p.partUp <> p.partCheck <> p.partDown)
                     | p <- LoadBalancing.lbParts a
+                    , p.partId /= LoadBalancing.LeftoversPart
                     ]
             )
+      where
+        without field sc = unlines (cut (concat [map Text.unpack (field p) | p <- LoadBalancing.lbParts a, p.partId == LoadBalancing.LeftoversPart]) (lines sc))
+        cut needle hay
+            | null needle = hay
+            | needle `isPrefixOf` hay = drop (length needle) hay
+            | otherwise = case hay of
+                [] -> []
+                (l : ls) -> l : cut needle ls
     fnv1a :: String -> Word64
     fnv1a = foldl' (\h c -> (h `xor` fromIntegral (fromEnum c)) * 1099511628211) 14695981039346656037
     svcUrl :: Text.Text -> Text.Text
@@ -2505,6 +2705,17 @@ lbTests =
                        ]
             }
     listening how = full{LoadBalancing.albHttp = how}
+    leftovers = LoadBalancing.LeftoversPart
+    -- every resource's up but the leftovers part's, and that part's alone
+    resourceLines a = unlines [Text.unpack l | p <- LoadBalancing.lbParts a, p.partId /= leftovers, l <- p.partUp]
+    leftoverLines a = unlines [Text.unpack l | p <- LoadBalancing.lbParts a, p.partId == leftovers, l <- p.partUp <> p.partCheck]
+    -- a balancer as a version before the leftovers part left it: nothing marked
+    upBefore run mutations a =
+        mutationsOf run mutations (unlines ["set -euo pipefail", "PROJECT='p'", "REGION='europe-west1'", "exists() { \"$@\" >/dev/null 2>&1; }", resourceLines a])
+    deletes = filter (" delete " `isInfixOf`)
+    listOf run what = do
+        (_, out, _) <- run ("gcloud " <> what <> " list --format='value(name)' | sed 's|.*/||' | sort")
+        pure (lines out)
     toHttps = listening (LoadBalancing.RedirectToHttps LoadBalancing.MovedPermanently)
     mutationsOf run mutations sc = do
         before <- length <$> mutations
@@ -2575,7 +2786,7 @@ fakeGcloud =
         , "S=\"$FAKE_GCLOUD_STATE\""
         , "coll=\"$2\"; verb=\"$3\"; name=\"$4\""
         , "if [ \"$verb\" = create ] && [ \"$name\" = tcp ]; then name=\"$5\"; fi"
-        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''"
+        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''; desc=''; authz=''"
         , "for a in \"$@\"; do case \"$a\" in"
         , "  --format=*) format=\"${a#--format=}\";;"
         , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
@@ -2588,11 +2799,15 @@ fakeGcloud =
         , "  --ssl-certificates=*) certs=\"${a#--ssl-certificates=}\";;"
         , "  --gcs-bucket-name=*) gcs=\"${a#--gcs-bucket-name=}\";;"
         , "  --url-map=*) urlmap=\"${a#--url-map=}\";;"
+        , "  --description=*) desc=\"${a#--description=}\";;"
+        , "  --dns-authorizations=*) authz=\"${a#--dns-authorizations=}\";;"
         , "esac; done"
         , "f=\"$S/$coll.$name\""
         , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
         , -- a proxy lists its certificates by path, as (it is assumed) the real one does
           "served() { for p in \"$S\"/target-https-proxies.*.certs; do [ -e \"$p\" ] && tr ',' '\\n' < \"$p\"; done; true; }"
+        , -- a test can have one call fail: FAKE_GCLOUD_FAIL='certificates list'
+          "if [ \"${FAKE_GCLOUD_FAIL:-}\" = \"$coll $verb\" ]; then echo \"FAILED $coll $verb\" >&2; exit 1; fi"
         , "case \"$verb\" in"
         , "  describe)"
         , "    [ \"$coll\" = instance-groups ] && exit 0"
@@ -2611,17 +2826,28 @@ fakeGcloud =
         , "      'value(bucketName)') cat \"$f.gcs\" 2>/dev/null || true;;"
         , -- a proxy names its map by URL, as (it is assumed) the real one does
           "      'value(urlMap)') echo \"https://www.googleapis.com/compute/v1/projects/p/regions/r/urlMaps/$(cat \"$f.urlmap\" 2>/dev/null)\";;"
-        , "      'value(description)') grep -o '\"description\":\"[^\"]*\"' \"$f\" | sed -e 's/\"description\"://' -e 's/\"//g' || true;;"
+        , "      'value(description)') if [ -e \"$f.description\" ]; then cat \"$f.description\"; exit 0; fi; grep -o '\"description\":\"[^\"]*\"' \"$f\" | sed -e 's/\"description\"://' -e 's/\"//g' || true;;"
         , "    esac;;"
         , "  create) [ -e \"$f\" ] && { echo \"ALREADY_EXISTS $coll $name\" >&2; exit 1; }; mutate; : > \"$f\"; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi"
         , "    if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi"
         , "    if [ -n \"$gcs\" ]; then echo \"$gcs\" > \"$f.gcs\"; fi"
         , "    if [ -n \"$urlmap\" ]; then echo \"$urlmap\" > \"$f.urlmap\"; fi"
+        , "    if [ -n \"$desc\" ]; then echo \"$desc\" > \"$f.description\"; fi"
+        , "    if [ -n \"$authz\" ]; then echo \"$authz\" > \"$f.authz\"; fi"
         , -- a new certificate is not issued at once, when the test says so
           "    if [ -n \"$domains\" ]; then echo \"$domains\" > \"$f.domains\"; echo \"${FAKE_GCLOUD_NEW_CERT_STATE:-ACTIVE}\" > \"$f.state\"; fi;;"
-        , "  list) for c in \"$S\"/\"$coll\".*; do n=\"${c##*/}\"; n=\"${n#\"$coll\".}\"; case \"$n\" in *.*|'*') ;; *) echo \"projects/p/locations/r/$coll/$n\";; esac; done;;"
+        , -- the listings the leftovers part reads; like the rest, a guess at gcloud's output
+          "  list) for c in \"$S\"/\"$coll\".*; do n=\"${c##*/}\"; n=\"${n#\"$coll\".}\"; case \"$n\" in *.*|'*') continue;; esac"
+        , "    case \"$format\" in"
+        , "      'value(name,description)') printf '%s\\t%s\\n' \"projects/p/locations/r/$coll/$n\" \"$(cat \"$c.description\" 2>/dev/null || true)\";;"
+        , "      json) cat \"$c\"; echo;;"
+        , "      'value(sslCertificates,certificateManagerCertificates)') tr ',' '\\n' < \"$c.certs\" 2>/dev/null | sed 's|^|//certificatemanager.googleapis.com/projects/p/locations/r/certificates/|' | paste -sd';' || true;;"
+        , "      'value(urlMap)') echo \"https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/urlMaps/$(cat \"$c.urlmap\" 2>/dev/null)\";;"
+        , "      'value(managed.dnsAuthorizations)') tr ',' '\\n' < \"$c.authz\" 2>/dev/null | sed 's|^|projects/p/locations/r/dnsAuthorizations/|' | paste -sd';' || true;;"
+        , "      *) echo \"projects/p/locations/r/$coll/$n\";;"
+        , "    esac; done;;"
         , "  import) mutate; cat > \"$f\";;"
-        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi; if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi; if [ -n \"$gcs\" ]; then echo \"$gcs\" > \"$f.gcs\"; fi; if [ -n \"$urlmap\" ]; then echo \"$urlmap\" > \"$f.urlmap\"; fi;;"
+        , "  update) [ -e \"$f\" ] || exit 1; mutate; if [ -n \"$timeout\" ]; then echo \"$timeout\" > \"$f.timeout\"; fi; if [ -n \"$portname\" ]; then echo \"$portname\" > \"$f.portname\"; fi; if [ -n \"$certs\" ]; then echo \"$certs\" > \"$f.certs\"; fi; if [ -n \"$gcs\" ]; then echo \"$gcs\" > \"$f.gcs\"; fi; if [ -n \"$urlmap\" ]; then echo \"$urlmap\" > \"$f.urlmap\"; fi; if [ -n \"$desc\" ]; then echo \"$desc\" > \"$f.description\"; fi;;"
         , "  add-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" 2>/dev/null && { echo 'already a backend' >&2; exit 1; }; mutate; echo \"$group\" >> \"$f.backends\";;"
         , "  remove-backend) [ -e \"$f\" ] || exit 1; grep -qxF \"$group\" \"$f.backends\" || { echo 'not a backend' >&2; exit 1; }; mutate; { grep -vxF \"$group\" \"$f.backends\" || true; } > \"$f.backends.new\"; mv \"$f.backends.new\" \"$f.backends\";;"
         , -- like the real one, it replaces the group's whole set
@@ -2630,7 +2856,11 @@ fakeGcloud =
         , "  get-health) echo 'HEALTHY;HEALTHY';;"
         , "  delete) [ -e \"$f\" ] || exit 1"
         , "    if [ \"$coll\" = certificates ] && served | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
-        , "    mutate; rm -f \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\";;"
+        , -- what GCP refuses too: a resource something else still names
+          "    if [ \"$coll\" = backend-buckets ] && grep -qsF \"/backendBuckets/$name\\\"\" \"$S\"/url-maps.*; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
+        , "    if [ \"$coll\" = dns-authorizations ] && cat \"$S\"/certificates.*.authz 2>/dev/null | tr ',' '\\n' | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
+        , "    if [ \"$coll\" = url-maps ] && cat \"$S\"/target-http-proxies.*.urlmap \"$S\"/target-https-proxies.*.urlmap 2>/dev/null | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
+        , "    mutate; rm -f \"$f.description\" \"$f.authz\" \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\";;"
         , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
         , "esac"
         ]
