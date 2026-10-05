@@ -617,6 +617,51 @@ leftover.
   `managed.domains` reads differently from what is assumed, a
   `ManagedCertificate` whose list never changed would be reported as
   covering other names: that is the first thing to look at on a real run.
+- **The removal of what a balancer no longer declares has never met a real
+  project**, and it deletes. The balancer's last node (`gcp-lb-leftovers`)
+  removes a backend bucket, a Certificate Manager certificate, a DNS
+  authorization or the redirect-only URL map that this balancer made and the
+  declaration no longer names, once nothing uses it. "Made by this balancer"
+  is a `description` of `salmon:lb:<balancer>` (for the redirect map, the
+  fingerprint the module writes into it), and that node writes it on the
+  declared resources that have no description. So **the first pass after an
+  upgrade runs one `update --description` per declared backend bucket,
+  managed certificate and DNS authorization, and deletes nothing**; a
+  resource that left the declaration before it was marked is never removed,
+  and is removed by hand:
+
+  ```sh
+  gcloud compute backend-buckets delete NAME-N-bucket --project P --region R
+  gcloud certificate-manager certificates delete CERT --project P --location R
+  gcloud certificate-manager dns-authorizations delete AUTHZ --project P --location R
+  gcloud compute url-maps delete NAME-http-redirect-url-map --project P --region R
+  ```
+
+  (GCP refuses each while something still names it; the published `CNAME` of
+  a deleted authorization is still in the zone.) A delete or a marking that
+  fails fails that node and the pass, after every resource that serves
+  traffic was applied. What the scripts assume and nobody recorded: that
+  `compute backend-buckets update --region`, `certificate-manager
+  certificates update` and `dns-authorizations update` take `--description`
+  alone and change nothing else (if one does not, the first pass after the
+  upgrade fails on that node, on every balancer that has such a resource:
+  the first thing to look at); that the three `list
+  --format='value(name,description)'` print the name (or a path ending in
+  it), a tab and the description, and an empty description as nothing; that
+  `compute backend-buckets list` without a region flag includes regional
+  ones (each candidate is read again with `describe --region` before
+  anything is concluded); that `compute url-maps list --format=json` holds
+  every map of the project and names a regional backend bucket as
+  `/regions/R/backendBuckets/NAME"`; that `target-https-proxies list
+  --format='value(sslCertificates,certificateManagerCertificates)'` shows
+  the certificates of every proxy by path, and `certificates list
+  --format='value(managed.dnsAuthorizations)'` the authorizations in use;
+  that `target-http-proxies list` and `target-https-proxies list` print
+  `value(urlMap)` as a URL containing `/regions/R/urlMaps/NAME`; and that
+  `certificate-manager ... list` simply fails, without prompting, in a
+  project where the API is off. Not removed at all: anything at teardown, a
+  backend service, a health check, a NEG, or the HTTPS proxy, rule and
+  address of a balancer that stops declaring certificates.
 - **The `--network`-carrying form of the forwarding rule** is still
   rendered-but-unrun.
 - **Two credentials; only the one that acts is pinned.** `gcp-adc` validates

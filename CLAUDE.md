@@ -1300,8 +1300,29 @@ latter onto a second redirect-only map `<name>-http-redirect-url-map` (`renderHt
 proxy and no `:80` rule plus a node whose `up` deletes the ones there. The last two are refused without a
 certificate. `Test/GcpSpec.hs` pins by checksum that a declaration using none of this renders every script and part
 as it did before (the pins moved with the set comparison: the check scripts, the rule-less map's `up`, and the
-description on a map of services). Not done: a default (unmatched-host) redirect, removal of a redirect map, backend
-bucket, `DomainSetCertificate` or DNS authorization no longer declared, a path rewrite in a rule, a dependency hook
+description on a map of services). **What a balancer made and no longer declares is removed by its last node,
+`LeftoversPart`** (`gcp-lb-leftovers`, after the URL map, the proxies and the superseded certificates; nothing else
+depends on it but the root). It deletes four kinds of resource, each under a proof of ownership and never while in
+use: a backend bucket named `<name>-<n>-bucket` whose `description` is `ownershipMarker` (`salmon:lb:<name>`: the
+balancer is in the marker because `web-eu-x-bucket` has balancer `web`'s shape), once no URL map of the project names
+it; a Certificate Manager certificate carrying the marker, once no HTTPS proxy of the project serves it (so not the
+old certificate of a pending swap); a DNS authorization carrying the marker, once no certificate of the location uses
+it; and `<name>-http-redirect-url-map` when the declaration is no longer `RedirectToHttps`, its description is one of
+the five fingerprints this module writes for that map, and no proxy is on it. Load-bearing: **the marker is written
+by that same node** (`update --description`, on declared resources that exist and have *no* description), so every
+other part's script is byte-identical to before (the checksum pins did not move; they are now taken with this part's
+lines cut out) and **the first pass after an upgrade marks and deletes nothing** — a resource dropped from the
+declaration before it was ever marked, or carrying somebody's description, is never deleted and takes a command by
+hand; a listing only enumerates candidates; it never writes a proxy, so under `HttpCreatedOnce` a proxy left on the
+redirect map keeps it there (a `NOTE`, not a finding) and a map of that name without the fingerprint is not ours;
+references are looked for with a here-string, since `printf | grep -q` under `pipefail` can read as "not in use";
+what is in use is `WAITING` (`Unknown`); **a failed delete or marking fails that node, and so the root** (chosen over
+an `up` that succeeds while its check keeps failing, which `Upkeep` would re-run at its delay floor), but it is the
+last node, so everything serving traffic was applied first; a listing that fails (Certificate Manager disabled on a
+plain balancer) is said and is nothing to clean. Not done: any of it at teardown; a backend service, health check,
+NEG, HTTPS proxy/rule/address no longer declared (a balancer that drops all its certificates keeps its HTTPS proxy,
+which keeps the certificate `WAITING`); a certificate two balancers declare is marked by the first only. Also not
+done: a default (unmatched-host) redirect, a path rewrite in a rule, a dependency hook
 on a bucket's node, the bucket itself, a toy flag. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of
 the rest. **Layer 0 only**:
 `Test/GcpSpec.hs` asserts the graph's shape and runs the scripts, whole and resource by resource, against a stand-in
