@@ -44,6 +44,12 @@ module Salmon.Builtin.Nodes.Gcp.CloudDns (
     renderRrdatas,
     txtRdata,
     txtContent,
+
+    -- * mail exchangers
+    MailExchanger (..),
+    mxDatum,
+    mxRecordSet,
+    parseMxDatum,
     Report (..),
     CloudDnsCommand (..),
     cloudDnsCommand,
@@ -52,6 +58,7 @@ module Salmon.Builtin.Nodes.Gcp.CloudDns (
 import Control.Exception (throwIO)
 import Data.Aeson (FromJSON (..), eitherDecodeStrict', withObject, (.!=), (.:), (.:?))
 import Data.ByteString (ByteString)
+import Data.Char (isDigit, isSpace)
 import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -201,7 +208,7 @@ interpretZoneDescribe zone ExitSuccess out =
 -- Record sets
 
 -- | The record types this module writes.
-data RecordType = A | AAAA | CNAME | TXT
+data RecordType = A | AAAA | CNAME | TXT | MX
     deriving (Eq, Ord, Show)
 
 renderRecordType :: RecordType -> Text
@@ -216,7 +223,10 @@ per record, in the type's own terms:
 * 'A', 'AAAA': an address literal;
 * 'CNAME': the one target name (the trailing dot is added);
 * 'TXT': the text itself, /unquoted/ -- quoting, escaping and the split into
-  255-character strings that the wire format wants are 'txtRdata''s job.
+  255-character strings that the wire format wants are 'txtRdata''s job;
+* 'MX': a preference and a mail server's name, @"10 mail.example.org"@ (the
+  trailing dot is added). 'mxDatum' writes one from a 'MailExchanger', and
+  'mxRecordSet' a whole record set from a list of them.
 -}
 data RecordSet = RecordSet
     { recordZone :: ManagedZone
@@ -353,9 +363,75 @@ recordSetProblems rs =
         <> ["a CNAME cannot sit at the zone's apex" | rs.recordType == CNAME, name == apex]
         <> [name <> " is not in " <> apex | name /= apex, not (("." <> apex) `Text.isSuffixOf` name)]
         <> ["the TTL is negative" | rs.recordTtl < 0]
+        <> (if rs.recordType == MX then mxProblems rs.recordData else [])
   where
     name = fqdn rs.recordName
     apex = fqdn rs.recordZone.zoneDnsName
+
+{- | A mail exchanger: the preference (lower is tried first) and the name of
+the server. An MX record set holds several, at the zone's apex or at a
+subdomain alike.
+
+The server is a name, never an address, and what it names must have an
+address record of its own: neither is checked here, since the name is usually
+in somebody else's zone. A lone @MailExchanger 0 "."@ is the "null MX" of RFC
+7505, a domain declaring that it takes no mail.
+-}
+data MailExchanger = MailExchanger
+    { mxPreference :: Int
+    , mxHost :: Text
+    }
+    deriving (Eq, Ord, Show)
+
+-- | A mail exchanger as one entry of 'recordData'.
+mxDatum :: MailExchanger -> Text
+mxDatum mx = Text.pack (show mx.mxPreference) <> " " <> fqdn mx.mxHost
+
+-- | The MX record set of a name: its mail exchangers, in any order.
+mxRecordSet :: ManagedZone -> Text -> Int -> [MailExchanger] -> RecordSet
+mxRecordSet zone name ttl exchangers = RecordSet zone name MX ttl (map mxDatum exchangers)
+
+{- | Reads one entry of an MX record set, declared or as Cloud DNS reports
+it: a preference in decimal, whitespace, one name. The name comes back with
+its trailing dot and in lower case, so two spellings of one exchanger are
+equal. 'Nothing' for anything else.
+-}
+parseMxDatum :: Text -> Maybe MailExchanger
+parseMxDatum datum = case Text.words datum of
+    [preference, host]
+        | not (Text.null preference)
+        , Text.all isDigit preference
+        , Text.length preference <= 5 ->
+            Just (MailExchanger (read (Text.unpack preference)) (fqdn host))
+    _ -> Nothing
+
+mxProblems :: [Text] -> [Text]
+mxProblems datums =
+    concatMap problem datums
+        <> [ "the same mail server is listed twice: " <> h
+           | h <- duplicates [mx.mxHost | Just mx <- parsed]
+           ]
+        <> [ "a null MX (\".\") must be the only one, with preference 0"
+           | any (\mx -> mx.mxHost == ".") exchangers
+           , exchangers /= [MailExchanger 0 "."]
+           ]
+  where
+    parsed = map parseMxDatum datums
+    exchangers = [mx | Just mx <- parsed]
+    duplicates xs = [x | (x, n) <- counted (sort xs), n > (1 :: Int)]
+    counted [] = []
+    counted (x : xs) = (x, 1 + length (takeWhile (== x) xs)) : counted (dropWhile (== x) xs)
+    problem datum = case parseMxDatum datum of
+        Nothing -> ["an MX is a preference and a server name (\"10 mail.example.org\"), not \"" <> Text.strip datum <> "\""]
+        Just mx ->
+            ["the MX preference " <> Text.pack (show mx.mxPreference) <> " is above 65535" | mx.mxPreference > 65535]
+                <> [ "an MX names a server, not an address: " <> mx.mxHost
+                   | looksLikeAddress mx.mxHost
+                   ]
+    -- an IPv4 literal, or anything with a colon: neither is a host name
+    looksLikeAddress h =
+        Text.any (== ':') h
+            || (h /= "." && Text.all (\c -> isDigit c || c == '.') h)
 
 problemText :: RecordSet -> [Text] -> Text
 problemText rs problems =
@@ -411,6 +487,8 @@ normalizeDatum A = Text.strip
 normalizeDatum AAAA = Text.toLower . Text.strip
 normalizeDatum CNAME = fqdn
 normalizeDatum TXT = id
+-- what does not read as an MX is kept (and refused by 'recordSetProblems')
+normalizeDatum MX = \d -> maybe (Text.unwords (Text.split isSpace (Text.strip d))) mxDatum (parseMxDatum d)
 
 -- | The same form, from what Cloud DNS reports (a TXT comes back quoted).
 normalizeRdata :: RecordType -> Text -> Text

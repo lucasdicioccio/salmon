@@ -1170,7 +1170,7 @@ registrar, and what a delegation probe compares with. The GCP toy declares it un
 a node that prints them. Layer 0 only (`Test/GcpSpec.hs`, on a description written from the API's resource shape, not
 captured); never run against a real project.
 
-`Gcp.CloudDns.recordSet` is a record set in such a zone (`A`, `AAAA`, `CNAME`, `TXT`; `gcloud dns record-sets`), keyed
+`Gcp.CloudDns.recordSet` is a record set in such a zone (`A`, `AAAA`, `CNAME`, `TXT`, `MX`; `gcloud dns record-sets`), keyed
 `"gcp-dns-record" (project, zone name, name, type)` with TTL and data in `notes`. Its `check` reads `describe --format
 json` and compares TTL and data as a set (`interpretRecordDescribe`); `up` describes, then `create`s or `update`s
 (`recordUpCommand`), since there is no "set" verb. Load-bearing: the name and type are the effect site, so unlike the
@@ -1179,11 +1179,15 @@ dependency of its own, so the caller injects the zone (it may also be one salmon
 unquoted and quoted/escaped/split at 255 by `txtRdata`, compared through `txtContent`; `--rrdatas` switches to gcloud's
 `^DELIM^` form when a datum holds a comma (`renderRrdatas`); `recordSetProblems` (no data, a `CNAME` with several
 targets or at the apex, a name outside the zone) is a `Failure` for `check` and a throw for `up` before anything is
-sent. `resolvedRecordSet` is the same node with data read at `check`/`up` time (`IO (Maybe [Text])`, `Nothing` being
+sent. An `MX` datum is `"PREFERENCE HOST"`: `mxRecordSet zone name ttl [MailExchanger 10 "mx1.example.net", ...]`
+writes them (`mxDatum`), apex or subdomain alike, and `parseMxDatum` puts both the declared and the read-back spelling
+in one form (decimal preference, lower-cased dotted host), so the comparison ignores order, case and the trailing dot;
+a datum that is not that, a preference above 65535, an address for a host, a host twice, or a null MX (`0 .`) with
+company are `recordSetProblems`. `resolvedRecordSet` is the same node with data read at `check`/`up` time (`IO (Maybe [Text])`, `Nothing` being
 `Unknown`/a throw), for an address GCP picks: `Gcp.LoadBalancing.readAddress` is that read for a balancer's forwarding
 rule, and the GCP toy uses both to point `lb.DNS_NAME` at its balancer (`--dns-zone` at tier 3). Layer 0 only: no
 record-set command has been run against a real project, so the `describe` JSON shape, the `^DELIM^` escaping, how Cloud
-DNS spells back a `TXT` or an `AAAA`, and the toy's tier 3 record are unverified.
+DNS spells back a `TXT`, an `AAAA` or an `MX`, and the toy's tier 3 record are unverified.
 
 `Gcp.LoadBalancing.applicationLoadBalancer` is one *declaration* for a whole *regional external* Application Load
 Balancer, unfolded into a node per resource under a root that keeps the old `ref` (`gcp-application-lb`): `lbParts` is
