@@ -67,6 +67,7 @@ tests =
         [ testGroup "Core.interpretAdc" adcTests
         , testGroup "Core.declaredAccount" accountTests
         , testGroup "Compute.interpretInstanceStatus" instanceTests
+        , testGroup "Compute.instanceScopes" instanceScopeTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
         , testGroup "Storage bucket settings" bucketSettingsTests
         , testGroup "Storage bucket contents" bucketContentsTests
@@ -206,6 +207,123 @@ instanceTests =
             , Compute.instanceInternalAddress = Compute.EphemeralInternal
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
+            }
+
+-------------------------------------------------------------------------------
+
+instanceScopeTests :: [TestTree]
+instanceScopeTests =
+    [ testCase "an instance declaring no scope is the command, ref, help and notes it was" $ do
+        assertEqual
+            "create"
+            [ "compute", "instances", "create", "toy-vm"
+            , "--machine-type", "e2-micro"
+            , "--boot-disk-size", "10GB"
+            , "--network", "default"
+            , "--subnet", "default"
+            , "--zone", "europe-west1-b"
+            , "--project", "p"
+            , "--image-family", "ubuntu-2404-lts-amd64"
+            , "--image-project", "ubuntu-os-cloud"
+            , "--metadata", "enable-oslogin=FALSE"
+            , "--metadata-from-file", "startup-script=/tmp/w/startup-script.sh"
+            , "--address", "toy-ip"
+            , "--tags", "toy-ssh"
+            ]
+            (createArgs inst)
+        let act = node inst
+        assertEqual "ref" (mkRef "gcp-instance" ("p" :: Text.Text, "europe-west1-b" :: Text.Text, "toy-vm" :: Text.Text)) act.extension.ref
+        assertEqual "help" "creates GCE instance toy-vm" act.extension.help
+        assertEqual "notes" [] act.extension.notes
+    , testCase "declared scopes are passed as written, after everything else" $
+        assertEqual
+            ""
+            (createArgs inst <> ["--scopes", "storage-rw,https://www.googleapis.com/auth/logging.write"])
+            (createArgs (scoped ["storage-rw", "https://www.googleapis.com/auth/logging.write"]))
+    , testCase "an empty declaration is no scope at all" $
+        assertEqual "" (createArgs inst <> ["--no-scopes"]) (createArgs (scoped []))
+    , testCase "declared scopes are the same node, described differently" $ do
+        assertEqual "ref" (node inst).extension.ref (node (scoped ["storage-rw"])).extension.ref
+        assertEqual "help" (node inst).extension.help (node (scoped ["storage-rw"])).extension.help
+        assertEqual "notes" ["scopes: storage-rw"] (node (scoped ["storage-rw"])).extension.notes
+        assertEqual "none" ["scopes: none"] (node (scoped [])).extension.notes
+        assertBool "another set is another description" ((node (scoped ["storage-rw"])).extension.notes /= (node (scoped ["storage-ro"])).extension.notes)
+    , testCase "an alias stands for its URIs, a URI for itself" $ do
+        assertEqual "alias" (Right ["https://www.googleapis.com/auth/devstorage.read_write"]) (Compute.scopeUris "storage-rw")
+        assertEqual "uri" (Right ["https://www.googleapis.com/auth/cloud-platform"]) (Compute.scopeUris "https://www.googleapis.com/auth/cloud-platform")
+        assertEqual "default is several" (Right 7) (length <$> Compute.scopeUris "default")
+    , testCase "an unknown alias, an empty scope and a scope holding a separator are refused" $ do
+        assertEqual "nothing wrong" [] (Compute.scopeProblems (Compute.DeclaredScopes ["storage-rw", "cloud-platform"]))
+        assertEqual "undeclared" [] (Compute.scopeProblems Compute.DefaultScopes)
+        assertEqual "each one named" 3 (length (Compute.scopeProblems (Compute.DeclaredScopes ["storage-rw", "storage-write", "", "a,b"])))
+        assertEqual "no set to compare" Nothing (Compute.declaredScopeUris (Compute.DeclaredScopes ["storage-write"]))
+    , testCase "the scopes are asked for in one describe" $
+        assertEqual
+            ""
+            ["compute", "instances", "describe", "toy-vm", "--format=value(serviceAccounts[].scopes)", "--zone", "europe-west1-b", "--project", "p"]
+            (processArgs (prepare Compute.computeCommand (Compute.InstancesDescribeScopes inst)))
+    , testCase "live scopes are read whatever separates them" $ do
+        let want = Set.fromList [rw, logging]
+        assertEqual "semicolons" want (Compute.parseLiveScopes (rw <> ";" <> logging <> "\n"))
+        assertEqual "commas" want (Compute.parseLiveScopes (logging <> "," <> rw))
+        assertEqual "a list" want (Compute.parseLiveScopes ("['" <> rw <> "', '" <> logging <> "']"))
+        assertEqual "no service account" Set.empty (Compute.parseLiveScopes "\n")
+    , testCase "an instance holding the declared scopes is satisfied, in any order and spelling" $ do
+        let declared = Compute.DeclaredScopes ["logging-write", rw]
+        assertEqual "" Success (Compute.interpretInstanceScopes declared ExitSuccess (rw <> ";" <> logging))
+        assertEqual "none, none" Success (Compute.interpretInstanceScopes (Compute.DeclaredScopes []) ExitSuccess "")
+    , testCase "an instance holding other scopes is a failure naming both sets" $
+        case Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ro of
+            Failure t -> do
+                assertBool (Text.unpack t) (ro `Text.isInfixOf` t)
+                assertBool (Text.unpack t) (rw `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("stopped" `Text.isInfixOf` t)
+            other -> assertBool (show other) False
+    , testCase "more scopes than declared, or fewer, is not satisfied" $ do
+        assertBool "more" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess (rw <> ";" <> logging)))
+        assertBool "fewer" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw", "logging-write"]) ExitSuccess rw))
+        assertBool "none held" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ""))
+    , testCase "a failing describe is a failure, and nothing declared is never one" $ do
+        assertBool "" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) (ExitFailure 1) ""))
+        assertEqual "" Success (Compute.interpretInstanceScopes Compute.DefaultScopes (ExitFailure 1) "")
+        assertEqual "" Success (Compute.interpretInstanceScopes Compute.DefaultScopes ExitSuccess ro)
+    , testCase "an undeclarable scope fails the check and the up before any gcloud call" $ do
+        let act = node (scoped ["storage-write"])
+        verdict <- act.extension.check
+        assertBool (show verdict) (isFailure verdict)
+        r <- try act.extension.up
+        case r of
+            Left e -> assertBool (show e) ("storage-write" `isInfixOf` show (e :: IOError))
+            Right () -> assertBool "up went through" False
+    ]
+  where
+    rw = "https://www.googleapis.com/auth/devstorage.read_write"
+    ro = "https://www.googleapis.com/auth/devstorage.read_only"
+    logging = "https://www.googleapis.com/auth/logging.write"
+    createArgs i = processArgs (prepare Compute.computeCommand (Compute.InstancesCreate i))
+    node i = only (Compute.gceInstance silent ignoreTrack i)
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    scoped scopes = inst{Compute.instanceScopes = Compute.DeclaredScopes scopes}
+    inst =
+        Compute.Instance
+            { Compute.instanceName = "toy-vm"
+            , Compute.instanceProject = Core.Project "p"
+            , Compute.instanceZone = Core.Zone "europe-west1-b"
+            , Compute.instanceMachineType = Compute.Custom "e2-micro"
+            , Compute.instanceBootDisk = Compute.BootDisk 10 Nothing (Just "ubuntu-2404-lts-amd64") (Just "ubuntu-os-cloud")
+            , Compute.instanceNetwork = "default"
+            , Compute.instanceSubnet = "default"
+            , Compute.instanceServiceAccount = Nothing
+            , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
+            , Compute.instanceExternalAddress = Compute.ReservedExternal "toy-ip"
+            , Compute.instanceInternalAddress = Compute.EphemeralInternal
+            , Compute.instanceTags = ["toy-ssh"]
+            , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
             }
 
 -------------------------------------------------------------------------------
@@ -2663,6 +2781,7 @@ vmTests =
             , Compute.instanceInternalAddress = Compute.EphemeralInternal
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
             }
 
 -------------------------------------------------------------------------------

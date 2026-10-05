@@ -1173,6 +1173,18 @@ account (that is the operator's machine configuration), is keyed `"gcp-account" 
 does not declare one behaves as before (`salmon-gcp-toy --account EMAIL` is the one caller). The check is once per pass,
 not `--account` on every call (`Core.withAccount` exists for a caller that wants that). Never run against a real gcloud.
 
+`Gcp.Compute.Instance` carries `instanceScopes :: AccessScopes`: `DefaultScopes` passes nothing (the command, `ref`,
+`help` and empty `notes` every instance had), `DeclaredScopes` is `--scopes` with the scopes as written (gcloud aliases
+or full URIs; `[]` is `--no-scopes`) and a `scopes: ...` note. Load-bearing: **scopes are create-time only and the node
+never changes them** (GCP wants the instance stopped for that). With scopes declared, `check` runs a second `describe`
+(`serviceAccounts[].scopes`) on an instance that exists and `interpretInstanceScopes` compares exact sets of URIs
+(`scopeAliases` expands the aliases); a difference is a `Failure` naming both sets, and `up` throws the same words
+*before* any start/stop/resume, so a running machine is neither stopped nor re-created. The remedy is the operator's
+(stop, `gcloud compute instances set-service-account`, start; or down then up). An unknown alias (`scopeProblems`) is a
+`Failure`/throw before any call. Layer 0 only (`Test/GcpSpec.hs`, "Compute.instanceScopes"): the alias table is from
+gcloud's documentation and the shape of that `describe` output has not been observed (the parser keeps the `https://`
+words whatever separates them); nothing was run against a real project.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another

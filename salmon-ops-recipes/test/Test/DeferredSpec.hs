@@ -305,4 +305,5 @@ vmConfig host =
             , Compute.instanceInternalAddress = Compute.EphemeralInternal
             , Compute.instanceTags = []
             , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
             }
