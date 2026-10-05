@@ -7,6 +7,13 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     InstancePower (..),
     ExternalAddress (..),
     InternalAddress (..),
+    AccessScopes (..),
+    scopeAliases,
+    scopeUris,
+    scopeProblems,
+    declaredScopeUris,
+    parseLiveScopes,
+    interpretInstanceScopes,
     gceInstance,
     Address (..),
     AddressKind (..),
@@ -39,6 +46,8 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
 import Control.Exception (throwIO)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -135,6 +144,151 @@ data InternalAddress
       PinnedInternal Text
     deriving (Eq, Show)
 
+{- | The access scopes of an instance: the ceiling on what its service
+account's tokens, as handed out by the metadata server, may be used for. IAM
+decides what the account /may/ do; the scopes decide how much of that a
+process on the machine gets, so an account allowed to write to a bucket
+still cannot from an instance holding gcloud's default scopes (storage
+read-only).
+
+'DefaultScopes' passes nothing and is what every instance was before this
+type existed. 'DeclaredScopes' lists them, each either one of gcloud's
+aliases ('scopeAliases': @storage-rw@, @cloud-platform@, ...) or a full
+@https://www.googleapis.com/auth/...@ URI; the empty list is no scope at all
+(@--no-scopes@).
+
+__Scopes are read at create time and never changed by this node.__ GCP only
+lets them change on a stopped instance, so on an existing instance holding
+other scopes than the declared ones the check is a 'Failure' naming both
+sets and @up@ throws the same words without starting, stopping or
+re-creating anything: stopping a machine is an operator's decision. The
+remedy is theirs too -- stop it, @gcloud compute instances
+set-service-account NAME --scopes ...@, start it; or take the node down and
+up again, which deletes the instance.
+-}
+data AccessScopes
+    = -- | say nothing: gcloud's defaults for the service account
+      DefaultScopes
+    | -- | exactly these, aliases or URIs (@[]@ is @--no-scopes@)
+      DeclaredScopes [Text]
+    deriving (Eq, Show)
+
+{- | gcloud's scope aliases and the URIs they stand for, as documented for
+@gcloud compute instances create --scopes@. The instance is described back
+with URIs only, so the check needs this table to compare; the create command
+is given the declared spelling, so if gcloud and this table ever disagree
+about an alias the check says so (a 'Failure' naming both sets) rather than
+an instance quietly holding something else.
+-}
+scopeAliases :: Map Text [Text]
+scopeAliases =
+    Map.fromList
+        [ ("bigquery", [auth "bigquery"])
+        , ("cloud-platform", [auth "cloud-platform"])
+        , ("cloud-source-repos", [auth "source.full_control"])
+        , ("cloud-source-repos-ro", [auth "source.read_only"])
+        , ("compute-ro", [auth "compute.readonly"])
+        , ("compute-rw", [auth "compute"])
+        , ("datastore", [auth "datastore"])
+        ,
+            ( "default"
+            , map
+                auth
+                [ "devstorage.read_only"
+                , "logging.write"
+                , "monitoring.write"
+                , "pubsub"
+                , "service.management.readonly"
+                , "servicecontrol"
+                , "trace.append"
+                ]
+            )
+        , ("logging-write", [auth "logging.write"])
+        , ("monitoring", [auth "monitoring"])
+        , ("monitoring-read", [auth "monitoring.read"])
+        , ("monitoring-write", [auth "monitoring.write"])
+        , ("pubsub", [auth "pubsub"])
+        , ("service-control", [auth "servicecontrol"])
+        , ("service-management", [auth "service.management.readonly"])
+        , ("sql-admin", [auth "sqlservice.admin"])
+        , ("storage-full", [auth "devstorage.full_control"])
+        , ("storage-ro", [auth "devstorage.read_only"])
+        , ("storage-rw", [auth "devstorage.read_write"])
+        , ("taskqueue", [auth "taskqueue"])
+        , ("trace", [auth "trace.append"])
+        , ("userinfo-email", [auth "userinfo.email"])
+        ]
+  where
+    auth t = "https://www.googleapis.com/auth/" <> t
+
+{- | The URIs one declared scope stands for, or why it cannot be declared: a
+full @https://@ URI is itself, an alias is looked up, anything else is
+refused here rather than by gcloud half-way through a pass.
+-}
+scopeUris :: Text -> Either Text [Text]
+scopeUris scope
+    | Text.null scope = Left "an empty scope"
+    | Text.any (`elem` separators) scope = Left ("scope " <> Text.pack (show scope) <> " holds a separator")
+    | "https://" `Text.isPrefixOf` scope = Right [scope]
+    | otherwise =
+        maybe
+            (Left ("unknown scope alias " <> scope <> " (spell it as a full https://www.googleapis.com/auth/... URI)"))
+            Right
+            (Map.lookup scope scopeAliases)
+  where
+    separators = ", ;\t\n" :: String
+
+-- | Everything wrong with a scope declaration; empty for 'DefaultScopes'.
+scopeProblems :: AccessScopes -> [Text]
+scopeProblems DefaultScopes = []
+scopeProblems (DeclaredScopes scopes) = [problem | Left problem <- map scopeUris scopes]
+
+{- | The set of URIs a declaration asks for; 'Nothing' when nothing is
+declared (nothing to compare) or the declaration has 'scopeProblems'.
+-}
+declaredScopeUris :: AccessScopes -> Maybe (Set Text)
+declaredScopeUris DefaultScopes = Nothing
+declaredScopeUris (DeclaredScopes scopes) = Set.fromList . concat <$> traverse (either (const Nothing) Just . scopeUris) scopes
+
+{- | The scope URIs in the output of @describe
+--format=value(serviceAccounts[].scopes)@. Only the @https://@ words are
+kept, whatever separates them, because how gcloud flattens a list of lists
+has not been observed; an instance with no service account yields none.
+-}
+parseLiveScopes :: Text -> Set Text
+parseLiveScopes =
+    Set.fromList
+        . filter ("https://" `Text.isPrefixOf`)
+        . Text.split (`elem` (",; \t\r\n'\"[]" :: String))
+
+{- | The verdict on an existing instance's scopes against the declared ones:
+'Success' when nothing is declared or the two sets are equal, a 'Failure'
+naming both otherwise. Never a reason to act: see 'AccessScopes'.
+-}
+interpretInstanceScopes :: AccessScopes -> ExitCode -> Text -> CheckResult
+interpretInstanceScopes DefaultScopes _ _ = Success
+interpretInstanceScopes scopes@(DeclaredScopes _) code out =
+    case (declaredScopeUris scopes, code) of
+        (Nothing, _) -> Failure ("scopes cannot be declared: " <> Text.intercalate "; " (scopeProblems scopes))
+        (_, ExitFailure n) -> Failure ("could not describe instance scopes (exit " <> Text.pack (show n) <> ")")
+        (Just wanted, ExitSuccess)
+            | wanted == live -> Success
+            | otherwise ->
+                Failure
+                    ( "instance holds scopes "
+                        <> renderSet live
+                        <> ", declared "
+                        <> renderSet wanted
+                        <> "; scopes only change on a stopped instance and this node does not stop one:"
+                        <> " stop it and run gcloud compute instances set-service-account, or re-create it"
+                    )
+          where
+            live = parseLiveScopes out
+  where
+    renderSet s
+        | Set.null s = "(none)"
+        | otherwise = Text.intercalate "," (Set.toList s)
+
 -- | A GCE instance.
 data Instance = Instance
     { instanceName :: Text
@@ -160,6 +314,10 @@ data Instance = Instance
     -- at the instance's status, so an existing instance holding another
     -- address is not noticed and not changed.
     , instanceTags :: [Text]
+    , instanceScopes :: AccessScopes
+    -- ^ the access scopes, or gcloud's defaults. Create-time only, and
+    -- unlike the addresses a difference on an existing instance /is/
+    -- noticed, as a 'Failure' the node never repairs: see 'AccessScopes'.
     }
     deriving (Eq, Show)
 
@@ -169,7 +327,12 @@ data Instance = Instance
 --   start it if @TERMINATED@ or resume it if @SUSPENDED@ for 'PoweredOn',
 --   stop it if @RUNNING@ for 'PoweredOff'. See 'planInstanceUp'.
 -- * 'down': delete the instance, whatever state it is in.
--- * 'check': report 'Success' if the instance is in the declared state.
+-- * 'check': report 'Success' if the instance is in the declared state and,
+--   when 'instanceScopes' declares some, holds exactly those.
+--
+-- Declared scopes that differ from an existing instance's are a 'Failure'
+-- for the check and a throw for @up@, before it starts or stops anything;
+-- undeclarable ones ('scopeProblems') are the same before any call.
 gceInstance :: Reporter Report -> Track' (Binary "gcloud") -> Instance -> Op
 gceInstance r gcloudTrack inst =
     withBinary gcloudTrack computeCommand (InstancesCreate inst) $ \create ->
@@ -180,14 +343,46 @@ gceInstance r gcloudTrack inst =
                         op "gcp-instance" nodeps $ \actions ->
                             actions
                                 { help = Text.unwords [verb, "GCE instance", inst.instanceName]
+                                , notes = actions.notes <> scopeNotes
                                 , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
                                 , up = bringUp create start resume stop
                                 , -- presence, not state: a stopped instance is still there to delete
                                   down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
-                                , check = uncurry (interpretInstanceStatus inst.instancePower) <$> describeStatus
+                                , check = checkInstance
                                 }
   where
     rFor cmd = contramap (RunComputeCommand cmd) r
+
+    -- in the notes so that a re-declaration with other scopes is a changed
+    -- node under @run serve@; nothing at all when none is declared
+    scopeNotes = case inst.instanceScopes of
+        DefaultScopes -> []
+        DeclaredScopes [] -> ["scopes: none"]
+        DeclaredScopes scopes -> ["scopes: " <> Text.intercalate "," scopes]
+
+    -- the status first, as before; the scopes are only asked of an instance
+    -- that is there, and only when some are declared (one more describe)
+    checkInstance = case scopeProblems inst.instanceScopes of
+        problems@(_ : _) -> pure (Failure ("scopes cannot be declared: " <> Text.intercalate "; " problems))
+        [] -> do
+            (code, status) <- describeStatus
+            case (inst.instanceScopes, code) of
+                (DeclaredScopes _, ExitSuccess) -> do
+                    scopes <- describeScopes
+                    pure $ case scopes of
+                        Success -> interpretInstanceStatus inst.instancePower code status
+                        differing -> differing
+                _ -> pure (interpretInstanceStatus inst.instancePower code status)
+
+    describeScopes :: IO CheckResult
+    describeScopes = do
+        (code, out, _err) <-
+            readCreateProcessWithExitCode
+                (prepare computeCommand (InstancesDescribeScopes inst))
+                ""
+        pure (interpretInstanceScopes inst.instanceScopes code (Text.decodeUtf8 out))
+
+    refuse reason = throwIO (userError ("instance " <> Text.unpack inst.instanceName <> ": " <> Text.unpack reason))
 
     verb = case inst.instancePower of
         PoweredOn -> "creates"
@@ -206,7 +401,20 @@ gceInstance r gcloudTrack inst =
     -- @create@ refuses because the instance exists. Asking first costs one
     -- describe that the check has usually just done.
     bringUp create start resume stop = do
+        case scopeProblems inst.instanceScopes of
+            [] -> pure ()
+            problems -> refuse ("scopes cannot be declared: " <> Text.intercalate "; " problems)
         plan <- uncurry (planInstanceUp inst.instancePower) <$> describeStatus
+        -- an instance that exists with other scopes is left exactly as it
+        -- is: no start, no stop, and certainly no re-creation
+        case (plan, inst.instanceScopes) of
+            (CreateInstance, _) -> pure ()
+            (_, DefaultScopes) -> pure ()
+            (_, DeclaredScopes _) -> do
+                scopes <- describeScopes
+                case scopes of
+                    Failure reason -> refuse reason
+                    _ -> pure ()
         case plan of
             CreateInstance -> do
                 create (rFor (InstancesCreate inst))
@@ -596,6 +804,7 @@ data ComputeCommand
     = InstancesCreate Instance
     | InstancesDescribe Instance
     | InstancesDescribeStatus Instance
+    | InstancesDescribeScopes Instance
     | InstancesStart Instance
     | InstancesResume Instance
     | InstancesStop Instance
@@ -652,7 +861,12 @@ computeCommand = Command $ \cmd -> case cmd of
                         EphemeralInternal -> []
                         PinnedInternal ip -> ["--private-network-ip", Text.unpack ip]
                    )
-                <> if null inst.instanceTags then [] else ["--tags", Text.unpack (Text.intercalate "," inst.instanceTags)]
+                <> (if null inst.instanceTags then [] else ["--tags", Text.unpack (Text.intercalate "," inst.instanceTags)])
+                <> ( case inst.instanceScopes of
+                        DefaultScopes -> []
+                        DeclaredScopes [] -> ["--no-scopes"]
+                        DeclaredScopes scopes -> ["--scopes", Text.unpack (Text.intercalate "," scopes)]
+                   )
     InstancesDescribe inst ->
         gcloudProc $
             withProject inst.instanceProject
@@ -672,6 +886,17 @@ computeCommand = Command $ \cmd -> case cmd of
                     , "describe"
                     , Text.unpack inst.instanceName
                     , "--format=value(status)"
+                    ]
+                )
+    InstancesDescribeScopes inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "describe"
+                    , Text.unpack inst.instanceName
+                    , "--format=value(serviceAccounts[].scopes)"
                     ]
                 )
     InstancesStart inst ->

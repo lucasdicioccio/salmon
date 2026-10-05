@@ -1002,6 +1002,7 @@ gceInstance spec vm =
           -- machine the balancer has already been pointed at.
           Compute.instanceTags = [sshTag spec] <> [lbTag spec | spec.tier >= 3]
         , Compute.instancePower = Compute.PoweredOn
+        , Compute.instanceScopes = Compute.DefaultScopes
         }
 
 -------------------------------------------------------------------------------
