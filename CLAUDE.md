@@ -1054,6 +1054,19 @@ the metadata server's token for the instance's own service account, plus a `chec
 and the stamp are put on the login node alone (it is `Podman.loginExpiring`, above): an `fmap` over the `Op` also
 reached the auth file's enclosing directory, a predecessor, which then renewed the stamp without logging in, so an
 expired login was skipped (`instanceLoginWith` takes the token's source, for the test that holds this).
+**Readiness is opt-in and lives in `up` alone.** The generated service is `Type=notify` over `--sdnotify=conmon`, so
+`systemctl restart` returns 0 once the container *exists*: one whose entrypoint dies at boot was reported done while
+systemd restarted it into `failed`. `containerReady = Just Readiness{..}` (`stillUp HOLD`, `readyWhen PROBE TIMEOUT`;
+`ProbeTcp host port` or `ProbeCommand cmd args`, both asked from the host as whoever runs salmon) makes `up` go on to
+`awaitReady`: the unit is sampled (`systemctl show`: `ActiveState`, `NRestarts`) every half second, the probe must
+answer within its timeout, then the unit must stay `active` with the restart count of the first look for `readyHold`
+seconds; anything else throws `NotReady` at the look that saw it. Nothing is rendered, so the file, the label and the
+fingerprint are the same with and without it and declaring it restarts nothing (it adds one `ready:` line to the
+node's `notes`; `Nothing`, the default, is the node as it was, pinned in `QuadletSpec`). Not done: the `check` is
+unchanged, so a later pass sampling a crash-looping unit while `active` still skips it; nothing is rolled back (the old
+container is gone by then); `Notify=healthy`/`HealthCmd` (podman 5) is not rendered; refused on a job. `awaitReady`
+runs in tests against a scripted unit and clock only: the real `systemctl` sampling, both probes and the node's `up`
+with readiness have not been run against a container.
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/

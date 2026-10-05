@@ -18,7 +18,7 @@ module Test.QuadletSpec (tests) where
 import qualified Data.ByteString.Lazy.Char8 as LC8
 import qualified Data.Map.Strict as Map
 import Data.Foldable (toList)
-import Data.IORef (modifyIORef, newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef, newIORef, readIORef)
 import Data.List (isInfixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -57,6 +57,7 @@ tests =
         , testGroup "refusals" problemTests
         , testGroup "check" checkTests
         , testGroup "node" nodeTests
+        , testGroup "readiness" readinessTests
         , testGroup "generator" generatorTests
         , testGroup "instance login" loginTests
         ]
@@ -406,6 +407,162 @@ generatorTests =
         if present
             then act
             else hPutStrLn stderr ("SKIPPED: no quadlet generator at " <> generatorPath <> "; the rendered file was not checked against podman")
+
+{- | 'Quadlet.awaitReady' against a scripted unit and a clock that only
+moves when the wait sleeps: the unit's samples are consumed one per look (the
+last one repeating), and the probe says yes once the clock has reached a
+given time.
+-}
+scripted :: [Maybe Quadlet.UnitSample] -> Maybe Int -> IO (Quadlet.Waiting, IORef Int, IORef Int)
+scripted samples readyAt = do
+    clock <- newIORef 0
+    looks <- newIORef 0
+    remaining <- newIORef samples
+    let next = atomicModifyIORef' remaining $ \xs -> case xs of
+            [x] -> ([x], x)
+            x : rest -> (rest, x)
+            [] -> ([], Nothing)
+    pure
+        ( Quadlet.Waiting
+            { Quadlet.waitSample = modifyIORef looks (+ 1) >> next
+            , Quadlet.waitProbe = \_ -> do
+                now <- readIORef clock
+                pure (maybe False (<= now) readyAt)
+            , Quadlet.waitSleep = \ms -> modifyIORef clock (+ ms)
+            , Quadlet.waitNow = readIORef clock
+            }
+        , clock
+        , looks
+        )
+
+standing :: Int -> Maybe Quadlet.UnitSample
+standing n = Just (Quadlet.UnitSample "active" "running" (Just n) "success")
+
+restarting :: Int -> Maybe Quadlet.UnitSample
+restarting n = Just (Quadlet.UnitSample "activating" "auto-restart" (Just n) "exit-code")
+
+readinessTests :: [TestTree]
+readinessTests =
+    [ testCase "a declaration that asks for no readiness is the node it was" $ do
+        assertEqual "" Nothing app.containerReady
+        assertEqual "" Nothing (Quadlet.container (Podman.ContainerName "x") "img:v1").containerReady
+    , testCase "declaring readiness changes neither the file nor its fingerprint, only the node's notes" $ do
+        let ready = app{Quadlet.containerReady = Just (Quadlet.stillUp 5)}
+        assertEqual "" (Quadlet.renderContainer app) (Quadlet.renderContainer ready)
+        plain <- Quadlet.quadletFingerprint app{Quadlet.containerEnvFile = Nothing}
+        withIt <- Quadlet.quadletFingerprint ready{Quadlet.containerEnvFile = Nothing}
+        assertEqual "the running container would read as started from another quadlet" plain withIt
+        assertEqual "" (refOf (node app)) (refOf (node ready))
+        assertEqual "" (helpOf (node app)) (helpOf (node ready))
+        assertEqual
+            ""
+            (fmap (<> ["ready: active with no restart for 5s"]) (notesOf (node app)))
+            (notesOf (node ready))
+    , testCase "readiness is described with its probe" $ do
+        assertEqual
+            ""
+            "tcp 127.0.0.1:8080 accepts within 30s, then active with no restart for 3s"
+            (Quadlet.describeReadiness (Quadlet.readyWhen (Quadlet.ProbeTcp "127.0.0.1" 8080) 30))
+        assertEqual
+            ""
+            "`curl -fsS http://127.0.0.1:8080/health` exits 0 within 10s, then active with no restart for 3s"
+            (Quadlet.describeReadiness (Quadlet.readyWhen (Quadlet.ProbeCommand "curl" ["-fsS", "http://127.0.0.1:8080/health"]) 10))
+    , testCase "readiness on a job, a probe with no time, a port that is not one are refused" $ do
+        let job = Quadlet.containerJob (Podman.ContainerName "job") "img:v1" ["true"]
+        assertBool "" (not (null (Quadlet.containerProblems job{Quadlet.containerReady = Just (Quadlet.stillUp 3)})))
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerReady = Just (Quadlet.readyWhen (Quadlet.ProbeTcp "h" 80) 0)})))
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerReady = Just (Quadlet.readyWhen (Quadlet.ProbeTcp "h" 70000) 5)})))
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerReady = Just (Quadlet.readyWhen (Quadlet.ProbeCommand "" []) 5)})))
+        assertBool "" (not (null (Quadlet.containerProblems app{Quadlet.containerReady = Just (Quadlet.stillUp (-1))})))
+        assertEqual "" [] (Quadlet.containerProblems app{Quadlet.containerReady = Just (Quadlet.readyWhen (Quadlet.ProbeTcp "127.0.0.1" 8080) 30)})
+    , testCase "the unit is asked for its state and restart count, in its scope" $ do
+        assertEqual "" ["show", "app.service", "--property=ActiveState,SubState,NRestarts,Result"] (Quadlet.sampleArgs app)
+        assertEqual
+            ""
+            ["--user", "show", "app.service", "--property=ActiveState,SubState,NRestarts,Result"]
+            (Quadlet.sampleArgs app{Quadlet.containerScope = Systemd.User})
+    , testCase "systemctl's lines are read whatever their order" $ do
+        assertEqual
+            ""
+            (Quadlet.UnitSample "active" "running" (Just 2) "success")
+            (Quadlet.parseSample ["Result=success", "NRestarts=2", "ActiveState=active", "SubState=running"])
+        assertEqual "" Nothing (Quadlet.parseSample ["ActiveState=active"]).sampleRestarts
+    , testCase "an active unit systemd has not restarted is standing" $ do
+        assertEqual "" (Right ()) (Quadlet.interpretStanding [0] (Quadlet.UnitSample "active" "running" (Just 0) "success"))
+        assertEqual "no counter to judge by" (Right ()) (Quadlet.interpretStanding [0] (Quadlet.UnitSample "active" "running" Nothing "success"))
+    , testCase "a unit being restarted, failed, stopped or already restarted is not" $ do
+        assertBool "" (isLeft (Quadlet.interpretStanding [0] (Quadlet.UnitSample "activating" "auto-restart" (Just 0) "exit-code")))
+        assertBool "" (isLeft (Quadlet.interpretStanding [0] (Quadlet.UnitSample "failed" "failed" (Just 5) "exit-code")))
+        assertBool "" (isLeft (Quadlet.interpretStanding [0] (Quadlet.UnitSample "inactive" "dead" (Just 0) "success")))
+        -- the report's case: sampled while active, between two deaths
+        assertBool "" (isLeft (Quadlet.interpretStanding [0] (Quadlet.UnitSample "active" "running" (Just 2) "success")))
+    , testCase "a container that stays up through the hold is ready, and the hold is waited out" $ do
+        (w, clock, _) <- scripted [standing 0] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.stillUp 3)
+        assertEqual "" (Right ()) verdict
+        waited <- readIORef clock
+        assertEqual "the hold was cut short or overrun" 3000 waited
+    , testCase "a container that dies at boot fails the wait at the first look that sees it" $ do
+        -- active when restart returned and at the first look, then systemd's auto-restart
+        (w, clock, _) <- scripted [standing 0, standing 0, restarting 1] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.stillUp 5)
+        assertBool ("not a failure: " <> show verdict) (isLeft verdict)
+        waited <- readIORef clock
+        assertBool "it waited the whole hold for a unit already seen down" (waited < 5000)
+    , testCase "a container sampled active between two deaths is caught by its restart count" $ do
+        (w, _, _) <- scripted [standing 0, standing 0, standing 1] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.stillUp 5)
+        assertBool ("not a failure: " <> show verdict) (isLeft verdict)
+    , testCase "a unit already down at the first look is not waited for" $ do
+        (w, clock, looks) <- scripted [restarting 0] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.stillUp 5)
+        assertBool ("not a failure: " <> show verdict) (isLeft verdict)
+        n <- readIORef looks
+        assertEqual "it kept looking" 1 n
+        waited <- readIORef clock
+        assertEqual "" 0 waited
+    , testCase "a restart count left over from before the restart is not a restart" $ do
+        -- `systemctl restart` does not reset NRestarts on a unit systemd was
+        -- restarting: the baseline is what the first look sees
+        (w, _, _) <- scripted [standing 3] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.stillUp 2)
+        assertEqual "" (Right ()) verdict
+    , testCase "the probe is waited for, then the hold starts" $ do
+        (w, clock, _) <- scripted [standing 0] (Just 2000)
+        verdict <- Quadlet.awaitReady w (Quadlet.readyWhen (Quadlet.ProbeTcp "127.0.0.1" 8080) 30)
+        assertEqual "" (Right ()) verdict
+        waited <- readIORef clock
+        assertEqual "2s until the probe held, then the 3s hold" 5000 waited
+    , testCase "a probe that never holds fails the wait at its timeout, naming the probe" $ do
+        (w, clock, _) <- scripted [standing 0] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.readyWhen (Quadlet.ProbeTcp "127.0.0.1" 8080) 4)
+        case verdict of
+            Left why -> assertBool (Text.unpack why) ("tcp 127.0.0.1:8080" `Text.isInfixOf` why)
+            Right () -> assertFailure "a container that never answered was called ready"
+        waited <- readIORef clock
+        assertEqual "" 4000 waited
+    , testCase "a container that dies while its probe is waited for does not wait out the timeout" $ do
+        (w, clock, _) <- scripted [standing 0, standing 0, restarting 1] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.readyWhen (Quadlet.ProbeTcp "127.0.0.1" 8080) 60)
+        assertBool ("not a failure: " <> show verdict) (isLeft verdict)
+        waited <- readIORef clock
+        assertBool "it waited for a probe of a unit already seen down" (waited < 5000)
+    , testCase "a container that dies during the hold, after its probe held, is not ready" $ do
+        (w, _, _) <- scripted [standing 0, standing 0, standing 0, restarting 1] (Just 0)
+        verdict <- Quadlet.awaitReady w (Quadlet.readyWhen (Quadlet.ProbeTcp "127.0.0.1" 8080) 30)
+        assertBool ("not a failure: " <> show verdict) (isLeft verdict)
+    , testCase "a systemd that cannot be asked is not a ready container" $ do
+        (w, _, _) <- scripted [Nothing] Nothing
+        verdict <- Quadlet.awaitReady w (Quadlet.stillUp 1)
+        assertBool ("not a failure: " <> show verdict) (isLeft verdict)
+    ]
+  where
+    isLeft :: Either a b -> Bool
+    isLeft = either (const True) (const False)
+    node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+    helpOf o = fmap (\act -> act.extension.help) (opAct o)
 
 loginTests :: [TestTree]
 loginTests =

@@ -64,6 +64,19 @@ forgets a successful run of a unit nothing keeps loaded, a generated one
 included, so a container job with no timer waiting on it is only skipped by
 the next pass when it leaves a stamp ('containerStamp').
 
+= Readiness
+
+The generated service is @Type=notify@ over @podman run --sdnotify=conmon@:
+systemd is told "started" when the container /exists/, not when what is in it
+works. So @systemctl restart@ returns 0 for a container whose entrypoint
+exits a moment later, and a pass reported such a node done while systemd was
+still restarting it into @failed@. 'containerReady' is the opt-in answer, and
+it lives in @up@ alone: after the restart, 'awaitReady' waits for a 'Probe'
+to succeed (if one is declared) and then for the unit to stay @active@ with
+no restart for 'readyHold' seconds, and @up@ throws 'NotReady' otherwise.
+Nothing of it is rendered, so declaring it (or not) leaves the file, the
+fingerprint and the running container alone.
+
 Needs podman 4.4 or later (quadlet's first release). Only keys that 4.9
 understands are rendered -- the registry credentials go through
 @PodmanArgs=--authfile=@ rather than the @AuthFile=@ key, which 4.9's
@@ -73,6 +86,18 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     Container (..),
     RestartPolicy (..),
     Lifetime (..),
+    Readiness (..),
+    Probe (..),
+    stillUp,
+    readyWhen,
+    describeReadiness,
+    UnitSample (..),
+    parseSample,
+    sampleArgs,
+    interpretStanding,
+    Waiting (..),
+    awaitReady,
+    NotReady (..),
     container,
     containerJob,
     quadletContainer,
@@ -102,16 +127,22 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     InvalidContainer (..),
 ) where
 
-import Control.Exception (Exception, throwIO)
+import Control.Concurrent (threadDelay)
+import Control.Exception (Exception, SomeException, bracket, throwIO, try)
 import Control.Monad (unless)
+import Data.List (find)
 import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import GHC.Clock (getMonotonicTimeNSec)
+import qualified Network.Socket as Net
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
 import System.Process (proc, readCreateProcessWithExitCode)
+import System.Timeout (timeout)
+import Text.Read (readMaybe)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
@@ -142,6 +173,56 @@ data Lifetime
     | -- | a job: @Type=oneshot@, the unit is done when the command exits
       RunToCompletion
     deriving (Eq, Ord, Show)
+
+{- | A question asked from the machine salmon runs on, as whoever runs it,
+whose answer "yes" means the service does its job.
+-}
+data Probe
+    = -- | a TCP connection to this host and port is accepted (a published port)
+      ProbeTcp Text Int
+    | -- | this command exits 0. It is run on the /host/; one asking inside
+      -- the container is @ProbeCommand "podman" ["exec", NAME, ...]@
+      ProbeCommand FilePath [Text]
+    deriving (Eq, Ord, Show)
+
+{- | What 'quadletContainer''s @up@ waits for after the restart, before it
+calls the container up. See 'awaitReady' for the order of things.
+-}
+data Readiness
+    = Readiness
+    { readyProbe :: Maybe Probe
+    , readyTimeout :: Int
+    -- ^ seconds the probe has to succeed for the first time, counted from
+    -- the restart returning. Unused without a probe.
+    , readyHold :: Int
+    -- ^ seconds the unit must then stay @active@ with no restart by
+    -- systemd. A container that dies at boot is restarted within a second
+    -- or so under @Restart=on-failure@; a few seconds sees it.
+    }
+    deriving (Eq, Ord, Show)
+
+-- | No probe: the unit stays @active@, unrestarted, for this many seconds.
+stillUp :: Int -> Readiness
+stillUp hold = Readiness{readyProbe = Nothing, readyTimeout = 0, readyHold = hold}
+
+{- | This probe succeeds within the timeout (seconds), and the unit is still
+standing, unrestarted, three seconds later.
+-}
+readyWhen :: Probe -> Int -> Readiness
+readyWhen probe seconds = Readiness{readyProbe = Just probe, readyTimeout = seconds, readyHold = 3}
+
+-- | One line for the node's @notes@, and the wording of a failed wait.
+describeReadiness :: Readiness -> Text
+describeReadiness rd =
+    Text.intercalate ", then " $
+        [describeProbe p <> " within " <> seconds rd.readyTimeout | p <- maybeToList rd.readyProbe]
+            <> ["active with no restart for " <> seconds rd.readyHold]
+  where
+    seconds n = Text.pack (show n) <> "s"
+
+describeProbe :: Probe -> Text
+describeProbe (ProbeTcp host port) = "tcp " <> host <> ":" <> Text.pack (show port) <> " accepts"
+describeProbe (ProbeCommand cmd args) = "`" <> Text.unwords (Text.pack cmd : args) <> "` exits 0"
 
 {- | One container run as a service. 'container' is the starting point; set
 the rest with record update.
@@ -198,6 +279,13 @@ data Container
     -- caller's: existing, and writable by whoever the unit runs as (root in
     -- 'Systemd.System', the user in 'Systemd.User'). 'Nothing' renders
     -- nothing, so a declaration without it is the file it always was.
+    , containerReady :: Maybe Readiness
+    -- ^ for a service only ('LongRunning'; refused otherwise): what @up@
+    -- waits for after the restart ('awaitReady'), failing if it does not
+    -- come. 'Nothing' is @up@ as it always was: done when @systemctl
+    -- restart@ returns, which for a container means "it exists". Never
+    -- rendered: the file, its fingerprint and the label are the same with
+    -- and without it.
     }
     deriving (Eq, Show)
 
@@ -229,6 +317,7 @@ container name image =
         , containerWantedBy = Just "multi-user.target"
         , containerWatched = []
         , containerStamp = Nothing
+        , containerReady = Nothing
         }
 
 {- | A system-scope job: this command, run in this image to completion.
@@ -382,6 +471,11 @@ containerProblems c =
           , c.containerLifetime /= RunToCompletion
           ]
         , ["the stamp is not an absolute path: " <> Text.pack s | s <- maybeToList c.containerStamp, not (isAbsolute s)]
+        , [ "readiness is a service's: a job is done when its command exits"
+          | Just _ <- [c.containerReady]
+          , c.containerLifetime /= LongRunning
+          ]
+        , concat [readinessProblems rd | rd <- maybeToList c.containerReady]
         , ["a line break in the " <> what | (what, value) <- fields, Text.any (`elem` ("\n\r" :: String)) value]
         ]
   where
@@ -400,6 +494,16 @@ containerProblems c =
             , [("wanted-by", w) | w <- maybeToList c.containerWantedBy]
             , [("stamp", Text.pack s) | s <- maybeToList c.containerStamp]
             ]
+
+readinessProblems :: Readiness -> [Text]
+readinessProblems rd =
+    mconcat
+        [ ["the readiness hold is negative" | rd.readyHold < 0]
+        , ["a readiness probe needs a timeout of at least a second" | Just _ <- [rd.readyProbe], rd.readyTimeout < 1]
+        , ["the readiness probe's port is not a port: " <> Text.pack (show p) | Just (ProbeTcp _ p) <- [rd.readyProbe], p < 1 || p > 65535]
+        , ["the readiness probe has no host" | Just (ProbeTcp h _) <- [rd.readyProbe], Text.null (Text.strip h)]
+        , ["the readiness probe has no command" | Just (ProbeCommand cmd _) <- [rd.readyProbe], null cmd]
+        ]
 
 data InvalidContainer = InvalidContainer !FilePath ![Text]
     deriving (Show)
@@ -429,6 +533,16 @@ container before the start would pull the new image, so the image is pulled
 before any of that, by 'imageNode', which the quadlet file depends on: a pull
 that fails is that node's failed @up@, the file and this node are @Blocked@,
 and whatever was running keeps running from the file it was started from.
+
+"Running" there means the container exists, not that it works. With
+'containerReady' declared, @up@ goes on to 'awaitReady' and throws 'NotReady'
+when the container dies, is restarted by systemd, or does not answer its
+probe in time. The failing unit is left as it is (systemd keeps restarting or
+has given up; either is what the operator needs to see), and nothing is
+rolled back: the old container was stopped by the restart. The node's
+@check@ is unchanged by it, so a later pass that happens to sample a
+crash-looping unit while it is @active@ still reads it as satisfied.
+
 @down@
 stops the service, which removes the container, and the file's own @down@
 removes the file and reloads so that the generated unit goes with it. The
@@ -453,9 +567,15 @@ quadletContainer r systemctl t c =
                             [ "image: " <> c.containerImage
                             , "quadlet: " <> declaredFingerprint c
                             ]
+                                <> ["ready: " <> describeReadiness rd | rd <- maybeToList c.containerReady]
                         , ref = mkRef "systemd-unit" target
                         , check = checkContainer c
-                        , up = reload >> restart
+                        , up = case c.containerReady of
+                            Nothing -> reload >> restart
+                            Just rd -> do
+                                reload >> restart
+                                verdict <- awaitReady (systemWaiting c) rd
+                                either (throwIO . NotReady target) pure verdict
                         , down = stop
                         }
   where
@@ -793,3 +913,176 @@ interpretRunning declared printed
         Failure ("the running container was started from quadlet " <> running <> ", the declared one is " <> declared)
   where
     running = Text.strip printed
+
+-------------------------------------------------------------------------------
+
+-- | What @systemctl show@ says about a unit at one instant, as far as standing goes.
+data UnitSample
+    = UnitSample
+    { sampleActive :: Text
+    , sampleSub :: Text
+    , sampleRestarts :: Maybe Int
+    -- ^ @NRestarts@: how many times systemd restarted it by itself
+    , sampleResult :: Text
+    }
+    deriving (Eq, Show)
+
+-- | @systemctl [--user] show UNIT@ for the four properties of a 'UnitSample'.
+sampleArgs :: Container -> [String]
+sampleArgs c =
+    Systemd.scopeArgs c.containerScope
+        <> ["show", Text.unpack (serviceTarget c), "--property=ActiveState,SubState,NRestarts,Result"]
+
+-- | The @KEY=VALUE@ lines of 'sampleArgs', in any order; a missing key is empty.
+parseSample :: [Text] -> UnitSample
+parseSample ls =
+    UnitSample
+        { sampleActive = value "ActiveState"
+        , sampleSub = value "SubState"
+        , sampleRestarts = readMaybe (Text.unpack (value "NRestarts"))
+        , sampleResult = value "Result"
+        }
+  where
+    value key = maybe "" (Text.strip . Text.drop (Text.length key + 1)) (find ((key <> "=") `Text.isPrefixOf`) ls)
+
+sampleUnit :: Container -> IO (Maybe UnitSample)
+sampleUnit c = do
+    (code, out, _err) <- readCreateProcessWithExitCode (proc "systemctl" (sampleArgs c)) ""
+    pure $ case code of
+        ExitSuccess -> Just (parseSample (Text.lines (Text.pack out)))
+        ExitFailure _ -> Nothing
+
+{- | Is a unit that @systemctl restart@ just reported started still the
+process that was started? Given the @NRestarts@ values that mean "systemd has
+not restarted it since" (none: do not judge by the counter).
+
+After a successful restart the unit was @active@, so anything else --
+@activating@ included, which is systemd's @auto-restart@ -- is it having gone
+down. The reason names the states and never the container's output.
+-}
+interpretStanding :: [Int] -> UnitSample -> Either Text ()
+interpretStanding allowed s
+    | s.sampleActive /= "active" =
+        Left ("the unit is " <> s.sampleActive <> " (" <> s.sampleSub <> ", result: " <> s.sampleResult <> ")")
+    | Just n <- s.sampleRestarts
+    , not (null allowed)
+    , n `notElem` allowed =
+        Left ("systemd has restarted it since it was started (NRestarts=" <> Text.pack (show n) <> ")")
+    | otherwise = Right ()
+
+{- | What 'awaitReady' needs of the world, so that the order of things can be
+tested without a systemd, a socket or a clock.
+-}
+data Waiting
+    = Waiting
+    { waitSample :: IO (Maybe UnitSample)
+    -- ^ 'Nothing' when systemd could not be asked
+    , waitProbe :: Probe -> IO Bool
+    , waitSleep :: Int -> IO ()
+    -- ^ milliseconds
+    , waitNow :: IO Int
+    -- ^ milliseconds, monotonic
+    }
+
+{- | Waits for a just-restarted unit to be ready, or says why it is not.
+
+The unit is looked at first, then at every step, and the wait ends at the
+first look that finds it down or restarted ('interpretStanding'): a
+container that dies at boot fails the pass in about a second, not after the
+probe's whole timeout. With a probe, it is asked every half second until it
+answers yes, for at most 'readyTimeout' seconds (one attempt is itself cut
+at five). Then the unit must stay standing for 'readyHold' seconds.
+
+The restart count every later look is held to is the /first look's/, not 0
+and not a reading from before the restart: @systemctl restart@ does not
+reset @NRestarts@ on a unit systemd was restarting (seen on this tree's
+development machine), and a count read before the restart can move before
+the restart does, which would fail a container that came up fine. The price
+is a container that died and came back between the restart returning and
+the first look: that one restart is the baseline, and it is the next one,
+inside the hold, that is seen. A hold shorter than the unit's own restart
+delay can therefore miss a crash loop; the default delay is 100ms.
+-}
+awaitReady :: Waiting -> Readiness -> IO (Either Text ())
+awaitReady w rd = do
+    start <- w.waitNow
+    first <- look []
+    case first of
+        Left why -> pure (Left why)
+        Right s -> probing start (maybeToList s.sampleRestarts)
+  where
+    poll :: Int
+    poll = 500
+
+    look :: [Int] -> IO (Either Text UnitSample)
+    look allowed = do
+        sample <- w.waitSample
+        pure $ case sample of
+            Nothing -> Left "systemctl could not say how the unit is doing"
+            Just s -> s <$ interpretStanding allowed s
+
+    probing :: Int -> [Int] -> IO (Either Text ())
+    probing start allowed = case rd.readyProbe of
+        Nothing -> holding allowed =<< w.waitNow
+        Just p -> do
+            ok <- w.waitProbe p
+            now <- w.waitNow
+            if ok
+                then holding allowed now
+                else
+                    if now - start >= rd.readyTimeout * 1000
+                        then pure (Left ("not ready after " <> Text.pack (show rd.readyTimeout) <> "s: " <> describeProbe p <> " never held"))
+                        else do
+                            w.waitSleep poll
+                            standing <- look allowed
+                            either (pure . Left) (const (probing start allowed)) standing
+
+    holding :: [Int] -> Int -> IO (Either Text ())
+    holding allowed since = do
+        standing <- look allowed
+        case standing of
+            Left why -> pure (Left why)
+            Right _ -> do
+                now <- w.waitNow
+                let remaining = rd.readyHold * 1000 - (now - since)
+                if remaining <= 0
+                    then pure (Right ())
+                    else w.waitSleep (min poll remaining) >> holding allowed since
+
+-- | 'Waiting' against this machine's systemd, network and clock.
+systemWaiting :: Container -> Waiting
+systemWaiting c =
+    Waiting
+        { waitSample = sampleUnit c
+        , waitProbe = runProbe
+        , waitSleep = \ms -> threadDelay (ms * 1000)
+        , waitNow = (\ns -> fromIntegral (ns `div` 1000000)) <$> getMonotonicTimeNSec
+        }
+
+-- | One attempt, cut at five seconds; anything thrown is "no".
+runProbe :: Probe -> IO Bool
+runProbe probe = do
+    answer <- timeout 5000000 (try attempt) :: IO (Maybe (Either SomeException Bool))
+    pure $ case answer of
+        Just (Right ok) -> ok
+        _ -> False
+  where
+    attempt :: IO Bool
+    attempt = case probe of
+        ProbeCommand cmd args -> do
+            (code, _out, _err) <- readCreateProcessWithExitCode (proc cmd (map Text.unpack args)) ""
+            pure (code == ExitSuccess)
+        ProbeTcp host port -> do
+            let hints = Net.defaultHints{Net.addrSocketType = Net.Stream}
+            addrs <- Net.getAddrInfo (Just hints) (Just (Text.unpack host)) (Just (show port))
+            case addrs of
+                [] -> pure False
+                addr : _ ->
+                    bracket (Net.openSocket addr) Net.close $ \sock ->
+                        True <$ Net.connect sock (Net.addrAddress addr)
+
+-- | A container that was restarted and is not ready: its unit, and why.
+data NotReady = NotReady !Systemd.UnitTarget !Text
+    deriving (Show)
+
+instance Exception NotReady
