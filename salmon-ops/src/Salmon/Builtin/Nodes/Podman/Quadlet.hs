@@ -77,6 +77,18 @@ no restart for 'readyHold' seconds, and @up@ throws 'NotReady' otherwise.
 Nothing of it is rendered, so declaring it (or not) leaves the file, the
 fingerprint and the running container alone.
 
+= Bind volumes
+
+'containerVolumes' renders a @Volume=@ line and nothing else: the host path
+is the caller's, existing before the start, and whoever the image makes its
+owner owns it afterwards. 'containerBinds' is the declaration that says more
+('Bind', 'bind' to start from): the options podman takes after the access
+mode (@:U@, @:z@, @:Z@), and a host /directory/ this module creates
+('hostDirNode') ahead of the quadlet file, with an owner and a mode if any
+are stated. @down@ never removes such a directory: it holds what the
+container wrote. A declaration with no binds is the file, the fingerprint and
+the nodes it always was.
+
 Needs podman 4.4 or later (quadlet's first release). Only keys that 4.9
 understands are rendered -- the registry credentials go through
 @PodmanArgs=--authfile=@ rather than the @AuthFile=@ key, which 4.9's
@@ -84,6 +96,18 @@ generator refuses as unsupported.
 -}
 module Salmon.Builtin.Nodes.Podman.Quadlet (
     Container (..),
+    Bind (..),
+    Relabel (..),
+    HostDir (..),
+    bind,
+    hostDir,
+    renderBind,
+    bindProblems,
+    hostDirNode,
+    hostDirNodes,
+    chownArgs,
+    interpretHostDir,
+    HostDirFailed (..),
     RestartPolicy (..),
     Lifetime (..),
     Readiness (..),
@@ -128,18 +152,21 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, SomeException, bracket, throwIO, try)
-import Control.Monad (unless)
+import Control.Exception (Exception, SomeException, bracket, onException, throwIO, try)
+import Control.Monad (unless, when)
+import Data.Char (isOctDigit, isSpace)
 import Data.List (find)
 import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.Clock (getMonotonicTimeNSec)
+import Numeric (readOct)
 import qualified Network.Socket as Net
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesPathExist, removeDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
+import System.Posix.Files (setFileMode)
 import System.Process (proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
@@ -224,6 +251,118 @@ describeProbe :: Probe -> Text
 describeProbe (ProbeTcp host port) = "tcp " <> host <> ":" <> Text.pack (show port) <> " accepts"
 describeProbe (ProbeCommand cmd args) = "`" <> Text.unwords (Text.pack cmd : args) <> "` exits 0"
 
+-- | The SELinux relabelling podman does on a bind's host path.
+data Relabel
+    = -- | @:z@, a label several containers can share
+      RelabelShared
+    | -- | @:Z@, a label private to this container
+      RelabelPrivate
+    deriving (Eq, Ord, Show)
+
+{- | A host directory this module creates for a 'Bind'. Owner and mode are
+the directory's /at creation/: one that already exists is left exactly as it
+is, whoever owns it. An image's entrypoint commonly takes its data directory
+for its own user at first start (postgres does), and a pass that set the
+declared owner back would pull the directory from under a running server.
+-}
+data HostDir
+    = HostDir
+    { hostDirOwner :: Maybe Text
+    -- ^ what @chown@ is given: @USER@, @USER:GROUP@, or the numeric forms.
+    -- Naming anyone but oneself needs root, so in 'Systemd.User' scope it
+    -- fails the node, and the directory is not left behind half-made.
+    , hostDirMode :: Maybe Text
+    -- ^ octal, three or four digits (@0750@). 'Nothing' is whatever the
+    -- umask of the salmon process gives.
+    }
+    deriving (Eq, Ord, Show)
+
+-- | A directory created with no owner and no mode stated.
+hostDir :: HostDir
+hostDir = HostDir{hostDirOwner = Nothing, hostDirMode = Nothing}
+
+{- | A host directory mounted in the container, with what 'Podman.VolumeMount'
+cannot say. Rendered as one more @Volume=@ line, after 'containerVolumes'.
+-}
+data Bind
+    = Bind
+    { bindHostPath :: FilePath
+    , bindGuestPath :: FilePath
+    , bindMode :: Podman.VolumeMode
+    , bindChown :: Bool
+    -- ^ @:U@: podman chowns the host path, recursively, to the container's
+    -- user at /every start/. Rootless, that is a subordinate uid of the
+    -- operator's, so the operator can neither list nor remove the directory
+    -- without @podman unshare@. It says who owns the data; it does not make
+    -- it readable from the host.
+    , bindRelabel :: Maybe Relabel
+    , bindCreate :: Maybe HostDir
+    -- ^ 'Nothing': the directory is the caller's, as for 'containerVolumes'
+    }
+    deriving (Eq, Ord, Show)
+
+{- | A read-write bind of this host directory at this path in the container,
+the directory created if it is missing, with no owner, mode or option stated.
+-}
+bind :: FilePath -> FilePath -> Bind
+bind host guest =
+    Bind
+        { bindHostPath = host
+        , bindGuestPath = guest
+        , bindMode = Podman.ReadWrite
+        , bindChown = False
+        , bindRelabel = Nothing
+        , bindCreate = Just hostDir
+        }
+
+-- | The value of a 'Bind''s @Volume=@ line: @HOST:GUEST:rw[,U][,z|,Z]@.
+renderBind :: Bind -> Text
+renderBind b =
+    mconcat
+        [ Text.pack b.bindHostPath
+        , ":"
+        , Text.pack b.bindGuestPath
+        , ":"
+        , Text.intercalate "," $
+            mconcat
+                [ [volumeModeWord b.bindMode]
+                , ["U" | b.bindChown]
+                , ["z" | b.bindRelabel == Just RelabelShared]
+                , ["Z" | b.bindRelabel == Just RelabelPrivate]
+                ]
+        ]
+
+volumeModeWord :: Podman.VolumeMode -> Text
+volumeModeWord Podman.ReadOnly = "ro"
+volumeModeWord Podman.ReadWrite = "rw"
+
+{- | Why this bind cannot be declared, if it cannot. A path with a colon in
+it would be read by podman as another field of the @Volume=@ value, and a
+relative host path as the name of a volume, which is no directory to create.
+-}
+bindProblems :: Bind -> [Text]
+bindProblems b =
+    mconcat
+        [ ["the bind's host path is not an absolute path: " <> host | not (isAbsolute b.bindHostPath)]
+        , ["the bind's guest path is not an absolute path: " <> guest | not (isAbsolute b.bindGuestPath)]
+        , ["a colon in the bind's " <> what <> ": " <> value | (what, value) <- [("host path", host), ("guest path", guest)], Text.any (== ':') value]
+        , [ "the bind of " <> host <> " states an owner and :U, which says another at every start"
+          | Just HostDir{hostDirOwner = Just _} <- [b.bindCreate]
+          , b.bindChown
+          ]
+        , [ "the owner of " <> host <> " is not what chown takes: " <> o
+          | Just HostDir{hostDirOwner = Just o} <- [b.bindCreate]
+          , Text.null o || "-" `Text.isPrefixOf` o || Text.any isSpace o
+          ]
+        , [ "the mode of " <> host <> " is not three or four octal digits: " <> m
+          | Just HostDir{hostDirMode = Just m} <- [b.bindCreate]
+          , Text.length m `notElem` [3, 4] || not (Text.all isOctDigit m)
+          ]
+        ]
+  where
+    host = Text.pack b.bindHostPath
+    guest = Text.pack b.bindGuestPath
+
 {- | One container run as a service. 'container' is the starting point; set
 the rest with record update.
 -}
@@ -254,6 +393,11 @@ data Container
     -- is pre-provisioned by something else and only watched here
     , containerPorts :: [Podman.PortMapping]
     , containerVolumes :: [Podman.VolumeMount]
+    , containerBinds :: [Bind]
+    -- ^ host directories mounted with options, and created by this module
+    -- when the bind says so ('hostDirNode'). Rendered after
+    -- 'containerVolumes'; empty renders nothing and adds no node, so a
+    -- declaration without any is the file it always was.
     , containerNetwork :: Maybe Text
     , containerAuthFile :: Maybe Podman.AuthFile
     -- ^ the credentials the start's pull uses, the file 'Podman.login' wrote
@@ -310,6 +454,7 @@ container name image =
         , containerEnvFile = Nothing
         , containerPorts = []
         , containerVolumes = []
+        , containerBinds = []
         , containerNetwork = Nothing
         , containerAuthFile = Nothing
         , containerRestart = RestartOnFailure
@@ -367,6 +512,7 @@ renderLabelled fingerprint c =
             , ["EnvironmentFile=" <> Text.pack f | f <- maybeToList c.containerEnvFile]
             , ["PublishPort=" <> port p | p <- c.containerPorts]
             , ["Volume=" <> volume v | v <- c.containerVolumes]
+            , ["Volume=" <> renderBind b | b <- c.containerBinds]
             , ["Network=" <> n | n <- maybeToList c.containerNetwork]
             , ["PodmanArgs=--authfile=" <> Text.pack (Podman.getAuthFile a) | a <- maybeToList c.containerAuthFile]
             , ["", "[Service]"]
@@ -406,9 +552,7 @@ renderLabelled fingerprint c =
             , ":"
             , Text.pack v.volumeGuestPath
             , ":"
-            , case v.volumeMode of
-                Podman.ReadOnly -> "ro"
-                Podman.ReadWrite -> "rw"
+            , volumeModeWord v.volumeMode
             ]
 
     restart :: RestartPolicy -> Text
@@ -476,10 +620,20 @@ containerProblems c =
           , c.containerLifetime /= LongRunning
           ]
         , concat [readinessProblems rd | rd <- maybeToList c.containerReady]
+        , concatMap bindProblems c.containerBinds
+        , [ "two binds create " <> Text.pack a.bindHostPath <> " differently"
+          | (i, a) <- created
+          , (j, b) <- created
+          , i < j
+          , a.bindHostPath == b.bindHostPath
+          , a.bindCreate /= b.bindCreate
+          ]
         , ["a line break in the " <> what | (what, value) <- fields, Text.any (`elem` ("\n\r" :: String)) value]
         ]
   where
     name = Podman.getContainerName c.containerName
+    created :: [(Int, Bind)]
+    created = [(i, b) | (i, b@Bind{bindCreate = Just _}) <- zip [0 ..] c.containerBinds]
     fields :: [(Text, Text)]
     fields =
         mconcat
@@ -489,6 +643,7 @@ containerProblems c =
             , [("env file", Text.pack f) | f <- maybeToList c.containerEnvFile]
             , [("published port", p.portOnHost <> p.portInGuest) | p <- c.containerPorts]
             , [("volume", Text.pack (v.volumeHostPath <> v.volumeGuestPath)) | v <- c.containerVolumes]
+            , [("bind", Text.pack (b.bindHostPath <> b.bindGuestPath)) | b <- c.containerBinds]
             , [("network", n) | n <- maybeToList c.containerNetwork]
             , [("auth file", Text.pack (Podman.getAuthFile a)) | a <- maybeToList c.containerAuthFile]
             , [("wanted-by", w) | w <- maybeToList c.containerWantedBy]
@@ -548,7 +703,8 @@ stops the service, which removes the container, and the file's own @down@
 removes the file and reloads so that the generated unit goes with it. The
 image is left on the machine, and so is 'containerUnitDir': the node creates
 it if it is missing but never removes it, since every quadlet on the machine
-lives there.
+lives there. So is every directory of 'containerBinds' ('hostDirNode'), which
+holds the container's data.
 -}
 quadletContainer ::
     Reporter Systemd.Report ->
@@ -560,7 +716,7 @@ quadletContainer r systemctl t c =
     withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
         withCommand r systemctl (Systemd.Up c.containerScope target) $ \restart ->
             withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
-                op "podman-quadlet" (deps [quadletFile r [imageNode c `inject` run t c, run t c] c, run t c]) $ \actions ->
+                op "podman-quadlet" (deps [quadletFile r ([imageNode c `inject` run t c, run t c] <> hostDirNodes c) c, run t c]) $ \actions ->
                     actions
                         { help = "runs " <> c.containerImage <> " as " <> target
                         , notes =
@@ -605,7 +761,7 @@ quadletJob ::
 quadletJob r systemctl t c =
     withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
         withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
-            op "podman-quadlet-job" (deps [quadletFile r [run t c] c, run t c]) $ \actions ->
+            op "podman-quadlet-job" (deps [quadletFile r (run t c : hostDirNodes c) c, run t c]) $ \actions ->
                 actions
                     { help = "installs the job " <> target <> " running " <> c.containerImage <> ", without running it"
                     , notes =
@@ -776,6 +932,92 @@ quadletFile r before c =
             }
 
 -------------------------------------------------------------------------------
+
+-- | The 'hostDirNode' of every bind that creates its directory, one per path.
+hostDirNodes :: Container -> [Op]
+hostDirNodes c = go [] c.containerBinds
+  where
+    go _ [] = []
+    go seen (b : rest) = case b.bindCreate of
+        Just d | b.bindHostPath `notElem` seen -> hostDirNode c b d : go (b.bindHostPath : seen) rest
+        _ -> go seen rest
+
+{- | A bind's host directory, on the machine before the quadlet is written
+(the file stands on it), so that the start does not fail on a path podman
+will not make.
+
+The @check@ is "a directory is there" and nothing more: 'Success' leaves an
+existing directory alone whoever owns it and whatever its mode (see
+'HostDir' for why), and a path that holds something else is a 'Failure' that
+@up@ then throws on. @up@ creates the directory and its missing parents,
+then applies the stated mode and owner /only to a directory it has just
+made/; if either fails, the directory just made is removed again, so the next
+pass does not find it there and call the declaration satisfied.
+
+@down@ is nothing. The directory holds what the container wrote, and
+'FS.dir''s @down@, which refuses a non-empty directory, would block the
+teardown of the quadlet file standing on it. Removing the data is the
+operator's.
+
+Keyed on the path and described by the owner and mode alone, so two
+containers binding one directory the same way share the node, and two
+stating different owners are a @Conflicting@ pair.
+-}
+hostDirNode :: Container -> Bind -> HostDir -> Op
+hostDirNode c b d =
+    op "podman-quadlet-bind-dir" nodeps $ \actions ->
+        actions
+            { help = "creates " <> Text.pack path <> " unless it is there"
+            , notes =
+                mconcat
+                    [ ["owner at creation: " <> o | o <- maybeToList d.hostDirOwner]
+                    , ["mode at creation: " <> m | m <- maybeToList d.hostDirMode]
+                    , ["an existing directory is left as it is; down leaves it, with what is in it"]
+                    ]
+            , ref = mkRef "podman-quadlet-bind-dir" path
+            , check = interpretHostDir path <$> doesDirectoryExist path <*> doesPathExist path
+            , up = do
+                let problems = containerProblems c
+                unless (null problems) $ throwIO (InvalidContainer (quadletPath c) problems)
+                isDir <- doesDirectoryExist path
+                unless isDir $ do
+                    createDirectoryIfMissing True path
+                    (setMode >> setOwner) `onException` removeDirectory path
+            }
+  where
+    path = b.bindHostPath
+
+    setMode :: IO ()
+    setMode = case d.hostDirMode of
+        Nothing -> pure ()
+        Just m -> case readOct (Text.unpack m) of
+            [(bits, "")] -> setFileMode path bits
+            _ -> throwIO (HostDirFailed path ("not an octal mode: " <> m))
+
+    setOwner :: IO ()
+    setOwner = case d.hostDirOwner of
+        Nothing -> pure ()
+        Just o -> do
+            (code, _out, err) <- readCreateProcessWithExitCode (proc "chown" (chownArgs o path)) ""
+            when (code /= ExitSuccess) $
+                throwIO (HostDirFailed path ("chown " <> o <> ": " <> Text.strip (Text.pack err)))
+
+-- | @chown -- OWNER PATH@, on the directory alone.
+chownArgs :: Text -> FilePath -> [String]
+chownArgs owner path = ["--", Text.unpack owner, path]
+
+-- | The verdict on a bind's host path: is a directory there, is anything there.
+interpretHostDir :: FilePath -> Bool -> Bool -> CheckResult
+interpretHostDir path isDir exists
+    | isDir = Success
+    | exists = Failure (Text.pack path <> " is there and is not a directory")
+    | otherwise = Failure ("the directory " <> Text.pack path <> " is missing")
+
+-- | A bind's directory that was made and could not be given its mode or owner.
+data HostDirFailed = HostDirFailed !FilePath !Text
+    deriving (Show)
+
+instance Exception HostDirFailed
 
 {- | The container's image, on the machine before its quadlet is written.
 
