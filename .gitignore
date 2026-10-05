@@ -19,3 +19,6 @@ website/src/builtins.cmark
 
 # python bytecode from website/scripts
 __pycache__/
+
+# cabal build output
+dist-newstyle/
