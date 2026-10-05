@@ -112,6 +112,7 @@ library
                    , Salmon.Builtin.Nodes.Ssh
                    , Salmon.Builtin.Nodes.Sysctl
                    , Salmon.Builtin.Nodes.Systemd
+                   , Salmon.Builtin.Nodes.Systemd.Job
                    , Salmon.Builtin.Nodes.Tar
                    , Salmon.Builtin.Nodes.Upx
                    , Salmon.Builtin.Nodes.Web

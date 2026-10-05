@@ -1037,6 +1037,28 @@ podman, `nginx:alpine` if already pulled, a local tag of it for the image change
 down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
 test, the metadata path has not been run on an instance, and the GCP toy does not use either yet.
 
+`Nodes/Systemd/Job.hs` is jobs under systemd, which `systemdService` cannot declare: its check wants `ActiveState=active`
+and its `up` restarts, so an idle oneshot unit reads as broken and is run at every pass. Three nodes, separate on
+purpose. `jobService` *installs* a `Type=oneshot` unit (no `[Install]`) and starts nothing: the check is
+`Systemd.checkLoaded` (`interpretLoaded`: `LoadState=loaded` and `NeedDaemonReload=no`), `up` is a reload after which a
+unit systemd still does not hold is thrown, `down` stops a run under way unless systemd never heard of the unit
+(`systemctl stop` exits 5 for one). `timerUnit` is a `.timer` that is enabled and waiting, checked with the service
+check since a timer is long-lived; `up` is reload/enable/restart, `down` is `disable --now` (new `SystemCtlCall`s
+`Disable` and `StartUnit`); `scheduledJob` is the timer standing on the job. `runJob` is `systemctl start`, which for a
+oneshot unit waits and fails when the command does; it has no check, so it runs at every pass. Load-bearing: command
+words go through `Systemd.literalArg` (`$` as `$$`, `%` as `%%`, since systemd substitutes both inside quotes;
+`quoteArg`, now top-level, is unchanged for authored services); the unit directory is `unitDirectory`, created and never
+removed (`Filesystem.dir`'s `down` refuses a non-empty one); a changed schedule needs no restart, since systemd re-arms
+a waiting timer at `daemon-reload` (seen on 255); a calendar expression is not judged by `timerProblems`, a timer
+systemd cannot read fails to start; nothing reads how the last run went. The container equivalent is
+`Quadlet.quadletJob` over `Quadlet.containerJob` (`containerExec` renders `Exec=`, `containerLifetime = RunToCompletion`
+renders `Type=oneshot`, for which podman 4.9's generator runs the container in the foreground): same install-only
+shape, and a `timerUnit` or `runJob` names its `serviceTarget`. `Test/SystemdJobSpec.hs` is Layer 0 plus
+`systemd-analyze verify` on the rendered units and the quadlet generator's dry-run on the container job; its
+`userTests` run the nodes against this user's systemd in user scope (install without running, skip, re-arm, re-install,
+run, failing run, down twice). Not run: system scope, a timer actually firing, a container job actually running, and
+`serve` tending any of it.
+
 `Nodes/Deferred.hs` (`deferred`) is a sub-graph built at `up` from a value another node of the same pass produced: the
 node holds a read (`IO (Maybe a)`) and a recipe (`a -> Op`), and its `up` reads, builds and runs a nested `upTree`
 (`down` the same with `downTree`), throwing if the nested walk fails. It is the `PostgresTemplate` opaque-walk shape

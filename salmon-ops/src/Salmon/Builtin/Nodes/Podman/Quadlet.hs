@@ -42,6 +42,18 @@ the same while the registry moves what it points at (@:latest@) is not a
 change this node can see; name images by a tag that moves with the content,
 or by digest.
 
+= Jobs
+
+A container can also be a /job/: a command run in the image to completion
+('containerExec', 'containerLifetime', and 'containerJob' to start from).
+Its service is @Type=oneshot@, for which the generator runs the container in
+the foreground, so starting the unit returns when the command has exited and
+fails if it failed. 'quadletJob' is the node for it and differs from
+'quadletContainer' as 'Salmon.Builtin.Nodes.Systemd.Job.jobService' differs
+from a service: it installs the unit and starts nothing. A
+'Salmon.Builtin.Nodes.Systemd.Job.timerUnit' naming 'serviceTarget' schedules
+it, a 'Salmon.Builtin.Nodes.Systemd.Job.runJob' runs it now.
+
 Needs podman 4.4 or later (quadlet's first release). Only keys that 4.9
 understands are rendered -- the registry credentials go through
 @PodmanArgs=--authfile=@ rather than the @AuthFile=@ key, which 4.9's
@@ -50,8 +62,11 @@ generator refuses as unsupported.
 module Salmon.Builtin.Nodes.Podman.Quadlet (
     Container (..),
     RestartPolicy (..),
+    Lifetime (..),
     container,
+    containerJob,
     quadletContainer,
+    quadletJob,
     serviceTarget,
     quadletPath,
     systemQuadletDir,
@@ -86,6 +101,7 @@ import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
 import Salmon.Op.OpGraph (OpGraph (..))
 import Salmon.Op.Ref
 import Salmon.Op.Track
@@ -98,6 +114,14 @@ data RestartPolicy
     = RestartNo
     | RestartOnFailure
     | RestartAlways
+    deriving (Eq, Ord, Show)
+
+-- | Whether the container is expected to stay or to finish.
+data Lifetime
+    = -- | a service: started, kept running
+      LongRunning
+    | -- | a job: @Type=oneshot@, the unit is done when the command exits
+      RunToCompletion
     deriving (Eq, Ord, Show)
 
 {- | One container run as a service. 'container' is the starting point; set
@@ -118,6 +142,11 @@ data Container
     -- ^ the full reference, registry included
     -- (@europe-west1-docker.pkg.dev\/project\/repo\/app:v3@); podman does not
     -- guess a registry for a short name under systemd
+    , containerExec :: [Text]
+    -- ^ the command run in the container, as an argv; empty is the image's
+    -- own. Each word reaches the container as written
+    -- ('Systemd.literalArg').
+    , containerLifetime :: Lifetime
     , containerDescription :: Text
     , containerAfter :: [Systemd.UnitTarget]
     , containerEnvFile :: Maybe FilePath
@@ -156,6 +185,8 @@ container name image =
         , containerUnitDir = systemQuadletDir
         , containerName = name
         , containerImage = image
+        , containerExec = []
+        , containerLifetime = LongRunning
         , containerDescription = "container " <> Podman.getContainerName name <> " (salmon)"
         , containerAfter = []
         , containerEnvFile = Nothing
@@ -167,6 +198,19 @@ container name image =
         , containerStartTimeout = Nothing
         , containerWantedBy = Just "multi-user.target"
         , containerWatched = []
+        }
+
+{- | A system-scope job: this command, run in this image to completion.
+Never restarted and not started at boot; something schedules or runs it.
+-}
+containerJob :: Podman.ContainerName -> Text -> [Text] -> Container
+containerJob name image command =
+    (container name image)
+        { containerExec = command
+        , containerLifetime = RunToCompletion
+        , containerDescription = "job " <> Podman.getContainerName name <> " (salmon)"
+        , containerRestart = RestartNo
+        , containerWantedBy = Nothing
         }
 
 -- | The unit the generator makes out of this container's file.
@@ -198,13 +242,16 @@ renderLabelled fingerprint c =
             , ["", "[Container]"]
             , ["ContainerName=" <> Podman.getContainerName c.containerName]
             , ["Image=" <> c.containerImage]
+            , ["Exec=" <> Text.unwords (map Systemd.literalArg c.containerExec) | not (null c.containerExec)]
             , ["Label=" <> quadletLabel <> "=" <> f | f <- maybeToList fingerprint]
             , ["EnvironmentFile=" <> Text.pack f | f <- maybeToList c.containerEnvFile]
             , ["PublishPort=" <> port p | p <- c.containerPorts]
             , ["Volume=" <> volume v | v <- c.containerVolumes]
             , ["Network=" <> n | n <- maybeToList c.containerNetwork]
             , ["PodmanArgs=--authfile=" <> Text.pack (Podman.getAuthFile a) | a <- maybeToList c.containerAuthFile]
-            , ["", "[Service]", "Restart=" <> restart c.containerRestart]
+            , ["", "[Service]"]
+            , ["Type=oneshot" | c.containerLifetime == RunToCompletion]
+            , ["Restart=" <> restart c.containerRestart]
             , ["TimeoutStartSec=" <> Text.pack (show t) | t <- maybeToList c.containerStartTimeout]
             , concat [["", "[Install]", "WantedBy=" <> w] | w <- maybeToList c.containerWantedBy]
             ]
@@ -284,6 +331,10 @@ containerProblems c =
         [ ["the container has no name" | Text.null name]
         , ["the container name is not a unit name: " <> name | Text.any (`elem` ("/ \t" :: String)) name]
         , ["the container has no image" | Text.null (Text.strip c.containerImage)]
+        , [ "a job cannot be restarted always: systemd refuses it for a oneshot unit"
+          | c.containerLifetime == RunToCompletion
+          , c.containerRestart == RestartAlways
+          ]
         , ["a line break in the " <> what | (what, value) <- fields, Text.any (`elem` ("\n\r" :: String)) value]
         ]
   where
@@ -292,6 +343,7 @@ containerProblems c =
     fields =
         mconcat
             [ [("name", name), ("image", c.containerImage), ("description", c.containerDescription)]
+            , [("command", w) | w <- c.containerExec]
             , [("after", a) | a <- c.containerAfter]
             , [("env file", Text.pack f) | f <- maybeToList c.containerEnvFile]
             , [("published port", p.portOnHost <> p.portInGuest) | p <- c.containerPorts]
@@ -330,15 +382,15 @@ quadletContainer ::
     Container ->
     Op
 quadletContainer r systemctl t c =
-    withCommand (Systemd.DaemonReload c.containerScope) $ \reload ->
-        withCommand (Systemd.Up c.containerScope target) $ \restart ->
-            withCommand (Systemd.Stop c.containerScope target) $ \stop ->
-                op "podman-quadlet" (deps [quadletFile, run t c]) $ \actions ->
+    withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
+        withCommand r systemctl (Systemd.Up c.containerScope target) $ \restart ->
+            withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
+                op "podman-quadlet" (deps [quadletFile r c, run t c]) $ \actions ->
                     actions
                         { help = "runs " <> c.containerImage <> " as " <> target
                         , notes =
                             [ "image: " <> c.containerImage
-                            , "quadlet: " <> declared
+                            , "quadlet: " <> declaredFingerprint c
                             ]
                         , ref = mkRef "systemd-unit" target
                         , check = checkContainer c
@@ -347,36 +399,81 @@ quadletContainer r systemctl t c =
                         }
   where
     target = serviceTarget c
+
+{- | Installs the quadlet of a job and starts nothing: 'quadletContainer' for
+a container that runs to completion ('containerJob').
+
+The check is 'Systemd.checkLoaded' on the generated service: systemd knows it
+and its source file has not changed since. There is no running container to
+ask, and none is wanted. @up@ is @daemon-reload@, after which a unit systemd
+still does not hold is thrown: the generator drops a file it cannot read
+without failing the reload, so that is the only place a refused quadlet
+shows. @down@ stops a run under way if there is one; the file's @down@
+removes the file and reloads.
+
+The image is pulled by the first /run/, not here. A job whose first run
+must not wait for a pull stands on a 'Podman.pullImage'.
+-}
+quadletJob ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' Container ->
+    Container ->
+    Op
+quadletJob r systemctl t c =
+    withCommand r systemctl (Systemd.DaemonReload c.containerScope) $ \reload ->
+        withCommand r systemctl (Systemd.Stop c.containerScope target) $ \stop ->
+            op "podman-quadlet-job" (deps [quadletFile r c, run t c]) $ \actions ->
+                actions
+                    { help = "installs the job " <> target <> " running " <> c.containerImage <> ", without running it"
+                    , notes =
+                        [ "image: " <> c.containerImage
+                        , "quadlet: " <> declaredFingerprint c
+                        ]
+                    , ref = mkRef "systemd-unit" target
+                    , check = Systemd.checkLoaded c.containerScope target
+                    , up = Job.reloadAndRequireLoaded c.containerScope target reload
+                    , down = Job.stopIfKnown c.containerScope target stop
+                    }
+  where
+    target = serviceTarget c
+
+withCommand ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Systemd.SystemCtlCall ->
+    (IO () -> Op) ->
+    Op
+withCommand r systemctl cmd f =
+    let
+        g :: (Reporter Binary.Report -> IO ()) -> Op
+        g callbin = f (callbin (contramap (Systemd.CallSystemCtl cmd) r))
+     in
+        withBinary systemctl Systemd.callSystemctl cmd g
+
+{- | What the declaration alone says the file is. The file node's own
+contents are an @IO Text@ once anything is watched, which has no content
+fingerprint, so without this a re-declaration under @serve@ that only changes
+the image would leave both nodes looking unchanged.
+-}
+declaredFingerprint :: Container -> Text
+declaredFingerprint c = FS.hashBytes (Text.encodeUtf8 (renderContainer c))
+
+{- | The quadlet file's node: 'FS.filecontents' with two changes, both to
+what it stands on rather than to the file. 'ownFile' is applied to the file
+node alone: an 'fmap' over the 'Op' reaches every node of its graph, and once
+reached the enclosing directory, which then carried this container's notes
+(two quadlets sharing the directory were a 'Conflicting' pair) and its
+reload. And the directory is 'unitDir', not 'FS.dir', whose @down@ refuses a
+non-empty directory: the generator's directory holds every quadlet on the
+machine, so tearing one down failed whenever another was there.
+-}
+quadletFile :: Reporter Systemd.Report -> Container -> Op
+quadletFile r c =
+    let file = FS.filecontents (FS.FileContents path (renderQuadlet c))
+     in file{node = fmap ownFile file.node, predecessors = deps [unitDir]}
+  where
     path = quadletPath c
-    r' cmd = contramap (Systemd.CallSystemCtl cmd) r
-
-    withCommand cmd f =
-        let
-            g :: (Reporter Binary.Report -> IO ()) -> Op
-            g callbin = f (callbin (r' cmd))
-         in
-            withBinary systemctl Systemd.callSystemctl cmd g
-
-    -- What the declaration alone says the file is. The file node's own
-    -- contents are an @IO Text@ once anything is watched, which has no
-    -- content fingerprint, so without this a re-declaration under @serve@
-    -- that only changes the image would leave both nodes looking unchanged.
-    declared :: Text
-    declared = FS.hashBytes (Text.encodeUtf8 (renderContainer c))
-
-    -- 'FS.filecontents' with two changes, both to what it stands on rather
-    -- than to the file. 'ownFile' is applied to the file node alone: an
-    -- 'fmap' over the 'Op' reaches every node of its graph, and once reached
-    -- the enclosing directory, which then carried this container's notes (two
-    -- quadlets sharing the directory were a 'Conflicting' pair) and its
-    -- reload. And the directory is 'unitDir', not 'FS.dir', whose @down@
-    -- refuses a non-empty directory: the generator's directory holds every
-    -- quadlet on the machine, so tearing one down failed whenever another
-    -- was there.
-    quadletFile :: Op
-    quadletFile =
-        let file = FS.filecontents (FS.FileContents path (renderQuadlet c))
-         in file{node = fmap ownFile file.node, predecessors = deps [unitDir]}
 
     unitDir :: Op
     unitDir =
@@ -391,7 +488,7 @@ quadletContainer r systemctl t c =
     ownFile :: Extension -> Extension
     ownFile ext =
         ext
-            { notes = ext.notes <> ["quadlet: " <> declared]
+            { notes = ext.notes <> ["quadlet: " <> declaredFingerprint c]
             , up = do
                 let problems = containerProblems c
                 unless (null problems) $ throwIO (InvalidContainer path problems)
@@ -404,7 +501,7 @@ quadletContainer r systemctl t c =
                     Systemd.callSystemctl
                     (Systemd.DaemonReload c.containerScope)
                     ""
-                    (r' (Systemd.DaemonReload c.containerScope))
+                    (contramap (Systemd.CallSystemCtl (Systemd.DaemonReload c.containerScope)) r)
             }
 
 {- | 'Systemd.interpretShow' for a generated unit: @generated@ is the only
