@@ -2632,8 +2632,89 @@ cloudDnsRecordTests =
         assertEqual "" 1 (length (CloudDns.recordSetProblems (cname {CloudDns.recordData = ["a.example.net", "b.example.net"]})))
     , testCase "a record set that cannot be written fails its check whatever is live" $
         assertBool "" (isFailure (CloudDns.interpretRecordDescribe (a {CloudDns.recordName = "www.example.net"}) ExitSuccess (described 300 ["192.0.2.1", "192.0.2.2"])))
+    , testGroup "MX" mxTests
+    , testCase "A, AAAA, CNAME and TXT nodes are described as before MX existed" $ do
+        let node rs = only (CloudDns.recordSet silent ignoreTrack rs)
+            key :: CloudDns.RecordSet -> Text.Text -> (Text.Text, Text.Text, Text.Text, Text.Text)
+            key rs t = ("my-project", "example-zone", CloudDns.fqdn rs.recordName, t)
+            aaaa = a{CloudDns.recordType = CloudDns.AAAA, CloudDns.recordData = ["2001:DB8::1"]}
+        mapM_
+            ( \(rs, t, wantHelp, wantNotes) -> do
+                assertEqual "ref" (mkRef "gcp-dns-record" (key rs t)) (node rs).extension.ref
+                assertEqual "help" wantHelp (node rs).extension.help
+                assertEqual "notes" wantNotes (node rs).extension.notes
+            )
+            [ (a, "A", "sets DNS record A www.example.org. in zone example-zone", ["ttl 300", "192.0.2.1 192.0.2.2"])
+            , (aaaa, "AAAA", "sets DNS record AAAA www.example.org. in zone example-zone", ["ttl 300", "2001:db8::1"])
+            , (cname, "CNAME", "sets DNS record CNAME alias.example.org. in zone example-zone", ["ttl 300", "target.example.net."])
+            , (txt, "TXT", "sets DNS record TXT example.org. in zone example-zone", ["ttl 300", "second v=spf1 ip4:192.0.2.0/24,-all"])
+            ]
+        assertEqual "" "--rrdatas=2001:db8::1" (last (args (CloudDns.RecordSetsCreate aaaa)))
     ]
   where
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    mx = CloudDns.mxRecordSet zone "example.org" 3600 [CloudDns.MailExchanger 10 "mx1.mail.example.net", CloudDns.MailExchanger 20 "MX2.mail.example.net."]
+    mxTests =
+        [ testCase "a record set of exchangers is one datum per exchanger, the name dotted" $
+            assertEqual "" (CloudDns.RecordSet zone "example.org" CloudDns.MX 3600 ["10 mx1.mail.example.net.", "20 mx2.mail.example.net."]) mx
+        , testCase "create hands gcloud preference and server, at the apex" $
+            assertEqual
+                ""
+                ["dns", "record-sets", "create", "example.org.", "--zone", "example-zone", "--type", "MX", "--project", "my-project", "--ttl", "3600", "--rrdatas=10 mx1.mail.example.net.,20 mx2.mail.example.net."]
+                (args (CloudDns.RecordSetsCreate mx))
+        , testCase "a datum written by hand is sent in the same form" $
+            assertEqual
+                ""
+                (args (CloudDns.RecordSetsCreate mx))
+                (args (CloudDns.RecordSetsCreate mx{CloudDns.recordData = [" 10   MX1.mail.example.net", "20\tmx2.mail.example.net."]}))
+        , testCase "describe and delete name the type" $ do
+            assertEqual "" ["--type", "MX"] (take 2 (drop 6 (args (CloudDns.RecordSetsDescribe mx))))
+            assertEqual "" ["--type", "MX"] (take 2 (drop 6 (args (CloudDns.RecordSetsDelete mx))))
+        , testCase "a subdomain takes one too" $ do
+            let sub = CloudDns.mxRecordSet zone "bounce.example.org" 300 [CloudDns.MailExchanger 10 "feedback.mail.example.net"]
+            assertEqual "" [] (CloudDns.recordSetProblems sub)
+            assertEqual "" "bounce.example.org." (args (CloudDns.RecordSetsCreate sub) !! 3)
+        , testCase "read-back compares whatever the order, the dot and the case" $ do
+            assertEqual "" Success (CloudDns.interpretRecordDescribe mx ExitSuccess (described 3600 ["20 mx2.mail.example.net.", "10 mx1.mail.example.net."]))
+            assertEqual "" Success (CloudDns.interpretRecordDescribe mx ExitSuccess (described 3600 ["20 MX2.mail.example.net", "10  mx1.mail.example.net"]))
+        , testCase "another preference, a missing exchanger or an extra one is a failure naming both sets" $ do
+            case CloudDns.interpretRecordDescribe mx ExitSuccess (described 3600 ["10 mx1.mail.example.net.", "30 mx2.mail.example.net."]) of
+                Failure why -> do
+                    assertBool (Text.unpack why) ("30 mx2.mail.example.net." `Text.isInfixOf` why)
+                    assertBool (Text.unpack why) ("20 mx2.mail.example.net." `Text.isInfixOf` why)
+                other -> assertBool (show other) False
+            assertBool "" (isFailure (CloudDns.interpretRecordDescribe mx ExitSuccess (described 3600 ["10 mx1.mail.example.net."])))
+            assertBool "" (isFailure (CloudDns.interpretRecordDescribe mx ExitSuccess (described 3600 ["10 mx1.mail.example.net.", "20 mx2.mail.example.net.", "30 mx3.mail.example.net."])))
+            assertBool "" (isFailure (CloudDns.interpretRecordDescribe mx ExitSuccess (described 300 ["10 mx1.mail.example.net.", "20 mx2.mail.example.net."])))
+        , testCase "parseMxDatum reads a preference and a name, and nothing else" $ do
+            assertEqual "" (Just (CloudDns.MailExchanger 10 "mail.example.org.")) (CloudDns.parseMxDatum "10 Mail.example.org")
+            assertEqual "" (Just (CloudDns.MailExchanger 0 ".")) (CloudDns.parseMxDatum "0 .")
+            mapM_
+                (\d -> assertEqual (Text.unpack d) Nothing (CloudDns.parseMxDatum d))
+                ["mail.example.org", "10", "", "ten mail.example.org", "-1 mail.example.org", "10 mail.example.org extra", "1234567 mail.example.org"]
+        , testCase "a datum that is not an exchanger, a preference too large, an address, a server twice are refused" $ do
+            assertEqual "" [] (CloudDns.recordSetProblems mx)
+            assertEqual "" [] (CloudDns.recordSetProblems (CloudDns.mxRecordSet zone "example.org" 300 [CloudDns.MailExchanger 0 "."]))
+            let problems ds = length (CloudDns.recordSetProblems mx{CloudDns.recordData = ds})
+            assertEqual "" 1 (problems [])
+            assertEqual "" 1 (problems ["mail.example.net"])
+            assertEqual "" 1 (problems ["70000 mail.example.net"])
+            assertEqual "" 1 (problems ["10 192.0.2.1"])
+            assertEqual "" 1 (problems ["10 2001:db8::1"])
+            assertEqual "" 1 (problems ["10 mail.example.net", "20 MAIL.example.net."])
+            assertEqual "" 1 (problems ["0 .", "10 mail.example.net"])
+            assertEqual "" 1 (problems ["10 ."])
+            assertBool "" (isFailure (CloudDns.interpretRecordDescribe mx{CloudDns.recordData = ["mail.example.net"]} ExitSuccess (described 3600 ["mail.example.net"])))
+        , testCase "the node is keyed on name and type, exchangers in the notes" $ do
+            let node rs = only (CloudDns.recordSet silent ignoreTrack rs)
+            assertEqual "" (mkRef "gcp-dns-record" ("my-project" :: Text.Text, "example-zone" :: Text.Text, "example.org." :: Text.Text, "MX" :: Text.Text)) (node mx).extension.ref
+            assertEqual "" "sets DNS record MX example.org. in zone example-zone" (node mx).extension.help
+            assertEqual "" ["ttl 3600", "10 mx1.mail.example.net. 20 mx2.mail.example.net."] (node mx).extension.notes
+            assertEqual "" (node mx).extension.notes (node mx{CloudDns.recordData = reverse mx.recordData}).extension.notes
+            assertBool "" ((node mx).extension.ref /= (node txt).extension.ref)
+        ]
     zone = CloudDns.ManagedZone "example-zone" (Core.Project "my-project") "example.org" "a zone"
     a = CloudDns.RecordSet zone "www.example.org" CloudDns.A 300 ["192.0.2.1", "192.0.2.2"]
     cname = CloudDns.RecordSet zone "alias.example.org." CloudDns.CNAME 300 ["target.example.net"]
