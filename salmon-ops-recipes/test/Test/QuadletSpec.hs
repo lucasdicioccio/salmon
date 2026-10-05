@@ -17,6 +17,8 @@ module Test.QuadletSpec (tests) where
 
 import qualified Data.ByteString.Lazy.Char8 as LC8
 import qualified Data.Map.Strict as Map
+import Control.Exception (SomeException, try)
+import Data.Bits ((.&.))
 import Data.Foldable (toList)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef, newIORef, readIORef)
 import Data.List (isInfixOf, sort)
@@ -25,11 +27,13 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
-import System.Directory (doesFileExist)
+import System.Directory (createDirectory, doesDirectoryExist, doesFileExist, doesPathExist)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
+import System.Posix.Files (fileMode, getFileStatus, setFileMode)
+import System.Posix.User (getEffectiveUserID)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -57,6 +61,7 @@ tests =
         , testGroup "refusals" problemTests
         , testGroup "check" checkTests
         , testGroup "node" nodeTests
+        , testGroup "bind volumes" bindTests
         , testGroup "readiness" readinessTests
         , testGroup "generator" generatorTests
         , testGroup "instance login" loginTests
@@ -371,6 +376,172 @@ nodeTests =
     notesOf o = fmap (\act -> act.extension.notes) (opAct o)
     helpOf o = fmap (\act -> act.extension.help) (opAct o)
 
+{- | 'Quadlet.containerBinds': what is rendered, what is refused, where the
+directory's node sits, and the node itself against a scratch directory (no
+podman, no systemd).
+-}
+bindTests :: [TestTree]
+bindTests =
+    [ testCase "a declaration with no binds is rendered, keyed and described as it was, with no node added" $ do
+        -- "a full container, key by key" pins the text and "a declaration
+        -- that sets no stamp" its hash; this is the rest of the graph
+        assertEqual "" [] app.containerBinds
+        assertEqual "" [] (map shorthandOf (Quadlet.hostDirNodes app))
+        assertEqual
+            ""
+            ["file-contents", "podman-quadlet", "podman-quadlet-dir", "podman-quadlet-image"]
+            (sort (shorthands (node app)))
+        assertEqual "" 1 (length (filter ("Volume=" `Text.isPrefixOf`) (Text.lines (Quadlet.renderContainer app))))
+    , testCase "a bind is one more Volume line, after the plain ones, with its options" $ do
+        let c = app{Quadlet.containerBinds = [(Quadlet.bind "/srv/pg" "/var/lib/postgresql/data"){Quadlet.bindChown = True, Quadlet.bindRelabel = Just Quadlet.RelabelPrivate}]}
+        assertEqual
+            ""
+            ["Volume=/srv/app:/data:ro", "Volume=/srv/pg:/var/lib/postgresql/data:rw,U,Z"]
+            (filter ("Volume=" `Text.isPrefixOf`) (Text.lines (Quadlet.renderContainer c)))
+        assertEqual
+            "the bind is not the only difference"
+            (Text.lines (Quadlet.renderContainer app))
+            (filter (/= "Volume=/srv/pg:/var/lib/postgresql/data:rw,U,Z") (Text.lines (Quadlet.renderContainer c)))
+    , testCase "the options are spelled as podman spells them" $ do
+        let b = Quadlet.bind "/srv/pg" "/data"
+        assertEqual "" "/srv/pg:/data:rw" (Quadlet.renderBind b)
+        assertEqual "" "/srv/pg:/data:ro" (Quadlet.renderBind b{Quadlet.bindMode = Podman.ReadOnly})
+        assertEqual "" "/srv/pg:/data:rw,U" (Quadlet.renderBind b{Quadlet.bindChown = True})
+        assertEqual "" "/srv/pg:/data:rw,z" (Quadlet.renderBind b{Quadlet.bindRelabel = Just Quadlet.RelabelShared})
+        assertEqual "" "/srv/pg:/data:ro,Z" (Quadlet.renderBind b{Quadlet.bindMode = Podman.ReadOnly, Quadlet.bindRelabel = Just Quadlet.RelabelPrivate})
+    , testCase "the directory's owner and mode are not in the quadlet, so stating them restarts nothing" $ do
+        let with d = app{Quadlet.containerBinds = [(Quadlet.bind "/srv/pg" "/data"){Quadlet.bindCreate = d}]}
+            stated = Just Quadlet.HostDir{Quadlet.hostDirOwner = Just "70:70", Quadlet.hostDirMode = Just "0700"}
+        assertEqual "" (Quadlet.renderContainer (with Nothing)) (Quadlet.renderContainer (with stated))
+        assertEqual "" (notesOf (node (with Nothing))) (notesOf (node (with stated)))
+    , testCase "a well-formed bind has no problems" $ do
+        assertEqual "" [] (Quadlet.bindProblems (Quadlet.bind "/srv/pg" "/data"))
+        assertEqual
+            ""
+            []
+            ( Quadlet.containerProblems
+                app{Quadlet.containerBinds = [(Quadlet.bind "/srv/pg" "/data"){Quadlet.bindCreate = Just (Quadlet.HostDir (Just "postgres:postgres") (Just "750"))}]}
+            )
+    , testCase "a relative path, a colon, an owner beside :U, a mode that is not octal are refused" $ do
+        let b = Quadlet.bind "/srv/pg" "/data"
+            owned o = b{Quadlet.bindCreate = Just Quadlet.hostDir{Quadlet.hostDirOwner = Just o}}
+            moded m = b{Quadlet.bindCreate = Just Quadlet.hostDir{Quadlet.hostDirMode = Just m}}
+            refused what x = assertBool what (not (null (Quadlet.bindProblems x)))
+        refused "a volume name" b{Quadlet.bindHostPath = "pgdata"}
+        refused "a relative guest path" b{Quadlet.bindGuestPath = "data"}
+        refused "a colon in the host path" b{Quadlet.bindHostPath = "/srv/pg:ro"}
+        refused "an owner and :U" (owned "70:70"){Quadlet.bindChown = True}
+        refused "an empty owner" (owned "")
+        refused "an owner that is an option" (owned "-R")
+        refused "an owner of two words" (owned "postgres postgres")
+        refused "a symbolic mode" (moded "u+rwx")
+        refused "a mode of two digits" (moded "75")
+        refused "a mode with a 9" (moded "0790")
+        assertBool "a line break in a bind was not refused" $
+            not (null (Quadlet.containerProblems app{Quadlet.containerBinds = [b{Quadlet.bindGuestPath = "/data\nImage=evil"}]}))
+        assertBool "one directory created two ways was not refused" $
+            not (null (Quadlet.containerProblems app{Quadlet.containerBinds = [owned "70:70", (moded "0700"){Quadlet.bindGuestPath = "/other"}]}))
+    , testCase "the quadlet file stands on the directory, for a service and for a job" $ do
+        let binds = [Quadlet.bind "/srv/pg" "/data"]
+            job = (Quadlet.containerJob (Podman.ContainerName "job") "app:v3" ["run"]){Quadlet.containerBinds = binds}
+            standing o = do
+                let dag = Dag.foldDag Dag.sameRepresentative (evalDeps o)
+                    refsOf short = [r | (r, act) <- Map.toList (Dag.dagNodes dag), act.shorthand == short]
+                dirRef <- one "bind directory node" (refsOf "podman-quadlet-bind-dir")
+                file <- one "file node" (refsOf "file-contents")
+                assertBool "the file does not wait for the directory" $
+                    dirRef `elem` toList (Map.findWithDefault mempty file (Dag.dagDependencies dag))
+                assertEqual "a conflict" 0 (length (Dag.dagConflicts dag))
+        standing (node app{Quadlet.containerBinds = binds})
+        standing (Quadlet.quadletJob silent ignoreTrack ignoreTrack job)
+    , testCase "only a bind that says so gets a directory node, and one path gets one" $ do
+        let b = Quadlet.bind "/srv/pg" "/data"
+            c = app{Quadlet.containerBinds = [b, b{Quadlet.bindGuestPath = "/again"}, (Quadlet.bind "/srv/theirs" "/x"){Quadlet.bindCreate = Nothing}]}
+        assertEqual "" 1 (length (Quadlet.hostDirNodes c))
+        assertEqual "" [Just (mkRef "podman-quadlet-bind-dir" ("/srv/pg" :: FilePath))] (map refOf (Quadlet.hostDirNodes c))
+    , testCase "two containers binding one directory the same way share its node" $ do
+        let binds = [Quadlet.bind "/srv/shared" "/data"]
+            a = app{Quadlet.containerBinds = binds}
+            b = a{Quadlet.containerName = Podman.ContainerName "other"}
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [node a, node b]) id))
+        assertEqual "" 1 (length [() | act <- Map.elems (Dag.dagNodes dag), act.shorthand == "podman-quadlet-bind-dir"])
+        assertEqual "the shared directory was described two ways" 0 (length (Dag.dagConflicts dag))
+    , testCase "the directory's verdict: there, something else there, missing" $ do
+        assertEqual "" Success (Quadlet.interpretHostDir "/srv/pg" True True)
+        assertBool "" (isFailure (Quadlet.interpretHostDir "/srv/pg" False True))
+        assertBool "" (isFailure (Quadlet.interpretHostDir "/srv/pg" False False))
+        assertEqual "" ["--", "70:70", "/srv/pg"] (Quadlet.chownArgs "70:70" "/srv/pg")
+    , testCase "a missing directory is created with its parents and its mode, then skipped" $ withTempDir $ \tmp -> do
+        let path = tmp </> "data" </> "pg"
+        act <- dirAct path Quadlet.hostDir{Quadlet.hostDirMode = Just "0750"}
+        act.extension.check >>= assertBool "a missing directory is satisfied" . isFailure
+        act.extension.up
+        modeOf path >>= assertEqual "" 0o750
+        act.extension.check >>= assertEqual "" Success
+        act.extension.up
+        modeOf path >>= assertEqual "a second up changed the mode" 0o750
+    , testCase "an existing directory is left with the mode it has" $ withTempDir $ \tmp -> do
+        let path = tmp </> "pg"
+        createDirectory path
+        setFileMode path 0o700
+        act <- dirAct path Quadlet.hostDir{Quadlet.hostDirMode = Just "0755"}
+        act.extension.check >>= assertEqual "" Success
+        act.extension.up
+        modeOf path >>= assertEqual "the image's own mode was overwritten" 0o700
+    , testCase "an owner one may name is applied at creation" $ withTempDir $ \tmp -> do
+        let path = tmp </> "pg"
+        uid <- getEffectiveUserID
+        act <- dirAct path Quadlet.hostDir{Quadlet.hostDirOwner = Just (Text.pack (show uid))}
+        act.extension.up
+        doesDirectoryExist path >>= assertBool "no directory"
+    , testCase "an owner that cannot be given fails up and leaves no directory behind" $ withTempDir $ \tmp -> do
+        let path = tmp </> "pg"
+        act <- dirAct path Quadlet.hostDir{Quadlet.hostDirOwner = Just "no-such-user-salmon-test"}
+        outcome <- try act.extension.up :: IO (Either SomeException ())
+        assertBool "up did not throw" (either (const True) (const False) outcome)
+        doesPathExist path >>= assertBool "the half-made directory would read as satisfied next pass" . not
+        act.extension.check >>= assertBool "" . isFailure
+    , testCase "a file where the directory should be is a failure, and up throws" $ withTempDir $ \tmp -> do
+        let path = tmp </> "pg"
+        writeFile path "not a directory"
+        act <- dirAct path Quadlet.hostDir
+        act.extension.check >>= assertBool "" . isFailure
+        outcome <- try act.extension.up :: IO (Either SomeException ())
+        assertBool "up did not throw" (either (const True) (const False) outcome)
+        readFile path >>= assertEqual "the file was touched" "not a directory"
+    , testCase "an invalid declaration creates nothing" $ withTempDir $ \tmp -> do
+        let path = tmp </> "pg"
+        act <- dirAct path Quadlet.hostDir{Quadlet.hostDirMode = Just "rwx"}
+        outcome <- try act.extension.up :: IO (Either SomeException ())
+        assertBool "up did not throw" (either (const True) (const False) outcome)
+        doesPathExist path >>= assertBool "a directory was made for a refused declaration" . not
+    , testCase "down leaves the directory and what is in it" $ withTempDir $ \tmp -> do
+        let path = tmp </> "pg"
+        act <- dirAct path Quadlet.hostDir
+        act.extension.up
+        writeFile (path </> "PG_VERSION") "16\n"
+        act.extension.down
+        readFile (path </> "PG_VERSION") >>= assertEqual "the data went with the container" "16\n"
+        act.extension.check >>= assertEqual "" Success
+    ]
+  where
+    one :: String -> [a] -> IO a
+    one _ [x] = pure x
+    one what xs = assertFailure ("not exactly one " <> what <> ": " <> show (length xs))
+    node = Quadlet.quadletContainer silent ignoreTrack ignoreTrack
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+    shorthandOf o = fmap (\act -> act.shorthand) (opAct o)
+    shorthands o = [act.shorthand | act <- Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o)))]
+    isFailure (Failure _) = True
+    isFailure _ = False
+    modeOf path = (.&. 0o7777) . fileMode <$> getFileStatus path
+    dirAct path d = do
+        let b = (Quadlet.bind path "/data"){Quadlet.bindCreate = Just d}
+        case Quadlet.hostDirNodes app{Quadlet.containerBinds = [b]} of
+            [o] -> maybe (assertFailure "the directory node has no actions") pure (opAct o)
+            os -> assertFailure ("not exactly one directory node: " <> show (length os))
+
 generatorPath :: FilePath
 generatorPath = "/usr/libexec/podman/quadlet"
 
@@ -399,6 +570,24 @@ generatorTests =
         assertBool said (("--label " <> Text.unpack (Quadlet.quadletLabel <> "=" <> fingerprint)) `isInfixOf` said)
         assertBool said ("europe-west1-docker.pkg.dev/acme/repo/app:v3" `isInfixOf` said)
         assertBool said (("SourcePath=" <> Quadlet.quadletPath c) `isInfixOf` said)
+    , testCase "podman's own generator passes a bind's options through" $ withGenerator $ withTempDir $ \dir -> do
+        let hostPath = dir </> "pg"
+            b = (Quadlet.bind hostPath "/var/lib/postgresql/data"){Quadlet.bindChown = True, Quadlet.bindRelabel = Just Quadlet.RelabelPrivate}
+            c = app{Quadlet.containerUnitDir = dir, Quadlet.containerEnvFile = Nothing, Quadlet.containerBinds = [b]}
+        Text.writeFile (Quadlet.quadletPath c) =<< Quadlet.renderQuadlet c
+        environment <- getEnvironment
+        (code, out, err) <-
+            readCreateProcessWithExitCode
+                (proc generatorPath ["--user", "--dryrun"]){env = Just (("QUADLET_UNIT_DIRS", dir) : environment)}
+                ""
+        let said = out <> err
+        case code of
+            ExitSuccess -> pure ()
+            ExitFailure n -> assertFailure ("the generator exited " <> show n <> ": " <> said)
+        assertBool said ("---app.service---" `isInfixOf` said)
+        assertBool said (("-v " <> hostPath <> ":/var/lib/postgresql/data:rw,U,Z") `isInfixOf` said)
+        assertBool said ("-v /srv/app:/data:ro" `isInfixOf` said)
+        doesPathExist hostPath >>= assertBool "the generator made the directory" . not
     ]
   where
     withGenerator :: IO () -> IO ()

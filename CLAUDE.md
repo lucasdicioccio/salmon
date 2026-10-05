@@ -1067,6 +1067,20 @@ unchanged, so a later pass sampling a crash-looping unit while `active` still sk
 container is gone by then); `Notify=healthy`/`HealthCmd` (podman 5) is not rendered; refused on a job. `awaitReady`
 runs in tests against a scripted unit and clock only: the real `systemctl` sampling, both probes and the node's `up`
 with readiness have not been run against a container.
+`containerBinds` (`Bind`, `bind HOST GUEST` to start from) is a bind mount that says what `containerVolumes` cannot:
+`:U`/`:z`/`:Z` after the access mode (`renderBind`, one more `Volume=` line after the plain ones), and a host
+directory created ahead of the quadlet file by `hostDirNode` (`podman-quadlet-bind-dir`, keyed on the path), with an
+optional owner (`chown`'s argument) and octal mode. Load-bearing: **owner and mode are applied at creation only** and
+the `check` is "a directory is there" — an image's entrypoint takes its data directory for its own user (postgres
+does), and a pass putting the declared owner back would pull it from under a running server; a failed chown/chmod
+removes the directory just made, so the next pass does not read it as satisfied; **`down` is nothing**, since the
+directory holds the container's data and `Filesystem.dir`'s `down` would block the file's teardown on a non-empty
+one; owner and mode are in the directory node's `notes`, never in the quadlet, so stating them restarts nothing; an
+empty `containerBinds` (the default) renders nothing and adds no node, pinned in `QuadletSpec`. `bindProblems` refuses
+a relative path, a colon, an owner beside `:U`, a non-octal mode. Not done: `UserNS=keep-id`, which is what would make
+a rootless container's data owned by the operator on the host (`:U` makes it a subordinate uid); a named volume.
+Layer 0 only (the node against a scratch directory, the options through the generator's dry-run): no container has
+been started on a bind declared this way, and a chown to another user, which needs root, has not been run.
 `Test/QuadletSpec.hs` is Layer 0 plus podman's generator in dry-run. `Test/QuadletUserSpec.hs` is Layer 2: the node
 itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/systemd`, `systemctl --user`, rootless
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/
