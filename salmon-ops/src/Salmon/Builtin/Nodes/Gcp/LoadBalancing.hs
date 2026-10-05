@@ -8,6 +8,7 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     BackendService (..),
     ServiceRef (..),
     BackendBucket (..),
+    BucketRoutes (..),
     Redirect (..),
     RedirectCode (..),
     redirectToHost,
@@ -151,6 +152,12 @@ The Cloud Storage bucket is the caller's, and is neither created nor removed
 here. GCP's documented limits for this kind are the caller's to meet too: a
 bucket in the balancer's region, readable by @allUsers@, no Cloud CDN, @GET@
 only.
+
+__A rule that routes to one is refused by default__ ('albProblems', see
+'BucketRoutes' for what was observed). The bucket declared with no rule
+naming it is not: the resource alone serves nothing and was not seen to harm
+anything, and keeping it declared is what lets a declaration drop the rule
+alone.
 -}
 data BackendBucket = BackendBucket
     { backendBucketName :: Text
@@ -159,13 +166,40 @@ data BackendBucket = BackendBucket
     }
     deriving (Eq, Show)
 
+{- | Whether a rule may route to a backend bucket ('NamedBucket').
+
+'RefuseBucketRoutes' is the default, after an outage. What was observed, on
+one live regional external Application Load Balancer (@europe-west1@,
+2026-10-05): with a single path matcher on a regional backend bucket in the
+URL map, every matcher on a backend service answered 503
+(@failed_to_pick_backend@) while the backends were @HEALTHY@ and the bucket's
+own host served. Importing the same map without that host rule and its
+matcher brought the service hosts back in 80 seconds; a matcher that only
+redirects stayed in the map and the services serve with it. The service
+rules are rendered identically with and without the bucket ('renderUrlMap'),
+so the difference is not in what this module writes about them. Why the
+platform does this is not known, and neither is whether a /global/ balancer
+(which this module does not make) does the same: nobody here has run one.
+
+The URL map's default service is always a backend service, so any bucket
+route on this balancer is such a mixed map.
+
+'AllowBucketRoutesKnownToHaveBrokenALiveBalancer' is for proving the
+contrary on a balancer that serves nothing that matters.
+-}
+data BucketRoutes
+    = RefuseBucketRoutes
+    | AllowBucketRoutesKnownToHaveBrokenALiveBalancer
+    deriving (Eq, Show)
+
 {- | Where a rule sends: a backend service, a backend bucket, or nowhere --
 a redirect the balancer answers itself.
 -}
 data ServiceRef
     = DefaultService
     | NamedService Text
-    | -- | a 'BackendBucket' of 'albBuckets', by its name
+    | -- | a 'BackendBucket' of 'albBuckets', by its name; refused unless
+      -- 'albBucketRoutes' says otherwise
       NamedBucket Text
     | RedirectTo Redirect
     deriving (Eq, Show)
@@ -345,6 +379,8 @@ data ApplicationLoadBalancer = ApplicationLoadBalancer
     -- ^ non-empty: also serve HTTPS on :443, with both forwarding rules on
     -- one reserved address (@\<balancer\>-ip@)
     , albBuckets :: [BackendBucket]
+    , albBucketRoutes :: BucketRoutes
+    -- ^ 'RefuseBucketRoutes' unless the outage it names is the thing to test
     , albHttp :: HttpListener
     -- ^ 'HttpCreatedOnce' unless something else is wanted of port 80
     }
@@ -367,6 +403,7 @@ httpLoadBalancer name project region backends hc =
         , albHostRules = []
         , albCertificates = []
         , albBuckets = []
+        , albBucketRoutes = RefuseBucketRoutes
         , albHttp = HttpCreatedOnce
         }
 
@@ -381,7 +418,8 @@ newtype InvalidLoadBalancer = InvalidLoadBalancer [Text]
 instance Exception InvalidLoadBalancer
 
 {- | What is wrong with a declaration, all of it rather than the first: a
-rule naming a service or a bucket nobody declared, two services or two
+rule naming a service or a bucket nobody declared, a rule routing to a
+backend bucket at all ('BucketRoutes'), two services or two
 buckets under one name, a redirect that redirects to the request itself, an
 HTTP listener option that leaves no listener, a host in two rules, a rule with no host or no path, the two certificate kinds
 mixed, a managed certificate with no domain, a timeout that is not positive,
@@ -434,6 +472,11 @@ albProblems alb =
            | NamedBucket n <- nub refs
            , n `notElem` buckets
            ]
+        <> [ bucketRouteRefusal alb routed
+           | alb.albBucketRoutes == RefuseBucketRoutes
+           , let routed = bucketRoutes alb
+           , not (null routed)
+           ]
         -- one that changes nothing answers every request with itself
         <> [ "a redirect names neither a host, a path nor HTTPS"
            | RedirectTo (Redirect Nothing Nothing False _) <- nub refs
@@ -464,6 +507,36 @@ albProblems alb =
             [ r.hostRuleService : map pathRuleService r.hostRulePaths
             | r <- alb.albHostRules
             ]
+
+{- | The rules of a declaration that route to a backend bucket, as (what the
+rule matches, the bucket's name in 'albBuckets').
+-}
+bucketRoutes :: ApplicationLoadBalancer -> [(Text, Text)]
+bucketRoutes alb =
+    concat
+        [ [("hosts " <> hosts, n) | NamedBucket n <- [r.hostRuleService]]
+            <> [ ("paths " <> Text.unwords p.pathRulePaths <> " of hosts " <> hosts, n)
+               | p <- r.hostRulePaths
+               , NamedBucket n <- [p.pathRuleService]
+               ]
+        | r <- alb.albHostRules
+        , let hosts = Text.unwords r.hostRuleHosts
+        ]
+
+{- | Why a bucket route is refused, and what to do about a balancer that
+already has one: the text of the 'albProblems' entry.
+-}
+bucketRouteRefusal :: ApplicationLoadBalancer -> [(Text, Text)] -> Text
+bucketRouteRefusal alb routed =
+    "a rule routes to a backend bucket ("
+        <> Text.intercalate ", " [what <> " to " <> bucketResource alb n | (what, n) <- routed]
+        <> "), which is refused on this regional load balancer: on a live one, a URL map with one"
+        <> " matcher on a regional backend bucket made every host on a backend service answer 503"
+        <> " (failed_to_pick_backend) while its backends were HEALTHY and the bucket's own host served."
+        <> " Nothing was changed by this pass. If the live URL map already has such a rule, drop the"
+        <> " rule from the declaration (its albBuckets entry may stay) and run a pass: the URL map is"
+        <> " re-imported without it, which is what restored the service hosts."
+        <> " albBucketRoutes = AllowBucketRoutesKnownToHaveBrokenALiveBalancer declares it anyway"
 
 {- | The balancer, declared once and unfolded into a node per resource.
 
@@ -641,6 +714,9 @@ albNotes alb =
         <> [ "hosts " <> Text.unwords r.hostRuleHosts <> ": " <> targetText alb r.hostRuleService
            | r <- alb.albHostRules
            , isRedirect r.hostRuleService
+           ]
+        <> [ "bucket routes allowed (known to have broken a live balancer)"
+           | alb.albBucketRoutes == AllowBucketRoutesKnownToHaveBrokenALiveBalancer
            ]
         <> case alb.albHttp of
             HttpCreatedOnce -> []

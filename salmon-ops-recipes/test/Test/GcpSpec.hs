@@ -1671,7 +1671,35 @@ lbTests =
             "one more resource than without"
             [LoadBalancing.BackendBucketPart "web-site-bucket"]
             (filter (`notElem` map LoadBalancing.partId (LoadBalancing.lbParts full)) (map LoadBalancing.partId (LoadBalancing.lbParts site)))
-        assertEqual "" [] (LoadBalancing.albProblems site)
+        assertEqual "" [] (LoadBalancing.albProblems (allowing site))
+    , testCase "a rule routing to a backend bucket is refused, naming the outage and the way out; the bucket alone is not" $ do
+        case LoadBalancing.albProblems site of
+            [t] ->
+                mapM_
+                    (\w -> assertBool (w <> "\n" <> Text.unpack t) (w `isInfixOf` Text.unpack t))
+                    [ "hosts static.example.org to web-site-bucket"
+                    , "refused on this regional load balancer"
+                    , "every host on a backend service answer 503 (failed_to_pick_backend) while its backends were HEALTHY and the bucket's own host served"
+                    , "drop the rule from the declaration (its albBuckets entry may stay) and run a pass: the URL map is re-imported without it"
+                    , "AllowBucketRoutesKnownToHaveBrokenALiveBalancer"
+                    ]
+            other -> assertBool (show other) False
+        -- a path rule is a route as much as a host rule's default is
+        let byPath = full{LoadBalancing.albBuckets = site.albBuckets, LoadBalancing.albHostRules = [LoadBalancing.HostRule ["app.example.org"] LoadBalancing.DefaultService [LoadBalancing.PathRule ["/static/*"] (LoadBalancing.NamedBucket "site")]]}
+        case LoadBalancing.albProblems byPath of
+            [t] -> assertBool (Text.unpack t) ("paths /static/* of hosts app.example.org to web-site-bucket" `isInfixOf` Text.unpack t)
+            other -> assertBool (show other) False
+        -- the two ways out of it: the rule dropped (bucket kept or not), and the redirects are no part of it
+        assertEqual "the bucket with no rule on it" [] (LoadBalancing.albProblems unrouted)
+        assertEqual "neither" [] (LoadBalancing.albProblems unrouted{LoadBalancing.albBuckets = []})
+        assertBool "the redirect rules stay" (length unrouted.albHostRules == length site.albHostRules - 1)
+        -- the opt-in is off unless spelled, and is said in the node's notes
+        assertEqual "" LoadBalancing.RefuseBucketRoutes (LoadBalancing.httpLoadBalancer "web" (Core.Project "p") (Core.Region "europe-west1") [] Nothing).albBucketRoutes
+        let notesOf a = concat [act.extension.notes | act <- Map.elems (Dag.dagNodes (dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack a))), act.extension.help == "application load balancer web"]
+        assertBool "" (any ("known to have broken a live balancer" `Text.isInfixOf`) (notesOf (allowing site)))
+        assertEqual "nothing more is said of a declaration that does not opt in" (notesOf site) (filter (not . ("known to have broken" `Text.isInfixOf`)) (notesOf (allowing site)))
+    , testCase "the opt-in changes no script: what is refused is rendered as what is allowed" $
+        assertEqual "" (pinned site) (pinned (allowing site))
     , testCase "what is wrong with a bucket, a redirect or a listener option is refused" $ do
         let redirect h path https = LoadBalancing.RedirectTo (LoadBalancing.Redirect h path https LoadBalancing.MovedPermanently)
         let bad =
@@ -2347,6 +2375,75 @@ lbTests =
                 assertEqual said Success v
                 again <- mutationsOf run mutations (createScript full)
                 assertEqual (unlines again) [] (deletes again)
+        , testCase "the outage: a live map with a bucket rule, the rule dropped from the declaration, one pass imports it away" $
+            withFakeGcloud $ \run mutations -> do
+                -- the balancer as a version without the leftovers part left it, bucket rule in the map
+                _ <- upBefore run mutations site
+                let liveMap = (\(_, out, _) -> out) <$> run "cat \"$FAKE_GCLOUD_STATE\"/url-maps.web-url-map"
+                before <- liveMap
+                assertBool before ("/backendBuckets/web-site-bucket" `isInfixOf` before && "static.example.org" `isInfixOf` before)
+                -- the declaration with that one rule dropped, its bucket still declared
+                stale <- partVerdict run unrouted LoadBalancing.UrlMapPart
+                case stale of
+                    [Failure t] -> assertBool (Text.unpack t) ("removal of undeclared host-rule static.example.org" `isInfixOf` Text.unpack t)
+                    other -> assertBool (show other) False
+                (said, whole) <- wholeVerdict run unrouted
+                assertBool said (isFailure whole)
+                -- the map's own node is enough, and does one thing
+                repaired <- upPart run mutations unrouted LoadBalancing.UrlMapPart
+                assertEqual "" ["url-maps import web-url-map"] repaired
+                after <- liveMap
+                assertBool after (not ("backendBuckets" `isInfixOf` after) && not ("static.example.org" `isInfixOf` after))
+                -- every service rule and the redirect are in it as declared
+                mapM_ (\w -> assertBool (w <> "\n" <> after) (w `isInfixOf` after)) ["app.example.org", "api.example.org", "/backendServices/web-slow-backend", "/backendServices/web-api-backend", "\"hosts\":[\"example.org\"]", "defaultUrlRedirect"]
+                fresh <- partVerdict run unrouted LoadBalancing.UrlMapPart
+                assertEqual "" [Success] fresh
+                -- the rest of the pass: the bucket, still declared, is kept and marked; nothing is deleted
+                rest <- mutationsOf run mutations (createScript unrouted)
+                assertEqual (unlines rest) [] (deletes rest)
+                assertBool (unlines rest) ("backend-buckets update web-site-bucket" `elem` rest)
+                (said', v) <- wholeVerdict run unrouted
+                assertEqual said' Success v
+                -- and a second pass imports (the map's "set" verb) the same map
+                again <- mutationsOf run mutations (createScript unrouted)
+                assertEqual (unlines again) ["url-maps import web-url-map"] (filter (\l -> "url-maps" `isInfixOf` l || "backend-buckets" `isInfixOf` l) again)
+                same <- liveMap
+                assertEqual "" after same
+                -- the bucket dropped from the declaration afterwards: marked by now, in no map, deleted
+                let bare = unrouted{LoadBalancing.albBuckets = []}
+                gone <- mutationsOf run mutations (createScript bare)
+                assertEqual (unlines gone) ["backend-buckets delete web-site-bucket"] (deletes gone)
+                (said'', v') <- wholeVerdict run bare
+                assertEqual said'' Success v'
+        , testCase "the outage: rule and bucket dropped at once, the map is imported first and the bucket goes only if it was ever marked" $ do
+            let bare = unrouted{LoadBalancing.albBuckets = []}
+            let relevant = filter (\l -> "url-maps" `isInfixOf` l || "backend-buckets" `isInfixOf` l)
+            -- marked (a pass of a version with the leftovers part ran while the bucket was declared)
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript site)
+                -- the cleanup alone, before the map is imported, holds: the live map still names the bucket
+                early <- partVerdict run bare leftovers
+                assertEqual "" [Unknown] early
+                held <- upPart run mutations bare leftovers
+                assertEqual "" [] held
+                made <- mutationsOf run mutations (createScript bare)
+                assertEqual (unlines made) ["url-maps import web-url-map", "backend-buckets delete web-site-bucket"] (relevant made)
+                buckets <- listOf run "compute backend-buckets"
+                assertEqual "" [] buckets
+                (said, v) <- wholeVerdict run bare
+                assertEqual said Success v
+            -- never marked (dropped in the first pass of a version with the leftovers part)
+            withFakeGcloud $ \run mutations -> do
+                _ <- upBefore run mutations site
+                made <- mutationsOf run mutations (createScript bare)
+                assertEqual (unlines made) ["url-maps import web-url-map"] (relevant made)
+                (_, live, _) <- run "cat \"$FAKE_GCLOUD_STATE\"/url-maps.web-url-map"
+                assertBool live (not ("backendBuckets" `isInfixOf` live))
+                -- in no map any more, and left: nothing says it is this balancer's
+                buckets <- listOf run "compute backend-buckets"
+                assertEqual "" ["web-site-bucket"] buckets
+                (said, v) <- wholeVerdict run bare
+                assertEqual said Success v
         , testCase "leftovers: a host-set certificate given up for one under a fixed name goes after the proxy has moved, then its authorizations" $
             withFakeGcloud $ \run mutations -> do
                 let fixed = full{LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-fixed" ["app.example.org", "api.example.org"]]}
@@ -2581,6 +2678,26 @@ lbTests =
                     assertBool (Text.unpack act.extension.help) (either (const True) (const False) r)
                 )
                 (Map.elems (Dag.dagNodes (dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack bad))))
+        , testCase "a bucket route is every node's Failure and every node's refusal, before any call; without the rule, no node refuses" $ do
+            let nodesOf a = Map.elems (Dag.dagNodes (dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack a)))
+            -- no gcloud is reachable from these nodes' up (ignoreTrack) nor
+            -- needed by their check: a refusal is decided before either
+            mapM_
+                ( \act -> do
+                    v <- act.extension.check
+                    case v of
+                        Failure t -> assertBool (Text.unpack t) ("invalid load balancer: a rule routes to a backend bucket (hosts static.example.org to web-site-bucket)" `isInfixOf` Text.unpack t)
+                        other -> assertBool (Text.unpack act.extension.help <> ": " <> show other) False
+                    r <- try act.extension.up :: IO (Either LoadBalancing.InvalidLoadBalancer ())
+                    case r of
+                        Left (LoadBalancing.InvalidLoadBalancer [t]) -> assertBool (Text.unpack t) ("drop the rule from the declaration" `isInfixOf` Text.unpack t)
+                        other -> assertBool (Text.unpack act.extension.help <> ": " <> show other) False
+                )
+                (nodesOf site)
+            assertEqual "the URL map and the bucket are among them" 2 (length [() | act <- nodesOf site, act.extension.help `elem` ["URL map web-url-map", "backend bucket web-site-bucket"]])
+            -- the declaration that repairs: the same nodes, none refusing
+            assertEqual "" [] (LoadBalancing.albProblems unrouted)
+            assertEqual "" (length (nodesOf site)) (length (nodesOf unrouted))
         , testCase "each resource's scripts parse as bash" $
             mapM_
                 ( \sc -> do
@@ -2704,6 +2821,10 @@ lbTests =
                        , LoadBalancing.HostRule ["example.org"] (LoadBalancing.RedirectTo (LoadBalancing.redirectToHost www)) []
                        ]
             }
+    -- a declaration as somebody who means to try a bucket route would write it
+    allowing a = a{LoadBalancing.albBucketRoutes = LoadBalancing.AllowBucketRoutesKnownToHaveBrokenALiveBalancer}
+    -- 'site' with the one rule that routes to the bucket dropped: bucket still declared, redirects kept
+    unrouted = site{LoadBalancing.albHostRules = filter ((/= ["static.example.org"]) . LoadBalancing.hostRuleHosts) site.albHostRules}
     listening how = full{LoadBalancing.albHttp = how}
     leftovers = LoadBalancing.LeftoversPart
     -- every resource's up but the leftovers part's, and that part's alone
@@ -2769,6 +2890,7 @@ lbTests =
             , LoadBalancing.albHostRules = []
             , LoadBalancing.albCertificates = []
             , LoadBalancing.albBuckets = []
+            , LoadBalancing.albBucketRoutes = LoadBalancing.RefuseBucketRoutes
             , LoadBalancing.albHttp = LoadBalancing.HttpCreatedOnce
             }
 
