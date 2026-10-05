@@ -1163,6 +1163,10 @@ albSpec spec vm lb =
             [ LoadBalancing.ManagedCertificate (spec.prefix <> "-lb-cert") [host]
             | host <- hosts
             ]
+        , -- not exercised by the toy: no backend bucket, and port 80 as it
+          -- always was (a proxy created once on the balancer's own map)
+          LoadBalancing.albBuckets = []
+        , LoadBalancing.albHttp = LoadBalancing.HttpCreatedOnce
         }
   where
     hosts = maybe [] pure (httpsHost spec lb)

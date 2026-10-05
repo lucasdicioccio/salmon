@@ -557,9 +557,32 @@ leftover.
   is sent to: only that each declared host is in the map, and each declared
   timeout on its service. A path rule changed behind salmon is put back by
   the next `up` that runs for another reason, not noticed.
-- **No HTTP-to-HTTPS redirect, no client-facing TLS policy, no self-managed
-  certificate upload.** `:80` serves the same map as `:443`;
+- **No client-facing TLS policy, no self-managed certificate upload.**
   `ComputeCertificate` names a regional certificate somebody else made.
+- **Backend buckets, redirects and the HTTP listener option: not declared by
+  the toy, never run.** A rule may send to a backend bucket (`albBuckets`,
+  `NamedBucket`) or answer with a redirect (`RedirectTo`), and `albHttp` says
+  what port 80 does: by default what it always did (`:80` serves the same map
+  as `:443`, through a proxy created once and never set again), or
+  `ServeHttp`, `RedirectToHttps code`, `NoHttp`. All of it is exercised
+  against the stand-in `gcloud` only. What the scripts assume and nobody
+  recorded: that `compute backend-buckets create --region` with
+  `--load-balancing-scheme=EXTERNAL_MANAGED` makes something a regional URL
+  map accepts (the flags are in gcloud 573's `--help`; the call was not
+  made), and that such a map names it as
+  `.../regions/R/backendBuckets/NAME`; how `value(bucketName)` reads; that
+  `url-maps import` takes `urlRedirect`/`defaultUrlRedirect` with
+  `redirectResponseCode` as spelled, a path matcher with a redirect and no
+  default service, and a map with nothing but `defaultUrlRedirect`; that
+  `description` survives an import and reads back through
+  `value(description)` (the check of a map with a bucket or a redirect
+  compares it, so if it does not, that map reads as never in place); that a
+  regional proxy prints its map under `value(urlMap)` as a URL ending in the
+  map's name; that `target-http-proxies update --url-map` moves a proxy in
+  service. On the GCP side, also unknown: whether a regional backend bucket
+  serves `/` as `index.html` or a custom 404 page, and whether it answers
+  `HEAD`. A throwaway balancer with one bucket route, one redirect and
+  `RedirectToHttps` settles these.
 - **Replacing a certificate on a live balancer has never met a real
   project.** A `DomainSetCertificate` is named after its domain set, so a
   changed set is a new certificate beside the old one; the HTTPS proxy is
