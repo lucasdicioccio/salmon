@@ -109,6 +109,11 @@ adcTests =
         assertEqual "" Success (Core.interpretAdc ExitSuccess)
     , testCase "no token means ADC is not configured" $
         assertBool "" (isFailure (Core.interpretAdc (ExitFailure 1)))
+    , testCase "every gcloud invocation is non-interactive" $ do
+        -- no node's process reads the pass's standard input, so a prompt
+        -- could never be answered: gcloud is told not to ask.
+        assertEqual "" ["config", "get-value", "account", "--quiet"] (processArgs (Core.gcloudProc Core.activeAccountArgs))
+        assertEqual "said once, wherever the caller put it" ["x", "--quiet", "--project", "p"] (processArgs (Core.gcloudProc ["x", "--quiet", "--project", "p"]))
     ]
 
 -------------------------------------------------------------------------------
@@ -185,7 +190,7 @@ instanceTests =
     , testCase "stop is rendered like start" $
         assertEqual
             ""
-            (RawCommand "gcloud" ["compute", "instances", "stop", "toy-vm", "--zone", "europe-west1-b", "--project", "p"])
+            (RawCommand "gcloud" ["compute", "instances", "stop", "toy-vm", "--zone", "europe-west1-b", "--project", "p", "--quiet"])
             (cmdspec (prepare Compute.computeCommand (Compute.InstancesStop toyInstance)))
     ]
   where
@@ -230,6 +235,7 @@ instanceScopeTests =
             , "--metadata-from-file", "startup-script=/tmp/w/startup-script.sh"
             , "--address", "toy-ip"
             , "--tags", "toy-ssh"
+            , "--quiet"
             ]
             (createArgs inst)
         let act = node inst
@@ -239,10 +245,10 @@ instanceScopeTests =
     , testCase "declared scopes are passed as written, after everything else" $
         assertEqual
             ""
-            (createArgs inst <> ["--scopes", "storage-rw,https://www.googleapis.com/auth/logging.write"])
+            (init (createArgs inst) <> ["--scopes", "storage-rw,https://www.googleapis.com/auth/logging.write", "--quiet"])
             (createArgs (scoped ["storage-rw", "https://www.googleapis.com/auth/logging.write"]))
     , testCase "an empty declaration is no scope at all" $
-        assertEqual "" (createArgs inst <> ["--no-scopes"]) (createArgs (scoped []))
+        assertEqual "" (init (createArgs inst) <> ["--no-scopes", "--quiet"]) (createArgs (scoped []))
     , testCase "declared scopes are the same node, described differently" $ do
         assertEqual "ref" (node inst).extension.ref (node (scoped ["storage-rw"])).extension.ref
         assertEqual "help" (node inst).extension.help (node (scoped ["storage-rw"])).extension.help
@@ -261,7 +267,7 @@ instanceScopeTests =
     , testCase "the scopes are asked for in one describe" $
         assertEqual
             ""
-            ["compute", "instances", "describe", "toy-vm", "--format=value(serviceAccounts[].scopes)", "--zone", "europe-west1-b", "--project", "p"]
+            ["compute", "instances", "describe", "toy-vm", "--format=value(serviceAccounts[].scopes)", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
             (processArgs (prepare Compute.computeCommand (Compute.InstancesDescribeScopes inst)))
     , testCase "live scopes are read whatever separates them" $ do
         let want = Set.fromList [rw, logging]
@@ -394,12 +400,12 @@ bucketSettingsTests =
         , testCase "the policy is read as JSON" $
             assertEqual
                 ""
-                ["storage", "buckets", "get-iam-policy", "gs://site-bucket", "--format", "json", "--project", "my-project"]
+                ["storage", "buckets", "get-iam-policy", "gs://site-bucket", "--format", "json", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsGetIamPolicy bkt))
         , testCase "add names the bucket, member and role" $
             assertEqual
                 ""
-                ["storage", "buckets", "add-iam-policy-binding", "gs://site-bucket", "--member", "allUsers", "--role", "roles/storage.legacyObjectReader", "--project", "my-project"]
+                ["storage", "buckets", "add-iam-policy-binding", "gs://site-bucket", "--member", "allUsers", "--role", "roles/storage.legacyObjectReader", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsAddIamBinding public))
         , testCase "remove differs from add by its verb only" $
             assertEqual
@@ -440,16 +446,16 @@ bucketSettingsTests =
         , testCase "set names the bucket and the file, clear the bucket alone" $ do
             assertEqual
                 ""
-                ["storage", "buckets", "update", "gs://site-bucket", "--lifecycle-file", "/tmp/rules.json", "--project", "my-project"]
+                ["storage", "buckets", "update", "gs://site-bucket", "--lifecycle-file", "/tmp/rules.json", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsSetLifecycle bkt "/tmp/rules.json"))
             assertEqual
                 ""
-                ["storage", "buckets", "update", "gs://site-bucket", "--clear-lifecycle", "--project", "my-project"]
+                ["storage", "buckets", "update", "gs://site-bucket", "--clear-lifecycle", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsClearLifecycle bkt))
         , testCase "the bucket is described raw, as JSON" $
             assertEqual
                 ""
-                ["storage", "buckets", "describe", "gs://site-bucket", "--raw", "--format", "json", "--project", "my-project"]
+                ["storage", "buckets", "describe", "gs://site-bucket", "--raw", "--format", "json", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsDescribeJson bkt))
         , testCase "the declared rules in any order are satisfied" $
             assertEqual "" Success (lifecycleVerdict [tiering, Storage.expireAfterDays 30] (describedWith "lifecycle" twoRules))
@@ -498,16 +504,16 @@ bucketSettingsTests =
         [ testCase "both settings are set" $
             assertEqual
                 ""
-                ["storage", "buckets", "update", "gs://site-bucket", "--web-main-page-suffix", "index.html", "--web-error-page", "404.html", "--project", "my-project"]
+                ["storage", "buckets", "update", "gs://site-bucket", "--web-main-page-suffix", "index.html", "--web-error-page", "404.html", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsSetWebsite site))
         , testCase "a setting not declared is cleared" $ do
             assertEqual
                 ""
-                ["storage", "buckets", "update", "gs://site-bucket", "--web-main-page-suffix", "index.html", "--clear-web-error-page", "--project", "my-project"]
+                ["storage", "buckets", "update", "gs://site-bucket", "--web-main-page-suffix", "index.html", "--clear-web-error-page", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsSetWebsite site{Storage.websiteNotFoundPage = Nothing}))
             assertEqual
                 ""
-                ["storage", "buckets", "update", "gs://site-bucket", "--clear-web-main-page-suffix", "--clear-web-error-page", "--project", "my-project"]
+                ["storage", "buckets", "update", "gs://site-bucket", "--clear-web-main-page-suffix", "--clear-web-error-page", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsSetWebsite (Storage.BucketWebsite bkt Nothing (Just " "))))
         , testCase "the declared settings are satisfied, under either name" $ do
             assertEqual "" Success (websiteVerdict site (describedWith "website" bothPages))
@@ -669,6 +675,7 @@ bucketContentsTests =
                 , "--dry-run"
                 , "--project"
                 , "my-project"
+                , "--quiet"
                 ]
                 (args (Storage.BucketsRsync (Storage.contentsRsync site htmlPass){Storage.rsyncDryRun = True}))
         , testCase "up runs what the check dry-ran" $
@@ -683,7 +690,7 @@ bucketContentsTests =
         , testCase "extraneous objects are left when not asked for, and the header is omitted when unset" $
             assertEqual
                 ""
-                ["storage", "rsync", "out/site", "gs://BUCKET/docs/v1", "--recursive", "--checksums-only", "--project", "my-project"]
+                ["storage", "rsync", "out/site", "gs://BUCKET/docs/v1", "--recursive", "--checksums-only", "--project", "my-project", "--quiet"]
                 ( map
                     (args . Storage.BucketsRsync . Storage.contentsRsync plain)
                     (Storage.contentsPasses plain)
@@ -692,7 +699,7 @@ bucketContentsTests =
         , testCase "emptying a destination is an empty directory synced over it" $
             assertEqual
                 ""
-                ["storage", "rsync", "/tmp/empty", "gs://BUCKET/docs/v1", "--recursive", "--delete-unmatched-destination-objects", "--checksums-only", "--project", "my-project"]
+                ["storage", "rsync", "/tmp/empty", "gs://BUCKET/docs/v1", "--recursive", "--delete-unmatched-destination-objects", "--checksums-only", "--project", "my-project", "--quiet"]
                 (args (Storage.BucketsRsync (Storage.emptyingRsync plain "/tmp/empty")))
         ]
     , testGroup
@@ -862,7 +869,7 @@ repoTests =
     [ testCase "gcloud artifacts takes --location, not --region" $
         assertEqual
             ""
-            ["artifacts", "repositories", "create", "my-repo", "--repository-format", "docker", "--location", "us-west1", "--project", "p"]
+            ["artifacts", "repositories", "create", "my-repo", "--repository-format", "docker", "--location", "us-west1", "--project", "p", "--quiet"]
             ( processArgs
                 ( prepare
                     ArtifactRegistry.artifactRegistryCommand
@@ -1000,27 +1007,27 @@ iamTests =
     , testCase "a secrets/ resource binds against the secrets group" $
         assertEqual
             ""
-            ["secrets", "add-iam-policy-binding", "my-secret", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/secretmanager.secretAccessor"]
+            ["secrets", "add-iam-policy-binding", "my-secret", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/secretmanager.secretAccessor", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.IamPolicyAddBinding secretBinding)))
     , testCase "an artifacts/repositories/ resource carries its location as a trailing flag, after the resource" $
         assertEqual
             ""
-            ["artifacts", "repositories", "add-iam-policy-binding", "my-repo", "--location", "us-west1", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/uploader"]
+            ["artifacts", "repositories", "add-iam-policy-binding", "my-repo", "--location", "us-west1", "--member", "serviceAccount:sa-1@p.iam.gserviceaccount.com", "--role", "roles/uploader", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.IamPolicyAddBinding repoBinding)))
     , testCase "a project-qualified repository passes --project rather than relying on gcloud's configured project" $
         assertEqual
             ""
-            ["artifacts", "repositories", "get-iam-policy", "my-repo", "--location", "us-west1", "--project", "p"]
+            ["artifacts", "repositories", "get-iam-policy", "my-repo", "--location", "us-west1", "--project", "p", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.IamPolicyGetBinding (binding {Iam.iamResource = "projects/p/locations/us-west1/repositories/my-repo"}))))
     , testCase "a project-qualified secret passes --project" $
         assertEqual
             ""
-            ["secrets", "get-iam-policy", "my-secret", "--project", "p"]
+            ["secrets", "get-iam-policy", "my-secret", "--project", "p", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.IamPolicyGetBinding (binding {Iam.iamResource = "projects/p/secrets/my-secret"}))))
     , testCase "a bucket resource is rendered as the gs:// URL gcloud storage requires" $
         assertEqual
             ""
-            ["storage", "buckets", "get-iam-policy", "gs://my-bucket"]
+            ["storage", "buckets", "get-iam-policy", "gs://my-bucket", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.IamPolicyGetBinding (binding {Iam.iamResource = "buckets/my-bucket"}))))
     , testCase "role describe succeeding means the custom role exists" $
         assertEqual "" Success (Iam.interpretRoleDescribe "registryUploader" ExitSuccess)
@@ -1029,12 +1036,12 @@ iamTests =
     , testCase "a custom role is created from its definition file" $
         assertEqual
             ""
-            ["iam", "roles", "create", "registryUploader", "--file", "infra/roles/registryUploader.yaml", "--project", "p"]
+            ["iam", "roles", "create", "registryUploader", "--file", "infra/roles/registryUploader.yaml", "--project", "p", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.RolesCreate role)))
     , testCase "a service account key is written to its target path" $
         assertEqual
             ""
-            ["iam", "service-accounts", "keys", "create", "secrets/gh-ci/uploader.key.json", "--iam-account", "uploader@p.iam.gserviceaccount.com", "--project", "p"]
+            ["iam", "service-accounts", "keys", "create", "secrets/gh-ci/uploader.key.json", "--iam-account", "uploader@p.iam.gserviceaccount.com", "--project", "p", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.ServiceAccountKeysCreate key)))
     ]
   where
@@ -1270,7 +1277,7 @@ lbTests =
     , testCase "the balancer's address is read off its forwarding rule" $
         assertEqual
             ""
-            ["compute", "forwarding-rules", "describe", "x-fw", "--format", "value(IPAddress)", "--region", "europe-west1", "--project", "my-project"]
+            ["compute", "forwarding-rules", "describe", "x-fw", "--format", "value(IPAddress)", "--region", "europe-west1", "--project", "my-project", "--quiet"]
             (processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbAddressDescribe (alb {LoadBalancing.albName = "x", LoadBalancing.albProject = Core.Project "my-project", LoadBalancing.albRegion = Core.Region "europe-west1"}))))
     , testCase "check script describes every sub-resource and asks for health" $ do
         let sc = Text.unpack (LoadBalancing.renderLbCheckScript alb)
@@ -1284,6 +1291,21 @@ lbTests =
     , testCase "create/delete run the script with bash, not as a gcloud subcommand" $ do
         assertBool "create" (isBash (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbCreate alb)))
         assertBool "delete" (isBash (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbDelete alb)))
+    , testCase "--quiet stays among gcloud's own flags, before a --" $
+        assertEqual "" ["compute", "ssh", "vm", "--quiet", "--", "rm", "--quiet"] (Core.quietly ["compute", "ssh", "vm", "--", "rm", "--quiet"])
+    , testCase "a script of gcloud calls turns prompts off before its first call" $
+        -- these calls do not go through gcloudProc, where the others get --quiet
+        mapM_
+            ( \cmd -> case processArgs (prepare LoadBalancing.loadBalancingCommand cmd) of
+                ["-c", sc] -> assertEqual (take 60 sc) (Text.unpack Core.disablePromptsLine) (takeWhile (/= '\n') sc)
+                other -> assertBool (show other) False
+            )
+            ( [LoadBalancing.LbCreate alb, LoadBalancing.LbCheck alb, LoadBalancing.LbHealth alb, LoadBalancing.LbDelete alb]
+                <> concat
+                    [ [LoadBalancing.LbPartUp alb p, LoadBalancing.LbPartCheck alb p, LoadBalancing.LbPartDown alb p]
+                    | p <- LoadBalancing.lbParts alb
+                    ]
+            )
     , testCase "scripts never swallow failures with || true" $ do
         let scripts = concatMap (processArgs . prepare LoadBalancing.loadBalancingCommand) [LoadBalancing.LbCreate alb, LoadBalancing.LbDelete alb]
         assertBool "" (not (any ("|| true" `isInfixOf`) scripts))
@@ -1443,7 +1465,7 @@ lbTests =
     , testCase "an authorization's record is asked for by location, as three fields" $
         assertEqual
             ""
-            ["certificate-manager", "dns-authorizations", "describe", "web-cert-app-example-org", "--format", "value(dnsResourceRecord.name,dnsResourceRecord.type,dnsResourceRecord.data)", "--location", "europe-west1", "--project", "p"]
+            ["certificate-manager", "dns-authorizations", "describe", "web-cert-app-example-org", "--format", "value(dnsResourceRecord.name,dnsResourceRecord.type,dnsResourceRecord.data)", "--location", "europe-west1", "--project", "p", "--quiet"]
             (processArgs (prepare LoadBalancing.loadBalancingCommand (LoadBalancing.LbDnsAuthorizationDescribe full "web-cert-app-example-org")))
     , testCase "the authorizations are named from the certificate and the domain" $
         assertEqual
@@ -2769,15 +2791,21 @@ lbTests =
                 ]
         ]
     -- everything a declaration renders, part by part and as a whole
+    -- the line turning gcloud's prompts off, which every script run by bash
+    -- now starts with, is not part of what these checksums were taken of
+    unprompted :: String -> String
+    unprompted sc = case break (== '\n') sc of
+        (first, _ : rest) | first == Text.unpack Core.disablePromptsLine -> rest
+        _ -> sc
     pinned :: LoadBalancing.ApplicationLoadBalancer -> String
     -- ... but for the leftovers part, which has tests of its own: its lines
     -- are taken out of the whole scripts, so that these checksums are of the
     -- scripts as they were before that part existed.
     pinned a =
         unlines
-            ( [ without LoadBalancing.partUp (createScript a)
+            ( [ without LoadBalancing.partUp (unprompted (createScript a))
               , without LoadBalancing.partCheck (Text.unpack (LoadBalancing.renderLbCheckScript a))
-              , deleteScript a
+              , unprompted (deleteScript a)
               , show (encode (LoadBalancing.renderUrlMap a))
               ]
                 <> concat
@@ -3089,7 +3117,7 @@ projectTests =
                         ( ResourceManager.ProjectsCreate
                             (ResourceManager.ProjectSpec (Core.Project "p") (ResourceManager.Folder "123") (Map.fromList [("purpose", "salmon-toy")]))
                         )
-        assertEqual "" ["projects", "create", "p", "--folder", "123", "--labels", "purpose=salmon-toy"] args
+        assertEqual "" ["projects", "create", "p", "--folder", "123", "--labels", "purpose=salmon-toy", "--quiet"] args
     ]
 
 -------------------------------------------------------------------------------
@@ -3099,11 +3127,11 @@ vmTests =
     [ testCase "an address is reserved regionally, and read back as a bare IP" $ do
         assertEqual
             "create"
-            ["compute", "addresses", "create", "toy-ip", "--region", "europe-west1", "--project", "p"]
+            ["compute", "addresses", "create", "toy-ip", "--region", "europe-west1", "--project", "p", "--quiet"]
             (processArgs (prepare Compute.computeCommand (Compute.AddressesCreate addr)))
         assertEqual
             "describe asks for the address itself, which is what a driver needs"
-            ["compute", "addresses", "describe", "toy-ip", "--region", "europe-west1", "--format=value(address)", "--project", "p"]
+            ["compute", "addresses", "describe", "toy-ip", "--region", "europe-west1", "--format=value(address)", "--project", "p", "--quiet"]
             (processArgs (prepare Compute.computeCommand (Compute.AddressesDescribe addr)))
     , testCase "a reserved address with no IP yet is not satisfied" $
         assertBool "" (isFailure (Compute.interpretAddressDescribe "toy-ip" ExitSuccess ""))
@@ -3116,6 +3144,7 @@ vmTests =
             , "--network", "default", "--allow", "tcp:22"
             , "--source-ranges", "0.0.0.0/0", "--project", "p"
             , "--target-tags", "toy-ssh"
+            , "--quiet"
             ]
             (processArgs (prepare Compute.computeCommand (Compute.FirewallCreate fw)))
     , testCase "an instance boots from an image family, in its publisher's project" $
@@ -3147,11 +3176,11 @@ vmTests =
     , testCase "an internal address is reserved in its subnet, at the declared literal" $ do
         assertEqual
             "pinned"
-            ["compute", "addresses", "create", "toy-int", "--region", "europe-west1", "--project", "p", "--subnet", "default", "--addresses", "10.132.0.10"]
+            ["compute", "addresses", "create", "toy-int", "--region", "europe-west1", "--project", "p", "--subnet", "default", "--addresses", "10.132.0.10", "--quiet"]
             (processArgs (prepare Compute.computeCommand (Compute.AddressesCreate (internal (Just "10.132.0.10")))))
         assertEqual
             "left to GCP"
-            ["compute", "addresses", "create", "toy-int", "--region", "europe-west1", "--project", "p", "--subnet", "default"]
+            ["compute", "addresses", "create", "toy-int", "--region", "europe-west1", "--project", "p", "--subnet", "default", "--quiet"]
             (processArgs (prepare Compute.computeCommand (Compute.AddressesCreate (internal Nothing))))
     , testCase "an internal address reserved at the declared literal is satisfied" $
         assertEqual "" Success (Compute.interpretAddress (internal (Just "10.132.0.10")) ExitSuccess "10.132.0.10")
@@ -3480,12 +3509,12 @@ cloudDnsTests =
     [ testCase "create names the zone, its DNS name with the trailing dot, a description and public visibility" $
         assertEqual
             ""
-            ["dns", "managed-zones", "create", "example-zone", "--dns-name", "example.org.", "--description", "a zone", "--visibility", "public", "--project", "my-project"]
+            ["dns", "managed-zones", "create", "example-zone", "--dns-name", "example.org.", "--description", "a zone", "--visibility", "public", "--project", "my-project", "--quiet"]
             (processArgs (prepare CloudDns.cloudDnsCommand (CloudDns.ZonesCreate zone)))
     , testCase "describe asks for JSON" $
         assertEqual
             ""
-            ["dns", "managed-zones", "describe", "example-zone", "--format", "json", "--project", "my-project"]
+            ["dns", "managed-zones", "describe", "example-zone", "--format", "json", "--project", "my-project", "--quiet"]
             (processArgs (prepare CloudDns.cloudDnsCommand (CloudDns.ZonesDescribe zone)))
     , testCase "delete is quiet" $
         assertEqual
@@ -3528,7 +3557,7 @@ cloudDnsRecordTests =
     [ testCase "create names the record, its zone, type, TTL and data" $
         assertEqual
             ""
-            ["dns", "record-sets", "create", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--ttl", "300", "--rrdatas=192.0.2.1,192.0.2.2"]
+            ["dns", "record-sets", "create", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--ttl", "300", "--rrdatas=192.0.2.1,192.0.2.2", "--quiet"]
             (args (CloudDns.RecordSetsCreate a))
     , testCase "update differs from create by its verb only" $
         assertEqual
@@ -3538,17 +3567,17 @@ cloudDnsRecordTests =
     , testCase "describe asks for JSON, by name and type" $
         assertEqual
             ""
-            ["dns", "record-sets", "describe", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--format", "json"]
+            ["dns", "record-sets", "describe", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--format", "json", "--quiet"]
             (args (CloudDns.RecordSetsDescribe a))
     , testCase "delete names the record and its type" $
         assertEqual
             ""
-            ["dns", "record-sets", "delete", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project"]
+            ["dns", "record-sets", "delete", "www.example.org.", "--zone", "example-zone", "--type", "A", "--project", "my-project", "--quiet"]
             (args (CloudDns.RecordSetsDelete a))
     , testCase "a CNAME's target gets its trailing dot" $
-        assertEqual "" "--rrdatas=target.example.net." (last (args (CloudDns.RecordSetsCreate cname)))
+        assertEqual "" ["--rrdatas=target.example.net."] (rrdataFlag (args (CloudDns.RecordSetsCreate cname)))
     , testCase "a TXT is quoted, and a comma in it moves the list separator" $
-        assertEqual "" "--rrdatas=^;^\"v=spf1 ip4:192.0.2.0/24,-all\";\"second\"" (last (args (CloudDns.RecordSetsCreate txt)))
+        assertEqual "" ["--rrdatas=^;^\"v=spf1 ip4:192.0.2.0/24,-all\";\"second\""] (rrdataFlag (args (CloudDns.RecordSetsCreate txt)))
     , testCase "the separator is one no datum contains" $ do
         assertEqual "" "a,b" (CloudDns.renderRrdatas ["a", "b"])
         assertEqual "" "^|^a,;|b" (CloudDns.renderRrdatas ["a,;", "b"])
@@ -3624,7 +3653,7 @@ cloudDnsRecordTests =
             , (cname, "CNAME", "sets DNS record CNAME alias.example.org. in zone example-zone", ["ttl 300", "target.example.net."])
             , (txt, "TXT", "sets DNS record TXT example.org. in zone example-zone", ["ttl 300", "second v=spf1 ip4:192.0.2.0/24,-all"])
             ]
-        assertEqual "" "--rrdatas=2001:db8::1" (last (args (CloudDns.RecordSetsCreate aaaa)))
+        assertEqual "" ["--rrdatas=2001:db8::1"] (rrdataFlag (args (CloudDns.RecordSetsCreate aaaa)))
     ]
   where
     only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
@@ -3637,7 +3666,7 @@ cloudDnsRecordTests =
         , testCase "create hands gcloud preference and server, at the apex" $
             assertEqual
                 ""
-                ["dns", "record-sets", "create", "example.org.", "--zone", "example-zone", "--type", "MX", "--project", "my-project", "--ttl", "3600", "--rrdatas=10 mx1.mail.example.net.,20 mx2.mail.example.net."]
+                ["dns", "record-sets", "create", "example.org.", "--zone", "example-zone", "--type", "MX", "--project", "my-project", "--ttl", "3600", "--rrdatas=10 mx1.mail.example.net.,20 mx2.mail.example.net.", "--quiet"]
                 (args (CloudDns.RecordSetsCreate mx))
         , testCase "a datum written by hand is sent in the same form" $
             assertEqual
@@ -3696,6 +3725,7 @@ cloudDnsRecordTests =
     txt = CloudDns.RecordSet zone "example.org" CloudDns.TXT 300 ["v=spf1 ip4:192.0.2.0/24,-all", "second"]
     args = processArgs . prepare CloudDns.cloudDnsCommand
     verb = take 1 . drop 2 . args
+    rrdataFlag = filter ("--rrdatas=" `isPrefixOf`)
     described :: Int -> [Text.Text] -> ByteString.ByteString
     described ttl rrdatas =
         LByteString.toStrict $

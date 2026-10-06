@@ -26,6 +26,8 @@ module Salmon.Builtin.Nodes.Binary (
     CommandIO (..),
     withBinaryIO,
     untrackedExecIO,
+    detachedStdin,
+    execDetached,
     Report (..),
     pattern CommandSuccess,
     isCommandSuccessful,
@@ -45,7 +47,7 @@ import Salmon.Op.Track
 import Salmon.Reporter
 
 import Control.Concurrent.Async (concurrently)
-import Control.Exception (Exception, IOException, throwIO, try)
+import Control.Exception (Exception, IOException, onException, throwIO, try)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as C8
 import Data.ByteString (ByteString)
@@ -60,7 +62,7 @@ import GHC.IO.Exception (ExitCode (..))
 import GHC.TypeLits (Symbol)
 
 import GHC.IO.Handle (Handle)
-import System.IO (IOMode (..), hClose, hIsEOF)
+import System.IO (IOMode (..), hClose, hIsEOF, openFile)
 import qualified System.IO as IO
 import System.Process (ProcessHandle, StdStream (..), createProcess, waitForProcess, withCreateProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
@@ -424,7 +426,54 @@ withBinaryIO t cmd arg consumeIO =
     let mk a = (untrackedExecIO cmd a, Binary)
      in tracking t mk arg consumeIO
 
+{- | Starts the command. A command that says nothing about its standard
+input gets @\/dev\/null@, not this process's own (see 'detachedStdin'); one
+that names a handle or asks for a pipe gets what it asked for.
+-}
 untrackedExecIO :: CommandIO x a ioarg -> a -> (ioarg -> IO RunningCommand)
 untrackedExecIO binary arg = \ioarg -> do
     p <- prepareIO binary arg ioarg
-    createProcess p
+    detachedStdin p createProcess
+
+{- | Runs a process-starting action on the given 'CreateProcess' with its
+standard input detached from this process's: where the process would
+/inherit/ it ('Inherit', the default of 'proc'), it reads @\/dev\/null@
+instead. A 'CreateProcess' that names its own input ('UseHandle',
+'CreatePipe', 'NoStream') is passed through untouched.
+
+No process started for a node may inherit the standard input of the pass
+that runs it. Under @run serve@ that input is the command channel (a
+terminal, a script, a fifo), so a child that prompts — a @gcloud@ asking
+whether to enable an API, an @ssh@ asking about a host key — blocks the pass
+with nothing in the reports saying a node is waiting on input, and competes
+with the loop's own reader for the bytes: it can eat a @quit@, and a line
+meant for the loop can answer its prompt. With @\/dev\/null@ a prompt reads
+end-of-file at once and the command fails or takes its default.
+
+It is @\/dev\/null@ rather than a closed descriptor ('NoStream') because a
+child whose descriptor 0 is closed hands that number to the next file it
+opens. 'untrackedExec' and friends need none of this: they give the child a
+pipe holding exactly the bytes the node passed, then close it.
+-}
+detachedStdin :: CreateProcess -> (CreateProcess -> IO a) -> IO a
+detachedStdin p start = case std_in p of
+    Inherit -> do
+        devnull <- openFile "/dev/null" ReadMode
+        -- 'createProcess' closes a 'UseHandle' handle in this process once
+        -- the child has it; closing twice is harmless.
+        (start p{std_in = UseHandle devnull} <* hClose devnull) `onException` hClose devnull
+    _ -> start p
+
+{- | Runs a command the way salmon runs its own — an empty standard input
+that is closed at once, a non-zero exit thrown as 'CommandFailed' — and hands
+back its standard output. For an @up@ or a @check@ written outside this
+library that would otherwise reach for 'System.Process.callProcess', which
+inherits the pass's standard input (see 'detachedStdin' for why that must
+not happen).
+-}
+execDetached :: CreateProcess -> IO ByteString
+execDetached p = do
+    (code, out, err) <- readCreateProcessWithExitCode p ""
+    case code of
+        ExitSuccess -> pure out
+        ExitFailure n -> throwIO (CommandFailed p n out err)

@@ -35,6 +35,8 @@ module Salmon.Builtin.Nodes.Gcp.Core (
 
     -- * CLI helpers
     gcloudProc,
+    quietly,
+    disablePromptsLine,
     withProject,
     withZone,
     withRegion,
@@ -316,9 +318,34 @@ afterEnableDelay = 10000000
 -------------------------------------------------------------------------------
 -- CLI helpers
 
--- | A bare @gcloud@ process with the given sub-command arguments.
+{- | A @gcloud@ process with the given sub-command arguments, and @--quiet@.
+
+Every invocation is non-interactive on purpose. No process a node starts
+reads the pass's standard input (see "Salmon.Builtin.Nodes.Binary".'Binary.detachedStdin'),
+so a prompt could never be answered anyway: without @--quiet@ gcloud prints
+it, reads end-of-file, and the node fails with the prompt's text (\"Would you
+like to enable and retry?\") for an error. With it, gcloud takes the default
+or says plainly that input was required.
+-}
 gcloudProc :: [String] -> CreateProcess
-gcloudProc args = proc "gcloud" args
+gcloudProc args = proc "gcloud" (quietly args)
+
+{- | Append @--quiet@ to a gcloud argument list unless it is already there.
+It goes among gcloud's own flags: before a @--@, after which the words are
+somebody else's (the remote command of a @gcloud compute ssh@).
+-}
+quietly :: [String] -> [String]
+quietly args
+    | "--quiet" `elem` flags = args
+    | otherwise = flags <> ["--quiet"] <> rest
+  where
+    (flags, rest) = break (== "--") args
+
+{- | The same for a script of @gcloud@ calls run by a shell, which
+'gcloudProc' never sees: the line to put first.
+-}
+disablePromptsLine :: Text
+disablePromptsLine = "export CLOUDSDK_CORE_DISABLE_PROMPTS=1"
 
 -- | Append @--project@ to a gcloud argument list.
 withProject :: Project -> [String] -> [String]

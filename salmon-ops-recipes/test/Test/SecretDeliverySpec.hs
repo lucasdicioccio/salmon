@@ -363,7 +363,7 @@ secretFileTests =
     [ testCase "reads the named version of the named secret" $
         assertEqual
             ""
-            ["secrets", "versions", "access", "7", "--secret", "db-password", "--project", "acme-prod"]
+            ["secrets", "versions", "access", "7", "--secret", "db-password", "--project", "acme-prod", "--quiet"]
             (argsOf (SecretManager.VersionsAccess (Core.Project "acme-prod") "db-password" "7"))
     , testCase "the node names the secret and the path, and its ref is the path" $
         case opAct (SecretManager.secretFile silent ignoreTrack file) of

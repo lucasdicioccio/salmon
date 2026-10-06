@@ -99,6 +99,7 @@ import System.Posix.Signals (Signal, sigKILL, sigTERM, signalProcessGroup)
 import System.Process (CreateProcess (..), Pid, ProcessHandle, StdStream (..), createProcess, getPid, getProcessExitCode, waitForProcess)
 
 import Salmon.Builtin.Extension
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Supervision (Micros (..), millis, seconds)
 import Salmon.Reporter
@@ -220,7 +221,9 @@ runDaemon r d out =
 
     spawn :: IO (Maybe Handle, Maybe Handle, ProcessHandle, Maybe Pid)
     spawn = do
-        (_, mout, merr, ph) <- createProcess cp
+        -- never the supervisor's own standard input: under @serve@ that is
+        -- the command channel, and a service reading it would eat commands.
+        (_, mout, merr, ph) <- Binary.detachedStdin cp createProcess
         pid <- getPid ph
         runReporter r (Spawned name pid)
         pure (mout, merr, ph, pid)

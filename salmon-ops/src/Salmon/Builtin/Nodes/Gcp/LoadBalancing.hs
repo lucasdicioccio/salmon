@@ -76,13 +76,13 @@ import qualified Data.Text.Encoding.Error as TextErr
 import GHC.IO.Exception (ExitCode (..))
 import Numeric (showHex)
 import System.Process.ByteString (readCreateProcessWithExitCode)
-import System.Process.ListLike (proc)
+import System.Process.ListLike (CreateProcess, proc)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
-import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject, withRegion)
+import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), disablePromptsLine, gcloudProc, withProject, withRegion)
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -937,6 +937,13 @@ data LoadBalancingCommand
     | LbDnsAuthorizationDescribe ApplicationLoadBalancer Text
     deriving (Show)
 
+{- | A script of @gcloud@ calls, run by @bash@ with gcloud's prompts turned
+off: these calls do not go through 'gcloudProc', which is where every other
+invocation gets its @--quiet@.
+-}
+bashScript :: Text -> CreateProcess
+bashScript script = proc "bash" ["-c", Text.unpack (disablePromptsLine <> "\n" <> script)]
+
 loadBalancingCommand :: Command "gcloud" LoadBalancingCommand
 loadBalancingCommand = Command $ \cmd -> case cmd of
     LbCreate alb ->
@@ -944,7 +951,7 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
         -- itself, not through 'gcloudProc' (which would run
         -- @gcloud bash -c ...@). 'Command' is still indexed by @"gcloud"@
         -- because that is the binary the script needs on @PATH@.
-        proc "bash" ["-c", Text.unpack (renderLbScript alb)]
+        bashScript (renderLbScript alb)
     LbDescribe alb ->
         gcloudProc $
             withProject alb.albProject
@@ -956,15 +963,15 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
                     ]
                 )
     LbCheck alb ->
-        proc "bash" ["-c", Text.unpack (renderLbCheckScript alb)]
+        bashScript (renderLbCheckScript alb)
     LbHealth alb ->
-        proc "bash" ["-c", Text.unpack (renderLbHealthScript alb)]
+        bashScript (renderLbHealthScript alb)
     LbPartUp alb part ->
-        proc "bash" ["-c", Text.unpack (renderPartUpScript alb part)]
+        bashScript (renderPartUpScript alb part)
     LbPartCheck alb part ->
-        proc "bash" ["-c", Text.unpack (renderPartCheckScript alb part)]
+        bashScript (renderPartCheckScript alb part)
     LbPartDown alb part ->
-        proc "bash" ["-c", Text.unpack (renderPartDownScript alb part)]
+        bashScript (renderPartDownScript alb part)
     LbAddressDescribe alb ->
         gcloudProc $
             withProject alb.albProject
@@ -993,7 +1000,7 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
                 , Text.unpack alb.albRegion.regionName
                 ]
     LbDelete alb ->
-        proc "bash" ["-c", Text.unpack (renderLbDeleteScript alb)]
+        bashScript (renderLbDeleteScript alb)
 
 serveHttps :: ApplicationLoadBalancer -> Bool
 serveHttps = not . null . albCertificates

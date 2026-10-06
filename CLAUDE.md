@@ -1808,6 +1808,23 @@ handling:
   `PostgresMigrations.remoteMigrateOpaqueSetup`'s continuation) must check the returned `Bool` and
   `throwIO` if it's `False` — the outer traversal has no other way to learn the nested one failed.
 
+**No process started for a node inherits the pass's standard input.** Under `run serve` that input
+is the command channel (a terminal, a script, a fifo): a child that prompts blocks the pass with
+nothing in the reports saying a node waits on input, and competes with the loop's reader for the
+bytes (it can eat a `quit`; a line meant for the loop can answer its prompt). `untrackedExec` and
+every `readCreateProcessWithExitCode p ""` already give the child a pipe that is closed at once.
+The two paths that called a bare `createProcess` did inherit, and now go through
+`Binary.detachedStdin`: `untrackedExecIO` (so `withBinaryIO`) and `Daemon.runDaemon`. It replaces
+`Inherit` with `/dev/null` (not `NoStream`: a closed descriptor 0 is handed to the child's next
+`open`) and leaves a `CreateProcess` that names its input (`UseHandle`, `CreatePipe`) alone. For an
+`up`/`check` written outside the library, `Binary.execDetached` is the replacement for
+`System.Process.callProcess`, which inherits. With no input to read, a prompt can only fail, so
+`Gcp.Core.gcloudProc` appends `--quiet` to every invocation (`quietly`, before any `--`) and the
+load-balancer scripts, which call `gcloud` from bash, start with `CLOUDSDK_CORE_DISABLE_PROMPTS=1`.
+`Test/BinarySpec.hs` and `Test/DaemonSpec.hs` ask real children what their descriptor 0 is. Nothing
+else in the four packages starts a process another way (no `callProcess`, no other `createProcess`).
+Not run against a real project: what each gcloud command does with its default under `--quiet`.
+
 ## The seed → spec → ops CLI protocol
 
 Every salmon binary (see `salmon-apps/src/Migrator.hs` as the worked example) exposes two
