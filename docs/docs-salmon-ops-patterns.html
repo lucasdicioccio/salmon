@@ -1,4 +1,4 @@
-<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Salmon ops patterns</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Salmon ops patterns"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Salmon ops patterns"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html"><meta property="og:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="article:published_time" content="2026-10-02T09:15:59Z"><meta name="article:modified_time" content="2026-10-02T09:15:59Z"><meta name="ks:article_json" content="/salmon/json/docs-salmon-ops-patterns.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-salmon-ops-patterns.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-02T09:15:59Z","datePublished":"2026-10-02T09:15:59Z","description":"This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine","headline":"Salmon ops patterns","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Salmon ops patterns</h1><p>On <span>Fri, 02 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 916 words, 2 code snippets, 1 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">6/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-salmon-core.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/salmon-ops-patterns.md"><code>resources/salmon-ops-patterns.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Salmon ops patterns</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Salmon ops patterns"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Salmon ops patterns"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html"><meta property="og:description" content="This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine"><meta name="article:published_time" content="2026-10-06T21:52:42Z"><meta name="article:modified_time" content="2026-10-06T21:52:42Z"><meta name="ks:article_json" content="/salmon/json/docs-salmon-ops-patterns.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-salmon-ops-patterns.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-06T21:52:42Z","datePublished":"2026-10-06T21:52:42Z","description":"This is a companion to [`howto-ops.md`](/docs-howto-ops.html): where that doc is a per-primitive cookbook (how to write one node, one `Op`, one CLI binary), this one collects recurring *shapes* worth reusing across recipes — patterns that combine","headline":"Salmon ops patterns","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-salmon-ops-patterns.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Salmon ops patterns</h1><p>On <span>Tue, 06 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1508 words, 4 code snippets, 1 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">6/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-salmon-core.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/salmon-ops-patterns.md"><code>resources/salmon-ops-patterns.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
 <h2 id="salmon-ops-patterns">Salmon ops patterns</h2>
 <p>This is a companion to <a href="/salmon/docs-howto-ops.html"><code>howto-ops.md</code></a>: where that doc is a
 per-primitive cookbook (how to write one node, one <code>Op</code>, one CLI binary),
@@ -115,4 +115,104 @@ look at what each plan selects after any change to the recipe.
 this way. The tagged-domain design in
 <code>specs/multi-user-privilege-separation.md</code> (L3) removes the glob and checks
 the cut.</p>
+<h3 id="pattern-secrets-are-files-somebody-else-put-there">Pattern: secrets are files somebody else put there</h3>
+<p>Recipes take a secret as a path to a file that already exists, and never as
+a value: a directive is printed in reports and piped on standard input, and
+a recipe that shipped its own secrets would have picked a transport for
+everyone using it. What puts the file there is a separate node the caller
+opts into, and there are two.</p>
+<p><strong>From the controlling machine, over ssh</strong> —
+<code>Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile</code>:</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a>SecretDelivery.uploadSecretFile clientOpts reporter Debian.ssh</span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a>    <span class="dt">SecretDelivery.SecretUpload</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a>        { uploadSource <span class="ot">=</span> <span class="st">&quot;secrets/app/db-password&quot;</span>        <span class="co">-- local, read at up time</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a>        , uploadRemote <span class="ot">=</span> <span class="dt">Ssh.Remote</span> <span class="st">&quot;salmon&quot;</span> <span class="st">&quot;10.0.0.2&quot;</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a>        , uploadPlacement <span class="ot">=</span> <span class="dt">SecretDelivery.Placement</span> <span class="st">&quot;/etc/app/db-password&quot;</span> <span class="st">&quot;app&quot;</span> <span class="st">&quot;app&quot;</span> <span class="st">&quot;0600&quot;</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a>        , uploadElevation <span class="ot">=</span> <span class="dt">SecretDelivery.WithSudo</span>        <span class="co">-- any owner but the login user</span></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a>        }</span></code></pre></div></div><p>It belongs wherever the hand-off to the machine is declared; for
+<code>SreBox.Gcp.VmProvision</code> that is <code>vmp_beforeCall</code>, which hands over the
+<code>Ssh.ClientOpts</code> to use. Inject the node that generates the local file
+(<code>Secrets.sharedSecretFile</code>, a certificate, …) so both happen in one pass.</p>
+<p><strong>On the machine itself, from Secret Manager</strong> —
+<code>Salmon.Builtin.Nodes.Gcp.SecretManager.secretFile</code>, declared in the graph
+that runs on the instance, which reads the secret as the instance’s own
+service account. Only the secret’s <em>name</em> is in the directive. The instance
+needs <code>roles/secretmanager.secretAccessor</code> on the secret, the
+<code>cloud-platform</code> scope and a <code>gcloud</code>; the enclosing directory is a
+dependency you declare.</p>
+<p>What both guarantee, and what a third transport should too:</p>
+<ul>
+<li>the bytes are read when <code>up</code>/<code>check</code> runs, never when the graph is built,
+so they are not in the directive, <code>ref</code>, <code>help</code> or <code>notes</code>;
+</li>
+<li>they travel on standard input, never in an argv;
+</li>
+<li>no report or failure text carries them — <strong>nor a digest of them</strong>. A
+fingerprint in <code>notes</code> is what would let <code>run serve</code> mark a re-declared
+secret <code>Stale</code>, and it is left out deliberately: a digest of a password is
+an offline guessing oracle for whoever can read a report. A changed secret
+is noticed by the node’s <code>check</code>, which compares the bytes themselves;
+</li>
+<li>the file is written to a <code>0600</code> temporary beside the destination, then
+chowned, chmoded and renamed over it, and a mode granting anything to
+<em>others</em> is refused.
+</li>
+</ul>
+<p><code>down</code> removes the delivered file. An upload’s <code>down</code> treats a machine it
+cannot reach as having nothing left to remove, since failing there would
+block the teardown of the machine itself.</p>
+<h3 id="pattern-a-container-as-a-service-pulled-with-the-machines-own-identity">Pattern: a container as a service, pulled with the machine’s own identity</h3>
+<p>“This image runs as a service on this machine” is two nodes and no shipped
+secret.</p>
+<div class="code code--highlighted"><div class="sourceCode"><pre class="sourceCode"><code class="sourceCode"><span id="1"><a href="#1" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Salmon.Builtin.Nodes.Debian.OS</span> <span class="kw">as</span> <span class="dt">OS</span></span>
+<span id="2"><a href="#2" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Salmon.Builtin.Nodes.Gcp.ArtifactRegistry</span> <span class="kw">as</span> <span class="dt">ArtifactRegistry</span></span>
+<span id="3"><a href="#3" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Salmon.Builtin.Nodes.Gcp.Core</span> <span class="kw">as</span> <span class="dt">Core</span></span>
+<span id="4"><a href="#4" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Salmon.Builtin.Nodes.Podman</span> <span class="kw">as</span> <span class="dt">Podman</span></span>
+<span id="5"><a href="#5" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Salmon.Builtin.Nodes.Podman.Quadlet</span> <span class="kw">as</span> <span class="dt">Quadlet</span></span>
+<span id="6"><a href="#6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="7"><a href="#7" aria-hidden="true" tabindex="-1"></a><span class="ot">appService ::</span> <span class="dt">Text</span> <span class="ot">-&gt;</span> <span class="dt">Op</span></span>
+<span id="8"><a href="#8" aria-hidden="true" tabindex="-1"></a>appService tag <span class="ot">=</span></span>
+<span id="9"><a href="#9" aria-hidden="true" tabindex="-1"></a>    Quadlet.quadletContainer reportPrint OS.systemctl prerequisites app</span>
+<span id="10"><a href="#10" aria-hidden="true" tabindex="-1"></a>  <span class="kw">where</span></span>
+<span id="11"><a href="#11" aria-hidden="true" tabindex="-1"></a>    authfile <span class="ot">=</span> <span class="dt">Podman.AuthFile</span> <span class="st">&quot;/etc/app/registry-auth.json&quot;</span></span>
+<span id="12"><a href="#12" aria-hidden="true" tabindex="-1"></a>    app <span class="ot">=</span></span>
+<span id="13"><a href="#13" aria-hidden="true" tabindex="-1"></a>        (Quadlet.container (<span class="dt">Podman.ContainerName</span> <span class="st">&quot;app&quot;</span>) (<span class="st">&quot;europe-west1-docker.pkg.dev/acme/repo/app:&quot;</span> <span class="op">&lt;&gt;</span> tag))</span>
+<span id="14"><a href="#14" aria-hidden="true" tabindex="-1"></a>            { Quadlet.containerEnvFile <span class="ot">=</span> <span class="dt">Just</span> <span class="st">&quot;/etc/app/env&quot;</span></span>
+<span id="15"><a href="#15" aria-hidden="true" tabindex="-1"></a>            , Quadlet.containerPorts <span class="ot">=</span> [<span class="dt">Podman.PortMapping</span> <span class="st">&quot;8080&quot;</span> <span class="st">&quot;8080&quot;</span> <span class="dt">Podman.TCPPort</span>]</span>
+<span id="16"><a href="#16" aria-hidden="true" tabindex="-1"></a>            , Quadlet.containerAuthFile <span class="ot">=</span> <span class="dt">Just</span> authfile</span>
+<span id="17"><a href="#17" aria-hidden="true" tabindex="-1"></a>            , Quadlet.containerStartTimeout <span class="ot">=</span> <span class="dt">Just</span> <span class="dv">300</span></span>
+<span id="18"><a href="#18" aria-hidden="true" tabindex="-1"></a>            }</span>
+<span id="19"><a href="#19" aria-hidden="true" tabindex="-1"></a>    prerequisites <span class="ot">=</span> <span class="dt">Track</span> <span class="op">$</span> <span class="op">\</span>_ <span class="ot">-&gt;</span></span>
+<span id="20"><a href="#20" aria-hidden="true" tabindex="-1"></a>        ArtifactRegistry.instanceLogin reportPrint OS.podman authfile (<span class="dt">Core.Region</span> <span class="st">&quot;europe-west1&quot;</span>)</span></code></pre></div></div><p><code>quadletContainer</code> writes <code>/etc/containers/systemd/app.container</code>, reloads
+systemd and restarts <code>app.service</code> when that file changed: a new tag, or new
+bytes in the env file, whose hash is folded into the quadlet. The env file is
+somebody else’s node (see the pattern above); here it is only read.
+Otherwise the service is checked and left alone. The check asks systemd
+(<code>systemctl show</code>) and then the running container: the file carries a
+<code>Label=salmon.quadlet=&lt;fingerprint&gt;</code> line, and a container whose label is not
+the declared fingerprint is restarted, even when something else has already
+run the <code>daemon-reload</code> that made systemd forget the file changed. A quadlet
+written before that label existed is restarted once.</p>
+<p><code>instanceLogin</code> is for a GCE instance: it asks the metadata server for the
+instance’s service account’s token and logs podman in with it, into an auth
+file of its own. Nothing is copied to the machine. The token lasts about an
+hour, so the node records its expiry and its <code>check</code> asks for a new login
+only when that is near; under <code>run serve</code> the credential stays fresh on its
+own. The instance’s service account needs <code>roles/artifactregistry.reader</code> on
+the repository and the instance an access scope that allows it.</p>
+<p>Things to know:</p>
+<ul>
+<li>The image is pulled by the service’s <em>start</em>. A failed pull is a failed
+<code>up</code> of the service node, and a slow one needs <code>containerStartTimeout</code>.
+</li>
+<li>A tag that keeps its name while its content moves (<code>:latest</code>) is not a
+change. Deploy by a tag that changes, or by digest.
+</li>
+<li>Anywhere other than a GCE instance, use <code>Podman.login</code> with whatever
+supplies the password; the quadlet only needs the auth file’s path.
+</li>
+<li>Needs podman 4.4 or later on the machine. A user-scope container
+(<code>Systemd.User</code>, <code>~/.config/containers/systemd</code>) needs no root.
+</li>
+</ul>
 </section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

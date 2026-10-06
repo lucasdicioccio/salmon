@@ -1,4 +1,4 @@
-<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Postgres with automatic failover: salmon provisions, Patroni decides</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><meta property="og:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="article:published_time" content="2026-10-02T09:15:59Z"><meta name="article:modified_time" content="2026-10-02T09:15:59Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-patroni.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-patroni.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-02T09:15:59Z","datePublished":"2026-10-02T09:15:59Z","description":"Status: draft / not implemented. A design sketch to react to, not a committed","headline":"Postgres with automatic failover: salmon provisions, Patroni decides","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Postgres with automatic failover: salmon provisions, Patroni decides</h1><p>On <span>Fri, 02 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 1737 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-ha-control-plane.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">2/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-patroni.md"><code>specs/pg-patroni.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Postgres with automatic failover: salmon provisions, Patroni decides</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="specs, spec, design"><meta name="description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Postgres with automatic failover: salmon provisions, Patroni decides"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html"><meta property="og:description" content="Status: draft / not implemented. A design sketch to react to, not a committed"><meta name="article:published_time" content="2026-10-06T21:52:42Z"><meta name="article:modified_time" content="2026-10-06T21:52:42Z"><meta name="ks:article_json" content="/salmon/json/specs-pg-patroni.cmark.json"><meta name="ks:article_text" content="/salmon/text/specs-pg-patroni.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-06T21:52:42Z","datePublished":"2026-10-06T21:52:42Z","description":"Status: draft / not implemented. A design sketch to react to, not a committed","headline":"Postgres with automatic failover: salmon provisions, Patroni decides","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="specs"><meta name="article:tag" content="spec"><meta name="article:tag" content="design"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Postgres with automatic failover: salmon provisions, Patroni decides</h1><p>On <span>Tue, 06 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 2074 words, 0 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/specs-pg-ha-control-plane.html">‹</a></span><a class="topic-link" href="/salmon/topics/specs.html"><span class="topic-name">specs</span><span class="topic-count">2/19</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/specs-per-node-state-machines.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/specs/pg-patroni.md"><code>specs/pg-patroni.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
 <h2 id="postgres-with-automatic-failover-salmon-provisions-patroni-decides">Postgres with automatic failover: salmon provisions, Patroni decides</h2>
 <p>Status: draft / not implemented. A design sketch to react to, not a committed
 plan.</p>
@@ -139,6 +139,16 @@ existing <code>PgBouncer</code>.
 <p>A <code>Haproxy</code> builtin would have the same shape as <code>Nginx</code>: a config value, a
 renderer, and a systemd unit. Unlike pgbouncer, HAProxy needs no reload on
 failover: its health checks move the traffic.</p>
+<p><strong>Done</strong> as <code>Salmon.Builtin.Nodes.Haproxy</code> (<code>setup</code>, <code>renderConfig</code>,
+<code>patroniRouter</code>): every member is listed under every listener and only the
+check path differs (<code>/primary</code>, <code>/replica</code>, <code>/replica?lag=N</code>, <code>/read-only</code>),
+so the file is the same text before and after a failover, which is T3 for the
+router. <code>on-marked-down shutdown-sessions</code> closes a demoted leader’s sessions
+so its clients reconnect to the new one. A member’s traffic port is its own
+field, so the upstream can be Postgres or a PgBouncer on the member. Changing
+the member <em>set</em> rewrites the file and restarts HAProxy, dropping connections;
+a graceful reload (<code>-sf</code>) is not done. Not done either: a recipe placing it
+beside <code>patroniMember</code>, TLS, and T1/T2/T6 through it (Layer 3).</p>
 <h3 id="reaching-the-leader">Reaching the leader</h3>
 <p>Admin nodes need a way to reach whichever member is the leader right now,
 which is not known when the directive is written.</p>
@@ -163,16 +173,52 @@ answers <code>Skipped</code> when this member is not the leader, is smaller but 
 <p>Backups (from a replica, by preference) and scheduled jobs (<code>CronTask</code>)
 would otherwise run on every member.</p>
 <ul>
-<li><strong>Backups:</strong> a Patroni tag such as <code>nofailover</code> or a custom one marks the
+<li>
+<p><strong>Backups:</strong> a Patroni tag such as <code>nofailover</code> or a custom one marks the
 member dedicated to them. The scheduled command gates itself with
 <code>curl -sf localhost:8008/replica</code>, skipping when the member is not a
-replica.
+replica.</p>
 </li>
-<li><strong>PITR:</strong> <code>SreBox.PostgresBackup</code> is <code>pg_dump</code>, which has no point-in-time
+<li>
+<p><strong>PITR:</strong> <code>SreBox.PostgresBackup</code> is <code>pg_dump</code>, which has no point-in-time
 recovery and no use to Patroni. A continuous archive (pgBackRest or WAL-G,
 both packaged by Debian) earns its place twice: as the disaster recovery
 story, and as Patroni’s <code>create_replica_methods</code>, which rebuilds a replica
-from the archive instead of loading the leader with a base backup.
+from the archive instead of loading the leader with a base backup.</p>
+<p><strong>Implemented, pgBackRest first</strong> (<code>Salmon.Builtin.Nodes.PgBackRest</code>,
+<code>Patroni.pat_archive</code>). What writing it settled, and what it did not:</p>
+<ul>
+<li>The repository has to be one every member reads (a shared mount, or S3):
+a replica is built from an archive it can reach.
+</li>
+<li><code>stanza-create</code> and <code>backup</code> are “exactly one member” operations too: with
+one <code>pg1-path</code> configured, pgBackRest refuses both on a standby. The nodes
+check the <em>repository</em> (which any member can read) and their <code>up</code> succeeds
+only on whichever member leads at that moment; no directive names it.
+</li>
+<li>The scheduled backup gates on <code>/primary</code>, not <code>/replica</code> as written above.
+A backup taken from a standby needs <code>backup-standby</code> and a second <code>pg</code>
+host reached over ssh or TLS. Not done.
+</li>
+<li><code>archive_mode</code>/<code>archive_command</code> are local <code>postgresql.parameters</code> in
+<code>patroni.yml</code>, not DCS keys, so that declaring an archive on an existing
+cluster takes effect; <code>archive_mode</code> is restart-only and shows up as
+<code>pending_restart</code> for the config node.
+</li>
+<li>Point-in-time recovery of a whole Patroni cluster is a custom bootstrap of
+a <em>new</em> scope (<code>patroniArchiveRecovering</code>). Rendered; never run.
+</li>
+<li>Shown in a container (<code>Test.PgBackRestSpec</code>, Layer 2): recovery to a
+timestamp on a plain cluster, and a second Patroni member made by
+pgBackRest rather than by a base backup. T7 on the three VMs is not run.
+</li>
+<li>Two defects in the Patroni builtin surfaced on the way, both from keeping
+the configuration outside the data directory: <code>bootstrap.pg_hba</code> never
+reaches a replica (now <code>postgresql.pg_hba</code>), and Patroni does not create
+the <code>postgresql.conf</code> it renames (now seeded, empty, once). And Debian’s
+<code>patroni</code> does not pull in <code>python3-etcd</code>.
+</li>
+</ul>
 </li>
 </ul>
 <h3 id="switchover-under-patroni">Switchover, under Patroni</h3>
@@ -267,6 +313,7 @@ a restart of one member.
 <li><strong>Routing:</strong> multi-host connection strings first, then HAProxy; T2, T6.
 </li>
 <li><strong>Archive and PITR</strong> (pgBackRest or WAL-G), and backups on one member; T7.
+<em>pgBackRest builtin and the Patroni wiring are in; T7 itself is not run.</em>
 </li>
 <li><strong>The opt-in preferred leader.</strong>
 </li>

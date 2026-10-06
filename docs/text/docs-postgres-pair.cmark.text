@@ -25,7 +25,7 @@ Three kinds of node, and only one of them mentions a role:
 ```html
 <table>
 <tr><th>Node</th><th>Says</th></tr>
-<tr><td><code>member</code> (one per machine)</td><td>how to be <em>either</em> half of the pair: replication settings, <code>pg_hba</code> lines for the peer, the replication and rewind roles. Nothing about which half it is.</td></tr>
+<tr><td><code>member</code> (one per machine)</td><td>how to be <em>either</em> half of the pair: replication settings, <code>pg_hba</code> lines for the peer (see "How the two members talk to each other"), the replication and rewind roles. Nothing about which half it is.</td></tr>
 <tr><td><code>bouncerSetup</code> (one per bouncer)</td><td>pgbouncer's own configuration, and a routing file it includes but does not own</td></tr>
 <tr><td><code>pairRole</code></td><td><em>"this pair's primary is on B"</em> — the only declaration an operator edits</td></tr>
 </table>
@@ -61,7 +61,56 @@ pg-pair-member (n6118828710077022853) member of app on 10.0.0.3
 pg-pair-member (2659614637461449593) member of app on 10.0.0.2
 ```
 
-What it assumes was done before it ever ran, because a recipe that ships secrets has chosen a transport for everyone who uses it: both machines have a Postgres cluster and the two `.pgpass` files the pair names, and the bouncer has pgbouncer, a `userlist.txt` and the `.pgpass` for its admin console. The recipe is given paths.
+What it assumes was done before it ever ran, because a recipe that ships secrets has chosen a transport for everyone who uses it: both machines have a Postgres cluster and the two `.pgpass` files the pair names, and the bouncer has pgbouncer, a `userlist.txt` and the `.pgpass` for its admin console. The recipe is given paths. `salmon-pgpair` leaves all of that to you; a binary of your own can declare it with the recipe below.
+
+## What it needs first
+
+`SreBox.PostgresPairPrereqs` is that assumption written as nodes, for a binary that composes the pair as a library. It still ships no secret: every secret is a file **already on the machine it is for**, left there by whatever your deployment uses to move secrets, and a `SecretFile` says where (`secret_from`) and how it must be held (owner, group, mode). The recipe installs it where the pair reads it. A file provisioned straight to its destination (`secret_from = Nothing`) only has its owner and mode set.
+
+```html
+<table>
+<tr><th>Node</th><th>Does</th></tr>
+<tr><td><code>memberPrereqs</code> (one per machine)</td><td>installs the packages that are missing, checks a cluster of the declared name exists, and puts the replication and rewind passfiles where the pair names them, <code>postgres:postgres 0600</code></td></tr>
+<tr><td><code>bouncerPrereqs</code> (one per bouncer)</td><td>the packages, the console passfile, and pgbouncer's auth file — copied only when it differs, and pgbouncer restarted (<code>try-restart</code>) only then</td></tr>
+<tr><td><code>applications</code> (one per machine)</td><td>a <code>pg_hba.conf</code> line per application and client address, and, on whichever machine is the primary, the role, its password and the database it owns</td></tr>
+</table>
+```
+
+```haskell
+Prereqs.pairWithPrereqs reportPrint pair
+    Prereqs.defaultPrereqs
+        { Prereqs.prereq_repl_passfile = Prereqs.postgresOwned "/run/secrets/replication.pgpass"
+        , Prereqs.prereq_rewind_passfile = Prereqs.postgresOwned "/run/secrets/rewind.pgpass"
+        , Prereqs.prereq_console_passfile = Prereqs.postgresOwned "/run/secrets/console.pgpass"
+        , Prereqs.prereq_userlist = (Prereqs.postgresOwned "/run/secrets/userlist.txt"){Prereqs.secret_mode = "0640"}
+        , Prereqs.prereq_applications =
+            [ Prereqs.Application
+                { Prereqs.app_role = "app"
+                , Prereqs.app_database = "app"
+                , Prereqs.app_passfile = "/run/secrets/app.pgpass" -- on each member
+                , Prereqs.app_clients = ["10.0.0.4"]               -- the bouncer, as the members see it
+                , Prereqs.app_hba_method = "md5"
+                }
+            ]
+        }
+```
+
+`pairWithPrereqs` is `pairOp` with those nodes in order: a machine's prerequisites before the pair's own node for that machine, and the applications after the role node. Things worth knowing:
+
+- **The auth file is the quiet one.** pgbouncer reads `userlist.txt` when it starts and not again, so a file written under a running process is a correct password that does not work. The restart happens when the file changed and only then, because any other restart drops the clients the bouncer is holding. The file is yours, in pgbouncer's `auth_file` format, hashed however you chose; left in place rather than installed, nothing can tell it changed and restarting is yours too.
+
+- **Applications come after the role node**, not before the pair. A machine about to be cloned is a pristine cluster that is not in recovery, and a database created on it is exactly what makes `--seed` refuse to clone over it. So if a machine is unreachable the applications node for it fails, and says so, after the pair itself has converged.
+
+- **A password is never in a script, an argument or a report.** It is read on the member (the fifth field of the passfile's first line, as for the pair's own passfiles), fed to `psql` on standard input, and the one statement holding it has its output withheld: a failure there is reported in words. Rotating a passfile and re-running rotates the role.
+
+- **`validate` lists everything wrong with a declaration** — names that are not plain identifiers, relative paths, an application claiming the pair's own role — since these words end up in scripts run as root. A node whose declaration does not pass refuses to run.
+
+- An application's `pg_hba.conf` line goes on both members, because that file is not replicated; the address is the client's as the members see it, which need not be where the controller's ssh goes.
+
+- With `--ssh-a`/`--ssh-b` (`member_ssh_host`) nothing changes here: these nodes reach a machine exactly as the pair's own do.
+
+
+Getting those files there is a node the caller declares, not one the recipe does: `Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile` puts a local secret file on a machine over ssh with an owner and a mode, and `Gcp.SecretManager.secretFile` has an instance read one out of Secret Manager as itself. Either goes before the pair's nodes; the recipe still only sees a path.
 
 `--seed B` is the first clone of a pair's life. It is safe to leave declared — the clone does nothing once the two sides share a system identifier, and refuses a machine holding a cluster it does not recognise. It is _not_ the way back from a standby that has fallen too far behind (see the slot budget below): that is `--reseed`.
 
@@ -70,6 +119,68 @@ What it assumes was done before it ever ran, because a recipe that ships secrets
 On **a machine that is not one of the pair's two members**: whatever runs `salmon-pgpair run up` (or `run serve`, for a pair that is also watched) — a CI runner, an admin box, a small third machine. Never on a member. Every step reaches the members over ssh (a member that cannot be reached is decided in seconds, not minutes), and the members are exactly the machines that stop, restart, get partitioned and die: a controller on the old primary is killed by the step that stops it, and one on a member that a partition cuts off is cut off with it, from the very machine it needs to decide about. Running it elsewhere is what makes "the member that dies" a case the controller can observe rather than one it is inside of.
 
 The controller does not have to be always up or unique-by-design: it keeps no state (the section above), so a pass killed mid-switchover is finished by whichever controller runs next (S2). What it does need is ssh to both members and to every bouncer, as the users the declaration names, and `salmon-pgpair` itself — the passwords stay on the machines in the `.pgpass` files the pair names, never on the controller. In the qemu demo the controller is the process on the host, outside all three guests, for the same reason.
+
+The controller need not sit on the network the pair talks over. `--a` and `--b` are the addresses the _peer and the bouncers_ use — they go into `pg_hba.conf`, `primary_conninfo` and the routing file — and by default they are also where the controller's ssh goes. When those differ, as on a cloud network where an operator reaches a machine on its external address and its peer reaches it on its internal one, say where ssh goes separately:
+
+```
+salmon-pgpair config --primary A --a 10.0.0.2 --ssh-a 203.0.113.1 \
+                                 --b 10.0.0.3 --ssh-b 203.0.113.2 ...
+```
+
+(`member_ssh_host` in the directive, absent meaning `member_host`.) The ssh address is the controller's route and nothing else: no script sent to any machine contains it, and reports, refs and the standby's upstream comparison all keep naming the member by `--a`/`--b`.
+
+The controller need not log in as root either. Every script the pair sends — the member and seed scripts, each step, the bouncer's setup and probe, and the prerequisite nodes — was written to be run by root: it appends to `pg_hba.conf`, calls `pg_ctlcluster`, installs into `/etc/pgbouncer`, restarts units. Stock cloud images refuse root logins, so name the login instead:
+
+```
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --ssh-user ops ...
+```
+
+(`member_ssh_user` / `bouncer_ssh_user` in the directive, per machine; `--ssh-user` sets all three, default `root`.) A login that is not `root` has the _whole_ script run under one `sudo -n bash -c ...`, so the scripts are the same text whoever logs in and no line can be missed. That login needs passwordless sudo: `-n` means a sudo that wants a password fails at once with sudo's own message, as a failed node, rather than waiting on a prompt nobody will answer. `root` is sent what it always was, with no `sudo` in front, so a machine with no sudo for root to go through is unaffected — though the scripts themselves have always used `sudo -u postgres`, so sudo is installed either way.
+
+## How the two members talk to each other
+
+Streaming replication, the first clone, `pg_rewind` and the slot bookkeeping are all connections one member makes to the other. What those connections must be is a declaration (`pair_conn_security`), with three values:
+
+```html
+<table>
+<tr><th><code>--conn-security</code></th><th><code>pg_hba.conf</code> on each member, for the peer</th><th>what the connecting side demands</th></tr>
+<tr><td><code>plain</code> (default)</td><td><code>host ... md5</code></td><td>nothing: libpq's <code>sslmode=prefer</code></td></tr>
+<tr><td><code>tls-scram</code></td><td><code>hostssl ... scram-sha-256</code></td><td><code>sslmode=require</code>, or <code>verify-ca</code>/<code>verify-full</code> with <code>--tls-ca</code></td></tr>
+<tr><td><code>tls-cert</code></td><td><code>hostssl ... cert</code></td><td>the same, plus a client certificate per role</td></tr>
+</table>
+```
+
+`plain` is the weak one and is the default on purpose: it is what every pair was before the choice existed, and a recipe that tightened `pg_hba.conf` under a running pair on upgrade would break replication on upgrade. It is fine on a network nobody else is on, and not for replication that crosses anything shared.
+
+```
+# encrypted, password proven by SCRAM, server not verified (Debian's self-signed cert is enough)
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --conn-security tls-scram
+
+# and the server verified against a CA, each member serving its own certificate
+salmon-pgpair config ... --conn-security tls-scram \
+    --tls-ca /etc/postgresql/pair-ca.crt --tls-verify-full \
+    --tls-server-cert /etc/postgresql/server.crt --tls-server-key /etc/postgresql/server.key
+
+# and the two roles authenticated by certificate rather than by password
+salmon-pgpair config ... --conn-security tls-cert --tls-ca ... --tls-server-cert ... --tls-server-key ...
+```
+
+Every file named is **pre-provisioned on both members at the same path** — like the passfiles, the pair neither issues certificates nor moves them (`SreBox.PostgresTls` can issue them; how they travel is yours). Keys are `postgres`-owned and `0600`. With `tls-cert`, `salmon-pgpair` expects the client certificates at `/etc/postgresql/salmon-{replication,rewind}.{crt,key}`, each with `CN` equal to its role (`replicator`, `rewinder`); a binary using the recipe as a library names its own paths (`ClientCerts`). `--tls-verify-full` needs each server certificate to name the address given as `--a`/`--b`, so for members declared by address, an IP subject alternative name. `--tls-ca` is also what each cluster trusts client certificates against when `--tls-server-cert` is given; without server files the cluster's TLS settings are left as found.
+
+What a pass does about it, and what it means for a pair that is already deployed:
+
+- **A pair that does not set the option is unchanged.** Same two hba lines, appended only if missing; no `sslmode` in any connection; a directive written before the field existed parses as `plain`. The member script does gain two no-ops there: it looks for the stronger choices' lines to remove (there are none), and compares a standby's `primary_conninfo` with what it would write (it is equal).
+
+- **Changing the option replaces the pair's own two lines per member; it does not append beside them.** `pg_hba.conf` is first-match and `host` matches TLS connections too, so an old `host ... md5` line left above a new `hostssl` line would keep accepting plaintext. Only the exact lines this recipe writes for this peer and these roles are removed; nothing else in the file is touched, and a wider line of your own above them still wins — the pair owns its lines, not the file.
+
+- **`pg_hba.conf` is not touched until the cluster says it serves TLS.** A `hostssl` line on a cluster with `ssl = off` matches nothing, so the member node fails first, naming the reason, and replication carries on as it was. `tls-cert` likewise wants an `ssl_ca_file`. Afterwards the server is asked (`pg_hba_file_rules`) whether it could load the file.
+
+- **The running standby is brought along.** Its `primary_conninfo` is rewritten (and reloaded) when it already points at its peer and differs from the declared one, so the stronger demand applies to the connection that exists rather than waiting for the next rejoin. The walreceiver reconnects once. With `tls-scram` the roles' passwords are re-stored as SCRAM verifiers from the same passfiles.
+
+- **The passfiles are still needed with `tls-cert`**: the roles are still given their passwords, though no line the pair writes accepts one.
+
+
+This was exercised by hand on two Debian trixie containers (Postgres 17): plain, then `tls-scram` on the running pair, a switchover, `tls-cert` with `--tls-verify-full`, a switchover back, a fresh `--seed`, back to plain, and both refusals. It has not been run in the qemu tier, nor on older Postgres.
 
 ## What a switchover actually does
 
@@ -91,6 +202,28 @@ PauseBouncers -> StopMember A -> Promote B -> RepointBouncers B -> Rejoin A -> D
 
 
 Traffic moves through pgbouncer's admin console, and the routing lives in its own file pulled in with `%include`. That is a seam between two writers: `bouncerSetup` owns the ini, so a change there is applied by a restart; the role node owns the routing file (`bouncerSetup` writes it only when it is missing), and applies a change gently. One file with two writers is how a switchover becomes an outage.
+
+### Several databases behind one bouncer
+
+A pair often carries more than one database (an application and its side services), and one pgbouncer can route them all. Declare the others beside the first:
+
+```sh
+salmon-pgpair config --primary A --a 10.0.0.2 --b 10.0.0.3 --bouncer 10.0.0.4 \
+  --db app --also-db jobs --also-db audit
+```
+
+In the directive that is `bouncer_more_databases`, a list of `{"routed_alias": ..., "routed_dbname": ...}` beside `bouncer_alias` and `bouncer_dbname`; a directive without the field is the one-database bouncer it always was. Declaring a second `Bouncer` on the same machine is not the way: both would write the same `pgbouncer.ini` and own the same service.
+
+All of a bouncer's databases live in the one routing file and move together: each is `PAUSE`d and checked, the file is rewritten once with a line per database, one `RELOAD`, then each is `RESUME`d and checked. The role node asks after every alias separately and requires all of them to agree — the old primary is not stopped while any alias still passes writes, and the pair has not arrived while any alias is held or pointed elsewhere.
+
+- **Adding a database** to a bouncer that is already up needs nothing special. `bouncerSetup` leaves the existing routing file alone, the role node finds the new alias going nowhere, and repoints: the file is rewritten with every database at the current primary and reloaded, without a restart.
+
+- **Removing one** from the declaration stops the pair from managing it; its line stays in the routing file until the next repoint rewrites the file.
+
+- **Refused**: one alias routed twice on a bouncer, and an extra database name that is not made of letters, digits, `_`, `-` and `.`.
+
+- The databases, roles and `pg_hba.conf` lines themselves are the prerequisites' (one `app` entry per database), as is every user in the bouncer's `userlist.txt`.
+
 
 ## When it refuses, and why
 
@@ -141,9 +274,61 @@ The client prints three numbers when it stops. On the machine this was written o
   acknowledged rows missing afterwards:     0
 ```
 
+The toy invents its own passwords — constants in its source — and is careful to do only that with them: one node leaves files in `/etc/salmon-toy-secrets` on each guest, playing the part of whoever provisions secrets, and everything done _with_ those files is `SreBox.PostgresPairPrereqs`, as in a deployment.
+
 `prereqs` is the only part that needs root — debootstrapping a root filesystem, regenerating an initrd that can mount a 9p root, and handing `/etc/ssh` to whoever runs the rest. Everything after it is an unprivileged user with two capabilities granted once (`capsh` needs `cap_net_admin`, qemu needs `cap_dac_override,cap_chown,cap_fowner`; see [`specs/qemu-test-vms-progress.md`](/specs-qemu-test-vms-progress.html )).
 
 After the demo B is the primary: pause machine B's guest, declare `up --primary A`, and it refuses; add `--may-discard B` and the refusal turns into a failover.
+
+## Driving it live
+
+Each line above is a process that starts from nothing: it asks every node again, does its one thing and exits, and to try the next thing somebody types the next line. For working on a scenario — a person with a terminal, or a program with a socket — the toy is better kept up. `run serve --http` boots the guests once, holds them, and takes what is wanted of them a line at a time, with every report on `/events`:
+
+```
+s=salmon-apps/scripts/qemu-pg-ha-serve.sh
+
+$s serve &                 # the server: a unix socket in $XDG_RUNTIME_DIR, a web UI on 127.0.0.1:9081
+$s guests                  # the bridge and three guests, answering ssh
+$s pair A --seed B         # the pair on top of them
+$s writer                  # a client the server holds, writing through the bouncer
+$s tail &                  # its lines, live
+$s pair B                  # move the primary
+$s freeze b                # pause B's guest (qemu's monitor) ...
+$s pair A                  # ... a failover is refused ...
+$s pair A --may-discard B  # ... until somebody says what may be lost
+$s thaw b                  # B carries on, finds it is no longer the primary, and is rewound
+$s pair A                  # drop the licence again (see below)
+$s down                    # clear everything, stop the guests, quit
+```
+
+Nothing in the script is more than a `POST /command` with one line of the serve language (`resources/serve-supervision.md` §14); `$s cmd '...'` sends any other, `$s status`/`dag`/`events`/`tui` read. An agent holding the socket needs none of it: `GET /help/seed` is the vocabulary, `GET /dag` the state, `GET /events?since=N` what happened, and `POST /command?async` returns at once with the sequence number to read from.
+
+Four seeds exist for this, beside `up`:
+
+```html
+<table>
+<tr><th>seed</th><th>what it declares</th></tr>
+<tr><td><code>guests</code></td><td>the bridge and the three machines, without the pair. Every one of its nodes is one <code>up</code> declares too, so the two merge; what it adds is a second holder, so <code>unpair</code> takes the pair down and leaves three machines booted</td></tr>
+<tr><td><code>writer</code></td><td>the client as a process the server <em>holds</em> (<code>managed</code>). The one-shot <code>client</code> cannot be this: its <code>up</code> returns when its time is up and a pass waits for it, so the line that moves the primary would wait for the client it was meant to move it under. Its lines — a tally every five seconds, and one each time inserts start or stop failing — are the <code>output</code> stream and the node's ring in <code>/dag</code></td></tr>
+<tr><td><code>frozen --machine M</code></td><td>a fault: M's CPUs are stopped. Its peers see a machine that went silent without closing anything. <code>down</code> resumes it</td></tr>
+<tr><td><code>partition --machine M --from N</code></td><td>a fault: M has a blackhole route for N's address, which cuts both directions. <code>down</code> removes it</td></tr>
+</table>
+```
+
+Things worth knowing before a session:
+
+- **Moving the primary is two lines**, the new declaration and then `down` of the old one, and `pair` does both. A seed is identified by the directive it configures to, so `up --primary B` does not replace `up --primary A`: for a moment both are live, the role node is reported `conflicting`, the newer one wins and the pass that follows is the switchover. The two declarations name the same nodes and describe all but the role node identically (`Test.QemuPgHaToySpec` asserts it), so nothing is booted or provisioned again and retiring the old one takes nothing down. `only` would also move it, and would retire the guests, the writer and every fault with it.
+
+- **A fault is a declaration, so it is state**: `/dag` shows which are in force, the loop re-applies one that went away by itself (a guest rebooted out of its blackhole route), and `clear` heals them before anything they stand on is stopped.
+
+- **The server tends what it declared.** Between commands every node with a check is asked again — the role node included, over ssh to both members — so a pair broken by a fault is noticed and, where the declaration allows, repaired with nobody typing. That is the point, and also the reason to take `--may-discard` off again once a failover is done: left declared, it is a standing licence that the next pass will use. `supervise off` makes passes the only thing that acts.
+
+- **A paused guest is reported, repeatedly.** Its "answers ssh" node fails its check and its `up` fails at once (it asks the monitor, rather than hold every later command behind two minutes of polling); the loop retries with backoff until the guest is resumed.
+
+- A guest killed outright needs no seed: `systemctl --user kill -s KILL salmon-vm-salmon-toy-a` is a machine losing power, the unit is `Restart=on-failure`, and the nodes standing on it are tended as it boots.
+
+
+What has been run: the declarations' shapes (Layer 0), qemu's pause, resume and run state against a real qemu process with no guest, and the server, the script and the held writer against a machine with no guests on it (the writer reporting that it cannot reach the bouncer). **Not run: any of it with the guests booted** — the session above, the blackhole route inside a guest, and the writer against a live pair are as written, not as observed.
 
 ## What is tested, and what that is worth
 
