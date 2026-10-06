@@ -12,6 +12,7 @@ and any other repository-relative link becomes a GitHub blob URL, so nothing
 on the site points at a path that only exists in a checkout.
 """
 import argparse
+import json
 import re
 import sys
 import os
@@ -74,6 +75,8 @@ def main():
     p.add_argument("--section-from", default="")
     p.add_argument("--section-to", default="")
     p.add_argument("--intro", default="")
+    p.add_argument("--group", default="", help="documentation layout: group the page is listed under")
+    p.add_argument("--order", default="", help="documentation layout: position among documentation pages")
     a = p.parse_args()
 
     text = open(a.source).read()
@@ -88,9 +91,21 @@ def main():
     kw = ", ".join('"%s"' % k.replace('"', '\\"') for k in keywords)
     title = a.title.replace('"', '\\"')
     summary = summary_text.replace('"', '\\"')
+    # the technical pages use kitchen-sink's `documentation` layout (sidebar of
+    # pages by group/order, table of contents, previous/next); a page given no
+    # --group stays an ordinary article.
+    layout = "documentation" if a.group else "article"
+    extra = ""
+    doc_css = ""
+    if a.group:
+        extra = ',"group":%s' % json.dumps(a.group)
+        if a.order:
+            extra += '\n,"order":%d' % int(a.order)
+        doc_css = '  , "@import \\"`$ctx.pathPrefix`/css/documentation.css\\";"\n'
     out = f'''=base:build-info.json
-{{"layout":"article"
+{{"layout":"{layout}"
 ,"publicationStatus":"Public"
+{extra}
 }}
 
 =base:preamble.json
@@ -129,7 +144,7 @@ def main():
   , "@import \\"`$ctx.pathPrefix`/css/colors.css\\";"
   , "@import \\"`$ctx.pathPrefix`/css/article.css\\";"
   , "@import \\"`$ctx.pathPrefix`/css/navigation.css\\";"
-  ]
+{doc_css}  ]
 }}
 '''
     sys.stdout.write(out)

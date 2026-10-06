@@ -27,3 +27,4 @@ https://lucasdicioccio.github.io/salmon/docs-howto-ops.html
 https://lucasdicioccio.github.io/salmon/specs-pg-patroni.html
 https://lucasdicioccio.github.io/salmon/index.html
 https://lucasdicioccio.github.io/salmon/specs-pg-ha-control-plane.html
+https://lucasdicioccio.github.io/salmon/about.html
