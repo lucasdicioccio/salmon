@@ -1157,7 +1157,7 @@ albSpec spec vm lb =
             [ LoadBalancing.HostRule
                 [host]
                 LoadBalancing.DefaultService
-                [LoadBalancing.PathRule ["/slow/*"] (LoadBalancing.NamedService "slow")]
+                [LoadBalancing.PathRule ["/slow/*"] (LoadBalancing.NamedService "slow") LoadBalancing.KeepPath]
             | host <- hosts
             ]
         , LoadBalancing.albCertificates =

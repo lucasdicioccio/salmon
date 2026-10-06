@@ -15,6 +15,7 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     HttpListener (..),
     HostRule (..),
     PathRule (..),
+    PathRewrite (..),
     Certificate (..),
     certificateResource,
     domainSetTag,
@@ -23,6 +24,10 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     applicationLoadBalancer,
     applicationLoadBalancerAfter,
     applicationLoadBalancerPart,
+    applicationLoadBalancerWith,
+    applicationLoadBalancerPartWith,
+    backendBucketPart,
+    afterStorageBuckets,
     Part (..),
     PartSpec (..),
     lbParts,
@@ -267,7 +272,31 @@ data PathRule = PathRule
     { pathRulePaths :: [Text]
     , pathRuleService :: ServiceRef
     -- ^ a service, a bucket or a redirect
+    , pathRuleRewrite :: PathRewrite
+    -- ^ what the backend is asked for; 'KeepPath' for the request's own path
     }
+    deriving (Eq, Show)
+
+{- | What a 'PathRule' does to the path before the request reaches the
+backend (the URL map's @routeAction.urlRewrite@, beside the rule's
+@service@). The client sees nothing of it: this is not a redirect.
+
+'RewritePrefix' is GCP's @pathPrefixRewrite@: the part of the path the rule
+/matched/ is replaced by the text given, and the rest is kept. By GCP's
+documentation, a pattern ending in @\/*@ matches up to and including that
+slash, so @\/static\/*@ with @RewritePrefix \"\/\"@ asks the backend for
+@\/a.css@ when the request was for @\/static\/a.css@; and an exact pattern
+matches the whole path, so @\/@ with @RewritePrefix \"\/index.html\"@ asks for
+@\/index.html@ -- the case this exists for, a backend bucket that serves
+nothing for @\/@. Neither reading has been checked against a live balancer.
+
+A rule that redirects has a path of its own ('redirectPath') and cannot
+rewrite ('albProblems').
+-}
+data PathRewrite
+    = KeepPath
+    | -- | starting with @\/@
+      RewritePrefix Text
     deriving (Eq, Show)
 
 {- | Requests for one of these host names go to 'hostRuleService', except
@@ -420,7 +449,8 @@ instance Exception InvalidLoadBalancer
 {- | What is wrong with a declaration, all of it rather than the first: a
 rule naming a service or a bucket nobody declared, a rule routing to a
 backend bucket at all ('BucketRoutes'), two services or two
-buckets under one name, a redirect that redirects to the request itself, an
+buckets under one name, a redirect that redirects to the request itself, a
+path rule that redirects and rewrites, a rewrite that is no path, an
 HTTP listener option that leaves no listener, a host in two rules, a rule with no host or no path, the two certificate kinds
 mixed, a managed certificate with no domain, a timeout that is not positive,
 one backend service sending to two different ports of one instance group.
@@ -488,6 +518,16 @@ albProblems alb =
         <> [ "a redirect names an empty host"
            | RedirectTo Redirect{redirectHost = Just ""} <- nub refs
            ]
+        -- a URL map's rule is a redirect or a route with its action, not both
+        <> [ "a path rule both redirects and rewrites its path (" <> Text.unwords p.pathRulePaths <> "): a redirect names its own path"
+           | p <- pathRules
+           , RedirectTo _ <- [p.pathRuleService]
+           , p.pathRuleRewrite /= KeepPath
+           ]
+        <> [ "a path rewrite must start with /: " <> prefix
+           | RewritePrefix prefix <- nub (map pathRuleRewrite pathRules)
+           , not ("/" `Text.isPrefixOf` prefix)
+           ]
         <> [ what <> " needs a certificate: without one the balancer serves nothing"
            | null alb.albCertificates
            , what <- case alb.albHttp of
@@ -502,6 +542,7 @@ albProblems alb =
         [base | (_, base, _) <- managedCertificates alb]
             <> [n | ComputeCertificate n <- alb.albCertificates]
     hosts = concatMap hostRuleHosts alb.albHostRules
+    pathRules = concatMap hostRulePaths alb.albHostRules
     refs =
         concat
             [ r.hostRuleService : map pathRuleService r.hostRulePaths
@@ -576,7 +617,20 @@ applicationLoadBalancer = applicationLoadBalancerAfter []
 of the balancer depends on.
 -}
 applicationLoadBalancerAfter :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Op
-applicationLoadBalancerAfter prereqs r gcloudTrack alb =
+applicationLoadBalancerAfter = applicationLoadBalancerWith (const [])
+
+{- | 'applicationLoadBalancerAfter' with prerequisites of single resources
+too: for each resource node, the nodes that one alone depends on, beside the
+ones every resource does. It is how a backend bucket is ordered after the
+Cloud Storage bucket it serves ('afterStorageBuckets') without the health
+checks and the certificates waiting for that bucket as well.
+
+The function is asked about every 'Part' of the declaration and answers @[]@
+for the ones it has nothing to say about. 'applicationLoadBalancerPartWith'
+has to be given the same one to hand back the same nodes.
+-}
+applicationLoadBalancerWith :: (Part -> [Op]) -> [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Op
+applicationLoadBalancerWith partPrereqs prereqs r gcloudTrack alb =
     op "gcp-application-lb" (deps (prereqs <> ordered)) $ \actions ->
         actions
             { help = Text.unwords ["application load balancer", alb.albName]
@@ -586,7 +640,7 @@ applicationLoadBalancerAfter prereqs r gcloudTrack alb =
             , check = checkHealth
             }
   where
-    nodes = partOps prereqs r gcloudTrack alb
+    nodes = partOps partPrereqs prereqs r gcloudTrack alb
     ordered = mapMaybe ((`Map.lookup` nodes) . partId) (lbParts alb)
     problems = albProblems alb
 
@@ -604,11 +658,39 @@ Given the prerequisites, reporter and declaration the balancer itself was
 made with, this is the very node the balancer's root depends on.
 -}
 applicationLoadBalancerPart :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Part -> Maybe Op
-applicationLoadBalancerPart prereqs r gcloudTrack alb part =
-    Map.lookup part (partOps prereqs r gcloudTrack alb)
+applicationLoadBalancerPart = applicationLoadBalancerPartWith (const [])
 
-partOps :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Map.Map Part Op
-partOps prereqs r gcloudTrack alb = nodes
+-- | 'applicationLoadBalancerPart' for a balancer made by 'applicationLoadBalancerWith'.
+applicationLoadBalancerPartWith :: (Part -> [Op]) -> [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Part -> Maybe Op
+applicationLoadBalancerPartWith partPrereqs prereqs r gcloudTrack alb part =
+    Map.lookup part (partOps partPrereqs prereqs r gcloudTrack alb)
+
+{- | The resource node of one of 'albBuckets', by the name it is declared
+under ('backendBucketName'): what 'applicationLoadBalancerPart' is asked for
+that backend bucket's node, and what an 'applicationLoadBalancerWith'
+function is asked about.
+-}
+backendBucketPart :: ApplicationLoadBalancer -> Text -> Part
+backendBucketPart alb n = BackendBucketPart (bucketResource alb n)
+
+{- | Prerequisites for 'applicationLoadBalancerWith' that put each backend
+bucket after what its Cloud Storage bucket needs -- the node that makes the
+bucket, the one that makes it readable -- and say nothing about any other
+resource:
+
+> applicationLoadBalancerWith (afterStorageBuckets alb (\b -> [storageBucket b.backendBucketGcsBucket])) prereqs ...
+
+A backend bucket is created whether or not the Cloud Storage bucket it names
+exists, so this is an ordering for the caller's sake (the backend bucket
+never points at nothing, and a teardown removes it first), not something a
+@create@ would otherwise fail on.
+-}
+afterStorageBuckets :: ApplicationLoadBalancer -> (BackendBucket -> [Op]) -> Part -> [Op]
+afterStorageBuckets alb needs part =
+    concat [needs b | b <- alb.albBuckets, backendBucketPart alb b.backendBucketName == part]
+
+partOps :: (Part -> [Op]) -> [Op] -> Reporter Report -> Track' (Binary "gcloud") -> ApplicationLoadBalancer -> Map.Map Part Op
+partOps partPrereqs prereqs r gcloudTrack alb = nodes
   where
     problems = albProblems alb
 
@@ -620,7 +702,7 @@ partOps prereqs r gcloudTrack alb = nodes
     mk s =
         withBinary gcloudTrack loadBalancingCommand (LbPartUp alb s) $ \create ->
             withBinary gcloudTrack loadBalancingCommand (LbPartDown alb s) $ \delete ->
-                op (partKind s.partId) (deps (prereqs <> mapMaybe (`Map.lookup` nodes) s.partDeps)) $ \actions ->
+                op (partKind s.partId) (deps (prereqs <> partPrereqs s.partId <> mapMaybe (`Map.lookup` nodes) s.partDeps)) $ \actions ->
                     actions
                         { help = s.partHelp
                         , notes = s.partNotes
@@ -975,6 +1057,12 @@ targets :: ApplicationLoadBalancer -> [ServiceRef]
 targets alb =
     DefaultService : concat [r.hostRuleService : map pathRuleService r.hostRulePaths | r <- alb.albHostRules]
 
+-- | A rewrite as a note says it, after the rule's target; nothing for 'KeepPath'.
+rewriteText :: PathRewrite -> Text
+rewriteText = \case
+    KeepPath -> ""
+    RewritePrefix prefix -> " with the matched prefix rewritten to " <> prefix
+
 redirectCodeText :: RedirectCode -> Text
 redirectCodeText = \case
     MovedPermanently -> "MOVED_PERMANENTLY_DEFAULT"
@@ -1073,9 +1161,9 @@ urlMapStamp alb
 {- | Whether the check /requires/ the live map to carry the declared
 fingerprint, or only refuses a different one.
 
-Required for a map naming a backend bucket or a redirect, as it has been
-since those exist: there, the same hosts can be a different map (a redirect
-sent elsewhere). A map of backend services only was written without a
+Required for a map naming a backend bucket or a redirect, or rewriting a
+path, as it has been since those exist: there, the same hosts can be a
+different map (a redirect sent elsewhere, another path asked of the backend). A map of backend services only was written without a
 description until it got one, and such a map is live under balancers that
 are up: requiring the stamp would re-import every one of them on the first
 pass, and would never settle if @url-maps import@ turned out not to keep a
@@ -1086,7 +1174,9 @@ another declaration, and one with no such description is judged on its host
 set alone.
 -}
 urlMapStampIsRequired :: ApplicationLoadBalancer -> Bool
-urlMapStampIsRequired alb = any novel (targets alb)
+urlMapStampIsRequired alb =
+    any novel (targets alb)
+        || any ((/= KeepPath) . pathRuleRewrite) (concatMap hostRulePaths alb.albHostRules)
   where
     novel = \case
         NamedBucket _ -> True
@@ -1165,7 +1255,13 @@ urlMapFields alb =
                 <> ["pathRules" Aeson..= map pathRule r.hostRulePaths | not (null r.hostRulePaths)]
     pathRule :: PathRule -> Aeson.Value
     pathRule p =
-        Aeson.object ["paths" Aeson..= p.pathRulePaths, target "service" "urlRedirect" p.pathRuleService]
+        Aeson.object $
+            ["paths" Aeson..= p.pathRulePaths, target "service" "urlRedirect" p.pathRuleService]
+                -- absent, not empty, without a rewrite: the map (and its
+                -- fingerprint) of a declaration with none is what it was
+                <> [ "routeAction" Aeson..= Aeson.object ["urlRewrite" Aeson..= Aeson.object ["pathPrefixRewrite" Aeson..= prefix]]
+                   | RewritePrefix prefix <- [p.pathRuleRewrite]
+                   ]
     -- a backend bucket goes where a backend service does; a redirect has a key of its own
     target :: Aeson.Key -> Aeson.Key -> ServiceRef -> Aeson.Pair
     target serviceKey redirectKey = \case
@@ -1672,7 +1768,7 @@ lbParts alb =
             , partNotes =
                 concat
                     [ ("hosts " <> Text.unwords r.hostRuleHosts <> " to " <> targetText alb r.hostRuleService)
-                        : [ "paths " <> Text.unwords p.pathRulePaths <> " to " <> targetText alb p.pathRuleService
+                        : [ "paths " <> Text.unwords p.pathRulePaths <> " to " <> targetText alb p.pathRuleService <> rewriteText p.pathRuleRewrite
                           | p <- r.hostRulePaths
                           ]
                     | r <- alb.albHostRules
