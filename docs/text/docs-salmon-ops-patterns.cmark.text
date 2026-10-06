@@ -59,4 +59,79 @@ sudo             my-salmon run up --plan root.plan    < directive.json
 
 Also note `run down --plan` does not exist, so teardown cannot be partitioned this way. The tagged-domain design in `specs/multi-user-privilege-separation.md` (L3) removes the glob and checks the cut.
 
+## Pattern: secrets are files somebody else put there
+
+Recipes take a secret as a path to a file that already exists, and never as a value: a directive is printed in reports and piped on standard input, and a recipe that shipped its own secrets would have picked a transport for everyone using it. What puts the file there is a separate node the caller opts into, and there are two.
+
+**From the controlling machine, over ssh** — `Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile`:
+
+```haskell
+SecretDelivery.uploadSecretFile clientOpts reporter Debian.ssh
+    SecretDelivery.SecretUpload
+        { uploadSource = "secrets/app/db-password"        -- local, read at up time
+        , uploadRemote = Ssh.Remote "salmon" "10.0.0.2"
+        , uploadPlacement = SecretDelivery.Placement "/etc/app/db-password" "app" "app" "0600"
+        , uploadElevation = SecretDelivery.WithSudo        -- any owner but the login user
+        }
+```
+
+It belongs wherever the hand-off to the machine is declared; for `SreBox.Gcp.VmProvision` that is `vmp_beforeCall`, which hands over the `Ssh.ClientOpts` to use. Inject the node that generates the local file (`Secrets.sharedSecretFile`, a certificate, ...) so both happen in one pass.
+
+**On the machine itself, from Secret Manager** — `Salmon.Builtin.Nodes.Gcp.SecretManager.secretFile`, declared in the graph that runs on the instance, which reads the secret as the instance's own service account. Only the secret's _name_ is in the directive. The instance needs `roles/secretmanager.secretAccessor` on the secret, the `cloud-platform` scope and a `gcloud`; the enclosing directory is a dependency you declare.
+
+What both guarantee, and what a third transport should too:
+
+- the bytes are read when `up`/`check` runs, never when the graph is built, so they are not in the directive, `ref`, `help` or `notes`;
+
+- they travel on standard input, never in an argv;
+
+- no report or failure text carries them — **nor a digest of them**. A fingerprint in `notes` is what would let `run serve` mark a re-declared secret `Stale`, and it is left out deliberately: a digest of a password is an offline guessing oracle for whoever can read a report. A changed secret is noticed by the node's `check`, which compares the bytes themselves;
+
+- the file is written to a `0600` temporary beside the destination, then chowned, chmoded and renamed over it, and a mode granting anything to _others_ is refused.
+
+
+`down` removes the delivered file. An upload's `down` treats a machine it cannot reach as having nothing left to remove, since failing there would block the teardown of the machine itself.
+
+## Pattern: a container as a service, pulled with the machine's own identity
+
+"This image runs as a service on this machine" is two nodes and no shipped secret.
+
+```haskell
+import qualified Salmon.Builtin.Nodes.Debian.OS as OS
+import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
+import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
+import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
+
+appService :: Text -> Op
+appService tag =
+    Quadlet.quadletContainer reportPrint OS.systemctl prerequisites app
+  where
+    authfile = Podman.AuthFile "/etc/app/registry-auth.json"
+    app =
+        (Quadlet.container (Podman.ContainerName "app") ("europe-west1-docker.pkg.dev/acme/repo/app:" <> tag))
+            { Quadlet.containerEnvFile = Just "/etc/app/env"
+            , Quadlet.containerPorts = [Podman.PortMapping "8080" "8080" Podman.TCPPort]
+            , Quadlet.containerAuthFile = Just authfile
+            , Quadlet.containerStartTimeout = Just 300
+            }
+    prerequisites = Track $ \_ ->
+        ArtifactRegistry.instanceLogin reportPrint OS.podman authfile (Core.Region "europe-west1")
+```
+
+`quadletContainer` writes `/etc/containers/systemd/app.container`, reloads systemd and restarts `app.service` when that file changed: a new tag, or new bytes in the env file, whose hash is folded into the quadlet. The env file is somebody else's node (see the pattern above); here it is only read. Otherwise the service is checked and left alone. The check asks systemd (`systemctl show`) and then the running container: the file carries a `Label=salmon.quadlet=<fingerprint>` line, and a container whose label is not the declared fingerprint is restarted, even when something else has already run the `daemon-reload` that made systemd forget the file changed. A quadlet written before that label existed is restarted once.
+
+`instanceLogin` is for a GCE instance: it asks the metadata server for the instance's service account's token and logs podman in with it, into an auth file of its own. Nothing is copied to the machine. The token lasts about an hour, so the node records its expiry and its `check` asks for a new login only when that is near; under `run serve` the credential stays fresh on its own. The instance's service account needs `roles/artifactregistry.reader` on the repository and the instance an access scope that allows it.
+
+Things to know:
+
+- The image is pulled by the service's _start_. A failed pull is a failed `up` of the service node, and a slow one needs `containerStartTimeout`.
+
+- A tag that keeps its name while its content moves (`:latest`) is not a change. Deploy by a tag that changes, or by digest.
+
+- Anywhere other than a GCE instance, use `Podman.login` with whatever supplies the password; the quadlet only needs the auth file's path.
+
+- Needs podman 4.4 or later on the machine. A user-scope container (`Systemd.User`, `~/.config/containers/systemd`) needs no root.
+
+
 

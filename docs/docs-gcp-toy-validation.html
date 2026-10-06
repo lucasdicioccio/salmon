@@ -1,4 +1,4 @@
-<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Validating the GCP builtins against a real project</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Validating the GCP builtins against a real project"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Validating the GCP builtins against a real project"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html"><meta property="og:description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="article:published_time" content="2026-10-02T09:15:59Z"><meta name="article:modified_time" content="2026-10-02T09:15:59Z"><meta name="ks:article_json" content="/salmon/json/docs-gcp-toy-validation.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-gcp-toy-validation.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-02T09:15:59Z","datePublished":"2026-10-02T09:15:59Z","description":"This is the playbook for running salmon's `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes' automated tests are all Layer 0: they check the *pure* verdict funct","headline":"Validating the GCP builtins against a real project","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Validating the GCP builtins against a real project</h1><p>On <span>Fri, 02 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 2297 words, 4 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs-howto-ops.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">2/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-postgres-pair.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/gcp-toy-validation.md"><code>resources/gcp-toy-validation.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
+<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="index, follow"><title>salmon - Validating the GCP builtins against a real project</title><link rel="icon" type="image/x-icon" href="/salmon/images/favicon.png"><link rel="canonical" href="https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html"><link rel="alternate" type="application/atom+xml" title="Atom Feed" href="https://lucasdicioccio.github.io/salmon/atom.xml"><meta name="author" content="Lucas DiCioccio"><meta name="keywords" content="docs, guide, documentation"><meta name="description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="twitter:card" content="summary"><meta name="twitter:title" content="salmon - Validating the GCP builtins against a real project"><meta name="twitter:site" content="@lucasdicioccio"><meta name="twitter:creator" content="@lucasdicioccio"><meta property="twitter:description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="type" property="og:type" content="article"><meta name="title" property="og:title" content="salmon - Validating the GCP builtins against a real project"><meta property="og:site_name" content="salmon"><meta name="url" property="og:url" content="https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html"><meta property="og:description" content="This is the playbook for running salmon&#39;s `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes&#39; automated tests are all Layer 0: they check the *pure* verdict funct"><meta name="article:published_time" content="2026-10-06T21:52:42Z"><meta name="article:modified_time" content="2026-10-06T21:52:42Z"><meta name="ks:article_json" content="/salmon/json/docs-gcp-toy-validation.cmark.json"><meta name="ks:article_text" content="/salmon/text/docs-gcp-toy-validation.cmark.text"><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"Lucas DiCioccio"},"dateModified":"2026-10-06T21:52:42Z","datePublished":"2026-10-06T21:52:42Z","description":"This is the playbook for running salmon's `Salmon.Builtin.Nodes.Gcp.*` builtins against real GCP, in a sandbox you are willing to destroy. It exists because the GCP nodes' automated tests are all Layer 0: they check the *pure* verdict funct","headline":"Validating the GCP builtins against a real project","mainEntityOfPage":{"@id":"https://lucasdicioccio.github.io/salmon/docs-gcp-toy-validation.html","@type":"WebPage"},"publisher":{"@type":"Organization","name":"salmon"}}</script><meta name="article:tag" content="docs"><meta name="article:tag" content="guide"><meta name="article:tag" content="documentation"><style>@import "/salmon/css/dev.css";@import "/salmon/css/colors.css";@import "/salmon/css/article.css";@import "/salmon/css/navigation.css";</style></head><body><nav id="site-navigation" class="nav"><a href="/salmon/" class="home-link">Home</a><div id="search-box" data-base-path="/salmon"><script type="text/javascript" src="/salmon/js/search-box.js" async></script></div></nav><div class="main"><article><header class="heading"><h1>Validating the GCP builtins against a real project</h1><p>On <span>Tue, 06 Oct 2026</span>, by <a href="https://twitter.com/lucasdicioccio">@lucasdicioccio</a>, 5559 words, 9 code snippets, 0 links, 0images.</p><div class="topiclist"><div class="topic"><span class="topic-nav topic-prev-link"><a class="topic-nav-link" href="/salmon/docs-howto-ops.html">‹</a></span><a class="topic-link" href="/salmon/topics/docs.html"><span class="topic-name">docs</span><span class="topic-count">2/7</span></a><span class="topic-nav topic-next-link"><a class="topic-nav-link" href="/salmon/docs-postgres-pair.html">›</a></span></div></div></header><div class="main-article"><section class="main-section"><p><em>Generated from <a href="https://github.com/lucasdicioccio/salmon/blob/master/resources/gcp-toy-validation.md"><code>resources/gcp-toy-validation.md</code></a> — the repository is the canonical source, and may be ahead of this page.</em></p>
 <h2 id="validating-the-gcp-builtins-against-a-real-project">Validating the GCP builtins against a real project</h2>
 <p>This is the playbook for running salmon’s <code>Salmon.Builtin.Nodes.Gcp.*</code> builtins
 against real GCP, in a sandbox you are willing to destroy. It exists because the
@@ -34,6 +34,7 @@ left behind.</p>
 <table>
 <tr><th>Node</th><th>Resource</th></tr>
 <tr><td><code>Gcp.Core.applicationDefaultCredentials</code></td><td>validates ADC before anything else runs</td></tr>
+<tr><td><code>Gcp.Core.declaredAccount</code></td><td>with <code>--account EMAIL</code>: refuses unless gcloud's active account is that one</td></tr>
 <tr><td><code>Gcp.ResourceManager.project</code></td><td>the project itself (skipped with <code>--existing-project</code>)</td></tr>
 <tr><td><code>Gcp.Billing.linkBillingAccount</code></td><td>links the billing account</td></tr>
 <tr><td><code>Gcp.ServiceUsage.enableService</code></td><td><code>storage</code>, <code>iam</code>, <code>artifactregistry</code> (and <code>run</code> at tier 1, <code>monitoring</code> with <code>--alert-email</code>)</td></tr>
@@ -42,6 +43,16 @@ left behind.</p>
 <tr><td><code>Gcp.ArtifactRegistry.artifactRepository</code></td><td><code>&lt;prefix&gt;-repo</code>, docker format</td></tr>
 <tr><td><code>Gcp.Iam.iamBinding</code> ×2</td><td><code>storage.objectViewer</code> on the bucket, <code>artifactregistry.reader</code> on the repo</td></tr>
 </table>
+<p>With <code>--dns-zone DNS_NAME</code>, tier 0 also enables <code>dns.googleapis.com</code> and
+declares <code>Gcp.CloudDns.managedZone</code> — a public zone <code>&lt;prefix&gt;-zone</code> for that
+domain — with a toy node on top that reads back the name servers Cloud DNS
+assigned (<code>Gcp.CloudDns.readNameServers</code>) and prints them:</p>
+<pre><code>name servers for example.org.: ns-cloud-c1.googledomains.com. ns-cloud-c2.googledomains.com. ...
+</code></pre>
+<p>Those four are what goes to the registrar to delegate the domain. Creating a
+zone needs no proof that you own the name, and nothing resolves through it
+until the registrar points there, so any name will do for a validation run. A
+zone is billed per month, pro rata (cents). <code>down</code> deletes it.</p>
 <p><strong>Tier 1</strong> (cents) adds <code>SreBox.Gcp.CloudRunDeploy.buildPushDeploy</code>: podman
 builds an image, logs in to <code>&lt;region&gt;-docker.pkg.dev</code> with an isolated
 authfile, pushes, and <code>Gcp.CloudRun.cloudRunService</code> deploys it as
@@ -72,30 +83,69 @@ then provisions with <em>this same binary</em>.</p>
 <tr><th>Node</th><th>Resource</th></tr>
 <tr><td><code>Gcp.Compute.address</code></td><td>a reserved regional external IP, <code>&lt;prefix&gt;-ip</code></td></tr>
 <tr><td><code>Gcp.Compute.firewallRule</code></td><td><code>tcp:22</code> from <code>--ssh-source-range</code> to instances tagged <code>&lt;prefix&gt;-ssh</code></td></tr>
-<tr><td><code>Filesystem.filecontents</code></td><td>the startup script, passed as <code>--metadata-from-file</code></td></tr>
+<tr><td><code>SreBox.Gcp.VmProvision.caTrustStartupScriptFile</code> (a <code>Filesystem.filecontents</code>)</td><td>the startup script, passed as <code>--metadata-from-file</code></td></tr>
 <tr><td><code>Keys.sshKey</code> ×2, <code>Keys.signKey</code></td><td>a CA and a client key, and a certificate for <code>--vm-user</code></td></tr>
 <tr><td><code>Gcp.SshAccess.installMetadataCaKey</code></td><td>the CA's public key, into project metadata</td></tr>
 <tr><td><code>Gcp.Compute.gceInstance</code></td><td>the VM, claiming the address and carrying the tag</td></tr>
 <tr><td><code>Gcp.SshAccess.sshAvailable</code></td><td>waits for sshd to answer <em>as that user, with that certificate</em></td></tr>
+<tr><td><code>Secrets.sharedSecretFile</code>, <code>SecretDelivery.uploadSecretFile</code> (a <code>vmp_beforeCall</code> node)</td><td>a secret generated in the workdir, put on the VM as <code>/etc/salmon-toy/secret</code>, <code>root:root 0600</code>, before the binary runs</td></tr>
 <tr><td><code>Self.uploadAndCallSelfAsSudoWith</code> (via <code>SreBox.Gcp.VmProvision.provisionedVm</code>)</td><td>rsyncs this binary over and runs <code>run up</code> on it there</td></tr>
 </table>
 <p>The startup script is what closes the gap <code>installMetadataCaKey</code> leaves:
-nothing on a GCE instance reads that metadata key by itself. It fetches the
+nothing on a GCE instance reads that metadata key by itself. It is not the
+toy’s own: <code>SreBox.Gcp.VmProvision</code> exports it as <code>caTrustStartupScript</code>
+(text, given the login user), with <code>caTrustStartupScriptFile</code> to write it as
+a node and <code>withStartupScriptFile</code> to name it in an <code>Instance</code>’s metadata, so
+a consumer does not carry a copy. It waits for the key to be visible (a 404
+under <code>set -e</code> would otherwise leave a machine nobody can log into), fetches the
 CA from the metadata server into <code>/etc/ssh/salmon_ca.pub</code>, points sshd’s
 <code>TrustedUserCAKeys</code> at it, creates the login user the certificate names as
 its principal (with no OS Login, a principal must be a local account), gives
 it passwordless sudo, and makes sure <code>rsync</code> is there for the upload.</p>
-<p><strong>Tier 2 runs in two passes, and the script drives both.</strong> GCP picks the
-address, so the first pass reserves it and stops; the driver then reads the
-IP (<code>gcloud compute addresses describe</code>, the call <code>Compute.readAddress</code>
-wraps) and re-issues the directive with <code>--vm-ip</code>, and
-the second pass declares the same graph plus the provisioning step. That is
-not a wart of the toy: an <code>Op</code> naming the host has to be built before any
-<code>up</code> runs, so <em>something</em> outside the graph has to carry the address across.</p>
+<p><strong>Tier 2 provisions in the pass that creates the machine.</strong> GCP picks the
+address, and an <code>Op</code> naming the host has to be built before any <code>up</code> runs, so
+the nodes that name it (the ssh probe, the secret upload, the remote call)
+cannot be declared. Without <code>--vm-ip</code> the toy uses
+<code>VmProvision.provisionedVmReadingHost</code>: the instance, the CA and the signed
+key are ordinary nodes, and the hand-off is one <code>Salmon.Builtin.Nodes.Deferred</code>
+node whose <code>up</code> reads the address (<code>Compute.readAddress</code>), builds those nodes
+from it and walks them. <code>run tree</code> shows that node and not what is inside it.</p>
+<p>The script still drives two passes: after the first it reads the IP itself
+(<code>gcloud compute addresses describe</code>) and re-issues the directive with
+<code>--vm-ip</code>, which declares the hand-off as ordinary nodes. The second pass is
+then expected to skip or re-check what the first already did, rather than to
+do the provisioning. <strong>The one-pass path has not been run against a real
+project</strong>; before this change the first pass stopped at the instance, so a
+first pass that fails at <code>deferred</code> is this code, not the infrastructure.
+Under <code>run serve</code>, moving from a seed without <code>--vm-ip</code> to one with it
+retires the deferred node, whose <code>down</code> removes the uploaded secret before the
+declared upload puts it back.</p>
 <p>What proves it worked is the file the uploaded binary writes on the VM,
 <code>/var/lib/salmon-toy/provisioned</code>; the script reads it back over ssh. The
 binary runs there with the same directive, tagged <code>OnVm</code>, which is why the
 payload is declared in the same <code>Track'</code> as everything else.</p>
+<p><strong>Tier 2 can also declare a peer</strong> (a second <code>e2-micro</code>), with
+<code>--vm-internal-ip A --peer-internal-ip B</code>: two free addresses in the region’s
+<code>default</code> subnet (<code>gcloud compute networks subnets describe default --region REGION --format='value(ipCidrRange)'</code> says which range; <code>10.132.0.0/20</code> in
+<code>europe-west1</code>).</p>
+<table>
+<tr><th>Node</th><th>Resource</th></tr>
+<tr><td><code>Gcp.Compute.address</code> ×2</td><td>reserved <em>internal</em> addresses <code>&lt;prefix&gt;-vm-internal</code> and <code>&lt;prefix&gt;-peer-internal</code>, at A and B</td></tr>
+<tr><td><code>Gcp.Compute.gceInstance</code></td><td>the VM again, now also pinned to A (<code>--private-network-ip</code>)</td></tr>
+<tr><td><code>Gcp.Compute.gceInstance</code></td><td><code>&lt;prefix&gt;-peer</code>: pinned to B, and with no external address (<code>--no-address</code>)</td></tr>
+<tr><td><code>Gcp.Compute.firewallRule</code></td><td><code>tcp:8081</code> from <code>A/32</code> to instances tagged <code>&lt;prefix&gt;-peer</code></td></tr>
+<tr><td><code>gcp-toy-peer-reached</code> (on the VM)</td><td>fetches <code>http://B:8081/</code> and keeps the answer in <code>/var/lib/salmon-toy/peer-reached</code></td></tr>
+</table>
+<p>The point is the contrast with the paragraph above: an internal address is
+the caller’s choice, so it is known when the graph is declared, and the
+firewall rule naming the VM and the URL naming the peer are written before
+either machine exists. That is what a recipe naming its peers by address
+(<code>SreBox.PostgresPair</code>: a <code>/32</code> in <code>pg_hba.conf</code>, a <code>primary_conninfo</code>) needs
+to run on GCE without replicating over public addresses. The peer has no way
+out of the VPC — the toy declares no Cloud NAT — so its startup script uses
+only what the image ships. An instance’s addresses are fixed when it is
+created: adding the two flags to a run whose VM already exists changes
+nothing about that VM.</p>
 <p><strong>Tier 3</strong> (a forwarding rule’s hourly rate on top of tier 2) puts a
 <em>regional external</em> Application Load Balancer in front of that VM.</p>
 <table>
@@ -104,9 +154,44 @@ payload is declared in the same <code>Track'</code> as everything else.</p>
 <tr><td><code>Gcp.Compute.instanceGroup</code></td><td>an unmanaged, zonal group, <code>&lt;prefix&gt;-ig</code></td></tr>
 <tr><td><code>Gcp.Compute.instanceGroupMember</code></td><td>the tier-2 VM, put in it</td></tr>
 <tr><td><code>Gcp.Compute.firewallRule</code></td><td><code>tcp:&lt;--lb-port&gt;</code> from the proxy range <strong>and</strong> the health-check ranges, to instances tagged <code>&lt;prefix&gt;-lb</code></td></tr>
-<tr><td><code>Gcp.LoadBalancing.applicationLoadBalancer</code></td><td>health check, backend service, named ports, URL map, target proxy, forwarding rule</td></tr>
+<tr><td><code>Gcp.LoadBalancing.applicationLoadBalancer</code></td><td>health check, backend service, named ports, URL map, target proxy, forwarding rule (a node each, under one root)</td></tr>
 <tr><td><code>Systemd.systemdService</code> (on the VM)</td><td><code>salmon-toy-web.service</code>, a <code>python3 -m http.server</code> over a page salmon wrote</td></tr>
 </table>
+<p>With <code>--dns-zone DNS_NAME</code>, tier 3 also declares
+<code>Gcp.CloudDns.resolvedRecordSet</code>: an <code>A</code> record <code>lb.DNS_NAME</code> (TTL 300) at
+the address GCP gave the forwarding rule. That address does not exist until
+the balancer’s <code>up</code> has run, so the record’s data is read at <code>up</code>
+(<code>Gcp.LoadBalancing.readAddress</code>) instead of being declared — no extra pass.
+Its <code>check</code> describes the record set and compares it with the address read
+again, so a second <code>up</code> skips it. The script compares what the zone holds
+with the forwarding rule’s address; it does not resolve the name, since
+nothing resolves through a zone the registrar does not delegate to. <code>down</code>
+removes the record before the zone, which Cloud DNS would otherwise refuse
+to delete.</p>
+<p>With <code>--lb-https</code> as well (it needs <code>--dns-zone</code>), the same balancer also
+serves <code>lb.DNS_NAME</code> over HTTPS, and the tier puts everything else
+<code>Gcp.LoadBalancing</code> can express through the project once:</p>
+<table>
+<tr><th>Declared</th><th>Resource</th></tr>
+<tr><td><code>ManagedCertificate</code></td><td>a regional Certificate Manager certificate <code>&lt;prefix&gt;-lb-cert</code> for <code>lb.DNS_NAME</code>, and one DNS authorization <code>&lt;prefix&gt;-lb-cert-lb-&lt;DNS_NAME, dots as dashes&gt;</code></td></tr>
+<tr><td>(the certificate list being non-empty)</td><td>a reserved address <code>&lt;prefix&gt;-lb-ip</code>, a target HTTPS proxy <code>&lt;prefix&gt;-lb-https-proxy</code>, a second forwarding rule <code>&lt;prefix&gt;-lb-https-fw</code> on <code>:443</code> — both rules on that one address</td></tr>
+<tr><td><code>BackendService "slow"</code></td><td>a second backend service <code>&lt;prefix&gt;-lb-slow-backend</code> over the same instance group, with a 120-second timeout</td></tr>
+<tr><td><code>HostRule</code> / <code>PathRule</code></td><td>the URL map imported whole: <code>lb.DNS_NAME</code> to the default service, <code>/slow/*</code> to the second one</td></tr>
+<tr><td>a toy node</td><td>the <code>CNAME</code> the authorization asks for, published in the zone</td></tr>
+</table>
+<p>A <em>regional</em> balancer cannot use the classic Google-managed
+<code>compute ssl-certificates</code> (those are global only, and are the ones that
+provision once DNS points at the balancer). What it takes is a regional
+Certificate Manager certificate issued against a <strong>DNS authorization</strong>: a
+<code>CNAME</code> whose name and target GCP picks, which the zone has to carry. So the
+order is the reverse of the classic one — the certificate can be issued
+before anything points at the balancer, but <strong>only if <code>DNS_NAME</code> is really
+delegated to the zone’s name servers</strong> (the ones tier 0 prints). Without the
+delegation everything is created, the certificate stays <code>PROVISIONING</code>, the
+balancer’s check says <code>Unknown</code>, and <code>:443</code> does not complete a handshake.</p>
+<p>The VM serves one page, so <code>/slow/*</code> answers <code>404</code> through the balancer; the
+path rule and the timeout are read back from the URL map and the backend
+service rather than observed in a response.</p>
 <p>Three of those exist only because a regional external ALB is an Envoy fleet
 rather than a Google frontend, and that is what the tier is really testing:
 the proxies run <em>inside</em> the VPC, in a proxy-only subnet that must already
@@ -155,6 +240,10 @@ gcloud auth login
 gcloud auth application-default login
 gcloud config get-value account                      # confirm the sandbox identity
 </code></pre>
+<p>Pass <code>--account you@example.com</code> in the seed to have the graph check this
+rather than you: <code>Gcp.Core.declaredAccount</code> reads <code>gcloud config get-value account</code> and, on any other answer, fails before a single resource is created,
+blocking everything declared on top of it. It never switches the account
+itself. Without the flag nothing is asserted, as before.</p>
 <p>The script prints the active account and the ambient project when it starts.
 The ambient project should not matter: every node passes <code>--project</code>
 explicitly. If a run only works when the ambient project happens to be right,
@@ -172,7 +261,71 @@ that is a bug in a node, and worth reporting.</p>
 <code>--vm-image-family</code>/<code>--vm-image-project</code> (Ubuntu 24.04 LTS), <code>--vm-user</code>
 (<code>salmon</code>) and <code>--ssh-source-range</code> (<code>0.0.0.0/0</code> — narrow it to your own
 address if the sandbox is not disposable). Tier 3 adds <code>--lb-proxy-range</code>
-(<code>192.168.100.0/24</code>) and <code>--lb-port</code> (<code>8080</code>).</p>
+(<code>192.168.100.0/24</code>) and <code>--lb-port</code> (<code>8080</code>), and with <code>--dns-zone</code> takes
+<code>--lb-https</code>.</p>
+<h4 id="the-https-run">The HTTPS run</h4>
+<p>Nothing below has been run against a real project yet; this is the run that
+would close the gap. It needs a domain you control, and the full verdict
+needs that domain (or a subdomain of it) delegated to the zone the toy
+creates, which takes two steps because the name servers are only known once
+the zone exists.</p>
+<pre><code class="language-sh"># 1. tier 0 with the zone, kept: prints the name servers Cloud DNS assigned
+salmon-apps/scripts/gcp-toy-validate.sh --keep -- \
+  --project YOUR_TOY_PROJECT \
+  --organization YOUR_ORG_ID \
+  --billing-account YOUR_BILLING_ACCOUNT \
+  --dns-zone toy.example.org \
+  --tier 0
+
+# 2. at the registrar (or in the parent zone): NS records for
+#    toy.example.org at those four name servers. Then wait for
+dig +short NS toy.example.org        # to answer with them
+
+# 3. the same project, tier 3 with HTTPS (the script drives both passes of a
+#    tier &gt;= 2 itself: reserve the VM address, then re-issue with --vm-ip)
+salmon-apps/scripts/gcp-toy-validate.sh -- \
+  --project YOUR_TOY_PROJECT \
+  --existing-project \
+  --dns-zone toy.example.org \
+  --tier 3 --lb-https
+</code></pre>
+<p>Adjust step 3’s project flags to whatever step 1 used; the point is that the
+zone, and so its name servers, must be the same one. <code>CERT_WAIT_ATTEMPTS</code>
+(default 30, twenty seconds apart) bounds how long the script waits for the
+certificate.</p>
+<p>A green run prints, beside the tier-3 lines:</p>
+<ul>
+<li><code>https: :443 and :80 share the reserved address</code>
+</li>
+<li><code>rules: the URL map routes lb.toy.example.org, and /slow/* to the second backend service</code>
+</li>
+<li><code>timeout: the second backend service waits 120s</code>
+</li>
+<li><code>authorization: the zone holds the CNAME Certificate Manager asked for</code>
+</li>
+<li><code>certificate: &lt;prefix&gt;-lb-cert is ACTIVE</code>
+</li>
+<li><code>https: the balancer served the VM's page over HTTPS, certificate verified for lb.toy.example.org</code>
+</li>
+</ul>
+<p>Without the delegation the first four can still be green; the certificate
+line then says so and HTTPS is not probed. To check by hand what the script
+checks:</p>
+<pre><code class="language-sh">gcloud compute url-maps describe &lt;prefix&gt;-lb-url-map --region REGION --project P
+gcloud compute backend-services describe &lt;prefix&gt;-lb-slow-backend --region REGION --project P --format='value(timeoutSec)'
+gcloud certificate-manager dns-authorizations describe &lt;prefix&gt;-lb-cert-lb-toy-example-org --location REGION --project P
+gcloud certificate-manager certificates describe &lt;prefix&gt;-lb-cert --location REGION --project P --format='value(managed.state)'
+curl --resolve lb.toy.example.org:443:LB_IP https://lb.toy.example.org/
+</code></pre>
+<p>A second <code>run up</code> on the directive should skip the balancer (its check is
+<code>Success</code> once the backends are healthy and the certificate is <code>ACTIVE</code>),
+though by design it would re-run two “set” calls if it did not: the URL map
+import and the timeout update.</p>
+<p><strong>Turning HTTPS on for a balancer that already exists</strong> leaves its <code>:80</code>
+rule on the ephemeral address it was created with — a forwarding rule’s
+address cannot be changed, and the script only creates what is missing. The
+<code>:443</code> rule gets the reserved one, and <code>readAddress</code> reads that. Tear the
+balancer down first if the two must agree.</p>
 <p>Script options, before the <code>--</code>: <code>-y</code> skips the confirmation prompt, <code>--keep</code>
 skips teardown (it then prints the <code>run down</code> command to finish up later).
 Everything after the <code>--</code> goes verbatim to <code>salmon-gcp-toy config</code>. <code>OUT=&lt;dir&gt;</code>
@@ -182,6 +335,17 @@ and <code>SALMON_GCP_TOY=&lt;binary&gt;</code> override the log directory and th
 <code>$(date +%s)</code> in the id is there for exactly this. <code>Gcp.ResourceManager</code>’s check
 reports that state with its own message rather than as a plain “not found”,
 because the <code>up</code> that follows is going to fail on the id, not on credentials.</p>
+<p><strong>Tier 2 also delivers a secret.</strong> The control side generates 32 random
+bytes into <code>&lt;workdir&gt;/secrets/toy-secret</code> and
+<code>Salmon.Builtin.Nodes.SecretDelivery.uploadSecretFile</code> writes them to
+<code>/etc/salmon-toy/secret</code> on the VM over the connection the provisioning
+already uses, before the uploaded binary is called. The VM-side directive
+knows only the path: its <code>gcp-toy-secret-read</code> node reads the file, fails if
+it is absent or not 64 bytes long, and leaves
+<code>/var/lib/salmon-toy/secret-read</code> saying how many bytes it read. The script
+reads that marker and the file’s owner and mode back, never its contents. On
+the second pass the upload should be a <code>Skip</code> (its check compares the remote
+file with the local one), which the script notes.</p>
 <h3 id="what-the-passes-mean">What the passes mean</h3>
 <table>
 <tr><th>Pass</th><th>What a clean result looks like</th><th>What a dirty one tells you</th></tr>
@@ -290,35 +454,274 @@ cause is nearly always a firewall rule rather than the balancer.</p>
 </ul>
 <h3 id="gaps-this-does-not-cover">Gaps this does not cover</h3>
 <ul>
-<li><strong>The VM’s own teardown is the project delete.</strong> <code>down</code> removes the
-instance, the address and the firewall rule as declared nodes, but nothing
-checks that the guest was left in any particular state.
+<li>
+<p><strong>The DNS zone has not been run against a real project yet.</strong> The <code>gcloud dns managed-zones</code> argv and the reading of <code>describe --format json</code> are
+covered by Layer 0 tests, on a description written from the API’s
+<code>ManagedZone</code> resource rather than captured; that the zone is created, its
+name servers printed, the second pass skips it and <code>down</code> removes it is
+what the first run with <code>--dns-zone</code> will show.</p>
 </li>
-<li><strong>Host identity is trust-on-first-use, per recipe.</strong> The user is
+<li>
+<p><strong>The peer has not been run against a real project yet.</strong> The <code>gcloud</code>
+argv for a pinned internal address, a reserved internal address and an
+instance with no external address is covered by Layer 0 tests; that GCP
+accepts <code>--private-network-ip</code> on an address already reserved by a
+<code>compute addresses create --subnet … --addresses …</code> in the same pass, and
+that the VM then reaches the peer, is what the first run with
+<code>--vm-internal-ip</code>/<code>--peer-internal-ip</code> will show.</p>
+</li>
+<li>
+<p><strong>The secret delivery has not been run against a real VM yet.</strong> The remote
+scripts are covered by Layer 0 tests that run them under a local <code>sh</code>, and
+the ssh command line by its rendering; <code>sudo -n sh -c</code> reading the secret
+from ssh’s standard input on a real guest is what the first tier-2 run
+will show.</p>
+</li>
+<li>
+<p><strong><code>Gcp.SecretManager.secretFile</code> is not exercised by the toy at all.</strong> It is
+the on-machine transport (the instance reads Secret Manager as its own
+service account); the toy’s VM has no service account granted on anything,
+and only the <code>gcloud</code> argv and the local placement are tested.</p>
+</li>
+<li>
+<p><strong>An instance’s addresses are not checked for drift.</strong> <code>gceInstance</code>’s
+check reads the instance’s status only, so an instance that exists on
+another internal address than the declared one is reported satisfied.</p>
+</li>
+<li>
+<p><strong>The VM’s own teardown is the project delete.</strong> <code>down</code> removes the
+instance, the address and the firewall rule as declared nodes, but nothing
+checks that the guest was left in any particular state.</p>
+</li>
+<li>
+<p><strong>Host identity is trust-on-first-use, per recipe.</strong> The user is
 authenticated by certificate, but the <em>host</em> is not: <code>VmProvision</code> keeps a
 known-hosts file next to the client key and accepts a new host on sight.
 Signing host certificates with the same CA would close that, and needs
 <code>ssh-keygen -s -h</code> support in <code>Keys</code> plus a way to get each VM’s host key
-signed at boot.
+signed at boot.</p>
 </li>
-<li><strong>The serverless-NEG backend is still unexercised.</strong> Tier 3 drives
+<li>
+<p><strong>The serverless-NEG backend is still unexercised.</strong> Tier 3 drives
 <code>Gcp.LoadBalancing</code>’s <code>InstanceGroupBackend</code>; the <code>CloudRunBackend</code> branch
 (a serverless NEG in front of tier 1’s Cloud Run service) renders but has
 never been run. Mixing the two in one balancer is not an option — a backend
 service holds one kind of backend — so exercising it means a second
-balancer.
+balancer.</p>
 </li>
-<li><strong>HTTPS, and anything past the default route.</strong> The URL map has one default
-service and the forwarding rule is plain <code>:80</code>; managed certificates, host
-and path rules, and the <code>--network</code>-carrying form of the forwarding rule are
-all rendered-but-unrun.
+<li>
+<p><strong>HTTPS, host and path rules, several backend services, timeouts: declared
+by <code>--lb-https</code>, never run.</strong> <code>Gcp.LoadBalancing</code> renders all of it and the
+toy declares it, but no <code>certificate-manager</code> command, no <code>url-maps import</code>,
+no <code>target-https-proxies</code> call and no <code>--address</code>-carrying forwarding rule
+has met a real project. The Layer 0 tests run the scripts against a
+stand-in <code>gcloud</code> written from the same assumptions, so they show the
+scripts’ own logic (guards, order, what a second run does) and nothing
+about the API. Specifically unverified: that a regional DNS authorization
+takes <code>--type=PER_PROJECT_RECORD</code>; that <code>target-https-proxies create --region</code> accepts <code>--certificate-manager-certificates</code> by bare name; that
+<code>url-maps import</code> reads JSON on stdin and replaces an existing map under
+<code>--quiet</code>; how <code>value(hostRules[].hosts)</code>, <code>value(timeoutSec)</code>,
+<code>value(managed.state)</code> and the three-field <code>dnsResourceRecord</code> read print;
+that a reserved regional address in the default tier is accepted by an
+<code>EXTERNAL_MANAGED</code> forwarding rule; that one instance group can back
+two backend services of one balancer; and the named-port handling that
+makes that useful – each backend service sends to a named port of its own
+(<code>--port-name</code>, its resource name), and a group’s named ports are set once
+per group, merged with what <code>instance-groups get-named-ports --format='value(name,port)'</code> prints – of which the two-column output and
+<code>value(portName)</code> are assumed, not recorded. “The HTTPS run” above is the
+run that settles these.</p>
 </li>
-<li><strong>Two credentials, one identity assumed.</strong> <code>gcp-adc</code> validates ADC;
-<code>Core.printAccessToken</code> (the registry login password) uses the active account.
-Log both in as the same identity.
+<li>
+<p><strong>The balancer’s check does not see path rules</strong>, nor which service a host
+is sent to: only that each declared host is in the map, and each declared
+timeout on its service. A path rule changed behind salmon is put back by
+the next <code>up</code> that runs for another reason, not noticed.</p>
 </li>
-<li><strong><code>CloudRun</code>’s check is a substring match</strong> on the image, so <code>img:1</code> matches
-<code>img:10</code>, and a changed env var or service account is not noticed.
+<li>
+<p><strong>No client-facing TLS policy, no self-managed certificate upload.</strong>
+<code>ComputeCertificate</code> names a regional certificate somebody else made.</p>
+</li>
+<li>
+<p><strong>A backend bucket route on a regional balancer took every service host
+down, and is now refused.</strong> Not run by the toy: observed on a downstream
+deployment’s live regional external Application Load Balancer
+(europe-west1, 2026-10-05, 14:36 to 15:28 UTC). What was seen: with one
+path matcher on a regional backend bucket in the URL map (<code>albBuckets</code> and
+a host rule to <code>NamedBucket</code>), every matcher on a backend service answered
+503 (<code>failed_to_pick_backend</code>) while the backends were <code>HEALTHY</code>, and the
+bucket’s own host served. What restored it: <code>url-maps import</code> of the same
+map minus that one host rule and its matcher; the six service hosts served
+again 80 seconds later. What is cleared: a matcher that only redirects,
+which stayed in the map. What it implies about the calls, on that
+deployment’s account and with no output recorded here: a regional
+<code>backend-buckets</code> resource was created and a regional URL map accepted it,
+since the bucket’s host served. What is not known: why (the service rules are
+rendered identically with and without the bucket, so it is not in what
+salmon writes about them; no cause is claimed), whether it happens on
+every regional balancer or needed something else this one had, and whether
+a <em>global</em> balancer mixes the two — this module does not make one and
+nobody here has run one. So <code>albProblems</code> refuses a rule routing to a
+backend bucket (every node’s check a <code>Failure</code>, every <code>up</code> a throw, no
+call made), naming the above. An <code>albBuckets</code> entry no rule names is
+still accepted. For a balancer already in that state the repair is the
+declaration without the rule, and one pass: the map’s check finds the
+host no rule declares and its <code>up</code> imports the map without it (at
+<code>2582343</code>, the commit that deployment ran, it did not: the check did not
+see a removed host). That path is tested against the stand-in <code>gcloud</code>
+only. The backend bucket dropped from the declaration as well is deleted
+after the import, if a pass ever marked it as the balancer’s; one that
+never was is left:</p>
+<pre><code class="language-sh">gcloud compute backend-buckets delete NAME-N-bucket --project P --region R
+</code></pre>
+<p><code>albBucketRoutes = AllowBucketRoutesKnownToHaveBrokenALiveBalancer</code> is
+there for whoever wants to show a mixed map working, on a balancer that
+serves nothing that matters.</p>
+</li>
+<li>
+<p><strong>A path rewrite on a path rule: not declared by the toy, never run.</strong>
+<code>PathRule</code>’s <code>pathRuleRewrite = RewritePrefix P</code> is rendered as
+<code>routeAction: {urlRewrite: {pathPrefixRewrite: P}}</code> beside the rule’s
+<code>service</code> in the imported map, from GCP’s URL map reference. Unverified:
+that a <em>regional external</em> balancer’s <code>url-maps import</code> accepts a
+<code>routeAction</code> on a <code>pathRules</code> entry that also names a <code>service</code>, and one
+that names a backend bucket; that an exact pattern (<code>/</code>) counts as wholly
+matched, so that <code>/</code> rewritten to <code>/index.html</code> asks the backend for
+<code>/index.html</code>; and that <code>/static/*</code> matches up to and including the last
+slash. The Layer 0 tests assert the JSON and the fingerprint, nothing
+about the API.</p>
+</li>
+<li>
+<p><strong>Redirects and the HTTP listener option (and what the scripts assume of
+backend buckets): not declared by the toy, never run by it.</strong> A rule may
+answer with a redirect (<code>RedirectTo</code>) or, under the opt-in above, send to
+a backend bucket (<code>albBuckets</code>, <code>NamedBucket</code>), and <code>albHttp</code> says
+what port 80 does: by default what it always did (<code>:80</code> serves the same map
+as <code>:443</code>, through a proxy created once and never set again), or
+<code>ServeHttp</code>, <code>RedirectToHttps code</code>, <code>NoHttp</code>. All of it is exercised
+against the stand-in <code>gcloud</code> only. What the scripts assume and nobody
+recorded: that <code>compute backend-buckets create --region</code> with
+<code>--load-balancing-scheme=EXTERNAL_MANAGED</code> makes something a regional URL
+map accepts (the flags are in gcloud 573’s <code>--help</code>; the deployment above
+had a bucket host serving, so it does, but nobody recorded the call), and
+that such a map names it as
+<code>.../regions/R/backendBuckets/NAME</code>; how <code>value(bucketName)</code> reads; that
+<code>url-maps import</code> takes <code>urlRedirect</code>/<code>defaultUrlRedirect</code> with
+<code>redirectResponseCode</code> as spelled, a path matcher with a redirect and no
+default service, and a map with nothing but <code>defaultUrlRedirect</code>; that
+<code>description</code> survives an import and reads back through
+<code>value(description)</code> (the check of a map with a bucket or a redirect
+requires it, so if it does not, that map reads as never in place; a map
+of backend services only is now written with one too, but its check only
+refuses a <em>different</em> <code>salmon:</code> description, so there a description that
+does not survive costs the detection of a host moved to another service
+and nothing else); that <code>value(hostRules[].hosts)</code> prints nothing for a
+map with no host rule and every host otherwise (the check now compares
+hosts as a set, and the rule-less map’s <code>up</code> imports over a map for which
+it prints anything); that <code>url-maps import</code> accepts a map of <code>name</code> and
+<code>defaultService</code> alone and takes the rules off the one there; that a
+regional proxy prints its map under <code>value(urlMap)</code> as a URL ending in the
+map’s name; that <code>target-http-proxies update --url-map</code> moves a proxy in
+service. On the GCP side, also unknown: whether a regional backend bucket
+serves <code>/</code> as <code>index.html</code> or a custom 404 page, and whether it answers
+<code>HEAD</code>. A throwaway balancer with one redirect and <code>RedirectToHttps</code>
+settles the rest; one with a bucket route as well (the opt-in) is the only
+way to learn more about the outage above.</p>
+</li>
+<li>
+<p><strong>Replacing a certificate on a live balancer has never met a real
+project.</strong> A <code>DomainSetCertificate</code> is named after its domain set, so a
+changed set is a new certificate beside the old one; the HTTPS proxy is
+moved to it (<code>target-https-proxies update</code>) only once it is <code>ACTIVE</code>, and
+the superseded one is deleted after. While the new one is being issued a
+pass exits 0: the proxy’s <code>up</code> prints <code>PENDING certificate swap</code> and leaves
+the proxy alone, the cleanup skips the certificate still served, and both
+checks read <code>Unknown</code>; only a <code>FAILED</code> or absent certificate fails the
+pass. So a release script cannot read “swap done” off the exit status, and
+a pass has to be run again (or <code>serve</code> left tending) after issuance. The
+records of the new authorizations belong on the <code>gcp-lb-dns-authorization</code>
+nodes, not on the balancer’s root. All of that is exercised against the
+stand-in <code>gcloud</code> only, and the toy still declares a <code>ManagedCertificate</code>
+(fixed name, one host). What the scripts assume and nobody recorded: that
+a regional proxy lists Certificate Manager certificates under
+<code>sslCertificates</code> (by path, last segment the name); that <code>update</code> takes
+<code>--certificate-manager-certificates</code>; that <code>value(managed.domains)</code>,
+<code>value(managed.authorizationAttemptInfo[].state)</code> and <code>value(expireTime)</code>
+read as they are parsed; that <code>certificates list --format='value(name)'</code>
+ends each line with the certificate’s name; that one DNS authorization can
+back two certificates at once (the swap relies on it for the names both
+sets cover); and that GCP refuses to delete a certificate a proxy still
+serves (the scripts look first, and do not rely on it). If
+<code>managed.domains</code> reads differently from what is assumed, a
+<code>ManagedCertificate</code> whose list never changed would be reported as
+covering other names: that is the first thing to look at on a real run.</p>
+</li>
+<li>
+<p><strong>The removal of what a balancer no longer declares has never met a real
+project</strong>, and it deletes. The balancer’s last node (<code>gcp-lb-leftovers</code>)
+removes a backend bucket, a Certificate Manager certificate, a DNS
+authorization or the redirect-only URL map that this balancer made and the
+declaration no longer names, once nothing uses it. “Made by this balancer”
+is a <code>description</code> of <code>salmon:lb:&lt;balancer&gt;</code> (for the redirect map, the
+fingerprint the module writes into it), and that node writes it on the
+declared resources that have no description. So <strong>the first pass after an
+upgrade runs one <code>update --description</code> per declared backend bucket,
+managed certificate and DNS authorization, and deletes nothing</strong>; a
+resource that left the declaration before it was marked is never removed,
+and is removed by hand:</p>
+<pre><code class="language-sh">gcloud compute backend-buckets delete NAME-N-bucket --project P --region R
+gcloud certificate-manager certificates delete CERT --project P --location R
+gcloud certificate-manager dns-authorizations delete AUTHZ --project P --location R
+gcloud compute url-maps delete NAME-http-redirect-url-map --project P --region R
+</code></pre>
+<p>(GCP refuses each while something still names it; the published <code>CNAME</code> of
+a deleted authorization is still in the zone.) A delete or a marking that
+fails fails that node and the pass, after every resource that serves
+traffic was applied. What the scripts assume and nobody recorded: that
+<code>compute backend-buckets update --region</code>, <code>certificate-manager certificates update</code> and <code>dns-authorizations update</code> take <code>--description</code>
+alone and change nothing else (if one does not, the first pass after the
+upgrade fails on that node, on every balancer that has such a resource:
+the first thing to look at); that the three <code>list --format='value(name,description)'</code> print the name (or a path ending in
+it), a tab and the description, and an empty description as nothing; that
+<code>compute backend-buckets list</code> without a region flag includes regional
+ones (each candidate is read again with <code>describe --region</code> before
+anything is concluded); that <code>compute url-maps list --format=json</code> holds
+every map of the project and names a regional backend bucket as
+<code>/regions/R/backendBuckets/NAME&quot;</code>; that <code>target-https-proxies list --format='value(sslCertificates,certificateManagerCertificates)'</code> shows
+the certificates of every proxy by path, and <code>certificates list --format='value(managed.dnsAuthorizations)'</code> the authorizations in use;
+that <code>target-http-proxies list</code> and <code>target-https-proxies list</code> print
+<code>value(urlMap)</code> as a URL containing <code>/regions/R/urlMaps/NAME</code>; and that
+<code>certificate-manager ... list</code> simply fails, without prompting, in a
+project where the API is off. Not removed at all: anything at teardown, a
+backend service, a health check, a NEG, or the HTTPS proxy, rule and
+address of a balancer that stops declaring certificates.</p>
+</li>
+<li>
+<p><strong>The <code>--network</code>-carrying form of the forwarding rule</strong> is still
+rendered-but-unrun.</p>
+</li>
+<li>
+<p><strong>Two credentials; only the one that acts is pinned.</strong> <code>gcp-adc</code> validates
+ADC, which no node here uses: every <code>gcloud</code> call and
+<code>Core.printAccessToken</code> (the registry login password) act as the active
+account. <code>--account</code> (<code>Core.declaredAccount</code>) asserts who that is; nothing
+compares the ADC identity with it, and the assertion is made once per pass
+rather than passed as <code>--account</code> on each call, so an account switched
+mid-pass is not caught.</p>
+</li>
+<li>
+<p><strong><code>CloudRun</code>’s check is a substring match</strong> on the image, so <code>img:1</code> matches
+<code>img:10</code>, and a changed env var or service account is not noticed.</p>
+</li>
+<li>
+<p><strong><code>CloudRunOptions</code>’ scaling knobs have never met a real service.</strong>
+<code>croMinInstances</code> (<code>--min-instances</code>) and <code>croCpuAlwaysAllocated</code>
+(<code>--no-cpu-throttling</code>) — what a service with a background loop needs to
+stay up and keep its CPU between requests — render, and the check compares
+them, when declared, against the template annotations
+<code>autoscaling.knative.dev/minScale</code> and <code>run.googleapis.com/cpu-throttling</code>.
+Those two names are from Cloud Run’s documented service YAML, not from a
+<code>describe</code> the toy captured: if gcloud reports them otherwise, a service
+declaring either knob redeploys on every pass.</p>
 </li>
 </ul>
 </section></div><footer class="footing"><div class="social-links"><a href="https://twitter.com/lucasdicioccio">twitter</a><a rel="me" href="https://fosstodon.org/@lucasdicioccio">mastodon</a><a href="https://github.com/lucasdicioccio">github</a><a href="https://linkedin.com/in/lucasdicioccio">linkedin</a></div></footer></article></div></body></html>

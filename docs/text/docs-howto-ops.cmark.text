@@ -270,7 +270,7 @@ You do not need `Track`/`Tracked` for the vast majority of new nodes — only re
 - `getDynamics`/`collectDynamics` walk a graph and pull out every `Dynamic` of a chosen type — used e.g. to flatten "which of these ops are actually remote calls" out of a graph for special handling.
 
 
-- `Debian.Package.deb` stashes a `Package`, which the `batchPackages` **rewrite** (`Salmon.Op.Rewrite`) collects across the whole graph into one `apt-get` invocation.
+- `Debian.Package.deb` stashes a `Package`, which the `batchPackages` **rewrite** (`Salmon.Op.Rewrite`) collects across the whole graph into one `apt-get` invocation. The `aptIndex` node every `deb` depends on (it runs `apt-get update` when `apt-cache policy` has no candidate for a package that is not installed yet) carries an `AptIndexFor` the same rewrite collects, so a batched graph refreshes the index at most once.
 
 
 - A `Salmon.Op.Supervision.Supervision` states how the node wants to be tended: whether to put it back when its `check` says the effect has gone (`Always`/ `OnFailure`/`Never`, defaulting to `OnFailure`), how long its silence may last before somebody should worry, and — `supStrategy` — what its _going away_ means for the nodes standing on it. `Salmon.Actions.Upkeep` reads it back with the same `getDynamics`. One line, and a node with no opinion needs none:

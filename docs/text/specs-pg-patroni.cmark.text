@@ -99,6 +99,8 @@ Three options, from least to most machinery. The recipe should offer the first a
 
 A `Haproxy` builtin would have the same shape as `Nginx`: a config value, a renderer, and a systemd unit. Unlike pgbouncer, HAProxy needs no reload on failover: its health checks move the traffic.
 
+**Done** as `Salmon.Builtin.Nodes.Haproxy` (`setup`, `renderConfig`, `patroniRouter`): every member is listed under every listener and only the check path differs (`/primary`, `/replica`, `/replica?lag=N`, `/read-only`), so the file is the same text before and after a failover, which is T3 for the router. `on-marked-down shutdown-sessions` closes a demoted leader's sessions so its clients reconnect to the new one. A member's traffic port is its own field, so the upstream can be Postgres or a PgBouncer on the member. Changing the member _set_ rewrites the file and restarts HAProxy, dropping connections; a graceful reload (`-sf`) is not done. Not done either: a recipe placing it beside `patroniMember`, TLS, and T1/T2/T6 through it (Layer 3).
+
 ## Reaching the leader
 
 Admin nodes need a way to reach whichever member is the leader right now, which is not known when the directive is written.
@@ -120,7 +122,26 @@ Backups (from a replica, by preference) and scheduled jobs (`CronTask`) would ot
 
 - **Backups:** a Patroni tag such as `nofailover` or a custom one marks the member dedicated to them. The scheduled command gates itself with `curl -sf localhost:8008/replica`, skipping when the member is not a replica.
 
+
 - **PITR:** `SreBox.PostgresBackup` is `pg_dump`, which has no point-in-time recovery and no use to Patroni. A continuous archive (pgBackRest or WAL-G, both packaged by Debian) earns its place twice: as the disaster recovery story, and as Patroni's `create_replica_methods`, which rebuilds a replica from the archive instead of loading the leader with a base backup.
+
+- **Implemented, pgBackRest first** (`Salmon.Builtin.Nodes.PgBackRest`, `Patroni.pat_archive`). What writing it settled, and what it did not:
+
+- - The repository has to be one every member reads (a shared mount, or S3): a replica is built from an archive it can reach.
+
+- `stanza-create` and `backup` are "exactly one member" operations too: with one `pg1-path` configured, pgBackRest refuses both on a standby. The nodes check the _repository_ (which any member can read) and their `up` succeeds only on whichever member leads at that moment; no directive names it.
+
+- The scheduled backup gates on `/primary`, not `/replica` as written above. A backup taken from a standby needs `backup-standby` and a second `pg` host reached over ssh or TLS. Not done.
+
+- `archive_mode`/`archive_command` are local `postgresql.parameters` in `patroni.yml`, not DCS keys, so that declaring an archive on an existing cluster takes effect; `archive_mode` is restart-only and shows up as `pending_restart` for the config node.
+
+- Point-in-time recovery of a whole Patroni cluster is a custom bootstrap of a _new_ scope (`patroniArchiveRecovering`). Rendered; never run.
+
+- Shown in a container (`Test.PgBackRestSpec`, Layer 2): recovery to a timestamp on a plain cluster, and a second Patroni member made by pgBackRest rather than by a base backup. T7 on the three VMs is not run.
+
+- Two defects in the Patroni builtin surfaced on the way, both from keeping the configuration outside the data directory: `bootstrap.pg_hba` never reaches a replica (now `postgresql.pg_hba`), and Patroni does not create the `postgresql.conf` it renames (now seeded, empty, once). And Debian's `patroni` does not pull in `python3-etcd`.
+
+
 
 
 ## Switchover, under Patroni
@@ -189,7 +210,7 @@ T3 is the test the whole design rests on, and the reason "the primary never appe
 
 - .1 **Routing:** multi-host connection strings first, then HAProxy; T2, T6.
 
-- .1 **Archive and PITR** (pgBackRest or WAL-G), and backups on one member; T7.
+- .1 **Archive and PITR** (pgBackRest or WAL-G), and backups on one member; T7. _pgBackRest builtin and the Patroni wiring are in; T7 itself is not run._
 
 - .1 **The opt-in preferred leader.**
 

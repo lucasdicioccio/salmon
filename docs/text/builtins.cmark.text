@@ -72,7 +72,7 @@ _Generated from [`README.md`](https://github.com/lucasdicioccio/salmon/blob/mast
 <tr><td><code>Gcp.CloudRunAlerts</code></td><td>the standard Cloud Monitoring alerts for a Cloud Run service (5xx ratio, p99 latency, memory, instances at max) to one email</td></tr>
 <tr><td><code>Gcp.PostgrestCloudRun</code></td><td>PostgREST on Cloud Run talking to a Postgres elsewhere over a client certificate</td></tr>
 <tr><td><code>Gcp.PreviewEnvironment</code></td><td>several Cloud Run deploys composed into one named node: a preview environment</td></tr>
-<tr><td><code>Gcp.VmProvision</code></td><td>turn up a GCE instance, then run a salmon binary on it over SSH via <code>Self</code></td></tr>
+<tr><td><code>Gcp.VmProvision</code></td><td>turn up a GCE instance, then run a salmon binary on it over SSH via <code>Self</code>; exports the startup script that makes the instance trust the SSH CA</td></tr>
 </table>
 ```
 
