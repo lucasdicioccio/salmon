@@ -1305,6 +1305,20 @@ services only it is a finding only when the live description is *another* `salmo
 before those were stamped (no description) is left alone on upgrade and its host-to-service moves stay unseen until
 something else imports it. That leniency is also the hedge on an unverified assumption: nobody has checked that
 `description` survives `url-maps import` on a real project. `bucketResource` is exported (the backend bucket's name).
+A `PathRule` has a third field, `pathRuleRewrite` (`KeepPath`, or `RewritePrefix "/x"`: GCP's `pathPrefixRewrite`, a
+`routeAction.urlRewrite` beside the rule's `service`, replacing the part of the path the rule matched — so `/` with
+`RewritePrefix "/index.html"` is a bucket's main page). `KeepPath` renders no `routeAction`, so a map without rewrites
+and its fingerprint are what they were; a map with one is among those whose fingerprint the check requires; a rule
+that redirects and rewrites, or a prefix not starting with `/`, is an `albProblems` entry. There is no rewrite on a
+host rule's default, no `hostRewrite`. Never imported into a real project: that a regional external balancer takes
+`routeAction.urlRewrite` on a `pathRules` entry (with a service, or with a backend bucket) and what "matched" means
+for an exact pattern are read from GCP's documentation only.
+**One resource's own prerequisites** go through `applicationLoadBalancerWith` (a `Part -> [Op]` beside the
+every-resource list; `applicationLoadBalancerAfter` is it with `const []`, and `applicationLoadBalancerPartWith` takes
+the same function to hand back the same node). `backendBucketPart alb n` names an `albBuckets` entry's node and
+`afterStorageBuckets alb (\b -> [...])` is the function that orders each backend bucket after its Cloud Storage
+bucket's nodes and nothing else after them, so no caller looks the part up in `lbParts`. Layer 0 (`Test/GcpSpec.hs`,
+the DAG's edges).
 **A rule routing to a backend bucket is refused by default** (`albBucketRoutes = RefuseBucketRoutes`, an `albProblems`
 entry: every node's `Failure` and throw before any call), after an outage on a downstream deployment. Observed, on one
 live regional external balancer (europe-west1, 2026-10-05): a URL map with one path matcher on a regional backend

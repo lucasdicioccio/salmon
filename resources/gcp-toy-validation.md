@@ -596,6 +596,17 @@ leftover.
   `albBucketRoutes = AllowBucketRoutesKnownToHaveBrokenALiveBalancer` is
   there for whoever wants to show a mixed map working, on a balancer that
   serves nothing that matters.
+- **A path rewrite on a path rule: not declared by the toy, never run.**
+  `PathRule`'s `pathRuleRewrite = RewritePrefix P` is rendered as
+  `routeAction: {urlRewrite: {pathPrefixRewrite: P}}` beside the rule's
+  `service` in the imported map, from GCP's URL map reference. Unverified:
+  that a *regional external* balancer's `url-maps import` accepts a
+  `routeAction` on a `pathRules` entry that also names a `service`, and one
+  that names a backend bucket; that an exact pattern (`/`) counts as wholly
+  matched, so that `/` rewritten to `/index.html` asks the backend for
+  `/index.html`; and that `/static/*` matches up to and including the last
+  slash. The Layer 0 tests assert the JSON and the fingerprint, nothing
+  about the API.
 - **Redirects and the HTTP listener option (and what the scripts assume of
   backend buckets): not declared by the toy, never run by it.** A rule may
   answer with a redirect (`RedirectTo`) or, under the opt-in above, send to

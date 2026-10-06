@@ -10,7 +10,7 @@ what makes it testable without a real GCP project.
 module Test.GcpSpec (tests) where
 
 import Control.Exception (try)
-import Data.Aeson (Value (..), encode, object, (.=))
+import Data.Aeson (Value (..), encode, object, toJSONList, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
@@ -1480,7 +1480,7 @@ lbTests =
                 full
                     { LoadBalancing.albServices = full.albServices <> [LoadBalancing.BackendService "slow" [] Nothing (Just 0)]
                     , LoadBalancing.albHostRules =
-                        [ LoadBalancing.HostRule ["app.example.org"] (LoadBalancing.NamedService "nope") [LoadBalancing.PathRule [] LoadBalancing.DefaultService]
+                        [ LoadBalancing.HostRule ["app.example.org"] (LoadBalancing.NamedService "nope") [LoadBalancing.PathRule [] LoadBalancing.DefaultService LoadBalancing.KeepPath]
                         , LoadBalancing.HostRule ["app.example.org"] LoadBalancing.DefaultService []
                         , LoadBalancing.HostRule [] LoadBalancing.DefaultService []
                         ]
@@ -1685,7 +1685,7 @@ lbTests =
                     ]
             other -> assertBool (show other) False
         -- a path rule is a route as much as a host rule's default is
-        let byPath = full{LoadBalancing.albBuckets = site.albBuckets, LoadBalancing.albHostRules = [LoadBalancing.HostRule ["app.example.org"] LoadBalancing.DefaultService [LoadBalancing.PathRule ["/static/*"] (LoadBalancing.NamedBucket "site")]]}
+        let byPath = full{LoadBalancing.albBuckets = site.albBuckets, LoadBalancing.albHostRules = [LoadBalancing.HostRule ["app.example.org"] LoadBalancing.DefaultService [LoadBalancing.PathRule ["/static/*"] (LoadBalancing.NamedBucket "site") LoadBalancing.KeepPath]]}
         case LoadBalancing.albProblems byPath of
             [t] -> assertBool (Text.unpack t) ("paths /static/* of hosts app.example.org to web-site-bucket" `isInfixOf` Text.unpack t)
             other -> assertBool (show other) False
@@ -1700,13 +1700,47 @@ lbTests =
         assertEqual "nothing more is said of a declaration that does not opt in" (notesOf site) (filter (not . ("known to have broken" `Text.isInfixOf`)) (notesOf (allowing site)))
     , testCase "the opt-in changes no script: what is refused is rendered as what is allowed" $
         assertEqual "" (pinned site) (pinned (allowing site))
+    , testCase "a path rule can rewrite the prefix it matched: a routeAction beside its service, seen by the fingerprint" $ do
+        let ruled rules = full{LoadBalancing.albHostRules = [LoadBalancing.HostRule ["app.example.org"] LoadBalancing.DefaultService rules]}
+        let rewriting prefix = ruled [LoadBalancing.PathRule ["/docs/*"] (LoadBalancing.NamedService "api") (LoadBalancing.RewritePrefix prefix)]
+        let kept = ruled [LoadBalancing.PathRule ["/docs/*"] (LoadBalancing.NamedService "api") LoadBalancing.KeepPath]
+        let pathRulesOf a = case LoadBalancing.renderUrlMap a of
+                Object o | Just (Array ms) <- KeyMap.lookup "pathMatchers" o -> [rs | Object m <- toList ms, Just rs <- [KeyMap.lookup "pathRules" m]]
+                _ -> []
+        assertEqual
+            ""
+            [toJSONList [object ["paths" .= (["/docs/*"] :: [Text.Text]), "service" .= svcUrl "web-api-backend", "routeAction" .= object ["urlRewrite" .= object ["pathPrefixRewrite" .= ("/" :: Text.Text)]]]]]
+            (pathRulesOf (rewriting "/"))
+        assertEqual
+            "no rewrite, no routeAction: the rule is what it was"
+            [toJSONList [object ["paths" .= (["/docs/*"] :: [Text.Text]), "service" .= svcUrl "web-api-backend"]]]
+            (pathRulesOf kept)
+        -- the rewrite is in what is imported, and in what the node says of itself
+        let urlMapOf a = [p | p <- LoadBalancing.lbParts a, p.partId == LoadBalancing.UrlMapPart]
+        let ups = unlines [Text.unpack l | p <- urlMapOf (rewriting "/v2/"), l <- p.partUp]
+        assertBool ups ("\"routeAction\":{\"urlRewrite\":{\"pathPrefixRewrite\":\"/v2/\"}}" `isInfixOf` ups)
+        assertEqual
+            ""
+            ["hosts app.example.org to web-backend", "paths /docs/* to web-api-backend with the matched prefix rewritten to /v2/"]
+            (concatMap LoadBalancing.partNotes (urlMapOf (rewriting "/v2/")))
+        assertEqual "" ["hosts app.example.org to web-backend", "paths /docs/* to web-api-backend"] (concatMap LoadBalancing.partNotes (urlMapOf kept))
+        -- a rewrite added, changed or dropped is another fingerprint, and one the live map must carry
+        let stamps = map LoadBalancing.urlMapStamp [kept, rewriting "/", rewriting "/v2/"]
+        assertEqual (show stamps) 3 (length (nub stamps))
+        let required a = "--format='value(description)' 2>/dev/null)\" = 'salmon:" `isInfixOf` Text.unpack (LoadBalancing.renderLbCheckScript a)
+        assertEqual "" (False, True) (required kept, required (rewriting "/"))
+        assertEqual "" [] (LoadBalancing.albProblems (rewriting "/"))
+        -- what no URL map takes
+        let redirecting = ruled [LoadBalancing.PathRule ["/old/*"] (LoadBalancing.RedirectTo (LoadBalancing.Redirect Nothing (Just "/new") False LoadBalancing.Found)) (LoadBalancing.RewritePrefix "/x")]
+        assertEqual "" ["a path rule both redirects and rewrites its path (/old/*): a redirect names its own path"] (LoadBalancing.albProblems redirecting)
+        assertEqual "" ["a path rewrite must start with /: index.html"] (LoadBalancing.albProblems (rewriting "index.html"))
     , testCase "what is wrong with a bucket, a redirect or a listener option is refused" $ do
         let redirect h path https = LoadBalancing.RedirectTo (LoadBalancing.Redirect h path https LoadBalancing.MovedPermanently)
         let bad =
                 alb
                     { LoadBalancing.albBuckets = [LoadBalancing.BackendBucket "site" "a", LoadBalancing.BackendBucket "site" ""]
                     , LoadBalancing.albHostRules =
-                        [ LoadBalancing.HostRule ["a.example.org"] (LoadBalancing.NamedBucket "nope") [LoadBalancing.PathRule ["/x"] (redirect Nothing (Just "x") False)]
+                        [ LoadBalancing.HostRule ["a.example.org"] (LoadBalancing.NamedBucket "nope") [LoadBalancing.PathRule ["/x"] (redirect Nothing (Just "x") False) LoadBalancing.KeepPath]
                         , LoadBalancing.HostRule ["b.example.org"] (redirect Nothing Nothing False) []
                         , LoadBalancing.HostRule ["c.example.org"] (redirect (Just "") Nothing True) []
                         ]
@@ -2668,6 +2702,31 @@ lbTests =
             assertBool
                 "a resource the declaration does not have"
                 (null (LoadBalancing.applicationLoadBalancerPart [] silent ignoreTrack alb LoadBalancing.AddressPart))
+        , testCase "one resource's own prerequisites go under that resource alone: a backend bucket after its storage bucket" $ do
+            let bucketed = full{LoadBalancing.albBuckets = [LoadBalancing.BackendBucket "site" "example-site", LoadBalancing.BackendBucket "docs" "example-docs"]}
+            let storageRef gcs = mkRef "test-storage" (gcs :: Text.Text)
+            let storage gcs = op "storage" nodeps (\actions -> actions{help = "storage " <> gcs, ref = storageRef gcs})
+            let needs = LoadBalancing.afterStorageBuckets bucketed (\b -> [storage b.backendBucketGcsBucket])
+            assertEqual "" (LoadBalancing.BackendBucketPart "web-site-bucket") (LoadBalancing.backendBucketPart bucketed "site")
+            assertEqual "only the buckets are spoken for" [[], []] (map (map (const ()) . needs) [LoadBalancing.UrlMapPart, LoadBalancing.BackendBucketPart "web-nope-bucket"])
+            let dag = dagOf (LoadBalancing.applicationLoadBalancerWith needs [] silent ignoreTrack bucketed)
+            let dependants gcs = [act.extension.help | (r, act) <- Map.toList (Dag.dagNodes dag), storageRef gcs `elem` Map.findWithDefault [] r (Dag.dagDependencies dag)]
+            assertEqual "" ["backend bucket web-site-bucket"] (dependants "example-site")
+            assertEqual "" ["backend bucket web-docs-bucket"] (dependants "example-docs")
+            assertEqual "the two storage nodes and nothing else are new" (length (LoadBalancing.lbParts bucketed) + 3) (Map.size (Dag.dagNodes dag))
+            -- the node handed back for the bucket is that very node, with its prerequisite
+            case LoadBalancing.applicationLoadBalancerPartWith needs [] silent ignoreTrack bucketed (LoadBalancing.backendBucketPart bucketed "site") of
+                Nothing -> assertBool "no such node" False
+                Just o -> do
+                    let both = dagOf (LoadBalancing.applicationLoadBalancerWith needs [] silent ignoreTrack bucketed `inject` o)
+                    assertEqual "nothing new" (Map.size (Dag.dagNodes dag)) (Map.size (Dag.dagNodes both))
+                    assertEqual "nothing conflicting" 0 (length (Dag.dagConflicts both))
+                    assertEqual "the bucket and its storage" 2 (Map.size (Dag.dagNodes (dagOf o)))
+            -- and without the function the balancer is the one it was
+            assertEqual
+                ""
+                (Dag.dagDependencies (dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack bucketed)))
+                (Dag.dagDependencies (dagOf (LoadBalancing.applicationLoadBalancerWith (const []) [] silent ignoreTrack bucketed)))
         , testCase "an invalid declaration is every node's Failure and every node's refusal, before any call" $ do
             let bad = alb{LoadBalancing.albHostRules = [LoadBalancing.HostRule ["x.example.org"] (LoadBalancing.NamedService "nope") []]}
             mapM_
@@ -2802,7 +2861,7 @@ lbTests =
                 [ LoadBalancing.HostRule
                     ["app.example.org", "www.example.org"]
                     LoadBalancing.DefaultService
-                    [LoadBalancing.PathRule ["/events/*", "/poll"] (LoadBalancing.NamedService "slow")]
+                    [LoadBalancing.PathRule ["/events/*", "/poll"] (LoadBalancing.NamedService "slow") LoadBalancing.KeepPath]
                 , LoadBalancing.HostRule ["api.example.org"] (LoadBalancing.NamedService "api") []
                 ]
             , LoadBalancing.albCertificates = [LoadBalancing.ManagedCertificate "web-cert" ["app.example.org", "api.example.org"]]
@@ -2817,7 +2876,7 @@ lbTests =
                     <> [ LoadBalancing.HostRule
                             ["static.example.org"]
                             (LoadBalancing.NamedBucket "site")
-                            [LoadBalancing.PathRule ["/old/*"] (LoadBalancing.RedirectTo (LoadBalancing.Redirect Nothing (Just "/new") False LoadBalancing.Found))]
+                            [LoadBalancing.PathRule ["/old/*"] (LoadBalancing.RedirectTo (LoadBalancing.Redirect Nothing (Just "/new") False LoadBalancing.Found)) LoadBalancing.KeepPath]
                        , LoadBalancing.HostRule ["example.org"] (LoadBalancing.RedirectTo (LoadBalancing.redirectToHost www)) []
                        ]
             }
