@@ -51,6 +51,7 @@ tests =
         , testCase "a process ignoring SIGTERM is escalated to SIGKILL" escalatesToKill
         , testCase "the whole process group goes, not just the leader" killsTheGroup
         , testCase "output reaches the node while the process is still running" capturesOutput
+        , testCase "the process does not inherit the supervisor's standard input" detachedFromStdin
         , testCase "a one-shot driver is told it cannot run this" upRefuses
         ]
 
@@ -130,6 +131,17 @@ runsAndStops = within 20 $ do
     _ <- timeout 400000 (awaitLines ls (\xs -> length xs > before))
     after <- length <$> atomically (readTVar ls)
     assertEqual "it stopped talking once the machine was cancelled" before after
+
+{- | Under @serve@ the supervisor's standard input is the command channel, so
+a service that reads its own would eat commands. The process is asked what
+its descriptor 0 is, which holds whatever this test's own input happens to be.
+-}
+detachedFromStdin :: IO ()
+detachedFromStdin = within 20 $ do
+    seen <- supervising (sh "readlink /proc/self/fd/0; while true; do sleep 0.05; done") $ \ls -> do
+        awaitLines ls (not . null)
+        reverse <$> atomically (readTVar ls)
+    assertEqual "descriptor 0 of the daemon" ["/dev/null"] (take 1 seen)
 
 {- | The case @cancel@ alone cannot handle, and the reason the escalation is
 recovered from @f9d7116@ rather than left to 'System.Process.withCreateProcess':

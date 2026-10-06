@@ -5,6 +5,7 @@ import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.BinaryOutputSpec as BinaryOutputSpec
+import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
@@ -118,6 +119,7 @@ main =
             , CheckSpec.tests
             , ClientModelSpec.tests
             , ConcurrentSpec.tests
+            , BinarySpec.tests
             , DaemonSpec.tests
             , BinaryOutputSpec.tests
             , DagSpec.tests
