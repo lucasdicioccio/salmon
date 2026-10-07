@@ -26,11 +26,24 @@ summary_of() {
     | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/ $//' | cut -c1-240
 }
 
+# position of a guide among the documentation pages (the Guides index is 100)
+guide_order() {
+  case "$1" in
+    salmon-core) echo 110 ;;
+    howto-ops) echo 120 ;;
+    salmon-ops-patterns) echo 130 ;;
+    serve-supervision) echo 140 ;;
+    postgres-pair) echo 150 ;;
+    gcp-toy-validation) echo 160 ;;
+    *) echo 199 ;;
+  esac
+}
+
 # resources/: the guides
 for src in resources/*.md; do
   name="$(basename "$src" .md)"
   $MIRROR --kind docs --source "$src" --title "$(title_of "$src")" --topic docs \
-    --keywords "guide, documentation" --summary "$(summary_of "$src")" \
+    --keywords "guide, documentation" --group "Guides" --order "$(guide_order "$name")" --summary "$(summary_of "$src")" \
     --github "$GITHUB/$src" --date "$DATE" > "$OUT/docs-$name.cmark"
 done
 
@@ -39,13 +52,13 @@ for src in specs/*.md; do
   name="$(basename "$src" .md)"
   status="$(grep -m1 -i '^status:' "$src" | sed 's/^[Ss]tatus: *//' | cut -c1-240)"
   $MIRROR --kind specs --source "$src" --title "$(title_of "$src")" --topic specs \
-    --keywords "spec, design" --summary "Status: $status" \
+    --keywords "spec, design" --group "Design specs" --summary "Status: $status" \
     --github "$GITHUB/$src" --date "$DATE" > "$OUT/specs-$name.cmark"
 done
 
 # README's three tables, as one page
 $MIRROR --kind readme-section --source README.md --title "Builtins, recipes and binaries" \
-  --topic reference --keywords "builtins, recipes, binaries, nodes" \
+  --topic reference --keywords "builtins, recipes, binaries, nodes" --group "Reference" --order 200 \
   --summary "Every builtin node module, every recipe and every shipped binary, one line each, as the README lists them." \
   --github "$GITHUB/README.md" --date "$DATE" \
   --section-from "## Builtin nodes" --section-to "## Docs" \
@@ -55,8 +68,10 @@ $MIRROR --kind readme-section --source README.md --title "Builtins, recipes and 
 {
   cat <<EOF
 =base:build-info.json
-{"layout":"article"
+{"layout":"documentation"
 ,"publicationStatus":"Public"
+,"group":"Design specs"
+,"order":300
 }
 
 =base:preamble.json
@@ -106,6 +121,7 @@ EOF
   , "@import \"`$ctx.pathPrefix`/css/colors.css\";"
   , "@import \"`$ctx.pathPrefix`/css/article.css\";"
   , "@import \"`$ctx.pathPrefix`/css/navigation.css\";"
+  , "@import \"`$ctx.pathPrefix`/css/documentation.css\";"
   ]
 }
 EOF
