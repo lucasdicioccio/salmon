@@ -172,7 +172,11 @@ nothing about that VM.
 | `Gcp.Compute.instanceGroupMember` | the tier-2 VM, put in it |
 | `Gcp.Compute.firewallRule` | `tcp:<--lb-port>` from the proxy range **and** the health-check ranges, to instances tagged `<prefix>-lb` |
 | `Gcp.LoadBalancing.applicationLoadBalancer` | health check, backend service, named ports, URL map, target proxy, forwarding rule (a node each, under one root) |
-| `Systemd.systemdService` (on the VM) | `salmon-toy-web.service`, a `python3 -m http.server` over a page salmon wrote |
+| `Podman.buildImage`, `Podman.pushLoggingIn` | `<region>-docker.pkg.dev/<project>/<prefix>-repo/page:<--image-tag>`, an `nginx:alpine` with the page copied in, built in `<workdir>/page` and pushed before the instance is created |
+| `Gcp.Compute.gceInstance` (the tier-2 VM, changed) | created as `<prefix>-sa` with the `cloud-platform` scope; tier 0's `roles/artifactregistry.reader` grant and the account are now its prerequisites |
+| `Debian.deb` (on the VM) | `podman` |
+| `Gcp.ArtifactRegistry.instanceLogin` (on the VM) | `/var/lib/salmon-toy/registry-auth.json`, the metadata server's token as `oauth2accesstoken` |
+| `Podman.Quadlet.quadletContainer` (on the VM) | `/etc/containers/systemd/salmon-toy-page.container`, so `salmon-toy-page.service`: the image's port 80 on `--lb-port` |
 
 With `--dns-zone DNS_NAME`, tier 3 also declares
 `Gcp.CloudDns.resolvedRecordSet`: an `A` record `lb.DNS_NAME` (TTL 300) at
@@ -228,6 +232,24 @@ script checks is a `200` carrying the project id, and the only thing that can
 put that body there is salmon running on the machine. A green tier 3 is
 therefore a second, independent proof that the tier-2 hand-off worked — this
 time through the front door.
+
+The page is not a file salmon wrote on the VM. It is baked into an image the
+control side builds and pushes to the toy's own repository, and the VM runs
+that image as a quadlet in **system scope**, having logged podman in to the
+registry with the token the metadata server gives the instance's service
+account. So the body (`served by salmon-gcp-toy from <project>, in a
+container pulled from <image>`) is also the evidence for three things that
+were written from documentation: `quadletContainer` as root under the system
+manager, `instanceLogin` on a real instance, and a pull through the auth file
+that login wrote. The script's verdict line says `from the VM's container`
+only when the body names the image. **None of this has been run against a
+real project yet** (see the gaps below for what was run instead).
+
+Until this change tier 3 served the page from an authored unit,
+`salmon-toy-web.service` (`python3 -m http.server`). A VM provisioned by that
+toy is not converted: its account and scopes were fixed when it was created
+(the instance node then fails on the scopes and changes nothing), and its old
+unit would still hold the port. Take the toy down and up again.
 
 ## Step 1 — dry run, no GCP calls
 
@@ -482,6 +504,16 @@ leftover.
   one `ACTIVE` proxy-only subnet may exist per network per region, so a second
   concurrent tier-3 run in the *same* project (not the same organization) will
   collide.
+- **Tier 3 builds and pushes an image, so it needs `podman` on the commanding
+  machine** (tier 1 already does) and pulls `docker.io/library/nginx:alpine`
+  there once. The VM pulls only from the toy's repository; what it fetches
+  from elsewhere is the `podman` package, over the external address it has.
+- **Tier 3 creates the instance as `<prefix>-sa`.** Whoever runs the toy needs
+  `iam.serviceAccounts.actAs` on that account (a project owner has it), and
+  the grant that lets the account read the repository is made minutes before
+  the VM pulls: an IAM binding that has not propagated yet shows as a failed
+  `podman-quadlet-image` on the VM (`denied`), which the script's retry pass
+  is there for.
 - **A tier-3 backend is `UNHEALTHY` for a minute or two after `up`.** The
   balancer answers `502` until the first health checks pass, which is why the
   script waits up to five minutes for the page rather than fetching once. If
@@ -510,8 +542,26 @@ leftover.
   will show.
 - **`Gcp.SecretManager.secretFile` is not exercised by the toy at all.** It is
   the on-machine transport (the instance reads Secret Manager as its own
-  service account); the toy's VM has no service account granted on anything,
-  and only the `gcloud` argv and the local placement are tested.
+  service account); the toy's VM runs as `<prefix>-sa` at tier 3 only, which
+  is granted nothing on a secret, and only the `gcloud` argv and the local
+  placement are tested.
+- **Tier 3's container has not been run against a real project yet.** What
+  was run: Layer 0 tests of both graphs (`Test/GcpToySpec.hs`: the same image
+  reference on both sides, login before pull before the unit, the instance
+  standing on the push, the account and the grant, tier 2 and the peer
+  unchanged); podman 4.9.3's *system* generator in dry-run on the rendered
+  `salmon-toy-page.container`, which it accepts; and the page's Containerfile
+  built and run by hand with rootless podman, answering with the page. What
+  the first tier-3 run will show: that `gcloud compute instances create
+  --service-account ... --scopes cloud-platform` is accepted, that the
+  metadata server's token logs podman in to Artifact Registry
+  (`instanceLogin` has only ever met a stand-in), that the pull through that
+  auth file works, that `quadletContainer` behaves as root under the system
+  manager as it does in user scope (`/etc/containers/systemd`, the key-less
+  label check, `daemon-reload` and restart), and that a second pass skips the
+  login (its expiry stamp), the pull and the unit. The quadlet declares no
+  `containerReady`, so `up` is done when the container exists; whether it
+  serves is what the balancer's health check and the script's fetch say.
 - **An instance's addresses are not checked for drift.** `gceInstance`'s
   check reads the instance's status only, so an instance that exists on
   another internal address than the declared one is reported satisfied.

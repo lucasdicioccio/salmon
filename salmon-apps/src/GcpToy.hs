@@ -21,9 +21,12 @@ Tiers are cumulative and ordered by cost:
 * __tier 3__ (a forwarding rule's hourly rate on top): put a regional
   external Application Load Balancer in front of that VM -- a proxy-only
   subnet, an unmanaged instance group holding the instance, a health check,
-  and the balancer itself. The VM serves the page through a systemd unit the
-  /tier-2 hand-off/ installed, so a @200@ from the balancer's address is
-  evidence for both halves at once.
+  and the balancer itself. The page is in an image the control side builds
+  and pushes to the toy's own repository, and the VM serves it from a
+  container the /tier-2 hand-off/ declared: a quadlet in system scope, pulled
+  with the instance's own service account. A @200@ from the balancer's
+  address carrying that page is evidence for the hand-off, the registry
+  login and the container at once.
 
 Tier 2 optionally declares a __peer__ (@--vm-internal-ip@ with
 @--peer-internal-ip@): a second instance with no external address at all,
@@ -63,6 +66,14 @@ module GcpToy (
     defaultBaseImage,
     configure,
     program,
+
+    -- * Tier 3's container, for the tests
+    pageImage,
+    pageBaseImage,
+    pageContainer,
+    pageAuthFile,
+    pageText,
+    gceInstance,
 ) where
 
 import Control.Exception (throwIO)
@@ -99,13 +110,12 @@ import qualified Salmon.Builtin.Nodes.Gcp.ResourceManager as ResourceManager
 import qualified Salmon.Builtin.Nodes.Gcp.ServiceUsage as ServiceUsage
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
 import qualified Salmon.Builtin.Nodes.Debian.OS as OS
-import qualified Salmon.Builtin.Nodes.Debian.Package as Debian
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as LoadBalancing
 import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
-import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Keys as Keys
 import qualified Salmon.Builtin.Nodes.Podman as Podman
+import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
 import qualified Salmon.Builtin.Nodes.SecretDelivery as SecretDelivery
 import qualified Salmon.Builtin.Nodes.Secrets as Secrets
 import qualified Salmon.Builtin.Nodes.Self as Self
@@ -439,7 +449,7 @@ VM: one file, whose existence is the whole proof that the hand-off worked.
 -}
 onVm :: Spec -> Op
 onVm spec =
-    op "gcp-toy-on-vm" (deps (marker : secretRead spec : maybe [] (\lb -> [webServer spec lb]) spec.lbConfig <> maybe [] (\peer -> [peerReached spec peer `inject` marker]) spec.peerConfig)) $ \actions ->
+    op "gcp-toy-on-vm" (deps (marker : secretRead spec : maybe [] (\lb -> [pageServer spec lb]) spec.lbConfig <> maybe [] (\peer -> [peerReached spec peer `inject` marker]) spec.peerConfig)) $ \actions ->
         actions
             { help = "the tier-2 payload, declared by this binary running on the VM"
             , ref = mkRef "gcp-toy-on-vm" spec.project
@@ -525,7 +535,7 @@ peerReached spec peer =
   where
     url = "http://" <> peer.peerInternalIp <> ":" <> Text.pack (show peer.peerPort) <> "/"
 
-{- | Tier 3's backend: a page, and a systemd unit serving it.
+{- | Tier 3's backend: the page, served from a container.
 
 Declared on the /VM side/ deliberately. A load balancer whose forwarding rule
 merely exists proves nothing -- a balancer in front of no server answers
@@ -534,60 +544,111 @@ the project id, and the only thing that can put that body there is salmon
 running on the machine. It is therefore also a second, independent proof
 that the tier-2 hand-off worked, this time through the front door.
 
-@python3@ is on every Ubuntu cloud image (cloud-init is written in it), so
-the 'Debian.deb' node here is nearly always a 'Skip' -- it is declared
-anyway, because "nearly always" is not a dependency.
+The page is not on the machine: it is in 'pageImage', which the control side
+built and pushed to the toy's own repository ('pagePushed') before the
+instance existed. So the body also says three more things happened here, none
+of which a file written by salmon would: podman was installed, it was logged
+in to the registry /as the instance's service account/
+('ArtifactRegistry.instanceLogin': the metadata server's token, no secret
+shipped), and a quadlet in system scope pulled that image and runs it
+('Quadlet.quadletContainer').
+
+The login is what the quadlet's 'Track'' declares, so it is ahead of the
+pull and of the file; podman's package is what the login stands on.
 -}
-webServer :: Spec -> LbConfig -> Op
-webServer spec lb =
-    Systemd.systemdService reportPrint OS.systemctl trackConfig config
+pageServer :: Spec -> LbConfig -> Op
+pageServer spec lb =
+    Quadlet.quadletContainer reportPrint OS.systemctl (Track (const loggedIn)) (pageContainer spec lb)
   where
-    root :: FilePath
-    root = "/var/www/salmon-toy"
+    loggedIn :: Op
+    loggedIn = ArtifactRegistry.instanceLogin reportPrint OS.podman pageAuthFile (regionOf spec)
 
-    trackConfig :: Track' Systemd.Config
-    trackConfig = Track $ \_ ->
-        op "setup-salmon-toy-web" (deps [indexFile, Debian.deb (Debian.Package "python3")]) id
+{- | The quadlet: 'pageImage' as @salmon-toy-page.service@, its port 80
+published on the port the balancer's backend and health check are configured
+for.
 
-    indexFile :: Op
-    indexFile =
-        FS.filecontents
-            ( FS.FileContents
-                (root <> "/index.html")
-                ("served by salmon-gcp-toy from " <> spec.project <> "\n")
+Not named @salmon-toy-web@, which is the unit this tier installed before it
+served from a container: a file of that name in @\/etc\/systemd\/system@
+takes precedence over a generated unit, so on a machine provisioned by an
+older toy the container would never start.
+-}
+pageContainer :: Spec -> LbConfig -> Quadlet.Container
+pageContainer spec lb =
+    (Quadlet.container (Podman.ContainerName "salmon-toy-page") (pageImage spec))
+        { Quadlet.containerDescription = "salmon-gcp-toy tier-3 backend"
+        , Quadlet.containerPorts = [Podman.PortMapping (Text.pack (show lb.lbPort)) "80" Podman.TCPPort]
+        , Quadlet.containerAuthFile = Just pageAuthFile
+        }
+
+{- | Where the VM keeps the registry credentials the metadata server's token
+is written to: beside the hand-off's markers, and root's alone.
+-}
+pageAuthFile :: Podman.AuthFile
+pageAuthFile = Podman.AuthFile "/var/lib/salmon-toy/registry-auth.json"
+
+{- | The one string that means "the page's image": what the control side
+tags, builds and pushes, and what the VM pulls and runs.
+-}
+pageImage :: Spec -> Text
+pageImage spec =
+    Text.concat [spec.region, "-docker.pkg.dev/", spec.project, "/", (repo spec).repoName, "/page:", spec.imageTag]
+
+{- | What the page's image is built from. It has to serve a directory on port
+80 and nothing else; this one is small and is what the quadlet node's own
+tests run.
+-}
+pageBaseImage :: Text
+pageBaseImage = "docker.io/library/nginx:alpine"
+
+-- | The page: the project, which the driver looks for, and the image it came in.
+pageText :: Spec -> Text
+pageText spec =
+    "served by salmon-gcp-toy from " <> spec.project <> ", in a container pulled from " <> pageImage spec <> "\n"
+
+{- | 'pageImage', built on the control side and pushed to the toy's
+repository.
+
+A second image beside tier 1's, not the same one: Cloud Run's must listen on
+@$PORT@ and may be the caller's own @--containerfile@, and this one has to
+carry a page naming the project. They share the login (same auth file, same
+registry, so one node) and the repository.
+
+The build has no @check@ and neither has the push, so both run at every
+pass, as tier 1's do. The tag is @--image-tag@: a page changed under an
+unchanged tag is pushed, and not pulled by a VM that already holds that tag
+(see 'Quadlet.imageNode').
+-}
+pagePushed :: Spec -> Op
+pagePushed spec =
+    Podman.pushLoggingIn reportPrint ignoreTrack authFile registry user Core.printAccessToken (pageImage spec)
+        `inject` built
+        `inject` loggedIn
+  where
+    authFile = Podman.AuthFile (spec.workDir <> "/podman-auth.json")
+    registry = ArtifactRegistry.dockerRegistry (regionOf spec)
+    user = Podman.Username "oauth2accesstoken"
+    dir = spec.workDir <> "/page"
+
+    loggedIn :: Op
+    loggedIn =
+        Podman.login reportPrint ignoreTrack authFile registry user Core.printAccessToken
+            `inject` repository spec
+
+    built :: Op
+    built =
+        Podman.buildImage reportPrint ignoreTrack containerfile (pageImage spec)
+            `inject` FS.filecontents (FS.FileContents (dir <> "/index.html") (pageText spec))
+
+    -- built with its own directory as context, which is where the page is
+    containerfile :: FS.File "containerfile"
+    containerfile =
+        FS.generateFileContents
+            ( Text.unlines
+                [ "FROM " <> pageBaseImage
+                , "COPY index.html /usr/share/nginx/html/index.html"
+                ]
             )
-
-    config :: Systemd.Config
-    config =
-        Systemd.Config
-            Systemd.System
-            "/etc/systemd/system"
-            "salmon-toy-web.service"
-            (Systemd.Unit "salmon-gcp-toy tier-3 backend" "network-online.target")
-            ( Systemd.Service
-                Systemd.Simple
-                "root"
-                "root"
-                "022"
-                start
-                Systemd.OnFailure
-                Systemd.Process
-                root
-            )
-            (Systemd.Install "multi-user.target")
-
-    start :: Systemd.Start
-    start =
-        Systemd.Start
-            "/usr/bin/python3"
-            [ "-m"
-            , "http.server"
-            , Text.pack (show lb.lbPort)
-            , "--bind"
-            , "0.0.0.0"
-            , "--directory"
-            , Text.pack root
-            ]
+            (dir <> "/Containerfile")
 
 control :: Spec -> Op
 control spec =
@@ -674,7 +735,7 @@ grant spec role resource =
 tier0 :: Spec -> [Op]
 tier0 spec =
     [ grant spec "roles/storage.objectViewer" ("buckets/" <> bucketName) `inject` bucket
-    , grant spec "roles/artifactregistry.reader" repoResource `inject` repository spec
+    , registryReader spec
     ]
         <> [dnsNameServers spec zone | zone <- maybe [] (pure . dnsZoneOf spec) spec.dnsZone]
   where
@@ -683,6 +744,15 @@ tier0 spec =
     bucket =
         Storage.bucket reportPrint Core.gcloud (Storage.Bucket bucketName (projectOf spec) (regionOf spec) True)
             `inject` api spec "storage.googleapis.com"
+
+{- | The toy's service account may read the toy's repository. Tier 0 declares
+it for its own sake; at tier 3 it is what lets the VM, which runs as that
+account, pull its page.
+-}
+registryReader :: Spec -> Op
+registryReader spec =
+    grant spec "roles/artifactregistry.reader" repoResource `inject` repository spec
+  where
     repoResource =
         Text.intercalate "/" ["projects", spec.project, "locations", spec.region, "repositories", (repo spec).repoName]
 
@@ -886,6 +956,11 @@ vmPrerequisites spec vm =
         -- is pinned to an address that should be reserved first, and what it
         -- is provisioned to do is fetch a page from the peer.
         <> maybe [] (\peer -> [internalAddress (vmInternalAddressSpec spec peer) `inject` computeApi, peerInstance spec vm peer]) spec.peerConfig
+        -- Tier 3: the instance is created /as/ the toy's service account, so
+        -- the account comes first; and what the hand-off does on the machine
+        -- is pull the page's image with that account, so the image is in the
+        -- repository and the account may read it before there is a machine.
+        <> (if spec.tier >= 3 then [serviceAccount spec, registryReader spec, pagePushed spec] else [])
   where
     -- every tier-2 resource is a Compute Engine one, and a fresh project has
     -- that API off: addresses, firewall rules and instances all answer
@@ -957,6 +1032,9 @@ peerInstance spec vm peer =
             , Compute.instanceExternalAddress = Compute.NoExternalAddress
             , Compute.instanceInternalAddress = Compute.PinnedInternal peer.peerInternalIp
             , Compute.instanceTags = [peerTag spec]
+            , -- the peer pulls nothing: it stays the instance it was
+              Compute.instanceServiceAccount = Nothing
+            , Compute.instanceScopes = Compute.DefaultScopes
             }
 
 {- | Serves one page naming the project, under a transient systemd unit so it
@@ -975,6 +1053,18 @@ peerStartupScript spec peer =
         , "  || systemd-run --unit salmon-toy-peer /usr/bin/python3 -m http.server " <> Text.pack (show peer.peerPort) <> " --bind 0.0.0.0 --directory /var/www/salmon-toy-peer"
         ]
 
+{- | The tier-2 instance. At tier 3 it runs as the toy's own service account
+with the @cloud-platform@ scope, which is what makes the metadata server's
+token one Artifact Registry accepts: the account holds
+@roles\/artifactregistry.reader@ on the toy's repository ('registryReader')
+and little else, so the scope is wide and the role is what bounds it. Below
+tier 3 the instance is declared as it always was (the project's default
+account, gcloud's default scopes).
+
+Like the tag below, both are fixed when the instance is created: a tier-2
+instance taken to tier 3 keeps its account and its scopes, and
+'Compute.gceInstance' fails on the scopes without changing them.
+-}
 gceInstance :: Spec -> VmConfig -> Compute.Instance
 gceInstance spec vm =
     VmProvision.withStartupScriptFile (startupScriptPath spec) $
@@ -992,7 +1082,7 @@ gceInstance spec vm =
                 }
         , Compute.instanceNetwork = "default"
         , Compute.instanceSubnet = "default"
-        , Compute.instanceServiceAccount = Nothing
+        , Compute.instanceServiceAccount = if spec.tier >= 3 then Just (serviceAccountEmail spec) else Nothing
         , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
         , Compute.instanceMetadataFiles = Map.empty
         , Compute.instanceExternalAddress = Compute.ReservedExternal (addressSpec spec).addressName
@@ -1002,7 +1092,7 @@ gceInstance spec vm =
           -- machine the balancer has already been pointed at.
           Compute.instanceTags = [sshTag spec] <> [lbTag spec | spec.tier >= 3]
         , Compute.instancePower = Compute.PoweredOn
-        , Compute.instanceScopes = Compute.DefaultScopes
+        , Compute.instanceScopes = if spec.tier >= 3 then Compute.DeclaredScopes ["cloud-platform"] else Compute.DefaultScopes
         }
 
 -------------------------------------------------------------------------------

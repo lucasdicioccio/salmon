@@ -1117,7 +1117,19 @@ itself through `upTree`/`downTree` in **user scope** (`~/.config/containers/syst
 podman, `nginx:alpine` if already pulled, a local tag of it for the image change), asserting up/skip/restart-on-change/
 down, and that of two changed quadlets sharing one `daemon-reload` the one never restarted is not skipped (also in the form a deployment met it: env files rotated, the image unchanged, one quadlet's file rewritten beside a failed injected predecessor and reloaded by its sibling's `up` — the label carries the watched files' fingerprint, so the next pass restarts it), and that a healthy container re-declared onto an unpullable image (a refused
 local port) fails at the pull with its service, container and file untouched; skipped loudly without `podman-user-generator`, a user manager or the image. System scope has not been run by a
-test, nor has a successful pull from a registry or one through an auth file (the tests' images are already local), the metadata path has not been run on an instance, and the GCP toy does not use either yet.
+test, nor has a successful pull from a registry or one through an auth file (the tests' images are already local), the metadata path has not been run on an instance. **The GCP toy's tier 3 declares both** (`GcpToy.pageServer`, on the VM
+side of the hand-off: `Debian.deb podman` under `instanceLogin` under the quadlet's `Track'`, `salmon-toy-page.container` in
+system scope publishing `--lb-port` onto the image's port 80; the image, `…/<prefix>-repo/page:<tag>`, is an
+`nginx:alpine` with the page copied in, built and pushed by the control side as a prerequisite of the *instance*
+(`pagePushed`, sharing tier 1's login node), and the instance is created as `<prefix>-sa` with `cloud-platform`, the
+account and its `roles/artifactregistry.reader` grant being prerequisites too). Load-bearing there: the instance's account
+and scopes are tier 3's only (a tier-2 instance and the peer are declared as before, pinned in `Test/GcpToySpec.hs`), both
+are fixed at creation like the `-lb` tag, and the unit is not named `salmon-toy-web`, which the toy's earlier authored unit
+was and which would shadow a generated one. It replaced `webServer` (a `python3 -m http.server` unit), so a VM provisioned
+by the older toy is not converted. Run for this: `Test/GcpToySpec.hs` (Layer 0, both graphs), podman 4.9.3's system
+generator in dry-run on the rendered file, and the page image built and served by hand with rootless podman. **Not run: any
+of it against GCP** — system scope, the metadata login, the authenticated pull and the instance flags are still from
+documentation until the developer's tier-3 run.
 
 `Nodes/Systemd/Job.hs` is jobs under systemd, which `systemdService` cannot declare: its check wants `ActiveState=active`
 and its `up` restarts, so an idle oneshot unit reads as broken and is run at every pass. Three nodes, separate on
