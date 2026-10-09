@@ -23,10 +23,12 @@
 #
 # Tier 3 puts a regional external load balancer in front of that VM and checks
 # it by fetching a page the VM only serves because the tier-2 hand-off
-# installed a systemd unit there. A balancer that exists proves nothing (one
-# in front of no server answers 502 just as well), so the verdict is a 200
-# carrying the project id -- allow a few minutes for the backend to pass its
-# first health checks.
+# declared a container there: a quadlet running an image this machine built
+# and pushed to the toy's own repository (so tier 3 needs podman here, as tier
+# 1 does), pulled on the VM as the instance's service account. A balancer that
+# exists proves nothing (one in front of no server answers 502 just as well),
+# so the verdict is a 200 carrying the project id and the image's name --
+# allow a few minutes for the backend to pass its first health checks.
 #
 # What it checks, pass by pass:
 #   up #1   everything comes up. If it fails, one retry is attempted and the
@@ -296,8 +298,13 @@ if [[ $TIER -ge 3 ]]; then
             [[ $attempt == 1 || $((attempt % 6)) == 0 ]] && echo "   still waiting for a healthy backend (attempt $attempt): ${body:0:80}"
             sleep 10
         done
-        if [[ $body == *"$PROJECT"* ]]; then
-            VERDICT+=("lb: the balancer served the VM's page")
+        # The page is baked into the image and names it, so a body saying so
+        # came out of the container; the project id alone would also be what
+        # a VM provisioned by an older toy (a python unit) answers.
+        if [[ $body == *"$PROJECT"*"in a container pulled from "*"/page:"* ]]; then
+            VERDICT+=("lb: the balancer served the page from the VM's container")
+        elif [[ $body == *"$PROJECT"* ]]; then
+            VERDICT+=("lb: THE BALANCER SERVED A PAGE, BUT NOT THE CONTAINER'S (${body:0:120})")
         else
             # The usual cause is a firewall rule, and the health of the
             # backend says so more precisely than the response body does.

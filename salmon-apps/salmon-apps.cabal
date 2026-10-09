@@ -166,6 +166,7 @@ test-suite salmon-apps-test
     main-is:          Main.hs
     hs-source-dirs:   test
     other-modules:    Test.FleetSpec
+                    , Test.GcpToySpec
                     , Test.QemuPgHaToySpec
                     , Test.ReportSpec
     build-depends:    base >=4.16.3.0 && <4.22
