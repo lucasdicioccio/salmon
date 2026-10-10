@@ -6,6 +6,10 @@ module Salmon.Builtin.Nodes.Gcp.CloudRun (
     renderSecretBinding,
     CloudRunOptions (..),
     defaultCloudRunOptions,
+    OwnerLabel (..),
+    renderOwnerLabel,
+    Ownership (..),
+    interpretOwnership,
     CloudRunService (..),
     cloudRunService,
     interpretServiceDescribe,
@@ -15,6 +19,7 @@ module Salmon.Builtin.Nodes.Gcp.CloudRun (
     cloudRunCommand,
 ) where
 
+import Control.Exception (throwIO)
 import Data.Aeson (Value (..), eitherDecodeStrict)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -25,6 +30,7 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextError
 import GHC.IO.Exception (ExitCode (..))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (proc)
@@ -125,7 +131,54 @@ data CloudRunOptions = CloudRunOptions
     -- billing"). 'False' (the default) leaves the deploy alone rather than
     -- passing @--cpu-throttling@, so turning this off again is not something
     -- a redeploy does.
+    , croOwner :: Maybe OwnerLabel
+    -- ^ a label that says this declaration made the service. 'Nothing' (the
+    -- default) is the node this module always made: the name is the whole
+    -- identity, a deploy lands on whatever service has it and @down@ deletes
+    -- it. With a label, see 'OwnerLabel'.
     }
+    deriving (Eq, Show)
+
+{- | A label proving who made a service: @key=value@ among the service's own
+labels, written by the deploy that creates it (@--update-labels@, so the
+labels somebody else put there are left alone).
+
+A node declared with one treats the service's name as an address rather than
+as proof:
+
+* a service of that name __without__ the label is somebody else's. The
+  @check@ says so, @up@ refuses to deploy over it, and @down@ leaves it
+  where it is;
+* a service __with__ it is deployed to and deleted as usual;
+* when the listing that answers the question fails, @up@ and @down@ both
+  throw rather than guess.
+
+The key and the value are label text, so GCP's rules apply to both
+(lowercase letters, digits, @-@ and @_@, at most 63 characters, the key
+starting with a letter); the caller validates, this module does not. The
+label ends up in argv, in the node's notes and in the service's metadata: it
+is a name, never a credential.
+-}
+data OwnerLabel = OwnerLabel
+    { ownerKey :: Text
+    , ownerValue :: Text
+    }
+    deriving (Eq, Show)
+
+-- | @key=value@, as @--update-labels@ takes it.
+renderOwnerLabel :: OwnerLabel -> Text
+renderOwnerLabel o = o.ownerKey <> "=" <> o.ownerValue
+
+-- | Whose a service of the declared name is, as far as its labels say.
+data Ownership
+    = -- | no service has the name
+      Absent
+    | -- | the service carries the label
+      Ours
+    | -- | a service has the name and not the label
+      Foreign
+    | -- | the listing failed or was not what this module reads
+      Undetermined Text
     deriving (Eq, Show)
 
 -- | Nothing set: the same deploy this module made before these knobs existed.
@@ -142,6 +195,7 @@ defaultCloudRunOptions =
         , croInvokerIamCheckDisabled = False
         , croMinInstances = Nothing
         , croCpuAlwaysAllocated = False
+        , croOwner = Nothing
         }
 
 -- | A CloudRun service.
@@ -167,17 +221,66 @@ cloudRunService r gcloudTrack svc =
             op "gcp-cloudrun-service" nodeps $ \actions ->
                 actions
                     { help = Text.unwords ["deploys CloudRun service", svc.crsName]
+                    , notes =
+                        [ "owned through the label " <> renderOwnerLabel owner <> ": a service of this name without it is neither deployed over nor deleted"
+                        | Just owner <- [svc.crsOptions.croOwner]
+                        ]
                     , ref = mkRef "gcp-cloudrun-service" (svc.crsProject.projectId, svc.crsRegion.regionName, svc.crsName)
-                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (deploy r')
+                    , up = refusingForeign >> Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (deploy r')
                     , -- Presence, not the image: a service running an older
                       -- image than the one declared is still there to delete.
                       -- Checking the image here made `down` skip every service
                       -- whose tag had moved with the code since its deploy.
-                      down = Core.downIfPresent (uncurry interpretServicePresence <$> describeService) (delete r')
+                      down = case svc.crsOptions.croOwner of
+                        Nothing -> Core.downIfPresent (uncurry interpretServicePresence <$> describeService) (delete r')
+                        Just owner -> deletingOurs owner (delete r')
                     , check = checkService
                     }
   where
     r' = contramap (RunCloudRunCommand (RunDeploy svc)) r
+
+    -- Asked through a listing, not @describe@: a listing that finds nothing
+    -- exits 0 with an empty array, where a failed @describe@ cannot be told
+    -- from a service that is not there.
+    readOwnership :: OwnerLabel -> IO Ownership
+    readOwnership owner = do
+        (code, out, _err) <-
+            readCreateProcessWithExitCode
+                (prepare cloudRunCommand (RunListNamed svc))
+                ""
+        pure (interpretOwnership owner svc.crsName code (Text.decodeUtf8With TextError.lenientDecode out))
+
+    refusingForeign :: IO ()
+    refusingForeign = case svc.crsOptions.croOwner of
+        Nothing -> pure ()
+        Just owner -> do
+            ownership <- readOwnership owner
+            case ownership of
+                Absent -> pure ()
+                Ours -> pure ()
+                Foreign ->
+                    throwIO . userError . Text.unpack $
+                        "a CloudRun service named "
+                            <> svc.crsName
+                            <> " exists without the label "
+                            <> renderOwnerLabel owner
+                            <> "; refusing to deploy over a service this declaration did not make"
+                Undetermined why ->
+                    throwIO . userError . Text.unpack $
+                        "could not establish whose CloudRun service " <> svc.crsName <> " is (" <> why <> "); not deploying"
+
+    deletingOurs :: OwnerLabel -> IO () -> IO ()
+    deletingOurs owner act = do
+        ownership <- readOwnership owner
+        case ownership of
+            Ours -> act
+            Absent -> pure ()
+            -- somebody else's: not this node's to remove, and nothing of
+            -- this node's is left standing
+            Foreign -> pure ()
+            Undetermined why ->
+                throwIO . userError . Text.unpack $
+                    "could not establish whose CloudRun service " <> svc.crsName <> " is (" <> why <> "); not deleting"
 
     describeService :: IO (ExitCode, Text)
     describeService = do
@@ -226,9 +329,44 @@ interpretServiceDescribe svc ExitSuccess outText =
         Left _ -> Unknown
         Right v -> case templateOf v of
             Nothing -> Unknown
-            Just tmpl -> case drifts svc tmpl of
-                [] -> Success
-                ds -> Failure ("CloudRun service found but differs from what is declared: " <> Text.intercalate "; " ds)
+            Just tmpl
+                | Just owner <- svc.crsOptions.croOwner
+                , Map.lookup owner.ownerKey (labelsOf v) /= Just owner.ownerValue ->
+                    Failure ("CloudRun service found without the label " <> renderOwnerLabel owner <> ": not made by this declaration")
+                | otherwise -> case drifts svc tmpl of
+                    [] -> Success
+                    ds -> Failure ("CloudRun service found but differs from what is declared: " <> Text.intercalate "; " ds)
+
+-- | A service's own labels (@metadata.labels@), GCP's included.
+labelsOf :: Value -> Map Text Text
+labelsOf v = case objectField "metadata" v >>= objectField "labels" of
+    Just (Object o) -> Map.fromList [(Key.toText k, t) | (k, String t) <- KeyMap.toList o]
+    _ -> Map.empty
+
+objectField :: Text -> Value -> Maybe Value
+objectField k (Object o) = KeyMap.lookup (Key.fromText k) o
+objectField _ _ = Nothing
+
+{- | The verdict drawn from @gcloud run services list --filter
+metadata.name=NAME --format=json@: its exit code and output, the declared
+label and the declared name.
+
+The filter is not trusted to be exact: only the entries whose
+@metadata.name@ /is/ the name count, so a listing that matched more (a
+substring, a prefix) does not make somebody else's service ours, nor ours
+somebody else's.
+-}
+interpretOwnership :: OwnerLabel -> Text -> ExitCode -> Text -> Ownership
+interpretOwnership _ _ (ExitFailure n) _ = Undetermined ("listing exited " <> Text.pack (show n))
+interpretOwnership owner name ExitSuccess outText =
+    case eitherDecodeStrict (Text.encodeUtf8 outText) of
+        Right (Array entries) ->
+            case [e | e <- toList entries, (objectField "metadata" e >>= objectField "name") == Just (String name)] of
+                [] -> Absent
+                named
+                    | all ((== Just owner.ownerValue) . Map.lookup owner.ownerKey . labelsOf) named -> Ours
+                    | otherwise -> Foreign
+        _ -> Undetermined "the listing is not a JSON array"
 
 -- | The revision template's @spec@: its first container and its service account.
 data Template = Template
@@ -310,6 +448,8 @@ data CloudRunCommand
     = RunDeploy CloudRunService
     | RunDescribe CloudRunService
     | RunDelete CloudRunService
+    | -- | the services of the region that have this one's name: none, or one
+      RunListNamed CloudRunService
     deriving (Show)
 
 {- | The @--set-secrets@ family. One flag carrying every binding, not one
@@ -332,6 +472,7 @@ optionArgs opts =
         , ["--no-invoker-iam-check" | opts.croInvokerIamCheckDisabled]
         , maybe [] (\v -> ["--min-instances", show v]) opts.croMinInstances
         , ["--no-cpu-throttling" | opts.croCpuAlwaysAllocated]
+        , maybe [] (\o -> ["--update-labels", Text.unpack (renderOwnerLabel o)]) opts.croOwner
         ]
 
 cloudRunCommand :: Command "gcloud" CloudRunCommand
@@ -375,5 +516,17 @@ cloudRunCommand = Command $ \cmd -> case cmd of
                     , "delete"
                     , Text.unpack svc.crsName
                     , "--quiet"
+                    ]
+                )
+    RunListNamed svc ->
+        gcloudProc $
+            withProject svc.crsProject
+                ( withRegion svc.crsRegion
+                    [ "run"
+                    , "services"
+                    , "list"
+                    , "--filter"
+                    , "metadata.name=" <> Text.unpack svc.crsName
+                    , "--format=json"
                     ]
                 )

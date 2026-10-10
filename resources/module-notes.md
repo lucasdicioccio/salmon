@@ -88,6 +88,37 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   reads `info status` off the human monitor (`interpretStatus`, pure; `Test/QemuShutdownSpec.hs`
   runs it and `pause`/`resume` against a real qemu process with no guest). **Not run with guests
   booted**: the session, the route inside a guest, the writer against a live pair.
+  `salmon-cloudrun` (`Cloudrun.hs`) is a Cloud Run turnup from one JSON file (`config --file F`): services deployed
+  from images already in a registry, each with its account (`{"create": ID}` or `{"email": A}`), plain `env`,
+  `bind_secrets` (a variable or a mounted file, `secret`, `version` defaulting to `latest`), the top-level `secrets`
+  the turnup itself makes (optionally filled from a `source_file`), and an optional regional external balancer with
+  one serverless backend per routed service (`default_service`, `hosts`/`paths`, existing regional compute
+  certificates by name). The directive is the declaration with its defaults written out (`Turnup`, hand-written JSON:
+  **an unknown key is refused**, since a misspelt one is a setting silently dropped; `loadTurnup` makes a relative
+  `source_file` absolute from the file's directory). `turnupProblems` collects every refusal (names GCP would refuse,
+  duplicates, a binding or route naming nothing, two bindings on one variable or two secrets in one mount directory,
+  an env value holding a comma since `--set-env-vars` splits on it, a balancer in front of an `internal` service, and
+  `albProblems`); `config` refuses on any, and a hand-written directive with one becomes a single failing node and no
+  resource. Load-bearing: **`run down` deletes only the services and the balancer.** Services carry
+  `salmon-turnup=NAME` (`CloudRun.croOwner`, below); the secrets, service accounts, IAM grants, proxy-only subnet and
+  APIs are *kept* (`keptNode`/`keptSecret` blank the builtin's `down` and say so in `notes`), because none carries a
+  proof of who made it, a secret is data, and a grant or the one proxy-only subnet of a network may be shared.
+  `keptSecret` is an `fmap` over the whole secret sub-graph on purpose (the version node declares the secret beneath
+  it, and the copy declared beside it for the API edge must stay the same representative): it rewrites only nodes
+  carrying the builtin's "destroys every version" note, so `gcloud`'s node is untouched. A service's account is granted
+  `secretAccessor` on each bound secret unless `grant_secret_access: false`; every node sits on the optional
+  `account` assertion. No secret byte is in the file, the directive, a node's text or argv. **Layer 0 only**
+  (`Test/CloudrunSpec.hs`: parser, refusals, folded graph, the deploy's argv; `config` and `run tree` were run by hand
+  on the documented example). No node's `up`, `check` or `down` has been run, with or without a stand-in, so the kept
+  `down`s are asserted through their notes, not by running them. **Not run against a real project**; a live run still
+  has to cover: `--update-labels` on a first deploy and the label showing in `metadata.labels`; `run services list
+  --filter metadata.name=N --format=json --region R` returning `[]` for an absent service; several plain variables
+  through one `--set-env-vars` per variable; a mounted file and a variable from secrets, with the grant landing before
+  the deploy reads them (IAM propagation); the deployer's `actAs` on a created account; a serverless NEG behind the
+  regional balancer end to end, HTTPS with an existing certificate included; `run down` then a second `run up`
+  finding the kept secrets, accounts and subnet; and a foreign service of the same name being refused.
+  Not done: building/pushing the image (`SreBox.Gcp.CloudRunDeploy`), Certificate Manager certificates and their DNS
+  records, alerts, ownership marks on secrets and accounts (which is what would let `down` remove them).
 
 `SreBox.WireGuardMesh` (in `salmon-ops-recipes`) is a WireGuard mesh declared once (`MeshSeed`: peers with declared
 addresses, inline public keys, optional endpoints, groups; policies; routers) and unfolded by the pure `genHost`/`genAll`
@@ -1415,6 +1446,17 @@ its `up` throws on anything but a match, so dependants are `Blocked` before anyt
 account (that is the operator's machine configuration), is keyed `"gcp-account" account`, and is opt-in: a recipe that
 does not declare one behaves as before (`salmon-gcp-toy --account EMAIL` is the one caller). The check is once per pass,
 not `--account` on every call (`Core.withAccount` exists for a caller that wants that). Never run against a real gcloud.
+
+`Gcp.CloudRun.croOwner :: Maybe OwnerLabel` makes a service's name an address rather than a proof of who made it.
+`Nothing` (the default) is the node as it was: same argv, `ref`, `help`, no `notes`, a deploy over whatever has the
+name and a `down` that deletes it. With a label the deploy passes `--update-labels k=v` (so other labels stay), the
+`check` fails a service lacking it (read from the same `describe`, `metadata.labels`), `up` refuses to deploy over one
+and `down` deletes only a service that carries it, leaving a foreign one in place. `up`/`down` ask through
+`run services list --filter metadata.name=N --format=json` (`RunListNamed`, `interpretOwnership`, pure), not
+`describe`: an empty listing exits 0, where a failed `describe` cannot be told from an absent service, and a failed or
+unreadable listing is `Undetermined`, on which both throw. Only entries whose `metadata.name` is exactly the name
+count. Layer 0 only (`Test/GcpSpec.hs`, "CloudRun options", on JSON written from the API's resource shape, not
+captured); `salmon-cloudrun` is the one caller.
 
 `Gcp.Compute.Instance` carries `instanceScopes :: AccessScopes`: `DefaultScopes` passes nothing (the command, `ref`,
 `help` and empty `notes` every instance had), `DeclaredScopes` is `--scopes` with the scopes as written (gcloud aliases
