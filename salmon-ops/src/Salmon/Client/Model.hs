@@ -45,6 +45,31 @@ What moves a node's view:
 A node wanted @down@ whose @done@ arrives is dropped: the loop prunes it
 after the pass, and @\/dag@ would not show it either.
 
+= The output stream
+
+The @output@ stream is what a node writes while it works, and it carries
+two kinds that are folded into two different fields because a snapshot
+covers one and not the other:
+
+  * @output@, a line a /held/ action wrote. The server pushes it into the
+    node's ring as it reports it, and @\/dag@ returns that ring as
+    @status.output@. So it is appended to 'nodeOutput' under the node's own
+    stamp like any other event about the node, and a re-read snapshot
+    replaces the lot.
+  * @log@, a line a node said during a one-shot @up@
+    ("Salmon.Builtin.NodeLog": a streamed command's output, or its own
+    progress message). No snapshot has these — they are not in the ring —
+    so they are kept apart in 'nodeSaid' with a stamp of their own
+    ('nodeSaidSeq'), and 'rebase' carries them onto the fresh snapshot
+    rather than losing a build's tail to the re-read every @declared@
+    asks for.
+
+Neither moves 'nodeLastKind': a line is not something that happened to
+the node's convergence, and a table whose last column reads @log@ for the
+length of a build says less than one that still reads @eval@. Both are
+bounded ('outputKept' lines, the oldest dropped), because a client left
+open on a chatty node would otherwise grow without limit.
+
 = Replays are dropped, per stamp
 
 One counter numbers everything on the stream, and a snapshot carries the
@@ -91,6 +116,8 @@ module Salmon.Client.Model (
     Counts (..),
     counts,
     lookupNode,
+    outputKept,
+    tailLines,
 
     -- * Rendering pieces
     renderNodeRow,
@@ -172,7 +199,13 @@ data Node = Node
     -- ^ @pending@\/@stale@\/@converged@\/@errored@\/@blocked@
     , nodeCheck :: !(Maybe Check)
     , nodeOutput :: ![Text]
-    -- ^ the snapshot's output ring, oldest first
+    -- ^ the snapshot's output ring, then each @output@ line since, oldest first
+    , nodeSaid :: ![Text]
+    -- ^ the @log@ lines the stream carried (what the node said during a
+    -- one-shot @up@), oldest first; a line from standard error is prefixed
+    -- @err| @ and the node's own message @msg| @. In no snapshot.
+    , nodeSaidSeq :: !Word64
+    -- ^ the number 'nodeSaid' is current to; 0 until a line arrives
     , nodeError :: !(Maybe Text)
     -- ^ the last @failed@'s error, cleared by a later @done@\/@skip@
     , nodeLastKind :: !(Maybe Text)
@@ -228,18 +261,26 @@ resolve m = m{modelResyncReason = Nothing}
 order and mode are the fresh snapshot's; the loop-level fields, their
 stamp and the last event are the old model's; the cursor is the higher of
 the two; and the resync request is answered. See the module header for
-why the loop's part is not simply the snapshot's.
+why the loop's part is not simply the snapshot's. What a node said
+('nodeSaid') is the old model's too, for the nodes the fresh snapshot
+still has: no snapshot carries it.
 -}
 rebase :: Model -> Model -> Model
 rebase old fresh =
     fresh
-        { modelSeq = max old.modelSeq fresh.modelSeq
+        { modelNodes = Map.mapWithKey keepSaid fresh.modelNodes
+        , modelSeq = max old.modelSeq fresh.modelSeq
         , modelLoopSeq = old.modelLoopSeq
         , modelPass = old.modelPass
         , modelSupervised = old.modelSupervised
         , modelLast = old.modelLast
         , modelResyncReason = Nothing
         }
+  where
+    keepSaid :: RefId -> Node -> Node
+    keepSaid r n = case Map.lookup r old.modelNodes of
+        Just o -> n{nodeSaid = o.nodeSaid, nodeSaidSeq = o.nodeSaidSeq}
+        Nothing -> n
 
 {- | A model from a @\/dag@ answer. 'Left' names what is missing; a @\/dag@
 answer always has @nodes@ and @seq@, so a 'Left' is a wrong URL, not a
@@ -276,6 +317,8 @@ fromDag v = do
                 , nodeConvergence = fromMaybe "?" (textAt ["convergence"] n)
                 , nodeCheck = checkAt ["status", "check"] n
                 , nodeOutput = maybe [] (mapMaybe asText) (arrayAt ["status", "output"] n)
+                , nodeSaid = []
+                , nodeSaidSeq = 0
                 , nodeError = Nothing
                 , nodeLastKind = Nothing
                 , nodeLastSeq = Nothing
@@ -321,7 +364,29 @@ step m0 e
         ("upkeep", "next-look") ->
             maybe m (\r -> onNode r (\n -> (touch e.eventKind n){nodeCheck = checkAt ["check"] e.eventValue}) m) e.eventRef
         ("upkeep", k) -> maybe m (\r -> onNode r (touch k) m) e.eventRef
+        -- a held action's line: in the ring, so under the node's stamp
+        ("output", "output") ->
+            case (e.eventRef, textAt ["line"] e.eventValue) of
+                (Just r, Just line) -> onNode r (\n -> n{nodeOutput = keepLast (n.nodeOutput ++ [line])}) m
+                _ -> m
+        -- a line said during a one-shot up: in no snapshot, so its own stamp
+        ("output", "log") ->
+            case (e.eventRef, textAt ["line"] e.eventValue) of
+                (Just r, Just line) -> said r (channelMark (textAt ["channel"] e.eventValue) <> line) m
+                _ -> m
         _ -> m
+
+    said :: RefId -> Text -> Model -> Model
+    said r line m = case Map.lookup r m.modelNodes of
+        Nothing -> m
+        Just n
+            | Just s <- e.eventSeq, s <= n.nodeSaidSeq -> m
+            | otherwise ->
+                let n' = n{nodeSaid = keepLast (n.nodeSaid ++ [line]), nodeSaidSeq = fromMaybe n.nodeSaidSeq e.eventSeq}
+                 in m{modelNodes = Map.insert r n' m.modelNodes}
+
+    keepLast :: [Text] -> [Text]
+    keepLast xs = drop (length xs - outputKept) xs
 
     -- the loop-level fields, unless the event is at or below their stamp
     onLoop :: Model -> (Model -> Model) -> Model
@@ -367,6 +432,28 @@ nodesInOrder m = mapMaybe (`Map.lookup` m.modelNodes) m.modelOrder
 
 lookupNode :: RefId -> Model -> Maybe Node
 lookupNode r m = Map.lookup r m.modelNodes
+
+-- | How many lines of 'nodeOutput' and of 'nodeSaid' a node's view keeps.
+outputKept :: Int
+outputKept = 200
+
+-- | How a @log@ line's channel shows in front of it: nothing for standard
+-- output, the marks the text reporter and the web UI's tail use otherwise.
+channelMark :: Maybe Text -> Text
+channelMark c = case c of
+    Just "stderr" -> "err| "
+    Just "message" -> "msg| "
+    _ -> ""
+
+{- | The last @k@ lines a live tail of this node shows: what it said during
+its one-shot @up@ when it said anything, its ring otherwise (a held
+action's output, which is the only other thing that moves while one
+watches).
+-}
+tailLines :: Int -> Node -> [Text]
+tailLines k n = lastN (if null n.nodeSaid then n.nodeOutput else n.nodeSaid)
+  where
+    lastN xs = drop (length xs - k) xs
 
 data Counts = Counts
     { countConverged :: !Int
@@ -440,10 +527,13 @@ renderEventLine e =
         , describeEvent e
         ]
 
--- | The words after the kind: the node's short ref, or the loop-level
--- fields worth a glance.
+-- | The words after the kind: the node's short ref (and, for a line of
+-- output, the line), or the loop-level fields worth a glance.
 describeEvent :: Event -> Text
 describeEvent e = case e.eventRef of
+    Just r
+        | e.eventStream == "output" ->
+            r.refShort <> " " <> channelMark (textAt ["channel"] e.eventValue) <> fromMaybe "" (textAt ["line"] e.eventValue)
     Just r -> r.refShort <> maybe "" (" " <>) (textAt ["node", "shorthand"] e.eventValue)
     Nothing -> Text.unwords (mapMaybe (\k -> (\t -> k <> "=" <> t) <$> scalarAt [k] e.eventValue) ["line", "epoch", "direction", "nodes", "down", "up", "ok", "remaining", "from", "error", "on"])
 

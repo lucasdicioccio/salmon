@@ -32,7 +32,10 @@ its reports arrive on the stream like everything else.
 
   * @j@\/@k@ (or the arrows): move the cursor over the node table
   * @enter@: expand the selected node — its help, notes, paths, edges,
-    last check and output ring — and collapse it again
+    last check and output ring — and collapse it again. Under it, a live
+    tail of what the node is writing: the lines of its one-shot @up@ (a
+    streamed command, its own progress messages) or of its held action,
+    as the @output@ stream carries them
   * @:@: type a serve command; @enter@ sends it asynchronously, @esc@
     drops it
   * @r@: re-read @\/dag@
@@ -319,7 +322,7 @@ clampCursor m i = max 0 (min i (length (Model.nodesInOrder m) - 1))
 -- drawing
 
 draw :: St -> [Widget Name]
-draw st = [vBox [header, table, detail, footer]]
+draw st = [vBox [header, table, detail, tailPane, footer]]
   where
     m = st.stModel
     nodes = Model.nodesInOrder m
@@ -357,6 +360,18 @@ draw st = [vBox [header, table, detail, footer]]
             (n : _) -> vLimit 14 (viewport Detail Vertical (vBox (fmap txtWrap (detailLines n))))
             [] -> emptyWidget
 
+    -- the live tail of the expanded node; nothing until it has written
+    tailPane
+        | not st.stExpanded = emptyWidget
+        | otherwise = case drop st.stCursor nodes of
+            (n : _)
+                | ls@(_ : _) <- Model.tailLines 8 n ->
+                    vBox (withAttr (attrName "header") (padRight Max (txt ("  tail of " <> n.nodeRef.refShort <> " (live)"))) : fmap (txt . ("  " <>) . printable) ls)
+            _ -> emptyWidget
+
+    -- someone else's output: no control character reaches the terminal
+    printable = Text.map (\c -> if c < ' ' || c == '\DEL' then ' ' else c)
+
     footer =
         vBox
             [ withAttr (attrName "notice") (padRight Max (txt (Text.take 200 st.stNotice)))
@@ -382,8 +397,8 @@ detailLines n =
         ++ ["error: " <> e | Just e <- [n.nodeError]]
         ++ ["last event: " <> k <> maybe "" (\s -> " #" <> tshow s) n.nodeLastSeq | Just k <- [n.nodeLastKind]]
         ++ case n.nodeOutput of
-            [] -> ["output: (none in the last snapshot)"]
-            ls -> "output (last snapshot):" : fmap ("  " <>) (lastN 10 ls)
+            [] -> ["output: (nothing in the node's ring)"]
+            ls -> "output (the node's ring):" : fmap ("  " <>) (lastN 10 ls)
   where
     lastN k xs = drop (max 0 (length xs - k)) xs
 
