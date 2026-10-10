@@ -10,7 +10,7 @@ what makes it testable without a real GCP project.
 module Test.GcpSpec (tests) where
 
 import Control.Exception (try)
-import Data.Aeson (Value (..), encode, object, toJSONList, (.=))
+import Data.Aeson (Value (..), decodeStrict, encode, object, toJSONList, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
@@ -1181,8 +1181,54 @@ cloudRunOptionTests =
                     [plain "A" "1"]
                 )
             )
+    , testCase "an owner label is a deploy flag, and nothing without one" $ do
+        let args = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy owned))
+        assertBool (show args) (["--update-labels", "salmon-turnup=acme"] `isSubsequenceOf` args)
+        let bare = processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunDeploy declared))
+        assertBool (show bare) (not (any ("label" `isInfixOf`) bare))
+    , testCase "ownership is asked through a listing, by name" $
+        assertEqual
+            ""
+            ["run", "services", "list", "--filter", "metadata.name=svc", "--format=json", "--region", "europe-west1", "--project", "p", "--quiet"]
+            (processArgs (prepare CloudRun.cloudRunCommand (CloudRun.RunListNamed owned)))
+    , testCase "a listing says whose the service is" $ do
+        let ask = CloudRun.interpretOwnership owner "svc" ExitSuccess
+        assertEqual "nothing of that name" CloudRun.Absent (ask "[]")
+        assertEqual "ours" CloudRun.Ours (ask (listing [("svc", [("salmon-turnup", "acme"), ("cloud.googleapis.com/location", "europe-west1")])]))
+        assertEqual "no label at all" CloudRun.Foreign (ask (listing [("svc", [])]))
+        assertEqual "another turnup's" CloudRun.Foreign (ask (listing [("svc", [("salmon-turnup", "other")])]))
+        -- a filter that matched more than the name decides nothing
+        assertEqual "a longer name is not this service" CloudRun.Absent (ask (listing [("svc-2", [("salmon-turnup", "acme")])]))
+        assertEqual "nor does it vouch for this one" CloudRun.Foreign (ask (listing [("svc-2", [("salmon-turnup", "acme")]), ("svc", [])]))
+    , testCase "a listing that failed or is not one decides nothing" $ do
+        assertBool "" (undetermined (CloudRun.interpretOwnership owner "svc" (ExitFailure 1) "[]"))
+        assertBool "" (undetermined (CloudRun.interpretOwnership owner "svc" ExitSuccess "Listed 0 items."))
+        assertBool "" (undetermined (CloudRun.interpretOwnership owner "svc" ExitSuccess "{}"))
+    , testCase "a service without the declared label is not satisfied, whatever it runs" $ do
+        let out labels = labelled labels (describeJson "us-docker.pkg.dev/p/r/img:1" (Just "sa@p.iam.gserviceaccount.com") [plain "A" "1"])
+        assertEqual "" Success (verdict owned (out [("salmon-turnup", "acme")]))
+        assertBool "" (isFailure (verdict owned (out [])))
+        assertBool "" (isFailure (verdict owned (out [("salmon-turnup", "other")])))
+        -- and a node declared without one does not look
+        assertEqual "" Success (verdict declared (out []))
     ]
   where
+    owner = CloudRun.OwnerLabel "salmon-turnup" "acme"
+    owned = declared{CloudRun.crsOptions = CloudRun.defaultCloudRunOptions{CloudRun.croOwner = Just owner}}
+    undetermined (CloudRun.Undetermined _) = True
+    undetermined _ = False
+    -- the parts of @gcloud run services list --format=json@ the reading uses
+    listing :: [(Text.Text, [(Text.Text, Text.Text)])] -> Text.Text
+    listing entries =
+        Text.decodeUtf8 . LByteString.toStrict . encode $
+            [object ["metadata" .= object ["name" .= name, "labels" .= Map.fromList labels]] | (name, labels) <- entries]
+    -- a describe output, with these labels on the service itself
+    labelled :: [(Text.Text, Text.Text)] -> Text.Text -> Text.Text
+    labelled labels described = case decodeStrict (Text.encodeUtf8 described) of
+        Just (Object o) ->
+            Text.decodeUtf8 . LByteString.toStrict . encode $
+                Object (KeyMap.insert "metadata" (object ["name" .= ("svc" :: Text.Text), "labels" .= Map.fromList labels]) o)
+        _ -> described
     alwaysOn =
         CloudRun.defaultCloudRunOptions
             { CloudRun.croMinInstances = Just 1

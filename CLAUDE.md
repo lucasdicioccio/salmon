@@ -23,7 +23,8 @@ Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-
   `acme-not-a-joke`). **Not** in `cabal.project`; built only via `cabal.perso.project`.
 - `salmon-apps`: binaries. `salmon-migrator`, `salmon-pgpair`, `salmon-report` (read-only
   capability/DNS probes), `salmon-fleet` (status fold, `keygen`, `sign`), `salmon-tui` (brick
-  client of `serve --http`), `salmon-docs-sync`, `salmon-gcp-toy`, `salmon-toy-qemu-pg-ha`.
+  client of `serve --http`), `salmon-docs-sync`, `salmon-gcp-toy`, `salmon-cloudrun` (a Cloud Run turnup from one JSON file),
+  `salmon-toy-qemu-pg-ha`.
 - `rs/`: **not a cabal package.** An experimental Rust workspace, outside `cabal.project` and
   every default build: `salmon-serve-client` (a read-only port of `Client.Model` and the read
   half of `Client.Http`) and `salmon-gpui` (a gpui-kit window on it). See "`rs/`" in the notes.

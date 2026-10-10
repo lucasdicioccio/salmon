@@ -217,6 +217,7 @@ above, where this project's own conventions get enforced:
 | `salmon-pg-backup` | take a Postgres dump now, or install the cron job that keeps taking one, here or on another machine |
 | `salmon-init-locally` | the local-machine salmon setup (sudoers, the salmon user and group) |
 | `salmon-gcp-toy` | a tiered, throwaway exercise of the GCP builtins against a real project — see [`resources/gcp-toy-validation.md`](resources/gcp-toy-validation.md) |
+| `salmon-cloudrun` | Cloud Run services, their environment and secret bindings, and a load balancer in front, from one declarative JSON file (Layer 0 only: not yet run against a real project) |
 | `salmon-toy-qemu-pg-ha` | the `salmon-pgpair` demo on three qemu guests, with a client that keeps writing while the primary moves |
 | `salmon-fleet` | the controller's side of pull mode: `status DIR` folds the hosts' status documents into one line per host; `keygen`/`sign` make signed documents |
 | `salmon-tui` | a terminal client for `run serve --http` (or `--http-tcp`) |
