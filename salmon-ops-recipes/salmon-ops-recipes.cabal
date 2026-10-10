@@ -108,6 +108,8 @@ test-suite salmon-ops-recipes-test
                     , Test.BinarySpec
                     , Test.DaemonSpec
                     , Test.DagSpec
+                    , Test.GraphFixture
+                    , Test.GraphFixtureSpec
                     , Test.DeferredSpec
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
@@ -199,8 +201,9 @@ test-suite salmon-ops-recipes-test
                     , warp
     -- Salmon.Actions.Serve reads its input handle on a forked thread, so a
     -- test driving the loop wants a runtime where a blocking read does not
-    -- stall every other Haskell thread.
-    ghc-options:      -threaded
+    -- stall every other Haskell thread. -rtsopts so that a large-graph run
+    -- (Test.GraphFixtureSpec's opt-in case) can be given a heap bound.
+    ghc-options:      -threaded -rtsopts
     default-language: Haskell2010
     default-extensions: DataKinds
                       , KindSignatures

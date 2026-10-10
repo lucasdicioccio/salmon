@@ -45,6 +45,9 @@ cabal build --project-file=cabal.perso.project salmon-ops-recipes-experimental s
 - Test layers: Layer 0 is pure/in-process (graph shape, rendered scripts, parsers); Layer 2 runs
   real recipes in disposable podman containers or user-scope systemd (skipped loudly when the
   tool is missing); Layer 3 is qemu VMs. See `salmon-ops-recipes/test/Test/Harness.hs`.
+- `Test/GraphFixture.hs` generates synthetic `Op` graphs (chain, fan, tree, diamonds, layered,
+  seeded random) of any size with closed-form counts, for scale tests. The million-node case
+  is opt-in (`SALMON_TEST_GRAPH_FIXTURE_SIZE`); keep large sizes out of the default run.
 - The suite runs groups in parallel in one process and nothing passes `close_fds`: mark your own
   fds close-on-exec in tests that spawn children.
 - Much of the GCP, quadlet system-scope, and pair-over-TLS code is **Layer 0 only**. When adding
