@@ -1678,6 +1678,24 @@ them on captured output (the no-device and not-an-IGD ones are real; the IGD lis
 format, never seen on a live IGD). NAT-PMP/PCP and a gateway-address `Dynamic` are not done
 (`gatewayExternalAddress` is the IO accessor instead).
 
+`Nodes/Netbird.hs` enrols a machine as a NetBird peer, the complement to `SreBox.WireGuardMesh` for roaming or
+NAT-bound devices (salmon does not rebuild NAT traversal). `peer` runs `netbird up --setup-key-file FILE` (plus
+`--management-url`/`--hostname` when declared) and its `check` is the pure `interpretStatus` over `netbird status
+--json`. Load-bearing: the setup key is only ever a path in argv, is read at `up` time, and a failed `netbird up` has
+the key's bytes replaced in both streams before they reach a report or the `CommandFailed` (`runRedacted`/`redact`,
+since the client's error text is not ours); the ref is the machine's one daemon (`("netbird-peer", "default-daemon")`),
+so two declarations collide instead of fighting; a peer *connected* to a management URL other than the declared one is
+a `Failure` for `check` and a refusal (`EnrolledElsewhere`) for `up`, never a re-enrolment; an empty key file is refused
+before anything runs (the client would fall back to an interactive login); `Connecting` is `Unknown`; `down` is
+`netbird down` and leaves the peer registered on the management server. `package`/`netbirdRepository` install the
+client from upstream's apt repository through `AptRepository` (key file and fingerprint are the caller's); the
+package's post-install script installs and starts the daemon's service, so no unit is written here. **Layer 0 only**
+(`Test/NetbirdSpec.hs`): flags, JSON field names and `daemonStatus` values were read in upstream's client sources
+(v0.80.0 was current), the status fixtures are hand-written, and nothing was run against a daemon or a management
+server. Unobserved: how `management.url` is spelled in real output (hence the lenient `sameManagement`), whether the
+client ever echoes a key, which release introduced `--setup-key-file`/`daemonStatus`. Not done: the self-hosted
+control-plane recipe (management, signal, relay, coturn), a non-default daemon address, deregistering a peer.
+
 `Nodes/Haproxy.hs` is HAProxy as a TCP router in front of a Patroni cluster (`specs/pg-patroni.md`, "Routing to
 the leader", option 3), in `Nginx.hs`'s shape with `PgBouncer.setup`'s unit: a config value, the pure `renderConfig`,
 and salmon's own `haproxy.service` (`-W -db`, as `haproxy_user`) through `Systemd.systemdServiceWatching` on

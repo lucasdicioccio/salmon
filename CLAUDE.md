@@ -173,7 +173,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Secrets delivery, deferred sub-graphs | `Nodes/{SecretDelivery,Deferred}.hs` | |
 | pg_turret log shipping (experimental package, Layer 0 only) | `Nodes/PgTurret.hs` in `salmon-ops-recipes-experimental` | |
 | Debian packages / apt index | `Nodes/Debian/Package.hs` | |
-| WireGuard mesh, UPnP port mapping | `SreBox.WireGuardMesh`, `Nodes/PortMapping.hs` | `specs/wireguard-mesh.md` |
+| WireGuard mesh, UPnP port mapping, NetBird peer | `SreBox.WireGuardMesh`, `Nodes/{PortMapping,Netbird}.hs` | `specs/wireguard-mesh.md` |
 | qemu harness and live demo | `salmon-apps/src/QemuPgHaToy.hs`, `Test.PostgresVms` | `specs/qemu-test-vms.md` |
 | Rust clients of `serve --http` (experimental) | `rs/salmon-serve-client/`, `rs/salmon-gpui/`, `rs/fixtures/` | |
 
