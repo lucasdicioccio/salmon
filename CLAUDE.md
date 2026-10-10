@@ -24,6 +24,9 @@ Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-
 - `salmon-apps`: binaries. `salmon-migrator`, `salmon-pgpair`, `salmon-report` (read-only
   capability/DNS probes), `salmon-fleet` (status fold, `keygen`, `sign`), `salmon-tui` (brick
   client of `serve --http`), `salmon-docs-sync`, `salmon-gcp-toy`, `salmon-toy-qemu-pg-ha`.
+- `rs/`: **not a cabal package.** An experimental Rust workspace, outside `cabal.project` and
+  every default build: `salmon-serve-client` (a read-only port of `Client.Model` and the read
+  half of `Client.Http`) and `salmon-gpui` (a gpui-kit window on it). See "`rs/`" in the notes.
 
 ## Build and test
 
@@ -32,6 +35,8 @@ cabal build all
 cabal build salmon-migrator
 cabal test salmon-ops-recipes
 cabal build --project-file=cabal.perso.project salmon-ops-recipes-experimental salmon-personal-apps
+(cd rs && cargo test)                      # the Rust protocol crate; no windowing libraries needed
+(cd rs && cargo test -p salmon-gpui)       # the window, headless; needs a recent Rust and GPUI's system libraries
 ```
 
 - GHC 9.10.3, no `source-repository-package` pins. `cabal.project.local` (tracked) carries
@@ -163,6 +168,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Debian packages / apt index | `Nodes/Debian/Package.hs` | |
 | WireGuard mesh, UPnP port mapping | `SreBox.WireGuardMesh`, `Nodes/PortMapping.hs` | `specs/wireguard-mesh.md` |
 | qemu harness and live demo | `salmon-apps/src/QemuPgHaToy.hs`, `Test.PostgresVms` | `specs/qemu-test-vms.md` |
+| Rust clients of `serve --http` (experimental) | `rs/salmon-serve-client/`, `rs/salmon-gpui/`, `rs/fixtures/` | |
 
 Vocabulary: **builtins** (near-atomic nodes), **recipes/apps** (combinations), **configs**
 (evaluated on the commanding machine), **setup** (evaluated on the target), **prefs** (conventions).

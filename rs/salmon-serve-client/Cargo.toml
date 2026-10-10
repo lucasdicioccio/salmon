@@ -1,0 +1,18 @@
+[package]
+name = "salmon-serve-client"
+description = "A read-only client of salmon's `run serve --http`: the /dag snapshot with /events folded onto it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+# TLS for `--http-tcp` listeners. `ring` rather than the default provider so
+# that the build needs no cmake.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+
+[dev-dependencies]
+# a throwaway self-signed certificate for the TLS transport test
+rcgen = "0.13"

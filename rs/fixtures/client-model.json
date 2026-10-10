@@ -1,0 +1,89 @@
+{
+  "about": "One /dag snapshot, the events of one `up` whose second node fails, and the text a client shows after folding them. Shared by two test suites so that both folds agree on the same wire data: salmon-ops-recipes/test/Test/ClientModelSpec.hs checks every field here against its own recorded pass and Salmon.Client.Model's rendering, and rs/salmon-serve-client/tests/model.rs folds it with the Rust model. Change both sides together.",
+  "snapshot": {
+    "mode": "interactive",
+    "seq": 5,
+    "nodes": [
+      {
+        "ref": {"short": "n1", "full": "full-n1"},
+        "shorthand": "node-one",
+        "help": "help for n1",
+        "notes": ["a note"],
+        "direction": "up",
+        "convergence": "pending",
+        "status": null,
+        "paths": ["/n1"],
+        "dynamics": [],
+        "dependencies": [],
+        "dependants": []
+      },
+      {
+        "ref": {"short": "n2", "full": "full-n2"},
+        "shorthand": "node-two",
+        "help": "help for n2",
+        "notes": ["a note"],
+        "direction": "up",
+        "convergence": "pending",
+        "status": null,
+        "paths": ["/n2"],
+        "dynamics": [],
+        "dependencies": [],
+        "dependants": []
+      },
+      {
+        "ref": {"short": "root", "full": "full-root"},
+        "shorthand": "the-root",
+        "help": "help for root",
+        "notes": ["a note"],
+        "direction": "up",
+        "convergence": "pending",
+        "status": null,
+        "paths": ["/root"],
+        "dynamics": [],
+        "dependencies": [
+          {"short": "n1", "full": "full-n1"},
+          {"short": "n2", "full": "full-n2"}
+        ],
+        "dependants": []
+      }
+    ]
+  },
+  "recorded": [
+    {"stream": "serve", "kind": "declared", "seq": 6, "epoch": 0, "direction": "up", "nodes": 3, "active_seeds": 1},
+    {"stream": "serve", "kind": "converge-start", "seq": 7, "down": 0, "up": 3},
+    {"stream": "updown", "kind": "eval", "seq": 8, "ref": {"short": "n1", "full": "full-n1"}, "node": {"shorthand": "n1", "help": "", "notes": []}},
+    {"stream": "updown", "kind": "done", "seq": 9, "ref": {"short": "n1", "full": "full-n1"}, "node": {"shorthand": "n1", "help": "", "notes": []}},
+    {"stream": "updown", "kind": "eval", "seq": 10, "ref": {"short": "n2", "full": "full-n2"}, "node": {"shorthand": "n2", "help": "", "notes": []}},
+    {"stream": "updown", "kind": "failed", "seq": 11, "ref": {"short": "n2", "full": "full-n2"}, "node": {"shorthand": "n2", "help": "", "notes": []}, "error": "boom"},
+    {"stream": "updown", "kind": "blocked", "seq": 12, "ref": {"short": "root", "full": "full-root"}, "node": {"shorthand": "root", "help": "", "notes": []}},
+    {"stream": "serve", "kind": "converge-stop", "seq": 13, "ok": false, "remaining": 2},
+    {"stream": "upkeep", "kind": "parked", "seq": 14, "ref": {"short": "n1", "full": "full-n1"}, "node": {"shorthand": "n1", "help": "", "notes": []}},
+    {"stream": "upkeep", "kind": "next-look", "seq": 15, "ref": {"short": "n1", "full": "full-n1"}, "node": {"shorthand": "n1", "help": "", "notes": []}, "check": {"verdict": "success"}, "delay_us": 500000},
+    {"stream": "serve", "kind": "hung-up", "seq": 16, "from": "x#0"},
+    {"stream": "server", "kind": "gap", "from": 40}
+  ],
+  "expect": {
+    "target": "/tmp/x.http",
+    "header": "/tmp/x.http mode=interactive seq=16 converged=1 errored=1 total=3 incomplete(2 left)+failure ",
+    "rows": [
+      "n1         node-one               up   converged success      next-look #15",
+      "n2         node-two               up   errored   -            failed #11: boom",
+      "root       the-root               up   blocked   -            blocked #12"
+    ],
+    "eventLines": [
+      "#6 serve declared epoch=0 direction=up nodes=3",
+      "#7 serve converge-start down=0 up=3",
+      "#8 updown eval n1 n1",
+      "#9 updown done n1 n1",
+      "#10 updown eval n2 n2",
+      "#11 updown failed n2 n2",
+      "#12 updown blocked root root",
+      "#13 serve converge-stop ok=false remaining=2",
+      "#14 upkeep parked n1 n1",
+      "#15 upkeep next-look n1 n1",
+      "#16 serve hung-up from=x#0",
+      "#- server gap from=40"
+    ],
+    "resync": "events 40 fell off the ring"
+  }
+}

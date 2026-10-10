@@ -97,6 +97,85 @@ and the build is on GHC 9.10.3. Caveat: Hackage's `acme-not-a-joke-0.1.0.0` boun
 gitignored, alongside its `.perso.project.local`) carries an extra `salmon-personal-apps` package
 used only by the author's personal, non-public binaries.
 
+## `rs/`: experimental Rust clients of `run serve --http`
+
+A cargo workspace at the top of the tree, **outside `cabal.project`**: no cabal build needs a
+Rust toolchain, and nothing here is built by `cabal build all` or by the release workflow (which
+only runs on a `v*` tag and only runs cabal). `rs/Cargo.lock` is tracked; `rs/target/` is ignored.
+It is a spike: a third client of the endpoints the web UI and `salmon-tui` already read, and it is
+**read-only** — the two crates issue `GET /dag` and `GET /events` and nothing else, so neither can
+stand a tending machine down.
+
+- **`rs/salmon-serve-client`** is the protocol with no window in it, a port of
+  `Salmon.Client.Model` and of the read half of `Salmon.Client.Http`. `model.rs` is the fold, rule
+  for rule (two stamps, replays dropped per stamp, `rebase`, the resync request set by
+  `declared`/`cleared`/`gap`, a node wanted down dropped by its `done`), and renders the same
+  text (`Node::render_row`, `Model::render_header`, `Event::render_line`). `sse.rs` is
+  `splitBlocks`/`parseBlock`. `http.rs` is a deliberately small blocking HTTP/1.1 client: one
+  request per connection, a body framed by `Content-Length`, by chunks or by the connection
+  ending, over the unix socket (`Client::unix`) or over TLS with a bearer token (`Client::tls`,
+  rustls with `ring`). `follow.rs` is the loop a reader runs (`/dag`, then `/events?since=` its
+  `seq`, re-read when the model asks) and `examples/follow.rs` prints it with no window.
+- **`rs/fixtures/client-model.json` is the guard against the two folds drifting**: one snapshot,
+  the recorded pass and the text expected after folding it. `Test/ClientModelSpec.hs` has a case
+  that holds the file to its own `snapshot`/`recorded` and to what `Salmon.Client.Model` renders,
+  and the Rust tests (`tests/model.rs`, and the window's `tests/dashboard.rs`) fold the same file.
+  A change to the fold's text or to a wire shape fails the Haskell case until the file, and so the
+  Rust side, is brought along. The other Layer 0 cases of the spec are ported one for one.
+- **The token is handled as `salmon-tui` handles it**: named by file only (never an argument),
+  refused when the file is readable by others or is not one word, sent as `Authorization: Bearer`
+  on every request, kept in a type whose `Debug` is redacted, and in no error text. An address
+  that is not `https://HOST:PORT` is refused before anything is read or sent; there is no switch
+  that turns certificate verification off, and no plain HTTP over TCP.
+- **Pinning differs from the Haskell client in one place, on purpose.** The certificate the tree
+  mints for a listener (`Certificates.certificateAuthority`, i.e. `openssl req -x509`) is
+  self-signed *and* `CA:TRUE`, and rustls' verifier refuses a CA presented as a server
+  (`CaUsedAsEndEntity`), so `--cacert` with the tree's own certificate would never connect. A
+  server certificate that is byte for byte one of those in `--cacert` is therefore accepted as
+  the pin it is (`http.rs`'s `Pinned`): the name is still checked and the handshake still proves
+  the server holds the key, but **the validity dates of a pinned certificate are not looked at**
+  (crypton, in the Haskell client, does look). Any other certificate goes through the ordinary
+  verification with `--cacert` as the only roots.
+- **A reconnect after a server restart starts over.** The sequence counter is per process, so a
+  snapshot numbered below the client's cursor is another server: `follow::join` drops the old
+  model instead of rebasing onto it, which would keep the old cursor and drop every event of the
+  new server as a replay.
+- **`rs/salmon-gpui`** is the window, on gpui-kit `=0.7.1` (which pins the pre-release GPUI
+  snapshot `gpui-pre 0.3.8`; any snapshot may change GPUI's API, so the exact pin plus the lock
+  file are what keep it building, and moving either is a port). `feed.rs` runs the client on a
+  thread and sends each snapshot it reads and then each event; the window keeps its own copy of the
+  model and folds the events itself, so an event costs the same however large the DAG is and a
+  burst is one redraw. `dashboard.rs` draws a header line (`render_header` plus the connection
+  state), the node table (gpui-kit's virtualised `DataTable`; the six cells are `Node::cells`,
+  the terminal's columns) and a panel for the selected node (help, state, last check and its
+  reason, error, notes, edges, paths, the output ring). The selection is a node, not a row, so it
+  follows the node when a re-read moves or drops rows. Not done, each a step of its own: the
+  layered DAG drawing, the event log, and anything that writes.
+- **Building it.** The protocol crate builds with any recent stable Rust and no system library:
+  `cd rs && cargo test` (the workspace's `default-members` is that crate alone). The window needs
+  a Rust recent enough for `gpui-pre` (1.93 is too old: `std::hint::cold_path`; 1.99 works) and
+  GPUI's Linux libraries at link time (`libxkbcommon`, `libxkbcommon-x11`; fontconfig either
+  through pkg-config or with `RUST_FONTCONFIG_DLOPEN=1`): `cargo test -p salmon-gpui`,
+  `cargo run -p salmon-gpui -- PATH`, or
+  `cargo run -p salmon-gpui -- https://HOST:PORT --token-file FILE [--cacert FILE]`.
+- **What was run, and what was not.** Run: the protocol crate's tests on Rust 1.93 and 1.99 (the
+  fold on the shared fixture; the transport against a canned server in the test process, over a
+  unix socket and over TLS with throwaway certificates, including a wrong pin, a wrong name, a
+  wrong token and a `CA:TRUE` pin); the `follow` example against a real
+  `salmon-ops-serve-fixture run serve --http ... --http-tcp ...` through an `up` and a `down`,
+  over the socket and over TLS with an `openssl req -x509` certificate pinned; and the window's
+  two headless tests (gpui-kit's test platform: the real table and view, fed the recorded pass,
+  read back with `TableState::dump`). **Never run: the window itself.** The binary links and its
+  argument refusals were exercised, but no window has been opened on a display, so nothing is
+  known about how it looks, about pointer selection (the tests set the selection on the table's
+  state), or about the renderer on any GPU. macOS and Windows were not built. No CI builds `rs/`.
+- **Seen while running against a real server, in the fold both clients share:** a snapshot read
+  after the last `done` of a `down` pass but before the loop prunes still lists the retired nodes
+  (`down`/`converged`), and the events that would drop them are then replays below its stamp, so
+  they stay on screen until the next declaration. It is a property of `step`'s rule, ported
+  as is; not checked in `salmon-tui`, which uses the same rule and re-reads on the same
+  occasions (it also has `r` to re-read by hand; the window has no such key).
+
 ## Build
 
 ```sh
@@ -1961,6 +2040,6 @@ The working directory contains many *untracked* directories (`git-repos/`, `imag
 `certs/`, `tls/`, `jwk-keys/`, `ssh-keys/`, `tokens/`, `wg-tmp/`, `working/`, `acme/`, etc.) that
 are scratch space, cloned dependency repos, or credential material for the author's personal
 infra — not part of the `salmon` project itself. `git ls-files` is the source of truth for what's
-actually part of this repository (currently just the four packages above plus root-level
-`README.md`/`cabal.project*`). Don't read from or write into those directories
+actually part of this repository (the cabal packages above, the Rust workspace under `rs/`,
+and root-level `README.md`/`cabal.project*`). Don't read from or write into those directories
 unless a task explicitly concerns them.

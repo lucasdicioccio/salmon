@@ -1,0 +1,19 @@
+[package]
+name = "salmon-gpui"
+description = "Experimental: a native read-only window on salmon's `run serve --http`, built with gpui-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+salmon-serve-client = { path = "../salmon-serve-client" }
+# gpui-kit pins pre-release GPUI snapshots (`gpui-pre`), and any snapshot may
+# change GPUI's API. The exact pin and the committed Cargo.lock are what keep
+# this building; moving either is a port, not a bump.
+gpui-kit = "=0.7.1"
+async-channel = "2"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.7.1", features = ["test-support"] }
+serde_json.workspace = true

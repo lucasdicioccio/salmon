@@ -22,3 +22,6 @@ __pycache__/
 
 # cabal build output
 dist-newstyle/
+
+# cargo build output of the Rust clients (rs/Cargo.lock is tracked)
+rs/target/

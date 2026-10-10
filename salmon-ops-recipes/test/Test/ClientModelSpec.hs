@@ -10,7 +10,11 @@ gives the per-node view a terminal would show; folding an event twice is
 folding it once; an @acted@ is unwrapped to the pass's vocabulary; a node
 wanted down is dropped by its @done@; the SSE block parser reads what
 "Salmon.Actions.Serve.Events" renders, comments included; and the rendered
-rows and header are the text expected.
+rows and header are the text expected. The same snapshot, sequence and text
+are written out in @rs\/fixtures\/client-model.json@, which the Rust client's
+fold is tested on (@rs\/salmon-serve-client@); one case here holds that file
+to this module, so the two folds are tested on the same wire data and
+neither side can change it alone.
 
 Layer 1 over a real @withHttpServer@ on a temp socket, driven through the
 client itself: @dag@, then @commandAsync "up ..."@, then @events@ from the
@@ -23,7 +27,7 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (try)
 import Control.Monad (forM_, when)
-import Data.Aeson (FromJSON, ToJSON, Value (..), object, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeFileStrict, object, toJSON, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Builder as Builder
@@ -36,6 +40,7 @@ import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
+import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import System.IO (Handle, hClose)
 import System.Posix.IO (FdOption (CloseOnExec), createPipe, fdToHandle, setFdOption)
@@ -71,6 +76,7 @@ tests =
             , testCase "a node wanted down is dropped by its done" downNodeDropped
             , testCase "the SSE parser reads what the server renders" sseParser
             , testCase "the rendered rows and header" rendering
+            , testCase "the fixture the Rust client is tested on is this recorded pass" sharedFixture
             ]
         , testGroup
             "the client against a real server"
@@ -282,6 +288,38 @@ rendering = do
         (Model.renderHeader "/tmp/x.http" m)
     assertEqual "an event line about a node" "#11 updown failed n2 n2" (Model.renderEventLine (Model.eventOf (recorded !! 5)))
     assertEqual "an event line about the loop" "#13 serve converge-stop ok=false remaining=2" (Model.renderEventLine (Model.eventOf (recorded !! 7)))
+
+{- | @rs\/fixtures\/client-model.json@ against this module: its @snapshot@
+and @recorded@ are 'snapshot' and 'recorded' object for object, and its
+@expect@ is what "Salmon.Client.Model" renders after the fold. The Rust
+tests read the same file, so a change to the fold's text or to the wire
+shapes here fails this case until the file (and with it the Rust side) is
+brought along.
+-}
+sharedFixture :: IO ()
+sharedFixture = do
+    let path = "../rs/fixtures/client-model.json"
+    there <- doesFileExist path
+    if not there
+        then putStrLn "SKIPPED: rs/fixtures/client-model.json is not next to the test suite; the comparison needs the source tree"
+        else do
+            fixture <- either (assertFailure . ("the fixture is not JSON: " <>)) pure =<< eitherDecodeFileStrict path
+            let field :: [Key.Key] -> Value -> Maybe Value
+                field [] v = Just v
+                field (k : ks) (Object o) = KeyMap.lookup k o >>= field ks
+                field _ _ = Nothing
+                expect ks = field ("expect" : ks) fixture
+            assertEqual "snapshot" (Just snapshot) (field ["snapshot"] fixture)
+            assertEqual "recorded" (Just (toJSON recorded)) (field ["recorded"] fixture)
+            m0 <- start
+            let m = fold m0 recorded
+            target <- case expect ["target"] of
+                Just (String t) -> pure t
+                other -> assertFailure ("expect.target: " <> show other)
+            assertEqual "expect.rows" (Just (toJSON (fmap Model.renderNodeRow (Model.nodesInOrder m)))) (expect ["rows"])
+            assertEqual "expect.header" (Just (String (Model.renderHeader target m))) (expect ["header"])
+            assertEqual "expect.eventLines" (Just (toJSON (fmap (Model.renderEventLine . Model.eventOf) recorded))) (expect ["eventLines"])
+            assertEqual "expect.resync" (Just (toJSON (Model.modelResync m))) (expect ["resync"])
 
 -------------------------------------------------------------------------------
 -- Layer 1: the client against a real server
