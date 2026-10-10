@@ -37,6 +37,7 @@ library
                     Report.Dns
                     Report.Inbound
                     Report.Nmap
+                    Report.Stun
     other-modules:
                     Migrator.Ops
                     Migrator.Seed
@@ -190,6 +191,7 @@ test-suite salmon-apps-test
                     , filepath
                     , containers
                     , process
+                    , network
                     , salmon-apps
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops-recipes ^>=0.1.0.0

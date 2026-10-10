@@ -40,7 +40,7 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
-  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); STUN and hairpin are not done; the `natpmpc` parser has no captured fixture.
+  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); the filtering half of the NAT type and hairpin are not done; the `natpmpc` parser has no captured fixture.
   Port probes (`--nmap HOST:PORTS`, repeatable, pure half in `Report/Nmap.hs`): one unprivileged connect scan per
   declared target (`nmap -sT -Pn -n -oG - -p PORTS HOST`, shared by that target's probes through `once`) and one finding
   per port: open is `yes`, closed is `no`, filtered is `unknown` with its meaning (`-Pn`, so a host that is away shows
@@ -51,6 +51,22 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   a directive from before `specNmap` still reads. The parser's open/closed/ignored-state/IPv6/unresolved fixtures were
   captured from loopback scans (nmap 7.94SVN) and the binary was run end to end against loopback; the filtered
   fixture is hand-written, and no scan of another host, of UDP, or as root (where `-sT` is still forced) has been run.
+  STUN probes (`--stun HOST:PORT`, repeatable, pure half in `Report/Stun.hs`, no library and no tool: the request is
+  the 20-byte Binding header, RFC 8489): one finding per declared server (the mapped address it saw; silence or an
+  error response is `no`, a name that does not resolve or a declaration that does not parse is `unknown`) and one on
+  the NAT's *mapping* (RFC 4787). All servers of an address family are asked from one UDP socket (`scanStunWith`,
+  shared through `once`), since comparing mappings means one local port: differing mapped addresses are `no`
+  (destination-dependent, "symmetric"), equal ones are `yes` only across two distinct server *addresses* (two ports of
+  one address leave it `unknown`, as does a single answer, and the evidence says to declare a second server), and a
+  mapped address equal to the local one is `yes` as "nothing translates". A `yes` needs every family that answered.
+  No default server and no default port; a name is resolved to one address and only it is sent to; the
+  `OTHER-ADDRESS` a server advertises is printed and never contacted (it is not declared); an answer counts only from
+  the address asked with the request's transaction id (12 bytes of `/dev/urandom`); integrity/fingerprint attributes
+  are not verified. Filtering behaviour (needs `CHANGE-REQUEST` and a two-address server) is not looked at. Run
+  against: the RFC 5769 response vectors, hand-built messages, and stand-in responders on `127.0.0.1`/`127.0.0.2` (in
+  the spec, and the binary end to end against a throwaway loopback responder). **No real STUN server was contacted
+  and no real NAT was exercised**: the translated cases are responders that lie about the address they saw, and IPv6
+  has only the parser's vector, no exchange.
   DNS setup probes (`--domain D [--ns S]... [--zone PROJECT/ZONE] [--record [TYPE:]NAME[=V,..]]... [--resolver ADDR]`,
   pure half in `Report/Dns.hs`): the NS set the *parent's* servers hand out against the expected set (unregistered / no
   delegation / not delegated / partly / delegated); whether each expected server holds the zone (`aa`) and they agree on
