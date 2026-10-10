@@ -1,0 +1,21 @@
+# The Rust side of salmon: experimental clients of `run serve --http`.
+#
+# Nothing here is part of the cabal build (`cabal.project` does not know this
+# directory), and nothing in the cabal build needs a Rust toolchain.
+#
+# `default-members` is the protocol crate alone, so a plain `cargo test` in
+# this directory needs no windowing or GPU library. The GPUI window is built
+# by name: `cargo build -p salmon-gpui`.
+[workspace]
+resolver = "2"
+members = ["salmon-serve-client", "salmon-gpui"]
+default-members = ["salmon-serve-client"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "BSD-3-Clause"
+publish = false
+
+[workspace.dependencies]
+serde_json = "1"
