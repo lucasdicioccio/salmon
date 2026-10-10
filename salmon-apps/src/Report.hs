@@ -36,8 +36,12 @@ hosts and ports the operator declares and file one finding per port: open,
 closed or filtered. There is no default target and no default port list; one
 declaration is one host, and one unprivileged TCP connect scan of its ports.
 
-Not done (follow-ups in the feature): STUN, hairpin NAT, inbound
-reachability from a second vantage. The @natpmpc@ parser follows the
+Inbound probes (@--inbound HOST:PORT[\@LISTEN]@ with @--vantage-ssh
+[USER\@]HOST@, see "Report.Inbound") ask a declared second machine, over the
+operator's own @ssh@, to open a TCP connection to a declared external address
+and port, and say whether it arrived. There is no default vantage point.
+
+Not done (follow-ups in the feature): STUN, hairpin NAT. The @natpmpc@ parser follows the
 tool's documented output and has no captured fixture yet.
 -}
 module Report (
@@ -57,6 +61,14 @@ module Report (
     probeOp,
     reportOp,
     runReport,
+
+    -- * Inbound reachability, from a second vantage point
+    AskVantage,
+    askSsh,
+    askWith,
+    inboundProbes,
+    inboundFinding,
+    withInbound,
 
     -- * Probes
     probesFor,
@@ -106,6 +118,7 @@ import Text.Read (readMaybe)
 import Salmon.Actions.UpDown (CheckResult (Failure, Success), expandDag)
 import qualified Salmon.Actions.UpDown as UpDown
 import Report.Dns
+import Report.Inbound
 import Report.Nmap
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
@@ -133,6 +146,8 @@ data Spec = Spec
     , specNatpmp :: Bool
     , specDomain :: Maybe DomainSpec
     -- ^ a domain whose DNS setup is reported on
+    , specInbound :: InboundSpec
+    -- ^ the inbound test from a second vantage point, see "Report.Inbound"
     , specNmap :: [Text]
     -- ^ @HOST:PORTS@ targets handed to @nmap@, see 'parseNmapTarget'
     }
@@ -153,6 +168,7 @@ instance FromJSON Spec where
             <*> o .: "specUpnp"
             <*> o .: "specNatpmp"
             <*> o .:? "specDomain"
+            <*> o .:? "specInbound" .!= noInbound
             <*> o .:? "specNmap" .!= []
 
 {- | A domain and the hosted zone meant to serve it. The expected name
@@ -659,6 +675,71 @@ crossCheck fs = fmap annotate fs
         _ -> f
 
 -------------------------------------------------------------------------------
+-- Inbound reachability, from a second vantage point
+
+-- | Runs @ssh@ with these arguments: its exit code and what it printed, or why it could not run.
+type AskVantage = [String] -> IO (Either Text (ExitCode, Text))
+
+{- | The operator's own @ssh@, found on @PATH@. Its stdin is a closed pipe,
+never this process's.
+-}
+askSsh :: AskVantage
+askSsh = askWith "ssh"
+
+-- | 'askSsh' through another binary (a stand-in, in the tests).
+askWith :: FilePath -> AskVantage
+askWith = run
+
+{- | The probes of the inbound test: one per declared target and vantage
+point. A declaration that does not parse is one probe saying why, and
+targets with no vantage point are one probe each saying so; neither runs
+anything. The listeners are those 'withListeners' holds for the targets that
+declared a local port. Not part of 'probesFor', which holds no listener.
+-}
+inboundProbes :: Collector -> AskVantage -> Map.Map Int (Either Text Listener) -> InboundSpec -> [Op]
+inboundProbes c ask listeners i =
+    [refused q why "HOST:PORT[@LISTEN], as in 192.0.2.7:443 or 192.0.2.7:443@8443" | (raw, Left why) <- targets, let q = "Does a TCP connection to the inbound target " <> raw <> " arrive?"]
+        <> [refused q why "[USER@]HOST, as in probe@vantage.example.org" | (raw, Left why) <- vantages, let q = "Can the vantage point " <> raw <> " be asked?"]
+        <> case ([t | (_, Right t) <- targets], [v | (_, Right v) <- vantages]) of
+            (ts, []) -> [refused q "no second vantage point is declared" "--vantage-ssh [USER@]HOST" | t <- ts, let q = "Does a TCP connection to " <> renderTarget t <> " arrive from outside?"]
+            (ts, vs) -> [probeOp c (inboundQuestion v t) (inboundFinding ask listeners (inbSshConfig i) v t) | t <- ts, v <- vs]
+  where
+    targets = [(raw, parseInboundTarget raw) | raw <- dedup (inbTargets i)]
+    vantages = [(raw, parseVantage raw) | raw <- dedup (inbVantageSsh i)]
+    dedup = Map.keys . Map.fromList . fmap (\x -> (x, ()))
+    refused q why expects = probeOp c q (pure (Finding q Unknown [why <> " (expected " <> expects <> ")"] "inbound test, not run" Nothing []))
+
+{- | Asks one vantage point about one target. A target whose local port
+could not be bound is not asked about: the answer would be about something else.
+-}
+inboundFinding :: AskVantage -> Map.Map Int (Either Text Listener) -> Maybe FilePath -> Vantage -> InboundTarget -> IO Finding
+inboundFinding ask listeners cfg v t = case traverse (\p -> maybe (Left ("no listener was opened on local port " <> Text.pack (show p))) id (Map.lookup p listeners)) (inListen t) of
+    Left why -> pure (mk (Judgement Nothing [why] Nothing))
+    Right listener -> do
+        r <- ask (sshArgs cfg v t)
+        peers <- maybe (pure []) listenerPeers listener
+        pure $ mk $ case r of
+            Left why -> Judgement Nothing [why] Nothing
+            Right (code, out) ->
+                let j = judgeInbound t ((\l -> (listenerToken l, peers)) <$> listener) (parseVantageOutput out)
+                 in case (jOk j, code) of
+                        (Nothing, ExitFailure n) -> j{jEvidence = jEvidence j <> ["ssh exited " <> Text.pack (show n)]}
+                        _ -> j
+  where
+    mk j = Finding (inboundQuestion v t) (verdictOf j) (jEvidence j) (inboundMethod v t) (jMeaning j) []
+
+{- | The inbound probes of a 'Spec', with the listeners its targets declare
+held open while the action runs.
+-}
+withInbound :: Collector -> AskVantage -> Spec -> ([Op] -> IO a) -> IO a
+withInbound c ask spec act =
+    withListeners
+        [p | Right t <- parseInboundTarget <$> inbTargets i, Just p <- [inListen t]]
+        (\listeners -> act (inboundProbes c ask listeners i))
+  where
+    i = specInbound spec
+
+-------------------------------------------------------------------------------
 -- Command line
 
 data Command = Config Spec | RunReport Bool Int
@@ -677,7 +758,7 @@ main = do
             -- one scan per declared nmap target, shared by its port probes
             scans <- Map.fromList <$> traverse (\t -> (\shared -> (t, shared)) <$> once (scanNmap t)) [t | Right t <- parseNmapTarget <$> specNmap spec]
             let probes = probesWith c (\d -> maybe (expectedServers d) id expected) (\t -> Map.findWithDefault (scanNmap t) t scans) spec
-            fs <- crossCheck <$> runReport (secs * 1000000) c (reportOp probes)
+            fs <- crossCheck <$> withInbound c askSsh spec (\inbound -> runReport (secs * 1000000) c (reportOp (probes <> inbound)))
             forM_ fs $ \f ->
                 if asJson
                     then LChar.putStrLn (Aeson.encode (findingValue f))
@@ -698,7 +779,13 @@ main = do
             <*> (not <$> O.switch (O.long "no-upnp" <> O.help "skip UPnP discovery"))
             <*> (not <$> O.switch (O.long "no-natpmp" <> O.help "skip NAT-PMP discovery"))
             <*> O.optional domainParser
+            <*> inboundParser
             <*> many' (O.strOption (O.long "nmap" <> O.metavar "HOST:PORTS" <> O.help "scan these TCP ports of this one host with nmap, as in example.org:22,443 or [2001:db8::1]:8000-8010 (repeatable); nothing is scanned unless declared"))
+    inboundParser =
+        InboundSpec
+            <$> many' (O.strOption (O.long "inbound" <> O.metavar "HOST:PORT[@LISTEN]" <> O.help "ask each vantage point to open a TCP connection to this external address and port, as in 192.0.2.7:443; with @LISTEN, listen on that local port during the report and have the vantage read a one-time token back (repeatable)"))
+            <*> many' (O.strOption (O.long "vantage-ssh" <> O.metavar "[USER@]HOST" <> O.help "a second machine, outside the network, to make the --inbound connections from; reached with ssh in batch mode, needs bash and timeout (repeatable); no default is assumed"))
+            <*> O.optional (O.strOption (O.long "vantage-ssh-config" <> O.metavar "FILE" <> O.help "an ssh configuration file for the vantage points (ssh -F); ssh's own when absent"))
     domainParser =
         DomainSpec
             <$> O.strOption (O.long "domain" <> O.metavar "DOMAIN" <> O.help "report on this domain's DNS setup: its delegation, and the servers it should be delegated to")

@@ -16,6 +16,7 @@ module Report.Nmap (
     -- * Declared targets
     NmapTarget (..),
     parseNmapTarget,
+    checkHost,
     parsePorts,
     renderPorts,
     maxPorts,
@@ -65,6 +66,7 @@ parseNmapTarget raw = do
     ports <- parsePorts p
     pure (NmapTarget host ports)
 
+-- | One DNS name, IPv4 address or IPv6 address, from a strict alphabet; else the reason.
 checkHost :: Text -> Either Text Text
 checkHost h
     | Text.null h = Left "no host before the colon"

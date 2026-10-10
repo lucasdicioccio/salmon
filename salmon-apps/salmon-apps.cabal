@@ -34,6 +34,7 @@ library
                     DocsSync
                     Report
                     Report.Dns
+                    Report.Inbound
                     Report.Nmap
     other-modules:
                     Migrator.Ops
@@ -169,6 +170,7 @@ test-suite salmon-apps-test
     other-modules:    Test.FleetSpec
                     , Test.GcpToySpec
                     , Test.QemuPgHaToySpec
+                    , Test.ReportInboundSpec
                     , Test.ReportSpec
     build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
