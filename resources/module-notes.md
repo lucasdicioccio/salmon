@@ -232,11 +232,37 @@ unfold, against the expansion and against `foldDag` at sizes up to 25, and a per
 every shape at 20 000 nodes. The million-node case is opt-in
 (`SALMON_TEST_GRAPH_FIXTURE_SIZE=1000000`, with `+RTS -M4g`; the test binary is built with
 `-rtsopts` for that): it was run once, every shape walked per node and `Chain` and `Tree 2`
-expanded and folded, in about two minutes and 1.1 GiB. *Not run:* any driver (`run up`,
-`Concurrent`, `serve`) over a fixture, the `managed` action under `serve`, and any measurement:
-nothing here profiles. `Fan` is left out of the large fold on purpose: `Dag.record` keeps a
-node's edges as a list it searches on each insert, so one node over a million others is
-quadratic there (read from the code, not measured).
+expanded and folded, in about two minutes and 1.1 GiB. *Not run by that spec:* any driver or
+measurement (the profiles below do both). `Fan` is left out of the large fold on purpose:
+`Dag.record` keeps a node's edges as a list it searches on each insert, so one node over a
+million others is quadratic there (since measured: 1.3 s at 10 000, see the profiles).
+`dagOf :: Op -> Dag Extension` builds what `foldDag . evalDeps` builds by visiting each node
+once (same nodes, edges and `dagOrder`; first declaration of a colliding `Ref` wins and no
+conflict is recorded), so a shape that shares can be handed to a walk at a size the fold cannot
+reach. `Test.GraphScaleSpec` checks it against the fold at sizes up to 25.
+
+**Graph profiles (`salmon-ops-recipes/bench/GraphProfiles.hs`, `resources/graph-profiles.md`).**
+A `benchmark` stanza (`cabal bench salmon-ops-recipes:graph-profiles`), so neither `cabal build
+all` nor `cabal test` builds it. It times each graph operation (expand, fold, `fromMagma`,
+`mergeDag`, `stuck`, both walks in both drivers, `startUpkeep`/`stopUpkeep`, rewrites, ledger
+reads, outline/selectors/paths, the `serve` loop by the intervals between its own reports, the
+`/dag` and `/status` renders, the client model) over seven fixture shapes at growing sizes, with
+bytes allocated, and stops a series on a time budget, a timeout or the heap bound. **Each series
+runs in a process of its own, and that is load-bearing:** an abandoned step leaves machines or a
+loop behind, and in one process everything measured afterwards came out hundreds of times
+slower. Operations that read the expansion are sized by occurrences, the others by nodes over a
+`dagOf` graph. `--summarise FILE` prints the tables; the raw rows are checked in under
+`resources/graph-profiles/`. The findings (all measured on one shared machine, indicative):
+`foldDag` is per path (58-node diamond chain: 3.8 s, doubling per diamond, and a `serve`
+declaration with it); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
+`startUpkeep` (chain of 3 000: 2 s); a node with many edges is quadratic in `record`,
+`fromMagma`, `transposeOf` and `Query.outline`; listed paths cost depth per node in time and
+memory; `Client.Model.step` is quadratic over a teardown; a supervisor over 100 000 nodes does
+not fit in 4 GB. None is fixed. The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
+a selector, listed paths, `fromMagma`, `mergeDag`, `stuck` and the walks over the three sharing
+shapes at 600 nodes within a minute each, which tells per-node from per-path and times
+nothing. *Not run:* more than one capability, real nodes, a tending supervisor, the HTTP server
+itself, and anything above 100 000 nodes except the handful of series in the last table.
 
 `cabal.project.local` (tracked) carries `allow-newer` pins for `dhall-json` against `aeson`/`bytestring`/`text`;
 don't remove these without checking the build still resolves.

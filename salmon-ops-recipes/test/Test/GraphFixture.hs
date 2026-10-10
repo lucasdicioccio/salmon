@@ -53,6 +53,9 @@ module Test.GraphFixture (
     counts,
     colliderCount,
 
+    -- * The folded graph, without the fold
+    dagOf,
+
     -- * The unfold itself
     successors,
     isCollider,
@@ -65,6 +68,9 @@ import Control.Monad (forever)
 import Control.Monad.Identity (Identity (..))
 import Data.Bits (shiftR, xor)
 import Data.Dynamic (Dynamic)
+import Data.Foldable (toList)
+import Data.List (foldl')
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -72,8 +78,11 @@ import Data.Word (Word64)
 import System.Exit (ExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
-import Salmon.Builtin.Extension (Extension (..), Op, Output, nodeps, op)
+import Salmon.Builtin.Extension (Extension (..), Op, Output, nodeps, op, opAct)
+import Salmon.Op.Actions (Act (..))
+import Salmon.Op.Dag (Dag (..))
 import Salmon.Op.Graph (Graph (..))
+import Salmon.Op.OpGraph (OpGraph (..))
 import Salmon.Op.Ref (Ref, mkRef)
 
 -------------------------------------------------------------------------------
@@ -409,3 +418,66 @@ generateWith opts shape size seed = declared 0
             AsVertices -> Vertices xs
             AsConnect -> foldr (Connect . Vertices . pure) (Vertices []) xs
             AsOverlay -> foldr (Overlay . Vertices . pure) (Vertices []) xs
+
+-------------------------------------------------------------------------------
+
+{- | The 'Dag' that folding a graph gives, built by visiting each node once
+instead of each occurrence: the same nodes, the same edges and the same
+'Salmon.Op.Dag.dagOrder' (first met, depth first) as
+@'Salmon.Op.Dag.foldDag' same . 'Salmon.Builtin.Extension.evalDeps'@.
+
+It exists because 'Salmon.Op.Dag.foldDag' walks the expansion, so a shape
+that shares cannot be folded at any size worth measuring, and because
+'Salmon.Op.Dag.record' (which the fold and 'Salmon.Op.Dag.fromMagma' both
+go through) is itself one of the things a profile wants to measure rather
+than pay for on the way in. Linear in nodes and edges, with a 'Set.Set' of
+the 'Ref's met.
+
+Two differences from the fold, neither visible to a walk: a node met again
+is not looked at a second time, so the first declaration of a colliding
+'Ref' is the representative (the fold keeps the last) and no
+'Salmon.Op.Dag.dagConflicts' are recorded; and a node's dependants are
+listed in the order their own first occurrences were met.
+-}
+dagOf :: Op -> Dag Extension
+dagOf root =
+    Dag
+        { dagNodes = Map.fromList [(r, act) | (r, act, _) <- entriesRev]
+        , dagDependencies = Map.fromList [(r, ds) | (r, _, ds) <- entriesRev]
+        , dagDependants =
+            -- entries arrive last met first and each one is consed on, so a
+            -- node's dependants end up first met first.
+            Map.union
+                (Map.fromListWith (<>) [(d, [r]) | (r, _, ds) <- entriesRev, d <- ds])
+                (Map.fromList [(r, []) | (r, _, _) <- entriesRev])
+        , dagOrderRev = [r | (r, _, _) <- entriesRev]
+        , dagConflicts = []
+        }
+  where
+    entriesRev :: [(Ref, Act Extension, [Ref])]
+    entriesRev = snd (visit (Set.empty, []) root)
+
+    visit :: (Set.Set Ref, [(Ref, Act Extension, [Ref])]) -> Op -> (Set.Set Ref, [(Ref, Act Extension, [Ref])])
+    visit acc@(seen, done) o =
+        case opAct o of
+            Nothing -> foldl' visit acc (effective o)
+            Just act
+                | Set.member act.extension.ref seen -> acc
+                | otherwise ->
+                    let kids = effective o
+                        ds = distinct [k.extension.ref | Just k <- fmap opAct kids]
+                     in foldl' visit (Set.insert act.extension.ref seen, (act.extension.ref, act, ds) : done) kids
+
+    -- the nearest nodes carrying a 'Ref' below a node, through any glue.
+    effective :: Op -> [Op]
+    effective o = concatMap pick (toList (runIdentity o.predecessors))
+      where
+        pick k = maybe (effective k) (const [k]) (opAct k)
+
+    distinct :: [Ref] -> [Ref]
+    distinct = go Set.empty
+      where
+        go _ [] = []
+        go s (y : ys)
+            | Set.member y s = go s ys
+            | otherwise = y : go (Set.insert y s) ys
