@@ -1,0 +1,210 @@
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	100	100	99	100	0.000040	113360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	300	300	299	300	0.000107	337360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	1000	1000	999	1000	0.000352	1121360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	3000	3000	2999	3000	0.001272	3361360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	10000	10000	9999	10000	0.010195	11201360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	30000	30000	29999	30000	0.031805	33601360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	100000	100000	99999	100000	0.099310	112001360	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	300000	300000	299999	300000	0.375942	336006272	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	1000000	1000000	999999	1000000	1.505344	1120003008	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	chain	1000000	1000000	999999	1000000	0.000000	0	stop:cap
+fold	expand + foldDag		occurrences	chain	100	100	99	100	0.000425	617488	ok
+fold	expand + foldDag		occurrences	chain	300	300	299	300	0.001446	1998936	ok
+fold	expand + foldDag		occurrences	chain	1000	1000	999	1000	0.005031	7249912	ok
+fold	expand + foldDag		occurrences	chain	3000	3000	2999	3000	0.016714	23108400	ok
+fold	expand + foldDag		occurrences	chain	10000	10000	9999	10000	0.073442	82196272	ok
+fold	expand + foldDag		occurrences	chain	30000	30000	29999	30000	0.292174	260798912	ok
+fold	expand + foldDag		occurrences	chain	100000	100000	99999	100000	1.255403	921901776	ok
+fold	expand + foldDag		occurrences	chain	300000	300000	299999	300000	4.876642	2907850336	ok
+fold	expand + foldDag		occurrences	chain	1000000	1000000	999999	1000000	20.028427	10213577272	ok
+fold	expand + foldDag		occurrences	chain	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	100	100	99	100	0.000283	586600	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	300	300	299	300	0.002452	1871112	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	1000	1000	999	1000	0.006134	6646152	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	3000	3000	2999	3000	0.016752	21121304	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	10000	10000	9999	10000	0.070045	74532352	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	30000	30000	29999	30000	0.335359	235574712	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	100000	100000	99999	100000	1.599961	825313128	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	300000	300000	299999	300000	6.256659	2596432240	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	1000000	1000000	999999	1000000	42.299170	9056411232	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	chain	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+dag	fromMagma		nodes	chain	100	100	99	100	0.000553	304968	ok
+dag	fromMagma		nodes	chain	300	300	299	300	0.001783	1094888	ok
+dag	fromMagma		nodes	chain	1000	1000	999	1000	0.005452	4318584	ok
+dag	fromMagma		nodes	chain	3000	3000	2999	3000	0.038576	14665400	ok
+dag	fromMagma		nodes	chain	10000	10000	9999	10000	0.063991	55787880	ok
+dag	fromMagma		nodes	chain	30000	30000	29999	30000	0.311045	186492344	ok
+dag	fromMagma		nodes	chain	100000	100000	99999	100000	1.479688	689610648	ok
+dag	fromMagma		nodes	chain	300000	300000	299999	300000	5.985280	2239849368	ok
+dag	fromMagma		nodes	chain	1000000	1000000	999999	1000000	29.113136	8167792176	ok
+dag	fromMagma		nodes	chain	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+walk	upDag (sequential)		nodes	chain	100	100	99	100	0.000251	147720	ok
+walk	upDag (sequential)		nodes	chain	300	300	299	300	0.001266	508752	ok
+walk	upDag (sequential)		nodes	chain	1000	1000	999	1000	0.005429	1969288	ok
+walk	upDag (sequential)		nodes	chain	3000	3000	2999	3000	0.010971	6630480	ok
+walk	upDag (sequential)		nodes	chain	10000	10000	9999	10000	0.050633	24525504	ok
+walk	upDag (sequential)		nodes	chain	30000	30000	29999	30000	0.274379	80438408	ok
+walk	upDag (sequential)		nodes	chain	100000	100000	99999	100000	1.469955	292463864	ok
+walk	upDag (sequential)		nodes	chain	300000	300000	299999	300000	6.798598	945865720	ok
+walk	upDag (sequential)		nodes	chain	1000000	1000000	999999	1000000	25.151581	3394990088	ok
+walk	upDag (sequential)		nodes	chain	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+walk	upDagConcurrent		nodes	chain	100	100	99	100	0.002007	687328	ok
+walk	upDagConcurrent		nodes	chain	300	300	299	300	0.013855	2198640	ok
+walk	upDagConcurrent		nodes	chain	1000	1000	999	1000	0.175411	7608936	ok
+walk	upDagConcurrent		nodes	chain	3000	3000	2999	3000	2.166350	23819256	ok
+walk	upDagConcurrent		nodes	chain	10000	10000	9999	10000	32.543581	83045168	ok
+walk	upDagConcurrent		nodes	chain	10000	10000	9999	10000	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	100	100	99	100	0.000582	1040496	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	300	300	299	300	0.002401	3426200	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	1000	1000	999	1000	0.009426	12369312	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	3000	3000	2999	3000	0.037032	39731784	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	10000	10000	9999	10000	0.290018	142348648	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	30000	30000	29999	30000	0.814428	454460560	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	100000	100000	99999	100000	3.263859	1615358336	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	300000	300000	299999	300000	13.196593	5125516904	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	1000000	1000000	999999	1000000	63.269019	18067760096	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	100	100	99	100	0.000029	119840	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	300	300	299	300	0.000081	356640	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	1000	1000	999	1000	0.000409	1186264	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	3000	3000	2999	3000	0.001027	3553440	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	10000	10000	9999	10000	0.004918	11841440	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	30000	30000	29999	30000	0.011571	35525160	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	100000	100000	99999	100000	0.035415	118401440	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	300000	300000	299999	300000	0.103615	355201440	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	1000000	1000000	999999	1000000	0.356282	1184002264	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:cap
+fold	expand + foldDag		occurrences	tree2	100	100	99	100	0.000302	627376	ok
+fold	expand + foldDag		occurrences	tree2	300	300	299	300	0.000967	2025800	ok
+fold	expand + foldDag		occurrences	tree2	1000	1000	999	1000	0.004097	7263720	ok
+fold	expand + foldDag		occurrences	tree2	3000	3000	2999	3000	0.015922	23265104	ok
+fold	expand + foldDag		occurrences	tree2	10000	10000	9999	10000	0.082816	82693640	ok
+fold	expand + foldDag		occurrences	tree2	30000	30000	29999	30000	0.400402	262120672	ok
+fold	expand + foldDag		occurrences	tree2	100000	100000	99999	100000	1.614228	928249088	ok
+fold	expand + foldDag		occurrences	tree2	300000	300000	299999	300000	5.081232	2923463280	ok
+fold	expand + foldDag		occurrences	tree2	1000000	1000000	999999	1000000	24.305908	10273943520	ok
+fold	expand + foldDag		occurrences	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	100	100	99	100	0.000495	597680	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	300	300	299	300	0.002000	1899312	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	1000	1000	999	1000	0.007665	6744488	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	3000	3000	2999	3000	0.017148	21377792	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	10000	10000	9999	10000	0.071440	75427296	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	30000	30000	29999	30000	0.273266	237919360	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	100000	100000	99999	100000	1.665694	833835304	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	300000	300000	299999	300000	6.959434	2615688616	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	1000000	1000000	999999	1000000	29.794085	9151992896	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+dag	fromMagma		nodes	tree2	100	100	99	100	0.000223	301288	ok
+dag	fromMagma		nodes	tree2	300	300	299	300	0.000818	1081528	ok
+dag	fromMagma		nodes	tree2	1000	1000	999	1000	0.003474	4277176	ok
+dag	fromMagma		nodes	tree2	3000	3000	2999	3000	0.013695	14676328	ok
+dag	fromMagma		nodes	tree2	10000	10000	9999	10000	0.060943	55593784	ok
+dag	fromMagma		nodes	tree2	30000	30000	29999	30000	0.280341	185624200	ok
+dag	fromMagma		nodes	tree2	100000	100000	99999	100000	1.266396	687599752	ok
+dag	fromMagma		nodes	tree2	300000	300000	299999	300000	5.263230	2239877856	ok
+dag	fromMagma		nodes	tree2	1000000	1000000	999999	1000000	26.849471	8172151600	ok
+dag	fromMagma		nodes	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+walk	upDag (sequential)		nodes	tree2	100	100	99	100	0.000273	150032	ok
+walk	upDag (sequential)		nodes	tree2	300	300	299	300	0.001018	516600	ok
+walk	upDag (sequential)		nodes	tree2	1000	1000	999	1000	0.002530	1944392	ok
+walk	upDag (sequential)		nodes	tree2	3000	3000	2999	3000	0.011191	6575904	ok
+walk	upDag (sequential)		nodes	tree2	10000	10000	9999	10000	0.057584	24292032	ok
+walk	upDag (sequential)		nodes	tree2	30000	30000	29999	30000	0.313898	79292640	ok
+walk	upDag (sequential)		nodes	tree2	100000	100000	99999	100000	1.476591	291246496	ok
+walk	upDag (sequential)		nodes	tree2	300000	300000	299999	300000	5.487743	936291848	ok
+walk	upDag (sequential)		nodes	tree2	1000000	1000000	999999	1000000	25.501693	3369829976	ok
+walk	upDag (sequential)		nodes	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+walk	upDagConcurrent		nodes	tree2	100	100	99	100	0.000960	636096	ok
+walk	upDagConcurrent		nodes	tree2	300	300	299	300	0.002227	2004584	ok
+walk	upDagConcurrent		nodes	tree2	1000	1000	999	1000	0.007458	6754856	ok
+walk	upDagConcurrent		nodes	tree2	3000	3000	2999	3000	0.040316	20890512	ok
+walk	upDagConcurrent		nodes	tree2	10000	10000	9999	10000	0.196163	71138608	ok
+walk	upDagConcurrent		nodes	tree2	30000	30000	29999	30000	0.891761	217557216	ok
+walk	upDagConcurrent		nodes	tree2	100000	100000	99999	100000	4.273480	742816800	ok
+walk	upDagConcurrent		nodes	tree2	300000	300000	299999	300000	18.950073	2268852272	ok
+walk	upDagConcurrent		nodes	tree2	1000000	1000000	999999	1000000	123.148088	7723842368	ok
+walk	upDagConcurrent		nodes	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	100	100	99	100	0.000615	994456	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	300	300	299	300	0.002139	3204680	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	1000	1000	999	1000	0.009278	11490672	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	3000	3000	2999	3000	0.039464	37979760	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	10000	10000	9999	10000	0.190921	134469632	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	30000	30000	29999	30000	0.652167	425930304	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	100000	100000	99999	100000	3.043511	1543121328	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	300000	300000	299999	300000	13.548133	4817742584	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	1000000	1000000	999999	1000000	49.965412	16887037816	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	1000000	1000000	999999	1000000	0.000000	0	stop:budget
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	32	25	40	57	0.000032	74488	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	48	41	72	249	0.000117	323000	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	56	49	88	505	0.000225	654280	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	72	65	120	2041	0.001005	2641912	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	88	81	152	8185	0.002193	10592264	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	96	89	168	16377	0.003936	21196448	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	112	105	200	65529	0.024155	84795416	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	128	121	232	262137	0.100682	339206200	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	136	129	248	524281	0.200097	678421376	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	152	145	280	2097145	0.805407	2713707392	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	168	161	312	8388601	3.227806	10854851472	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	176	169	328	16777209	6.630626	21709710224	ok
+fold	expand (evalDeps, every occurrence visited)		occurrences	layered8x2	176	169	328	16777209	0.000000	0	stop:cap
+fold	expand + foldDag		occurrences	layered8x2	32	25	40	57	0.000179	347440	ok
+fold	expand + foldDag		occurrences	layered8x2	48	41	72	249	0.000625	1552608	ok
+fold	expand + foldDag		occurrences	layered8x2	56	49	88	505	0.001272	3121632	ok
+fold	expand + foldDag		occurrences	layered8x2	72	65	120	2041	0.005518	12752576	ok
+fold	expand + foldDag		occurrences	layered8x2	88	81	152	8185	0.022941	51777328	ok
+fold	expand + foldDag		occurrences	layered8x2	96	89	168	16377	0.047464	103216888	ok
+fold	expand + foldDag		occurrences	layered8x2	112	105	200	65529	0.199019	428022016	ok
+fold	expand + foldDag		occurrences	layered8x2	128	121	232	262137	0.803828	1715036512	ok
+fold	expand + foldDag		occurrences	layered8x2	136	129	248	524281	1.613219	3377685512	ok
+fold	expand + foldDag		occurrences	layered8x2	152	145	280	2097145	7.942910	13968339624	ok
+fold	expand + foldDag		occurrences	layered8x2	168	161	312	8388601	29.442714	55528210744	ok
+fold	expand + foldDag		occurrences	layered8x2	168	161	312	8388601	0.000000	0	stop:budget
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	100	97	184	32761	0.000576	938448	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	300	297	584	1099511627769	0.001169	3078864	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	1000	993	1976	1e38	0.005719	10869656	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	3000	2993	5976	1e113	0.023878	34217432	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	10000	9993	19976	1e376	0.104501	119378536	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	30000	29993	59976	1e1129	0.436795	372346392	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	100000	99993	199976	1e3763	1.906336	1292472488	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	300000	299993	599976	1e11289	7.182057	4016270696	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	1000000	999993	1999976	1e37629	33.533559	13903556120	ok
+fold	dagOf (the fixture's per-node build, for comparison)		nodes	layered8x2	1000000	999993	1999976	1e37629	0.000000	0	stop:budget
+dag	fromMagma		nodes	layered8x2	100	97	184	32761	0.000529	428544	ok
+dag	fromMagma		nodes	layered8x2	300	297	584	1099511627769	0.001240	1583808	ok
+dag	fromMagma		nodes	layered8x2	1000	993	1976	1e38	0.005586	6379728	ok
+dag	fromMagma		nodes	layered8x2	3000	2993	5976	1e113	0.022500	21923088	ok
+dag	fromMagma		nodes	layered8x2	10000	9993	19976	1e376	0.103333	83097792	ok
+dag	fromMagma		nodes	layered8x2	30000	29993	59976	1e1129	0.453338	277005072	ok
+dag	fromMagma		nodes	layered8x2	100000	99993	199976	1e3763	2.365509	1028783664	ok
+dag	fromMagma		nodes	layered8x2	300000	299993	599976	1e11289	9.321722	3367155712	ok
+dag	fromMagma		nodes	layered8x2	1000000	999993	1999976	1e37629	51.338854	12257582096	ok
+dag	fromMagma		nodes	layered8x2	1000000	999993	1999976	1e37629	0.000000	0	stop:budget
+walk	upDag (sequential)		nodes	layered8x2	100	97	184	32761	0.000188	176064	ok
+walk	upDag (sequential)		nodes	layered8x2	300	297	584	1099511627769	0.001192	640336	ok
+walk	upDag (sequential)		nodes	layered8x2	1000	993	1976	1e38	0.003980	2463256	ok
+walk	upDag (sequential)		nodes	layered8x2	3000	2993	5976	1e113	0.014513	8367800	ok
+walk	upDag (sequential)		nodes	layered8x2	10000	9993	19976	1e376	0.066808	31466568	ok
+walk	upDag (sequential)		nodes	layered8x2	30000	29993	59976	1e1129	0.266515	103599616	ok
+walk	upDag (sequential)		nodes	layered8x2	100000	99993	199976	1e3763	1.432249	379897872	ok
+walk	upDag (sequential)		nodes	layered8x2	300000	299993	599976	1e11289	7.252691	1233030168	ok
+walk	upDag (sequential)		nodes	layered8x2	1000000	999993	1999976	1e37629	36.381221	4453289584	ok
+walk	upDag (sequential)		nodes	layered8x2	1000000	999993	1999976	1e37629	0.000000	0	stop:budget
+walk	upDagConcurrent		nodes	layered8x2	100	97	184	32761	0.000959	638416	ok
+walk	upDagConcurrent		nodes	layered8x2	300	297	584	1099511627769	0.004400	2090664	ok
+walk	upDagConcurrent		nodes	layered8x2	1000	993	1976	1e38	0.029880	7288528	ok
+walk	upDagConcurrent		nodes	layered8x2	3000	2993	5976	1e113	0.308500	23023096	ok
+walk	upDagConcurrent		nodes	layered8x2	10000	9993	19976	1e376	4.450570	80472784	ok
+walk	upDagConcurrent		nodes	layered8x2	30000	29993	59976	1e1129	61.276615	251710752	ok
+walk	upDagConcurrent		nodes	layered8x2	30000	29993	59976	1e1129	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	32	25	40	57	0.000441	432320	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	48	41	72	249	0.000815	1708648	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	56	49	88	505	0.002393	3320352	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	72	65	120	2041	0.006631	13033768	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	88	81	152	8185	0.031216	52149104	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	96	89	168	16377	0.056005	103630752	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	112	105	200	65529	0.319461	428533944	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	128	121	232	262137	1.100752	1715630440	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	136	129	248	524281	2.034543	3378331184	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	152	145	280	2097145	8.263961	13969086640	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	168	161	312	8388601	40.923161	55529055120	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	168	161	312	8388601	0.000000	0	stop:budget
