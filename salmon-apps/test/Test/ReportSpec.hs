@@ -8,10 +8,70 @@ import Control.Concurrent (threadDelay)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertEqual, testCase)
 
+import qualified Data.Aeson as Aeson
+import Data.Either (isLeft)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 
 import Report
 import Report.Dns
+import Report.Nmap
+
+-- nmap -sT -Pn -n -oG - -p PORTS HOST, captured on 2026-10-10 from nmap
+-- 7.94SVN scanning the loopback address of the capturing machine, where one
+-- throwaway listener held port 28471. Only the dates are replaced.
+
+-- | Two declared ports: one listening, one not.
+nmapOpenClosed :: Text.Text
+nmapOpenClosed =
+    Text.unlines
+        [ "# Nmap 7.94SVN scan initiated Thu Jan  1 00:00:00 1970 as: nmap -sT -Pn -n -oG - -p 28471,28472 127.0.0.1"
+        , "Host: 127.0.0.1 ()\tStatus: Up"
+        , "Host: 127.0.0.1 ()\tPorts: 28471/open/tcp/////, 28472/closed/tcp/////"
+        , "# Nmap done at Thu Jan  1 00:00:00 1970 -- 1 IP address (1 host up) scanned in 0.03 seconds"
+        ]
+
+-- | A range of 101 ports: the hundred closed ones are counted, not listed.
+nmapRange :: Text.Text
+nmapRange =
+    Text.unlines
+        [ "# Nmap 7.94SVN scan initiated Thu Jan  1 00:00:00 1970 as: nmap -sT -Pn -n -oG - -p 28400-28500 127.0.0.1"
+        , "Host: 127.0.0.1 ()\tStatus: Up"
+        , "Host: 127.0.0.1 ()\tPorts: 28471/open/tcp/////\tIgnored State: closed (100)"
+        , "# Nmap done at Thu Jan  1 00:00:00 1970 -- 1 IP address (1 host up) scanned in 0.03 seconds"
+        ]
+
+-- | The IPv6 loopback, where nothing listened.
+nmapV6 :: Text.Text
+nmapV6 =
+    Text.unlines
+        [ "# Nmap 7.94SVN scan initiated Thu Jan  1 00:00:00 1970 as: nmap -6 -sT -Pn -n -oG - -p 28471 ::1"
+        , "Host: ::1 ()\tStatus: Up"
+        , "Host: ::1 ()\tPorts: 28471/closed/tcp/////"
+        , "# Nmap done at Thu Jan  1 00:00:00 1970 -- 1 IP address (1 host up) scanned in 0.03 seconds"
+        ]
+
+-- | A name that does not resolve: no @Host:@ line at all, and exit code 0.
+nmapUnresolved :: Text.Text
+nmapUnresolved =
+    Text.unlines
+        [ "# Nmap 7.94SVN scan initiated Thu Jan  1 00:00:00 1970 as: nmap -sT -Pn -n -oG - -p 80 nosuchhost.invalid"
+        , "Failed to resolve \"nosuchhost.invalid\"."
+        , "WARNING: No targets were specified, so 0 hosts scanned."
+        , "# Nmap done at Thu Jan  1 00:00:00 1970 -- 0 IP addresses (0 hosts up) scanned in 0.04 seconds"
+        ]
+
+{- | NOT captured: a filtered port cannot be produced on loopback without a
+firewall rule. Written by hand in the shape of the captures above, with a
+service name in the fifth field as nmap prints for well-known ports.
+-}
+nmapFiltered :: Text.Text
+nmapFiltered =
+    Text.unlines
+        [ "Host: 192.0.2.7 ()\tStatus: Up"
+        , "Host: 192.0.2.7 ()\tPorts: 22/filtered/tcp//ssh///, 443/open/tcp//https///"
+        ]
 
 -- dig +norecurse +noall +comments +answer +authority, in the shapes captured
 -- from real servers on 2026-10-02 (names and addresses replaced).
@@ -217,5 +277,89 @@ tests =
                 let d = DomainSpec "example.com" [] Nothing ["not a record="] Nothing
                     ps = dnsSetupProbes c (pure (Left "none")) d
                 assertEqual "" 3 (length ps)
+            ]
+        , testGroup
+            "nmap"
+            [ testCase "a target is one host and a bounded port list" $ do
+                assertEqual "" (Right (NmapTarget "example.org" [22, 443])) (parseNmapTarget "example.org:443,22,443")
+                assertEqual "" (Right (NmapTarget "192.0.2.7" [8000, 8001, 8002])) (parseNmapTarget "192.0.2.7:8000-8002")
+                assertEqual "" (Right (NmapTarget "2001:db8::1" [80])) (parseNmapTarget "[2001:db8::1]:80")
+                assertEqual "the cap" (Right 128) (length . targetPorts <$> parseNmapTarget "example.org:1-128")
+            , testCase "what nmap would expand into several hosts, or read as an option, is refused" $ do
+                let mustRefuse t = assertEqual (Text.unpack t) True (isLeft (parseNmapTarget t))
+                mapM_
+                    mustRefuse
+                    [ "192.0.2.0/24:22"
+                    , "192.0.2.1-9:22"
+                    , "192.0.2.*:22"
+                    , "192.0.2.1,192.0.2.2:22"
+                    , "192.0.2:22"
+                    , "-iL:22"
+                    , "--script=x:22"
+                    , "a b:22"
+                    , "example.org"
+                    , ":22"
+                    , "example.org:"
+                    , "example.org:0"
+                    , "example.org:65536"
+                    , "example.org:22-"
+                    , "example.org:90-80"
+                    , "example.org:1-129"
+                    , "example.org:1-65535"
+                    , "example.org:T:22"
+                    , "example.org:-p-"
+                    ]
+            , testCase "the argument vector: a connect scan of the declared ports, nothing else" $ do
+                assertEqual "" (Right ["-sT", "-Pn", "-n", "-oG", "-", "-p", "22,80-82,443", "example.org"]) (nmapArgs <$> parseNmapTarget "example.org:80,81,82,22,443")
+                assertEqual "" (Right ["-6", "-sT", "-Pn", "-n", "-oG", "-", "-p", "80", "::1"]) (nmapArgs <$> parseNmapTarget "[::1]:80")
+            , testCase "captured: an open and a closed port" $
+                assertEqual "" (Just (NmapScan "127.0.0.1" (Map.fromList [(28471, PortOpen), (28472, PortClosed)]) [])) (parseNmapGrepable nmapOpenClosed)
+            , testCase "captured: unlisted ports take the one ignored state" $ do
+                let scan = parseNmapGrepable nmapRange
+                assertEqual "" (Just (NmapScan "127.0.0.1" (Map.fromList [(28471, PortOpen)]) [(PortClosed, 100)])) scan
+                assertEqual "listed" (Just (Right PortOpen)) ((`portState` 28471) <$> scan)
+                assertEqual "unlisted" (Just (Right PortClosed)) ((`portState` 28400) <$> scan)
+            , testCase "captured: IPv6" $
+                assertEqual "" (Just (NmapScan "::1" (Map.fromList [(28471, PortClosed)]) [])) (parseNmapGrepable nmapV6)
+            , testCase "captured: a name that does not resolve prints no host" $
+                assertEqual "" Nothing (parseNmapGrepable nmapUnresolved)
+            , testCase "a port nmap says nothing about is not guessed" $ do
+                let two = NmapScan "192.0.2.7" Map.empty [(PortClosed, 30), (PortFiltered, 40)]
+                assertEqual "" True (isLeft (portState two 22))
+                assertEqual "" True (isLeft (portState (NmapScan "192.0.2.7" Map.empty []) 22))
+            , testCase "findings: open is yes, closed is no, filtered is unknown with its meaning" $ do
+                let t = NmapTarget "example.org" [22, 443, 8080]
+                    scan = maybe (Left "no host") Right (parseNmapGrepable nmapFiltered)
+                    f p = nmapFinding t p scan
+                assertEqual "" [Unknown, Yes, Unknown] (fVerdict . f <$> [22, 443, 8080])
+                assertEqual "" ["22/tcp is filtered on 192.0.2.7"] (fEvidence (f 22))
+                assertEqual "" (Just "Filtered") (Text.takeWhile (/= ':') <$> fMeaning (f 22))
+                assertEqual "" "Is TCP port 443 of example.org open, seen from this host?" (fQuestion (f 443))
+                assertEqual "" "nmap -sT -Pn -n -oG - -p 22,443,8080 example.org" (fMethod (f 443))
+                let closed = nmapFinding (NmapTarget "127.0.0.1" [28472]) 28472 (maybe (Left "no host") Right (parseNmapGrepable nmapOpenClosed))
+                assertEqual "" (No, ["28472/tcp is closed on 127.0.0.1"]) (fVerdict closed, fEvidence closed)
+                assertEqual "a failed scan" (Unknown, ["nmap could not run"]) ((\x -> (fVerdict x, fEvidence x)) (nmapFinding t 22 (Left "nmap could not run")))
+            , testCase "one probe per declared port; a bad declaration is one probe and no scan" $ do
+                c <- newCollector
+                calls <- newIORef (0 :: Int)
+                let scan _ = do
+                        atomicModifyIORef' calls (\n -> (n + 1, ()))
+                        pure (maybe (Left "no host") Right (parseNmapGrepable nmapOpenClosed))
+                    good = nmapProbes c scan "127.0.0.1:28471-28472"
+                    bad = nmapProbes c scan "192.0.2.0/24:22"
+                assertEqual "" (2, 1) (length good, length bad)
+                fs <- runReport 2000000 c (reportOp (good <> bad))
+                assertEqual "" [Yes, No, Unknown] (fVerdict <$> fs)
+                assertEqual "the bad declaration says why" True (any (Text.isInfixOf "HOST:PORTS") (concatMap fEvidence fs))
+                n <- readIORef calls
+                assertEqual "only the good target's probes scanned" 2 n
+            , testCase "nothing is scanned unless declared, and an older directive still reads" $ do
+                c <- newCollector
+                let old = "{\"specNames\":[],\"specTcp\":[],\"specEcho\":null,\"specGateway\":null,\"specUpnp\":false,\"specNatpmp\":false,\"specDomain\":null}"
+                    spec = Aeson.eitherDecode old :: Either String Spec
+                assertEqual "" (Right []) (specNmap <$> spec)
+                assertEqual "round trip" (Right ["example.org:22"]) (specNmap <$> (Aeson.eitherDecode . Aeson.encode . (\s -> s{specNmap = ["example.org:22"]}) =<< spec))
+                -- the IPv6 probe is the only one a bare spec has
+                assertEqual "" (Right 1) (length . probesWith c expectedServers (\_ -> ioError (userError "scanned")) <$> spec)
             ]
         ]

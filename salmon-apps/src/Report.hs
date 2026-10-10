@@ -31,7 +31,12 @@ a Cloud DNS zone (@--zone PROJECT\/ZONE@). These probes send DNS queries to
 the parent zone's servers, the expected servers and a resolver: that is their
 subject, not a third-party service.
 
-Not done (follow-ups in the feature): @nmap@, STUN, hairpin NAT, inbound
+Port probes (@--nmap HOST:PORTS@, see "Report.Nmap") run @nmap@ against the
+hosts and ports the operator declares and file one finding per port: open,
+closed or filtered. There is no default target and no default port list; one
+declaration is one host, and one unprivileged TCP connect scan of its ports.
+
+Not done (follow-ups in the feature): STUN, hairpin NAT, inbound
 reachability from a second vantage. The @natpmpc@ parser follows the
 tool's documented output and has no captured fixture yet.
 -}
@@ -59,6 +64,9 @@ module Report (
     dnsSetupProbes,
     expectedServers,
     parseZoneRef,
+    nmapProbes,
+    nmapFinding,
+    scanNmap,
 
     -- * Pure parsers (exposed for tests)
     parseDigAddresses,
@@ -73,7 +81,7 @@ import Control.Concurrent.Async (forConcurrently)
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (SomeException, evaluate, throwIO, try)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON, ToJSON, Value, object, (.=))
+import Data.Aeson (FromJSON (..), ToJSON, Value, object, withObject, (.!=), (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Data.ByteString.Lazy.Char8 as LChar
@@ -98,6 +106,7 @@ import Text.Read (readMaybe)
 import Salmon.Actions.UpDown (CheckResult (Failure, Success), expandDag)
 import qualified Salmon.Actions.UpDown as UpDown
 import Report.Dns
+import Report.Nmap
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..))
@@ -124,11 +133,27 @@ data Spec = Spec
     , specNatpmp :: Bool
     , specDomain :: Maybe DomainSpec
     -- ^ a domain whose DNS setup is reported on
+    , specNmap :: [Text]
+    -- ^ @HOST:PORTS@ targets handed to @nmap@, see 'parseNmapTarget'
     }
     deriving (Eq, Show, Generic)
 
 instance ToJSON Spec
-instance FromJSON Spec
+
+{- | Field for field what the generic instance reads, except that a directive
+written before 'specNmap' existed still reads (as no target).
+-}
+instance FromJSON Spec where
+    parseJSON = withObject "Spec" $ \o ->
+        Spec
+            <$> o .: "specNames"
+            <*> o .: "specTcp"
+            <*> o .:? "specEcho"
+            <*> o .:? "specGateway"
+            <*> o .: "specUpnp"
+            <*> o .: "specNatpmp"
+            <*> o .:? "specDomain"
+            <*> o .:? "specNmap" .!= []
 
 {- | A domain and the hosted zone meant to serve it. The expected name
 servers are 'domNameServers' when given, and otherwise read from the Cloud
@@ -268,15 +293,18 @@ unknownFor q why method = Finding q Unknown [why] method Nothing []
 -------------------------------------------------------------------------------
 -- Probes
 
--- | The probes a 'Spec' asks for.
-probesFor :: Collector -> Spec -> [Op]
-probesFor c = probesWith c expectedServers
-
-{- | 'probesFor' with the read of a domain's expected name servers supplied,
-so that a caller can share one read between the probes (or fake it).
+{- | The probes a 'Spec' asks for. Nothing is shared between them: each port
+probe of an @--nmap@ target runs its own scan, where 'main' runs one per target.
 -}
-probesWith :: Collector -> (DomainSpec -> IO (Either Text [Text])) -> Spec -> [Op]
-probesWith c expected spec =
+probesFor :: Collector -> Spec -> [Op]
+probesFor c = probesWith c expectedServers scanNmap
+
+{- | 'probesFor' with the read of a domain's expected name servers and the
+scan of an @nmap@ target supplied, so that a caller can share one of each
+between the probes (or fake them).
+-}
+probesWith :: Collector -> (DomainSpec -> IO (Either Text [Text])) -> (NmapTarget -> IO (Either Text NmapScan)) -> Spec -> [Op]
+probesWith c expected scan spec =
     concat
         [ [probeOp c "Does the router offer UPnP-IGD port mapping?" upnpProbe | specUpnp spec]
         , [probeOp c "Does the router answer NAT-PMP / PCP?" (natpmpProbe (specGateway spec)) | specNatpmp spec]
@@ -285,6 +313,7 @@ probesWith c expected spec =
         , [probeOp c ("Can this host open TCP to " <> hp <> "?") (tcpProbe hp) | hp <- specTcp spec]
         , [probeOp c "Does this host have a global IPv6 address?" ipv6Probe]
         , maybe [] (\d -> dnsSetupProbes c (expected d) d) (specDomain spec)
+        , concatMap (nmapProbes c scan) (specNmap spec)
         ]
 
 -- | Runs a command, treating a missing binary as a reason rather than a crash.
@@ -431,6 +460,57 @@ ipv6Probe = do
              in if null as then mk No ["no global-scope IPv6 address"] else mk Yes (("address " <>) <$> as)
   where
     mk v ev = Finding "Does this host have a global IPv6 address?" v ev "ip -6 addr show scope global" Nothing []
+
+-------------------------------------------------------------------------------
+-- nmap
+
+{- | The probes of one declared @HOST:PORTS@ target: one per port, all
+reading the same scan. A declaration that does not parse is one probe
+saying why, and scans nothing.
+-}
+nmapProbes :: Collector -> (NmapTarget -> IO (Either Text NmapScan)) -> Text -> [Op]
+nmapProbes c scan raw = case parseNmapTarget raw of
+    Left why ->
+        let q = "Which ports of the nmap target " <> raw <> " are open, seen from this host?"
+         in [probeOp c q (pure (Finding q Unknown [why <> " (expected HOST:PORTS, as in example.org:22,443)"] "nmap, not run" Nothing []))]
+    Right t -> [probeOp c (nmapQuestion t p) (nmapFinding t p <$> scan t) | p <- targetPorts t]
+
+nmapQuestion :: NmapTarget -> Int -> Text
+nmapQuestion t p = "Is TCP port " <> Text.pack (show p) <> " of " <> targetHost t <> " open, seen from this host?"
+
+{- | One scan of one target: @nmap@ with 'nmapArgs', its output read by
+'parseNmapGrepable'. A scan that printed no host is a reason, made of what
+nmap said instead.
+-}
+scanNmap :: NmapTarget -> IO (Either Text NmapScan)
+scanNmap t = do
+    r <- run "nmap" (nmapArgs t)
+    pure $ case r of
+        Left why -> Left why
+        Right (code, out) -> case parseNmapGrepable out of
+            Just s -> Right s
+            Nothing ->
+                let said = [l | l <- Text.strip <$> Text.lines out, not (Text.null l), not ("#" `Text.isPrefixOf` l)]
+                 in Left (Text.intercalate "; " (take 3 said <> ["nmap reported no host" <> exited code]))
+  where
+    exited ExitSuccess = ""
+    exited (ExitFailure n) = " (exit " <> Text.pack (show n) <> ")"
+
+-- | What a scan (or the reason there is none) says about one port of its target.
+nmapFinding :: NmapTarget -> Int -> Either Text NmapScan -> Finding
+nmapFinding t p res = case res of
+    Left why -> mk Unknown [why] Nothing
+    Right s -> case portState s p of
+        Left why -> mk Unknown [why] Nothing
+        Right st ->
+            let ev = [Text.pack (show p) <> "/tcp is " <> stateText st <> " on " <> scanAddress s]
+             in case st of
+                    PortOpen -> mk Yes ev Nothing
+                    PortClosed -> mk No ev (Just "Closed: the host answered and refused, so it is reachable and nothing listens on this port.")
+                    PortFiltered -> mk Unknown ev (Just "Filtered: nothing answered, so a firewall drops the attempt or the host is away; whether a service listens cannot be told from here.")
+                    PortOther _ -> mk Unknown ev Nothing
+  where
+    mk v ev m = Finding (nmapQuestion t p) v ev (Text.pack (unwords ("nmap" : nmapArgs t))) m []
 
 -------------------------------------------------------------------------------
 -- DNS setup
@@ -594,7 +674,9 @@ main = do
             c <- newCollector
             -- one read of the expected name servers, shared by the DNS setup probes
             expected <- traverse (once . expectedServers) (specDomain spec)
-            let probes = probesWith c (\d -> maybe (expectedServers d) id expected) spec
+            -- one scan per declared nmap target, shared by its port probes
+            scans <- Map.fromList <$> traverse (\t -> (\shared -> (t, shared)) <$> once (scanNmap t)) [t | Right t <- parseNmapTarget <$> specNmap spec]
+            let probes = probesWith c (\d -> maybe (expectedServers d) id expected) (\t -> Map.findWithDefault (scanNmap t) t scans) spec
             fs <- crossCheck <$> runReport (secs * 1000000) c (reportOp probes)
             forM_ fs $ \f ->
                 if asJson
@@ -616,6 +698,7 @@ main = do
             <*> (not <$> O.switch (O.long "no-upnp" <> O.help "skip UPnP discovery"))
             <*> (not <$> O.switch (O.long "no-natpmp" <> O.help "skip NAT-PMP discovery"))
             <*> O.optional domainParser
+            <*> many' (O.strOption (O.long "nmap" <> O.metavar "HOST:PORTS" <> O.help "scan these TCP ports of this one host with nmap, as in example.org:22,443 or [2001:db8::1]:8000-8010 (repeatable); nothing is scanned unless declared"))
     domainParser =
         DomainSpec
             <$> O.strOption (O.long "domain" <> O.metavar "DOMAIN" <> O.help "report on this domain's DNS setup: its delegation, and the servers it should be delegated to")

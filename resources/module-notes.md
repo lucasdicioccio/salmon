@@ -38,7 +38,17 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
-  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); nmap, STUN, hairpin and a second-vantage inbound test are not done; the `natpmpc` parser has no captured fixture.
+  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); STUN, hairpin and a second-vantage inbound test are not done; the `natpmpc` parser has no captured fixture.
+  Port probes (`--nmap HOST:PORTS`, repeatable, pure half in `Report/Nmap.hs`): one unprivileged connect scan per
+  declared target (`nmap -sT -Pn -n -oG - -p PORTS HOST`, shared by that target's probes through `once`) and one finding
+  per port: open is `yes`, closed is `no`, filtered is `unknown` with its meaning (`-Pn`, so a host that is away shows
+  as filtered ports, not as "down"). Nothing is scanned unless declared: no default target, no default port list. A
+  declaration is one host (a name, an IPv4 or a bracketed IPv6 address) and at most 128 ports; what nmap would expand
+  into several hosts (`/24`, `1-9`, `*`, lists) or read as an option is refused at graph build as one `unknown` finding
+  that runs nothing, and the `-p` value is re-rendered from the parsed numbers. `Spec`'s `FromJSON` is hand-written so
+  a directive from before `specNmap` still reads. The parser's open/closed/ignored-state/IPv6/unresolved fixtures were
+  captured from loopback scans (nmap 7.94SVN) and the binary was run end to end against loopback; the filtered
+  fixture is hand-written, and no scan of another host, of UDP, or as root (where `-sT` is still forced) has been run.
   DNS setup probes (`--domain D [--ns S]... [--zone PROJECT/ZONE] [--record [TYPE:]NAME[=V,..]]... [--resolver ADDR]`,
   pure half in `Report/Dns.hs`): the NS set the *parent's* servers hand out against the expected set (unregistered / no
   delegation / not delegated / partly / delegated); whether each expected server holds the zone (`aa`) and they agree on

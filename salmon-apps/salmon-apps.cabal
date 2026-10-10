@@ -34,6 +34,7 @@ library
                     DocsSync
                     Report
                     Report.Dns
+                    Report.Nmap
     other-modules:
                     Migrator.Ops
                     Migrator.Seed
