@@ -156,6 +156,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Per-node state machines, upkeep, supervision | `Actions/{Concurrent,Upkeep,Serve}.hs`, `Op/{Status,Mailbox,Supervision}.hs` | `specs/per-node-state-machines*.md`, `resources/serve-supervision.md` |
 | serve socket, HTTP, events, web UI, TLS | `Actions/Serve/{Socket,Http,Events,StatusSink}.hs`, `salmon-ops/ui/`, `Client/` | `specs/generic-server.md` |
 | Pull mode (registries, scheduler, cache, signatures) | `Actions/Follow.hs`, `Actions/Follow/` | `specs/pull-mode.md` |
+| Guarded risky operations (preconditions, park, hold siblings) | `Builtin/Guarded.hs`, `Op/Guard.hs` | `specs/pg-patroni.md` |
 | Query, selectors, rewrites | `Actions/Query.hs`, `Op/Rewrite.hs` | `specs/advance-querying.md` |
 | Processes, output routing, node logs, daemons | `Builtin/Nodes/{Binary,Daemon}.hs`, `Builtin/NodeLog.hs` | `specs/salmon-as-init.md` |
 | Postgres, replication, templates | `Nodes/Postgres.hs`, `SreBox.PostgresTemplate` | |

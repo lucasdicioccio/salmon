@@ -49,6 +49,7 @@ library
                    , Salmon.Client.Http
                    , Salmon.Client.Model
                    , Salmon.Builtin.Extension
+                   , Salmon.Builtin.Guarded
                    , Salmon.Builtin.CommandLine
                    , Salmon.Builtin.Helpers
                    , Salmon.Builtin.Migrations
@@ -119,6 +120,7 @@ library
                    , Salmon.Builtin.Nodes.WireGuard
                    , Salmon.Op.Concurrency
                    , Salmon.Op.Dag
+                   , Salmon.Op.Guard
                    , Salmon.Op.Ledger
                    , Salmon.Op.Mailbox
                    , Salmon.Op.Rewrite

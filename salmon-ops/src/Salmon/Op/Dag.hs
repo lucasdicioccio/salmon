@@ -91,6 +91,7 @@ import GHC.Records (HasField (..))
 
 import Salmon.Op.Actions
 import Salmon.Op.Graph
+import Salmon.Op.Guard (Guard)
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
 import Salmon.Op.Supervision (Supervision)
@@ -459,7 +460,13 @@ changed policy is a changed representative — see (I5) in
 dynamics, whose identity 'foldDag' does not need to track this way).
 -}
 showDynamic :: Dynamic -> String
-showDynamic d = maybe (show d) show (fromDynamic d :: Maybe Supervision)
+showDynamic d =
+    case (fromDynamic d :: Maybe Supervision, fromDynamic d :: Maybe Guard) of
+        (Just s, _) -> show s
+        -- likewise by value: a guarded node whose hold set changed is a
+        -- different node to tend. See "Salmon.Op.Guard".
+        (_, Just g) -> show g
+        _ -> show d
 
 representative ::
     ( HasField "help" ext Text
