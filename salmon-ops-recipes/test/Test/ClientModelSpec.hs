@@ -57,7 +57,8 @@ import qualified Salmon.Client.Http as Client
 import qualified Salmon.Client.Model as Model
 import Salmon.Client.Model (Check (..), Model (..), Node (..), Pass (..), RefId (..))
 import Salmon.Op.Configure (Configure (..))
-import Salmon.Op.Ref (mkRef)
+import qualified Salmon.Builtin.NodeLog as NodeLog
+import Salmon.Op.Ref (mkRef, shortRef, unRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (contramap)
 import qualified Salmon.Reporter.Tagged as Tagged
@@ -76,6 +77,7 @@ tests =
             , testCase "a node wanted down is dropped by its done" downNodeDropped
             , testCase "the SSE parser reads what the server renders" sseParser
             , testCase "the rendered rows and header" rendering
+            , testCase "the output stream: a held action's lines join the ring, a one-shot up's lines are kept across a re-read" outputFolded
             , testCase "the fixture the Rust client is tested on is this recorded pass" sharedFixture
             ]
         , testGroup
@@ -288,6 +290,69 @@ rendering = do
         (Model.renderHeader "/tmp/x.http" m)
     assertEqual "an event line about a node" "#11 updown failed n2 n2" (Model.renderEventLine (Model.eventOf (recorded !! 5)))
     assertEqual "an event line about the loop" "#13 serve converge-stop ok=false remaining=2" (Model.renderEventLine (Model.eventOf (recorded !! 7)))
+
+{- | The @output@ stream folded: a held action's @output@ lines go on after
+the snapshot's ring under the node's stamp, a one-shot @up@'s @log@ lines
+(encoded here by the server's own 'Tagged.FromNode', so the wire shape is
+not this test's guess) go to 'nodeSaid' under a stamp of their own, and a
+re-read snapshot replaces the first and keeps the second. Neither changes
+what the node's last event is said to be.
+-}
+outputFolded :: IO ()
+outputFolded = do
+    let builder = mkRef "client-model-spec" ("builder" :: Text)
+        rid = RefId (shortRef builder) (unRef builder)
+        refJson = object ["short" .= shortRef builder, "full" .= unRef builder]
+        node ring = case nodeValue "x" "the-builder" [] of
+            Object o -> Object (KeyMap.insert "ref" refJson (KeyMap.insert "status" (object ["output" .= (ring :: [Text])]) o))
+            v -> v
+        dagAt :: Int -> [Text] -> Value
+        dagAt seqNo ring = object ["mode" .= ("interactive" :: Text), "seq" .= seqNo, "nodes" .= [node ring]]
+        said seqNo channel line = Events.eventValue (Events.Event seqNo Nothing (Events.Reported (Tagged.FromNode (NodeLog.Line builder channel line))))
+        held :: Int -> Text -> Value
+        held seqNo line = object ["stream" .= ("output" :: Text), "kind" .= ("output" :: Text), "seq" .= seqNo, "ref" .= refJson, "line" .= line]
+        eval = object ["stream" .= ("updown" :: Text), "kind" .= ("eval" :: Text), "seq" .= (6 :: Int), "ref" .= refJson]
+        events =
+            [ eval
+            , said 7 NodeLog.Stdout "STEP 1/2: FROM scratch"
+            , said 8 NodeLog.Stderr "warning: no cache"
+            , said 9 NodeLog.Message "waiting for ssh"
+            , held 10 "listening on :8080"
+            ]
+        view m = maybe (assertFailure "no builder node") pure (Model.lookupNode rid m)
+    m0 <- either (assertFailure . ("snapshot: " <>)) pure (Model.fromDag (dagAt 5 ["spawn"]))
+    let m = fold m0 events
+    n <- view m
+    assertEqual "what it said, marked by channel" ["STEP 1/2: FROM scratch", "err| warning: no cache", "msg| waiting for ssh"] n.nodeSaid
+    assertEqual "current to the last line" 9 n.nodeSaidSeq
+    assertEqual "the ring, then the held action's line" ["spawn", "listening on :8080"] n.nodeOutput
+    assertEqual "a line is not the node's last event" (Just "eval", Just 6) (n.nodeLastKind, n.nodeLastSeq)
+    assertEqual "the cursor follows the lines" 10 m.modelSeq
+    assertEqual "a tail prefers what was said" ["err| warning: no cache", "msg| waiting for ssh"] (Model.tailLines 2 n)
+    assertEqual "the line shows in the event line" "#8 output log " (Text.take 14 (Model.renderEventLine (Model.eventOf (events !! 2))))
+    assertBool "with its mark" ("err| warning: no cache" `Text.isSuffixOf` Model.renderEventLine (Model.eventOf (events !! 2)))
+    -- replayed (a reconnect from an older cursor): nothing is said twice
+    assertEqual "folding the lines again changes nothing" m (fold m events)
+    -- a re-read snapshot has the ring's lines and none of the said ones
+    fresh <- either (assertFailure . ("snapshot: " <>)) pure (Model.fromDag (dagAt 12 ["spawn", "listening on :8080"]))
+    assertEqual "no snapshot carries what was said" (Just []) (nodeSaid <$> Model.lookupNode rid fresh)
+    r <- view (Model.rebase m fresh)
+    assertEqual "rebase keeps what was said" n.nodeSaid r.nodeSaid
+    assertEqual "and takes the snapshot's ring" ["spawn", "listening on :8080"] r.nodeOutput
+    -- the held line at 10 is below the fresh snapshot's stamp: not appended twice
+    r' <- view (fold (Model.rebase m fresh) events)
+    assertEqual "a replay onto the rebased model appends nothing" (r.nodeOutput, r.nodeSaid) (r'.nodeOutput, r'.nodeSaid)
+    -- bounded: a chatty node keeps the last 'Model.outputKept' lines
+    let chatty = fold m0 [said (100 + fromIntegral i) NodeLog.Stdout (Text.pack (show i)) | i <- [1 .. Model.outputKept + 50 :: Int]]
+    c <- view chatty
+    assertEqual "bounded" Model.outputKept (length c.nodeSaid)
+    assertEqual "the newest kept" (Just (Text.pack (show (Model.outputKept + 50)))) (lastOf c.nodeSaid)
+    -- a line about a node the model does not have is moved past
+    let stranger = Events.eventValue (Events.Event 400 Nothing (Events.Reported (Tagged.FromNode (NodeLog.Line (mkRef "client-model-spec" ("other" :: Text)) NodeLog.Stdout "x"))))
+    assertEqual "an unknown node's line changes no node" m0.modelNodes (fold m0 [stranger]).modelNodes
+  where
+    lastOf [] = Nothing
+    lastOf xs = Just (last xs)
 
 {- | @rs\/fixtures\/client-model.json@ against this module: its @snapshot@
 and @recorded@ are 'snapshot' and 'recorded' object for object, and its

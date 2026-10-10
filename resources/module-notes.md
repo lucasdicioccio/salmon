@@ -1007,7 +1007,19 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `converge-stop` of a pass whose start it had already shown. And **the model asks to be re-read
   rather than guessing** (`modelResync`, set by `declared`, `cleared` and `gap`): an event names
   nodes by ref and cannot describe a node the model has never seen, so the client holds no state
-  the server does not, and a restart is one `/dag` read. `renderNodeRow`/`renderHeader` are the
+  the server does not, and a restart is one `/dag` read. **The `output` stream is folded into two
+  fields**, because a snapshot covers one kind and not the other: a held action's `output` line is
+  in the node's ring, so it is appended to `nodeOutput` under the node's stamp and a re-read
+  replaces the lot; a `log` line (`Builtin/NodeLog.hs`, what a one-shot `up` said) is in no
+  snapshot, so it goes to `nodeSaid` under its own stamp (`nodeSaidSeq`) and `rebase` carries it
+  over, else the re-read every `declared` asks for would drop a build's tail as it starts.
+  Neither sets `nodeLastKind`; both keep the last `outputKept` (200) lines. `salmon-tui` shows
+  `tailLines` under the expanded node (what was said, else the ring), control characters
+  blanked. Tested at Layer 0 only (`outputFolded`, the `log` events encoded by the server's own
+  `Tagged.FromNode`); the TUI pane has not been looked at against a running `serve`, and the Rust
+  client (`rs/`) does not fold this stream. Still open: a one-shot `up`'s lines never enter the
+  server's ring, so a client that connects after they were said sees them only while `/events`
+  still replays them. `renderNodeRow`/`renderHeader` are the
   text a terminal shows, kept here so `Test/ClientModelSpec.hs` can assert on it: a recorded
   pass folded onto a snapshot, replay and rebase, the SSE parser against what `Events` renders,
   and, at Layer 1, the client itself against a real `withHttpServer` (`dag`, `commandAsync`,
