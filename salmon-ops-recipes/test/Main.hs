@@ -11,6 +11,7 @@ import qualified Test.DagSpec as DagSpec
 import qualified Test.GraphFixtureSpec as GraphFixtureSpec
 import qualified Test.GraphScaleSpec as GraphScaleSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
+import qualified Test.ClipCppSpec as ClipCppSpec
 import qualified Test.LlamaServerSpec as LlamaServerSpec
 import qualified Test.ServeApiSpec as ServeApiSpec
 import qualified Test.PgVectorSpec as PgVectorSpec
@@ -129,6 +130,7 @@ main =
             , GraphScaleSpec.tests
             , AptRepositorySpec.tests
             , DebianPackageSpec.tests
+            , ClipCppSpec.tests
             , LlamaServerSpec.tests
             , ServeApiSpec.tests
             , PgVectorSpec.tests

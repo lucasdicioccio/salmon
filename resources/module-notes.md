@@ -1755,6 +1755,31 @@ not executed), so `up` as a whole, the settings round trip through a real `pg_tu
 `CREATE EXTENSION`, the restart step, `down`, the self-logging loop and its exclusion, and the
 Debian paths and `sudo -u postgres` plumbing of this node are untested. No Layer 2 test exists.
 
+`Salmon.Builtin.Nodes.ClipCpp` (in `salmon-ops`, used by no recipe) is clip.cpp for a
+`vector(N)` column that holds text and images together: `clipBuild` (a pinned commit, compiled),
+`clipModel` (`LlamaServer.ggufModel` under its own kind), and `clipCpp` on top, whose check
+embeds a fixed string and an image and compares both lengths with the declared dimension. There
+is no server; `embed` is what a loader calls, one process per input. Load-bearing, all **read
+from the upstream sources at `knownCommit` and not run**:
+- The binary is `extract`. It has no `--version`, so the build's check is a stamp (commit,
+  remote, options) written after a successful build; a different stamp removes the build
+  directory first.
+- `extract` writes `.npy` files into **its current directory** and **exits 0 when it could not
+  read an input**. `embed` runs it in a fresh directory with one input and wants the one file;
+  the exit code alone proves nothing.
+- The vectors are not normalised, and since June 2025 the image preprocessing is bicubic with a
+  centre crop (the README still says linear). Vectors from another commit or another tool are
+  not comparable, which is why the commit must be a full object id (`validCommit`).
+- The submodules are fetched whole on purpose (a shallow one may not hold the recorded commit).
+- The text to embed is on the command line, hence public.
+- `laionViTB32` carries the sha256 the model hub lists; the file was never downloaded.
+
+Run: Layer 0 (`Test/ClipCppSpec.hs`: arguments, stamp, the `.npy` parser on a **hand-written**
+fixture, graph shape) and `embed`/`clipCheck` against a shell stub of `extract`. **Never run**:
+the `git` and `cmake` steps, any real `extract` (so its flags, its file names and its file
+format as this module reads them), any model, the 512 dimensions of ViT-B/32, `debianTools` on
+a real machine, `down`. No Layer 2 test exists.
+
 `SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary,
 and `pairRole` — a node that *states where the primary is* rather than an action that moves it.
 Its `check` asks both machines and every bouncer; its `up` takes steps until the declaration
