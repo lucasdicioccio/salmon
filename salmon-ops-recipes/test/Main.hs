@@ -8,6 +8,7 @@ import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagSpec as DagSpec
+import qualified Test.GraphFixtureSpec as GraphFixtureSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.LlamaServerSpec as LlamaServerSpec
 import qualified Test.ServeApiSpec as ServeApiSpec
@@ -123,6 +124,7 @@ main =
             , DaemonSpec.tests
             , BinaryOutputSpec.tests
             , DagSpec.tests
+            , GraphFixtureSpec.tests
             , AptRepositorySpec.tests
             , DebianPackageSpec.tests
             , LlamaServerSpec.tests

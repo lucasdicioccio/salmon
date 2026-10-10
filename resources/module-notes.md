@@ -194,6 +194,38 @@ containers (see `salmon-ops-recipes/test/Test/Harness.hs` and `Test.PostgresInit
 pattern) — those need a working `podman` on the machine running the tests and are skipped loudly
 if it's missing.
 
+**Synthetic graphs for scale (`salmon-ops-recipes/test/Test/GraphFixture.hs`).** A generator
+`generateWith options shape size seed :: Op` for testing scale on purpose. It is a recursive
+unfold: `successors` maps a node number to the numbers it depends on (node 0 is the root, a
+dependency always has a larger number, so the numbering is a topological order) and the `Op`'s
+`predecessors` are built on demand, with no memo table and nothing retained. Describing a
+million nodes is one closure; whoever expands it pays, and only for what they expand.
+Shapes: `Chain`, `Fan`, `Tree b` (no sharing: one occurrence per node), `Diamonds w`,
+`Layered width sharing` and the seeded `RandomLayered width sharing` (sharing: the expansion is
+exponentially larger than the graph). `counts shape size` gives nodes, edges, occurrences (the
+size of the expanded `Cofree`, i.e. paths from the root to any node) and root-to-leaf paths in
+closed form as `Integer`s, seed-independent even for the random shape because every node there
+has exactly `sharing` dependencies. **Read `countOccurrences` before expanding a shape that
+shares**: `foldDag` walks every occurrence, so a large chain of diamonds can be *described* and
+walked per node (dedup by `Ref`), never folded. The size is a requested node count; a shape
+builds the largest graph not exceeding it and `counts` says what was built. `Options`: a fixed
+`check` verdict, `managed` on every node (`holdUntilCancelled`), a `dynamics` payload by node
+number, how edges are written (`Vertices` / a `Connect` per dependency / an `Overlay` per
+dependency), and a fraction of colliding `Ref`s: exactly `colliderCount` non-root nodes are
+declared twice (a leaf with the same `Ref` and a differing `help`, right after the real one),
+which leaves nodes and edges unchanged, makes the second declaration the representative, and
+adds one leaf to the expansion per occurrence of a colliding node. Nodes do no IO.
+*What was run:* `Test.GraphFixtureSpec` (Layer 0) checks the closed forms against a walk of the
+unfold, against the expansion and against `foldDag` at sizes up to 25, and a per-node walk of
+every shape at 20 000 nodes. The million-node case is opt-in
+(`SALMON_TEST_GRAPH_FIXTURE_SIZE=1000000`, with `+RTS -M4g`; the test binary is built with
+`-rtsopts` for that): it was run once, every shape walked per node and `Chain` and `Tree 2`
+expanded and folded, in about two minutes and 1.1 GiB. *Not run:* any driver (`run up`,
+`Concurrent`, `serve`) over a fixture, the `managed` action under `serve`, and any measurement:
+nothing here profiles. `Fan` is left out of the large fold on purpose: `Dag.record` keeps a
+node's edges as a list it searches on each insert, so one node over a million others is
+quadratic there (read from the code, not measured).
+
 `cabal.project.local` (tracked) carries `allow-newer` pins for `dhall-json` against `aeson`/`bytestring`/`text`;
 don't remove these without checking the build still resolves.
 
