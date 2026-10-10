@@ -58,6 +58,7 @@ import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuShutdownSpec as QemuShutdownSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
+import qualified Test.RemoteOutputSpec as RemoteOutputSpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeEventsSpec as ServeEventsSpec
@@ -126,6 +127,7 @@ main =
             , BinarySpec.tests
             , DaemonSpec.tests
             , BinaryOutputSpec.tests
+            , RemoteOutputSpec.tests
             , DagSpec.tests
             , GraphFixtureSpec.tests
             , GraphScaleSpec.tests

@@ -1,7 +1,7 @@
 module Salmon.Builtin.Nodes.Ssh where
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinaryStdin)
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..))
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
 import Salmon.Op.Ref
@@ -89,8 +89,53 @@ callWith ::
     [Text] ->
     ByteString ->
     Op
-callWith opts r ssh tRemote remote remotepath args stdin =
-    withBinaryStdin ssh sshRun cmd stdin $ \up ->
+callWith = callTapped Binary.captured Binary.plainLines
+
+{- | 'callWith', with a say in where the remote command's output goes
+("Salmon.Builtin.Nodes.Binary".'Binary.Routing').
+
+Under 'Binary.streamed' each line the remote command writes is a
+"Salmon.Builtin.NodeLog" line about this node, said while the command is
+still running on the other machine, where 'call' and 'callWith' hold all of
+it until ssh exits. Only the caller knows whether that is safe: a streamed
+line is public the moment it is read, so a remote command that can print a
+secret keeps 'Binary.captured', which is what every call was before there
+was a choice.
+
+The node is the same node whatever the routing: same 'Ref', @help@ and
+@notes@, so asking for the output to be followed restarts nothing.
+-}
+callRouted ::
+    Binary.Routing ->
+    ClientOpts ->
+    Reporter Report ->
+    Track' (Binary "ssh") ->
+    Track' Remote ->
+    Remote ->
+    FilePath ->
+    [Text] ->
+    ByteString ->
+    Op
+callRouted routing = callTapped routing Binary.plainLines
+
+{- | 'callRouted', with a 'Binary.LineTap' deciding what is said for each
+streamed line: for a remote command whose output is a report stream to
+re-tell rather than text to repeat.
+-}
+callTapped ::
+    Binary.Routing ->
+    Binary.LineTap ->
+    ClientOpts ->
+    Reporter Report ->
+    Track' (Binary "ssh") ->
+    Track' Remote ->
+    Remote ->
+    FilePath ->
+    [Text] ->
+    ByteString ->
+    Op
+callTapped routing tap opts r ssh tRemote remote remotepath args stdin =
+    Binary.withBinaryStdinTapped routing tap ssh sshRun cmd stdin $ \up ->
         op "ssh:call" (deps [run tRemote remote]) $ \actions ->
             actions
                 { help = "calls " <> Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> Text.decodeUtf8 stdin
