@@ -41,7 +41,14 @@ Inbound probes (@--inbound HOST:PORT[\@LISTEN]@ with @--vantage-ssh
 operator's own @ssh@, to open a TCP connection to a declared external address
 and port, and say whether it arrived. There is no default vantage point.
 
-Not done (follow-ups in the feature): STUN, hairpin NAT. The @natpmpc@ parser follows the
+STUN probes (@--stun HOST:PORT@, see "Report.Stun") send one Binding request
+over UDP to each declared server, all from one local socket per address
+family, and file the mapped address each server saw plus one finding on
+whether the NAT's mapping depends on the destination. There is no default
+server; the second address a server advertises is reported, not contacted.
+
+Not done (follow-ups in the feature): the filtering half of the NAT type,
+hairpin NAT. The @natpmpc@ parser follows the
 tool's documented output and has no captured fixture yet.
 -}
 module Report (
@@ -79,6 +86,11 @@ module Report (
     nmapProbes,
     nmapFinding,
     scanNmap,
+    stunProbes,
+    stunFinding,
+    stunMappingFinding,
+    scanStun,
+    scanStunWith,
 
     -- * Pure parsers (exposed for tests)
     parseDigAddresses,
@@ -91,25 +103,29 @@ module Report (
 
 import Control.Concurrent.Async (forConcurrently)
 import Control.Concurrent.MVar (modifyMVar, newMVar)
-import Control.Exception (SomeException, evaluate, throwIO, try)
-import Control.Monad (forM_)
+import Control.Exception (SomeException, bracket, evaluate, throwIO, try)
+import Control.Monad (forM, forM_)
 import Data.Aeson (FromJSON (..), ToJSON, Value, object, withObject, (.!=), (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Data.ByteString.Lazy.Char8 as LChar
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Generics (Generic)
 import qualified Network.HTTP.Client as Http
-import Network.Socket (AddrInfo (..), SocketType (Stream), close, connect, defaultHints, getAddrInfo, socket)
+import Network.Socket (AddrInfo (..), Family (AF_INET, AF_INET6), SockAddr (..), SocketType (Datagram, Stream), bind, close, connect, defaultHints, defaultProtocol, getAddrInfo, getSocketName, hostAddress6ToTuple, hostAddressToTuple, socket, socketPort)
+import Network.Socket.ByteString (recvFrom, sendAllTo)
 import qualified Options.Applicative as O
 import System.Exit (ExitCode (..))
-import System.IO (hFlush, stdout)
+import System.IO (IOMode (ReadMode), hFlush, stdout, withBinaryFile)
 import System.IO.Error (ioeGetErrorString)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
@@ -120,6 +136,8 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Report.Dns
 import Report.Inbound
 import Report.Nmap
+import Report.Stun hiding (Family)
+import qualified Report.Stun as Stun
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..))
@@ -150,13 +168,16 @@ data Spec = Spec
     -- ^ the inbound test from a second vantage point, see "Report.Inbound"
     , specNmap :: [Text]
     -- ^ @HOST:PORTS@ targets handed to @nmap@, see 'parseNmapTarget'
+    , specStun :: [Text]
+    -- ^ @HOST:PORT@ STUN servers to ask over UDP, see 'parseStunServer'
     }
     deriving (Eq, Show, Generic)
 
 instance ToJSON Spec
 
 {- | Field for field what the generic instance reads, except that a directive
-written before 'specNmap' existed still reads (as no target).
+written before 'specNmap' or 'specStun' existed still reads (as no target
+and no server).
 -}
 instance FromJSON Spec where
     parseJSON = withObject "Spec" $ \o ->
@@ -170,6 +191,7 @@ instance FromJSON Spec where
             <*> o .:? "specDomain"
             <*> o .:? "specInbound" .!= noInbound
             <*> o .:? "specNmap" .!= []
+            <*> o .:? "specStun" .!= []
 
 {- | A domain and the hosted zone meant to serve it. The expected name
 servers are 'domNameServers' when given, and otherwise read from the Cloud
@@ -310,17 +332,18 @@ unknownFor q why method = Finding q Unknown [why] method Nothing []
 -- Probes
 
 {- | The probes a 'Spec' asks for. Nothing is shared between them: each port
-probe of an @--nmap@ target runs its own scan, where 'main' runs one per target.
+probe of an @--nmap@ target runs its own scan and each STUN probe its own
+exchange, where 'main' runs one per target and one for all the servers.
 -}
 probesFor :: Collector -> Spec -> [Op]
-probesFor c = probesWith c expectedServers scanNmap
+probesFor c = probesWith c expectedServers scanNmap scanStun
 
-{- | 'probesFor' with the read of a domain's expected name servers and the
-scan of an @nmap@ target supplied, so that a caller can share one of each
-between the probes (or fake them).
+{- | 'probesFor' with the read of a domain's expected name servers, the scan
+of an @nmap@ target and the exchange with the STUN servers supplied, so that
+a caller can share one of each between the probes (or fake them).
 -}
-probesWith :: Collector -> (DomainSpec -> IO (Either Text [Text])) -> (NmapTarget -> IO (Either Text NmapScan)) -> Spec -> [Op]
-probesWith c expected scan spec =
+probesWith :: Collector -> (DomainSpec -> IO (Either Text [Text])) -> (NmapTarget -> IO (Either Text NmapScan)) -> ([StunServer] -> IO [Observation]) -> Spec -> [Op]
+probesWith c expected scan stun spec =
     concat
         [ [probeOp c "Does the router offer UPnP-IGD port mapping?" upnpProbe | specUpnp spec]
         , [probeOp c "Does the router answer NAT-PMP / PCP?" (natpmpProbe (specGateway spec)) | specNatpmp spec]
@@ -330,6 +353,7 @@ probesWith c expected scan spec =
         , [probeOp c "Does this host have a global IPv6 address?" ipv6Probe]
         , maybe [] (\d -> dnsSetupProbes c (expected d) d) (specDomain spec)
         , concatMap (nmapProbes c scan) (specNmap spec)
+        , stunProbes c stun (specStun spec)
         ]
 
 -- | Runs a command, treating a missing binary as a reason rather than a crash.
@@ -527,6 +551,152 @@ nmapFinding t p res = case res of
                     PortOther _ -> mk Unknown ev Nothing
   where
     mk v ev m = Finding (nmapQuestion t p) v ev (Text.pack (unwords ("nmap" : nmapArgs t))) m []
+
+-------------------------------------------------------------------------------
+-- STUN
+
+{- | The probes of the declared @HOST:PORT@ STUN servers: one per server
+(the address it saw this host as), and one on what those addresses say of
+the NAT's mapping, all reading the same exchange. A declaration that does
+not parse is one probe saying why, and is sent nothing. No declaration, no probe.
+-}
+stunProbes :: Collector -> ([StunServer] -> IO [Observation]) -> [Text] -> [Op]
+stunProbes _ _ [] = []
+stunProbes c scan raws =
+    [either bad (\s -> probeOp c (stunQuestion s) (stunFinding s <$> scan servers)) d | d <- declared]
+        <> [probeOp c stunMappingQuestion (stunMappingFinding <$> scan servers)]
+  where
+    declared = nub [either (\why -> Left (Text.strip r, why)) Right (parseStunServer r) | r <- raws]
+    servers = [s | Right s <- declared]
+    bad (r, why) =
+        let q = "Does the STUN server " <> r <> " tell this host its mapped address?"
+         in probeOp c q (pure (Finding q Unknown [why <> " (expected HOST:PORT, as in stun.example.org:3478)"] "STUN, not sent" Nothing []))
+
+stunQuestion :: StunServer -> Text
+stunQuestion s = "Does the STUN server " <> renderStunServer s <> " tell this host its mapped address?"
+
+stunMappingQuestion :: Text
+stunMappingQuestion = "Does the NAT give this host one mapped address whatever the destination (endpoint-independent mapping)?"
+
+-- | What the exchange says about one declared server.
+stunFinding :: StunServer -> [Observation] -> Finding
+stunFinding s obs = case [o | o <- obs, obsServer o == s] of
+    [] -> mk Unknown ["the exchange holds nothing about this server"] []
+    (o : _) -> case obsOutcome o of
+        NotAsked why -> mk Unknown [why] []
+        Silent why -> mk No (why : asked o) []
+        Answered (Stun.Refused code reason) -> mk No (("the server answered with the error " <> Text.pack (show code) <> (if Text.null reason then "" else " " <> reason)) : asked o) []
+        Answered (Mapped m other) ->
+            mk
+                Yes
+                ( ["mapped address " <> renderEndpoint m <> " (" <> classOf m <> ")"]
+                    <> asked o
+                    <> [translation l m | Just l <- [obsLocal o]]
+                    <> ["the server advertises a second address, " <> renderEndpoint a <> ": it is not contacted unless declared with --stun" | Just a <- [other]]
+                )
+                [epHost m]
+  where
+    mk v ev as = Finding (stunQuestion s) v ev "STUN Binding request over UDP (RFC 8489), without attributes" Nothing as
+    asked o = ["asked " <> renderEndpoint d <> maybe "" (\l -> " from " <> renderEndpoint l) (obsLocal o) | Just d <- [obsDestination o]]
+    classOf m = case epFamily m of
+        V4 -> describeClass (classifyAddress (epHost m))
+        V6 -> "IPv6"
+    translation l m
+        | l == m = "the mapped address is the local one: nothing translates on the path to this server"
+        | epHost l == epHost m = "the address is the local one and the port is not: something on the path rewrites the port"
+        | otherwise = "the mapped address is not the local one: a NAT is on the path to this server"
+
+-- | What the exchange says about the NAT's mapping, see 'judgeMapping'.
+stunMappingFinding :: [Observation] -> Finding
+stunMappingFinding obs =
+    let j = judgeMapping obs
+     in Finding stunMappingQuestion (verdictOf j) (jEvidence j) "STUN Binding requests from one UDP socket to each declared server, comparing the mapped addresses" (jMeaning j) []
+
+-- | How long each request waits for its answer before it is sent again: 3.5s in all.
+stunSchedule :: [Int]
+stunSchedule = [500000, 1000000, 2000000]
+
+-- | One exchange with the declared servers, see 'scanStunWith'.
+scanStun :: [StunServer] -> IO [Observation]
+scanStun = scanStunWith stunSchedule
+
+{- | Asks every server once (resent after each wait of the schedule, in
+microseconds, while unanswered), from one UDP socket per address family so
+that the mapped addresses can be compared. Each name is resolved to one
+address, and only that address is sent to. An answer counts when it comes
+from the address asked and carries the request's transaction id. Nothing
+here throws: what went wrong is the observation's 'Outcome'.
+-}
+scanStunWith :: [Int] -> [StunServer] -> IO [Observation]
+scanStunWith waits declared = do
+    let servers = nub declared
+    resolved <- traverse (\s -> (,) s <$> resolve s) servers
+    let targets = [(s, sa, d) | (s, Right (sa, d)) <- resolved]
+        unresolved = [Observation s Nothing Nothing (NotAsked why) | (s, Left why) <- resolved]
+    asked <- forM [V4, V6] $ \fam -> case [t | t@(_, _, d) <- targets, epFamily d == fam] of
+        [] -> pure []
+        ts -> do
+            r <- try (exchange fam ts)
+            pure $ case r of
+                Right os -> os
+                Left (e :: SomeException) -> [Observation s (Just d) Nothing (NotAsked ("the UDP exchange failed: " <> Text.pack (show e))) | (s, _, d) <- ts]
+    let found = unresolved <> concat asked
+    pure [o | s <- servers, o <- found, obsServer o == s]
+  where
+    resolve s = do
+        r <- try (getAddrInfo (Just defaultHints{addrSocketType = Datagram}) (Just (Text.unpack (stunHost s))) (Just (show (stunPort s))))
+        pure $ case r of
+            Left (e :: SomeException) -> Left (stunHost s <> " could not be resolved: " <> Text.pack (show e))
+            Right ais -> case [(addrAddress ai, d) | ai <- ais, Just d <- [sockEndpoint (addrAddress ai)]] of
+                (x : _) -> Right x
+                [] -> Left (stunHost s <> " resolved to no IPv4 or IPv6 address")
+    exchange fam ts = bracket (socket (if fam == V4 then AF_INET else AF_INET6) Datagram defaultProtocol) close $ \sock -> do
+        bind sock (if fam == V4 then SockAddrInet 0 0 else SockAddrInet6 0 0 (0, 0, 0, 0) 0)
+        port <- fromIntegral <$> socketPort sock
+        prepared <- forM ts $ \(s, sa, d) -> do
+            tid <- newTransactionId
+            local <- localToward sa
+            pure (s, sa, d, tid, (\l -> l{epPort = port}) <$> local)
+        got <- rounds sock prepared waits Map.empty
+        let total = Text.pack (show (fromIntegral (sum waits) / (1000000 :: Double)))
+            silence = Silent ("no answer within " <> total <> "s (" <> (if length waits == 1 then "1 request" else Text.pack (show (length waits)) <> " requests") <> " sent)")
+        pure [Observation s (Just d) local (Map.findWithDefault silence tid got) | (s, _, d, tid, local) <- prepared]
+    rounds _ _ [] got = pure got
+    rounds sock ps (w : ws) got = case [p | p@(_, _, _, tid, _) <- ps, Map.notMember tid got] of
+        [] -> pure got
+        pending -> do
+            sent <- forM pending $ \(_, sa, _, tid, _) -> (,) tid <$> try (sendAllTo sock (bindingRequest tid) sa)
+            let got' = foldr (\(tid, r) m -> either (\(e :: SomeException) -> Map.insert tid (NotAsked ("the request could not be sent: " <> Text.pack (show e))) m) (const m) r) got sent
+            deadline <- (+ fromIntegral w * 1000) <$> getMonotonicTimeNSec
+            listen sock ps deadline got' >>= rounds sock ps ws
+    listen sock ps deadline got = do
+        now <- getMonotonicTimeNSec
+        if now >= deadline || all (\(_, _, _, tid, _) -> Map.member tid got) ps
+            then pure got
+            else do
+                m <- timeout (fromIntegral ((deadline - now) `div` 1000) + 1) (recvFrom sock 2048)
+                case m of
+                    Nothing -> pure got
+                    Just (bytes, from) -> listen sock ps deadline (maybe got (\(tid, o) -> Map.insert tid o got) (accept ps bytes from))
+    -- the request this datagram answers, if it is the answer of one: right sender, right transaction
+    accept ps bytes from = case [tid | Right msg <- [parseStunMessage bytes], (_, _, d, tid, _) <- ps, msgTransaction msg == tid, sockEndpoint from == Just d] of
+        (tid : _) -> Just (tid, either (\why -> Silent ("an answer that could not be read: " <> why)) Answered (parseBindingResponse tid bytes))
+        [] -> Nothing
+    -- this host's address on the route to the server: a connected UDP socket sends nothing
+    localToward sa = do
+        r <- try (bracket (socket (familyOf sa) Datagram defaultProtocol) close (\s -> connect s sa >> getSocketName s))
+        pure (either (\(_ :: SomeException) -> Nothing) sockEndpoint r)
+    familyOf (SockAddrInet6{}) = AF_INET6
+    familyOf _ = AF_INET
+    newTransactionId = do
+        bytes <- withBinaryFile "/dev/urandom" ReadMode (`ByteString.hGet` 12)
+        maybe (throwIO (userError "could not draw a transaction id from /dev/urandom")) pure (mkTransactionId bytes)
+
+-- | A socket address as the endpoint the pure half compares; 'Nothing' for a non-IP one.
+sockEndpoint :: SockAddr -> Maybe Endpoint
+sockEndpoint (SockAddrInet p h) = let (a, b, c', d) = hostAddressToTuple h in Just (endpointV4 [a, b, c', d] (fromIntegral p))
+sockEndpoint (SockAddrInet6 p _ h _) = let (a, b, c', d, e, f, g, i) = hostAddress6ToTuple h in Just (endpointV6 [a, b, c', d, e, f, g, i] (fromIntegral p))
+sockEndpoint _ = Nothing
 
 -------------------------------------------------------------------------------
 -- DNS setup
@@ -757,7 +927,9 @@ main = do
             expected <- traverse (once . expectedServers) (specDomain spec)
             -- one scan per declared nmap target, shared by its port probes
             scans <- Map.fromList <$> traverse (\t -> (\shared -> (t, shared)) <$> once (scanNmap t)) [t | Right t <- parseNmapTarget <$> specNmap spec]
-            let probes = probesWith c (\d -> maybe (expectedServers d) id expected) (\t -> Map.findWithDefault (scanNmap t) t scans) spec
+            -- one exchange with the declared STUN servers, shared by their probes
+            exchange <- once (scanStun [s | Right s <- parseStunServer <$> specStun spec])
+            let probes = probesWith c (\d -> maybe (expectedServers d) id expected) (\t -> Map.findWithDefault (scanNmap t) t scans) (const exchange) spec
             fs <- crossCheck <$> withInbound c askSsh spec (\inbound -> runReport (secs * 1000000) c (reportOp (probes <> inbound)))
             forM_ fs $ \f ->
                 if asJson
@@ -781,6 +953,7 @@ main = do
             <*> O.optional domainParser
             <*> inboundParser
             <*> many' (O.strOption (O.long "nmap" <> O.metavar "HOST:PORTS" <> O.help "scan these TCP ports of this one host with nmap, as in example.org:22,443 or [2001:db8::1]:8000-8010 (repeatable); nothing is scanned unless declared"))
+            <*> many' (O.strOption (O.long "stun" <> O.metavar "HOST:PORT" <> O.help "ask this STUN server over UDP for the address it sees this host as, as in stun.example.org:3478; declare two at distinct addresses to learn whether the NAT's mapping depends on the destination (repeatable); no default server is assumed"))
     inboundParser =
         InboundSpec
             <$> many' (O.strOption (O.long "inbound" <> O.metavar "HOST:PORT[@LISTEN]" <> O.help "ask each vantage point to open a TCP connection to this external address and port, as in 192.0.2.7:443; with @LISTEN, listen on that local port during the report and have the vantage read a one-time token back (repeatable)"))
