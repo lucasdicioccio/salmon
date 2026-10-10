@@ -1197,6 +1197,28 @@ held open, a 1.4 MB stream kept as 64 bytes, each sink, a node's lines reaching 
 `Test/ServeEventsSpec.hs` reads a node's lines off `/events`; the `CommandLine` wiring itself (the text line under
 `run up`, a real long build under `serve`) has not been run by a test.
 
+Remote calls and what they say while running (`Nodes/Ssh.hs`, `Nodes/Self.hs`). `Ssh.call`/`callWith` are `captured`
+and declare the node they always did; `Ssh.callRouted` takes a `Binary.Routing` (same `ref`, `help`, `notes`, so
+turning it on restarts nothing) and `Ssh.callTapped` also a `Binary.LineTap`, a pure `Channel -> Text -> [(Channel,
+Text)]` between a streamed line and the node's log (`Binary.withBinaryStdinTapped`; `plainLines` is the identity; it
+changes what is *said*, never the tail kept for `CommandStopped`). The self-call has one general form,
+`Self.callSelfOpts`/`uploadAndCallSelfOpts` over a `CallOpts` (ssh client options, sudo or not, `RemoteOutput`), and
+`callSelf`, `callSelfAsSudo*`, `uploadAndCallSelf*` are it at fixed options. `RemoteOutput` is the opt-in:
+`RemoteCaptured` (default), `RemoteLines` (the remote salmon's text, line by line, same node) and `RemoteReports` (the
+remote is run with `--json`, only for `up`/`down`, and `Self.remoteReportLines` re-tells each report). Load-bearing:
+**a remote report nests under the calling node as text**, a `log` line under the caller's ref reading `remote: done
+[<remote short ref>] <shorthand>` (a remote node's own line keeps its channel, an error is one line per line,
+`acted`/`tended` wrappers are looked through, a stdout line that is not a report and every stderr line pass as they
+are), so there is no new event, field or route and nothing to add to `/openapi.json`, at the price that a client
+cannot rebuild the remote graph; `--json` is part of the remote argv, so a `RemoteReports` call is a *different* node
+(another `ref`) from the captured one; and the opt-in is the caller's statement that nothing the other side prints is
+a secret. Not done: `VmProvisionConfig` has no field for it (its callers still get `captured`), no recipe opts in,
+`PostgresPair.sshToTarget` and `SecretDelivery` are untouched on purpose. `Test/RemoteOutputSpec.hs` pins the
+unchanged refs, runs the re-telling over lines encoded by `Tagged` itself, and holds a `/bin/sh` open in place of
+`ssh` to show a report is said while the command runs. Run by hand, not by a test: a binary calling itself through a
+stand-in `ssh` on `PATH` (a script that drops the host and runs the rest locally), in all three modes, text and
+`--json`. **Never run: a real ssh hop**, sudo on the far side, or any of it under `run serve`.
+
 `Podman.buildImage` builds with the Containerfile's own directory as context (the build runs *in* that directory, no
 context argument) and no `--target`; `Podman.buildImageWith` takes a `BuildOptions` for the two cases that does not
 cover: `buildContext` (the context is passed as the positional argument, `-f` gets the Containerfile's path as given,

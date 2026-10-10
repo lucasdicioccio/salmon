@@ -20,6 +20,9 @@ module Salmon.Builtin.Nodes.Binary (
     defaultTailBytes,
     withBinaryWith,
     withBinaryStdinWith,
+    LineTap,
+    plainLines,
+    withBinaryStdinTapped,
     untrackedExecWith,
     runRouted,
     tailOf,
@@ -134,7 +137,32 @@ kept: one line has one destination, and a recipe's reporter that prints
 would otherwise print every line a second time.
 -}
 withBinaryStdinWith :: Routing -> Track' (Binary x) -> Command x arg -> arg -> ByteString -> ((Reporter Report -> IO ()) -> Op) -> Op
-withBinaryStdinWith routing t cmd arg stdin consumeIO =
+withBinaryStdinWith routing = withBinaryStdinTapped routing plainLines
+
+{- | What becomes of one line a streamed command wrote, before it is said
+about the node: the channel it was read on and its text, to the lines to say
+(none to drop it, several to split it). Pure on purpose: it runs on the two
+threads reading the command's streams.
+
+It exists for a command whose output is another program's report stream
+rather than prose -- a salmon run on another machine with @--json@, see
+"Salmon.Builtin.Nodes.Self" -- where the line as written is not what a reader
+of this node's log wants. It decides what is /said/ and nothing else: the
+tail kept for 'CommandStopped' and 'CommandFailed' is the command's own
+output, untouched.
+-}
+type LineTap = Channel -> Text -> [(Channel, Text)]
+
+-- | Every line said as it was written, on the channel it was written to.
+plainLines :: LineTap
+plainLines channel line = [(channel, line)]
+
+{- | 'withBinaryStdinWith' with a 'LineTap' between the command's streamed
+lines and the node's log. Without a 'Stream' sink in the 'Routing' there are
+no lines and the tap is never called.
+-}
+withBinaryStdinTapped :: Routing -> LineTap -> Track' (Binary x) -> Command x arg -> arg -> ByteString -> ((Reporter Report -> IO ()) -> Op) -> Op
+withBinaryStdinTapped routing tap t cmd arg stdin consumeIO =
     -- we use laziness here so that the Ref we add as Referral is the Ref from the enclosed Op (which has a circular dep itself)
     let mk a = (untrackedExecWith routing cmd a stdin, Binary)
         -- wrap consumer by capturing the reporter being passed around
@@ -142,7 +170,7 @@ withBinaryStdinWith routing t cmd arg stdin consumeIO =
         fconsume f =
             let
                 g :: Reporter Report -> IO ()
-                g r = f (nodeLogTap (opAct ret) (contramap (Requested (opAct ret)) r))
+                g r = f (nodeLogTap tap (opAct ret) (contramap (Requested (opAct ret)) r))
              in
                 consumeIO g
         ret = tracking t mk arg fconsume
@@ -152,11 +180,13 @@ withBinaryStdinWith routing t cmd arg stdin consumeIO =
 the node's 'Ref' and everything else to the given reporter. With no node to
 name, everything goes to the reporter.
 -}
-nodeLogTap :: Maybe Act' -> Reporter Report -> Reporter Report
-nodeLogTap mact r = ReporterM $ \rep ->
+nodeLogTap :: LineTap -> Maybe Act' -> Reporter Report -> Reporter Report
+nodeLogTap tap mact r = ReporterM $ \rep ->
     case (mact, rep) of
         (Just act, CommandOutput _ channel line) ->
-            NodeLog.emit (NodeLog.Line act.extension.ref channel (decodeLine line))
+            mapM_
+                (\(c, l) -> NodeLog.emit (NodeLog.Line act.extension.ref c l))
+                (tap channel (decodeLine line))
         _ -> runReporter r rep
 
 decodeLine :: ByteString -> Text
