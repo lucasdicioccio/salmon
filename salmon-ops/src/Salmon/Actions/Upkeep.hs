@@ -82,6 +82,17 @@ and 'Salmon.Op.Mailbox.Resume' starts again. 'Salmon.Op.Mailbox.Force' and
 the neighbour wait and the delay both — is a choice against the mailbox, so
 an instruction is never queued behind a 60s nap.
 
+= A guarded node waits for its preconditions, and holds its siblings
+
+A node carrying a 'Salmon.Op.Guard.Guard' (see "Salmon.Builtin.Guarded") is
+an operation that cannot be undone, and gets three things no other node
+does. Its check answering 'Salmon.Actions.UpDown.Unknown' on the way in
+means "not yet" rather than "go ahead" ('awaiting'). An @up@ that refuses to
+start is not counted as a failure. And the nodes it names are paused, and
+seen to have stopped, before its @up@ runs ('holdSiblings'), then resumed
+when it completes or gives up. Parking after a failure is nothing new: it is
+'Salmon.Op.Supervision.supGiveUpAfter', which the guard sets.
+
 = Failure is waited out, not contained
 
 This is the sharpest difference from the one-shot drivers and the reason
@@ -208,8 +219,8 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, poll, waitCatch, waitCatchSTM, withAsync)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTVar)
-import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, throwIO, try)
-import Control.Monad (forM, forM_, unless)
+import Control.Exception (SomeAsyncException, SomeException, bracket, finally, fromException, throwIO, try)
+import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Data.Dynamic (Dynamic)
 import Data.Foldable (traverse_)
 import Data.Map.Strict (Map)
@@ -229,6 +240,7 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Op.Actions (Act (..))
 import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
+import Salmon.Op.Guard (Guard (..), PreconditionUnmet (..), guardOf)
 import Salmon.Op.Mailbox (Instruction (..), Mailbox)
 import qualified Salmon.Op.Mailbox as Mailbox
 import Salmon.Op.Ref (Ref, unRef)
@@ -411,6 +423,10 @@ data Machine ext = Machine
     , machineDirection :: !Direction
     , machineStatus :: !(TVar Status)
     , machineMailbox :: !Mailbox
+    , machinePaused :: !(TVar Bool)
+    -- ^ whether this machine has read a 'Salmon.Op.Mailbox.Pause' and is
+    -- standing still on it. What a guarded node waits on before it runs;
+    -- see 'holdSiblings'.
     , machineWatchdog :: !(Maybe Micros)
     , machineHolds :: !Bool
     -- ^ whether this machine holds a running
@@ -460,6 +476,20 @@ data Under = Under
     -- the ones whose leaving 'Up' sends this node back to 'WaitUp'. Empty
     -- for every node until somebody opts one in, and that emptiness is the
     -- whole of why the feature costs nothing.
+    , underPeers :: !(Map Ref Peer)
+    -- ^ how to tell another node of this supervisor to hold still, and how
+    -- to see that it has. Only nodes wanted up are in here: a teardown is
+    -- not something a neighbour's operation pauses.
+    , underClaims :: !(TVar (Map Ref (Set Ref)))
+    -- ^ which nodes are being held still, and by whom: held node to its
+    -- holders. Only a node carrying a 'Salmon.Op.Guard.Guard' with a
+    -- non-empty hold set ever writes here. See 'holdSiblings'.
+    }
+
+-- | The two things one machine needs of another to hold it still.
+data Peer = Peer
+    { peerBox :: !Mailbox
+    , peerPaused :: !(TVar Bool)
     }
 
 {- | Where a node in 'Up' last saw each of its demoting dependencies: which
@@ -648,6 +678,27 @@ startUpkeep report (Kept prior) tend dag = do
             <$> forM starting (\(aref, _, t) -> (,) aref <$> newStatus t.tendDirection)
     let statuses = fmap machineStatus adopted <> fresh
 
+    -- made before any machine starts, because every machine is handed the
+    -- whole table: a guarded node pauses its siblings through it.
+    claims <- newTVarIO (Map.empty :: Map Ref (Set Ref))
+    freshPeers <-
+        Map.fromList
+            <$> forM
+                starting
+                ( \(aref, _, _) -> do
+                    box <- Mailbox.newMailbox Mailbox.defaultCapacity
+                    still <- newTVarIO False
+                    pure (aref, Peer box still)
+                )
+    let peers =
+            fmap (\m -> Peer (machineMailbox m) (machinePaused m)) adopted
+                <> Map.fromList
+                    [ (aref, p)
+                    | (aref, _, t) <- starting
+                    , t.tendDirection == TurnUp
+                    , Just p <- [Map.lookup aref freshPeers]
+                    ]
+
     let under aref =
             let ds = Dag.dependenciesOf dag aref
              in Under
@@ -665,6 +716,8 @@ startUpkeep report (Kept prior) tend dag = do
                         , Map.member d statuses
                         , Map.lookup d strategies == Just RestForOne
                         ]
+                    , underPeers = peers
+                    , underClaims = claims
                     }
 
     -- an adopted machine came from a supervisor whose maps are now nobody's:
@@ -676,7 +729,7 @@ startUpkeep report (Kept prior) tend dag = do
     machines <- forM starting $ \(aref, act, t) -> do
         let (policy, ignored) = supervisionOf act.extension
         unless (null ignored) $ say (Policy act policy ignored)
-        box <- Mailbox.newMailbox Mailbox.defaultCapacity
+        let Peer box still = freshPeers Map.! aref
         drops <- newTVarIO 0
         under' <- newTVarIO (under aref)
         let status = statuses Map.! aref
@@ -691,6 +744,10 @@ startUpkeep report (Kept prior) tend dag = do
                     , ctxBox = box
                     , ctxDrops = drops
                     , ctxPolicy = policy
+                    , ctxPaused = still
+                    , -- a node that /is/ a running process has no @up@ for a
+                      -- guard to stand in front of. See "Salmon.Builtin.Guarded".
+                      ctxGuard = if holds then Nothing else guardOf act.extension
                     }
         -- A 'Settled' claim is about an effect that persists on its own, and
         -- a managed effect does not persist without a machine holding it. So
@@ -705,6 +762,7 @@ startUpkeep report (Kept prior) tend dag = do
                 , machineDirection = t.tendDirection
                 , machineStatus = status
                 , machineMailbox = box
+                , machinePaused = still
                 , machineWatchdog = supWatchdog policy
                 , machineHolds = holds
                 , machineUnder = under'
@@ -833,6 +891,11 @@ data Ctx ext = Ctx
     -- ^ evictions already reported, so a repeated read reports the
     -- difference rather than the running total.
     , ctxPolicy :: !Supervision
+    , ctxPaused :: !(TVar Bool)
+    -- ^ set while this machine stands still on a 'Pause'. See 'machinePaused'.
+    , ctxGuard :: !(Maybe Guard)
+    -- ^ what this node declared about being an operation that cannot be
+    -- undone, if it did. 'Nothing' for nearly every node.
     }
 
 {- | What 'upping' is to do about the node's own check before acting.
@@ -999,13 +1062,20 @@ restarting ::
     Tend ->
     IO ()
 restarting ctx t = do
-    outcome <- try @SomeException (machine t ctx)
+    -- whatever way a machine leaves, the nodes it was holding still are let
+    -- go: a holder that stopped (or was stopped) can no longer say when its
+    -- operation is over.
+    outcome <- try @SomeException (machine t ctx `finally` releaseHolds ctx)
     case outcome of
         Right () -> pure ()
         Left e
             | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
             | otherwise -> do
                 ctxSay ctx (Escaped (ctxAct ctx) e)
+                -- a machine that was standing still on somebody's say comes
+                -- back standing still: the 'Pause' it had read died with it.
+                wasPaused <- readTVarIO (ctxPaused ctx)
+                when wasPaused (void (Mailbox.post (ctxBox ctx) Pause))
                 u <- readTVarIO (ctxUnder ctx)
                 halted <- readTVarIO (underHalt u)
                 unless halted $ do
@@ -1095,39 +1165,106 @@ upkeep standing ctx =
 
     -- | Decide whether to act, then act in whichever way this node acts.
     attempt :: [Instruction] -> Intent -> Tally -> IO ()
-    attempt told intent tally
+    attempt = attemptFrom initialDelay
+
+    {- | 'attempt', carrying how long a guarded node waits before asking
+    about its preconditions again. Every other node ignores the delay.
+
+    A node carrying a 'Salmon.Op.Guard.Guard' reads
+    'Salmon.Actions.UpDown.Unknown' the way the rest of this module already
+    does once a node is up: "could not tell" is not a reason to act. For
+    such a node that is the whole point, since its check answers exactly
+    that while its preconditions are unmet, so it is asked /before/ the node
+    says it is moving and an unmet precondition never reaches 'Upping' at
+    all. Every other node keeps today's reading, where a first
+    'Salmon.Actions.UpDown.Unknown' on the way in means "go ahead". -}
+    attemptFrom :: Delay -> [Instruction] -> Intent -> Tally -> IO ()
+    attemptFrom d told intent tally
         | Just Satisfy <- override told = satisfy
         | otherwise = do
-            say (Upkeep act Upping)
-            unsettle status TurnUp
-            decided <- case (intent, told `has` Force) of
-                (_, True) -> pure (Right (Failure "forced"))
-                (Regardless why, _) -> pure (Right why)
-                (Consult, _) -> do
-                    verdict <- runCheck act
-                    pure (if satisfiedBy verdict then Left verdict else Right verdict)
-            case decided of
-                Left verdict -> do
-                    say (Acted (UpDown.Skip act))
-                    reached verdict tally
-                Right _ -> case holding of
-                    Nothing -> oneShot tally
-                    Just action -> hold action tally
+            early <- case (ctxGuard ctx, intent, told `has` Force) of
+                (Just _, Consult, False) -> Just <$> runCheck act
+                _ -> pure Nothing
+            case early of
+                Just Unknown -> awaiting d tally
+                _ -> do
+                    say (Upkeep act Upping)
+                    unsettle status TurnUp
+                    decided <- case (intent, told `has` Force) of
+                        (_, True) -> pure (Right (Failure "forced"))
+                        (Regardless why, _) -> pure (Right why)
+                        (Consult, _) -> do
+                            verdict <- maybe (runCheck act) pure early
+                            pure (if satisfiedBy verdict then Left verdict else Right verdict)
+                    case decided of
+                        Left verdict -> do
+                            say (Acted (UpDown.Skip act))
+                            reached verdict tally
+                        Right _ -> case holding of
+                            Nothing -> oneShot d tally
+                            Just action -> hold action tally
 
-    -- | An @up@ that returns, leaving something behind that persists.
-    oneShot :: Tally -> IO ()
-    oneShot tally = do
-        say (Acted (UpDown.Eval act))
-        note status "up"
-        outcome <- try @SomeException act.extension.up
-        case outcome of
-            Right () -> do
-                say (Acted (UpDown.Done act))
-                reached Success tally
-            Left e -> do
-                say (Acted (UpDown.Failed act e))
-                note status (Text.pack (show e))
-                failed (Failure (Text.pack (show e))) tally
+    {- | A guarded node whose preconditions are unmet: nothing starts, and it
+    looks again later. Said as a 'NextLook' carrying
+    'Salmon.Actions.UpDown.Unknown', which is exactly what it is.
+
+    The node's 'Status' is left as it was (not settled if it has never been
+    up, so its dependants keep waiting) and its 'Tally' is not touched: not
+    starting is not failing. The delay doubles toward the cap like any
+    other; 'Salmon.Op.Mailbox.Recheck' looks now. -}
+    awaiting :: Delay -> Tally -> IO ()
+    awaiting d tally = do
+        releaseHolds ctx
+        touch status
+        say (NextLook act Unknown (delayMicros d))
+        w <- naptime ctx (delayMicros d)
+        told <- announce ctx w
+        case w of
+            Halt -> pure ()
+            Ended _ -> pure ()
+            Demote _ -> awaiting d tally
+            Rearm{} -> awaiting d tally
+            Told _ -> paused ctx told (awaiting d tally) (attemptFrom (soonIf told d) told Consult tally)
+            Elapsed -> attemptFrom (relaxed d) told Consult tally
+
+    {- | An @up@ that returns, leaving something behind that persists.
+
+    For a guarded node with a hold set, the siblings it names are stopped
+    first ('holdSiblings') and stay stopped until the operation completes
+    ('reached'), is parked ('gaveUp') or turns out not to be startable
+    ('awaiting'). A failure that is going to be retried keeps them held
+    through the backoff: the cluster is mid-operation, which is when a
+    sibling putting itself back does the most damage. -}
+    oneShot :: Delay -> Tally -> IO ()
+    oneShot d tally = do
+        refused <- holdSiblings ctx
+        case refused of
+            Just Halt -> pure ()
+            -- told something while its siblings were stopping. Nothing has
+            -- run, so there is nothing to undo: do as told and come back.
+            Just w -> do
+                told <- announce ctx w
+                paused ctx told (attemptFrom d [] Consult tally) (attemptFrom d told Consult tally)
+            Nothing -> do
+                say (Acted (UpDown.Eval act))
+                note status "up"
+                outcome <- try @SomeException act.extension.up
+                case outcome of
+                    Right () -> do
+                        say (Acted (UpDown.Done act))
+                        reached Success tally
+                    -- refused to start, which is not the operation failing:
+                    -- reported, so the operator sees why, and not counted
+                    -- toward giving up. See "Salmon.Builtin.Guarded".
+                    Left e | Just (PreconditionUnmet why) <- fromException e -> do
+                        say (Acted (UpDown.Failed act e))
+                        note status ("not started: " <> why)
+                        say (Upkeep act WaitUp)
+                        awaiting d tally
+                    Left e -> do
+                        say (Acted (UpDown.Failed act e))
+                        note status (Text.pack (show e))
+                        failed (Failure (Text.pack (show e))) tally
 
     {- | An action that /is/ the effect. 'withAsync' rather than 'async' is
     the whole of the teardown story: cancelling this machine's thread
@@ -1217,7 +1354,9 @@ upkeep standing ctx =
                 -- a teardown. So this parks while still holding.
                 | Just Pause <- tending told -> do
                     say (Paused act)
+                    standingStill ctx True
                     heldPause
+                    standingStill ctx False
                     say (Resumed act)
                     watch running verdict d tally armed
                 -- forcing a node that is already running its own effect
@@ -1300,6 +1439,7 @@ upkeep standing ctx =
     -- | The effect is in place. Keep an eye on it.
     reached :: CheckResult -> Tally -> IO ()
     reached verdict tally = do
+        releaseHolds ctx
         now <- getMonotonicTimeNSec
         markOk ctx
         settle status verdict
@@ -1498,9 +1638,14 @@ upkeep standing ctx =
     Parked rather than exited, for two reasons: the node's dependants have to
     keep seeing it settled-and-failing, and an operator has to be able to
     change their mind. 'Force' or 'Recheck' starts it over with a clean
-    tally. -}
+    tally.
+
+    Whatever this node was holding still is let go here: a parked operation
+    is not running. A parked node told to 'Pause' stands still like any
+    other, so a sibling's guarded operation can count on it. -}
     gaveUp :: CheckResult -> Tally -> IO ()
     gaveUp why tally = do
+        releaseHolds ctx
         say (GaveUp act tally.tallyFailures)
         loop
       where
@@ -1513,11 +1658,16 @@ upkeep standing ctx =
                 Demote _ -> loop
                 Rearm{} -> loop
                 Elapsed -> loop
-                Told _
-                    | told `has` Force -> attempt told (Regardless why) freshTally
-                    | told `has` Recheck -> attempt told Consult freshTally
-                    | Just Satisfy <- override told -> satisfy
-                    | otherwise -> loop
+                Told _ ->
+                    paused ctx told loop $
+                        if told `has` Force
+                            then attempt told (Regardless why) freshTally
+                            else
+                                if told `has` Recheck
+                                    then attempt told Consult freshTally
+                                    else case override told of
+                                        Just Satisfy -> satisfy
+                                        _ -> loop
 
     {- | An operator said "treat this as done". Settled without acting, and
     still tended: the instruction satisfies this attempt, it does not stop
@@ -1525,6 +1675,7 @@ upkeep standing ctx =
     does that. -}
     satisfy :: IO ()
     satisfy = do
+        releaseHolds ctx
         say (Acted (UpDown.Skip act))
         markOk ctx
         settle status Skipped
@@ -1870,13 +2021,14 @@ paused ctx told onResume onwards =
     case tending told of
         Just Pause -> do
             ctxSay ctx (Paused (ctxAct ctx))
+            standingStill ctx True
             hold
         _ -> onwards
   where
     hold = do
         w <- atomically (halting HeedHalt ctx (listen ctx retry))
         case w of
-            Halt -> pure ()
+            Halt -> standingStill ctx False
             Ended _ -> pure ()
             Demote _ -> hold
             Rearm{} -> hold
@@ -1885,9 +2037,121 @@ paused ctx told onResume onwards =
                 _ <- announce ctx (Told ts)
                 case tending ts of
                     Just Resume -> do
+                        standingStill ctx False
                         ctxSay ctx (Resumed (ctxAct ctx))
                         onResume
                     _ -> hold
+
+-- | Publish whether this machine is standing still on a 'Pause', for a
+-- guarded node waiting on it. See 'holdSiblings'.
+standingStill :: Ctx ext -> Bool -> IO ()
+standingStill ctx = atomically . writeTVar (ctxPaused ctx)
+
+{- | Stop the nodes this node's 'Salmon.Op.Guard.Guard' names, and wait until
+they have all stopped. 'Nothing' once they have (or there was nobody to
+stop); otherwise why the wait ended first, with nothing left held.
+
+The hold is a 'Pause' through each sibling's mailbox, so it means what an
+operator's 'Pause' means: the sibling's effect is untouched and its machine
+stops tending it. A sibling in the middle of its own @up@ finishes that
+first, which is why this waits rather than posting and carrying on.
+
+Three rules keep it from turning into a deadlock or a surprise:
+
+* __A node that is itself held does not claim anybody.__ Two guarded nodes
+  naming each other would otherwise each stop the other and wait forever.
+  The claim is one transaction over 'underClaims', so exactly one of them
+  wins and the other hears its 'Pause'.
+* __A sibling already standing still on somebody else's say is not
+  touched__, and so is not resumed on release either: an operator's 'Pause'
+  outlives a neighbour's operation. One held by another guarded node is
+  joined instead, and resumes when the last holder lets go.
+* __A name nobody here is tending is skipped__, the same call 'standby'
+  makes about an untended dependency: nothing is going to move it.
+
+An operator can still say 'Resume' to a held sibling, and is obeyed.
+-}
+holdSiblings :: Ctx ext -> IO (Maybe Wake)
+holdSiblings ctx =
+    case maybe [] guardHolds (ctxGuard ctx) of
+        [] -> pure Nothing
+        wanted -> do
+            claimed <- atomically (claim wanted)
+            case claimed of
+                Left w -> pure (Just w)
+                Right (fresh, everyone) -> do
+                    forM_ fresh $ \p -> Mailbox.post (peerBox p) Pause
+                    w <-
+                        atomically $
+                            halting HeedHalt ctx $
+                                listen ctx $ do
+                                    still <- traverse (readTVar . peerPaused) everyone
+                                    if and still then pure Elapsed else retry
+                    case w of
+                        Elapsed -> pure Nothing
+                        _ -> releaseHolds ctx >> pure (Just w)
+  where
+    me = ctxRef ctx
+
+    -- the siblings to send a 'Pause' to, and the ones to wait for.
+    claim :: [Ref] -> STM (Either Wake ([Peer], [Peer]))
+    claim wanted = do
+        u <- readTVar (ctxUnder ctx)
+        stop <- readTVar (underHalt u)
+        if stop
+            then pure (Left Halt)
+            else do
+                told <- Mailbox.takeAll (ctxBox ctx)
+                claims <- readTVar (underClaims u)
+                let mine = Map.filter (Set.member me) claims
+                if not (null told)
+                    then pure (Left (Told told))
+                    else
+                        if not (Map.null mine)
+                            then -- a retry of an operation still under way
+                                pure (Right ([], []))
+                            else
+                                if Map.member me claims
+                                    then retry
+                                    else do
+                                        let peers =
+                                                [ (r, p)
+                                                | r <- Set.toList (Set.fromList wanted)
+                                                , r /= me
+                                                , Just p <- [Map.lookup r (underPeers u)]
+                                                ]
+                                        let held = [rp | rp@(r, _) <- peers, Map.member r claims]
+                                        free <-
+                                            filterM
+                                                (\(_, p) -> not <$> readTVar (peerPaused p))
+                                                [rp | rp@(r, _) <- peers, not (Map.member r claims)]
+                                        writeTVar (underClaims u) $
+                                            foldr
+                                                (\(r, _) -> Map.insertWith Set.union r (Set.singleton me))
+                                                claims
+                                                (held <> free)
+                                        pure (Right (fmap snd free, fmap snd (held <> free)))
+
+{- | Let go of every node this one is holding still. A sibling nobody else is
+holding is told to 'Resume'; one that another guarded node also holds stays
+where it is. Does nothing for a node holding nobody, which is nearly all of
+them.
+-}
+releaseHolds :: Ctx ext -> IO ()
+releaseHolds ctx =
+    case ctxGuard ctx of
+        Nothing -> pure ()
+        Just _ -> do
+            freed <- atomically $ do
+                u <- readTVar (ctxUnder ctx)
+                claims <- readTVar (underClaims u)
+                let me = ctxRef ctx
+                let mine = Map.keys (Map.filter (Set.member me) claims)
+                let letGo hs = let hs' = Set.delete me hs in if Set.null hs' then Nothing else Just hs'
+                let claims' = foldr (Map.update letGo) claims mine
+                unless (null mine) (writeTVar (underClaims u) claims')
+                pure [p | r <- mine, not (Map.member r claims'), Just p <- [Map.lookup r (underPeers u)]]
+            forM_ freed $ \p -> Mailbox.post (peerBox p) Resume
 
 -- | The last 'Pause'/'Resume' said, if either was.
 tending :: [Instruction] -> Maybe Instruction

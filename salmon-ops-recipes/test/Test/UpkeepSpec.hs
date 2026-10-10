@@ -24,11 +24,12 @@ module Test.UpkeepSpec (tests) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket)
+import Control.Exception (ErrorCall (..), bracket, fromException, throwIO)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, retry)
 import Control.Monad (unless, void)
 import Data.Dynamic (toDyn)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (findIndex)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -45,17 +46,18 @@ import qualified Salmon.Actions.Upkeep as Upkeep
 -- HasField for fields whose selector is in scope, and 'Upkeep' asks for
 -- several this module never mentions by name.
 import Salmon.Builtin.Extension (Extension, Op, check, deps, down, dynamics, evalDeps, help, managed, nodeps, notes, op, opAct, ref, up)
+import Salmon.Builtin.Guarded (Guarding (..), Precondition (..), PreconditionUnmet (..), defaultGuarding, guarded)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Mailbox (Instruction (..))
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Status (Direction (..))
-import Salmon.Op.Supervision (Restart (..), Strategy (..), Supervision (..), defaultSupervision, millis, seconds, supervised)
+import Salmon.Op.Supervision (Restart (..), Strategy (..), Supervision (..), defaultSupervision, millis, seconds, supervised, supervisionOf)
 import Salmon.Reporter (ReporterM (..))
 import System.Directory (doesDirectoryExist, removeDirectory)
 import System.FilePath ((</>))
-import Test.Harness (withTempDir)
+import Test.Harness (runUpCapturing, withTempDir)
 
 tests :: TestTree
 tests =
@@ -122,6 +124,19 @@ tests =
             "adoption sees a changed Supervision policy (I5)"
             [ testCase "a policy-only change is not adopted, and the process restarts" changedPolicyIsNotAdopted
             , testCase "an unchanged policy is adopted, and the process is not restarted" unchangedPolicyIsAdopted
+            ]
+        , testGroup
+            "a guarded operation (Salmon.Builtin.Guarded)"
+            [ testCase "an unmet precondition stays Unknown and starts nothing" guardedWaitsForPreconditions
+            , testCase "a refusal at up time is reported and not counted as a failure" guardedRefusalIsNotCounted
+            , testCase "a failing up parks after its attempts and does not restart on its own" guardedParksOnFailure
+            , testCase "siblings in the hold set are paused for the duration" guardedHoldsSiblings
+            , testCase "a sibling in the middle of its own up is waited for" guardedWaitsForSiblingInFlight
+            , testCase "a parked operation lets its siblings go" guardedReleasesOnPark
+            , testCase "a sibling the operator paused is left paused" guardedLeavesOperatorPauseAlone
+            , testCase "two operations holding each other both get to run" guardedMutualHoldsDoNotDeadlock
+            , testCase "a one-shot pass refuses rather than acts" guardedOneShotRefuses
+            , testCase "the node keeps its own supervision, and a changed hold set is a changed node" guardedDeclaration
             ]
         ]
 
@@ -1427,3 +1442,326 @@ unchangedPolicyIsAdopted = within 10 $ do
     assertEqual "nothing was released" 0 (length [() | Released _ <- rs])
     kept2 <- Upkeep.stopUpkeep sup2
     void (Upkeep.releaseKept r (const False) kept2)
+
+-------------------------------------------------------------------------------
+-- guarded operations
+
+{- | A risky operation as a node: not done until its @up@ has run, and its
+@up@ counts how often that was. The preconditions are whatever the 'IORef'
+says at the moment they are asked.
+-}
+riskyNode :: Text -> Guarding -> IORef Precondition -> IORef Bool -> IO () -> Op
+riskyNode name g pre done act =
+    node name $ \x ->
+        guarded
+            g
+            (readIORef pre)
+            x
+                { check = do
+                    ok <- readIORef done
+                    pure (if ok then Success else Failure "not done")
+                , up = act >> writeIORef done True
+                }
+
+-- | A sibling: something with a real check, so its machine polls rather
+-- than parks and a pause is a change in what it does.
+siblingNode :: Text -> IO () -> Op
+siblingNode name act =
+    node name $ \x -> x{check = pure (Failure "always wants putting back"), up = act}
+
+unknownLooksAt :: Text -> [Report Extension] -> Int
+unknownLooksAt name rs = length [() | NextLook a Unknown _ <- rs, a.shorthand == name]
+
+indexOf :: (Report Extension -> Bool) -> [Report Extension] -> Maybe Int
+indexOf = findIndex
+
+isPausedOf, isResumedOf, isEvalOf, isDoneOf :: Text -> Report Extension -> Bool
+isPausedOf name (Paused a) = a.shorthand == name
+isPausedOf _ _ = False
+isResumedOf name (Resumed a) = a.shorthand == name
+isResumedOf _ _ = False
+isEvalOf name (Acted (UpDown.Eval a)) = a.shorthand == name
+isEvalOf _ _ = False
+isDoneOf name (Acted (UpDown.Done a)) = a.shorthand == name
+isDoneOf _ _ = False
+
+{- | Rule one. While the preconditions are unmet the node's check answers
+'Unknown', and for a guarded node that means "keep looking": its @up@ never
+runs, it never says it is moving, and a node standing on it keeps waiting.
+The moment they are met it goes, with nobody re-declaring anything.
+-}
+guardedWaitsForPreconditions :: IO ()
+guardedWaitsForPreconditions = within 10 $ do
+    pre <- newIORef (Unmet "a replica is lagging")
+    done <- newIORef False
+    (ran, bump) <- counter
+    (after, bumpAfter) <- counter
+    let upgrade = riskyNode "upgrade" defaultGuarding pre done bump
+        top = nodeOn "after" [upgrade] $ \x -> x{up = bumpAfter}
+    supervising (dagOf top) allUp $ \sup trace -> do
+        await trace (\rs -> unknownLooksAt "upgrade" rs >= 1)
+        -- look again, at once, rather than waiting out a nap to prove it
+        void (Upkeep.instruct sup (refOf "upgrade") Recheck)
+        await trace (\rs -> unknownLooksAt "upgrade" rs >= 2)
+        rs <- seen trace
+        assertEqual "nothing started" 0 =<< readIORef ran
+        assertEqual "it never said it was running anything" [] (evals rs)
+        assertEqual "nor that it was moving" 0 (reachedBy "upgrade" Upping rs)
+        assertEqual "and what stands on it waited" 0 =<< readIORef after
+        assertEqual "no failure was counted" [] [n | GaveUp _ n <- rs]
+        writeIORef pre Met
+        void (Upkeep.instruct sup (refOf "upgrade") Recheck)
+        await trace (\rs -> donesOf "after" rs >= 1)
+        assertEqual "ran once the preconditions were met" 1 =<< readIORef ran
+
+{- | The preconditions can stop holding between the check and the @up@. The
+@up@ asks again and refuses, and a refusal is not the operation failing:
+with a limit of one failure, counting it would park an operation that never
+started.
+-}
+guardedRefusalIsNotCounted :: IO ()
+guardedRefusalIsNotCounted = within 10 $ do
+    asked <- newIORef (0 :: Int)
+    always <- newIORef False
+    done <- newIORef False
+    (ran, bump) <- counter
+    -- met the first time it is asked (the check), unmet after that (the up)
+    let pre = do
+            n <- atomicModifyIORef' asked (\k -> (k + 1, k))
+            ok <- readIORef always
+            pure (if ok || n == 0 then Met else Unmet "the leader moved")
+        o =
+            node "upgrade" $ \x ->
+                guarded
+                    defaultGuarding
+                    pre
+                    x
+                        { check = do
+                            ok <- readIORef done
+                            pure (if ok then Success else Failure "not done")
+                        , up = bump >> writeIORef done True
+                        }
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> unknownLooksAt "upgrade" rs >= 1)
+        rs <- seen trace
+        assertEqual "the operation itself never ran" 0 =<< readIORef ran
+        assertEqual
+            "the refusal was said, as what it is"
+            [True]
+            [ case fromException e of
+                Just (PreconditionUnmet _) -> True
+                Nothing -> False
+            | Acted (UpDown.Failed _ e) <- rs
+            ]
+        assertEqual "and did not park the node" [] [n | GaveUp _ n <- rs]
+        writeIORef always True
+        void (Upkeep.instruct sup (refOf "upgrade") Recheck)
+        await trace (\rs -> donesOf "upgrade" rs >= 1)
+        assertEqual "it ran once it could" 1 =<< readIORef ran
+
+{- | Rule two. A real failure is counted, and at the limit the node parks: no
+retry on a timer, however long it is left. 'Force' is the operator clearing
+the latch.
+-}
+guardedParksOnFailure :: IO ()
+guardedParksOnFailure = within 20 $ do
+    pre <- newIORef Met
+    done <- newIORef False
+    (ran, bump) <- counter
+    let o =
+            riskyNode
+                "upgrade"
+                defaultGuarding{guardingAttempts = 2}
+                pre
+                done
+                (bump >> throwIO (ErrorCall "pg_upgrade exited 1"))
+    supervising (dagOf o) allUp $ \sup trace -> do
+        await trace (\rs -> not (null [n | GaveUp _ n <- rs]))
+        assertEqual "tried exactly as often as it was allowed" 2 =<< readIORef ran
+        -- nothing to await for a non-event. Three times the retry floor: an
+        -- unparked node would have had another go well inside it.
+        threadDelay 1500000
+        assertEqual "and did not start over on its own" 2 =<< readIORef ran
+        rs <- seen trace
+        assertEqual "parked once" [2] [n | GaveUp _ n <- rs]
+        void (Upkeep.instruct sup (refOf "upgrade") Force)
+        await trace (\rs -> length [n | GaveUp _ n <- rs] >= 2)
+        n <- readIORef ran
+        assertBool "an operator starts it over" (n >= 3)
+
+{- | Rule three. The siblings named in the hold set are paused before the
+operation's @up@ starts and resumed after it has finished, and in between
+they do nothing even when told to look.
+-}
+guardedHoldsSiblings :: IO ()
+guardedHoldsSiblings = within 10 $ do
+    pre <- newIORef (Unmet "not yet")
+    done <- newIORef False
+    gate <- newEmptyMVar
+    (sibling, bumpSibling) <- counter
+    let replica = siblingNode "replica" bumpSibling
+        upgrade =
+            riskyNode
+                "upgrade"
+                defaultGuarding{guardingHolds = [refOf "replica"]}
+                pre
+                done
+                (takeMVar gate)
+        top = nodeOn "top" [replica, upgrade] id
+    supervising (dagOf top) allUp $ \sup trace -> do
+        -- the sibling is up and being tended before the operation starts
+        await trace (\rs -> reachedBy "replica" Up rs >= 1)
+        writeIORef pre Met
+        void (Upkeep.instruct sup (refOf "upgrade") Recheck)
+        await trace (any (isEvalOf "upgrade"))
+        before <- seen trace
+        assertBool
+            "the sibling was paused before the operation started"
+            (maybe False (\i -> Just i < indexOf (isEvalOf "upgrade") before) (indexOf (isPausedOf "replica") before))
+        held <- readIORef sibling
+        -- a tended node would look, find its effect missing and re-apply
+        void (Upkeep.instruct sup (refOf "replica") Recheck)
+        await trace (\rs -> not (null [() | Acted (UpDown.Instructed a Recheck) <- rs, a.shorthand == "replica"]))
+        assertEqual "held still while the operation ran" held =<< readIORef sibling
+        during <- seen trace
+        assertBool "and not resumed yet" (not (any (isResumedOf "replica") during))
+        putMVar gate ()
+        await trace (any (isResumedOf "replica"))
+        after <- seen trace
+        assertBool
+            "resumed once the operation was done"
+            (indexOf (isDoneOf "upgrade") after < indexOf (isResumedOf "replica") after)
+
+{- | Posting a 'Pause' is not the sibling having stopped: one in the middle
+of its own @up@ only reads its mailbox when that returns. The operation
+waits for it.
+-}
+guardedWaitsForSiblingInFlight :: IO ()
+guardedWaitsForSiblingInFlight = within 10 $ do
+    pre <- newIORef Met
+    done <- newIORef False
+    gate <- newEmptyMVar
+    (ran, bump) <- counter
+    first <- newIORef True
+    -- blocks the first time only: once resumed it is re-applied again, and
+    -- must not sit in an up nobody will ever release.
+    let slowOnce = do
+            block <- atomicModifyIORef' first (\was -> (False, was))
+            if block then takeMVar gate else pure ()
+    let replica = siblingNode "replica" slowOnce
+        upgrade = riskyNode "upgrade" defaultGuarding{guardingHolds = [refOf "replica"]} pre done bump
+        top = nodeOn "top" [replica, upgrade] id
+    supervising (dagOf top) allUp $ \_ trace -> do
+        await trace (\rs -> any (isEvalOf "replica") rs && reachedBy "upgrade" Upping rs >= 1)
+        -- nothing to await for a non-event: time it could have used to start
+        threadDelay 300000
+        assertEqual "not started while the sibling is mid-up" 0 =<< readIORef ran
+        putMVar gate ()
+        await trace (\rs -> donesOf "upgrade" rs >= 1)
+        rs <- seen trace
+        assertBool
+            "started only after the sibling had stopped"
+            (maybe False (\i -> Just i < indexOf (isEvalOf "upgrade") rs) (indexOf (isPausedOf "replica") rs))
+
+-- | The other way a hold ends: the operation is parked, so it is not
+-- running, so nothing is held.
+guardedReleasesOnPark :: IO ()
+guardedReleasesOnPark = within 10 $ do
+    pre <- newIORef Met
+    done <- newIORef False
+    let replica = siblingNode "replica" (pure ())
+        upgrade =
+            riskyNode
+                "upgrade"
+                defaultGuarding{guardingHolds = [refOf "replica"]}
+                pre
+                done
+                (throwIO (ErrorCall "failed halfway"))
+        top = nodeOn "top" [replica, upgrade] id
+    supervising (dagOf top) allUp $ \_ trace -> do
+        await trace (\rs -> not (null [() | GaveUp{} <- rs]) && any (isResumedOf "replica") rs)
+        rs <- seen trace
+        assertBool "it had been paused" (any (isPausedOf "replica") rs)
+
+{- | A sibling an operator paused is not this operation's to resume: it was
+standing still before, and it is standing still after.
+-}
+guardedLeavesOperatorPauseAlone :: IO ()
+guardedLeavesOperatorPauseAlone = within 10 $ do
+    pre <- newIORef (Unmet "not yet")
+    done <- newIORef False
+    let replica = siblingNode "replica" (pure ())
+        upgrade = riskyNode "upgrade" defaultGuarding{guardingHolds = [refOf "replica"]} pre done (pure ())
+        top = nodeOn "top" [replica, upgrade] id
+    supervising (dagOf top) allUp $ \sup trace -> do
+        await trace (\rs -> reachedBy "replica" Up rs >= 1)
+        void (Upkeep.instruct sup (refOf "replica") Pause)
+        await trace (any (isPausedOf "replica"))
+        writeIORef pre Met
+        void (Upkeep.instruct sup (refOf "upgrade") Recheck)
+        -- the hold is let go before the operation says it is up
+        await trace (\rs -> reachedBy "upgrade" Up rs >= 1)
+        rs <- seen trace
+        assertEqual "the operation ran" 1 (donesOf "upgrade" rs)
+        assertBool "and the operator's pause outlived it" (not (any (isResumedOf "replica") rs))
+
+{- | Two operations each naming the other. Without the claim being one
+transaction they would each pause the other and wait forever.
+-}
+guardedMutualHoldsDoNotDeadlock :: IO ()
+guardedMutualHoldsDoNotDeadlock = within 20 $ do
+    pre <- newIORef Met
+    doneA <- newIORef False
+    doneB <- newIORef False
+    running <- newIORef (0 :: Int)
+    overlap <- newIORef False
+    let body = do
+            n <- atomicModifyIORef' running (\k -> (k + 1, k + 1))
+            unless (n == 1) (writeIORef overlap True)
+            threadDelay 100000
+            atomicModifyIORef' running (\k -> (k - 1, ()))
+        a = riskyNode "a" defaultGuarding{guardingHolds = [refOf "b"]} pre doneA body
+        b = riskyNode "b" defaultGuarding{guardingHolds = [refOf "a"]} pre doneB body
+        top = nodeOn "top" [a, b] id
+    supervising (dagOf top) allUp $ \_ trace -> do
+        await trace (\rs -> donesOf "a" rs >= 1 && donesOf "b" rs >= 1)
+        assertEqual "and never at the same time" False =<< readIORef overlap
+
+{- | @run up@ maps 'Unknown' to "run @up@", so the check alone would not hold
+a one-shot pass back. The guarded @up@ does: it throws, the node is reported
+failed, and what stands on it is blocked.
+-}
+guardedOneShotRefuses :: IO ()
+guardedOneShotRefuses = do
+    pre <- newIORef (Unmet "a replica is lagging")
+    done <- newIORef False
+    (ran, bump) <- counter
+    let upgrade = riskyNode "upgrade" defaultGuarding pre done bump
+        top = nodeOn "after" [upgrade] id
+    refused <- runUpCapturing top
+    assertEqual "the operation did not run" 0 =<< readIORef ran
+    assertEqual "it is a failure of the pass" ["upgrade"] [a.shorthand | UpDown.Failed a _ <- refused]
+    assertEqual "and its dependant is blocked" ["after"] [a.shorthand | UpDown.Blocked a <- refused]
+    writeIORef pre Met
+    allowed <- runUpCapturing top
+    assertEqual "met, it runs" 1 =<< readIORef ran
+    assertEqual "and is done" ["upgrade", "after"] [a.shorthand | UpDown.Done a <- allowed]
+
+guardedDeclaration :: IO ()
+guardedDeclaration = do
+    let declared holds =
+            node "upgrade" $ \x ->
+                guarded
+                    defaultGuarding{guardingHolds = holds}
+                    (pure Met)
+                    x{dynamics = [supervised defaultSupervision{supWatchdog = Just (seconds 30)}]}
+        actOf o = Dag.representativeOf (dagOf o) (refOf "upgrade")
+    case (actOf (declared [refOf "a"]), actOf (declared [refOf "a"]), actOf (declared [refOf "b"])) of
+        (Just one, Just same, Just other) -> do
+            assertEqual
+                "its own policy, with only the give-up limit set"
+                (defaultSupervision{supWatchdog = Just (seconds 30), supGiveUpAfter = Just 1}, [])
+                (supervisionOf one.extension)
+            assertBool "the same declaration is the same node" (Dag.sameRepresentative one same)
+            assertBool "a different hold set is not" (not (Dag.sameRepresentative one other))
+        _ -> assertBool "the node is in its own dag" False

@@ -255,6 +255,45 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   and tells a callback when the next opens. The window belongs to the *invocation*, the opt-in to the node.
   Wired into `run up` only (`--maintenance-window`, repeatable; `--override-window`); a held node is a `Skip`,
   not a failure, so it does not block dependants. Not yet consulted by `run serve`/`Upkeep`, nor shown in `status`.
+- **`Builtin/Guarded.hs`** (with `Op/Guard.hs`, the part `Dag` and `Upkeep` can import) is the pattern for an
+  operation that cannot be undone, written once as a combinator over an existing node:
+  `guarded :: Guarding -> IO Precondition -> Extension -> Extension`. Three rules.
+  **Preconditions are in `check`**: effect absent and preconditions unmet is `Unknown`, and a satisfied check
+  outranks them (an upgrade that happened is done). They are asked again at the top of `up`, which throws
+  `PreconditionUnmet` instead of acting, because the one-shot drivers map `Unknown` to "run `up`": under `run up`
+  the operation is *refused and reported failed*, and its dependants are `Blocked`. A probe that throws counts as
+  unmet. **A failure parks**: `guarded` sets `supGiveUpAfter` (one, unless `guardingAttempts` says otherwise) on
+  whatever `Supervision` the node already declared. **Siblings hold still**: `guardingHolds` is an explicit list
+  of `Ref`s, carried on `dynamics` as a `Guard` (rendered by value in `Dag.showDynamic`, so a changed hold set is
+  a changed representative).
+  The hold set is explicit and not read off the graph, deliberately: an edge keeps a dependant from coming up
+  *before* the node, but says nothing to a node that is already up, whose machine would notice its effect
+  disturbed mid-operation and put it back; and the nodes to hold are usually not dependants at all.
+  What `Upkeep` does with a node carrying a `Guard` (and nothing changes for a node without one):
+  a `Consult`ed check answering `Unknown` *waits and looks again* (`awaiting`, said as `NextLook _ Unknown _`, on
+  the doubling ladder; `Recheck` looks now) rather than acting, asked before the node says `Upping`, with the
+  `Status` left unsettled so dependants keep waiting; a `PreconditionUnmet` thrown by `up` is reported `Failed`
+  (the `Eval`/`Failed` pairing is kept) but **not counted** toward giving up; before `up` runs, `holdSiblings`
+  claims the hold set in one STM transaction (`Under.underClaims`: held node to holders), posts `Pause` to each
+  member's mailbox, and **waits until each has actually stopped** (`machinePaused`), since a sibling in the middle
+  of its own `up` only reads its mailbox afterwards; `Resume` is posted when the operation completes, is parked,
+  turns out not to be startable, or its machine leaves by any route (`restarting`'s `finally`). A failure that
+  will be retried keeps the siblings held through the backoff. Three rules there are load-bearing: a node that is
+  itself held claims nobody (two operations naming each other serialize instead of deadlocking); a sibling already
+  paused by an operator is neither paused nor resumed by the hold, and one held by two operations resumes when the
+  last lets go; a name no machine here is tending up is skipped. An operator's `Resume` to a held sibling is
+  obeyed. `Force` does not bypass preconditions (it overrides the check, `up` asks again). One side effect on
+  existing nodes: a node that has given up now honours `Pause` like every other state (it used to ignore it), so
+  a hold can count on it.
+  **Not done, and it matters under `run serve`:** the park lives in the node's machine, and `serve` rebuilds
+  one-shot machines on every command (`stopTending`), so there the latch lasts until the next command, after
+  which the node gets a fresh tally; a convergence pass is one-shot, so it pauses nobody and its failed attempt
+  is `Errored`, not parked. Preconditions are enforced on both paths. Making the park survive a command needs a
+  `serve`-side record and a gate verdict that blocks dependants (a `Skip` would let them proceed), which is its
+  own piece of work, as is showing "parked" as its own state in `status`/the status sink. No report says *why* a
+  sibling was paused. `managed` nodes are not guarded. No builtin uses `guarded` yet.
+  Run: `Test/UpkeepSpec.hs`'s "a guarded operation" group, Layer 0, in-process. Never run against a real
+  cluster, and not under `serve`.
 - **`Actions/Concurrent.hs`** is the same two walks with one thread per node. Each node gets a
   `TVar Status` (`Op/Status.hs`) and blocks on `waitStability` over its neighbours — dependencies
   going up, dependants coming down — so STM's `retry` does the scheduling: no counters, no

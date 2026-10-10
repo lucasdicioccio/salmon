@@ -260,7 +260,10 @@ expressible with what already exists:
   preconditions in the node's `check` (`Unknown` when unmet, so nothing
   starts), `supGiveUpAfter` with the node parked, and a way to tell sibling
   nodes on the same cluster to hold still while it runs (a `Pause`, see
-  `Op/Mailbox.hs`); that last one has no counterpart yet.
+  `Op/Mailbox.hs`). *All three are assembled by `Salmon.Builtin.Guarded`
+  (`guarded`), with an explicit hold set rather than one read off the
+  graph; the park does not yet survive a command under `run serve`, and no
+  Patroni node uses it yet. See `resources/module-notes.md`.*
 
 ## Disaster scenarios
 
