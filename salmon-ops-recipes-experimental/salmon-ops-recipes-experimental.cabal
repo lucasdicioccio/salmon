@@ -28,15 +28,18 @@ library
                    , SreBox.KitchenSinkMultiSites
                    , SreBox.CertSigning
                    , Salmon.Builtin.Nodes.Acme
+                   , Salmon.Builtin.Nodes.PgTurret
     build-depends:    base >=4.16.3.0
                     , acme-not-a-joke
                     , aeson
                     , bytestring
+                    , containers
                     , contravariant
                     , crypton-connection
                     , crypton-x509
                     , crypton-x509-store
                     , crypton-x509-validation
+                    , directory
                     , filepath
                     , http-client
                     , http-client-tls
@@ -56,3 +59,22 @@ library
                       , OverloadedRecordDot
                       , TypeApplications
                       , ScopedTypeVariables
+
+test-suite salmon-ops-recipes-experimental-test
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    other-modules:    Test.PgTurretSpec
+    build-depends:    base
+                    , bytestring
+                    , directory
+                    , salmon-core
+                    , salmon-ops
+                    , salmon-ops-recipes-experimental
+                    , tasty
+                    , tasty-hunit
+                    , text
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+    ghc-options:      -threaded

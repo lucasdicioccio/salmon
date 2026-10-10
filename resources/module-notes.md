@@ -23,7 +23,9 @@ semantics regardless of whether a node is as small as "create a file" or as larg
 - `salmon-ops-recipes-experimental` — recipes that need heavier or less-stable dependencies:
   `SreBox.KitchenSinkBlog`/`SreBox.KitchenSinkMultiSites` (pull in the `kitchen-sink` library) and
   `SreBox.GeneratedSite` (builds/publishes kitchen-sink-generated sites via `SreBox.CabalBuilding`),
-  plus `SreBox.CertSigning` and the `Salmon.Builtin.Nodes.Acme` builtin (pull in `acme-not-a-joke`).
+  plus `SreBox.CertSigning` and the `Salmon.Builtin.Nodes.Acme` builtin (pull in `acme-not-a-joke`),
+  and `Salmon.Builtin.Nodes.PgTurret` (no heavy dependency: it is here because the extension it
+  configures is a 0.0.0, and nothing enables it). The package has a test suite, Layer 0 only.
   Split out of `salmon-ops-recipes` so that package's build stays fast; **not** part of the
   default `cabal.project` package set — it's only built via `cabal.perso.project` (see below).
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
@@ -1672,6 +1674,60 @@ than running commands that exit non-zero when there is nothing to do, and
 systemd's `NeedDaemonReload`. `restartCluster` and `promoteCluster` stay unconditional: a
 restart is not a state, and "not in recovery" is a fact about a *pair* of machines that one of
 them cannot answer alone.
+
+`Salmon.Builtin.Nodes.PgTurret` (in `salmon-ops-recipes-experimental`, used by no recipe) makes one
+cluster ship its log lines through the `pg_turret` extension: `pgTurret` is the artifact's files
+(`pg-turret-file`, compared byte for byte), then `preloadLibrary`, then `restartClusterIfPending`,
+then `pg-turret-settings`, then `Postgres.extension` for the databases of `turretFunctionsIn`
+(empty by default: the SQL objects are counters, the hook comes from the preloaded library). It
+takes a pre-built artifact as three paths and does not build one. Load-bearing:
+- **Every setting name is copied from the extension's `src/lib.rs` at commit `5c7407af`**
+  (`upstreamNames` in `Test/PgTurretSpec.hs` is that list, written by hand), with the ranges it
+  registers (`problems`). The extension is single-maintainer and unversioned: re-read that file
+  before trusting any name against a newer build.
+- `preloadLibrary` is a read-modify-write of `shared_preload_libraries` (`ALTER SYSTEM SET`
+  replaces the whole value). It reads the list from `pg_file_settings`, not from the running
+  server, because a library another node added and that still waits for its restart is only in
+  the files; it does not filter on `error IS NULL`, because that column is how
+  `pg_file_settings` marks exactly those entries. It ends with `pg_reload_conf()`: **without a
+  reload `pg_settings.pending_restart` stays false** and `restartClusterIfPending` would see
+  nothing to do (observed on a stock PostgreSQL 16; `primaryReplicationSetup` sets restart-only
+  settings with no reload before the same check, which is worth a look and was not looked at
+  here). Two `preloadLibrary` nodes need an edge between them, and an `alterSystemSet` of the
+  same parameter undoes it every pass.
+- The settings come **after** the restart: a server without the library loaded answers
+  `unrecognized configuration parameter` to `ALTER SYSTEM SET pg_turret.*` (observed on 16). For
+  the same reason `down` skips the reset when the library is not in the running list.
+- All `pg_turret.*` settings are `sighup`, so the settings node reloads and never restarts.
+  `num_workers` is the exception in effect: the extension reads it once at load, PostgreSQL does
+  not flag it `pending_restart`, and this node does not restart for it.
+- Credentials (`http.api_key`, `kafka.api_key`, `kafka.api_secret`) are `SecretFile` paths read at
+  `up`/`check`. The batch goes to `psql` on stdin, not through `Binary`'s tracked commands (their
+  reports and `CommandFailed` carry the output); the failure text is `psql`'s stderr after `scrub`.
+  The `check` query holds names only and the comparison is done in-process; a credential that
+  differs is named by setting and path. The batch first turns off `log_statement`,
+  `log_min_error_statement`, `log_min_duration_statement` and `pg_stat_statements.track_utility`
+  for its session.
+- **What that does not cover, and cannot while the extension takes credentials as settings**:
+  the settings are not superuser-only (any role can `SHOW pg_turret.http.api_key`), they sit in
+  `postgresql.auto.conf`, and on reload the postmaster logs `parameter "..." changed to "..."`
+  with the new value (observed), into the log this extension ships.
+- Left out on purpose: the Sentry adapter (its settings are registered but the worker reads a
+  JSON file written by a SQL function instead, by reading the source), any recipe wiring, Patroni
+  (where `shared_preload_libraries` belongs to the cluster-wide config), a build recipe.
+- `defaultFilter` excludes `^pg_turret: `, the worker's own failure lines, which the hook would
+  otherwise capture and send on the next poll. By reading the source, the filter state is set in
+  the worker's process only, so it may not apply to ordinary backends' lines at all.
+
+Run: Layer 0 (`cabal test --project-file=cabal.perso.project salmon-ops-recipes-experimental`),
+and the rendered statements fed by hand to a stock `postgres:16-alpine` container **without the
+extension**: the list read/merge/empty round trip, `pending_restart` with and without a reload,
+the refusal of unknown `pg_turret.*` names, the session settings keeping a statement out of the
+server log under `log_statement=all`, the JSON the check reads. **Never run**: anything with
+`pg_turret` loaded (no artifact was built; the upstream repository ships a binary for 18 that was
+not executed), so `up` as a whole, the settings round trip through a real `pg_turret.*` name,
+`CREATE EXTENSION`, the restart step, `down`, the self-logging loop and its exclusion, and the
+Debian paths and `sudo -u postgres` plumbing of this node are untested. No Layer 2 test exists.
 
 `SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary,
 and `pairRole` — a node that *states where the primary is* rather than an action that moves it.
