@@ -17,6 +17,7 @@ import qualified Test.PgVectorSpec as PgVectorSpec
 import qualified Test.PlakarSpec as PlakarSpec
 import qualified Test.WireGuardMeshSpec as WireGuardMeshSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
+import qualified Test.NetbirdSpec as NetbirdSpec
 import qualified Test.PortMappingSpec as PortMappingSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DeferredSpec as DeferredSpec
@@ -135,6 +136,7 @@ main =
             , PlakarSpec.tests
             , WireGuardSpec.tests
             , WireGuardMeshSpec.tests
+            , NetbirdSpec.tests
             , PortMappingSpec.tests
             , DeferredSpec.tests
             , DownTreeSpec.tests

@@ -101,6 +101,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PlakarSpec
                     , Test.WireGuardSpec
                     , Test.WireGuardMeshSpec
+                    , Test.NetbirdSpec
                     , Test.PortMappingSpec
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
