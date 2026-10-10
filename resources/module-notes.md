@@ -40,7 +40,7 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
-  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); STUN, hairpin and a second-vantage inbound test are not done; the `natpmpc` parser has no captured fixture.
+  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); STUN and hairpin are not done; the `natpmpc` parser has no captured fixture.
   Port probes (`--nmap HOST:PORTS`, repeatable, pure half in `Report/Nmap.hs`): one unprivileged connect scan per
   declared target (`nmap -sT -Pn -n -oG - -p PORTS HOST`, shared by that target's probes through `once`) and one finding
   per port: open is `yes`, closed is `no`, filtered is `unknown` with its meaning (`-Pn`, so a host that is away shows
@@ -58,6 +58,27 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   a resolver (the system's unless `--resolver`), telling "wrong record" from "not propagated". The expected set is
   `--ns`, else `CloudDns.readNameServers` on `--zone` (a `gcloud ... describe`, read once per report), else every
   verdict is `unknown` with the handed-out set as evidence. All of it is `dig`; that gcloud read has not been run.
+  Inbound probes (`--inbound HOST:PORT[@LISTEN]`... `--vantage-ssh [USER@]HOST`... `[--vantage-ssh-config FILE]`, pure
+  half and the listener in `Report/Inbound.hs`): each declared second machine is asked, over the operator's own `ssh`,
+  to open a TCP connection to each declared external address and port; one finding per (target, vantage). The vantage
+  runs one fixed command (`remoteCommand`: bash `/dev/tcp` under `timeout 4`, ending with its exit status on a marker
+  line) in which only the host and port vary, both re-rendered from a strict alphabet (`Nmap.checkHost`) and parsed
+  numbers; the destination is `[USER@]HOST` only and follows `--`. `ssh` runs with `BatchMode=yes` (a login that would
+  prompt fails), `ConnectTimeout=4`, `-T` and a closed pipe for stdin; keys, ports, jump hosts and host keys are ssh's
+  configuration (or the `-F` file), never read here. Connected is `yes`, refused or unanswered is `no` with its
+  meaning, and a vantage that could not be asked or has no route is `unknown`. Without `@LISTEN` a `yes` only says
+  *something* accepted at that address (the finding says so). With `@LISTEN`, `main` (`withInbound`, not `probesFor`)
+  holds a listener on that local port, on every address, for the length of the report; it hands a random one-time
+  token to whoever connects, and only a vantage that reads it back is a `yes` ("arrived at this host"); the token is
+  not a credential and still stays out of findings and argv. A local port that cannot be bound is `unknown` and the
+  vantage is not asked. `specInbound` defaults to empty, so older directives read and render the same probes. The two
+  timeouts add up to 8s against the default `--timeout 10` per probe: a slow ssh login needs a larger `--timeout`.
+  **Run:** Layer 0, plus the vantage's command run locally (`sh -c`, bash 5.2) against loopback listeners in the
+  suite, and the binary end to end on loopback with a stand-in `ssh` on `PATH`. **Not run:** any real `ssh`, any
+  second machine, any connection through a router or NAT; the timed-out, no-route and ssh-failure outputs are
+  hand-written fixtures; a vantage whose login shell is not POSIX-like, or without bash/`timeout`, shows as `unknown`
+  by design but was not tried. An HTTP "connect-back" service as the vantage is not done: there is no such service
+  contract to speak to yet.
   `salmon-docs-sync` (`DocsSync.hs`) is salmon on its own repo: `check` fingerprints the tracked inputs of
   `website/scripts/build-site.sh` against `docs/.docs-sync-stamp`; `up` rebuilds `docs/`, stamps, commits and pushes it.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for
