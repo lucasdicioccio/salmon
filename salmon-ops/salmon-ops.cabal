@@ -98,6 +98,7 @@ library
                    , Salmon.Builtin.Nodes.Patroni
                    , Salmon.Builtin.Nodes.PgBackRest
                    , Salmon.Builtin.Nodes.Postgres
+                   , Salmon.Builtin.Nodes.ClipCpp
                    , Salmon.Builtin.Nodes.LlamaServer
                    , Salmon.Builtin.Nodes.PgVector
                    , Salmon.Builtin.Nodes.Plakar

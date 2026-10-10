@@ -52,6 +52,7 @@ module Salmon.Builtin.Nodes.LlamaServer (
     llamaBinary,
     ModelFile (..),
     llamaModel,
+    ggufModel,
     Pooling (..),
     Listen (..),
     LlamaServer (..),
@@ -170,12 +171,20 @@ provisioned. @down@ leaves it: a model is expensive to get back and is
 not something this node made unless it fetched it.
 -}
 llamaModel :: ModelFile -> Op
-llamaModel m =
-    op "llama-model" nodeps $ \actions ->
+llamaModel = ggufModel "llama-model"
+
+{- | 'llamaModel' under another kind of 'Ref', for the other builtins that
+take a pinned GGUF file ("Salmon.Builtin.Nodes.ClipCpp"). The kind is the
+node's name and its 'Ref' tag, so one path declared for two tools is two
+nodes.
+-}
+ggufModel :: Text -> ModelFile -> Op
+ggufModel kind m =
+    op kind nodeps $ \actions ->
         actions
             { help = "GGUF model at " <> Text.pack m.modelPath
             , notes = ["pinned sha256: " <> m.modelSha256, "down leaves the file"]
-            , ref = mkRef "llama-model" m.modelPath
+            , ref = mkRef kind m.modelPath
             , check = do
                 there <- doesFileExist m.modelPath
                 if not there
