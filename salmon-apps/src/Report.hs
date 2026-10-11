@@ -47,8 +47,14 @@ family, and file the mapped address each server saw plus one finding on
 whether the NAT's mapping depends on the destination. There is no default
 server; the second address a server advertises is reported, not contacted.
 
-Not done (follow-ups in the feature): the filtering half of the NAT type,
-hairpin NAT. The @natpmpc@ parser follows the
+Hairpin probes (@--hairpin [ADDR:]PORT[\@LISTEN]@, see "Report.Hairpin") make
+one TCP connection from this host to the gateway's external address and a
+port that is already mapped, and say whether it came back in. The probe opens
+no mapping and changes nothing on the gateway; what the evidence does not
+settle is @unknown@.
+
+Not done (follow-ups in the feature): the filtering half of the NAT type.
+The @natpmpc@ parser follows the
 tool's documented output and has no captured fixture yet.
 -}
 module Report (
@@ -76,6 +82,13 @@ module Report (
     inboundProbes,
     inboundFinding,
     withInbound,
+
+    -- * Hairpin, from this host to its own external address
+    HairpinIO (..),
+    hairpinIO,
+    hairpinProbes,
+    hairpinFinding,
+    withReportListeners,
 
     -- * Probes
     probesFor,
@@ -114,7 +127,7 @@ import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -134,6 +147,7 @@ import Text.Read (readMaybe)
 import Salmon.Actions.UpDown (CheckResult (Failure, Success), expandDag)
 import qualified Salmon.Actions.UpDown as UpDown
 import Report.Dns
+import Report.Hairpin
 import Report.Inbound
 import Report.Nmap
 import Report.Stun hiding (Family)
@@ -170,14 +184,16 @@ data Spec = Spec
     -- ^ @HOST:PORTS@ targets handed to @nmap@, see 'parseNmapTarget'
     , specStun :: [Text]
     -- ^ @HOST:PORT@ STUN servers to ask over UDP, see 'parseStunServer'
+    , specHairpin :: [Text]
+    -- ^ @[ADDR:]PORT[\@LISTEN]@ mapped ports to connect back to, see 'parseHairpinTarget'
     }
     deriving (Eq, Show, Generic)
 
 instance ToJSON Spec
 
 {- | Field for field what the generic instance reads, except that a directive
-written before 'specNmap' or 'specStun' existed still reads (as no target
-and no server).
+written before 'specNmap', 'specStun' or 'specHairpin' existed still reads
+(as no target and no server).
 -}
 instance FromJSON Spec where
     parseJSON = withObject "Spec" $ \o ->
@@ -192,6 +208,7 @@ instance FromJSON Spec where
             <*> o .:? "specInbound" .!= noInbound
             <*> o .:? "specNmap" .!= []
             <*> o .:? "specStun" .!= []
+            <*> o .:? "specHairpin" .!= []
 
 {- | A domain and the hosted zone meant to serve it. The expected name
 servers are 'domNameServers' when given, and otherwise read from the Cloud
@@ -418,7 +435,7 @@ externalProbe echo = do
         Nothing -> case echo of
             Nothing -> pure Nothing
             Just url -> do
-                r <- try (fetch url) :: IO (Either SomeException Text)
+                r <- try (fetchEcho url) :: IO (Either SomeException Text)
                 pure $ case r of
                     Right body | not (Text.null body) -> Just (body, "GET " <> url <> " (declared echo)")
                     _ -> Nothing
@@ -434,12 +451,14 @@ externalProbe echo = do
              in Finding q v [addr <> " is " <> describeClass cls] how meaning [addr]
   where
     q = "What is the external address, and can it be mapped to?"
-    fetch :: Text -> IO Text
-    fetch url = do
-        mgr <- Http.newManager Http.defaultManagerSettings
-        req <- Http.parseRequest (Text.unpack url)
-        resp <- Http.httpLbs req{Http.responseTimeout = Http.responseTimeoutMicro 5000000} mgr
-        pure (Text.strip (Text.pack (LChar.unpack (LChar.take 64 (Http.responseBody resp)))))
+
+-- | The first 64 bytes a declared echo URL answers with, within 5s. Throws when it does not answer.
+fetchEcho :: Text -> IO Text
+fetchEcho url = do
+    mgr <- Http.newManager Http.defaultManagerSettings
+    req <- Http.parseRequest (Text.unpack url)
+    resp <- Http.httpLbs req{Http.responseTimeout = Http.responseTimeoutMicro 5000000} mgr
+    pure (Text.strip (Text.pack (LChar.unpack (LChar.take 64 (Http.responseBody resp)))))
 
 -- | Addresses on the lines of @dig +short@ output (CNAME targets are skipped).
 parseDigAddresses :: Text -> [Text]
@@ -910,6 +929,93 @@ withInbound c ask spec act =
     i = specInbound spec
 
 -------------------------------------------------------------------------------
+-- Hairpin, from this host to its own external address
+
+{- | What the hairpin probes do to the outside, as actions a caller can
+share between the probes (or fake).
+-}
+data HairpinIO = HairpinIO
+    { hioGateway :: IO (Either Text GatewayView)
+    -- ^ the gateway's addresses and mappings, or why they could not be read
+    , hioEcho :: IO (Maybe Text)
+    -- ^ what the declared echo URL answers with, if one is declared and answers
+    , hioLocal :: Text -> Int -> IO (Maybe Text)
+    -- ^ this host's address on the route to that address and port
+    , hioConnect :: Text -> Int -> Bool -> IO Attempt
+    -- ^ the TCP connection to that address and port, reading back when asked
+    }
+
+{- | The real actions for a 'Spec': @upnpc -l@ (a read; skipped with
+@--no-upnp@), the declared @--echo@ URL, and 'connectAttempt'.
+-}
+hairpinIO :: Spec -> HairpinIO
+hairpinIO spec =
+    HairpinIO
+        { hioGateway =
+            if specUpnp spec
+                then (\r -> r >>= readGatewayListing . snd) <$> run "upnpc" ["-l"]
+                else pure (Left "UPnP discovery is off (--no-upnp)")
+        , hioEcho = case specEcho spec of
+            Nothing -> pure Nothing
+            Just url -> either (\(_ :: SomeException) -> Nothing) Just <$> try (fetchEcho url)
+        , hioLocal = localAddressToward
+        , hioConnect = connectAttempt (hairpinConnectSeconds * 1000000) (hairpinReadSeconds * 1000000)
+        }
+
+{- | The probes of the hairpin test: one per declared target. A declaration
+that does not parse is one probe saying why, and connects to nothing. The
+listeners are those 'withReportListeners' holds for the targets that declared
+a local port. Not part of 'probesFor', which holds no listener.
+-}
+hairpinProbes :: Collector -> HairpinIO -> Map.Map Int (Either Text Listener) -> [Text] -> [Op]
+hairpinProbes c hio listeners raws =
+    [either bad (\t -> probeOp c (hairpinQuestion t) (hairpinFinding hio listeners t)) d | d <- declared]
+  where
+    declared = nub [either (\why -> Left (Text.strip r, why)) Right (parseHairpinTarget r) | r <- raws]
+    bad (r, why) =
+        let q = "Does the gateway hairpin a TCP connection to the hairpin target " <> r <> "?"
+         in probeOp c q (pure (Finding q Unknown [why <> " (expected [ADDR:]PORT[@LISTEN], as in 8443, 203.0.113.7:443 or 443@8443)"] "hairpin test, not run" Nothing []))
+
+{- | Gathers the evidence for one target and judges it ('judgeHairpin'). The
+echo URL is only asked when neither the declaration nor the gateway gives an
+address, and the connection is only made when 'hairpinBlocked' has no
+objection.
+-}
+hairpinFinding :: HairpinIO -> Map.Map Int (Either Text Listener) -> HairpinTarget -> IO Finding
+hairpinFinding hio listeners t = do
+    gw <- hioGateway hio
+    let reported = either (const Nothing) gvExternal gw
+    external <- case chooseExternal t reported Nothing of
+        Right e -> pure (Right e)
+        Left _ -> chooseExternal t reported <$> hioEcho hio
+    local <- either (const (pure Nothing)) (\e -> hioLocal hio (extAddress e) (hpPort t)) external
+    let listener = hpListen t >>= (`Map.lookup` listeners)
+        mapping = viewMapping t (catMaybes [local, either (const Nothing) gvLocal gw]) (gvMappings <$> gw)
+        evidence peers attempt = Evidence external mapping local (fmap (\l -> (listenerToken l, peers)) <$> listener) attempt
+        idle = evidence [] Nothing
+    case (hairpinBlocked t idle, external) of
+        (Nothing, Right e) -> do
+            a <- hioConnect hio (extAddress e) (hpPort t) (isJust (hpListen t))
+            peers <- case listener of
+                Just (Right l) -> listenerPeers l
+                _ -> pure []
+            pure (mk (judgeHairpin t (evidence peers (Just a))))
+        _ -> pure (mk (judgeHairpin t idle))
+  where
+    mk j = Finding (hairpinQuestion t) (verdictOf j) (jEvidence j) (hairpinMethod t) (jMeaning j) []
+
+{- | The listeners a 'Spec' declares, for its inbound and its hairpin
+targets, held open while the action runs: one per distinct local port, so an
+inbound and a hairpin target may name the same one.
+-}
+withReportListeners :: Spec -> (Map.Map Int (Either Text Listener) -> IO a) -> IO a
+withReportListeners spec =
+    withListeners
+        ( [p | Right t <- parseInboundTarget <$> inbTargets (specInbound spec), Just p <- [inListen t]]
+            <> [p | Right t <- parseHairpinTarget <$> specHairpin spec, Just p <- [hpListen t]]
+        )
+
+-------------------------------------------------------------------------------
 -- Command line
 
 data Command = Config Spec | RunReport Bool Int
@@ -930,7 +1036,12 @@ main = do
             -- one exchange with the declared STUN servers, shared by their probes
             exchange <- once (scanStun [s | Right s <- parseStunServer <$> specStun spec])
             let probes = probesWith c (\d -> maybe (expectedServers d) id expected) (\t -> Map.findWithDefault (scanNmap t) t scans) (const exchange) spec
-            fs <- crossCheck <$> withInbound c askSsh spec (\inbound -> runReport (secs * 1000000) c (reportOp (probes <> inbound)))
+            -- one read of the gateway's listing and one of the echo URL, shared by the hairpin probes
+            listing <- once (hioGateway (hairpinIO spec))
+            echoed <- once (hioEcho (hairpinIO spec))
+            let hio = (hairpinIO spec){hioGateway = listing, hioEcho = echoed}
+            fs <- fmap crossCheck . withReportListeners spec $ \listeners ->
+                runReport (secs * 1000000) c (reportOp (probes <> inboundProbes c askSsh listeners (specInbound spec) <> hairpinProbes c hio listeners (specHairpin spec)))
             forM_ fs $ \f ->
                 if asJson
                     then LChar.putStrLn (Aeson.encode (findingValue f))
@@ -954,6 +1065,7 @@ main = do
             <*> inboundParser
             <*> many' (O.strOption (O.long "nmap" <> O.metavar "HOST:PORTS" <> O.help "scan these TCP ports of this one host with nmap, as in example.org:22,443 or [2001:db8::1]:8000-8010 (repeatable); nothing is scanned unless declared"))
             <*> many' (O.strOption (O.long "stun" <> O.metavar "HOST:PORT" <> O.help "ask this STUN server over UDP for the address it sees this host as, as in stun.example.org:3478; declare two at distinct addresses to learn whether the NAT's mapping depends on the destination (repeatable); no default server is assumed"))
+            <*> many' (O.strOption (O.long "hairpin" <> O.metavar "[ADDR:]PORT[@LISTEN]" <> O.help "connect from this host to the gateway's external address and this port, which must already be mapped, to learn whether the gateway hairpins, as in 8443 or 203.0.113.7:443; ADDR defaults to the address the gateway (or --echo) reports; with @LISTEN, listen on that local port during the report and read a one-time token back (repeatable); no mapping is opened"))
     inboundParser =
         InboundSpec
             <$> many' (O.strOption (O.long "inbound" <> O.metavar "HOST:PORT[@LISTEN]" <> O.help "ask each vantage point to open a TCP connection to this external address and port, as in 192.0.2.7:443; with @LISTEN, listen on that local port during the report and have the vantage read a one-time token back (repeatable)"))

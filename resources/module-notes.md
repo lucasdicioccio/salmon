@@ -40,7 +40,7 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
-  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); the filtering half of the NAT type and hairpin are not done; the `natpmpc` parser has no captured fixture.
+  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); the filtering half of the NAT type is not done; the `natpmpc` parser has no captured fixture.
   Port probes (`--nmap HOST:PORTS`, repeatable, pure half in `Report/Nmap.hs`): one unprivileged connect scan per
   declared target (`nmap -sT -Pn -n -oG - -p PORTS HOST`, shared by that target's probes through `once`) and one finding
   per port: open is `yes`, closed is `no`, filtered is `unknown` with its meaning (`-Pn`, so a host that is away shows
@@ -95,6 +95,33 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   hand-written fixtures; a vantage whose login shell is not POSIX-like, or without bash/`timeout`, shows as `unknown`
   by design but was not tried. An HTTP "connect-back" service as the vantage is not done: there is no such service
   contract to speak to yet.
+  Hairpin probes (`--hairpin [ADDR:]PORT[@LISTEN]`, repeatable, pure half and the one TCP connection in
+  `Report/Hairpin.hs`): does a connection from this host to the gateway's external address and an *already mapped*
+  port come back in? One finding per declared target. The probe opens no mapping and changes nothing on the gateway:
+  it makes one TCP connection (3s to connect, 2s to read, nothing written) and reads `upnpc -l` (skipped with
+  `--no-upnp`). The address is the declared `ADDR` (a dotted IPv4 literal, never a name), else the gateway's
+  `ExternalIPAddress`, else the declared `--echo`'s answer (asked only then). With `@LISTEN` the report's own token
+  listener (`Inbound.withListener`) is held on that port and the connection reads the token back. The judgement
+  (`judgeHairpin`, evidence in, verdict out) is deliberately narrow. `yes`: the token read back, or, without a
+  listener, an accepted connection on a port the gateway lists as mapped (the finding says no token was exchanged).
+  `no`: only when the gateway lists the mapping as leading to this host *and* the listener's port, the listener saw
+  nothing, and the connection was refused or answered by something else. Everything else is `unknown` with its
+  evidence: no external address, a timeout (a firewall on either side looks the same), no route, a refusal or a
+  foreign answer with no listed mapping to the listener, an address this host holds itself (`hairpinBlocked`: the
+  UDP-connect route lookup says the connection would leave from that same address) or a loopback one, a local port
+  that could not be bound; no address, an own or loopback address and an unbound port connect to nothing. So without UPnP a `no` cannot be reached, and a
+  hand-made forwarding (not in `upnpc -l`) gets a `yes` only through `@LISTEN`. The refused-`no` carries its caveat
+  in the meaning (a rejecting firewall on this host looks the same): an owner who wants that `unknown` flips one
+  branch. `main` now holds the listeners of inbound and hairpin targets together (`withReportListeners`), so both may
+  name one local port; they then share its token and its list of peers, which can only turn a hairpin `no` into
+  `unknown`. `specHairpin` defaults to empty: older directives read and render the same probes. A slow `upnpc` discovery plus a 5s echo plus the connection can exceed the default
+  `--timeout 10`. **Run:** Layer 0 (HUnit and QuickCheck properties over the declaration parser, the listing view,
+  the address choice, the judgement and the token reader), the real `connectAttempt`/`localAddressToward` against
+  loopback listeners in the suite with a loopback port *standing in* for the gateway's external port, and the binary
+  end to end with `--no-upnp --no-natpmp` on loopback and unparseable targets (all `unknown`, as they must be).
+  **Not run:** any gateway, any NAT, any real hairpin, `upnpc -l` itself (its listing is hand-written from
+  `upnpc.c`'s format, as in `Test/PortMappingSpec.hs`), the echo fallback over HTTP, a connect timeout and a
+  no-route error (those `Attempt`s are only fed to the judgement by hand).
   `salmon-docs-sync` (`DocsSync.hs`) is salmon on its own repo: `check` fingerprints the tracked inputs of
   `website/scripts/build-site.sh` against `docs/.docs-sync-stamp`; `up` rebuilds `docs/`, stamps, commits and pushes it.
   `salmon-toy-qemu-pg-ha` (`QemuPgHaToy.hs`) is the same pair on three qemu guests it makes for

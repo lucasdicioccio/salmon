@@ -6,6 +6,7 @@ import qualified Test.CloudrunSpec as CloudrunSpec
 import qualified Test.FleetSpec as FleetSpec
 import qualified Test.GcpToySpec as GcpToySpec
 import qualified Test.QemuPgHaToySpec as QemuPgHaToySpec
+import qualified Test.ReportHairpinSpec as ReportHairpinSpec
 import qualified Test.ReportInboundSpec as ReportInboundSpec
 import qualified Test.ReportSpec as ReportSpec
 
@@ -18,6 +19,7 @@ main =
             , FleetSpec.tests
             , GcpToySpec.tests
             , QemuPgHaToySpec.tests
+            , ReportHairpinSpec.tests
             , ReportInboundSpec.tests
             , ReportSpec.tests
             ]
