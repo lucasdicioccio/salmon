@@ -1035,6 +1035,7 @@ peerInstance spec vm peer =
             , -- the peer pulls nothing: it stays the instance it was
               Compute.instanceServiceAccount = Nothing
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             }
 
 {- | Serves one page naming the project, under a transient systemd unit so it
@@ -1093,6 +1094,7 @@ gceInstance spec vm =
           Compute.instanceTags = [sshTag spec] <> [lbTag spec | spec.tier >= 3]
         , Compute.instancePower = Compute.PoweredOn
         , Compute.instanceScopes = if spec.tier >= 3 then Compute.DeclaredScopes ["cloud-platform"] else Compute.DefaultScopes
+        , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
         }
 
 -------------------------------------------------------------------------------
