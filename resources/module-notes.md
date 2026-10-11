@@ -25,7 +25,9 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   `SreBox.GeneratedSite` (builds/publishes kitchen-sink-generated sites via `SreBox.CabalBuilding`),
   plus `SreBox.CertSigning` and the `Salmon.Builtin.Nodes.Acme` builtin (pull in `acme-not-a-joke`),
   and `Salmon.Builtin.Nodes.PgTurret` (no heavy dependency: it is here because the extension it
-  configures is a 0.0.0, and nothing enables it). The package has a test suite, Layer 0 only.
+  configures is a 0.0.0, and nothing enables it) and `SreBox.NetbirdControlPlane` (no heavy
+  dependency either: it is here by the owner's decision, and nothing has run it). The package has
+  a test suite, Layer 0 only, which runs its tests one at a time (see "`SreBox.NetbirdControlPlane`").
   Split out of `salmon-ops-recipes` so that package's build stays fast; **not** part of the
   default `cabal.project` package set — it's only built via `cabal.perso.project` (see below).
 - `salmon-apps` — blessed, project-useful binaries built from the above (e.g. `salmon-migrator`,
@@ -2019,8 +2021,74 @@ package's post-install script installs and starts the daemon's service, so no un
 (`Test/NetbirdSpec.hs`): flags, JSON field names and `daemonStatus` values were read in upstream's client sources
 (v0.80.0 was current), the status fixtures are hand-written, and nothing was run against a daemon or a management
 server. Unobserved: how `management.url` is spelled in real output (hence the lenient `sameManagement`), whether the
-client ever echoes a key, which release introduced `--setup-key-file`/`daemonStatus`. Not done: the self-hosted
-control-plane recipe (management, signal, relay, coturn), a non-default daemon address, deregistering a peer.
+client ever echoes a key, which release introduced `--setup-key-file`/`daemonStatus`. Not done: a non-default daemon
+address, deregistering a peer, and **an enrolment against a real management server, still owed** (the control-plane
+recipe below exists but has never been started).
+
+`SreBox.NetbirdControlPlane` (in `salmon-ops-recipes-experimental`, used by no app) is a self-hosted NetBird control
+plane over two quadlets, what a `Netbird.peer` enrols against (`managementUrl`). **It is not the "management, signal,
+relay, coturn" of its filing**: read in `netbirdio/netbird` at tag `v0.80.0` (`infrastructure_files/getting-started.sh`,
+`combined/config.yaml.example`, `combined/cmd/config.go`), upstream's quickstart is now `netbirdio/netbird-server` (the
+*combined server*: management, signal, relay and STUN in one process, one `config.yaml`, no coturn and no TURN) plus
+`netbirdio/dashboard`; the four-container layout is still in upstream's tree as the older setup and is not built here.
+Decisions, each load-bearing:
+- **Images are pinned** (`serverImage` `docker.io/netbirdio/netbird-server:0.80.0`, `dashboardImage`
+  `docker.io/netbirdio/dashboard:v2.94.0`; both tags were checked to exist on Docker Hub, upstream's script says
+  `latest`), and `problems` refuses a reference with no tag or digest, or `:latest`. The configuration keys are those of
+  that server release: re-read `combined/cmd/config.go` before moving the pin (`upstreamConfigKeys` in the spec is that
+  list, written by hand).
+- **The identity provider is the embedded one and there is no field for an external OIDC provider.** The combined
+  server always runs the embedded Dex (no key switches it on; `server.auth` only says where it is reached), users and
+  external providers are added in the Dashboard, and `server.auth` has no connector key at that tag
+  (`buildEmbeddedIdPConfig` never sets `StaticConnectors`). The only file route upstream has is the older layout's
+  undocumented `EmbeddedIdP.StaticConnectors` in `management.json`, client secret inline. The owner asked for the
+  optional field only if it could be declared from files beside the embedded provider; it cannot, so it was not built.
+- **Secrets.** `server.authSecret` (relay), `server.store.encryptionKey` and `server.auth.sessionCookieEncryptionKey`
+  exist only as values inside `config.yaml` (upstream has no file or environment form for the first two). The recipe
+  takes three `SecretFile` paths, reads them at `up`/`check` only, and writes them nowhere but that file, `0600`,
+  through a temporary file and a rename. The node's `notes` are `publicConfig`: the same rendering with each secret
+  replaced by the path it is read from, so a changed setting is a changed representative and a changed secret is not.
+  `check` compares the file byte for byte in-process and says "is not what is declared", never what differs; a refused
+  secret is named by its path and the fault in its *form* (`secretProblem`: no byte, no length, no digest). `Secrets`
+  has no `Show`. The server's quadlet watches the file through Quadlet's keyed digest, so a rotated secret is one
+  restart. **Rotating `store.encryptionKey` makes the existing store unreadable**; nothing here guards that.
+- A secret must be printable ASCII with no space, quote or backslash, and every public value written into
+  `config.yaml`, `dashboard.env` or a quadlet is held to characters that need no quoting (`problems`), so the
+  renderers quote nothing and escape nothing.
+- **TLS and the routing between the two containers are the caller's.** Both HTTP ports are published on
+  `cpBindAddress` (loopback by default, upstream's "exposed ports" variant: dashboard 8080, server 8081) and
+  `proxyRoutes` is upstream's route table for a reverse proxy in front (gRPC over h2c, WebSocket, HTTP, catch-all);
+  no reverse-proxy node is declared. Only STUN (3478/udp) is published on every address.
+- `cpConfigDir` is its own node (`netbird-config-dir`), created `0700` if missing and never removed; the data
+  directory is a Quadlet bind (`podman-quadlet-bind-dir`), never removed either. `down` of the two file nodes removes
+  a file only when its first line is `marker`; anything else at that path is left.
+- The caller's `Track' ControlPlane` (podman, the secrets' delivery) is applied ahead of both files, which are ahead
+  of their quadlets, so a missing secret leaves the old `config.yaml`, the old quadlet and the running container.
+- `cpReadyTimeout` (default 120s, a number chosen without watching a start) makes `up` wait for the server's
+  published port (`Quadlet.containerReady`); it is never rendered.
+
+Run: Layer 0 only (`Test/NetbirdControlPlaneSpec.hs`, unit cases and QuickCheck properties: rendered `config.yaml`,
+`dashboard.env` and quadlets against text and against the hand-copied upstream key lists, `problems`, `secretProblem`,
+the fold's shape and refs, no secret or digest of one in any `help`/`notes`/verdict/exception, and the two file nodes
+and the directory node against a scratch directory), plus the two rendered quadlets of the starting point fed by hand
+to podman 4.9.3's generator in dry-run, which made a `podman run` of each with the ports, mounts and env file
+declared (no test does this). **Never run**: the images were not pulled, no NetBird server has parsed a rendered
+`config.yaml`, no container was started, no dashboard was opened, no peer enrolled; the trusted-proxy CIDR a podman-published port presents to the server was not observed. Not offered: a
+Postgres store, an initial owner (`server.auth.owner`), external STUN/relay/signal, upstream's own Traefik and
+reverse-proxy containers.
+
+**The experimental test suite runs one test at a time** (`test/Main.hs` sets `TASTY_NUM_THREADS=1` unless it is set;
+`-j` still wins). In parallel, with the spec above in it, between one run in six and one in two hung under GHC 9.10.3
+with every test thread `BlockedOnBlackHole`; the same binary with `-j1` did not in 140 runs. Observed with the debug
+RTS: threads each folding one shared `Op` (`Dag.foldDag`), the owner of a node's `ref` thunk blocked inside `mkRef`'s
+`printf` on a black hole whose owner was itself blocked on that `ref` (`+RTS -Ds`: "thread 104 blocked on black hole
+owned by thread 105" and the reverse). No lock is involved and no code of this recipe is on those stacks. It matches
+GHC's #26324 (lost wakeups in `threadPaused` for threads blocked on black holes, fixed on GHC master in September
+2025); that this compiler has that bug was not shown, and a build with a fixed GHC was not tried. Not reproduced by six
+parallel folds of one shared `Op` in a module of their own (0 of 60), so the trigger is narrower than "parallel folds".
+**Worth a look outside this package**: the default suite folds shared `Op`s in parallel too and has an unexplained
+hang about one full run in 15, and `Actions/Concurrent.hs` evaluates one graph from many threads; neither was
+examined here.
 
 `Nodes/Haproxy.hs` is HAProxy as a TCP router in front of a Patroni cluster (`specs/pg-patroni.md`, "Routing to
 the leader", option 3), in `Nginx.hs`'s shape with `PgBouncer.setup`'s unit: a config value, the pure `renderConfig`,
