@@ -187,6 +187,89 @@ pub struct Counts {
     pub total: usize,
 }
 
+/// The order the nodes are shown in: the refs of a snapshot, in the
+/// snapshot's order, less the ones removed since. The port of
+/// `Salmon.Client.Model`'s `Order`.
+///
+/// It reads as the list it was pushed ([`Order::iter`], [`Order::to_vec`]),
+/// and [`Order::remove`] is that list with every copy of a ref dropped,
+/// which is what `Vec::retain` did here until a teardown (one removal per
+/// node) was measured as quadratic on the Haskell side. Each ref keeps the
+/// seat the snapshot gave it, so removing one is a lookup of its seats, and
+/// the refs that stay are never renumbered: ascending seats are the
+/// snapshot's order whatever was removed in between.
+///
+/// A ref pushed twice has two seats and is shown twice, as before. Two
+/// orders are equal when they read the same: which seats a removal left
+/// empty is not something a reader can see.
+#[derive(Debug, Clone, Default)]
+pub struct Order {
+    /// Seat to ref; ascending seats are the display order.
+    seats: BTreeMap<u64, RefId>,
+    /// The seats of each ref still shown.
+    places: BTreeMap<RefId, Vec<u64>>,
+    /// The next seat to hand out: never reused, so a push lands last.
+    next: u64,
+}
+
+impl Order {
+    /// Show a ref after every other.
+    pub fn push(&mut self, r: RefId) {
+        let seat = self.next;
+        self.next += 1;
+        self.places.entry(r.clone()).or_default().push(seat);
+        self.seats.insert(seat, r);
+    }
+
+    /// Stop showing a ref, wherever it is. One that is not shown leaves the
+    /// order as it was.
+    pub fn remove(&mut self, r: &RefId) {
+        for seat in self.places.remove(r).unwrap_or_default() {
+            self.seats.remove(&seat);
+        }
+    }
+
+    /// The refs shown, first to last.
+    pub fn iter(&self) -> impl Iterator<Item = &RefId> {
+        self.seats.values()
+    }
+
+    pub fn to_vec(&self) -> Vec<RefId> {
+        self.iter().cloned().collect()
+    }
+
+    /// How many refs are shown (a ref pushed twice counts twice).
+    pub fn len(&self) -> usize {
+        self.seats.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seats.is_empty()
+    }
+}
+
+impl FromIterator<RefId> for Order {
+    fn from_iter<I: IntoIterator<Item = RefId>>(refs: I) -> Order {
+        let mut order = Order::default();
+        for r in refs {
+            order.push(r);
+        }
+        order
+    }
+}
+
+impl PartialEq for Order {
+    fn eq(&self, other: &Order) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl PartialEq<Vec<RefId>> for Order {
+    fn eq(&self, other: &Vec<RefId>) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     /// `interactive`/`replay`/`following`, from the snapshot's envelope.
@@ -196,8 +279,8 @@ pub struct Model {
     pub seq: u64,
     /// The number the loop-level fields are current to.
     pub loop_seq: u64,
-    /// The snapshot's dependency order.
-    pub order: Vec<RefId>,
+    /// The snapshot's dependency order, less the nodes dropped since.
+    pub order: Order,
     pub nodes: BTreeMap<RefId, Node>,
     pub pass: Option<Pass>,
     /// `None` until a `supervised` event says.
@@ -217,7 +300,7 @@ impl Model {
     pub fn from_dag(dag: &Value) -> Result<Model, String> {
         let nodes = array_at(dag, &["nodes"]).ok_or("/dag answer has no nodes array")?;
         let seq = number_at(dag, &["seq"]).ok_or("/dag answer carries no seq")?;
-        let mut order = Vec::with_capacity(nodes.len());
+        let mut order = Order::default();
         let mut by_ref = BTreeMap::new();
         for n in nodes {
             let id = ref_at(n, &["ref"]).ok_or_else(|| format!("a node without a ref: {n}"))?;
@@ -395,7 +478,7 @@ impl Model {
             && matches!(n.last_kind.as_deref(), Some("done") | Some("acted done"));
         if brought_down {
             self.nodes.remove(r);
-            self.order.retain(|o| o != r);
+            self.order.remove(r);
         }
     }
 

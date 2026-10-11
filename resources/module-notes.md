@@ -229,6 +229,15 @@ stand a tending machine down.
   and the Rust tests (`tests/model.rs`, and the window's `tests/dashboard.rs`) fold the same file.
   A change to the fold's text or to a wire shape fails the Haskell case until the file, and so the
   Rust side, is brought along. The other Layer 0 cases of the spec are ported one for one.
+- **`model::Order` is the port of `Salmon.Client.Model`'s `Order`** (see `Client/Model.hs`
+  below): `Model::order` was a `Vec<RefId>` and a removal was `retain`, the same pass over every
+  node per removal as the Haskell list. It compares equal to a `Vec<RefId>` that reads the same,
+  so the existing assertions on `m.order` are unchanged. `tests/order.rs` checks it against the
+  `Vec` it replaces (unit cases, and pushes, removals and folds drawn from fixed seeds by a small
+  generator of its own: the workspace has no property-testing crate and none was added) and folds
+  a 50 000-node teardown. *Run:* `cargo test -p salmon-serve-client`. *Not run:* `salmon-gpui`,
+  neither built nor tested with this change (it reads `nodes_in_order()` and never the field);
+  the Rust fold was not timed before or after; the fixture did not change.
 - **The token is handled as `salmon-tui` handles it**: named by file only (never an argument),
   refused when the file is readable by others or is not one word, sent as `Authorization: Bearer`
   on every request, kept in a type whose `Debug` is redacted, and in no error text. An address
@@ -352,8 +361,9 @@ slower. Operations that read the expansion are sized by occurrences, the others 
 declaration with it); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
 `startUpkeep` (chain of 3 000: 2 s); a node with many edges is quadratic in `record`,
 `fromMagma`, `transposeOf` and `Query.outline`; listed paths cost depth per node in time and
-memory; `Client.Model.step` is quadratic over a teardown; a supervisor over 100 000 nodes does
-not fit in 4 GB. None is fixed. The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
+memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes does
+not fit in 4 GB. Only the `Client.Model.step` one is fixed (see `Client/Model.hs` below; its
+before and after rows are `client-step-{before,after}.tsv`). The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
 a selector, listed paths, `fromMagma`, `mergeDag`, `stuck` and the walks over the three sharing
 shapes at 600 nodes within a minute each, which tells per-node from per-path and times
 nothing. *Not run:* more than one capability, real nodes, a tending supervisor, the HTTP server
@@ -1228,6 +1238,29 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   pass folded onto a snapshot, replay and rebase, the SSE parser against what `Events` renders,
   and, at Layer 1, the client itself against a real `withHttpServer` (`dag`, `commandAsync`,
   `events` from that seq, the model converges).
+  **The display order is `Model.Order`, not a list** (`modelOrder`; read it with `orderToList`).
+  It was a list, and dropping a node filtered all of it, so a teardown (one `done` per node
+  wanted down) was quadratic: 2.2 s and 4.3 GB allocated for 10 000 nodes (finding 5 of
+  `resources/graph-profiles.md`). An `Order` is seat number to ref plus each ref's seats: the
+  snapshot seats the refs once, a removal is a lookup and a delete, and nothing left is ever
+  renumbered, which is what keeps the display order the snapshot's. Three things are deliberate:
+  a ref a document lists twice keeps two seats and is removed from both (what `filter` did; `/dag`
+  never sends one); `Eq` compares what is read, not the seats, so a model that dropped a node
+  still equals one that never had it; and `step` never adds to the order, only `fromDag` does (a
+  removed node comes back through a re-read snapshot and `rebase`). Measured after: 22 ms and
+  21 MB at 10 000, 507 ms at 100 000 (one run each side, the same shared machine, indicative).
+  `Test/ClientModelStepSpec.hs` holds `step` to the fold as it was, which is kept as a copy in
+  the test tree (`Test/ClientModelReference.hs`, not to be improved): QuickCheck over generated
+  scripts of events and re-read snapshots, 1 000 cases a property, compares everything a client
+  reads after every step; further properties state the order's invariant without the reference
+  and `Order` against the list operations; unit cases cover each position of a removal; one case
+  folds a 100 000-node teardown within a minute. All Layer 0. *Not run:* the generated events are
+  made up from the kinds the fold names, not recorded from a server; the scripts use eight refs,
+  so only the scale case says anything about size; `salmon-tui` was built and its suite run but
+  no terminal was looked at; `fromDag`, which now seats the order too (11 to 15 % more
+  allocation than the day before; it keys the refs once for both maps), was timed after
+  the change only. The web UI's fold (`salmon-ops/ui/ui.js`) was not changed because it never
+  had the cost: it removes no node on an event, and its order is rebuilt only by a `/dag` read.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately

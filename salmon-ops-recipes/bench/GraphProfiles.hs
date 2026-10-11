@@ -472,7 +472,7 @@ expansionSize root = weighCofree (evalDeps root) (\rest g -> toList g <> rest)
 
 weighModel :: Model.Model -> Int
 weighModel m =
-    length m.modelOrder
+    Model.orderSize m.modelOrder
         + Map.foldl' (\n x -> n + Text.length x.nodeShorthand + length x.nodeDependencies + length x.nodeDependants + length x.nodePaths + Text.length x.nodeConvergence) 0 m.modelNodes
 
 -- | Run an action with standard output going nowhere: two of the renders
@@ -874,7 +874,7 @@ modelOf e = do
             pure m
 
 doneEvents :: Model.Model -> [Model.Event]
-doneEvents m = [Model.Event (Just i) "updown" "done" (Just r) Nothing Null | (i, r) <- zip [1 ..] m.modelOrder]
+doneEvents m = [Model.Event (Just i) "updown" "done" (Just r) Nothing Null | (i, r) <- zip [1 ..] (Model.orderToList m.modelOrder)]
 
 clientBenches :: [Bench]
 clientBenches =

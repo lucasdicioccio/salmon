@@ -3,6 +3,7 @@ module Main (main) where
 import qualified Test.AptRepositorySpec as AptRepositorySpec
 import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
+import qualified Test.ClientModelStepSpec as ClientModelStepSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
@@ -124,6 +125,7 @@ main =
                 ]
             , CheckSpec.tests
             , ClientModelSpec.tests
+            , ClientModelStepSpec.tests
             , ConcurrentSpec.tests
             , BinarySpec.tests
             , DaemonSpec.tests

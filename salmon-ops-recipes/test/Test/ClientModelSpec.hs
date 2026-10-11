@@ -164,7 +164,7 @@ recordedPass :: IO ()
 recordedPass = do
     m0 <- start
     assertEqual "the snapshot's seq" 5 m0.modelSeq
-    assertEqual "the snapshot's order" [refOf "n1", refOf "n2", refOf "root"] m0.modelOrder
+    assertEqual "the snapshot's order" [refOf "n1", refOf "n2", refOf "root"] (Model.orderToList m0.modelOrder)
     assertEqual "mode" "interactive" m0.modelMode
     -- the declaration asks for a re-read, and the fold goes on past it
     let afterDeclared = fold m0 (take 1 recorded)
@@ -242,7 +242,7 @@ downNodeDropped = do
     assertEqual "two nodes" 2 (Model.countTotal (Model.counts m0))
     let m = fold m0 [about "updown" "eval" "n1" 2 [], about "updown" "done" "n1" 3 []]
     assertEqual "n1 is gone once down" Nothing (Model.lookupNode (refOf "n1") m)
-    assertEqual "the order follows" [refOf "n2"] m.modelOrder
+    assertEqual "the order follows" [refOf "n2"] (Model.orderToList m.modelOrder)
     -- while a node wanted up that is done stays
     let m' = fold m0 [about "updown" "done" "n2" 4 []]
     assertEqual "n2 stays, converged" (Just "converged") (nodeConvergence <$> Model.lookupNode (refOf "n2") m')
