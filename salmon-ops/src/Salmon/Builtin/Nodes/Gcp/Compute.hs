@@ -12,6 +12,18 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     InstanceStep (..),
     instanceUpSteps,
     planExistingInstance,
+    planAbsentInstance,
+    RunLimit (..),
+    LiveRunLimit (..),
+    RunLimitVerdict (..),
+    runLimitGrace,
+    runLimitProblems,
+    runLimitArgs,
+    renderRunLimit,
+    renderDeadline,
+    parseLiveRunLimit,
+    judgeRunLimit,
+    interpretInstanceRun,
     BootDisk (..),
     Instance (..),
     InstancePower (..),
@@ -53,7 +65,10 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     computeCommand,
 ) where
 
+import Control.Applicative ((<|>))
 import Control.Exception (throwIO)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
@@ -61,6 +76,12 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Data.Time.LocalTime (zonedTimeToUTC)
+import Text.Read (readMaybe)
 import GHC.IO.Exception (ExitCode (..))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.IO.Error (userError)
@@ -194,6 +215,227 @@ interpretInstanceMachineType change declared code out =
         MachineTypeAsDeclared -> Success
         MachineTypeDiffers live wanted -> Failure ("instance " <> machineTypeReason change live wanted)
         MachineTypeUndetermined why -> Failure why
+
+{- | How long an instance may run before GCP turns it off by itself (the
+termination action is always @STOP@: the instance, its disks and its
+addresses stay, and only what a stopped instance bills for is billed).
+
+'NoRunLimit' passes nothing and asks nothing: it is what every instance was
+before this type existed.
+
+'MaxRunDuration' is a number of seconds counted by GCP from each start
+(@--max-run-duration@; GCP accepts 30 seconds to 120 days, see
+'runLimitProblems'). 'RunUntil' is one date for the life of the instance
+(@--termination-time@), compared and rendered to the second.
+
+With a limit declared, 'gceInstance' reads it back from an instance that
+exists ('judgeRunLimit') and, once the deadline has passed, an instance that
+is @TERMINATED@ /is/ the declared state of a 'PoweredOn' declaration: the
+check is satisfied and @up@ does not start it. See 'RunLimitVerdict' for
+every case, and 'planExistingInstance' for what @up@ then does.
+
+__Starting an expired instance again is a new declaration__: another
+duration or a later date, which @up@ sets on the stopped instance before
+starting it. For a duration, starting it by hand does the same, since the
+deadline is counted from the last start. A forced @up@ of an unchanged
+declaration starts nothing.
+-}
+data RunLimit
+    = -- | say nothing: the instance runs until something stops it
+      NoRunLimit
+    | -- | this many seconds after each start
+      MaxRunDuration Integer
+    | -- | until this date
+      RunUntil UTCTime
+    deriving (Eq, Show)
+
+-- | Everything wrong with a run limit declaration; empty for 'NoRunLimit'.
+runLimitProblems :: RunLimit -> [Text]
+runLimitProblems limit = case limit of
+    MaxRunDuration seconds
+        | seconds < 30 || seconds > 120 * 86400 ->
+            ["a maximum run duration of " <> Text.pack (show seconds) <> "s (GCP accepts 30s to 120 days)"]
+    _ -> []
+
+-- | A date the way it is given to gcloud and written in reports: UTC, to the second.
+renderDeadline :: UTCTime -> Text
+renderDeadline = Text.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
+
+-- | A declared limit in words, for the notes and the reasons.
+renderRunLimit :: RunLimit -> Text
+renderRunLimit limit = case limit of
+    NoRunLimit -> "none"
+    MaxRunDuration seconds -> Text.pack (show seconds) <> "s after each start, then stopped by GCP"
+    RunUntil date -> "until " <> renderDeadline date <> ", then stopped by GCP"
+
+{- | The flags a declared limit is at @create@, and at @set-scheduling@ too
+(with the other kind of limit cleared there, see 'computeCommand'). Nothing
+for 'NoRunLimit'.
+-}
+runLimitArgs :: RunLimit -> [String]
+runLimitArgs limit = case limit of
+    NoRunLimit -> []
+    MaxRunDuration seconds -> ["--max-run-duration", show seconds <> "s", "--instance-termination-action", "STOP"]
+    RunUntil date -> ["--termination-time", Text.unpack (renderDeadline date), "--instance-termination-action", "STOP"]
+
+{- | What an instance says of its own run limit, from @describe
+--format=json(lastStartTimestamp,scheduling.maxRunDuration.seconds,scheduling.terminationTime,scheduling.instanceTerminationAction)@.
+Every field may be absent.
+
+The deadline GCP computes (@terminationTimestamp@) is deliberately not
+read: gcloud's help says it is removed whenever the instance is stopped,
+which is exactly when the check needs it, and the v1 API this command speaks
+does not carry it. A duration's deadline is 'liveLastStart' plus the
+duration instead.
+-}
+data LiveRunLimit = LiveRunLimit
+    { liveMaxRunSeconds :: Maybe Integer
+    , liveTerminationTime :: Maybe UTCTime
+    , liveTerminationAction :: Maybe Text
+    , liveLastStart :: Maybe UTCTime
+    }
+    deriving (Eq, Show)
+
+{- | Reads that describe. An output that is not a JSON object, or a field
+that is there and cannot be read (a duration that is not a number, a date
+that is not RFC 3339), is a 'Left' saying so: a misread limit must never be
+taken for an expired one, nor for one worth setting again.
+-}
+parseLiveRunLimit :: Text -> Either Text LiveRunLimit
+parseLiveRunLimit out =
+    case Aeson.decodeStrict (Text.encodeUtf8 out) of
+        Just (Aeson.Object top) -> do
+            let scheduling = case KeyMap.lookup "scheduling" top of
+                    Just (Aeson.Object o) -> o
+                    _ -> KeyMap.empty
+            seconds <- case KeyMap.lookup "maxRunDuration" scheduling of
+                Nothing -> Right Nothing
+                Just Aeson.Null -> Right Nothing
+                Just (Aeson.Object o) -> optional "scheduling.maxRunDuration.seconds" readSeconds (KeyMap.lookup "seconds" o)
+                Just other -> unreadable "scheduling.maxRunDuration" other
+            terminationTime <- optional "scheduling.terminationTime" readDate (KeyMap.lookup "terminationTime" scheduling)
+            action <- optional "scheduling.instanceTerminationAction" readText (KeyMap.lookup "instanceTerminationAction" scheduling)
+            lastStart <- optional "lastStartTimestamp" readDate (KeyMap.lookup "lastStartTimestamp" top)
+            Right (LiveRunLimit seconds terminationTime action lastStart)
+        _ -> Left ("no run limit could be read in " <> Text.pack (show out))
+  where
+    optional :: Text -> (Aeson.Value -> Maybe a) -> Maybe Aeson.Value -> Either Text (Maybe a)
+    optional _ _ Nothing = Right Nothing
+    optional _ _ (Just Aeson.Null) = Right Nothing
+    optional field readValue (Just value) = maybe (unreadable field value) (Right . Just) (readValue value)
+    unreadable :: Text -> Aeson.Value -> Either Text a
+    unreadable field value = Left ("could not read " <> field <> " in " <> Text.pack (show (Aeson.encode value)))
+    -- an int64 is a string in the API's JSON; a number is accepted as well
+    readSeconds :: Aeson.Value -> Maybe Integer
+    readSeconds value = case value of
+        Aeson.String t -> readMaybe (Text.unpack t)
+        Aeson.Number n | n == fromInteger (round n) -> Just (round n)
+        _ -> Nothing
+    readText value = case value of
+        Aeson.String t -> Just t
+        _ -> Nothing
+    readDate value = case value of
+        Aeson.String t ->
+            let s = Text.unpack t
+             in (iso8601ParseM s :: Maybe UTCTime) <|> (zonedTimeToUTC <$> iso8601ParseM s)
+        _ -> Nothing
+
+{- | An existing instance against its declared 'RunLimit', at a given time.
+
+A deadline is, for 'RunUntil', the declared date; for 'MaxRunDuration', the
+instance's last start plus the duration, and only when the instance holds
+the declared duration (otherwise no run of it was under this limit).
+-}
+data RunLimitVerdict
+    = -- | nothing is declared, so nothing was asked
+      RunUnlimited
+    | -- | the instance holds the declared limit and its deadline, this one, is ahead
+      RunWithin UTCTime
+    | -- | the deadline passed less than 'runLimitGrace' ago: GCP is stopping
+      -- the instance, or just did
+      RunEnding UTCTime
+    | -- | the deadline passed
+      RunExpired UTCTime
+    | -- | the instance holds another limit (or none), and no declared date
+      -- has passed: what it holds, then what is declared
+      RunLimitDiffers Text Text
+    | -- | the describe failed or could not be read: nothing is known, so
+      -- nothing is started, stopped or set
+      RunLimitUndetermined Text
+    deriving (Eq, Show)
+
+{- | For how long after a deadline a @RUNNING@ instance is still GCP's to
+stop rather than a failure. GCP's documentation says the stop may come up to
+30 seconds late, and a duration's deadline is computed here from the start
+/request/, a little earlier than the moment GCP counts from.
+-}
+runLimitGrace :: NominalDiffTime
+runLimitGrace = 300
+
+{- | The verdict, from the declared limit, the current time and the describe
+'parseLiveRunLimit' reads. Split out of 'gceInstance' for testability: no
+clock is read here.
+
+A declared date that has passed is 'RunEnding'/'RunExpired' whatever limit
+the instance holds: nothing may start it any more, and GCP itself refuses to.
+-}
+judgeRunLimit :: RunLimit -> UTCTime -> ExitCode -> Text -> RunLimitVerdict
+judgeRunLimit NoRunLimit _ _ _ = RunUnlimited
+judgeRunLimit _ _ (ExitFailure n) _ =
+    RunLimitUndetermined ("could not describe the run limit (exit " <> Text.pack (show n) <> ")")
+judgeRunLimit limit now ExitSuccess out =
+    case parseLiveRunLimit out of
+        Left why -> RunLimitUndetermined why
+        Right live -> case limit of
+            NoRunLimit -> RunUnlimited
+            RunUntil date
+                | now >= date -> passed date
+                | holds live && (seconds <$> live.liveTerminationTime) == Just (seconds date) && live.liveMaxRunSeconds == Nothing -> RunWithin date
+                | otherwise -> differs live
+            MaxRunDuration duration
+                | holds live && live.liveMaxRunSeconds == Just duration && live.liveTerminationTime == Nothing ->
+                    case live.liveLastStart of
+                        Nothing -> RunLimitUndetermined "the instance holds the declared run limit and says nothing of its last start"
+                        Just started
+                            | now < deadline -> RunWithin deadline
+                            | otherwise -> passed deadline
+                          where
+                            deadline = addUTCTime (fromInteger duration) started
+                | otherwise -> differs live
+  where
+    seconds :: UTCTime -> Integer
+    seconds = floor . utcTimeToPOSIXSeconds
+    holds :: LiveRunLimit -> Bool
+    holds live = live.liveTerminationAction == Just "STOP"
+    passed deadline
+        | now < addUTCTime runLimitGrace deadline = RunEnding deadline
+        | otherwise = RunExpired deadline
+    differs :: LiveRunLimit -> RunLimitVerdict
+    differs live = RunLimitDiffers (renderLive live) (renderRunLimit limit)
+    renderLive :: LiveRunLimit -> Text
+    renderLive live =
+        case (live.liveMaxRunSeconds, live.liveTerminationTime) of
+            (Nothing, Nothing) -> "none"
+            (duration, date) ->
+                Text.intercalate
+                    " and "
+                    ( [Text.pack (show d) <> "s after each start" | Just d <- [duration]]
+                        <> ["until " <> renderDeadline t | Just t <- [date]]
+                    )
+                    <> ", then "
+                    <> maybe "no declared action" id live.liveTerminationAction
+
+{- | Why an instance's run limit is not the declared one, worded to follow
+@instance NAME@: the check and @up@ say the same thing.
+-}
+runLimitReason :: Text -> Text -> Text
+runLimitReason live wanted =
+    "holds run limit "
+        <> live
+        <> ", declared "
+        <> wanted
+        <> "; a run limit is only set on a stopped instance and this node does not stop one for it:"
+        <> " stop it (the next up sets the limit and starts it), or run gcloud compute instances set-scheduling"
 
 -- | Boot disk configuration.
 {- | A boot disk, named either by a specific image or by an image family (in
@@ -432,6 +674,10 @@ data Instance = Instance
     -- ^ whether @up@ may stop an existing instance to give it the declared
     -- machine type, or fails naming both types ('RefuseMachineTypeChange',
     -- which renders nothing)
+    , instanceRunLimit :: RunLimit
+    -- ^ how long the instance may run before GCP stops it; once that
+    -- deadline has passed a stopped instance is the declared state and is
+    -- not started ('NoRunLimit' renders nothing and asks nothing)
     }
     deriving (Eq, Show)
 
@@ -453,6 +699,12 @@ data Instance = Instance
 -- Declared scopes that differ from an existing instance's are a 'Failure'
 -- for the check and a throw for @up@, before it starts or stops anything;
 -- undeclarable ones ('scopeProblems') are the same before any call.
+--
+-- With an 'instanceRunLimit', GCP stops the instance at its deadline and the
+-- node accepts that: after the deadline a @TERMINATED@ instance satisfies a
+-- 'PoweredOn' declaration and @up@ starts nothing ('interpretInstanceRun',
+-- 'planExistingInstance'). A limit that differs on an existing instance is
+-- set when the instance is stopped and is a 'Failure' naming both otherwise.
 gceInstance :: Reporter Report -> Track' (Binary "gcloud") -> Instance -> Op
 gceInstance r gcloudTrack inst =
     withBinary gcloudTrack computeCommand (InstancesCreate inst) $ \create ->
@@ -460,17 +712,18 @@ gceInstance r gcloudTrack inst =
             withBinary gcloudTrack computeCommand (InstancesResume inst) $ \resume ->
                 withBinary gcloudTrack computeCommand (InstancesStop inst) $ \stop ->
                     withBinary gcloudTrack computeCommand (InstancesSetMachineType inst) $ \setType ->
-                        withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
-                            op "gcp-instance" nodeps $ \actions ->
-                                actions
-                                    { help = Text.unwords [verb, "GCE instance", inst.instanceName]
-                                    , notes = actions.notes <> scopeNotes <> resizeNotes
-                                    , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
-                                    , up = bringUp create start resume stop setType
-                                    , -- presence, not state: a stopped instance is still there to delete
-                                      down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
-                                    , check = checkInstance
-                                    }
+                        withBinary gcloudTrack computeCommand (InstancesSetScheduling inst) $ \setScheduling ->
+                            withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
+                                op "gcp-instance" nodeps $ \actions ->
+                                    actions
+                                        { help = Text.unwords [verb, "GCE instance", inst.instanceName]
+                                        , notes = actions.notes <> scopeNotes <> resizeNotes <> runLimitNotes
+                                        , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
+                                        , up = bringUp create start resume stop setType setScheduling
+                                        , -- presence, not state: a stopped instance is still there to delete
+                                          down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
+                                        , check = checkInstance
+                                        }
   where
     rFor cmd = contramap (RunComputeCommand cmd) r
 
@@ -488,11 +741,35 @@ gceInstance r gcloudTrack inst =
         RefuseMachineTypeChange -> []
         MayStopToResize -> ["machine type: " <> machineTypeName (renderMachineType inst.instanceMachineType) <> " (may stop to resize)"]
 
-    -- the status first, as before; the scopes and the machine type are only
-    -- asked of an instance that is there: the scopes when some are declared,
-    -- the machine type always (one more describe each)
-    checkInstance = case scopeProblems inst.instanceScopes of
-        problems@(_ : _) -> pure (Failure ("scopes cannot be declared: " <> Text.intercalate "; " problems))
+    -- in the notes so that a re-declared limit is a changed node under
+    -- @run serve@; nothing at all when none is declared
+    runLimitNotes = case inst.instanceRunLimit of
+        NoRunLimit -> []
+        limit -> ["run limit: " <> renderRunLimit limit]
+
+    declarationProblems :: [Text]
+    declarationProblems =
+        ["scopes cannot be declared: " <> Text.intercalate "; " problems | problems@(_ : _) <- [scopeProblems inst.instanceScopes]]
+            <> ["run limit cannot be declared: " <> Text.intercalate "; " problems | problems@(_ : _) <- [runLimitProblems inst.instanceRunLimit]]
+
+    -- the clock is read here and nowhere else; with no limit declared
+    -- neither it nor the instance is asked anything
+    judgeRun :: IO RunLimitVerdict
+    judgeRun = case inst.instanceRunLimit of
+        NoRunLimit -> pure RunUnlimited
+        limit -> do
+            (code, out, _err) <-
+                readCreateProcessWithExitCode
+                    (prepare computeCommand (InstancesDescribeRunLimit inst))
+                    ""
+            now <- getCurrentTime
+            pure (judgeRunLimit limit now code (Text.decodeUtf8 out))
+
+    -- the status first, as before; the scopes, the machine type and the run
+    -- limit are only asked of an instance that is there: the scopes and the
+    -- limit when declared, the machine type always (one more describe each)
+    checkInstance = case declarationProblems of
+        problems@(_ : _) -> pure (Failure (Text.intercalate "; " problems))
         [] -> do
             (code, status) <- describeStatus
             case code of
@@ -504,9 +781,11 @@ gceInstance r gcloudTrack inst =
                     case scopes of
                         Success -> do
                             (typeCode, typeOut) <- describeMachineType
-                            pure $ case interpretInstanceMachineType inst.instanceMachineTypeChange inst.instanceMachineType typeCode typeOut of
-                                Success -> interpretInstanceStatus inst.instancePower code status
-                                differing -> differing
+                            case interpretInstanceMachineType inst.instanceMachineTypeChange inst.instanceMachineType typeCode typeOut of
+                                Success -> do
+                                    run <- judgeRun
+                                    pure (interpretInstanceRun inst.instancePower run code status)
+                                differing -> pure differing
                         differing -> pure differing
 
     describeMachineType :: IO (ExitCode, Text)
@@ -543,10 +822,10 @@ gceInstance r gcloudTrack inst =
     -- unrecoverable: the check says 'Failure', 'up' runs @create@, and
     -- @create@ refuses because the instance exists. Asking first costs one
     -- describe that the check has usually just done.
-    bringUp create start resume stop setType = do
-        case scopeProblems inst.instanceScopes of
+    bringUp create start resume stop setType setScheduling = do
+        case declarationProblems of
             [] -> pure ()
-            problems -> refuse ("scopes cannot be declared: " <> Text.intercalate "; " problems)
+            problems -> refuse (Text.intercalate "; " problems)
         (code, status) <- describeStatus
         let plan = planInstanceUp inst.instancePower code status
         -- an instance that exists with other scopes is left exactly as it
@@ -563,8 +842,10 @@ gceInstance r gcloudTrack inst =
         -- the whole sequence is decided before its first step: a refusal
         -- leaves the machine exactly as it is
         steps <- case plan of
-            CreateInstance -> pure (instanceUpSteps inst.instancePower plan)
-            _ -> planExistingInstance inst.instanceMachineTypeChange inst.instancePower status . uncurry (compareMachineType inst.instanceMachineType) <$> describeMachineType
+            CreateInstance -> planAbsentInstance inst.instanceRunLimit inst.instancePower <$> getCurrentTime
+            _ -> do
+                typeVerdict <- uncurry (compareMachineType inst.instanceMachineType) <$> describeMachineType
+                planExistingInstance inst.instanceMachineTypeChange inst.instancePower status typeVerdict <$> judgeRun
         case steps of
             Left reason -> throwIO (userError ("instance " <> Text.unpack inst.instanceName <> " " <> Text.unpack reason))
             Right todo -> mapM_ runStep todo
@@ -575,6 +856,7 @@ gceInstance r gcloudTrack inst =
             ResumeStep -> resume (rFor (InstancesResume inst))
             StopStep -> stop (rFor (InstancesStop inst))
             SetMachineTypeStep -> setType (rFor (InstancesSetMachineType inst))
+            SetSchedulingStep -> setScheduling (rFor (InstancesSetScheduling inst))
 
 -- | The verdict drawn from @gcloud compute instances describe
 -- --format=value(status)@ against the declared power state, split out for
@@ -597,6 +879,41 @@ interpretInstanceStatus power ExitSuccess status =
         "REPAIRING" -> Unknown
         "SUSPENDED" -> Failure "instance is SUSPENDED"
         _ -> Failure ("unexpected instance status: " <> status)
+
+{- | The check's verdict on an existing instance's status given the verdict
+on its run limit: 'interpretInstanceStatus' with the deadline taken into
+account. Split out of 'gceInstance' for testability.
+
+* Nothing declared, or the limit in place with its deadline ahead: exactly
+  'interpretInstanceStatus'.
+* The deadline has passed and the declaration is 'PoweredOn': @TERMINATED@
+  is 'Success' (the instance ran its allotted time); @RUNNING@ is 'Unknown'
+  for 'runLimitGrace' (GCP is stopping it) and then a 'Failure' naming the
+  deadline; any other status is what 'interpretInstanceStatus' says.
+* A 'PoweredOff' declaration is not changed by a deadline.
+* The instance holds another limit: a 'Failure' naming both (a transitional
+  status stays 'Unknown').
+* The limit could not be read: a 'Failure' saying so, never a pass.
+-}
+interpretInstanceRun :: InstancePower -> RunLimitVerdict -> ExitCode -> Text -> CheckResult
+interpretInstanceRun power run code status = case (code, run) of
+    (ExitFailure _, _) -> asBefore
+    (_, RunUnlimited) -> asBefore
+    (_, RunWithin _) -> asBefore
+    (_, RunLimitUndetermined why) -> Failure why
+    (_, RunLimitDiffers live wanted) -> case asBefore of
+        Unknown -> Unknown
+        _ -> Failure ("instance " <> runLimitReason live wanted)
+    (_, RunEnding deadline) -> after deadline True
+    (_, RunExpired deadline) -> after deadline False
+  where
+    asBefore = interpretInstanceStatus power code status
+    after deadline ending = case (power, status) of
+        (PoweredOn, "TERMINATED") -> Success
+        (PoweredOn, "RUNNING")
+            | ending -> Unknown
+            | otherwise -> Failure ("instance is RUNNING past its run limit (deadline " <> renderDeadline deadline <> ")")
+        _ -> asBefore
 
 -- | Whether the instance exists at all, whatever it is doing: what @down@ asks.
 interpretInstancePresence :: ExitCode -> Text -> CheckResult
@@ -642,6 +959,8 @@ data InstanceStep
     | ResumeStep
     | StopStep
     | SetMachineTypeStep
+    | -- | @set-scheduling@ with the declared 'RunLimit'; only on a stopped instance
+      SetSchedulingStep
     deriving (Eq, Show)
 
 {- | The calls a plan stands for, or why none is made (worded to follow
@@ -657,9 +976,22 @@ instanceUpSteps power plan = case plan of
     AlreadyThere -> Right []
     CannotActYet status -> Left ("is " <> status <> "; retry once it settles")
 
+{- | What @up@ does when there is no instance: create it, unless its
+declared date has already passed (GCP refuses a termination time in the
+past, and a machine that may no longer run is not one to create).
+-}
+planAbsentInstance :: RunLimit -> InstancePower -> UTCTime -> Either Text [InstanceStep]
+planAbsentInstance limit power now = case limit of
+    RunUntil date
+        | now >= date -> Left ("is absent and its declared deadline " <> renderDeadline date <> " has passed: it is not created")
+    _ -> instanceUpSteps power CreateInstance
+
 {- | What @up@ does to an instance that exists, in the given status, given
-the verdict on its machine type. Split out of 'gceInstance' for testability;
-this is the one place a resize is decided.
+the verdicts on its machine type and on its run limit. Split out of
+'gceInstance' for testability; this is the one place a resize, a start past
+a deadline and a change of limit are decided.
+
+The machine type first, as if there were no limit:
 
 * The type is as declared: exactly what 'planInstanceUp' says, whatever the
   permission.
@@ -676,27 +1008,72 @@ this is the one place a resize is decided.
 If a step fails the ones after it are not run: a failed @set-machine-type@
 leaves the instance stopped, and the next pass, finding it @TERMINATED@ with
 the old type, sets the type and starts it.
+
+Then the run limit decides what of that is kept:
+
+* None declared ('RunUnlimited'), or in place with its deadline ahead
+  ('RunWithin'): all of it, unchanged.
+* It could not be read: nothing, and a reason.
+* The deadline has passed and the declaration is 'PoweredOn': __nothing
+  starts, resumes or stops the instance__. A @TERMINATED@ one gets the plan
+  without its start, so a permitted resize still sets the type and leaves
+  the machine off; any other status is a reason and no call (GCP stops a
+  @RUNNING@ one itself; this node never stops a machine declared running).
+  A 'PoweredOff' declaration never starts anything and is not changed.
+* The instance holds another limit: @set-scheduling@ is added where the plan
+  has the machine stopped -- first on a @TERMINATED@ instance, right after
+  the stop when the plan (a 'PoweredOff' declaration, a permitted resize)
+  already stops a @RUNNING@ one. A machine is never stopped for its limit:
+  otherwise a reason naming both limits and no call.
+
+A failed start after a successful @set-scheduling@ leaves a stopped instance
+holding the declared limit: for a duration, if its previous start is more
+than that duration ago, the next pass reads it as expired and leaves it off
+(start it by hand, or declare another duration).
 -}
-planExistingInstance :: MachineTypeChange -> InstancePower -> Text -> MachineTypeVerdict -> Either Text [InstanceStep]
-planExistingInstance change power status verdict = case verdict of
-    MachineTypeAsDeclared -> instanceUpSteps power (planInstanceUp power ExitSuccess status)
-    MachineTypeUndetermined why -> Left ("is left as it is: " <> why)
-    MachineTypeDiffers live wanted -> case change of
-        RefuseMachineTypeChange -> Left (machineTypeReason change live wanted)
-        MayStopToResize -> case status of
-            "RUNNING" -> Right ([StopStep, SetMachineTypeStep] <> restart)
-            "TERMINATED" -> Right (SetMachineTypeStep : restart)
-            _ ->
-                Left
-                    ( "is "
-                        <> status
-                        <> " and runs machine type "
-                        <> live
-                        <> ", declared "
-                        <> wanted
-                        <> "; the type is only set on an instance that is RUNNING (stopped first) or TERMINATED: retry once it settles"
-                    )
+planExistingInstance :: MachineTypeChange -> InstancePower -> Text -> MachineTypeVerdict -> RunLimitVerdict -> Either Text [InstanceStep]
+planExistingInstance change power status verdict run = case run of
+    RunUnlimited -> typed
+    RunWithin _ -> typed
+    RunLimitUndetermined why -> Left ("is left as it is: " <> why)
+    RunLimitDiffers live wanted -> case (status, typed) of
+        (_, Left why) -> Left why
+        ("TERMINATED", Right steps) -> Right (SetSchedulingStep : steps)
+        ("RUNNING", Right (StopStep : steps)) -> Right (StopStep : SetSchedulingStep : steps)
+        _ -> Left (runLimitReason live wanted)
+    RunEnding deadline -> after deadline True
+    RunExpired deadline -> after deadline False
   where
+    after deadline ending = case (power, status) of
+        (PoweredOff, _) -> typed
+        (PoweredOn, "TERMINATED") -> filter (/= StartStep) <$> typed
+        (PoweredOn, "RUNNING")
+            | ending -> Left ("is RUNNING at its deadline " <> renderDeadline deadline <> ", when GCP stops it: retry once it settles")
+            | otherwise ->
+                Left
+                    ( "is RUNNING past its run limit (deadline "
+                        <> renderDeadline deadline
+                        <> "); this node does not stop a machine declared running: stop it, or declare a later limit"
+                    )
+        (PoweredOn, _) -> Left ("is " <> status <> " past its deadline " <> renderDeadline deadline <> ": it is not started")
+    typed = case verdict of
+        MachineTypeAsDeclared -> instanceUpSteps power (planInstanceUp power ExitSuccess status)
+        MachineTypeUndetermined why -> Left ("is left as it is: " <> why)
+        MachineTypeDiffers live wanted -> case change of
+            RefuseMachineTypeChange -> Left (machineTypeReason change live wanted)
+            MayStopToResize -> case status of
+                "RUNNING" -> Right ([StopStep, SetMachineTypeStep] <> restart)
+                "TERMINATED" -> Right (SetMachineTypeStep : restart)
+                _ ->
+                    Left
+                        ( "is "
+                            <> status
+                            <> " and runs machine type "
+                            <> live
+                            <> ", declared "
+                            <> wanted
+                            <> "; the type is only set on an instance that is RUNNING (stopped first) or TERMINATED: retry once it settles"
+                        )
     restart = [StartStep | power == PoweredOn]
 
 -------------------------------------------------------------------------------
@@ -1018,6 +1395,8 @@ data ComputeCommand
     | InstancesDescribeScopes Instance
     | InstancesDescribeMachineType Instance
     | InstancesSetMachineType Instance
+    | InstancesDescribeRunLimit Instance
+    | InstancesSetScheduling Instance
     | InstancesStart Instance
     | InstancesResume Instance
     | InstancesStop Instance
@@ -1080,6 +1459,7 @@ computeCommand = Command $ \cmd -> case cmd of
                         DeclaredScopes [] -> ["--no-scopes"]
                         DeclaredScopes scopes -> ["--scopes", Text.unpack (Text.intercalate "," scopes)]
                    )
+                <> runLimitArgs inst.instanceRunLimit
     InstancesDescribe inst ->
         gcloudProc $
             withProject inst.instanceProject
@@ -1134,6 +1514,36 @@ computeCommand = Command $ \cmd -> case cmd of
                     , "--machine-type"
                     , Text.unpack (renderMachineType inst.instanceMachineType)
                     ]
+                )
+    InstancesDescribeRunLimit inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "describe"
+                    , Text.unpack inst.instanceName
+                    , "--format=json(lastStartTimestamp,scheduling.maxRunDuration.seconds,scheduling.terminationTime,scheduling.instanceTerminationAction)"
+                    ]
+                )
+    -- the declared limit, and the other kind of limit cleared so that the
+    -- instance holds exactly what is declared
+    InstancesSetScheduling inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    ( [ "compute"
+                      , "instances"
+                      , "set-scheduling"
+                      , Text.unpack inst.instanceName
+                      ]
+                        <> runLimitArgs inst.instanceRunLimit
+                        <> ( case inst.instanceRunLimit of
+                                NoRunLimit -> ["--clear-max-run-duration", "--clear-termination-time"]
+                                MaxRunDuration _ -> ["--clear-termination-time"]
+                                RunUntil _ -> ["--clear-max-run-duration"]
+                           )
+                    )
                 )
     InstancesStart inst ->
         gcloudProc $
