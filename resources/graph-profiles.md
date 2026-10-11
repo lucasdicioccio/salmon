@@ -5,8 +5,9 @@ by the `graph-profiles` benchmark in `salmon-ops-recipes` over the synthetic gra
 `Test.GraphFixture`. The numbers are **indicative**: one run, on a shared laptop-class machine that
 other work was using. Read the growth and the order of magnitude, not the third digit.
 
-This document reports; it fixes nothing. The super-linear findings are listed with what was
-measured and, separately, what reading the code suggests is the cause.
+This document reports. The super-linear findings are listed with what was measured and,
+separately, what reading the code suggests is the cause. One has been fixed since (finding 5, the
+client model's teardown: see "Since fixed" below); the others stand as measured.
 
 ## Running it
 
@@ -126,7 +127,7 @@ not itself profiled.
    end as `inputs`. `query show --dedupe` has the same shape (10 s at 10 000 on a chain). *Read
    from the code:* a path is as long as the node is deep and each of up to eight per node is a
    fresh list, so a deep graph holds nodes x depth segments.
-5. **`Client.Model.step` is quadratic over a teardown.** One `done` event per node wanted down:
+5. **`Client.Model.step` was quadratic over a teardown (fixed since, see "Since fixed").** One `done` event per node wanted down:
    1.5 to 2.0 s and 4.3 GB allocated at 10 000 nodes on the five shapes that got there, abandoned
    at 30 000 on fan and tree2. Folding
    the same number of events for a bring-up is per node (0.3 s at 100 000). *Read from the code:*
@@ -143,7 +144,7 @@ not itself profiled.
 
 ### Candidate follow-ups
 
-One per finding worth fixing, in the order the numbers suggest; none is done here.
+One per finding worth fixing, in the order the numbers suggest. Only the fifth is done.
 
 1. `foldDag` per node instead of per occurrence (finding 1): it bounds `run up`/`down`/`tree`/
    `dag`, `query plan` and every `serve` declaration at a few dozen nodes of diamond chain.
@@ -154,8 +155,49 @@ One per finding worth fixing, in the order the numbers suggest; none is done her
    neighbours is a separate question.
 4. Listed paths that do not cost depth per node (finding 4): shared prefixes, a length cap, or
    listing on request.
-5. `Client.Model.step` removing a node without filtering the order list (finding 5).
+5. `Client.Model.step` removing a node without filtering the order list (finding 5). **Done.**
 6. What a tended node retains (finding 6): not investigated beyond the heap bound being hit.
+
+### Since fixed
+
+**Finding 5, `Client.Model.step` over a teardown** (2026-10-11). The model's display order was a
+list and each removal filtered it; it is now `Model.Order` (seat number to ref, and each ref's
+seats), so a removal is a lookup and the refs that stay keep their place. The same change was
+made to the Rust port (`rs/salmon-serve-client`, `Vec::retain` before). The web UI's fold
+(`salmon-ops/ui/ui.js`) never had the cost: it does not remove a node on an event at all, its
+order is only rebuilt by a `/dag` read.
+
+The two `Model.step` series were run again, before and after, the same day on the same machine
+(one run each side; load average about 2 for the first and 3.5 to 5 for the second, so as
+indicative as the rest), budget 6 s:
+
+| teardown, one `done` per node wanted down | before | after |
+|---|---|---|
+| chain, 3 000 | 159 ms, 355 MB | 5 ms, 6 MB |
+| chain, 10 000 | 2.2 s, 4.3 GB | 22 ms, 21 MB |
+| fan, 10 000 | 2.1 s, 4.3 GB | 27 ms, 21 MB |
+| tree2, 10 000 | 2.2 s, 4.3 GB | 26 ms, 21 MB |
+| tree2, 30 000 | not reached (budget) | 102 ms, 67 MB |
+| tree2, 100 000 | not reached (budget) | 507 ms, 247 MB |
+
+Fitted growth went from `n^2.0`-`n^2.3` to `n^1.2`-`n^1.3` where there were enough steps to fit,
+which is "per node" as this document reads it; the allocation, which the load does not move, went
+from 4.3 GB to 21 MB at 10 000. A teardown now costs about what folding the same number of events
+for a bring-up costs (422 ms and 158 MB at 100 000 on tree2 in the same run), plus half again in
+allocation. The rows are `resources/graph-profiles/client-step-before.tsv` and
+`client-step-after.tsv`; the tables further down are still the original full run and still show
+the old teardown row.
+
+What this does not say:
+
+- The other shapes stop at 3 000 or 10 000 nodes after the change as before it, because
+  *building their input* (the listed paths, finding 4) is what runs out, not the fold. How far a
+  series gets on that account moved with the load between runs.
+- Only the Haskell fold was timed. The Rust one was not, before or after.
+- `Model.fromDag` now seats the order as well as keying the nodes. Its series was run after the
+  change only (`client-fromdag-after.tsv`), so the comparison is with the original run of the day
+  before under another load: allocation is up by 11 to 15 % (27 to 31 MB at 10 000 on a chain, 289
+  to 322 MB at 100 000 on tree2), and the times (25 to 33 ms, 470 to 802 ms) are not comparable.
 
 ## Not measured
 

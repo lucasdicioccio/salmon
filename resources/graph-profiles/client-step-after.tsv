@@ -1,0 +1,79 @@
+client	Model.step, one done event per node		nodes	chain	100	100	99	100	0.000132	110912	ok
+client	Model.step, one done event per node		nodes	chain	300	300	299	300	0.000307	351496	ok
+client	Model.step, one done event per node		nodes	chain	1000	1000	999	1000	0.000959	1256664	ok
+client	Model.step, one done event per node		nodes	chain	3000	3000	2999	3000	0.003238	3999640	ok
+client	Model.step, one done event per node		nodes	chain	10000	10000	9999	10000	0.019313	14191080	ok
+client	Model.step, one done event per node		nodes	chain	30000	30000	29999	30000	0.000000	0	stop:timeout
+client	Model.step, a teardown: one done event per node wanted down		nodes	chain	100	100	99	100	0.000131	130920	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	chain	300	300	299	300	0.000369	446784	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	chain	1000	1000	999	1000	0.001330	1676352	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	chain	3000	3000	2999	3000	0.005025	5626240	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	chain	10000	10000	9999	10000	0.021840	20924800	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	chain	30000	30000	29999	30000	0.000000	0	stop:inputs
+client	Model.step, one done event per node		nodes	fan	100	100	99	100	0.000065	110912	ok
+client	Model.step, one done event per node		nodes	fan	300	300	299	300	0.000256	351496	ok
+client	Model.step, one done event per node		nodes	fan	1000	1000	999	1000	0.000825	1256664	ok
+client	Model.step, one done event per node		nodes	fan	3000	3000	2999	3000	0.003187	3999640	ok
+client	Model.step, one done event per node		nodes	fan	10000	10000	9999	10000	0.020004	14191080	ok
+client	Model.step, one done event per node		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:inputs
+client	Model.step, a teardown: one done event per node wanted down		nodes	fan	100	100	99	100	0.000086	130336	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	fan	300	300	299	300	0.000546	446784	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	fan	1000	1000	999	1000	0.001315	1680144	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	fan	3000	3000	2999	3000	0.005337	5626240	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	fan	10000	10000	9999	10000	0.026880	20924800	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:inputs
+client	Model.step, one done event per node		nodes	tree2	100	100	99	100	0.000090	110912	ok
+client	Model.step, one done event per node		nodes	tree2	300	300	299	300	0.000208	350824	ok
+client	Model.step, one done event per node		nodes	tree2	1000	1000	999	1000	0.000878	1247976	ok
+client	Model.step, one done event per node		nodes	tree2	3000	3000	2999	3000	0.003366	3999496	ok
+client	Model.step, one done event per node		nodes	tree2	10000	10000	9999	10000	0.019082	14103432	ok
+client	Model.step, one done event per node		nodes	tree2	30000	30000	29999	30000	0.079184	44682904	ok
+client	Model.step, one done event per node		nodes	tree2	100000	100000	99999	100000	0.421778	157675376	ok
+client	Model.step, one done event per node		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	100	100	99	100	0.000119	129864	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	300	300	299	300	0.000554	447008	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	1000	1000	999	1000	0.001256	1662048	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	3000	3000	2999	3000	0.005176	5620384	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	10000	10000	9999	10000	0.026095	20754080	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	30000	30000	29999	30000	0.102078	67457472	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	100000	100000	99999	100000	0.506730	247109696	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+client	Model.step, one done event per node		nodes	diamonds2	100	100	132	34359738365	0.000109	111104	ok
+client	Model.step, one done event per node		nodes	diamonds2	300	298	396	1e30	0.000220	348264	ok
+client	Model.step, one done event per node		nodes	diamonds2	1000	1000	1332	1e100	0.001003	1251912	ok
+client	Model.step, one done event per node		nodes	diamonds2	3000	2998	3996	1e301	0.004138	3987048	ok
+client	Model.step, one done event per node		nodes	diamonds2	10000	10000	13332	1e1003	0.000000	0	stop:inputs
+client	Model.step, a teardown: one done event per node wanted down		nodes	diamonds2	100	100	132	34359738365	0.000127	131080	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	diamonds2	300	298	396	1e30	0.000302	442824	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	diamonds2	1000	1000	1332	1e100	0.001359	1672256	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	diamonds2	3000	2998	3996	1e301	0.005600	5597224	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	diamonds2	10000	10000	13332	1e1003	0.000000	0	stop:inputs
+client	Model.step, one done event per node		nodes	layered8x2	100	97	184	32761	0.000087	107120	ok
+client	Model.step, one done event per node		nodes	layered8x2	300	297	584	1099511627769	0.000360	346312	ok
+client	Model.step, one done event per node		nodes	layered8x2	1000	993	1976	1e38	0.000932	1240696	ok
+client	Model.step, one done event per node		nodes	layered8x2	3000	2993	5976	1e113	0.004989	3981848	ok
+client	Model.step, one done event per node		nodes	layered8x2	10000	9993	19976	1e376	0.000000	0	stop:inputs
+client	Model.step, a teardown: one done event per node wanted down		nodes	layered8x2	100	97	184	32761	0.000140	126872	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	layered8x2	300	297	584	1099511627769	0.000315	441264	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	layered8x2	1000	993	1976	1e38	0.001408	1658736	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	layered8x2	3000	2993	5976	1e113	0.004822	5593936	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	layered8x2	10000	9993	19976	1e376	0.000000	0	stop:inputs
+client	Model.step, one done event per node		nodes	random8x3	100	97	272	2125761	0.000126	106640	ok
+client	Model.step, one done event per node		nodes	random8x3	300	297	872	1e18	0.000271	346792	ok
+client	Model.step, one done event per node		nodes	random8x3	1000	993	2960	1e59	0.001161	1241032	ok
+client	Model.step, one done event per node		nodes	random8x3	3000	2993	8960	1e179	0.004255	3980456	ok
+client	Model.step, one done event per node		nodes	random8x3	10000	9993	29960	1e596	0.000000	0	stop:inputs
+client	Model.step, a teardown: one done event per node wanted down		nodes	random8x3	100	97	272	2125761	0.000127	126200	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	random8x3	300	297	872	1e18	0.000290	442384	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	random8x3	1000	993	2960	1e59	0.001206	1661104	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	random8x3	3000	2993	8960	1e179	0.005476	5591408	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	random8x3	10000	9993	29960	1e596	0.000000	0	stop:inputs
+client	Model.step, one done event per node		nodes	dense32	100	97	2080	33825	0.000094	106248	ok
+client	Model.step, one done event per node		nodes	dense32	300	289	8224	36319351833633	0.000625	337752	ok
+client	Model.step, one done event per node		nodes	dense32	1000	993	30752	1e46	0.002132	1240648	ok
+client	Model.step, one done event per node		nodes	dense32	3000	2977	94240	1e139	0.007919	3953496	ok
+client	Model.step, one done event per node		nodes	dense32	10000	9985	318496	1e469	0.000000	0	stop:inputs
+client	Model.step, a teardown: one done event per node wanted down		nodes	dense32	100	97	2080	33825	0.000082	126352	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	dense32	300	289	8224	36319351833633	0.000286	429840	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	dense32	1000	993	30752	1e46	0.001243	1654352	ok
+client	Model.step, a teardown: one done event per node wanted down		nodes	dense32	3000	2977	94240	1e139	0.000000	0	stop:inputs

@@ -43,7 +43,10 @@ What moves a node's view:
     has never seen.
 
 A node wanted @down@ whose @done@ arrives is dropped: the loop prunes it
-after the pass, and @\/dag@ would not show it either.
+after the pass, and @\/dag@ would not show it either. Dropping it costs a
+lookup, not a pass over the display order ('Order'): a teardown is one such
+event per node, and filtering a list of every node for each of them made
+the fold quadratic over one (finding 5 of @resources\/graph-profiles.md@).
 
 = The output stream
 
@@ -111,6 +114,13 @@ module Salmon.Client.Model (
     resolve,
     rebase,
 
+    -- * The display order
+    Order,
+    orderFromList,
+    orderToList,
+    orderRemove,
+    orderSize,
+
     -- * Reading it
     nodesInOrder,
     Counts (..),
@@ -130,6 +140,9 @@ import Data.Aeson (Result (..), Value (..), fromJSON)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
+import Data.Function (on)
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IntMap
 import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -219,6 +232,74 @@ data Node = Node
     }
     deriving (Show, Eq)
 
+{- | The order the nodes are shown in: the refs of a snapshot, in the
+snapshot's order, less the ones removed since.
+
+It reads as the list it is built from ('orderToList'), and 'orderRemove'
+is that list with every copy of a ref filtered out, which is what the
+model did on a plain list until a teardown of ten thousand nodes was
+measured at two seconds of filtering. Each ref keeps the seat the snapshot
+gave it, so removing one is a lookup of its seats and a deletion of each,
+and the refs that stay are never renumbered: ascending seats are the
+snapshot's order whatever has been removed in between.
+
+A ref listed twice has two seats and is shown twice, as before; a @\/dag@
+answer has one node per ref, so this only keeps the fold total on a
+document that is not one.
+
+Two orders are equal when they read the same: which seats a removal left
+empty is not something a reader can see, and a model that dropped a node
+equals one read from a snapshot that never had it (as it did when the
+order was a list).
+-}
+data Order = Order
+    { orderSeats :: !(IntMap RefId)
+    -- ^ seat to ref; ascending seats are the display order
+    , orderPlaces :: !(Map RefId [Int])
+    -- ^ the seats of each ref still shown
+    }
+
+instance Eq Order where
+    (==) = (==) `on` orderToList
+
+instance Show Order where
+    showsPrec d o = showParen (d > 10) (showString "orderFromList " . showsPrec 11 (orderToList o))
+
+-- | The order that shows these refs, first to last.
+orderFromList :: [RefId] -> Order
+orderFromList rs = orderSeated rs (Map.fromListWith (++) [(r, [i]) | (i, r) <- zip [0 ..] rs])
+
+-- | 'orderFromList' for a caller that already has each ref's seats (its
+-- positions in the list, counted from 0): 'fromDag', which keys the nodes
+-- by ref anyway and would otherwise compare every ref a second time.
+orderSeated :: [RefId] -> Map RefId [Int] -> Order
+orderSeated rs places =
+    Order
+        { orderSeats = IntMap.fromDistinctAscList (zip [0 ..] rs)
+        , orderPlaces = places
+        }
+
+-- | The refs shown, first to last.
+orderToList :: Order -> [RefId]
+orderToList = IntMap.elems . orderSeats
+
+-- | How many refs are shown (a ref listed twice counts twice).
+orderSize :: Order -> Int
+orderSize = IntMap.size . orderSeats
+
+{- | Stop showing a ref: @orderToList (orderRemove r o) == filter (/= r)
+(orderToList o)@, at the cost of a lookup rather than of the list. A ref
+that is not shown leaves the order as it was.
+-}
+orderRemove :: RefId -> Order -> Order
+orderRemove r o = case Map.lookup r o.orderPlaces of
+    Nothing -> o
+    Just seats ->
+        Order
+            { orderSeats = foldl' (flip IntMap.delete) o.orderSeats seats
+            , orderPlaces = Map.delete r o.orderPlaces
+            }
+
 -- | The loop's last convergence pass as the stream told it.
 data Pass
     = -- | @converge-start@: nodes to turn down, nodes to turn up
@@ -235,8 +316,9 @@ data Model = Model
     -- event's; the cursor to resume @\/events@ from
     , modelLoopSeq :: !Word64
     -- ^ the number the loop-level fields are current to
-    , modelOrder :: ![RefId]
-    -- ^ the snapshot's dependency order ('Salmon.Op.Dag.dagOrder')
+    , modelOrder :: !Order
+    -- ^ the snapshot's dependency order ('Salmon.Op.Dag.dagOrder'), less
+    -- the nodes dropped since; read it with 'orderToList'
     , modelNodes :: !(Map RefId Node)
     , modelPass :: !(Maybe Pass)
     , modelSupervised :: !(Maybe Bool)
@@ -291,19 +373,26 @@ fromDag v = do
     nodes <- maybe (Left "/dag answer has no nodes array") Right (arrayAt ["nodes"] v)
     seqNo <- maybe (Left "/dag answer carries no seq") Right (numberAt ["seq"] v)
     parsed <- traverse (nodeOf seqNo) nodes
+    let seated = seatedOf parsed
     pure
         Model
             { modelMode = fromMaybe "?" (textAt ["mode"] v)
             , modelSeq = seqNo
             , modelLoopSeq = 0
-            , modelOrder = fmap nodeRef parsed
-            , modelNodes = Map.fromList [(nodeRef n, n) | n <- parsed]
+            , modelOrder = orderSeated (fmap nodeRef parsed) (Map.map snd seated)
+            , modelNodes = Map.map fst seated
             , modelPass = Nothing
             , modelSupervised = Nothing
             , modelLast = Nothing
             , modelResyncReason = Nothing
             }
   where
+    -- each ref's node (the last listed, as 'Map.fromList' keeps) and its
+    -- seats, keyed once: the refs are compared for one map, not for the
+    -- node map and again for the order's
+    seatedOf :: [Node] -> Map RefId (Node, [Int])
+    seatedOf parsed = Map.fromListWith (\(n, new) (_, old) -> (n, new ++ old)) [(nodeRef n, (n, [i])) | (i, n) <- zip [0 ..] parsed]
+
     nodeOf :: Word64 -> Value -> Either String Node
     nodeOf seqNo n = do
         r <- maybe (Left ("a node without a ref: " <> show n)) Right (refAt ["ref"] n)
@@ -405,7 +494,7 @@ step m0 e
             | otherwise ->
                 let n' = (f n){nodeSeq = fromMaybe n.nodeSeq e.eventSeq}
                  in if n'.nodeDirection == "down" && n'.nodeConvergence == "converged" && n'.nodeLastKind `elem` [Just "done", Just "acted done"]
-                        then m{modelNodes = Map.delete r m.modelNodes, modelOrder = filter (/= r) m.modelOrder}
+                        then m{modelNodes = Map.delete r m.modelNodes, modelOrder = orderRemove r m.modelOrder}
                         else m{modelNodes = Map.insert r n' m.modelNodes}
 
     touch :: Text -> Node -> Node
@@ -428,7 +517,7 @@ step m0 e
 
 -- | The nodes in the snapshot's dependency order.
 nodesInOrder :: Model -> [Node]
-nodesInOrder m = mapMaybe (`Map.lookup` m.modelNodes) m.modelOrder
+nodesInOrder m = mapMaybe (`Map.lookup` m.modelNodes) (orderToList m.modelOrder)
 
 lookupNode :: RefId -> Model -> Maybe Node
 lookupNode r m = Map.lookup r m.modelNodes
