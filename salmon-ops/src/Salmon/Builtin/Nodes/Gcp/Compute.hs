@@ -2,6 +2,16 @@
 
 module Salmon.Builtin.Nodes.Gcp.Compute (
     MachineType (..),
+    renderMachineType,
+    MachineTypeChange (..),
+    MachineTypeVerdict (..),
+    machineTypeName,
+    parseLiveMachineType,
+    compareMachineType,
+    interpretInstanceMachineType,
+    InstanceStep (..),
+    instanceUpSteps,
+    planExistingInstance,
     BootDisk (..),
     Instance (..),
     InstancePower (..),
@@ -86,6 +96,104 @@ renderMachineType E2Medium = "e2-medium"
 renderMachineType E2Standard2 = "e2-standard-2"
 renderMachineType N2Standard4 = "n2-standard-4"
 renderMachineType (Custom t) = t
+
+{- | What 'gceInstance' may do about an existing instance whose machine type
+is not the declared one. GCP only changes a machine type on a stopped
+instance, so reconciling one means an outage (about two minutes from stop to
+serving, on the one resize this was written after), and that is the
+declaration's to permit, never the node's to decide.
+
+'RefuseMachineTypeChange' is what every declaration should start from: the
+difference is a 'Failure' for the check and a throw for @up@, both naming
+the running and the declared type, and nothing is stopped, started or
+re-created. The remedy is then the operator's: stop it, @gcloud compute
+instances set-machine-type NAME --machine-type T@, start it; or declare
+'MayStopToResize'.
+
+'MayStopToResize' lets @up@ do exactly that: stop the instance if it runs,
+set the type, and start it again when the declaration is 'PoweredOn' (a
+'PoweredOff' one stays stopped). It is a standing permission, not a one-off:
+while it is declared, any later change of 'instanceMachineType' stops the
+machine again, under @run serve@ as soon as the check notices.
+-}
+data MachineTypeChange
+    = -- | fail the node, naming both types; never stop anything
+      RefuseMachineTypeChange
+    | -- | stop, @set-machine-type@, start
+      MayStopToResize
+    deriving (Eq, Show)
+
+{- | The name a machine type goes by, whether it was written as a bare name
+or as the URL (or partial path) GCP describes it with:
+@.../zones/Z/machineTypes/e2-medium@ is @e2-medium@.
+-}
+machineTypeName :: Text -> Text
+machineTypeName = Text.takeWhileEnd (/= '/') . Text.strip
+
+{- | The machine type in the output of @describe
+--format=value(machineType.basename())@: one word, read by its last path
+segment so that the full URL (should the projection ever not apply) is the
+same answer. Anything else -- no word, several, or one that does not look
+like a machine type name -- is a 'Left' saying so, because under
+'MayStopToResize' a misread output must never be taken for a difference
+worth stopping a machine over.
+-}
+parseLiveMachineType :: Text -> Either Text Text
+parseLiveMachineType out =
+    case Text.words out of
+        [word]
+            | name <- machineTypeName word
+            , not (Text.null name)
+            , Text.all isNameChar name ->
+                Right name
+        _ -> Left ("no machine type could be read in " <> Text.pack (show out))
+  where
+    isNameChar c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+
+-- | An existing instance's machine type against the declared one.
+data MachineTypeVerdict
+    = MachineTypeAsDeclared
+    | -- | the running one, then the declared one
+      MachineTypeDiffers Text Text
+    | -- | the describe failed or could not be read: nothing is known, so nothing is changed
+      MachineTypeUndetermined Text
+    deriving (Eq, Show)
+
+-- | Compares names exactly: GCP has no two spellings of one machine type.
+compareMachineType :: MachineType -> ExitCode -> Text -> MachineTypeVerdict
+compareMachineType _ (ExitFailure n) _ =
+    MachineTypeUndetermined ("could not describe the machine type (exit " <> Text.pack (show n) <> ")")
+compareMachineType declared ExitSuccess out =
+    case parseLiveMachineType out of
+        Left why -> MachineTypeUndetermined why
+        Right live
+            | live == wanted -> MachineTypeAsDeclared
+            | otherwise -> MachineTypeDiffers live wanted
+  where
+    wanted = machineTypeName (renderMachineType declared)
+
+{- | Why an instance is not as declared, worded to follow @instance NAME@:
+the check and @up@ say the same thing. Both types are named in every case.
+-}
+machineTypeReason :: MachineTypeChange -> Text -> Text -> Text
+machineTypeReason change live wanted =
+    "runs machine type " <> live <> ", declared " <> wanted <> "; " <> case change of
+        RefuseMachineTypeChange ->
+            "a machine type only changes on a stopped instance and this declaration does not permit stopping it:"
+                <> " stop it and run gcloud compute instances set-machine-type, or declare MayStopToResize"
+        MayStopToResize -> "the declaration permits stopping it to resize"
+
+{- | The check's verdict on an existing instance's machine type: 'Success'
+when it is the declared one, a 'Failure' naming both otherwise, and a
+'Failure' too when it could not be read. Under 'RefuseMachineTypeChange' the
+node never repairs that failure; under 'MayStopToResize' its @up@ does.
+-}
+interpretInstanceMachineType :: MachineTypeChange -> MachineType -> ExitCode -> Text -> CheckResult
+interpretInstanceMachineType change declared code out =
+    case compareMachineType declared code out of
+        MachineTypeAsDeclared -> Success
+        MachineTypeDiffers live wanted -> Failure ("instance " <> machineTypeReason change live wanted)
+        MachineTypeUndetermined why -> Failure why
 
 -- | Boot disk configuration.
 {- | A boot disk, named either by a specific image or by an image family (in
@@ -297,6 +405,8 @@ data Instance = Instance
     , instanceProject :: Project
     , instanceZone :: Zone
     , instanceMachineType :: MachineType
+    -- ^ compared, by name, with what an existing instance runs: a difference
+    -- is never left silently, see 'instanceMachineTypeChange'
     , instanceBootDisk :: BootDisk
     , instanceNetwork :: Text
     , instanceSubnet :: Text
@@ -318,6 +428,10 @@ data Instance = Instance
     -- ^ the access scopes, or gcloud's defaults. Create-time only, and
     -- unlike the addresses a difference on an existing instance /is/
     -- noticed, as a 'Failure' the node never repairs: see 'AccessScopes'.
+    , instanceMachineTypeChange :: MachineTypeChange
+    -- ^ whether @up@ may stop an existing instance to give it the declared
+    -- machine type, or fails naming both types ('RefuseMachineTypeChange',
+    -- which renders nothing)
     }
     deriving (Eq, Show)
 
@@ -327,8 +441,14 @@ data Instance = Instance
 --   start it if @TERMINATED@ or resume it if @SUSPENDED@ for 'PoweredOn',
 --   stop it if @RUNNING@ for 'PoweredOff'. See 'planInstanceUp'.
 -- * 'down': delete the instance, whatever state it is in.
--- * 'check': report 'Success' if the instance is in the declared state and,
---   when 'instanceScopes' declares some, holds exactly those.
+-- * 'check': report 'Success' if the instance is in the declared state,
+--   runs the declared machine type and, when 'instanceScopes' declares
+--   some, holds exactly those.
+--
+-- An existing instance running another machine type than the declared one is
+-- a 'Failure' naming both. What @up@ does then is 'instanceMachineTypeChange':
+-- it throws the same words without touching the machine, or, permitted to,
+-- stops it, sets the type and starts it again ('planExistingInstance').
 --
 -- Declared scopes that differ from an existing instance's are a 'Failure'
 -- for the check and a throw for @up@, before it starts or stops anything;
@@ -339,17 +459,18 @@ gceInstance r gcloudTrack inst =
         withBinary gcloudTrack computeCommand (InstancesStart inst) $ \start ->
             withBinary gcloudTrack computeCommand (InstancesResume inst) $ \resume ->
                 withBinary gcloudTrack computeCommand (InstancesStop inst) $ \stop ->
-                    withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
-                        op "gcp-instance" nodeps $ \actions ->
-                            actions
-                                { help = Text.unwords [verb, "GCE instance", inst.instanceName]
-                                , notes = actions.notes <> scopeNotes
-                                , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
-                                , up = bringUp create start resume stop
-                                , -- presence, not state: a stopped instance is still there to delete
-                                  down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
-                                , check = checkInstance
-                                }
+                    withBinary gcloudTrack computeCommand (InstancesSetMachineType inst) $ \setType ->
+                        withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
+                            op "gcp-instance" nodeps $ \actions ->
+                                actions
+                                    { help = Text.unwords [verb, "GCE instance", inst.instanceName]
+                                    , notes = actions.notes <> scopeNotes <> resizeNotes
+                                    , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
+                                    , up = bringUp create start resume stop setType
+                                    , -- presence, not state: a stopped instance is still there to delete
+                                      down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
+                                    , check = checkInstance
+                                    }
   where
     rFor cmd = contramap (RunComputeCommand cmd) r
 
@@ -360,19 +481,41 @@ gceInstance r gcloudTrack inst =
         DeclaredScopes [] -> ["scopes: none"]
         DeclaredScopes scopes -> ["scopes: " <> Text.intercalate "," scopes]
 
-    -- the status first, as before; the scopes are only asked of an instance
-    -- that is there, and only when some are declared (one more describe)
+    -- only with the permission, so that a declaration without it has the
+    -- notes it had; with it, a re-declared type is a changed node under
+    -- @run serve@
+    resizeNotes = case inst.instanceMachineTypeChange of
+        RefuseMachineTypeChange -> []
+        MayStopToResize -> ["machine type: " <> machineTypeName (renderMachineType inst.instanceMachineType) <> " (may stop to resize)"]
+
+    -- the status first, as before; the scopes and the machine type are only
+    -- asked of an instance that is there: the scopes when some are declared,
+    -- the machine type always (one more describe each)
     checkInstance = case scopeProblems inst.instanceScopes of
         problems@(_ : _) -> pure (Failure ("scopes cannot be declared: " <> Text.intercalate "; " problems))
         [] -> do
             (code, status) <- describeStatus
-            case (inst.instanceScopes, code) of
-                (DeclaredScopes _, ExitSuccess) -> do
-                    scopes <- describeScopes
-                    pure $ case scopes of
-                        Success -> interpretInstanceStatus inst.instancePower code status
-                        differing -> differing
-                _ -> pure (interpretInstanceStatus inst.instancePower code status)
+            case code of
+                ExitFailure _ -> pure (interpretInstanceStatus inst.instancePower code status)
+                ExitSuccess -> do
+                    scopes <- case inst.instanceScopes of
+                        DeclaredScopes _ -> describeScopes
+                        DefaultScopes -> pure Success
+                    case scopes of
+                        Success -> do
+                            (typeCode, typeOut) <- describeMachineType
+                            pure $ case interpretInstanceMachineType inst.instanceMachineTypeChange inst.instanceMachineType typeCode typeOut of
+                                Success -> interpretInstanceStatus inst.instancePower code status
+                                differing -> differing
+                        differing -> pure differing
+
+    describeMachineType :: IO (ExitCode, Text)
+    describeMachineType = do
+        (code, out, _err) <-
+            readCreateProcessWithExitCode
+                (prepare computeCommand (InstancesDescribeMachineType inst))
+                ""
+        pure (code, Text.decodeUtf8 out)
 
     describeScopes :: IO CheckResult
     describeScopes = do
@@ -400,11 +543,12 @@ gceInstance r gcloudTrack inst =
     -- unrecoverable: the check says 'Failure', 'up' runs @create@, and
     -- @create@ refuses because the instance exists. Asking first costs one
     -- describe that the check has usually just done.
-    bringUp create start resume stop = do
+    bringUp create start resume stop setType = do
         case scopeProblems inst.instanceScopes of
             [] -> pure ()
             problems -> refuse ("scopes cannot be declared: " <> Text.intercalate "; " problems)
-        plan <- uncurry (planInstanceUp inst.instancePower) <$> describeStatus
+        (code, status) <- describeStatus
+        let plan = planInstanceUp inst.instancePower code status
         -- an instance that exists with other scopes is left exactly as it
         -- is: no start, no stop, and certainly no re-creation
         case (plan, inst.instanceScopes) of
@@ -415,19 +559,22 @@ gceInstance r gcloudTrack inst =
                 case scopes of
                     Failure reason -> refuse reason
                     _ -> pure ()
-        case plan of
-            CreateInstance -> do
-                create (rFor (InstancesCreate inst))
-                -- a created instance runs; a stopped declaration stops it right after
-                case inst.instancePower of
-                    PoweredOn -> pure ()
-                    PoweredOff -> stop (rFor (InstancesStop inst))
-            StartInstance -> start (rFor (InstancesStart inst))
-            ResumeInstance -> resume (rFor (InstancesResume inst))
-            StopInstance -> stop (rFor (InstancesStop inst))
-            AlreadyThere -> pure ()
-            CannotActYet status ->
-                throwIO (userError ("instance " <> Text.unpack inst.instanceName <> " is " <> Text.unpack status <> "; retry once it settles"))
+        -- the machine type is only asked of an instance that is there, and
+        -- the whole sequence is decided before its first step: a refusal
+        -- leaves the machine exactly as it is
+        steps <- case plan of
+            CreateInstance -> pure (instanceUpSteps inst.instancePower plan)
+            _ -> planExistingInstance inst.instanceMachineTypeChange inst.instancePower status . uncurry (compareMachineType inst.instanceMachineType) <$> describeMachineType
+        case steps of
+            Left reason -> throwIO (userError ("instance " <> Text.unpack inst.instanceName <> " " <> Text.unpack reason))
+            Right todo -> mapM_ runStep todo
+      where
+        runStep step = case step of
+            CreateStep -> create (rFor (InstancesCreate inst))
+            StartStep -> start (rFor (InstancesStart inst))
+            ResumeStep -> resume (rFor (InstancesResume inst))
+            StopStep -> stop (rFor (InstancesStop inst))
+            SetMachineTypeStep -> setType (rFor (InstancesSetMachineType inst))
 
 -- | The verdict drawn from @gcloud compute instances describe
 -- --format=value(status)@ against the declared power state, split out for
@@ -487,6 +634,70 @@ planInstanceUp PoweredOff ExitSuccess status =
         "TERMINATED" -> AlreadyThere
         "SUSPENDED" -> CannotActYet "SUSPENDED (resume it before declaring it stopped)"
         _ -> CannotActYet status
+
+-- | One gcloud call of 'gceInstance'\'s @up@.
+data InstanceStep
+    = CreateStep
+    | StartStep
+    | ResumeStep
+    | StopStep
+    | SetMachineTypeStep
+    deriving (Eq, Show)
+
+{- | The calls a plan stands for, or why none is made (worded to follow
+@instance NAME@). A created instance runs, so a stopped declaration stops it
+right after.
+-}
+instanceUpSteps :: InstancePower -> InstanceUpPlan -> Either Text [InstanceStep]
+instanceUpSteps power plan = case plan of
+    CreateInstance -> Right (CreateStep : [StopStep | power == PoweredOff])
+    StartInstance -> Right [StartStep]
+    ResumeInstance -> Right [ResumeStep]
+    StopInstance -> Right [StopStep]
+    AlreadyThere -> Right []
+    CannotActYet status -> Left ("is " <> status <> "; retry once it settles")
+
+{- | What @up@ does to an instance that exists, in the given status, given
+the verdict on its machine type. Split out of 'gceInstance' for testability;
+this is the one place a resize is decided.
+
+* The type is as declared: exactly what 'planInstanceUp' says, whatever the
+  permission.
+* It could not be read: nothing, and a reason. Not knowing is never a reason
+  to stop a machine, nor to report it converged.
+* It differs and the declaration is 'RefuseMachineTypeChange': nothing, and
+  a reason naming both types, even when the instance happens to be stopped
+  (the declaration did not ask for its type to be changed).
+* It differs and the declaration is 'MayStopToResize': stop it if @RUNNING@,
+  set the type, start it if the declaration is 'PoweredOn'. Any other status
+  (transitional, or @SUSPENDED@, which GCP does not resize) is a reason and
+  no call.
+
+If a step fails the ones after it are not run: a failed @set-machine-type@
+leaves the instance stopped, and the next pass, finding it @TERMINATED@ with
+the old type, sets the type and starts it.
+-}
+planExistingInstance :: MachineTypeChange -> InstancePower -> Text -> MachineTypeVerdict -> Either Text [InstanceStep]
+planExistingInstance change power status verdict = case verdict of
+    MachineTypeAsDeclared -> instanceUpSteps power (planInstanceUp power ExitSuccess status)
+    MachineTypeUndetermined why -> Left ("is left as it is: " <> why)
+    MachineTypeDiffers live wanted -> case change of
+        RefuseMachineTypeChange -> Left (machineTypeReason change live wanted)
+        MayStopToResize -> case status of
+            "RUNNING" -> Right ([StopStep, SetMachineTypeStep] <> restart)
+            "TERMINATED" -> Right (SetMachineTypeStep : restart)
+            _ ->
+                Left
+                    ( "is "
+                        <> status
+                        <> " and runs machine type "
+                        <> live
+                        <> ", declared "
+                        <> wanted
+                        <> "; the type is only set on an instance that is RUNNING (stopped first) or TERMINATED: retry once it settles"
+                    )
+  where
+    restart = [StartStep | power == PoweredOn]
 
 -------------------------------------------------------------------------------
 
@@ -805,6 +1016,8 @@ data ComputeCommand
     | InstancesDescribe Instance
     | InstancesDescribeStatus Instance
     | InstancesDescribeScopes Instance
+    | InstancesDescribeMachineType Instance
+    | InstancesSetMachineType Instance
     | InstancesStart Instance
     | InstancesResume Instance
     | InstancesStop Instance
@@ -897,6 +1110,29 @@ computeCommand = Command $ \cmd -> case cmd of
                     , "describe"
                     , Text.unpack inst.instanceName
                     , "--format=value(serviceAccounts[].scopes)"
+                    ]
+                )
+    InstancesDescribeMachineType inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "describe"
+                    , Text.unpack inst.instanceName
+                    , "--format=value(machineType.basename())"
+                    ]
+                )
+    InstancesSetMachineType inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    [ "compute"
+                    , "instances"
+                    , "set-machine-type"
+                    , Text.unpack inst.instanceName
+                    , "--machine-type"
+                    , Text.unpack (renderMachineType inst.instanceMachineType)
                     ]
                 )
     InstancesStart inst ->

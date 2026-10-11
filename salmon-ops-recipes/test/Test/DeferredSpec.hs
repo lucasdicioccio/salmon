@@ -306,4 +306,5 @@ vmConfig host =
             , Compute.instanceTags = []
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             }

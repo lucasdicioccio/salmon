@@ -1529,6 +1529,39 @@ never changes them** (GCP wants the instance stopped for that). With scopes decl
 gcloud's documentation and the shape of that `describe` output has not been observed (the parser keeps the `https://`
 words whatever separates them); nothing was run against a real project.
 
+`Gcp.Compute.gceInstance` compares an existing instance's **machine type** with `instanceMachineType` (it used to
+create with it and never look again, so a retyped declaration converged on the old machine). Both answers the request
+allowed are built, and the declaration picks: `instanceMachineTypeChange = RefuseMachineTypeChange` is the scopes
+precedent (a `Failure` from `check` and a throw from `up`, both naming the running and the declared type, nothing
+stopped, started or re-created; it renders nothing, so command, `ref`, `help` and `notes` are what they were), and
+`MayStopToResize` is the explicit permission, like the pair's `pair_may_discard`: `up` stops a `RUNNING` instance, runs
+`set-machine-type`, and starts it again unless the declaration is `PoweredOff`, and the node carries a
+`machine type: T (may stop to resize)` note (so a retyped declaration is a changed node under `serve`). Refusal alone
+was not chosen because the resize that prompted this was done by hand for want of anything else; reconciling without a
+permission was never on the table (GCP resizes only a stopped instance, about 130 s of outage on that one occasion).
+Load-bearing:
+- **This changes `run up` for every existing caller**, on purpose: `check` runs one more `describe`
+  (`--format=value(machineType.basename())`) on an instance that exists, and an instance whose type differs, which used
+  to pass, now fails the node until the declaration or the machine is changed. `salmon-gcp-toy --vm-machine-type` is
+  such a caller (it declares the refusal).
+- The whole sequence is decided by the pure `planExistingInstance` before the first call; a `StopStep` is only planned
+  for a `PoweredOff` declaration or for the permission meeting a differing type (a QuickCheck property). Without the
+  permission a differing type refuses even on a `TERMINATED` instance (it is not started as another machine than the
+  declared one).
+- An unreadable type (`parseLiveMachineType` wants exactly one word whose last path segment is `[a-z0-9-]+`, or the
+  describe failed) is `MachineTypeUndetermined`: a `Failure`/throw under either declaration, never a difference, so a
+  misread output cannot stop a machine. The price is that if gcloud's output is not the shape assumed, every instance
+  node fails loudly rather than passing.
+- `MayStopToResize` is a standing permission: under `serve` a failing check is repaired by `up`, so a later retype
+  stops the machine again without another word. A `SUSPENDED` or transitional instance is not resized (a reason, no
+  call). A failed `set-machine-type` leaves the instance stopped and the node failed; the next pass finds it
+  `TERMINATED` with the old type, sets it and starts it.
+Layer 0 only (`Test/GcpSpec.hs`, "Compute.instanceMachineType": HUnit cases and QuickCheck properties over the parser,
+the comparison, the plan and what is rendered). **Not run**: the IO sequencing in `gceInstance` (`check`'s and `up`'s
+calls) has no test, with a real or a stand-in gcloud, because the node execs `gcloud` from `PATH` and the suite shares
+one process; the `describe` projection and `set-machine-type` argv are from gcloud's documentation, not observed; no
+stop/resize/start was ever run against a real project.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another

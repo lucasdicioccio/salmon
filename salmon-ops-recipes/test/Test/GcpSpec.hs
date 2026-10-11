@@ -31,8 +31,10 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import System.Process.ListLike (CmdSpec (..), CreateProcess, cmdspec)
+import Test.QuickCheck (Gen, Property, arbitrary, conjoin, counterexample, elements, forAll, listOf, listOf1, oneof, property, (.&&.), (===), (==>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.QuickCheck (testProperty)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension (Extension (..), Op, evalDeps, ignoreTrack, nodeps, op)
@@ -68,6 +70,7 @@ tests =
         , testGroup "Core.declaredAccount" accountTests
         , testGroup "Compute.interpretInstanceStatus" instanceTests
         , testGroup "Compute.instanceScopes" instanceScopeTests
+        , testGroup "Compute.instanceMachineType" instanceMachineTypeTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
         , testGroup "Storage bucket settings" bucketSettingsTests
         , testGroup "Storage bucket contents" bucketContentsTests
@@ -213,6 +216,7 @@ instanceTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             }
 
 -------------------------------------------------------------------------------
@@ -330,6 +334,287 @@ instanceScopeTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            }
+
+-------------------------------------------------------------------------------
+
+{- | The machine type of an existing instance: compared by the check, and
+either refused or (with the declaration's permission) reconciled by @up@.
+Everything here is the pure half -- the parser, the comparison, the plan and
+what is rendered; no gcloud, real or fake, is run.
+-}
+instanceMachineTypeTests :: [TestTree]
+instanceMachineTypeTests =
+    [ testCase "the machine type is asked for in one describe" $
+        assertEqual
+            ""
+            ["compute", "instances", "describe", "toy-vm", "--format=value(machineType.basename())", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.InstancesDescribeMachineType inst)))
+    , testCase "set-machine-type names the declared type and never prompts" $
+        assertEqual
+            ""
+            ["compute", "instances", "set-machine-type", "toy-vm", "--machine-type", "e2-micro", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.InstancesSetMachineType inst)))
+    , testCase "a live type is read as a bare name or as the URL GCP describes it with" $ do
+        assertEqual "name" (Right "e2-medium") (Compute.parseLiveMachineType "e2-medium\n")
+        assertEqual "url" (Right "e2-medium") (Compute.parseLiveMachineType "https://www.googleapis.com/compute/v1/projects/p/zones/europe-west1-b/machineTypes/e2-medium\n")
+        assertEqual "custom" (Right "e2-custom-2-4096") (Compute.parseLiveMachineType "e2-custom-2-4096")
+    , testCase "an output that is not one machine type name is not read as one" $ do
+        assertBool "empty" (isLeft (Compute.parseLiveMachineType ""))
+        assertBool "blank" (isLeft (Compute.parseLiveMachineType " \n"))
+        assertBool "two words" (isLeft (Compute.parseLiveMachineType "e2-medium e2-small"))
+        assertBool "an error message" (isLeft (Compute.parseLiveMachineType "ERROR: (gcloud.compute.instances.describe) not found"))
+        assertBool "a trailing slash" (isLeft (Compute.parseLiveMachineType "zones/z/machineTypes/"))
+        assertBool "other characters" (isLeft (Compute.parseLiveMachineType "E2_MEDIUM"))
+    , testCase "an instance running the declared type is satisfied, under either declaration" $ do
+        assertEqual "" Success (Compute.interpretInstanceMachineType refuse (Compute.Custom "e2-micro") ExitSuccess "e2-micro\n")
+        assertEqual "" Success (Compute.interpretInstanceMachineType mayStop Compute.E2Medium ExitSuccess "e2-medium\n")
+        assertEqual "declared as a path" Success (Compute.interpretInstanceMachineType refuse (Compute.Custom "zones/z/machineTypes/e2-micro") ExitSuccess "e2-micro\n")
+    , testCase "an instance running another type is a failure naming both" $
+        case Compute.interpretInstanceMachineType refuse Compute.E2Standard2 ExitSuccess "e2-medium\n" of
+            Failure t -> do
+                assertBool (Text.unpack t) ("runs machine type e2-medium" `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("declared e2-standard-2" `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("does not permit stopping it" `Text.isInfixOf` t)
+            other -> assertBool (show other) False
+    , testCase "a type that could not be read is a failure, never a pass" $ do
+        assertBool "describe failed" (isFailure (Compute.interpretInstanceMachineType refuse Compute.E2Medium (ExitFailure 1) "e2-medium"))
+        assertBool "empty" (isFailure (Compute.interpretInstanceMachineType mayStop Compute.E2Medium ExitSuccess ""))
+    , testCase "without the permission, up refuses a differing type and plans no call" $ do
+        let differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+        case Compute.planExistingInstance refuse on "RUNNING" differs of
+            Left t -> do
+                assertBool (Text.unpack t) ("e2-medium" `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("e2-standard-2" `Text.isInfixOf` t)
+            Right steps -> assertBool (show steps) False
+        -- a stopped instance of another type is not started either: the
+        -- declaration did not ask for that machine
+        assertBool "stopped" (isLeft (Compute.planExistingInstance refuse on "TERMINATED" differs))
+        assertBool "declared stopped" (isLeft (Compute.planExistingInstance refuse off "RUNNING" differs))
+    , testCase "with the permission, up stops, sets the type and starts again" $ do
+        let differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+        assertEqual "running" (Right [Compute.StopStep, Compute.SetMachineTypeStep, Compute.StartStep]) (Compute.planExistingInstance mayStop on "RUNNING" differs)
+        assertEqual "already stopped" (Right [Compute.SetMachineTypeStep, Compute.StartStep]) (Compute.planExistingInstance mayStop on "TERMINATED" differs)
+        assertEqual "declared stopped, running" (Right [Compute.StopStep, Compute.SetMachineTypeStep]) (Compute.planExistingInstance mayStop off "RUNNING" differs)
+        assertEqual "declared stopped, stopped" (Right [Compute.SetMachineTypeStep]) (Compute.planExistingInstance mayStop off "TERMINATED" differs)
+    , testCase "with the permission, a suspended or unsettled instance is not resized" $ do
+        let differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+        assertBool "suspended" (isLeft (Compute.planExistingInstance mayStop on "SUSPENDED" differs))
+        assertBool "stopping" (isLeft (Compute.planExistingInstance mayStop on "STOPPING" differs))
+    , testCase "a type that could not be read stops nothing, even with the permission" $
+        assertBool "" (isLeft (Compute.planExistingInstance mayStop on "RUNNING" (Compute.MachineTypeUndetermined "no machine type could be read")))
+    , testCase "the permission is a note naming the type; the node is the same node" $ do
+        let permitted = node inst{Compute.instanceMachineTypeChange = Compute.MayStopToResize}
+        assertEqual "ref" (node inst).extension.ref permitted.extension.ref
+        assertEqual "help" (node inst).extension.help permitted.extension.help
+        assertEqual "notes" ["machine type: e2-micro (may stop to resize)"] permitted.extension.notes
+        assertEqual "without it, the notes it had" [] (node inst).extension.notes
+    , testProperty "a machine type name is read back from a bare name, a path or a URL, whatever surrounds it" $
+        forAll genTypeName $ \name ->
+            forAll (elements ["", "zones/europe-west1-b/machineTypes/", "https://www.googleapis.com/compute/v1/projects/p/zones/europe-west1-b/machineTypes/"]) $ \prefix ->
+                forAll genBlank $ \before ->
+                    forAll genBlank $ \after ->
+                        Compute.parseLiveMachineType (before <> prefix <> name <> after) === Right name
+    , testProperty "whatever the output, what is read is a well-formed name the output ends with" $
+        \junk ->
+            let out = Text.pack junk
+             in case Compute.parseLiveMachineType out of
+                    Left _ -> property True
+                    Right name ->
+                        counterexample (show name) $
+                            not (Text.null name)
+                                .&&. Text.all (`elem` typeNameChars) name
+                                .&&. name `Text.isSuffixOf` Text.strip out
+    , testProperty "rendering a declared type and reading it back is the declared type" $
+        forAll genMachineType $ \declared ->
+            Compute.compareMachineType declared ExitSuccess (Compute.renderMachineType declared <> "\n") === Compute.MachineTypeAsDeclared
+    , testProperty "the comparison is equality of names, and names both when they differ" $
+        forAll genMachineType $ \declared ->
+            forAll genTypeName $ \live ->
+                let wanted = Compute.renderMachineType declared
+                 in Compute.compareMachineType declared ExitSuccess live
+                        === if live == wanted then Compute.MachineTypeAsDeclared else Compute.MachineTypeDiffers live wanted
+    , testProperty "a failed describe decides nothing, whatever it printed" $
+        forAll genMachineType $ \declared ->
+            forAll genTypeName $ \out ->
+                case Compute.compareMachineType declared (ExitFailure 1) out of
+                    Compute.MachineTypeUndetermined _ -> True
+                    _ -> False
+    , testProperty "the check passes exactly when the types are equal, and its failure names both" $
+        forAll genChange $ \change ->
+            forAll genMachineType $ \declared ->
+                forAll genTypeName $ \live ->
+                    let wanted = Compute.renderMachineType declared
+                     in case Compute.interpretInstanceMachineType change declared ExitSuccess live of
+                            Success -> live === wanted
+                            Failure t -> counterexample (Text.unpack t) (live /= wanted .&&. live `Text.isInfixOf` t .&&. wanted `Text.isInfixOf` t)
+                            other -> counterexample (show other) False
+    , testProperty "an instance of the declared type gets what up did before, with or without the permission" $
+        forAll genChange $ \change ->
+            forAll genPower $ \power ->
+                forAll genStatus $ \status ->
+                    mapLeft (const ()) (Compute.planExistingInstance change power status Compute.MachineTypeAsDeclared)
+                        === previousUp power (Compute.planInstanceUp power ExitSuccess status)
+    , testProperty "an absent instance is created as before" $
+        forAll genPower $ \power ->
+            mapLeft (const ()) (Compute.instanceUpSteps power Compute.CreateInstance) === previousUp power Compute.CreateInstance
+    , testProperty "without the permission the type is never set, and a declared-running machine is never stopped" $
+        forAll genPower $ \power ->
+            forAll genStatus $ \status ->
+                forAll genVerdict $ \verdict ->
+                    case Compute.planExistingInstance refuse power status verdict of
+                        Left _ -> property True
+                        Right steps ->
+                            counterexample (show steps) $
+                                verdict === Compute.MachineTypeAsDeclared
+                                    .&&. Compute.SetMachineTypeStep `notElem` steps
+                                    .&&. (Compute.StopStep `notElem` steps || power == off)
+    , testProperty "without the permission a differing or unread type is always a refusal" $
+        forAll genPower $ \power ->
+            forAll genStatus $ \status ->
+                forAll genVerdict $ \verdict ->
+                    verdict /= Compute.MachineTypeAsDeclared ==> isLeft (Compute.planExistingInstance refuse power status verdict)
+    , testProperty "a stop is only ever planned by a stopped declaration or by the permission meeting a differing type" $
+        forAll genChange $ \change ->
+            forAll genPower $ \power ->
+                forAll genStatus $ \status ->
+                    forAll genVerdict $ \verdict ->
+                        case Compute.planExistingInstance change power status verdict of
+                            Right steps
+                                | Compute.StopStep `elem` steps ->
+                                    counterexample (show steps) (power == off || (change == mayStop && differing verdict))
+                            _ -> property True
+    , testProperty "an unread type plans nothing under either declaration" $
+        forAll genChange $ \change ->
+            forAll genPower $ \power ->
+                forAll genStatus $ \status ->
+                    isLeft (Compute.planExistingInstance change power status (Compute.MachineTypeUndetermined "unread"))
+    , testProperty "a permitted resize sets the type once, on a stopped machine, and ends in the declared power state" $
+        forAll genPower $ \power ->
+            forAll (elements ["RUNNING", "TERMINATED"]) $ \status ->
+                forAll genDiffers $ \verdict ->
+                    case Compute.planExistingInstance mayStop power status verdict of
+                        Left t -> counterexample (Text.unpack t) False
+                        Right steps ->
+                            counterexample (show steps) $
+                                length (filter (== Compute.SetMachineTypeStep) steps) === 1
+                                    .&&. simulate (status == "RUNNING") steps === Just (power == on)
+    , testProperty "a permitted resize of an instance neither running nor stopped is a refusal naming both types" $
+        forAll genPower $ \power ->
+            forAll genStatus $ \status ->
+                forAll genDiffers $ \verdict ->
+                    status `notElem` ["RUNNING", "TERMINATED"] ==>
+                        case (verdict, Compute.planExistingInstance mayStop power status verdict) of
+                            (Compute.MachineTypeDiffers live wanted, Left t) -> counterexample (Text.unpack t) (live `Text.isInfixOf` t .&&. wanted `Text.isInfixOf` t)
+                            (_, other) -> counterexample (show other) False
+    , testProperty "the permission changes no command, ref or help, and only it adds a note" $
+        forAll genInstance $ \i ->
+            let permitted = i{Compute.instanceMachineTypeChange = Compute.MayStopToResize}
+                refused = i{Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange}
+                args c = processArgs (prepare Compute.computeCommand c)
+             in conjoin
+                    [ args (Compute.InstancesCreate permitted) === args (Compute.InstancesCreate refused)
+                    , args (Compute.InstancesStop permitted) === args (Compute.InstancesStop refused)
+                    , args (Compute.InstancesStart permitted) === args (Compute.InstancesStart refused)
+                    , args (Compute.InstancesDescribeStatus permitted) === args (Compute.InstancesDescribeStatus refused)
+                    , (node permitted).extension.ref === (node refused).extension.ref
+                    , (node permitted).extension.help === (node refused).extension.help
+                    , (node refused).extension.notes === []
+                    , (node permitted).extension.notes === ["machine type: " <> Compute.renderMachineType i.instanceMachineType <> " (may stop to resize)"]
+                    ]
+    , testProperty "set-machine-type carries the declared type, the instance's coordinates and --quiet" $
+        forAll genInstance $ \i ->
+            processArgs (prepare Compute.computeCommand (Compute.InstancesSetMachineType i))
+                === [ "compute", "instances", "set-machine-type", Text.unpack i.instanceName
+                    , "--machine-type", Text.unpack (Compute.renderMachineType i.instanceMachineType)
+                    , "--zone", "europe-west1-b"
+                    , "--project", "p"
+                    , "--quiet"
+                    ]
+    ]
+  where
+    on = Compute.PoweredOn
+    off = Compute.PoweredOff
+    refuse = Compute.RefuseMachineTypeChange
+    mayStop = Compute.MayStopToResize
+    isLeft :: Either a b -> Bool
+    isLeft = either (const True) (const False)
+    mapLeft :: (a -> c) -> Either a b -> Either c b
+    mapLeft f = either (Left . f) Right
+    differing v = case v of
+        Compute.MachineTypeDiffers _ _ -> True
+        _ -> False
+    typeNameChars = ['a' .. 'z'] <> ['0' .. '9'] <> "-" :: String
+    genTypeName :: Gen Text.Text
+    genTypeName = oneof [elements ["e2-medium", "e2-standard-2", "n2-standard-4", "e2-custom-2-4096"], Text.pack <$> listOf1 (elements typeNameChars)]
+    genBlank :: Gen Text.Text
+    genBlank = Text.pack <$> listOf (elements " \t\n")
+    genMachineType :: Gen Compute.MachineType
+    genMachineType = oneof [elements [Compute.E2Medium, Compute.E2Standard2, Compute.N2Standard4], Compute.Custom <$> genTypeName]
+    genChange = elements [refuse, mayStop]
+    genPower = elements [on, off]
+    genStatus :: Gen Text.Text
+    genStatus =
+        oneof
+            [ elements ["RUNNING", "TERMINATED", "SUSPENDED", "PROVISIONING", "STAGING", "STOPPING", "SUSPENDING", "REPAIRING", ""]
+            , Text.pack <$> arbitrary
+            ]
+    genDiffers :: Gen Compute.MachineTypeVerdict
+    genDiffers = do
+        live <- genTypeName
+        wanted <- genTypeName
+        pure (Compute.MachineTypeDiffers live (if wanted == live then wanted <> "-x" else wanted))
+    genVerdict :: Gen Compute.MachineTypeVerdict
+    genVerdict = oneof [pure Compute.MachineTypeAsDeclared, genDiffers, pure (Compute.MachineTypeUndetermined "unread")]
+    genInstance :: Gen Compute.Instance
+    genInstance = do
+        name <- genTypeName
+        machine <- genMachineType
+        power <- genPower
+        change <- genChange
+        pure inst{Compute.instanceName = name, Compute.instanceMachineType = machine, Compute.instancePower = power, Compute.instanceMachineTypeChange = change}
+    -- what 'up' ran for each plan before the machine type was compared,
+    -- restated here from the old @bringUp@ rather than taken from the module
+    previousUp :: Compute.InstancePower -> Compute.InstanceUpPlan -> Either () [Compute.InstanceStep]
+    previousUp power plan = case plan of
+        Compute.CreateInstance -> Right (Compute.CreateStep : [Compute.StopStep | power == off])
+        Compute.StartInstance -> Right [Compute.StartStep]
+        Compute.ResumeInstance -> Right [Compute.ResumeStep]
+        Compute.StopInstance -> Right [Compute.StopStep]
+        Compute.AlreadyThere -> Right []
+        Compute.CannotActYet _ -> Left ()
+    -- a machine that is running or not: a step that GCP would refuse (the
+    -- type set on a running machine, a stop of a stopped one) is 'Nothing'
+    simulate :: Bool -> [Compute.InstanceStep] -> Maybe Bool
+    simulate running [] = Just running
+    simulate running (step : rest) = case (step, running) of
+        (Compute.StopStep, True) -> simulate False rest
+        (Compute.StartStep, False) -> simulate True rest
+        (Compute.SetMachineTypeStep, False) -> simulate False rest
+        _ -> Nothing
+    node i = only (Compute.gceInstance silent ignoreTrack i)
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    inst =
+        Compute.Instance
+            { Compute.instanceName = "toy-vm"
+            , Compute.instanceProject = Core.Project "p"
+            , Compute.instanceZone = Core.Zone "europe-west1-b"
+            , Compute.instanceMachineType = Compute.Custom "e2-micro"
+            , Compute.instanceBootDisk = Compute.BootDisk 10 Nothing (Just "ubuntu-2404-lts-amd64") (Just "ubuntu-os-cloud")
+            , Compute.instanceNetwork = "default"
+            , Compute.instanceSubnet = "default"
+            , Compute.instanceServiceAccount = Nothing
+            , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
+            , Compute.instanceExternalAddress = Compute.ReservedExternal "toy-ip"
+            , Compute.instanceInternalAddress = Compute.EphemeralInternal
+            , Compute.instanceTags = ["toy-ssh"]
+            , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             }
 
 -------------------------------------------------------------------------------
@@ -3268,6 +3553,7 @@ vmTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             }
 
 -------------------------------------------------------------------------------
