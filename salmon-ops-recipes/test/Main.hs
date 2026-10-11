@@ -20,6 +20,7 @@ import qualified Test.WireGuardMeshSpec as WireGuardMeshSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
 import qualified Test.NetbirdSpec as NetbirdSpec
 import qualified Test.PortMappingSpec as PortMappingSpec
+import qualified Test.RsyncSpec as RsyncSpec
 import qualified Test.DebootstrapSpec as DebootstrapSpec
 import qualified Test.DeferredSpec as DeferredSpec
 import qualified Test.DownTreeSpec as DownTreeSpec
@@ -142,6 +143,7 @@ main =
             , WireGuardMeshSpec.tests
             , NetbirdSpec.tests
             , PortMappingSpec.tests
+            , RsyncSpec.tests
             , DeferredSpec.tests
             , DownTreeSpec.tests
             , FilesystemSpec.tests

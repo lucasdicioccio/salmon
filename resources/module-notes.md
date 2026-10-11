@@ -1232,6 +1232,31 @@ teardown of the machine the file is on. `salmon-gcp-toy` tier 2 uses the upload 
 `Test/SecretDeliverySpec.hs` runs the remote scripts under a local `sh`; neither transport has been run against a
 real machine.
 
+`Nodes/Rsync.hs` has `sendFile`, `sendDir`, `receiveFile` and `receiveDir` (each with a `...With` taking
+`Ssh.ClientOpts`, passed through `--rsh` since rsync has no `-i`). `receiveDir` is `sendDir` in the other direction,
+asked for by a downstream benchmark that had to archive a results directory on the remote before it could fetch it.
+Paths mean what they mean to rsync: a remote path with no trailing slash lands as a directory of that name *under*
+the local one. It is the only one of the four with a `check`: `rsync --dry-run --itemize-changes` over the same
+operands (`ProbeReceiveDir`), read by `interpretProbe`. Load-bearing: the fetch and the probe both carry `--times`
+(`sendDir` does not), because without it the local copies get the transfer's time, rsync's size-and-time comparison
+never finds a file up to date, and the check would say `Failure` forever; the parser is lopsided on purpose
+(`classifyProbeLine`: only a blank line, a `skipping ...` remark, or an itemized line with update `.` and no
+attribute named is harmless, anything unrecognised is `Pending`), since a wrong `Pending` costs an rsync run that
+transfers nothing and a wrong `Success` leaves a stale copy for good; a non-zero exit is `Unknown`, not `Failure`
+(ssh not connecting, but also rsync's exit 23 on a dangling symlink under `--copy-links`, which fails `up` too);
+the `Failure` text counts the differing items and names none; the `Ref` is `("rsync-receivedir", remote path, local
+directory, user, host)` and leaves the ssh options out. Nothing is deleted: no `--delete`, and `down` is `pure ()`
+as for `receiveFile`. The check costs an ssh connection and a walk of both directories every time something asks,
+which under `serve` is every look a supervisor takes. `sendFile`/`sendDir`/`receiveFile` were left as they were
+(same argv, `ref`, `help`, and still no `check`: adding one would change `run up` for their callers); `sendDir`'s
+`Ref` still omits the remote path, so two `sendDir`s of one directory to two places on one host collide.
+`Test/RsyncSpec.hs` is Layer 0 plus QuickCheck properties for the argv, the parser/verdict and the refs. What was
+run with a real rsync (3.2.7): the module's flags between two *local* directories (in the default suite, skipped
+without `rsync`), and the node itself end to end (`check`/`up`/`check`, change, again) through an `ssh` shim that
+runs the command locally, which is opt-in (`SALMON_TEST_RSYNC_SSH_SHIM`, see the spec's header) because the suite
+will not put a fake `ssh` on its process-wide `PATH`. **Never run over a real ssh connection or against a remote
+machine**, nor under `serve`.
+
 `Builtin/NodeLog.hs` is the per-node logging event: a `Line` (the node's `Ref`, a `Channel` — `Stdout`, `Stderr`,
 `Message` — and one line of text) that a node `emit`s, or `say`s for a progress message of its own, *while its `up` is
 still running*. `Extension.up` is `IO ()` and a recipe is a `directive -> Op` that does not know which driver will run
