@@ -22,9 +22,10 @@ The shapes are chosen to separate the two costs a consumer can have:
   ('Salmon.Builtin.Extension.evalDeps') has exactly one occurrence per node.
 * 'Diamonds', 'Layered' and 'RandomLayered' share nodes, so the expanded tree
   is exponentially larger than the graph. 'countOccurrences' says by how
-  much. Anything that walks the expansion ('Salmon.Op.Dag.foldDag' included)
-  pays per occurrence, so pick the size with 'counts' in hand: a million-node
-  chain of diamonds has more occurrences than can ever be visited.
+  much. Anything that walks the whole expansion pays per occurrence
+  ('Salmon.Op.Dag.foldDag' did, and no longer does), so pick the size with
+  'counts' in hand: a million-node chain of diamonds has more occurrences
+  than can ever be visited.
 
 = Sizes
 
@@ -426,11 +427,12 @@ instead of each occurrence: the same nodes, the same edges and the same
 'Salmon.Op.Dag.dagOrder' (first met, depth first) as
 @'Salmon.Op.Dag.foldDag' same . 'Salmon.Builtin.Extension.evalDeps'@.
 
-It exists because 'Salmon.Op.Dag.foldDag' walks the expansion, so a shape
-that shares cannot be folded at any size worth measuring, and because
-'Salmon.Op.Dag.record' (which the fold and 'Salmon.Op.Dag.fromMagma' both
-go through) is itself one of the things a profile wants to measure rather
-than pay for on the way in. Linear in nodes and edges, with a 'Set.Set' of
+It was written when 'Salmon.Op.Dag.foldDag' walked every occurrence, so
+that a shape that shares could not be folded at any size worth measuring.
+The fold is per node now; this stays because 'Salmon.Op.Dag.record' (which
+the fold and 'Salmon.Op.Dag.fromMagma' both go through) is itself one of the
+things a profile wants to measure rather than pay for on the way in, and
+because it shares no code with the fold it is compared against. Linear in nodes and edges, with a 'Set.Set' of
 the 'Ref's met.
 
 Two differences from the fold, neither visible to a walk: a node met again

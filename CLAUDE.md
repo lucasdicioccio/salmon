@@ -69,7 +69,9 @@ The rest of `Salmon.Op.*` lives in `salmon-ops/src/Salmon/Op/`:
 - `Dag.foldDag`: collapses that to one representative per `Ref`, with dependencies *and*
   dependants. A `Ref` is **location-addressed** (kind tag + author-chosen key: "the same effect
   site"), so two declarations can collide; last writer wins and the loser is reported
-  `Conflicting`. `sameRepresentative` compares only `shorthand`/`help`/`notes`/rendered `dynamics`
+  `Conflicting`. The fold is per node, not per path: an occurrence with the same `Ref`,
+  description and predecessor `Ref`s as one already walked is trusted to be the same below and
+  is skipped, so a difference hidden under two look-alike declarations is not seen (notes). `sameRepresentative` compares only `shorthand`/`help`/`notes`/rendered `dynamics`
   (functions are not comparable), so content must show in `notes` to be seen as a change.
 - `Ledger`: who still wants which nodes. A set, not a refcount; a retraction retires, not deletes.
 - `Rewrite`: the only place cross-declaration knowledge can live (e.g. batching packages); runs

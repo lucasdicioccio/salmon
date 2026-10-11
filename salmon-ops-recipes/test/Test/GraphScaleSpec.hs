@@ -11,10 +11,11 @@ the point is to tell "per node" from "per path", not to time anything. The
 measurements themselves are the @graph-profiles@ benchmark and
 @resources\/graph-profiles.md@.
 
-What is __not__ guarded, because it does pay per path today:
-'Salmon.Op.Dag.foldDag', and so declaring a graph in @serve@ and every
-command-line entry that folds. That is why the walks here are given a 'Dag'
-built by 'dagOf', and why 'dagOf' is checked against the fold first.
+'Salmon.Op.Dag.foldDag' (and so declaring a graph in @serve@ and every
+command-line entry that folds) paid per path when this was written, which is
+why the walks here are given a 'Dag' built by 'dagOf', and why 'dagOf' is
+checked against the fold first. The fold is per node now, and guarded by
+"Test.DagPerNodeSpec" (a thousand diamonds), not here.
 -}
 module Test.GraphScaleSpec (tests) where
 

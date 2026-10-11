@@ -113,6 +113,8 @@ test-suite salmon-ops-recipes-test
                     , Test.BinarySpec
                     , Test.DaemonSpec
                     , Test.DagSpec
+                    , Test.DagPerNodeSpec
+                    , Test.DagReference
                     , Test.GraphFixture
                     , Test.GraphFixtureSpec
                     , Test.GraphScaleSpec
@@ -228,6 +230,7 @@ benchmark graph-profiles
     main-is:          GraphProfiles.hs
     hs-source-dirs:   bench test
     other-modules:    Test.GraphFixture
+                    , Test.DagReference
     build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , bytestring

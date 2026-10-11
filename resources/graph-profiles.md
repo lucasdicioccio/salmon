@@ -6,8 +6,11 @@ by the `graph-profiles` benchmark in `salmon-ops-recipes` over the synthetic gra
 other work was using. Read the growth and the order of magnitude, not the third digit.
 
 This document reports. The super-linear findings are listed with what was measured and,
-separately, what reading the code suggests is the cause. One has been fixed since (finding 5, the
-client model's teardown: see "Since fixed" below); the others stand as measured.
+separately, what reading the code suggests is the cause. Two have been fixed since: finding 5
+(the client model's teardown: see "Since fixed" below) and finding 1 (`foldDag` per path: see
+"After the per-node fold", which gives the fold, `query plan` and the `serve` loop before and
+after, and what else changed). The others stand as measured, and the findings and the two big
+tables below are the 2026-10-10 run, left as measured.
 
 ## Running it
 
@@ -70,8 +73,14 @@ marked `occurrences` in the tables, and the node count is given beside the size.
 
 An operation that reads a `Dag` pays per node. Those series are given a `Dag` built by
 `Test.GraphFixture.dagOf`, which visits each node once and does not go through `foldDag`, so they
-can be measured at node counts the fold could never produce. `dagOf` is checked against the fold
-at small sizes by `Test.GraphScaleSpec`.
+can be measured at node counts the fold could never produce (at the time; the fold is per node
+now, and `dagOf` is kept because it does not go through `Dag.record`). `dagOf` is checked against
+the fold at small sizes by `Test.GraphScaleSpec`.
+
+In the 2026-10-10 tables `expand + foldDag`, `query plan` and the `serve` loop are sized by
+occurrences. The benchmark now sizes them by nodes, and has a separate
+`expand + foldDagPerOccurrence` series (the old fold, kept as `Test.DagReference`) sized by
+occurrences.
 
 ### Reading a cell
 
@@ -144,10 +153,12 @@ not itself profiled.
 
 ### Candidate follow-ups
 
-One per finding worth fixing, in the order the numbers suggest. Only the fifth is done.
+One per finding worth fixing, in the order the numbers suggest. The first and the fifth are done.
 
 1. `foldDag` per node instead of per occurrence (finding 1): it bounds `run up`/`down`/`tree`/
    `dag`, `query plan` and every `serve` declaration at a few dozen nodes of diamond chain.
+   **Done since, under a precondition and with two accepted behaviour changes: see "After the
+   per-node fold".**
 2. `Dag.stuck` in one pass (finding 2): it bounds every concurrent pass and every tending start
    on a deep graph at a few thousand nodes.
 3. Edge lists that do not search or append on the right, in `Dag.record`, `fromMagma`,
@@ -198,6 +209,64 @@ What this does not say:
   change only (`client-fromdag-after.tsv`), so the comparison is with the original run of the day
   before under another load: allocation is up by 11 to 15 % (27 to 31 MB at 10 000 on a chain, 289
   to 322 MB at 100 000 on tree2), and the times (25 to 33 ms, 470 to 802 ms) are not comparable.
+
+## After the per-node fold
+
+`Dag.foldDag` no longer visits every occurrence. It recognises an occurrence by its `Ref`, its
+description (as far as `sameRepresentative` can tell) and the `Ref`s it depends on, and does not
+walk one it has already walked, nor anything below it. The precondition ("coherent
+declarations"), the two accepted differences (one `Conflicting` per declaration that lost
+instead of one per flip; a difference below two declarations that look alike is not seen) and
+the tests are in `resources/module-notes.md` under `Op/Dag.hs`.
+
+**What was run.** The three operations finding 1 names, before (master `61e84b6`) and after, on
+the same machine as above, 2026-10-11, load average 2 to 7 from other work (the "before" run
+started at a load of about 6 and came out about twice as slow as the 2026-10-10 run on the same
+code: 7.4 s where that run had 3.8 s; the "after" run ended at about 2). One run each, budget 6 s, cap 100 000 nodes:
+
+```sh
+cabal bench salmon-ops-recipes:graph-profiles --benchmark-options='--max-size 100000 --budget 6 \
+  --heap 4g --only "expand + foldDag" --only "query plan" --only "loop" --out rows.tsv'
+```
+
+The rows are `resources/graph-profiles/folddag-per-node-before.tsv` and
+`folddag-per-node-after.tsv`. **Indicative, like everything here:** what they are worth is the
+change of regime (a series that stopped at a few dozen nodes now reaches the cap, with a fitted
+growth of n^1.1 to n^1.3), not the ratios between two cells, which the load moves by a factor of
+two. "Before" is sized by occurrences, "after" by nodes, so the cells are the largest size each
+reached.
+
+| operation | | diamonds2 | layered8x2 | random8x3 | dense32 |
+|---|---|---|---|---|---|
+| expand + foldDag | before | 58 nodes: 7.4 s, 13.4 GB | 145 nodes: 7.1 s, 14.0 GB | 89 nodes: 2.5 s, 4.5 GB | 129 nodes: 5.0 s, 7.5 GB |
+| | after | n^1.2, 100.0k: 2.1 s, 1.6 GB | n^1.2, 100.0k: 2.0 s, 2.6 GB | n^1.1, 100.0k: 3.3 s, 5.0 GB | n^1.4, 3.0k: 7.3 s, 12.5 GB |
+| query plan | before | 52 nodes: 2.1 s, 3.3 GB | 129 nodes: 2.1 s, 3.4 GB | 89 nodes: 3.0 s, 4.5 GB | 129 nodes: 6.0 s, 7.5 GB |
+| | after | n^1.2, 100.0k: 3.8 s, 2.3 GB | n^1.2, 100.0k: 3.8 s, 3.5 GB | n^1.2, 100.0k: 6.1 s, 6.1 GB | n^1.5, 993: 2.5 s, 4.2 GB |
+| serve: record a declaration | before | 58 nodes: 7.9 s, 13.4 GB | 129 nodes: 2.6 s, 3.4 GB | 89 nodes: 3.2 s, 4.5 GB | 129 nodes: 5.5 s, 7.5 GB |
+| | after | 3.0k: 30 ms, 46 MB | 10.0k: 201 ms, 265 MB | 3.0k: 75 ms, 146 MB | 3.0k: 6.0 s, 12.6 GB |
+
+What the numbers say, and what they do not:
+
+- **The wall of finding 1 is gone on the shapes that share.** A chain of diamonds folds at
+  100 000 nodes in about 2 s (it stopped at 58), and `query plan` with it. The `serve` series
+  now end on the *other* findings, not on the declaration: the passes (`stuck`, finding 2) and
+  `status` (the listed paths, finding 4: 3.8 s and 3.9 GB allocated at 3 000 nodes of diamond
+  chain, which could not be reached before). Those are not touched here.
+- **Shapes with no sharing pay a little more.** In the "after" run, the same process measured
+  the old fold beside the new one: chain at 100 000, 0.71 s and 922 MB old against 1.0 s and
+  1.0 GB new; tree2 0.79 s against 1.1 s. So roughly 15 to 40 % slower and 10 % more
+  allocation where there is nothing to skip (the table of walked occurrences), within a run
+  whose noise is of the same order.
+- **dense32 is per node but expensive: about 2 ms and 4 MB a node.** An occurrence can only be
+  recognised after reading its predecessors' `Ref`s, so a node costs its dependencies times
+  their dependencies (32 x 32 here), and in this fixture reading a `Ref` builds the node. It
+  went from 129 nodes to 3 000 in the same time, and it is never more than the old fold paid
+  (every occurrence looked at now was visited then), but it is not cheap. *Read from the code,
+  not profiled.*
+- **fan is unchanged** (`n^2.0`, 30 000 in 9 to 15 s): that is `Dag.record`'s edge list, finding 3.
+- **Not measured:** the 1 000 000-node run was not repeated; `optCollisions` (the backward walk
+  that settles contested `Ref`s only runs when there are some, and no benchmark series has
+  any); the full benchmark (only the three operations above); a quiet machine.
 
 ## Not measured
 

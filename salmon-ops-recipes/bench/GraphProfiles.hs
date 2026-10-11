@@ -29,13 +29,16 @@ fastest kept.
 
 = Two size axes
 
-An operation that reads the expanded graph ('Salmon.Op.Dag.foldDag', and so
-a declaration in @serve@) pays per __occurrence__: per path from the root
-to a node. On a shape that shares nodes that number is exponential in the
-node count, so those series are sized by occurrences and reach a few dozen
+An operation that reads the whole expanded graph (the expansion itself,
+@query show@ of every path, and the per-occurrence fold kept as
+"Test.DagReference") pays per __occurrence__: per path from the root to a
+node. On a shape that shares nodes that number is exponential in the node
+count, so those series are sized by occurrences and reach a few dozen
 nodes. An operation that reads a 'Dag' pays per __node__, and is given one
 built by 'Test.GraphFixture.dagOf' without going through the fold, at
-whatever node count the cap allows.
+whatever node count the cap allows. 'Salmon.Op.Dag.foldDag', and so
+@query plan@ and a declaration in @serve@, were sized by occurrences until
+the fold went per node; they are sized by nodes now.
 
 = When a series stops
 
@@ -106,6 +109,7 @@ import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (ReporterM (..), silent)
 import Salmon.Reporter.Tagged (Tagged (..))
 
+import Test.DagReference (foldDagPerOccurrence)
 import Test.GraphFixture
 
 -------------------------------------------------------------------------------
@@ -521,9 +525,14 @@ foldBenches =
     [ single "fold" "expand (evalDeps, every occurrence visited)" PerOccurrence $ \e -> do
         root <- e.envFresh
         pure (evaluate (expansionSize root))
-    , single "fold" "expand + foldDag" PerOccurrence $ \e -> do
+    , single "fold" "expand + foldDag" PerNode $ \e -> do
         root <- e.envFresh
         pure (evaluate (weighDag (Dag.foldDag Dag.sameRepresentative (evalDeps root))))
+    , -- what 'Dag.foldDag' was before it went per node, for the comparison:
+      -- "Test.DagReference", which the tests use as their reference.
+      single "fold" "expand + foldDagPerOccurrence (the fold before it went per node)" PerOccurrence $ \e -> do
+        root <- e.envFresh
+        pure (evaluate (weighDag (foldDagPerOccurrence Dag.sameRepresentative (evalDeps root))))
     , single "fold" "dagOf (the fixture's per-node build, for comparison)" PerNode $ \e -> do
         root <- e.envFresh
         pure (evaluate (weighDag (dagOf root)))
@@ -728,7 +737,7 @@ queryBenches =
     , single "query" "query show, every path (renderAnnotated)" PerOccurrence $ \e -> do
         root <- e.envFresh
         pure (evaluate (weighTexts (Query.renderAnnotated (evalDeps root) Set.empty Set.empty False True)))
-    , single "query" "query plan (expand, fold, resolve, encode)" PerOccurrence $ \e -> do
+    , single "query" "query plan (expand, fold, resolve, encode)" PerNode $ \e -> do
         root <- e.envFresh
         pure $ do
             -- what the command line does for @query plan@, minus reading the directive.
@@ -752,7 +761,7 @@ charged work that an earlier one set up.
 -}
 serveBench :: Bench
 serveBench =
-    Bench "serve" "loop" PerOccurrence $ \e -> do
+    Bench "serve" "loop" PerNode $ \e -> do
         marks <- newIORef []
         let mark name = do
                 t <- getMonotonicTimeNSec
