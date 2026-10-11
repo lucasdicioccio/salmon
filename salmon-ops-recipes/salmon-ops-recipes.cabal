@@ -101,6 +101,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ServeApi
                     , Test.ServeApiSpec
                     , Test.PgVectorSpec
+                    , Test.PgTextSearchSpec
                     , Test.PlakarSpec
                     , Test.WireGuardSpec
                     , Test.WireGuardMeshSpec

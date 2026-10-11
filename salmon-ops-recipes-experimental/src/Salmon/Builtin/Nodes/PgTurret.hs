@@ -61,7 +61,7 @@ module Salmon.Builtin.Nodes.PgTurret (
 
     -- * Nodes
     pgTurret,
-    preloadLibrary,
+    Postgres.preloadLibrary,
     libraryName,
 
     -- * Pure parts
@@ -69,11 +69,11 @@ module Salmon.Builtin.Nodes.PgTurret (
     settings,
     settingNotes,
     problems,
-    parseLibraryList,
-    addLibrary,
-    removeLibrary,
-    alterPreloadSql,
-    fileSettingSql,
+    Postgres.parseLibraryList,
+    Postgres.addLibrary,
+    Postgres.removeLibrary,
+    Postgres.alterPreloadSql,
+    Postgres.fileSettingSql,
     inspectSettingsSql,
     applySettingsSql,
     resetSettingsSql,
@@ -83,7 +83,6 @@ module Salmon.Builtin.Nodes.PgTurret (
     PgTurretError (..),
 ) where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, IOException, throwIO, try)
 import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
@@ -104,7 +103,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
-import Salmon.Builtin.Nodes.Postgres (ClusterName, DatabaseName, PgExtension (..), Port)
+import Salmon.Builtin.Nodes.Postgres (ClusterName, DatabaseName, PgExtension (..), Port, parseLibraryList, preloadLibrary)
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref
@@ -362,95 +361,6 @@ problems t =
         | Just v <- [mv]
         , v < lo || v > hi
         ]
-
--------------------------------------------------------------------------------
--- shared_preload_libraries
-
-{- | The libraries in a @shared_preload_libraries@ value, as PostgreSQL
-writes one: comma-separated, each possibly double-quoted. A library whose
-quoted name contains a comma is not handled.
--}
-parseLibraryList :: Text -> [Text]
-parseLibraryList = filter (not . Text.null) . fmap (unquote . Text.strip) . Text.splitOn ","
-  where
-    unquote s = fromMaybe s (Text.stripPrefix "\"" s >>= Text.stripSuffix "\"")
-
--- | Appends, unless it is there already. The others keep their order: it can matter.
-addLibrary :: Text -> [Text] -> [Text]
-addLibrary lib libs
-    | lib `elem` libs = libs
-    | otherwise = libs <> [lib]
-
-removeLibrary :: Text -> [Text] -> [Text]
-removeLibrary lib = filter (/= lib)
-
-{- | @ALTER SYSTEM SET@ takes a list, and writes it back as one value. The
-reload that follows changes nothing in the running server; it is what makes
-the server notice the files and report the setting as @pending_restart@,
-which is the question 'Postgres.restartClusterIfPending' asks.
--}
-alterPreloadSql :: [Text] -> Text
-alterPreloadSql libs =
-    "ALTER SYSTEM SET shared_preload_libraries = " <> value <> ";\nSELECT pg_reload_conf();\n"
-  where
-    value = case libs of
-        [] -> "''"
-        _ -> Text.intercalate ", " (fmap Postgres.quoteLiteral libs)
-
-{- | What the configuration files say a setting is, which for a
-restart-only setting is not what the running server has: a library another
-node added and that is still waiting for its restart is in the files and
-nowhere else, and a merge that read the running value would drop it.
-
-Rows with an @error@ are not left out: @pg_file_settings@ marks exactly
-those entries (\"setting could not be applied\") once the files are reloaded.
--}
-fileSettingSql :: Text -> Text
-fileSettingSql name =
-    "SELECT coalesce((SELECT setting FROM pg_file_settings WHERE name = "
-        <> Postgres.quoteLiteral name
-        <> " ORDER BY seqno DESC LIMIT 1), '')"
-
-{- | The library is in @shared_preload_libraries@, next to whatever else is.
-
-@ALTER SYSTEM SET shared_preload_libraries@ replaces the whole value, so
-this reads the list the files hold and writes it back with one more entry.
-That is a read followed by a write: two of these for two libraries need an
-edge between them, and a declaration that sets the whole value some other
-way (an 'Postgres.alterSystemSet' of the same parameter has no check and
-runs every pass) undoes this one every time.
-
-Going down takes the library out of the list and leaves the others. Neither
-direction restarts anything; see 'Postgres.restartClusterIfPending'.
--}
-preloadLibrary :: Track' (Binary "psql") -> Port -> Text -> Op
-preloadLibrary psql port lib =
-    op "pg-preload-library" (deps [justInstall psql]) $ \actions ->
-        actions
-            { ref = mkRef "pg-preload-library" (port, lib)
-            , help = Text.unwords ["preload", lib, "in the cluster on port", Text.pack (show port)]
-            , notes = ["takes effect at the next restart of the cluster", "keeps the other entries of shared_preload_libraries"]
-            , check = either (const Unknown) verdict <$> current
-            , up = rewrite (addLibrary lib)
-            , down = rewrite (removeLibrary lib)
-            }
-  where
-    current = fmap parseLibraryList <$> Postgres.psqlQuery_Sudo port (fileSettingSql "shared_preload_libraries")
-    verdict libs
-        | lib `elem` libs = Success
-        | otherwise = Failure (lib <> " is not in shared_preload_libraries")
-    rewrite f = do
-        libs <- either (\err -> throwIO (PgTurretError ("cannot read shared_preload_libraries: " <> Text.strip err))) pure =<< current
-        when (f libs /= libs) $ do
-            runBatch port [] (alterPreloadSql (f libs))
-            awaitReload (20 :: Int)
-    -- A reload is a signal, and the restart node's check is a new session
-    -- asking the postmaster a moment later. Waits up to two seconds for the
-    -- flag, and carries on without it: a list put back to what the running
-    -- server already has is never pending.
-    awaitReload n = do
-        seen <- Postgres.psqlQuery_Sudo port "SELECT pending_restart FROM pg_settings WHERE name = 'shared_preload_libraries'"
-        unless (n <= 0 || fmap Text.strip seen == Right "t") $ threadDelay 100000 >> awaitReload (n - 1)
 
 -------------------------------------------------------------------------------
 -- settings

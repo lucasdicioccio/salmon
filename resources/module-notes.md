@@ -2097,8 +2097,16 @@ takes a pre-built artifact as three paths and does not build one. Load-bearing:
   (`upstreamNames` in `Test/PgTurretSpec.hs` is that list, written by hand), with the ranges it
   registers (`problems`). The extension is single-maintainer and unversioned: re-read that file
   before trusting any name against a newer build.
-- `preloadLibrary` is a read-modify-write of `shared_preload_libraries` (`ALTER SYSTEM SET`
-  replaces the whole value). It reads the list from `pg_file_settings`, not from the running
+- `preloadLibrary` (now `Postgres.preloadLibrary` in `salmon-ops`, with its pure parts: it moved
+  when `PgTextSearch` needed the same node, `PgTurret` re-exports it, and its `ref`/`help`/`notes`
+  are pinned in `Test/PgTextSearchSpec.hs`) is a read-modify-write of `shared_preload_libraries`
+  (`ALTER SYSTEM SET` replaces the whole value). **An emptied list is `ALTER SYSTEM RESET`, not
+  `= ''`**: PostgreSQL 17 writes `= ''` as `'""'`, a list of one library with an empty name, and
+  does not start at its next restart (`FATAL: could not access file ""`). That is what the node's
+  `down` rendered until the `pg_textsearch` Layer 2 test restarted a cluster after a teardown; the
+  "empty round trip" below had read the value back and never restarted on it. A `RESET` drops
+  `ALTER SYSTEM`'s entry, so a value in `postgresql.conf` itself applies again. Its failures are
+  now `PostgresError`, not `PgTurretError`. It reads the list from `pg_file_settings`, not from the running
   server, because a library another node added and that still waits for its restart is only in
   the files; it does not filter on `error IS NULL`, because that column is how
   `pg_file_settings` marks exactly those entries. It ends with `pg_reload_conf()`: **without a
@@ -2140,6 +2148,73 @@ server log under `log_statement=all`, the JSON the check reads. **Never run**: a
 not executed), so `up` as a whole, the settings round trip through a real `pg_turret.*` name,
 `CREATE EXTENSION`, the restart step, `down`, the self-logging loop and its exclusion, and the
 Debian paths and `sudo -u postgres` plumbing of this node are untested. No Layer 2 test exists.
+(`preloadLibrary` and `restartClusterIfPending` have since been run for real, by `PgTextSearch`'s
+Layer 2 test below. After the move the package was rebuilt and its suite re-run with an ad hoc
+project file, since `cabal.perso.project` is not tracked.)
+
+`Salmon.Builtin.Nodes.PgTextSearch` (in `salmon-ops`, used by no recipe) makes one cluster able to
+build and use `bm25` indexes with Timescale's `pg_textsearch`. `pgTextSearch` is, in order:
+`pg-textsearch-version-gate` → `pg-textsearch-files` → `Postgres.preloadLibrary` → the restart →
+`pg-textsearch-loaded` → `pg-textsearch-settings` (only if a setting is declared) and one
+`Postgres.extension` per database. Everything below was read off release **v1.5.1** (2026-10);
+re-read upstream before trusting it against a later one. Load-bearing:
+- **A release zip is not a tree of files**: it holds one entry, a Debian package
+  (`pg-textsearch-postgresql-<major>_<version>-1_<arch>.deb`), whose content is the `.so` under
+  `usr/lib/postgresql/<major>/lib` and the control file and scripts under
+  `usr/share/postgresql/<major>/extension`. `releaseFiles` verifies the zip against the pinned
+  sha256 (a public artifact's digest, shown in the notes: not a secret), refuses a zip holding
+  anything but that one package for the declared major, version and this machine's architecture,
+  unpacks it in a temporary directory with `dpkg-deb -x` (**no `dpkg -i`**: nothing is registered
+  and no maintainer script runs; the package `Depends` on `postgresql-<major>` or TimescaleDB's)
+  and copies the files into `pg_config --pkglibdir` and `--sharedir/extension`, each by rename.
+  `planInstall` refuses a package holding any file it has no place for, on purpose: a later
+  release shipping something more should be read by a person before root copies it.
+- `ptsPgConfig` is the server's own `pg_config` (`debianPgConfig`), not the one on `PATH`, which on
+  Debian comes with `libpq-dev` and may be of another major. It is also the files node's `Ref`.
+- The files node's `check` reads the installed control file's `default_version` and looks for the
+  library and that version's script: no zip, no hash, no server, so it answers on a standby and
+  after the zip is gone. It does **not** see a library rebuilt under the same version.
+- Files the Debian package of that name owns (`/var/lib/dpkg/info/pg-textsearch-postgresql-N.list`)
+  are neither replaced nor removed. Otherwise `down` removes `pg_textsearch.so`,
+  `pg_textsearch.control` and `pg_textsearch--*.sql` whoever put them there (a `make install`
+  included): there is no proof of authorship beyond the names.
+- The gate is a floor **and a ceiling** (17 and 18), and also refuses a supported server that is
+  not of the declared major; `Postgres.extension` only has a floor. An unreachable server is
+  `Unknown` for `check` and a throw for `up`.
+- **The restart is declared, with no default** (`Restart`): `RestartWhenPending cluster` is
+  `restartClusterIfPending`, a real restart of the whole cluster; `RestartLeftToOperator` declares
+  no restart node, and `pg-textsearch-loaded` then throws until somebody has restarted. The files
+  come before the preload entry and the entry before any restart, because a server asked to
+  preload a library it cannot find does not start.
+- `pg-textsearch-loaded` asks the running server for `pg_textsearch.library_version` (the control
+  file's `default_version`, compiled into the library). It is the only thing that notices a
+  release replaced under a running server: PostgreSQL does not report that as `pending_restart`,
+  so **an upgrade is never restarted for**, under either `Restart`.
+- The ten settings are the README's table, checked against `src/mod.c`; sizes are written with
+  their unit and compared, without it, to `pg_settings.setting`. None is restart-only at v1.5.1
+  (`memory_limit` is `sighup`, three are `user`, the rest `superuser`), but the node reads
+  `pg_settings.context` and `pending_restart` instead of keeping that list, and its `up` reads
+  the values back and throws if one is not in effect. `user`/`superuser` settings can also be set
+  per role or database, which this node neither does nor looks at.
+- Left out on purpose: BM25 indexes (schema: migrations), managed background compaction
+  (`pg_durable`), a build from source, any transport for the zip, and Patroni, where
+  `shared_preload_libraries` belongs to the cluster-wide configuration and `preloadLibrary`
+  would fight it. On a pair, declare it on each member with no database on the standby; whether
+  a standby without the library can replay `bm25` WAL was not tried.
+
+Run: Layer 0 and QuickCheck properties (`Test/PgTextSearchSpec.hs`); Layer 1, `releaseFiles` for
+real on a package built in the test with `dpkg-deb` and a stand-in `pg_config` (install, digest
+and version refusals, upgrade, `down`); and Layer 2, **once by hand on 2026-10-11**, in a
+`debian:trixie` container with PostgreSQL 17 and upstream's `pg-textsearch-v1.5.1-pg17-amd64.zip`:
+`up` twice (one restart, then none, every check satisfied), the settings and their contexts, a
+`bm25` index ranking two documents, `down` refused while the index exists and clean after, and a
+restart on what `down` left. The Layer 2 test needs `SALMON_TEST_PG_TEXTSEARCH_ZIP` and is
+skipped without it, so **no default run executes it**. In it the files are copied by the node
+into a temporary directory and from there into the container by the test (`podman cp`): the
+node's own write under `/usr/lib/postgresql` as root was never run. **Never run**: PostgreSQL 18,
+arm64, `RestartLeftToOperator` against a server, `ptsUpgrade` (`ALTER EXTENSION UPDATE`), an
+upgrade of a loaded library, the dpkg-owned refusal, a standby, a setting that is restart-only
+(none exists upstream), and anything under `serve`.
 
 `Salmon.Builtin.Nodes.ClipCpp` (in `salmon-ops`, used by no recipe) is clip.cpp for a
 `vector(N)` column that holds text and images together: `clipBuild` (a pinned commit, compiled),
