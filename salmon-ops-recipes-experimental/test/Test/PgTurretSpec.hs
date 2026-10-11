@@ -143,8 +143,9 @@ tests =
                 assertEqual "" [] (removeLibrary "pg_turret" ["pg_turret"])
             , testCase "the statement lists every library" $ do
                 assertEqual "" "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements', 'pg_turret';\nSELECT pg_reload_conf();\n" (alterPreloadSql ["pg_stat_statements", "pg_turret"])
-                assertEqual "" "ALTER SYSTEM SET shared_preload_libraries = '';\nSELECT pg_reload_conf();\n" (alterPreloadSql [])
-            , testCase "an emptied list reads back as no library" $
+            , testCase "an emptied list is a reset: = '' is written as '\"\"', and a server does not start on that" $
+                assertEqual "" "ALTER SYSTEM RESET shared_preload_libraries;\nSELECT pg_reload_conf();\n" (alterPreloadSql [])
+            , testCase "a list emptied the old way reads back as no library" $
                 assertEqual "" [] (parseLibraryList "\"\"")
             , testCase "the list is read from the files, not from the running server" $
                 assertEqual

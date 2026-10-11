@@ -15,6 +15,7 @@ import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.ClipCppSpec as ClipCppSpec
 import qualified Test.LlamaServerSpec as LlamaServerSpec
 import qualified Test.ServeApiSpec as ServeApiSpec
+import qualified Test.PgTextSearchSpec as PgTextSearchSpec
 import qualified Test.PgVectorSpec as PgVectorSpec
 import qualified Test.PlakarSpec as PlakarSpec
 import qualified Test.WireGuardMeshSpec as WireGuardMeshSpec
@@ -110,6 +111,7 @@ main =
                 , PostgresTemplateSpec.sandboxTests
                 , MigratorTemplateSpec.tests
                 , PgBackRestSpec.sandboxTests
+                , PgTextSearchSpec.sandboxTests
                 , -- the rest of the VM specs: they share one bridge and a
                   -- handful of fixed addresses, so two at once is two guests
                   -- claiming one address.
@@ -140,6 +142,7 @@ main =
             , LlamaServerSpec.tests
             , ServeApiSpec.tests
             , PgVectorSpec.tests
+            , PgTextSearchSpec.tests
             , PlakarSpec.tests
             , WireGuardSpec.tests
             , WireGuardMeshSpec.tests
