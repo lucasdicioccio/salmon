@@ -84,6 +84,7 @@ import Data.Foldable (toList)
 import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -125,6 +126,9 @@ data Dag ext = Dag
     -- ^ Representatives replaced by a /differing/ one, newest first. Empty
     -- for the overwhelmingly common case of one node reached by several
     -- paths, which replaces a representative with an indistinguishable one.
+    -- 'foldDag' records one per declaration that lost, each against the
+    -- final representative; 'record' (and so 'mergeDag') one per
+    -- replacement.
     }
 
 -- | A representative that lost to last-writer-wins, and the one that beat it.
@@ -132,7 +136,8 @@ data Conflict ext = Conflict
     { conflictRef :: !Ref
     , conflictKept :: !(Act ext)
     -- ^ The representative that replaced 'conflictReplaced'. Note a /later/
-    -- write may have replaced this one in turn; @'dagNodes' dag '!'
+    -- write may have replaced this one in turn (a merge; within one
+    -- 'foldDag' it is always the final one); @'dagNodes' dag '!'
     -- 'conflictRef'@ is the final answer.
     , conflictReplaced :: !(Act ext)
     }
@@ -210,20 +215,88 @@ stuck waitsOn dag = go (Set.fromList (dagOrder dag))
 
 -------------------------------------------------------------------------------
 
-{- | Collapse an expanded graph.
+{- | Collapse an expanded graph, visiting each node once.
 
-The walk visits every occurrence of a node, so the edge sets are the union
-over all of them and the representative is the last one seen. It does not
-prune already-seen 'Ref's the way the collapse inside @downTreeWith@ used to:
-that pruning dropped the edges of every occurrence after the first, which is
-exactly what a merge must not do. The cost is a full walk of the expanded
-'Cofree' — the same cost the old tree-walking @upTree@ paid before milestone
-4 moved it onto this module, and 'expand' before it.
+= What is walked
 
-The first argument decides whether replacing a representative is worth
-reporting: it answers "are these two the same node?", so 'True' records no
-'Conflict'. Pass 'sameRepresentative' unless you have something better; pass
-@\\_ _ -> True@ to opt out of conflict detection entirely.
+An /occurrence/ is one cell of the expansion that carries a node. The
+expansion is a tree, so a node reached by several paths has one occurrence
+per path, and a chain of diamonds has exponentially many. This fold does not
+walk them all. Of an occurrence it looks at three things, its /top/:
+
+* its 'Ref';
+* its act, as far as the conflict test (the first argument) can tell;
+* the 'Ref's of its effective predecessors (the nearest nodes below it,
+  through any 'Actionless' glue), deduplicated, in order.
+
+An occurrence whose top has been walked already is __not walked again, and
+neither is anything below it__. So the cost is one visit per distinct top
+(one per node, in a graph where a node is declared one way) plus one look at
+each of its predecessors, instead of one visit per path. It does not prune by
+'Ref' alone, the way the collapse inside @downTreeWith@ used to: that dropped
+the edges of a re-declaration with other predecessors, which is exactly what
+a merge must not do.
+
+= The precondition: coherent declarations
+
+Skipping is only right if a second occurrence with the same top has the same
+things below it. That is the precondition, and nothing here checks it (doing
+so is the per-path walk this fold exists to avoid):
+
+__Coherent__: whenever two occurrences have the same top, they have as many
+effective predecessors as each other, and those have the same tops, one for
+one in order. By induction, same top means same tree all the way down, up to
+the conflict test.
+
+A graph built by calling the same functions with the same arguments is
+coherent, however many paths reach a node. Two declarations of one 'Ref' that
+differ in their description or in their predecessors have different tops, are
+both walked, and are still merged (edges) and reported (conflict) as before.
+
+The conflict test is assumed to be an equivalence. 'sameRepresentative' is.
+
+= What is the same as walking every occurrence, on a coherent expansion
+
+* 'dagNodes' has the same keys, and each representative is one the conflict
+  test cannot tell from the last occurrence in the tree (last writer wins,
+  in the order of the tree, not in the order of this walk).
+* 'dagDependencies' and 'dagDependants' are equal, order included, and so is
+  'dagOrder'.
+* The same 'Ref's are contested, by the same declarations.
+
+= What is not the same
+
+* __Conflicts are one per declaration that lost__, not one per change of
+  representative. Walking every occurrence used to record a 'Conflict' each
+  time the representative flipped, so a node and a differing declaration of
+  it under a parent reached by @k@ paths gave @2k - 1@ of them. Now each
+  contested 'Ref' with @n@ distinguishable declarations gives @n - 1@: the
+  final representative as 'conflictKept', against each of the others as
+  'conflictReplaced'. With two declarations that is the last flip the old
+  walk recorded; with three or more, the old chain of flips (@b@ over @a@,
+  @c@ over @b@) reads @c@ over @a@, @c@ over @b@.
+* __On an expansion that is not coherent, what differs below two occurrences
+  with the same top is not seen.__ The standard example: a unit declared
+  twice with the same description, each over a file with the same path, the
+  two files differing in content. The second unit is not walked, so the
+  second file is never met: no 'Conflict' is recorded, and the first file is
+  the representative where the last used to be. Nodes and edges that only
+  exist below such an occurrence are missed in the same way. A difference in
+  the description of the upper node (or in its predecessor 'Ref's) is enough
+  to have both walked.
+* With a conflict test that cannot tell two declarations apart (@\\_ _ ->
+  True@ in particular), which of them is the representative is unspecified:
+  that is what the test said.
+
+The first argument decides whether two acts are the same node: 'True' records
+no 'Conflict'. Pass 'sameRepresentative' unless you have something better;
+pass @\\_ _ -> True@ to opt out of conflict detection entirely, at the price
+of occurrences being told apart by 'Ref' and predecessors alone.
+
+The expansion is only forced where it is walked, so over a lazily built one
+(@Identity@, as 'Salmon.Builtin.Extension.evalDeps' builds) the skipped
+occurrences are never built at all. An expansion built in a strict monad has
+been paid for per path before this is called.
 -}
 foldDag ::
     forall m ext.
@@ -231,39 +304,168 @@ foldDag ::
     (Act ext -> Act ext -> Bool) ->
     Cofree Graph (OpGraph m (Actions ext)) ->
     Dag ext
-foldDag same = go emptyDag
+foldDag same root
+    | Map.null contested = walkDag walked
+    | otherwise =
+        (walkDag walked)
+            { dagNodes = Map.foldlWithKey' (\nodes r (winner, _) -> Map.insert r winner nodes) (dagNodes (walkDag walked)) verdicts
+            , dagConflicts =
+                reverse
+                    [ Conflict r winner loser
+                    | r <- dagOrder (walkDag walked)
+                    , Just (winner, losers) <- [Map.lookup r verdicts]
+                    , loser <- losers
+                    ]
+            }
   where
-    go ::
-        Dag ext ->
-        Cofree Graph (OpGraph m (Actions ext)) ->
-        Dag ext
-    go dag (x :< g) =
+    walked :: Walk ext
+    walked = forward (Walk emptyDag Map.empty) root
+
+    variants :: Map Ref [Act ext]
+    variants = Map.map (fmap fst) (walkMet walked)
+
+    -- the refs declared in more than one distinguishable way.
+    contested :: Map Ref [Act ext]
+    contested = Map.filter (\declared -> length declared > 1) variants
+
+    -- for each contested ref, the declaration that is last in the tree and
+    -- the ones it beat, in first-met order.
+    verdicts :: Map Ref (Act ext, [Act ext])
+    verdicts = Map.intersectionWith verdict contested (lastWriters same variants contested root)
+
+    verdict :: [Act ext] -> Int -> (Act ext, [Act ext])
+    verdict declared winner =
+        ( declared !! winner
+        , [v | (i, v) <- zip [0 ..] declared, i /= winner]
+        )
+
+    -- Depth first, predecessors in order, as the walk of every occurrence
+    -- was: on a coherent expansion a skipped occurrence would have recorded
+    -- nothing new, so what is recorded, and in which order, is unchanged.
+    forward :: Walk ext -> Cofree Graph (OpGraph m (Actions ext)) -> Walk ext
+    forward w (x :< g) =
         case x.node of
-            Actionless -> foldl' go dag (effPreds g)
+            Actionless -> foldl' forward w (effPreds g)
             Actions act ->
                 let aref = getField @"ref" act.extension
                     preds = effPreds g
                     predRefs = nubOrd [pr | p <- preds, Just pr <- [refOf p]]
-                 in foldl' go (record same aref act predRefs dag) preds
+                 in case meet same act predRefs (Map.findWithDefault [] aref (walkMet w)) of
+                        Nothing -> w
+                        Just met ->
+                            foldl'
+                                forward
+                                Walk
+                                    { -- only for the edges and the order: the
+                                      -- representative and the conflicts of
+                                      -- a contested ref are settled at the end.
+                                      walkDag = record (\_ _ -> True) aref act predRefs (walkDag w)
+                                    , walkMet = Map.insert aref met (walkMet w)
+                                    }
+                                preds
 
-    -- The effective predecessors of a node: the nearest 'Ref'-carrying
-    -- subtrees below it, descending through 'Actionless' nodes, which are
-    -- structural glue with no identity and nothing to run.
-    effPreds ::
-        Graph (Cofree Graph (OpGraph m (Actions ext))) ->
-        [Cofree Graph (OpGraph m (Actions ext))]
-    effPreds g = concatMap pick (toList g)
-      where
-        pick c@(x :< g') =
+data Walk ext = Walk
+    { walkDag :: !(Dag ext)
+    , walkMet :: !(Map Ref [(Act ext, [[Ref]])])
+    -- ^ The tops walked, by 'Ref': the declarations of it the conflict test
+    -- tells apart, in first-met order, each with the predecessor lists it
+    -- was met with. One declaration with one list, almost always.
+    }
+
+-- | A top among those met for its 'Ref': 'Nothing' if it was walked already,
+-- otherwise the tops with it added.
+meet ::
+    forall ext.
+    (Act ext -> Act ext -> Bool) ->
+    Act ext ->
+    [Ref] ->
+    [(Act ext, [[Ref]])] ->
+    Maybe [(Act ext, [[Ref]])]
+meet same act predRefs = go
+  where
+    go :: [(Act ext, [[Ref]])] -> Maybe [(Act ext, [[Ref]])]
+    go [] = Just [(act, [predRefs])]
+    go ((v, walked) : rest)
+        | same v act = if predRefs `elem` walked then Nothing else Just ((v, predRefs : walked) : rest)
+        | otherwise = fmap ((v, walked) :) (go rest)
+
+-- | What an occurrence is recognised by: its 'Ref', which of the
+-- distinguishable declarations of that 'Ref' it is (by position, first met
+-- first), and the 'Ref's it depends on.
+type Top = (Ref, Int, [Ref])
+
+-- | Which known declaration an act is, as far as the test can tell.
+variantOf :: forall ext. (Act ext -> Act ext -> Bool) -> [Act ext] -> Act ext -> Maybe Int
+variantOf same known act = go 0 known
+  where
+    go :: Int -> [Act ext] -> Maybe Int
+    go _ [] = Nothing
+    go i (v : vs)
+        | same v act = Just i
+        | otherwise = go (i + 1) vs
+
+{- | For each contested 'Ref', which of its declarations is the last
+occurrence in the tree: the one walking every occurrence would have ended on.
+
+The forward walk cannot say: it skips occurrences, and the last one in the
+tree may sit below a skipped one. So this walks the tree backwards (a node's
+predecessors last to first, then the node), where the first occurrence met
+of a 'Ref' is its last in the tree, and skips an occurrence whose top was
+already walked for the same reason the forward walk does: on a coherent
+expansion everything below it has been met. It stops as soon as every
+contested 'Ref' is settled, and is not run at all when nothing is contested.
+-}
+lastWriters ::
+    forall m ext a.
+    (HasField "ref" ext Ref) =>
+    (Act ext -> Act ext -> Bool) ->
+    Map Ref [Act ext] ->
+    Map Ref a ->
+    Cofree Graph (OpGraph m (Actions ext)) ->
+    Map Ref Int
+lastWriters same variants contested root = snd (backward (Set.empty, Map.empty) root)
+  where
+    backward :: (Set Top, Map Ref Int) -> Cofree Graph (OpGraph m (Actions ext)) -> (Set Top, Map Ref Int)
+    backward acc@(tops, found) (x :< g)
+        | Map.size found == Map.size contested = acc
+        | otherwise =
             case x.node of
-                Actions _ -> [c]
-                Actionless -> effPreds g'
+                Actionless -> foldl' backward acc (reverse (effPreds g))
+                Actions act ->
+                    let aref = getField @"ref" act.extension
+                        preds = effPreds g
+                        predRefs = nubOrd [pr | p <- preds, Just pr <- [refOf p]]
+                        -- always found: the forward walk classified this
+                        -- occurrence, or one with the same top.
+                        variant = fromMaybe 0 (variantOf same (Map.findWithDefault [] aref variants) act)
+                        top = (aref, variant, predRefs)
+                     in if Set.member top tops
+                            then acc
+                            else
+                                let (tops', found') = foldl' backward (tops, found) (reverse preds)
+                                    found''
+                                        | Map.member aref contested = Map.insertWith (\_ earlier -> earlier) aref variant found'
+                                        | otherwise = found'
+                                 in (Set.insert top tops', found'')
 
-    refOf :: Cofree Graph (OpGraph m (Actions ext)) -> Maybe Ref
-    refOf (x :< _) =
+-- | The effective predecessors of a node: the nearest 'Ref'-carrying
+-- subtrees below it, descending through 'Actionless' nodes, which are
+-- structural glue with no identity and nothing to run.
+effPreds ::
+    Graph (Cofree Graph (OpGraph m (Actions ext))) ->
+    [Cofree Graph (OpGraph m (Actions ext))]
+effPreds g = concatMap pick (toList g)
+  where
+    pick c@(x :< g') =
         case x.node of
-            Actions act -> Just (getField @"ref" act.extension)
-            Actionless -> Nothing
+            Actions _ -> [c]
+            Actionless -> effPreds g'
+
+refOf :: (HasField "ref" ext Ref) => Cofree Graph (OpGraph m (Actions ext)) -> Maybe Ref
+refOf (x :< _) =
+    case x.node of
+        Actions act -> Just (getField @"ref" act.extension)
+        Actionless -> Nothing
 
 {- | Add one node and its outgoing dependency edges, last-writer-wins.
 

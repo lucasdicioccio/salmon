@@ -1,0 +1,547 @@
+fold	expand + foldDag		occurrences	chain	100	100	99	100	0.000271	617488	ok
+fold	expand + foldDag		occurrences	chain	300	300	299	300	0.000920	1998936	ok
+fold	expand + foldDag		occurrences	chain	1000	1000	999	1000	0.004161	7253632	ok
+fold	expand + foldDag		occurrences	chain	3000	3000	2999	3000	0.016575	23108400	ok
+fold	expand + foldDag		occurrences	chain	10000	10000	9999	10000	0.083310	82201184	ok
+fold	expand + foldDag		occurrences	chain	30000	30000	29999	30000	0.321848	260798912	ok
+fold	expand + foldDag		occurrences	chain	100000	100000	99999	100000	1.566050	921898024	ok
+fold	expand + foldDag		occurrences	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	100	100	99	100	0.000842	1040496	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	300	300	299	300	0.003157	3426600	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	1000	1000	999	1000	0.012302	12365288	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	3000	3000	2999	3000	0.035553	39731784	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	10000	10000	9999	10000	0.168009	142343736	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	30000	30000	29999	30000	0.651417	454460560	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	100000	100000	99999	100000	3.145757	1615358336	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	chain	100000	100000	99999	100000	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	chain	100	100	99	100	0.000724	769936	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	chain	100	100	99	100	0.000014	32832	ok
+serve	loop	first pass, every node up	occurrences	chain	100	100	99	100	0.003291	2362160	ok
+serve	loop	status	occurrences	chain	100	100	99	100	0.000731	1087664	ok
+serve	loop	before the idle pass	occurrences	chain	100	100	99	100	0.000018	35832	ok
+serve	loop	idle pass, nothing pending	occurrences	chain	100	100	99	100	0.000094	78328	ok
+serve	loop	clear	occurrences	chain	100	100	99	100	0.000004	2976	ok
+serve	loop	before the teardown pass	occurrences	chain	100	100	99	100	0.000072	90472	ok
+serve	loop	teardown pass, every node down	occurrences	chain	100	100	99	100	0.002441	1111584	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	chain	300	300	299	300	0.002560	2457360	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	chain	300	300	299	300	0.000033	95232	ok
+serve	loop	first pass, every node up	occurrences	chain	300	300	299	300	0.019315	11359288	ok
+serve	loop	status	occurrences	chain	300	300	299	300	0.005525	7601424	ok
+serve	loop	before the idle pass	occurrences	chain	300	300	299	300	0.000033	87440	ok
+serve	loop	idle pass, nothing pending	occurrences	chain	300	300	299	300	0.000247	231304	ok
+serve	loop	clear	occurrences	chain	300	300	299	300	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	chain	300	300	299	300	0.000200	267448	ok
+serve	loop	teardown pass, every node down	occurrences	chain	300	300	299	300	0.015774	9260608	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	chain	1000	1000	999	1000	0.006950	8837408	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	chain	1000	1000	999	1000	0.000082	313632	ok
+serve	loop	first pass, every node up	occurrences	chain	1000	1000	999	1000	0.207776	43731088	ok
+serve	loop	status	occurrences	chain	1000	1000	999	1000	0.064235	75075704	ok
+serve	loop	before the idle pass	occurrences	chain	1000	1000	999	1000	0.000103	283440	ok
+serve	loop	idle pass, nothing pending	occurrences	chain	1000	1000	999	1000	0.000816	777384	ok
+serve	loop	clear	occurrences	chain	1000	1000	999	1000	0.000005	2784	ok
+serve	loop	before the teardown pass	occurrences	chain	1000	1000	999	1000	0.000670	897528	ok
+serve	loop	teardown pass, every node down	occurrences	chain	1000	1000	999	1000	0.204570	41184440	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	chain	3000	3000	2999	3000	0.027691	28128408	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	chain	3000	3000	2999	3000	0.000450	941656	ok
+serve	loop	first pass, every node up	occurrences	chain	3000	3000	2999	3000	2.179463	137926992	ok
+serve	loop	status	occurrences	chain	3000	3000	2999	3000	0.702959	729728432	ok
+serve	loop	before the idle pass	occurrences	chain	3000	3000	2999	3000	0.000418	843440	ok
+serve	loop	idle pass, nothing pending	occurrences	chain	3000	3000	2999	3000	0.003231	2326312	ok
+serve	loop	clear	occurrences	chain	3000	3000	2999	3000	0.000010	2784	ok
+serve	loop	before the teardown pass	occurrences	chain	3000	3000	2999	3000	0.002861	2686456	ok
+serve	loop	teardown pass, every node down	occurrences	chain	3000	3000	2999	3000	2.034390	134563048	ok
+serve	loop		occurrences	chain	3000	3000	2999	3000	0.000000	0	stop:budget
+fold	expand + foldDag		occurrences	fan	100	100	99	100	0.000447	900056	ok
+fold	expand + foldDag		occurrences	fan	300	300	299	300	0.002358	4519048	ok
+fold	expand + foldDag		occurrences	fan	1000	1000	999	1000	0.018569	35163912	ok
+fold	expand + foldDag		occurrences	fan	3000	3000	2999	3000	0.148021	274801176	ok
+fold	expand + foldDag		occurrences	fan	10000	10000	9999	10000	1.710494	2881073168	ok
+fold	expand + foldDag		occurrences	fan	30000	30000	29999	30000	17.251901	25457026288	ok
+fold	expand + foldDag		occurrences	fan	30000	30000	29999	30000	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	fan	100	100	99	100	0.001070	1146120	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	fan	300	300	299	300	0.006269	5294912	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	fan	1000	1000	999	1000	0.030663	37957576	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	fan	3000	3000	2999	3000	0.279116	283901088	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	fan	10000	10000	9999	10000	2.953088	2913706968	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	fan	10000	10000	9999	10000	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	fan	100	100	99	100	0.001746	1052424	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	fan	100	100	99	100	0.000021	32832	ok
+serve	loop	first pass, every node up	occurrences	fan	100	100	99	100	0.002657	2779848	ok
+serve	loop	status	occurrences	fan	100	100	99	100	0.000716	385576	ok
+serve	loop	before the idle pass	occurrences	fan	100	100	99	100	0.000025	35816	ok
+serve	loop	idle pass, nothing pending	occurrences	fan	100	100	99	100	0.000081	78328	ok
+serve	loop	clear	occurrences	fan	100	100	99	100	0.000003	2976	ok
+serve	loop	before the teardown pass	occurrences	fan	100	100	99	100	0.000054	90472	ok
+serve	loop	teardown pass, every node down	occurrences	fan	100	100	99	100	0.001119	1554704	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	fan	300	300	299	300	0.004291	4975872	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	fan	300	300	299	300	0.000027	95232	ok
+serve	loop	first pass, every node up	occurrences	fan	300	300	299	300	0.005503	15872160	ok
+serve	loop	status	occurrences	fan	300	300	299	300	0.001467	1247184	ok
+serve	loop	before the idle pass	occurrences	fan	300	300	299	300	0.000026	87440	ok
+serve	loop	idle pass, nothing pending	occurrences	fan	300	300	299	300	0.000204	231304	ok
+serve	loop	clear	occurrences	fan	300	300	299	300	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	fan	300	300	299	300	0.000166	267448	ok
+serve	loop	teardown pass, every node down	occurrences	fan	300	300	299	300	0.004282	13893336	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	fan	1000	1000	999	1000	0.020630	36755600	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	fan	1000	1000	999	1000	0.000088	313632	ok
+serve	loop	first pass, every node up	occurrences	fan	1000	1000	999	1000	0.042135	98021232	ok
+serve	loop	status	occurrences	fan	1000	1000	999	1000	0.012680	4475968	ok
+serve	loop	before the idle pass	occurrences	fan	1000	1000	999	1000	0.000077	283440	ok
+serve	loop	idle pass, nothing pending	occurrences	fan	1000	1000	999	1000	0.000737	777384	ok
+serve	loop	clear	occurrences	fan	1000	1000	999	1000	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	fan	1000	1000	999	1000	0.000600	897528	ok
+serve	loop	teardown pass, every node down	occurrences	fan	1000	1000	999	1000	0.034170	95919912	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	fan	3000	3000	2999	3000	0.158011	279814064	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	fan	3000	3000	2999	3000	0.000316	941656	ok
+serve	loop	first pass, every node up	occurrences	fan	3000	3000	2999	3000	0.280065	735701792	ok
+serve	loop	status	occurrences	fan	3000	3000	2999	3000	0.107060	14307032	ok
+serve	loop	before the idle pass	occurrences	fan	3000	3000	2999	3000	0.000329	843440	ok
+serve	loop	idle pass, nothing pending	occurrences	fan	3000	3000	2999	3000	0.002509	2326312	ok
+serve	loop	clear	occurrences	fan	3000	3000	2999	3000	0.000007	2784	ok
+serve	loop	before the teardown pass	occurrences	fan	3000	3000	2999	3000	0.002039	2686456	ok
+serve	loop	teardown pass, every node down	occurrences	fan	3000	3000	2999	3000	0.254450	639948048	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	fan	10000	10000	9999	10000	1.697356	2898625008	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	fan	10000	10000	9999	10000	0.001285	3121632	ok
+serve	loop	first pass, every node up	occurrences	fan	10000	10000	9999	10000	3.030769	7547357224	ok
+serve	loop	status	occurrences	fan	10000	10000	9999	10000	1.230335	50962840	ok
+serve	loop	before the idle pass	occurrences	fan	10000	10000	9999	10000	0.001361	2803440	ok
+serve	loop	idle pass, nothing pending	occurrences	fan	10000	10000	9999	10000	0.011006	7783872	ok
+serve	loop	clear	occurrences	fan	10000	10000	9999	10000	0.000011	2784	ok
+serve	loop	before the teardown pass	occurrences	fan	10000	10000	9999	10000	0.010268	8984016	ok
+serve	loop	teardown pass, every node down	occurrences	fan	10000	10000	9999	10000	3.038797	7516257792	ok
+serve	loop		occurrences	fan	10000	10000	9999	10000	0.000000	0	stop:budget
+fold	expand + foldDag		occurrences	tree2	100	100	99	100	0.000272	627376	ok
+fold	expand + foldDag		occurrences	tree2	300	300	299	300	0.001031	2025800	ok
+fold	expand + foldDag		occurrences	tree2	1000	1000	999	1000	0.004145	7267440	ok
+fold	expand + foldDag		occurrences	tree2	3000	3000	2999	3000	0.015850	23265104	ok
+fold	expand + foldDag		occurrences	tree2	10000	10000	9999	10000	0.078604	82692816	ok
+fold	expand + foldDag		occurrences	tree2	30000	30000	29999	30000	0.316341	262120672	ok
+fold	expand + foldDag		occurrences	tree2	100000	100000	99999	100000	1.465287	928245336	ok
+fold	expand + foldDag		occurrences	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	100	100	99	100	0.001453	997600	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	300	300	299	300	0.002918	3204680	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	1000	1000	999	1000	0.011649	11490672	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	3000	3000	2999	3000	0.035188	37979760	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	10000	10000	9999	10000	0.166826	134469632	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	30000	30000	29999	30000	0.660627	425934392	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	100000	100000	99999	100000	3.478682	1543117496	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	tree2	100000	100000	99999	100000	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	tree2	100	100	99	100	0.001251	782144	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	tree2	100	100	99	100	0.000022	32832	ok
+serve	loop	first pass, every node up	occurrences	tree2	100	100	99	100	0.001873	2345792	ok
+serve	loop	status	occurrences	tree2	100	100	99	100	0.000333	460160	ok
+serve	loop	before the idle pass	occurrences	tree2	100	100	99	100	0.000013	35832	ok
+serve	loop	idle pass, nothing pending	occurrences	tree2	100	100	99	100	0.000073	80568	ok
+serve	loop	clear	occurrences	tree2	100	100	99	100	0.000003	2976	ok
+serve	loop	before the teardown pass	occurrences	tree2	100	100	99	100	0.000054	92712	ok
+serve	loop	teardown pass, every node down	occurrences	tree2	100	100	99	100	0.000824	1133768	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	tree2	300	300	299	300	0.002270	2487664	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	tree2	300	300	299	300	0.000033	95232	ok
+serve	loop	first pass, every node up	occurrences	tree2	300	300	299	300	0.005056	9632792	ok
+serve	loop	status	occurrences	tree2	300	300	299	300	0.001104	1570560	ok
+serve	loop	before the idle pass	occurrences	tree2	300	300	299	300	0.000026	87440	ok
+serve	loop	idle pass, nothing pending	occurrences	tree2	300	300	299	300	0.000214	236504	ok
+serve	loop	clear	occurrences	tree2	300	300	299	300	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	tree2	300	300	299	300	0.000175	272648	ok
+serve	loop	teardown pass, every node down	occurrences	tree2	300	300	299	300	0.003776	6070248	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	tree2	1000	1000	999	1000	0.007028	8847104	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	tree2	1000	1000	999	1000	0.000087	313632	ok
+serve	loop	first pass, every node up	occurrences	tree2	1000	1000	999	1000	0.027266	33818864	ok
+serve	loop	status	occurrences	tree2	1000	1000	999	1000	0.004851	5825200	ok
+serve	loop	before the idle pass	occurrences	tree2	1000	1000	999	1000	0.000075	283440	ok
+serve	loop	idle pass, nothing pending	occurrences	tree2	1000	1000	999	1000	0.000719	777064	ok
+serve	loop	clear	occurrences	tree2	1000	1000	999	1000	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	tree2	1000	1000	999	1000	0.000585	897208	ok
+serve	loop	teardown pass, every node down	occurrences	tree2	1000	1000	999	1000	0.022893	28314648	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	tree2	3000	3000	2999	3000	0.024811	28273872	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	tree2	3000	3000	2999	3000	0.000278	941656	ok
+serve	loop	first pass, every node up	occurrences	tree2	3000	3000	2999	3000	0.100024	105942336	ok
+serve	loop	status	occurrences	tree2	3000	3000	2999	3000	0.023944	19434184	ok
+serve	loop	before the idle pass	occurrences	tree2	3000	3000	2999	3000	0.000414	843440	ok
+serve	loop	idle pass, nothing pending	occurrences	tree2	3000	3000	2999	3000	0.002761	2327672	ok
+serve	loop	clear	occurrences	tree2	3000	3000	2999	3000	0.000007	2784	ok
+serve	loop	before the teardown pass	occurrences	tree2	3000	3000	2999	3000	0.002138	2687816	ok
+serve	loop	teardown pass, every node down	occurrences	tree2	3000	3000	2999	3000	0.121575	84137792	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	tree2	10000	10000	9999	10000	0.118269	100251608	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	tree2	10000	10000	9999	10000	0.001407	3121632	ok
+serve	loop	first pass, every node up	occurrences	tree2	10000	10000	9999	10000	0.501531	365802664	ok
+serve	loop	status	occurrences	tree2	10000	10000	9999	10000	0.107601	71354040	ok
+serve	loop	before the idle pass	occurrences	tree2	10000	10000	9999	10000	0.001596	2803440	ok
+serve	loop	idle pass, nothing pending	occurrences	tree2	10000	10000	9999	10000	0.011066	7750952	ok
+serve	loop	clear	occurrences	tree2	10000	10000	9999	10000	0.000011	2784	ok
+serve	loop	before the teardown pass	occurrences	tree2	10000	10000	9999	10000	0.010126	8951096	ok
+serve	loop	teardown pass, every node down	occurrences	tree2	10000	10000	9999	10000	0.605075	305261600	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	tree2	30000	30000	29999	30000	0.447383	317467816	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	tree2	30000	30000	29999	30000	0.004918	9361632	ok
+serve	loop	first pass, every node up	occurrences	tree2	30000	30000	29999	30000	2.153349	1121045040	ok
+serve	loop	status	occurrences	tree2	30000	30000	29999	30000	0.665346	231852520	ok
+serve	loop	before the idle pass	occurrences	tree2	30000	30000	29999	30000	0.009100	8403440	ok
+serve	loop	idle pass, nothing pending	occurrences	tree2	30000	30000	29999	30000	0.067498	23263864	ok
+serve	loop	clear	occurrences	tree2	30000	30000	29999	30000	0.000013	2784	ok
+serve	loop	before the teardown pass	occurrences	tree2	30000	30000	29999	30000	0.076834	26864008	ok
+serve	loop	teardown pass, every node down	occurrences	tree2	30000	30000	29999	30000	3.196792	903524984	ok
+serve	loop		occurrences	tree2	30000	30000	29999	30000	0.000000	0	stop:budget
+fold	expand + foldDag		occurrences	diamonds2	15	13	16	61	0.000142	347544	ok
+fold	expand + foldDag		occurrences	diamonds2	21	19	24	253	0.000559	1449800	ok
+fold	expand + foldDag		occurrences	diamonds2	24	22	28	509	0.001066	3070344	ok
+fold	expand + foldDag		occurrences	diamonds2	30	28	36	2045	0.004428	12339040	ok
+fold	expand + foldDag		occurrences	diamonds2	36	34	44	8189	0.021112	50793344	ok
+fold	expand + foldDag		occurrences	diamonds2	39	37	48	16381	0.042380	99850032	ok
+fold	expand + foldDag		occurrences	diamonds2	45	43	56	65533	0.171804	405844208	ok
+fold	expand + foldDag		occurrences	diamonds2	51	49	64	262141	0.776212	1603911488	ok
+fold	expand + foldDag		occurrences	diamonds2	54	52	68	524285	1.565487	3344750672	ok
+fold	expand + foldDag		occurrences	diamonds2	60	58	76	2097149	7.369908	13390536552	ok
+fold	expand + foldDag		occurrences	diamonds2	60	58	76	2097149	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	15	13	16	61	0.000197	404168	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	21	19	24	253	0.000814	1530296	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	24	22	28	509	0.001266	3155096	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	30	28	36	2045	0.005867	12453760	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	36	34	44	8189	0.030458	50933008	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	39	37	48	16381	0.054115	100006224	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	45	43	56	65533	0.216760	406023616	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	51	49	64	262141	0.902720	1604120496	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	54	52	68	524285	2.095354	3344965592	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	diamonds2	54	52	68	524285	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	15	13	16	61	0.000359	402456	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	15	13	16	61	0.000006	5688	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	15	13	16	61	0.000266	130352	ok
+serve	loop	status	occurrences	diamonds2	15	13	16	61	0.000119	138256	ok
+serve	loop	before the idle pass	occurrences	diamonds2	15	13	16	61	0.000005	7592	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	15	13	16	61	0.000011	15480	ok
+serve	loop	clear	occurrences	diamonds2	15	13	16	61	0.000003	2976	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	15	13	16	61	0.000010	13368	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	15	13	16	61	0.000393	123896	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	21	19	24	253	0.001044	1483200	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	21	19	24	253	0.000012	7560	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	21	19	24	253	0.000314	193008	ok
+serve	loop	status	occurrences	diamonds2	21	19	24	253	0.000208	289416	ok
+serve	loop	before the idle pass	occurrences	diamonds2	21	19	24	253	0.000005	12784	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	21	19	24	253	0.000014	15544	ok
+serve	loop	clear	occurrences	diamonds2	21	19	24	253	0.000002	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	21	19	24	253	0.000011	17968	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	21	19	24	253	0.000479	187216	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	24	22	28	509	0.002107	3103816	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	24	22	28	509	0.000007	8496	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	24	22	28	509	0.000528	228760	ok
+serve	loop	status	occurrences	diamonds2	24	22	28	509	0.000303	381024	ok
+serve	loop	before the idle pass	occurrences	diamonds2	24	22	28	509	0.000007	9600	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	24	22	28	509	0.000018	18176	ok
+serve	loop	clear	occurrences	diamonds2	24	22	28	509	0.000002	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	24	22	28	509	0.000013	20960	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	24	22	28	509	0.000633	218176	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	30	28	36	2045	0.006326	12383960	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	30	28	36	2045	0.000007	10368	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	30	28	36	2045	0.000772	331648	ok
+serve	loop	status	occurrences	diamonds2	30	28	36	2045	0.000379	575392	ok
+serve	loop	before the idle pass	occurrences	diamonds2	30	28	36	2045	0.000007	11280	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	30	28	36	2045	0.000022	23056	ok
+serve	loop	clear	occurrences	diamonds2	30	28	36	2045	0.000002	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	30	28	36	2045	0.000017	26560	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	30	28	36	2045	0.000529	316744	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	36	34	44	8189	0.034803	50846992	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	36	34	44	8189	0.000009	16264	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	36	34	44	8189	0.000861	396384	ok
+serve	loop	status	occurrences	diamonds2	36	34	44	8189	0.000576	804224	ok
+serve	loop	before the idle pass	occurrences	diamonds2	36	34	44	8189	0.000009	12960	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	36	34	44	8189	0.000028	28024	ok
+serve	loop	clear	occurrences	diamonds2	36	34	44	8189	0.000009	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	36	34	44	8189	0.000021	32248	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	36	34	44	8189	0.000575	382032	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	39	37	48	16381	0.051370	99910904	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	39	37	48	16381	0.000011	13176	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	39	37	48	16381	0.000593	435048	ok
+serve	loop	status	occurrences	diamonds2	39	37	48	16381	0.000633	930624	ok
+serve	loop	before the idle pass	occurrences	diamonds2	39	37	48	16381	0.000009	13800	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	39	37	48	16381	0.000028	30152	ok
+serve	loop	clear	occurrences	diamonds2	39	37	48	16381	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	39	37	48	16381	0.000020	34736	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	39	37	48	16381	0.000790	417288	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	45	43	56	65533	0.226758	405908640	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	45	43	56	65533	0.000015	15048	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	45	43	56	65533	0.000893	501168	ok
+serve	loop	status	occurrences	diamonds2	45	43	56	65533	0.000753	1205976	ok
+serve	loop	before the idle pass	occurrences	diamonds2	45	43	56	65533	0.000010	15480	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	45	43	56	65533	0.000031	34048	ok
+serve	loop	clear	occurrences	diamonds2	45	43	56	65533	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	45	43	56	65533	0.000023	39352	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	45	43	56	65533	0.000827	519112	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	51	49	64	262141	0.972988	1603984192	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	51	49	64	262141	0.000012	16920	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	51	49	64	262141	0.001363	573568	ok
+serve	loop	status	occurrences	diamonds2	51	49	64	262141	0.001013	1511888	ok
+serve	loop	before the idle pass	occurrences	diamonds2	51	49	64	262141	0.000011	17160	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	51	49	64	262141	0.000039	39424	ok
+serve	loop	clear	occurrences	diamonds2	51	49	64	262141	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	51	49	64	262141	0.000027	45448	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	51	49	64	262141	0.000999	559320	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	54	52	68	524285	1.868936	3344822960	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	54	52	68	524285	0.000011	17856	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	54	52	68	524285	0.001644	606368	ok
+serve	loop	status	occurrences	diamonds2	54	52	68	524285	0.001344	1676464	ok
+serve	loop	before the idle pass	occurrences	diamonds2	54	52	68	524285	0.000012	18000	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	54	52	68	524285	0.000042	41352	ok
+serve	loop	clear	occurrences	diamonds2	54	52	68	524285	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	54	52	68	524285	0.000031	51760	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	54	52	68	524285	0.001203	590088	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	diamonds2	60	58	76	2097149	7.907468	13390622184	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	diamonds2	60	58	76	2097149	0.000011	19728	ok
+serve	loop	first pass, every node up	occurrences	diamonds2	60	58	76	2097149	0.001127	712984	ok
+serve	loop	status	occurrences	diamonds2	60	58	76	2097149	0.001274	2028976	ok
+serve	loop	before the idle pass	occurrences	diamonds2	60	58	76	2097149	0.000011	19680	ok
+serve	loop	idle pass, nothing pending	occurrences	diamonds2	60	58	76	2097149	0.000048	46696	ok
+serve	loop	clear	occurrences	diamonds2	60	58	76	2097149	0.000003	6872	ok
+serve	loop	before the teardown pass	occurrences	diamonds2	60	58	76	2097149	0.000031	53800	ok
+serve	loop	teardown pass, every node down	occurrences	diamonds2	60	58	76	2097149	0.001232	692616	ok
+serve	loop		occurrences	diamonds2	60	58	76	2097149	0.000000	0	stop:budget
+fold	expand + foldDag		occurrences	layered8x2	32	25	40	57	0.000225	347440	ok
+fold	expand + foldDag		occurrences	layered8x2	48	41	72	249	0.001276	1552608	ok
+fold	expand + foldDag		occurrences	layered8x2	56	49	88	505	0.002556	3121632	ok
+fold	expand + foldDag		occurrences	layered8x2	72	65	120	2041	0.007667	12752576	ok
+fold	expand + foldDag		occurrences	layered8x2	88	81	152	8185	0.022783	51777328	ok
+fold	expand + foldDag		occurrences	layered8x2	96	89	168	16377	0.048018	103213992	ok
+fold	expand + foldDag		occurrences	layered8x2	112	105	200	65529	0.272585	428022840	ok
+fold	expand + foldDag		occurrences	layered8x2	128	121	232	262137	0.885753	1715032424	ok
+fold	expand + foldDag		occurrences	layered8x2	136	129	248	524281	1.924951	3377685512	ok
+fold	expand + foldDag		occurrences	layered8x2	152	145	280	2097145	7.110960	13968339624	ok
+fold	expand + foldDag		occurrences	layered8x2	152	145	280	2097145	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	32	25	40	57	0.000490	432320	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	48	41	72	249	0.000802	1712304	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	56	49	88	505	0.001821	3316824	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	72	65	120	2041	0.010830	13037376	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	88	81	152	8185	0.031549	52152888	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	96	89	168	16377	0.055646	103630752	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	112	105	200	65529	0.239030	428533144	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	128	121	232	262137	1.034545	1715630440	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	136	129	248	524281	2.118433	3378331184	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	layered8x2	136	129	248	524281	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	32	25	40	57	0.000611	420800	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	32	25	40	57	0.000012	9432	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	32	25	40	57	0.000871	342224	ok
+serve	loop	status	occurrences	layered8x2	32	25	40	57	0.000266	159448	ok
+serve	loop	before the idle pass	occurrences	layered8x2	32	25	40	57	0.000014	10952	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	32	25	40	57	0.000039	24512	ok
+serve	loop	clear	occurrences	layered8x2	32	25	40	57	0.000006	2976	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	32	25	40	57	0.000030	23840	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	32	25	40	57	0.000702	303344	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	48	41	72	249	0.003199	1622720	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	48	41	72	249	0.000016	14424	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	48	41	72	249	0.001063	650528	ok
+serve	loop	status	occurrences	layered8x2	48	41	72	249	0.000650	485880	ok
+serve	loop	before the idle pass	occurrences	layered8x2	48	41	72	249	0.000017	18944	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	48	41	72	249	0.000053	33016	ok
+serve	loop	clear	occurrences	layered8x2	48	41	72	249	0.000005	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	48	41	72	249	0.000046	38080	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	48	41	72	249	0.000881	519808	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	56	49	88	505	0.003379	3204520	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	56	49	88	505	0.000013	16920	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	56	49	88	505	0.000983	636592	ok
+serve	loop	status	occurrences	layered8x2	56	49	88	505	0.000603	693240	ok
+serve	loop	before the idle pass	occurrences	layered8x2	56	49	88	505	0.000011	17160	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	56	49	88	505	0.000043	39464	ok
+serve	loop	clear	occurrences	layered8x2	56	49	88	505	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	56	49	88	505	0.000042	45488	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	56	49	88	505	0.001236	696232	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	72	65	120	2041	0.009844	12863472	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	72	65	120	2041	0.000013	21912	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	72	65	120	2041	0.001693	1083952	ok
+serve	loop	status	occurrences	layered8x2	72	65	120	2041	0.001126	1135920	ok
+serve	loop	before the idle pass	occurrences	layered8x2	72	65	120	2041	0.000023	21640	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	72	65	120	2041	0.000070	51704	ok
+serve	loop	clear	occurrences	layered8x2	72	65	120	2041	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	72	65	120	2041	0.000045	59648	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	72	65	120	2041	0.001581	1083552	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	88	81	152	8185	0.044300	51913048	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	88	81	152	8185	0.000015	30928	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	88	81	152	8185	0.001309	1679504	ok
+serve	loop	status	occurrences	layered8x2	88	81	152	8185	0.001463	1631320	ok
+serve	loop	before the idle pass	occurrences	layered8x2	88	81	152	8185	0.000018	26120	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	88	81	152	8185	0.000074	63416	ok
+serve	loop	clear	occurrences	layered8x2	88	81	152	8185	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	88	81	152	8185	0.000053	73280	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	88	81	152	8185	0.001522	1032872	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	96	89	168	16377	0.075844	103367280	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	96	89	168	16377	0.000019	29400	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	96	89	168	16377	0.002160	2181760	ok
+serve	loop	status	occurrences	layered8x2	96	89	168	16377	0.001904	1900528	ok
+serve	loop	before the idle pass	occurrences	layered8x2	96	89	168	16377	0.000026	28360	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	96	89	168	16377	0.000101	70048	ok
+serve	loop	clear	occurrences	layered8x2	96	89	168	16377	0.000005	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	96	89	168	16377	0.000063	80872	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	96	89	168	16377	0.001679	1378792	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	112	105	200	65529	0.345387	428201008	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	112	105	200	65529	0.000020	34392	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	112	105	200	65529	0.002577	2749224	ok
+serve	loop	status	occurrences	layered8x2	112	105	200	65529	0.002588	2475272	ok
+serve	loop	before the idle pass	occurrences	layered8x2	112	105	200	65529	0.000027	32840	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	112	105	200	65529	0.000112	84016	ok
+serve	loop	clear	occurrences	layered8x2	112	105	200	65529	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	112	105	200	65529	0.000090	96760	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	112	105	200	65529	0.002181	1322216	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	128	121	232	262137	1.273471	1715235424	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	128	121	232	262137	0.000020	39384	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	128	121	232	262137	0.002789	3179264	ok
+serve	loop	status	occurrences	layered8x2	128	121	232	262137	0.003043	3095816	ok
+serve	loop	before the idle pass	occurrences	layered8x2	128	121	232	262137	0.000028	37320	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	128	121	232	262137	0.000115	92912	ok
+serve	loop	clear	occurrences	layered8x2	128	121	232	262137	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	128	121	232	262137	0.000085	107576	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	128	121	232	262137	0.002388	1658144	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	layered8x2	136	129	248	524281	2.552186	3377902520	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	layered8x2	136	129	248	524281	0.000026	41880	ok
+serve	loop	first pass, every node up	occurrences	layered8x2	136	129	248	524281	0.002804	3779064	ok
+serve	loop	status	occurrences	layered8x2	136	129	248	524281	0.003359	3427904	ok
+serve	loop	before the idle pass	occurrences	layered8x2	136	129	248	524281	0.000026	39560	ok
+serve	loop	idle pass, nothing pending	occurrences	layered8x2	136	129	248	524281	0.000094	99712	ok
+serve	loop	clear	occurrences	layered8x2	136	129	248	524281	0.000005	2784	ok
+serve	loop	before the teardown pass	occurrences	layered8x2	136	129	248	524281	0.000072	119360	ok
+serve	loop	teardown pass, every node down	occurrences	layered8x2	136	129	248	524281	0.002034	1727352	ok
+serve	loop		occurrences	layered8x2	136	129	248	524281	0.000000	0	stop:budget
+fold	expand + foldDag		occurrences	random8x3	24	17	32	33	0.000189	197928	ok
+fold	expand + foldDag		occurrences	random8x3	32	25	56	105	0.000564	644560	ok
+fold	expand + foldDag		occurrences	random8x3	48	41	104	969	0.002551	6188400	ok
+fold	expand + foldDag		occurrences	random8x3	56	49	128	2913	0.008053	18014768	ok
+fold	expand + foldDag		occurrences	random8x3	64	57	152	8745	0.024795	54761424	ok
+fold	expand + foldDag		occurrences	random8x3	72	65	176	26241	0.079457	168902264	ok
+fold	expand + foldDag		occurrences	random8x3	80	73	200	78729	0.259281	511951072	ok
+fold	expand + foldDag		occurrences	random8x3	88	81	224	236193	0.902790	1511622176	ok
+fold	expand + foldDag		occurrences	random8x3	96	89	248	708585	2.519434	4491517632	ok
+fold	expand + foldDag		occurrences	random8x3	96	89	248	708585	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	24	17	32	33	0.000307	262624	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	32	25	56	105	0.000795	753320	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	48	41	104	969	0.003781	6405048	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	56	49	128	2913	0.010726	18288968	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	64	57	152	8745	0.037577	55095464	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	72	65	176	26241	0.110132	169296248	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	80	73	200	78729	0.365115	512401760	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	88	81	224	236193	1.002648	1512135368	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	96	89	248	708585	3.027868	4492091264	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	random8x3	96	89	248	708585	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	24	17	32	33	0.000285	262576	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	24	17	32	33	0.000010	6936	ok
+serve	loop	first pass, every node up	occurrences	random8x3	24	17	32	33	0.000444	186672	ok
+serve	loop	status	occurrences	random8x3	24	17	32	33	0.000104	98144	ok
+serve	loop	before the idle pass	occurrences	random8x3	24	17	32	33	0.000007	8712	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	24	17	32	33	0.000016	19064	ok
+serve	loop	clear	occurrences	random8x3	24	17	32	33	0.000003	2976	ok
+serve	loop	before the teardown pass	occurrences	random8x3	24	17	32	33	0.000012	17432	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	24	17	32	33	0.000545	190040	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	32	25	56	105	0.000499	696600	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	32	25	56	105	0.000006	9432	ok
+serve	loop	first pass, every node up	occurrences	random8x3	32	25	56	105	0.000694	369768	ok
+serve	loop	status	occurrences	random8x3	32	25	56	105	0.000192	236000	ok
+serve	loop	before the idle pass	occurrences	random8x3	32	25	56	105	0.000007	14464	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	32	25	56	105	0.000020	21016	ok
+serve	loop	clear	occurrences	random8x3	32	25	56	105	0.000002	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	32	25	56	105	0.000015	24160	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	32	25	56	105	0.000497	323104	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	48	41	104	969	0.005133	6268288	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	48	41	104	969	0.000008	14424	ok
+serve	loop	first pass, every node up	occurrences	random8x3	48	41	104	969	0.000927	557040	ok
+serve	loop	status	occurrences	random8x3	48	41	104	969	0.000542	703184	ok
+serve	loop	before the idle pass	occurrences	random8x3	48	41	104	969	0.000009	14920	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	48	41	104	969	0.000033	32976	ok
+serve	loop	clear	occurrences	random8x3	48	41	104	969	0.000002	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	48	41	104	969	0.000023	38040	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	48	41	104	969	0.000721	573072	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	56	49	128	2913	0.010845	18115648	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	56	49	128	2913	0.000013	16920	ok
+serve	loop	first pass, every node up	occurrences	random8x3	56	49	128	2913	0.001114	679600	ok
+serve	loop	status	occurrences	random8x3	56	49	128	2913	0.000843	964144	ok
+serve	loop	before the idle pass	occurrences	random8x3	56	49	128	2913	0.000011	17160	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	56	49	128	2913	0.000037	39064	ok
+serve	loop	clear	occurrences	random8x3	56	49	128	2913	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	56	49	128	2913	0.000028	45088	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	56	49	128	2913	0.001026	653024	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	64	57	152	8745	0.036620	54880360	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	64	57	152	8745	0.000011	23440	ok
+serve	loop	first pass, every node up	occurrences	random8x3	64	57	152	8745	0.001444	788672	ok
+serve	loop	status	occurrences	random8x3	64	57	152	8745	0.001081	1246904	ok
+serve	loop	before the idle pass	occurrences	random8x3	64	57	152	8745	0.000013	19400	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	64	57	152	8745	0.000045	46192	ok
+serve	loop	clear	occurrences	random8x3	64	57	152	8745	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	64	57	152	8745	0.000032	53176	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	64	57	152	8745	0.001363	880640	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	72	65	176	26241	0.108688	169042672	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	72	65	176	26241	0.000012	21912	ok
+serve	loop	first pass, every node up	occurrences	random8x3	72	65	176	26241	0.001385	1024880	ok
+serve	loop	status	occurrences	random8x3	72	65	176	26241	0.001479	1545800	ok
+serve	loop	before the idle pass	occurrences	random8x3	72	65	176	26241	0.000015	21640	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	72	65	176	26241	0.000053	51464	ok
+serve	loop	clear	occurrences	random8x3	72	65	176	26241	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	72	65	176	26241	0.000039	59408	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	72	65	176	26241	0.001427	917240	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	80	73	200	78729	0.363857	512103912	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	80	73	200	78729	0.000013	24408	ok
+serve	loop	first pass, every node up	occurrences	random8x3	80	73	200	78729	0.001908	1564168	ok
+serve	loop	status	occurrences	random8x3	80	73	200	78729	0.001794	1863064	ok
+serve	loop	before the idle pass	occurrences	random8x3	80	73	200	78729	0.000018	23880	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	80	73	200	78729	0.000063	57760	ok
+serve	loop	clear	occurrences	random8x3	80	73	200	78729	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	80	73	200	78729	0.000048	66664	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	80	73	200	78729	0.001884	1415392	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	88	81	224	236193	1.050387	1511790456	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	88	81	224	236193	0.000017	26904	ok
+serve	loop	first pass, every node up	occurrences	random8x3	88	81	224	236193	0.002027	1816176	ok
+serve	loop	status	occurrences	random8x3	88	81	224	236193	0.002480	2198096	ok
+serve	loop	before the idle pass	occurrences	random8x3	88	81	224	236193	0.000018	26120	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	88	81	224	236193	0.000077	63136	ok
+serve	loop	clear	occurrences	random8x3	88	81	224	236193	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	88	81	224	236193	0.000058	73000	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	88	81	224	236193	0.001885	1620264	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	random8x3	96	89	248	708585	3.221220	4491704336	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	random8x3	96	89	248	708585	0.000014	29400	ok
+serve	loop	first pass, every node up	occurrences	random8x3	96	89	248	708585	0.003036	2194032	ok
+serve	loop	status	occurrences	random8x3	96	89	248	708585	0.002508	2546720	ok
+serve	loop	before the idle pass	occurrences	random8x3	96	89	248	708585	0.000018	28360	ok
+serve	loop	idle pass, nothing pending	occurrences	random8x3	96	89	248	708585	0.000073	69408	ok
+serve	loop	clear	occurrences	random8x3	96	89	248	708585	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	random8x3	96	89	248	708585	0.000054	84288	ok
+serve	loop	teardown pass, every node down	occurrences	random8x3	96	89	248	708585	0.001656	1252224	ok
+serve	loop		occurrences	random8x3	96	89	248	708585	0.000000	0	stop:budget
+fold	expand + foldDag		occurrences	dense32	64	33	32	33	0.000188	222288	ok
+fold	expand + foldDag		occurrences	dense32	96	65	1056	1057	0.004353	8657080	ok
+fold	expand + foldDag		occurrences	dense32	128	97	2080	33825	0.137093	230895448	ok
+fold	expand + foldDag		occurrences	dense32	160	129	3104	1082401	4.979972	7519270624	ok
+fold	expand + foldDag		occurrences	dense32	160	129	3104	1082401	0.000000	0	stop:budget
+query	query plan (expand, fold, resolve, encode)		occurrences	dense32	64	33	32	33	0.000266	306120	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	dense32	96	65	1056	1057	0.005559	9721168	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	dense32	128	97	2080	33825	0.183148	238321832	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	dense32	160	129	3104	1082401	6.000998	7533093720	ok
+query	query plan (expand, fold, resolve, encode)		occurrences	dense32	160	129	3104	1082401	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	dense32	64	33	32	33	0.000364	278984	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	dense32	64	33	32	33	0.000012	11928	ok
+serve	loop	first pass, every node up	occurrences	dense32	64	33	32	33	0.000826	437280	ok
+serve	loop	status	occurrences	dense32	64	33	32	33	0.000164	118888	ok
+serve	loop	before the idle pass	occurrences	dense32	64	33	32	33	0.000015	17072	ok
+serve	loop	idle pass, nothing pending	occurrences	dense32	64	33	32	33	0.000040	26680	ok
+serve	loop	clear	occurrences	dense32	64	33	32	33	0.000005	2976	ok
+serve	loop	before the teardown pass	occurrences	dense32	64	33	32	33	0.000035	30784	ok
+serve	loop	teardown pass, every node down	occurrences	dense32	64	33	32	33	0.000957	389960	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	dense32	96	65	1056	1057	0.008099	9268768	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	dense32	96	65	1056	1057	0.000012	21912	ok
+serve	loop	first pass, every node up	occurrences	dense32	96	65	1056	1057	0.006125	7758720	ok
+serve	loop	status	occurrences	dense32	96	65	1056	1057	0.001792	2072792	ok
+serve	loop	before the idle pass	occurrences	dense32	96	65	1056	1057	0.000013	25648	ok
+serve	loop	idle pass, nothing pending	occurrences	dense32	96	65	1056	1057	0.000052	52384	ok
+serve	loop	clear	occurrences	dense32	96	65	1056	1057	0.000003	2784	ok
+serve	loop	before the teardown pass	occurrences	dense32	96	65	1056	1057	0.000039	60328	ok
+serve	loop	teardown pass, every node down	occurrences	dense32	96	65	1056	1057	0.004456	6750728	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	dense32	128	97	2080	33825	0.168463	232134120	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	dense32	128	97	2080	33825	0.000015	31896	ok
+serve	loop	first pass, every node up	occurrences	dense32	128	97	2080	33825	0.010032	13558064	ok
+serve	loop	status	occurrences	dense32	128	97	2080	33825	0.026236	14291088	ok
+serve	loop	before the idle pass	occurrences	dense32	128	97	2080	33825	0.000029	30600	ok
+serve	loop	idle pass, nothing pending	occurrences	dense32	128	97	2080	33825	0.000088	76720	ok
+serve	loop	clear	occurrences	dense32	128	97	2080	33825	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	dense32	128	97	2080	33825	0.000059	88504	ok
+serve	loop	teardown pass, every node down	occurrences	dense32	128	97	2080	33825	0.008475	12377168	ok
+serve	loop	record a declaration (expand, fold, ledger)	occurrences	dense32	160	129	3104	1082401	5.500046	7521178712	ok
+serve	loop	before the first pass (rewrite, worldDag)	occurrences	dense32	160	129	3104	1082401	0.000018	41880	ok
+serve	loop	first pass, every node up	occurrences	dense32	160	129	3104	1082401	0.015317	20629064	ok
+serve	loop	status	occurrences	dense32	160	129	3104	1082401	0.060779	27026200	ok
+serve	loop	before the idle pass	occurrences	dense32	160	129	3104	1082401	0.000034	39560	ok
+serve	loop	idle pass, nothing pending	occurrences	dense32	160	129	3104	1082401	0.000106	99832	ok
+serve	loop	clear	occurrences	dense32	160	129	3104	1082401	0.000004	2784	ok
+serve	loop	before the teardown pass	occurrences	dense32	160	129	3104	1082401	0.000074	115456	ok
+serve	loop	teardown pass, every node down	occurrences	dense32	160	129	3104	1082401	0.014550	20794240	ok
+serve	loop		occurrences	dense32	160	129	3104	1082401	0.000000	0	stop:budget

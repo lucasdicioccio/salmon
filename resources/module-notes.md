@@ -321,9 +321,10 @@ Shapes: `Chain`, `Fan`, `Tree b` (no sharing: one occurrence per node), `Diamond
 exponentially larger than the graph). `counts shape size` gives nodes, edges, occurrences (the
 size of the expanded `Cofree`, i.e. paths from the root to any node) and root-to-leaf paths in
 closed form as `Integer`s, seed-independent even for the random shape because every node there
-has exactly `sharing` dependencies. **Read `countOccurrences` before expanding a shape that
-shares**: `foldDag` walks every occurrence, so a large chain of diamonds can be *described* and
-walked per node (dedup by `Ref`), never folded. The size is a requested node count; a shape
+has exactly `sharing` dependencies. **Read `countOccurrences` before forcing the whole expansion
+of a shape that shares** (`toList`, `query show` of every path, `Test.DagReference`): a large
+chain of diamonds can be *described*, walked per node and, since `foldDag` went per node,
+folded, but never visited occurrence by occurrence. The size is a requested node count; a shape
 builds the largest graph not exceeding it and `counts` says what was built. `Options`: a fixed
 `check` verdict, `managed` on every node (`holdUntilCancelled`), a `dynamics` payload by node
 number, how edges are written (`Vertices` / a `Connect` per dependency / an `Overlay` per
@@ -342,8 +343,10 @@ measurement (the profiles below do both). `Fan` is left out of the large fold on
 million others is quadratic there (since measured: 1.3 s at 10 000, see the profiles).
 `dagOf :: Op -> Dag Extension` builds what `foldDag . evalDeps` builds by visiting each node
 once (same nodes, edges and `dagOrder`; first declaration of a colliding `Ref` wins and no
-conflict is recorded), so a shape that shares can be handed to a walk at a size the fold cannot
-reach. `Test.GraphScaleSpec` checks it against the fold at sizes up to 25.
+conflict is recorded). It predates the per-node `foldDag` and is kept because it shares no code
+with it and does not go through `Dag.record`, which the profiles want to measure on its own.
+`Test.GraphScaleSpec` checks it against the fold at sizes up to 25, and `Test.DagPerNodeSpec` at
+3 001 nodes of diamond chain.
 
 **Graph profiles (`salmon-ops-recipes/bench/GraphProfiles.hs`, `resources/graph-profiles.md`).**
 A `benchmark` stanza (`cabal bench salmon-ops-recipes:graph-profiles`), so neither `cabal build
@@ -357,13 +360,15 @@ loop behind, and in one process everything measured afterwards came out hundreds
 slower. Operations that read the expansion are sized by occurrences, the others by nodes over a
 `dagOf` graph. `--summarise FILE` prints the tables; the raw rows are checked in under
 `resources/graph-profiles/`. The findings (all measured on one shared machine, indicative):
-`foldDag` is per path (58-node diamond chain: 3.8 s, doubling per diamond, and a `serve`
-declaration with it); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
+`foldDag` was per path (58-node diamond chain: 3.8 s, doubling per diamond, and a `serve`
+declaration with it; **fixed since**, see `Op/Dag.hs` below: 100 000 nodes of diamond chain fold
+in about 2 s); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
 `startUpkeep` (chain of 3 000: 2 s); a node with many edges is quadratic in `record`,
 `fromMagma`, `transposeOf` and `Query.outline`; listed paths cost depth per node in time and
 memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes does
-not fit in 4 GB. Only the `Client.Model.step` one is fixed (see `Client/Model.hs` below; its
-before and after rows are `client-step-{before,after}.tsv`). The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
+not fit in 4 GB. Only the `foldDag` and `Client.Model.step` ones are fixed (see `Op/Dag.hs` and
+`Client/Model.hs` below; the latter's before and after rows are
+`client-step-{before,after}.tsv`, the former's `folddag-per-node-{before,after}.tsv`). The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
 a selector, listed paths, `fromMagma`, `mergeDag`, `stuck` and the walks over the three sharing
 shapes at 600 nodes within a minute each, which tells per-node from per-path and times
 nothing. *Not run:* more than one capability, real nodes, a tending supervisor, the HTTP server
@@ -699,6 +704,59 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `specs/per-node-state-machines-remaining.md`). It is still a heuristic — every other `Dynamic`
   payload is unaffected — but strictly more than the zero available before. See
   `specs/per-node-state-machines.md` milestone 2 and `Test/DagSpec.hs`.
+  **`foldDag` is per node, under a precondition.** It used to visit every *occurrence* (one per
+  path from the root), which is exponential in stacked diamonds. It now recognises an occurrence
+  by its *top*: its `Ref`, its act as far as the conflict test can tell, and the deduplicated
+  list of its effective predecessors' `Ref`s. An occurrence whose top was already walked is not
+  walked again, **and neither is anything below it**. That is only right for **coherent
+  declarations**: any two occurrences with the same top have as many effective predecessors as
+  each other, with the same tops, one for one in order (so, by induction, the same tree all the
+  way down, up to the conflict test, which is assumed to be an equivalence). Nothing checks
+  this: checking it is the per-path walk. A graph built by calling the same functions with the
+  same arguments is coherent; so is `Test.GraphFixture`, colliders included. On a coherent
+  expansion the nodes, both edge maps (order included) and `dagOrder` are what the old fold gave,
+  each representative is one the conflict test cannot tell from the last occurrence in the tree
+  (a second, backward walk settles that for contested `Ref`s only, since the last one may sit
+  below a skipped occurrence), and the same `Ref`s are contested by the same declarations.
+  **Two accepted differences (owner's decision, 2026-10-11).** (1) *Conflicts are one per
+  declaration that lost, not one per flip:* a contested `Ref` with n distinguishable
+  declarations gives n-1 `Conflict`s, each with the final representative as `conflictKept`; the
+  old fold recorded one each time the representative changed, so 2k-1 for a node and its
+  collider under a parent reached by k paths, and `run up`/`down` and `serve` printed that many
+  `Conflicting` reports. With three or more declarations the pairs differ too (old: b over a, c
+  over b; now: c over a, c over b). `mergeDag`/`record` are unchanged and still record one per
+  replacement. No JSON golden, `/openapi.json` entry or UI code depended on the count; `Serve`
+  keeps the newest conflict per `Ref`, whose `conflictKept` is the final representative as
+  before. (2) *An incoherent declaration hides what is below it:* a unit declared twice with the
+  same description, each over a file with the same path but different content, has two
+  occurrences with the same top; the second is not walked, the second file is never met, **no
+  `Conflicting` is reported and the first file is the representative** (it was the last). Nodes
+  and edges that exist only below such an occurrence are missed the same way. Making the upper
+  declarations differ in anything `sameRepresentative` sees (or in their predecessor `Ref`s) has
+  both walked. This is pinned as a known difference in `Test.DagPerNodeSpec`
+  (`hiddenBelowLookAlikes`, `prop_hiddenConflictIsLost`), not as wanted behaviour. With
+  `\_ _ -> True` as the test, which declaration of a `Ref` is kept is unspecified (one of those walked;
+  it was the last occurrence). **Cost:** one visit per distinct top plus one look at each of its
+  predecessors, and a look at a predecessor reads *its* predecessors' `Ref`s, so it is
+  dependencies x their dependencies per node (never more than the old fold paid: every
+  occurrence looked at was visited before). The expansion must be lazy for any of this to help:
+  `evalDeps` and `expandDag` over `Identity` are; an `expand` in a strict monad has paid per path
+  before the fold is called. `Dag.record`'s edge lists are still searched and appended on every
+  insert, so one node over many others is still quadratic (the profile's finding 3, not touched).
+  *What was run:* `Test.DagPerNodeSpec` (Layer 0), with the old fold kept verbatim as
+  `Test.DagReference.foldDagPerOccurrence` and the precondition as `Test.DagReference.coherent`:
+  unit cases (every fixture shape at sizes up to 20, a colliding `Ref`, the conflict count, last
+  in tree versus last walked, three declarations, edge merging, a cycle of `Ref`s, the opt-out,
+  the known difference, 3 001 nodes of diamond chain with colliders against `dagOf`) and four
+  QuickCheck properties (500 fixture graphs of every shape, edge form and collision fraction;
+  2 000 coherent random recipes; 2 000 random recipes of either kind, on which the result is
+  well-formed and claims no node, edge or contested `Ref` the reference lacks; 500 of the
+  incoherent family). The `graph-profiles` rows for the fold, `query plan` and the `serve` loop
+  were re-run before and after (`resources/graph-profiles.md`). *Not run or not covered:* random
+  recipes are at most 9 declarations; fixture properties stop at 3 000 occurrences because the
+  reference is per path; no property generates `notes` or `dynamics` differences (only `help`);
+  a conflict test that is not an equivalence; a strict-monad expansion; no real recipe was
+  audited for coherence beyond the existing suites passing.
 - **`Op/Ledger.hs`** is the other half: who still *wants* which nodes. One `Contribution` per
   declaration — a `Set Ref` and a `Set (Ref, Ref)` of precedence edges, plus a `contribLive`
   flag — keyed by whatever identifies the declaration. `desired` is the union of the live ones'
@@ -751,9 +809,10 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `outlineFirstPaths` is the deduped rendering. Two limits: a later occurrence of a `Ref` is looked
   at one level deep (what is new directly under it is merged, which covers a node named again with
   one more dependency; a difference further down is not seen), and a `Ref` met under two shorthands
-  keeps the first. `Dag.foldDag` still walks every occurrence at declaration, so a declaration is
-  still exponential in stacked diamonds (about 7s for a 61-node chain, which is why `ServeHttpSpec`'s
-  diamond chain stops at 49 nodes and `QuerySpec`'s 181-node one has no loop around it).
+  keeps the first. `Dag.foldDag` used to walk every occurrence at declaration, so a declaration was
+  exponential in stacked diamonds (about 7s for a 61-node chain, which is why `ServeHttpSpec`'s
+  diamond chain stops at 49 nodes and `QuerySpec`'s 181-node one has no loop around it); it is per
+  node now (see `Op/Dag.hs`), and those two tests were left at their sizes.
 - **`Actions/Serve.hs`** is the long-running counterpart to the one-shot `upTree`: it keeps a
   `World` — a `worldLedger` of who's asked for what, a `worldMagma` of one representative per
   `Ref` (what each node *is*), a `NodeState` per node (a `Direction` it's wanted in plus whether

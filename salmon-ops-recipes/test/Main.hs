@@ -8,6 +8,7 @@ import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
+import qualified Test.DagPerNodeSpec as DagPerNodeSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.GraphFixtureSpec as GraphFixtureSpec
 import qualified Test.GraphScaleSpec as GraphScaleSpec
@@ -132,6 +133,7 @@ main =
             , BinaryOutputSpec.tests
             , RemoteOutputSpec.tests
             , DagSpec.tests
+            , DagPerNodeSpec.tests
             , GraphFixtureSpec.tests
             , GraphScaleSpec.tests
             , AptRepositorySpec.tests
