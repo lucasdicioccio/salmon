@@ -21,6 +21,10 @@ import Data.List (foldl', isInfixOf, isPrefixOf, isSubsequenceOf, nub, sort, tai
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Foldable (toList)
+import Data.Time.Clock (UTCTime, addUTCTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.LocalTime (hoursToTimeZone, utcToZonedTime)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Word (Word64)
@@ -31,7 +35,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import System.Process.ListLike (CmdSpec (..), CreateProcess, cmdspec)
-import Test.QuickCheck (Gen, Property, arbitrary, conjoin, counterexample, elements, forAll, listOf, listOf1, oneof, property, (.&&.), (===), (==>))
+import Test.QuickCheck (Gen, Property, arbitrary, choose, conjoin, counterexample, elements, forAll, listOf, listOf1, oneof, property, (.&&.), (===), (==>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 import Test.Tasty.QuickCheck (testProperty)
@@ -71,6 +75,7 @@ tests =
         , testGroup "Compute.interpretInstanceStatus" instanceTests
         , testGroup "Compute.instanceScopes" instanceScopeTests
         , testGroup "Compute.instanceMachineType" instanceMachineTypeTests
+        , testGroup "Compute.instanceRunLimit" instanceRunLimitTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
         , testGroup "Storage bucket settings" bucketSettingsTests
         , testGroup "Storage bucket contents" bucketContentsTests
@@ -217,6 +222,7 @@ instanceTests =
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
             }
 
 -------------------------------------------------------------------------------
@@ -335,6 +341,7 @@ instanceScopeTests =
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
             }
 
 -------------------------------------------------------------------------------
@@ -383,27 +390,27 @@ instanceMachineTypeTests =
         assertBool "empty" (isFailure (Compute.interpretInstanceMachineType mayStop Compute.E2Medium ExitSuccess ""))
     , testCase "without the permission, up refuses a differing type and plans no call" $ do
         let differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
-        case Compute.planExistingInstance refuse on "RUNNING" differs of
+        case planTyped refuse on "RUNNING" differs of
             Left t -> do
                 assertBool (Text.unpack t) ("e2-medium" `Text.isInfixOf` t)
                 assertBool (Text.unpack t) ("e2-standard-2" `Text.isInfixOf` t)
             Right steps -> assertBool (show steps) False
         -- a stopped instance of another type is not started either: the
         -- declaration did not ask for that machine
-        assertBool "stopped" (isLeft (Compute.planExistingInstance refuse on "TERMINATED" differs))
-        assertBool "declared stopped" (isLeft (Compute.planExistingInstance refuse off "RUNNING" differs))
+        assertBool "stopped" (isLeft (planTyped refuse on "TERMINATED" differs))
+        assertBool "declared stopped" (isLeft (planTyped refuse off "RUNNING" differs))
     , testCase "with the permission, up stops, sets the type and starts again" $ do
         let differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
-        assertEqual "running" (Right [Compute.StopStep, Compute.SetMachineTypeStep, Compute.StartStep]) (Compute.planExistingInstance mayStop on "RUNNING" differs)
-        assertEqual "already stopped" (Right [Compute.SetMachineTypeStep, Compute.StartStep]) (Compute.planExistingInstance mayStop on "TERMINATED" differs)
-        assertEqual "declared stopped, running" (Right [Compute.StopStep, Compute.SetMachineTypeStep]) (Compute.planExistingInstance mayStop off "RUNNING" differs)
-        assertEqual "declared stopped, stopped" (Right [Compute.SetMachineTypeStep]) (Compute.planExistingInstance mayStop off "TERMINATED" differs)
+        assertEqual "running" (Right [Compute.StopStep, Compute.SetMachineTypeStep, Compute.StartStep]) (planTyped mayStop on "RUNNING" differs)
+        assertEqual "already stopped" (Right [Compute.SetMachineTypeStep, Compute.StartStep]) (planTyped mayStop on "TERMINATED" differs)
+        assertEqual "declared stopped, running" (Right [Compute.StopStep, Compute.SetMachineTypeStep]) (planTyped mayStop off "RUNNING" differs)
+        assertEqual "declared stopped, stopped" (Right [Compute.SetMachineTypeStep]) (planTyped mayStop off "TERMINATED" differs)
     , testCase "with the permission, a suspended or unsettled instance is not resized" $ do
         let differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
-        assertBool "suspended" (isLeft (Compute.planExistingInstance mayStop on "SUSPENDED" differs))
-        assertBool "stopping" (isLeft (Compute.planExistingInstance mayStop on "STOPPING" differs))
+        assertBool "suspended" (isLeft (planTyped mayStop on "SUSPENDED" differs))
+        assertBool "stopping" (isLeft (planTyped mayStop on "STOPPING" differs))
     , testCase "a type that could not be read stops nothing, even with the permission" $
-        assertBool "" (isLeft (Compute.planExistingInstance mayStop on "RUNNING" (Compute.MachineTypeUndetermined "no machine type could be read")))
+        assertBool "" (isLeft (planTyped mayStop on "RUNNING" (Compute.MachineTypeUndetermined "no machine type could be read")))
     , testCase "the permission is a note naming the type; the node is the same node" $ do
         let permitted = node inst{Compute.instanceMachineTypeChange = Compute.MayStopToResize}
         assertEqual "ref" (node inst).extension.ref permitted.extension.ref
@@ -454,7 +461,7 @@ instanceMachineTypeTests =
         forAll genChange $ \change ->
             forAll genPower $ \power ->
                 forAll genStatus $ \status ->
-                    mapLeft (const ()) (Compute.planExistingInstance change power status Compute.MachineTypeAsDeclared)
+                    mapLeft (const ()) (planTyped change power status Compute.MachineTypeAsDeclared)
                         === previousUp power (Compute.planInstanceUp power ExitSuccess status)
     , testProperty "an absent instance is created as before" $
         forAll genPower $ \power ->
@@ -463,7 +470,7 @@ instanceMachineTypeTests =
         forAll genPower $ \power ->
             forAll genStatus $ \status ->
                 forAll genVerdict $ \verdict ->
-                    case Compute.planExistingInstance refuse power status verdict of
+                    case planTyped refuse power status verdict of
                         Left _ -> property True
                         Right steps ->
                             counterexample (show steps) $
@@ -474,13 +481,13 @@ instanceMachineTypeTests =
         forAll genPower $ \power ->
             forAll genStatus $ \status ->
                 forAll genVerdict $ \verdict ->
-                    verdict /= Compute.MachineTypeAsDeclared ==> isLeft (Compute.planExistingInstance refuse power status verdict)
+                    verdict /= Compute.MachineTypeAsDeclared ==> isLeft (planTyped refuse power status verdict)
     , testProperty "a stop is only ever planned by a stopped declaration or by the permission meeting a differing type" $
         forAll genChange $ \change ->
             forAll genPower $ \power ->
                 forAll genStatus $ \status ->
                     forAll genVerdict $ \verdict ->
-                        case Compute.planExistingInstance change power status verdict of
+                        case planTyped change power status verdict of
                             Right steps
                                 | Compute.StopStep `elem` steps ->
                                     counterexample (show steps) (power == off || (change == mayStop && differing verdict))
@@ -489,12 +496,12 @@ instanceMachineTypeTests =
         forAll genChange $ \change ->
             forAll genPower $ \power ->
                 forAll genStatus $ \status ->
-                    isLeft (Compute.planExistingInstance change power status (Compute.MachineTypeUndetermined "unread"))
+                    isLeft (planTyped change power status (Compute.MachineTypeUndetermined "unread"))
     , testProperty "a permitted resize sets the type once, on a stopped machine, and ends in the declared power state" $
         forAll genPower $ \power ->
             forAll (elements ["RUNNING", "TERMINATED"]) $ \status ->
                 forAll genDiffers $ \verdict ->
-                    case Compute.planExistingInstance mayStop power status verdict of
+                    case planTyped mayStop power status verdict of
                         Left t -> counterexample (Text.unpack t) False
                         Right steps ->
                             counterexample (show steps) $
@@ -505,7 +512,7 @@ instanceMachineTypeTests =
             forAll genStatus $ \status ->
                 forAll genDiffers $ \verdict ->
                     status `notElem` ["RUNNING", "TERMINATED"] ==>
-                        case (verdict, Compute.planExistingInstance mayStop power status verdict) of
+                        case (verdict, planTyped mayStop power status verdict) of
                             (Compute.MachineTypeDiffers live wanted, Left t) -> counterexample (Text.unpack t) (live `Text.isInfixOf` t .&&. wanted `Text.isInfixOf` t)
                             (_, other) -> counterexample (show other) False
     , testProperty "the permission changes no command, ref or help, and only it adds a note" $
@@ -538,6 +545,9 @@ instanceMachineTypeTests =
     off = Compute.PoweredOff
     refuse = Compute.RefuseMachineTypeChange
     mayStop = Compute.MayStopToResize
+    -- the plan of an instance with no run limit: what it was before there
+    -- was one to declare
+    planTyped change power status verdict = Compute.planExistingInstance change power status verdict Compute.RunUnlimited
     isLeft :: Either a b -> Bool
     isLeft = either (const True) (const False)
     mapLeft :: (a -> c) -> Either a b -> Either c b
@@ -615,9 +625,502 @@ instanceMachineTypeTests =
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
             }
 
 -------------------------------------------------------------------------------
+
+{- | An instance with a run limit: what is rendered, what is read back, the
+verdict at a given time, and what the check and @up@ make of it. Everything
+here is the pure half, with the time an argument; no gcloud, real or fake,
+is run and no clock is read.
+-}
+instanceRunLimitTests :: [TestTree]
+instanceRunLimitTests =
+    [ testCase "no limit renders nothing: no flag, no note" $ do
+        assertEqual "flags" [] (Compute.runLimitArgs Compute.NoRunLimit)
+        assertEqual "notes" [] (node inst).extension.notes
+        assertEqual "nothing wrong" [] (Compute.runLimitProblems Compute.NoRunLimit)
+    , testCase "a duration is passed in seconds with the STOP action, after everything else" $
+        assertEqual
+            ""
+            (init (createArgs inst) <> ["--max-run-duration", "3600s", "--instance-termination-action", "STOP", "--quiet"])
+            (createArgs (limited (Compute.MaxRunDuration 3600)))
+    , testCase "a date is passed as an RFC 3339 UTC timestamp with the STOP action" $
+        assertEqual
+            ""
+            (init (createArgs inst) <> ["--termination-time", "2026-10-12T08:30:00Z", "--instance-termination-action", "STOP", "--quiet"])
+            (createArgs (limited (Compute.RunUntil (at 1791793800))))
+    , testCase "a limit is the same node, described differently" $ do
+        let hourly = node (limited (Compute.MaxRunDuration 3600))
+        assertEqual "ref" (node inst).extension.ref hourly.extension.ref
+        assertEqual "help" (node inst).extension.help hourly.extension.help
+        assertEqual "notes" ["run limit: 3600s after each start, then stopped by GCP"] hourly.extension.notes
+        assertEqual "date" ["run limit: until 2026-10-12T08:30:00Z, then stopped by GCP"] (node (limited (Compute.RunUntil (at 1791793800)))).extension.notes
+        assertBool "another limit is another description" (hourly.extension.notes /= (node (limited (Compute.MaxRunDuration 7200))).extension.notes)
+    , testCase "the limit is asked for in one describe, as JSON" $
+        assertEqual
+            ""
+            [ "compute", "instances", "describe", "toy-vm"
+            , "--format=json(lastStartTimestamp,scheduling.maxRunDuration.seconds,scheduling.terminationTime,scheduling.instanceTerminationAction)"
+            , "--zone", "europe-west1-b", "--project", "p", "--quiet"
+            ]
+            (processArgs (prepare Compute.computeCommand (Compute.InstancesDescribeRunLimit inst)))
+    , testCase "set-scheduling carries the declared limit, clears the other kind and never prompts" $ do
+        assertEqual
+            "duration"
+            ["compute", "instances", "set-scheduling", "toy-vm", "--max-run-duration", "3600s", "--instance-termination-action", "STOP", "--clear-termination-time", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.InstancesSetScheduling (limited (Compute.MaxRunDuration 3600)))))
+        assertEqual
+            "date"
+            ["compute", "instances", "set-scheduling", "toy-vm", "--termination-time", "2026-10-12T08:30:00Z", "--instance-termination-action", "STOP", "--clear-max-run-duration", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.InstancesSetScheduling (limited (Compute.RunUntil (at 1791793800))))))
+    , testCase "a duration outside what GCP accepts is refused, by the check and by up, before any gcloud call" $ do
+        assertEqual "30s" [] (Compute.runLimitProblems (Compute.MaxRunDuration 30))
+        assertEqual "120 days" [] (Compute.runLimitProblems (Compute.MaxRunDuration (120 * 86400)))
+        assertEqual "too short" 1 (length (Compute.runLimitProblems (Compute.MaxRunDuration 29)))
+        assertEqual "too long" 1 (length (Compute.runLimitProblems (Compute.MaxRunDuration (120 * 86400 + 1))))
+        let act = node (limited (Compute.MaxRunDuration 5))
+        verdict <- act.extension.check
+        assertBool (show verdict) (isFailure verdict)
+        r <- try act.extension.up
+        case r of
+            Left e -> assertBool (show e) ("run limit cannot be declared" `isInfixOf` show (e :: IOError))
+            Right () -> assertBool "up went through" False
+    , testCase "a describe is read with the seconds as a string or a number, and dates with an offset or Z" $ do
+        assertEqual
+            "as the API writes it"
+            (Right (Compute.LiveRunLimit (Just 3600) Nothing (Just "STOP") (Just (at 1791720000))))
+            (Compute.parseLiveRunLimit "{\"lastStartTimestamp\": \"2026-10-11T05:00:00.000-07:00\", \"scheduling\": {\"instanceTerminationAction\": \"STOP\", \"maxRunDuration\": {\"seconds\": \"3600\"}}}\n")
+        assertEqual
+            "a number, a date"
+            (Right (Compute.LiveRunLimit (Just 60) (Just (at 1791793800)) (Just "DELETE") Nothing))
+            (Compute.parseLiveRunLimit "{\"scheduling\": {\"instanceTerminationAction\": \"DELETE\", \"maxRunDuration\": {\"seconds\": 60}, \"terminationTime\": \"2026-10-12T08:30:00Z\"}}")
+        assertEqual "an instance with no limit" (Right (Compute.LiveRunLimit Nothing Nothing Nothing Nothing)) (Compute.parseLiveRunLimit "{}")
+        assertEqual "nulls are absences" (Right (Compute.LiveRunLimit Nothing Nothing Nothing Nothing)) (Compute.parseLiveRunLimit "{\"lastStartTimestamp\": null, \"scheduling\": {\"maxRunDuration\": null}}")
+    , testCase "an output that is not that describe, or holds a field that cannot be read, is not read" $ do
+        assertBool "empty" (isLeft (Compute.parseLiveRunLimit ""))
+        assertBool "an error message" (isLeft (Compute.parseLiveRunLimit "ERROR: (gcloud.compute.instances.describe) not found"))
+        assertBool "a list" (isLeft (Compute.parseLiveRunLimit "[]"))
+        assertBool "a duration in words" (isLeft (Compute.parseLiveRunLimit "{\"scheduling\": {\"maxRunDuration\": {\"seconds\": \"1h\"}}}"))
+        assertBool "a duration that is not an object" (isLeft (Compute.parseLiveRunLimit "{\"scheduling\": {\"maxRunDuration\": \"3600s\"}}"))
+        assertBool "a date in words" (isLeft (Compute.parseLiveRunLimit "{\"scheduling\": {\"terminationTime\": \"tomorrow\"}}"))
+        assertBool "a start in words" (isLeft (Compute.parseLiveRunLimit "{\"lastStartTimestamp\": \"yesterday\"}"))
+    , testCase "a duration's deadline is the instance's last start plus the duration" $ do
+        let hour = Compute.MaxRunDuration 3600
+            held = liveJson False hour (Just (at 1000000))
+        assertEqual "before" (Compute.RunWithin (at 1003600)) (Compute.judgeRunLimit hour (at 1003599) ExitSuccess held)
+        assertEqual "at it" (Compute.RunEnding (at 1003600)) (Compute.judgeRunLimit hour (at 1003600) ExitSuccess held)
+        assertEqual "the grace over" (Compute.RunExpired (at 1003600)) (Compute.judgeRunLimit hour (at 1003900) ExitSuccess held)
+        assertEqual
+            "no start to count from"
+            (Compute.RunLimitUndetermined "the instance holds the declared run limit and says nothing of its last start")
+            (Compute.judgeRunLimit hour (at 1003900) ExitSuccess (liveJson False hour Nothing))
+    , testCase "a date's deadline is the declared date, whatever the instance holds once it has passed" $ do
+        let date = Compute.RunUntil (at 2000000)
+        assertEqual "before, held" (Compute.RunWithin (at 2000000)) (Compute.judgeRunLimit date (at 1999999) ExitSuccess (liveJson True date Nothing))
+        assertEqual "passed, held" (Compute.RunExpired (at 2000000)) (Compute.judgeRunLimit date (at 2000300) ExitSuccess (liveJson True date Nothing))
+        assertEqual "passed, not held" (Compute.RunExpired (at 2000000)) (Compute.judgeRunLimit date (at 2000300) ExitSuccess "{}")
+        assertEqual "just passed" (Compute.RunEnding (at 2000000)) (Compute.judgeRunLimit date (at 2000001) ExitSuccess "{}")
+    , testCase "an instance holding another limit, none, or another action is named with the declared one" $ do
+        let hour = Compute.MaxRunDuration 3600
+            wanted = "3600s after each start, then stopped by GCP"
+        assertEqual "none" (Compute.RunLimitDiffers "none" wanted) (Compute.judgeRunLimit hour (at 5) ExitSuccess "{\"lastStartTimestamp\": \"2026-10-11T05:00:00Z\"}")
+        assertEqual
+            "another duration"
+            (Compute.RunLimitDiffers "7200s after each start, then STOP" wanted)
+            (Compute.judgeRunLimit hour (at 5) ExitSuccess (liveJson False (Compute.MaxRunDuration 7200) (Just (at 1))))
+        assertEqual
+            "a date instead"
+            (Compute.RunLimitDiffers "until 1970-01-24T03:33:20Z, then STOP" wanted)
+            (Compute.judgeRunLimit hour (at 5) ExitSuccess (liveJson False (Compute.RunUntil (at 2000000)) (Just (at 1))))
+        assertEqual
+            "DELETE is not the declared action"
+            (Compute.RunLimitDiffers "3600s after each start, then DELETE" wanted)
+            (Compute.judgeRunLimit hour (at 5) ExitSuccess "{\"lastStartTimestamp\": \"2026-10-11T05:00:00Z\", \"scheduling\": {\"instanceTerminationAction\": \"DELETE\", \"maxRunDuration\": {\"seconds\": \"3600\"}}}")
+        assertEqual
+            "another date, not yet passed"
+            (Compute.RunLimitDiffers "until 1970-01-24T03:33:20Z, then STOP" "until 1970-02-04T17:20:00Z, then stopped by GCP")
+            (Compute.judgeRunLimit (Compute.RunUntil (at 3000000)) (at 5) ExitSuccess (liveJson True (Compute.RunUntil (at 2000000)) Nothing))
+    , testCase "after the deadline a stopped instance is the declared state, and a running one is not" $ do
+        let expired = Compute.RunExpired (at 1791793800)
+        assertEqual "stopped" Success (Compute.interpretInstanceRun on expired ExitSuccess "TERMINATED")
+        assertEqual "what it was without a limit" (Failure "instance is TERMINATED") (Compute.interpretInstanceRun on Compute.RunUnlimited ExitSuccess "TERMINATED")
+        assertEqual "running" (Failure "instance is RUNNING past its run limit (deadline 2026-10-12T08:30:00Z)") (Compute.interpretInstanceRun on expired ExitSuccess "RUNNING")
+        assertEqual "running, GCP about to stop it" Unknown (Compute.interpretInstanceRun on (Compute.RunEnding (at 1791793800)) ExitSuccess "RUNNING")
+        assertEqual "stopping" Unknown (Compute.interpretInstanceRun on expired ExitSuccess "STOPPING")
+        assertBool "suspended" (isFailure (Compute.interpretInstanceRun on expired ExitSuccess "SUSPENDED"))
+    , testCase "after the deadline up starts nothing, and says why of anything but a stopped instance" $ do
+        let expired = Compute.RunExpired (at 1791793800)
+        assertEqual "stopped: nothing to do" (Right []) (plan refuse on "TERMINATED" asDeclared expired)
+        assertEqual "what it did without a limit" (Right [Compute.StartStep]) (plan refuse on "TERMINATED" asDeclared Compute.RunUnlimited)
+        case plan refuse on "RUNNING" asDeclared expired of
+            Left t -> do
+                assertBool (Text.unpack t) ("2026-10-12T08:30:00Z" `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("does not stop" `Text.isInfixOf` t)
+            Right steps -> assertBool (show steps) False
+        assertBool "suspended is not resumed" (isLeft (plan refuse on "SUSPENDED" asDeclared expired))
+        assertBool "at the deadline, wait" (isLeft (plan refuse on "RUNNING" asDeclared (Compute.RunEnding (at 1791793800))))
+    , testCase "a permitted resize past the deadline sets the type and leaves the machine off" $ do
+        let expired = Compute.RunExpired (at 1791793800)
+            differs = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+        assertEqual "stopped" (Right [Compute.SetMachineTypeStep]) (plan mayStop on "TERMINATED" differs expired)
+        assertEqual "before the deadline it restarts" (Right [Compute.SetMachineTypeStep, Compute.StartStep]) (plan mayStop on "TERMINATED" differs (Compute.RunWithin (at 1791793800)))
+        assertBool "running: not stopped for it either" (isLeft (plan mayStop on "RUNNING" differs expired))
+        assertBool "refused as before" (isLeft (plan refuse on "TERMINATED" differs expired))
+    , testCase "a differing limit is set on a stopped instance and refused on a running one, naming both" $ do
+        let differs = Compute.RunLimitDiffers "none" "3600s after each start, then stopped by GCP"
+        assertEqual "stopped" (Right [Compute.SetSchedulingStep, Compute.StartStep]) (plan refuse on "TERMINATED" asDeclared differs)
+        assertEqual "declared stopped, stopped" (Right [Compute.SetSchedulingStep]) (plan refuse off "TERMINATED" asDeclared differs)
+        assertEqual "declared stopped, running" (Right [Compute.StopStep, Compute.SetSchedulingStep]) (plan refuse off "RUNNING" asDeclared differs)
+        case plan refuse on "RUNNING" asDeclared differs of
+            Left t -> do
+                assertBool (Text.unpack t) ("holds run limit none" `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("declared 3600s after each start" `Text.isInfixOf` t)
+            Right steps -> assertBool (show steps) False
+        assertBool "suspended is not resumed without its limit" (isLeft (plan refuse on "SUSPENDED" asDeclared differs))
+        case Compute.interpretInstanceRun on differs ExitSuccess "RUNNING" of
+            Failure t -> assertBool (Text.unpack t) ("holds run limit none" `Text.isInfixOf` t)
+            other -> assertBool (show other) False
+        assertBool "stopped is a failure too: up has the limit to set" (isFailure (Compute.interpretInstanceRun on differs ExitSuccess "TERMINATED"))
+    , testCase "a resize that stops the machine anyway sets a differing limit while it is stopped" $ do
+        let differs = Compute.RunLimitDiffers "none" "3600s after each start, then stopped by GCP"
+            retyped = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+        assertEqual
+            "running"
+            (Right [Compute.StopStep, Compute.SetSchedulingStep, Compute.SetMachineTypeStep, Compute.StartStep])
+            (plan mayStop on "RUNNING" retyped differs)
+        assertEqual
+            "stopped"
+            (Right [Compute.SetSchedulingStep, Compute.SetMachineTypeStep, Compute.StartStep])
+            (plan mayStop on "TERMINATED" retyped differs)
+        assertBool "without the permission nothing is set" (isLeft (plan refuse on "TERMINATED" retyped differs))
+    , testCase "an absent instance is created, unless its declared date has passed" $ do
+        assertEqual "no limit" (Right [Compute.CreateStep]) (Compute.planAbsentInstance Compute.NoRunLimit on (at 9))
+        assertEqual "a duration, whenever" (Right [Compute.CreateStep, Compute.StopStep]) (Compute.planAbsentInstance (Compute.MaxRunDuration 60) off (at 9))
+        assertEqual "a date ahead" (Right [Compute.CreateStep]) (Compute.planAbsentInstance (Compute.RunUntil (at 10)) on (at 9))
+        assertBool "a date passed" (isLeft (Compute.planAbsentInstance (Compute.RunUntil (at 10)) on (at 10)))
+    , testProperty "without a limit the verdict is today's for every status, exit code and time, and nothing is read" $
+        forAll genPower $ \power ->
+            forAll genStatus $ \status ->
+                forAll genCode $ \code ->
+                    forAll genTime $ \now ->
+                        \junk ->
+                            Compute.judgeRunLimit Compute.NoRunLimit now code (Text.pack junk) === Compute.RunUnlimited
+                                .&&. Compute.interpretInstanceRun power Compute.RunUnlimited code status === Compute.interpretInstanceStatus power code status
+    , testProperty "before the deadline, with the limit in place, the verdict is today's for every status" $
+        forAll genHeld $ \(limit, started, deadline, describe) ->
+            forAll (genBefore deadline) $ \now ->
+                forAll genPower $ \power ->
+                    forAll genStatus $ \status ->
+                        let run = Compute.judgeRunLimit limit now ExitSuccess describe
+                         in counterexample (show (started, run)) $
+                                run === Compute.RunWithin deadline
+                                    .&&. Compute.interpretInstanceRun power run ExitSuccess status === Compute.interpretInstanceStatus power ExitSuccess status
+    , testProperty "before the deadline, with the limit in place, up does what it does without a limit" $
+        forAll genTime $ \deadline ->
+            forAll genChange $ \change ->
+                forAll genPower $ \power ->
+                    forAll genStatus $ \status ->
+                        forAll genTypeVerdict $ \verdict ->
+                            plan change power status verdict (Compute.RunWithin deadline) === plan change power status verdict Compute.RunUnlimited
+    , testProperty "the verdict moves from within to ending to expired as time passes, at the deadline and at the grace" $
+        forAll genHeld $ \(limit, _, deadline, describe) ->
+            forAll genTime $ \now ->
+                Compute.judgeRunLimit limit now ExitSuccess describe
+                    === if now < deadline
+                        then Compute.RunWithin deadline
+                        else
+                            if now < addUTCTime Compute.runLimitGrace deadline
+                                then Compute.RunEnding deadline
+                                else Compute.RunExpired deadline
+    , testProperty "after the deadline a declared-running instance that is stopped passes, and one that runs never does" $
+        forAll genPassed $ \run ->
+            Compute.interpretInstanceRun on run ExitSuccess "TERMINATED" === Success
+                .&&. case (run, Compute.interpretInstanceRun on run ExitSuccess "RUNNING") of
+                    (Compute.RunEnding _, Unknown) -> property True
+                    (Compute.RunExpired deadline, Failure t) -> counterexample (Text.unpack t) (Compute.renderDeadline deadline `Text.isInfixOf` t)
+                    (_, other) -> counterexample (show other) False
+    , testProperty "after the deadline only TERMINATED and RUNNING are judged differently from today" $
+        forAll genPassed $ \run ->
+            forAll genStatus $ \status ->
+                status `notElem` ["TERMINATED", "RUNNING"] ==>
+                    Compute.interpretInstanceRun on run ExitSuccess status === Compute.interpretInstanceStatus on ExitSuccess status
+    , testProperty "after the deadline up never creates, starts, resumes or stops a declared-running instance" $
+        forAll genPassed $ \run ->
+            forAll genChange $ \change ->
+                forAll genStatus $ \status ->
+                    forAll genTypeVerdict $ \verdict ->
+                        case plan change on status verdict run of
+                            Left _ -> property True
+                            Right steps ->
+                                counterexample (show steps) $
+                                    status === "TERMINATED"
+                                        .&&. all (`elem` [Compute.SetMachineTypeStep]) steps
+                                        .&&. fmap (filter (/= Compute.StartStep)) (plan change on status verdict Compute.RunUnlimited) === Right steps
+    , testProperty "after the deadline a stopped instance is never an error for up unless its machine type is" $
+        forAll genPassed $ \run ->
+            forAll genChange $ \change ->
+                forAll genTypeVerdict $ \verdict ->
+                    isLeft (plan change on "TERMINATED" verdict run) === isLeft (plan change on "TERMINATED" verdict Compute.RunUnlimited)
+    , testProperty "a deadline changes nothing for an instance declared stopped" $
+        forAll genPassed $ \run ->
+            forAll genChange $ \change ->
+                forAll genStatus $ \status ->
+                    forAll genTypeVerdict $ \verdict ->
+                        plan change off status verdict run === plan change off status verdict Compute.RunUnlimited
+                            .&&. Compute.interpretInstanceRun off run ExitSuccess status === Compute.interpretInstanceStatus off ExitSuccess status
+    , testProperty "a limit that could not be read never passes the check and plans no call" $
+        forAll (oneof [Compute.MaxRunDuration <$> genDuration, Compute.RunUntil <$> genTime]) $ \limit ->
+            forAll genTime $ \now ->
+                forAll genChange $ \change ->
+                    forAll genPower $ \power ->
+                        forAll genStatus $ \status ->
+                            forAll genTypeVerdict $ \verdict ->
+                                \junk ->
+                                    let failed = Compute.judgeRunLimit limit now (ExitFailure 1) (Text.pack junk)
+                                        unread = Compute.RunLimitUndetermined "unread"
+                                     in conjoin
+                                            [ counterexample (show failed) (undetermined failed)
+                                            , property (isFailure (Compute.interpretInstanceRun power unread ExitSuccess status))
+                                            , property (isLeft (plan change power status verdict unread))
+                                            ]
+    , testProperty "whatever a describe printed, it is read as that describe or as nothing known" $
+        forAll genDuration $ \duration ->
+            forAll genTime $ \now ->
+                \junk ->
+                    let out = Text.pack junk
+                     in case (Compute.parseLiveRunLimit out, Compute.judgeRunLimit (Compute.MaxRunDuration duration) now ExitSuccess out) of
+                            (Left why, run) -> run === Compute.RunLimitUndetermined why
+                            -- junk that happens to be a JSON object holds no limit
+                            (Right live, run) -> counterexample (show (live, run)) (not (within run))
+    , testProperty "a rendered describe is read back, whichever way its dates and seconds are written" $
+        forAll genLimit $ \limit ->
+            forAll (oneof [pure Nothing, Just <$> genTime]) $ \started ->
+                forAll arbitrary $ \offsets ->
+                    Compute.parseLiveRunLimit (liveJson offsets limit started)
+                        === Right
+                            ( Compute.LiveRunLimit
+                                (case limit of Compute.MaxRunDuration d -> Just d; _ -> Nothing)
+                                (case limit of Compute.RunUntil t -> Just t; _ -> Nothing)
+                                (case limit of Compute.NoRunLimit -> Nothing; _ -> Just "STOP")
+                                started
+                            )
+    , testProperty "an instance holding another limit than the declared one is never within it, and both are named" $
+        forAll genLimit $ \declared ->
+            forAll genLimit $ \held ->
+                forAll genTime $ \started ->
+                    forAll genTime $ \now ->
+                        declared /= held && declared /= Compute.NoRunLimit ==>
+                            case Compute.judgeRunLimit declared now ExitSuccess (liveJson False held (Just started)) of
+                                Compute.RunLimitDiffers _ wanted -> wanted === Compute.renderRunLimit declared
+                                -- a declared date that has passed is a deadline whatever is held
+                                Compute.RunEnding deadline -> declared === Compute.RunUntil deadline
+                                Compute.RunExpired deadline -> declared === Compute.RunUntil deadline
+                                other -> counterexample (show other) False
+    , testProperty "a differing limit is set once, on a stopped machine, and the plan ends in the declared power state" $
+        forAll genChange $ \change ->
+            forAll genPower $ \power ->
+                forAll (elements ["RUNNING", "TERMINATED"]) $ \status ->
+                    forAll genTypeVerdict $ \verdict ->
+                        case plan change power status verdict genuinelyDiffers of
+                            Left _ -> property True
+                            Right steps ->
+                                counterexample (show steps) $
+                                    length (filter (== Compute.SetSchedulingStep) steps) === 1
+                                        .&&. simulate (status == "RUNNING") steps === Just (power == on)
+    , testProperty "a machine is never stopped for its limit: a stop is planned exactly when it was without one" $
+        forAll genChange $ \change ->
+            forAll genPower $ \power ->
+                forAll genStatus $ \status ->
+                    forAll genTypeVerdict $ \verdict ->
+                        forAll genRun $ \run ->
+                            case plan change power status verdict run of
+                                Right steps
+                                    | Compute.StopStep `elem` steps ->
+                                        counterexample (show steps) (fmap (Compute.StopStep `elem`) (plan change power status verdict Compute.RunUnlimited) === Right True)
+                                _ -> property True
+    , testProperty "a differing limit only adds set-scheduling to what up did, or refuses" $
+        forAll genChange $ \change ->
+            forAll genPower $ \power ->
+                forAll genStatus $ \status ->
+                    forAll genTypeVerdict $ \verdict ->
+                        case plan change power status verdict genuinelyDiffers of
+                            Left _ -> property True
+                            Right steps -> Right (filter (/= Compute.SetSchedulingStep) steps) === plan change power status verdict Compute.RunUnlimited
+    , testProperty "a running instance declared running is never given a differing limit without a resize stopping it" $
+        forAll genChange $ \change ->
+            forAll genTypeVerdict $ \verdict ->
+                case (plan change on "RUNNING" verdict genuinelyDiffers, verdict, change) of
+                    (Right _, Compute.MachineTypeDiffers _ _, Compute.MayStopToResize) -> property True
+                    (Right steps, _, _) -> counterexample (show steps) False
+                    (Left _, _, _) -> property True
+    , testProperty "an absent instance is created as before unless a declared date has passed" $
+        forAll genLimit $ \limit ->
+            forAll genPower $ \power ->
+                forAll genTime $ \now ->
+                    case (limit, Compute.planAbsentInstance limit power now) of
+                        (Compute.RunUntil date, Left t) -> counterexample (Text.unpack t) (now >= date)
+                        (Compute.RunUntil date, Right steps) -> counterexample (show steps) (now < date .&&. Right steps === Compute.instanceUpSteps power Compute.CreateInstance)
+                        (_, steps) -> steps === Compute.instanceUpSteps power Compute.CreateInstance
+    , testProperty "a limit only appends its flags to create and its note to the notes; no other command, ref or help changes" $
+        forAll genLimit $ \limit ->
+            forAll genPower $ \power ->
+                forAll genChange $ \change ->
+                    let bare = inst{Compute.instancePower = power, Compute.instanceMachineTypeChange = change}
+                        with = bare{Compute.instanceRunLimit = limit}
+                        args c = processArgs (prepare Compute.computeCommand c)
+                     in conjoin
+                            [ args (Compute.InstancesCreate with) === init (args (Compute.InstancesCreate bare)) <> Compute.runLimitArgs limit <> ["--quiet"]
+                            , args (Compute.InstancesStop with) === args (Compute.InstancesStop bare)
+                            , args (Compute.InstancesStart with) === args (Compute.InstancesStart bare)
+                            , args (Compute.InstancesResume with) === args (Compute.InstancesResume bare)
+                            , args (Compute.InstancesDelete with) === args (Compute.InstancesDelete bare)
+                            , args (Compute.InstancesDescribeStatus with) === args (Compute.InstancesDescribeStatus bare)
+                            , args (Compute.InstancesDescribeMachineType with) === args (Compute.InstancesDescribeMachineType bare)
+                            , args (Compute.InstancesSetMachineType with) === args (Compute.InstancesSetMachineType bare)
+                            , (node with).extension.ref === (node bare).extension.ref
+                            , (node with).extension.help === (node bare).extension.help
+                            , (node with).extension.notes
+                                === (node bare).extension.notes <> ["run limit: " <> Compute.renderRunLimit limit | limit /= Compute.NoRunLimit]
+                            ]
+    , testProperty "the flags of a limit are its kind, its value and the STOP action, and none without a limit" $
+        forAll genLimit $ \limit ->
+            Compute.runLimitArgs limit === case limit of
+                Compute.NoRunLimit -> []
+                Compute.MaxRunDuration d -> ["--max-run-duration", show d <> "s", "--instance-termination-action", "STOP"]
+                Compute.RunUntil t -> ["--termination-time", Text.unpack (Compute.renderDeadline t), "--instance-termination-action", "STOP"]
+    , testProperty "two declared limits have the same note only when they are the same limit" $
+        forAll genLimit $ \a ->
+            forAll genLimit $ \b ->
+                (Compute.renderRunLimit a == Compute.renderRunLimit b) === (a == b)
+    ]
+  where
+    on = Compute.PoweredOn
+    off = Compute.PoweredOff
+    refuse = Compute.RefuseMachineTypeChange
+    mayStop = Compute.MayStopToResize
+    asDeclared = Compute.MachineTypeAsDeclared
+    plan = Compute.planExistingInstance
+    genuinelyDiffers = Compute.RunLimitDiffers "none" "3600s after each start, then stopped by GCP"
+    isLeft :: Either a b -> Bool
+    isLeft = either (const True) (const False)
+    undetermined run = case run of
+        Compute.RunLimitUndetermined _ -> True
+        _ -> False
+    within run = case run of
+        Compute.RunWithin _ -> True
+        _ -> False
+    at :: Integer -> UTCTime
+    at = posixSecondsToUTCTime . fromInteger
+    -- whole seconds: a date is rendered and compared to the second
+    genTime :: Gen UTCTime
+    genTime = at <$> choose (1600000000, 2000000000)
+    genBefore :: UTCTime -> Gen UTCTime
+    genBefore deadline = do
+        early <- choose (1, 200 * 86400 :: Integer)
+        pure (addUTCTime (negate (fromInteger early)) deadline)
+    genDuration :: Gen Integer
+    genDuration = oneof [elements [30, 60, 3600, 86400, 120 * 86400], choose (30, 120 * 86400)]
+    genLimit :: Gen Compute.RunLimit
+    genLimit = oneof [pure Compute.NoRunLimit, Compute.MaxRunDuration <$> genDuration, Compute.RunUntil <$> genTime]
+    -- a declared limit, the last start of an instance holding it, the
+    -- deadline that makes, and what that instance describes itself as
+    genHeld :: Gen (Compute.RunLimit, Maybe UTCTime, UTCTime, Text.Text)
+    genHeld = do
+        offsets <- arbitrary
+        started <- genTime
+        oneof
+            [ do
+                duration <- genDuration
+                let limit = Compute.MaxRunDuration duration
+                pure (limit, Just started, addUTCTime (fromInteger duration) started, liveJson offsets limit (Just started))
+            , do
+                date <- genTime
+                let limit = Compute.RunUntil date
+                pure (limit, Just started, date, liveJson offsets limit (Just started))
+            ]
+    genPassed :: Gen Compute.RunLimitVerdict
+    genPassed = oneof [Compute.RunEnding <$> genTime, Compute.RunExpired <$> genTime]
+    genRun :: Gen Compute.RunLimitVerdict
+    genRun =
+        oneof
+            [ pure Compute.RunUnlimited
+            , Compute.RunWithin <$> genTime
+            , genPassed
+            , pure genuinelyDiffers
+            , pure (Compute.RunLimitUndetermined "unread")
+            ]
+    genCode = elements [ExitSuccess, ExitFailure 1]
+    genChange = elements [refuse, mayStop]
+    genPower = elements [on, off]
+    genStatus :: Gen Text.Text
+    genStatus =
+        oneof
+            [ elements ["RUNNING", "TERMINATED", "SUSPENDED", "PROVISIONING", "STAGING", "STOPPING", "SUSPENDING", "REPAIRING", ""]
+            , Text.pack <$> arbitrary
+            ]
+    genTypeVerdict :: Gen Compute.MachineTypeVerdict
+    genTypeVerdict =
+        elements
+            [ Compute.MachineTypeAsDeclared
+            , Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+            , Compute.MachineTypeUndetermined "unread"
+            ]
+    -- what an instance holding this limit describes itself as; the dates
+    -- either as GCP writes them (milliseconds, an offset) or in UTC
+    liveJson :: Bool -> Compute.RunLimit -> Maybe UTCTime -> Text.Text
+    liveJson offsets limit started =
+        Text.decodeUtf8 . LByteString.toStrict . encode . object $
+            ["lastStartTimestamp" .= stamp t | Just t <- [started]]
+                <> case limit of
+                    Compute.NoRunLimit -> []
+                    Compute.MaxRunDuration d ->
+                        ["scheduling" .= object ["instanceTerminationAction" .= ("STOP" :: Text.Text), "maxRunDuration" .= object ["seconds" .= show d]]]
+                    Compute.RunUntil t ->
+                        ["scheduling" .= object ["instanceTerminationAction" .= ("STOP" :: Text.Text), "terminationTime" .= stamp t]]
+      where
+        stamp :: UTCTime -> String
+        stamp t
+            | offsets = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S.000%Ez" (utcToZonedTime (hoursToTimeZone (-7)) t)
+            | otherwise = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" t
+    -- a machine that is running or not: a step that GCP would refuse (the
+    -- type or the scheduling set on a running machine, a stop of a stopped
+    -- one) is 'Nothing'
+    simulate :: Bool -> [Compute.InstanceStep] -> Maybe Bool
+    simulate running [] = Just running
+    simulate running (step : rest) = case (step, running) of
+        (Compute.StopStep, True) -> simulate False rest
+        (Compute.StartStep, False) -> simulate True rest
+        (Compute.SetMachineTypeStep, False) -> simulate False rest
+        (Compute.SetSchedulingStep, False) -> simulate False rest
+        _ -> Nothing
+    createArgs i = processArgs (prepare Compute.computeCommand (Compute.InstancesCreate i))
+    limited limit = inst{Compute.instanceRunLimit = limit}
+    node i = only (Compute.gceInstance silent ignoreTrack i)
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    inst =
+        Compute.Instance
+            { Compute.instanceName = "toy-vm"
+            , Compute.instanceProject = Core.Project "p"
+            , Compute.instanceZone = Core.Zone "europe-west1-b"
+            , Compute.instanceMachineType = Compute.Custom "e2-micro"
+            , Compute.instanceBootDisk = Compute.BootDisk 10 Nothing (Just "ubuntu-2404-lts-amd64") (Just "ubuntu-os-cloud")
+            , Compute.instanceNetwork = "default"
+            , Compute.instanceSubnet = "default"
+            , Compute.instanceServiceAccount = Nothing
+            , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
+            , Compute.instanceExternalAddress = Compute.ReservedExternal "toy-ip"
+            , Compute.instanceInternalAddress = Compute.EphemeralInternal
+            , Compute.instanceTags = ["toy-ssh"]
+            , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
+            }
 
 bucketTests :: [TestTree]
 bucketTests =
@@ -3554,6 +4057,7 @@ vmTests =
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
             }
 
 -------------------------------------------------------------------------------

@@ -1682,6 +1682,61 @@ calls) has no test, with a real or a stand-in gcloud, because the node execs `gc
 one process; the `describe` projection and `set-machine-type` argv are from gcloud's documentation, not observed; no
 stop/resize/start was ever run against a real project.
 
+`Gcp.Compute.Instance` carries `instanceRunLimit :: RunLimit`, a **maximum run time after which GCP stops the instance
+itself** (the action is always `STOP`). `NoRunLimit` passes nothing, asks nothing (no describe, no clock) and leaves
+command, `ref`, `help` and `notes` what they were; `MaxRunDuration seconds` is `--max-run-duration Ns` (counted by GCP
+from each start; 30 s to 120 days, else `runLimitProblems` fails check and `up` before any call) and `RunUntil date` is
+`--termination-time` (RFC 3339 UTC, to the second), both with `--instance-termination-action STOP` and a `run limit: ...`
+note (a re-declared limit is a changed node under `serve`). What it is for: under `serve`, `interpretInstanceStatus`
+said `Failure "instance is TERMINATED"` and `up` started the machine again, undoing the limit. Now, **once the deadline
+has passed, a `TERMINATED` instance is the declared state of a `PoweredOn` declaration** (`Success`) and `up` starts
+nothing. The shape is the machine type's: a pure `judgeRunLimit` (declared limit, current time, one more `describe`)
+gives a `RunLimitVerdict`, which the pure check `interpretInstanceRun` and the same pure `planExistingInstance` take as
+an argument; the clock is read in `gceInstance` only. Decisions, each load-bearing:
+- **Where the deadline is read.** For a date, the declaration. For a duration, the instance: `lastStartTimestamp` plus
+  the duration, and only when the instance holds the declared duration. Not a local marker, and *not*
+  `terminationTimestamp`, which the filing proposed: gcloud's help says it is removed whenever the VM is stopped (when
+  the check needs it), and the v1 API messages shipped with the SDK (573) do not have the field at all (beta/alpha
+  only). The start *request* precedes the moment GCP counts from, and GCP's documentation allows the stop 30 s of
+  lateness, hence `runLimitGrace` (300 s): a `RUNNING` instance is `Unknown` for that long after its deadline, then a
+  `Failure` naming the deadline. The local clock is compared with GCP's timestamps; nothing corrects a skewed one.
+- **After the deadline nothing starts, resumes or stops a declared-running instance.** `TERMINATED`: the plan without
+  its start. Anything else: a reason and no call; GCP stops a `RUNNING` one, and this node never stops a machine
+  declared running (the machine-type property "a stop is only planned by a stopped declaration or a permitted resize"
+  still holds, restated as "a stop is planned exactly when it was without a limit"). `PoweredOff` is not changed by a
+  deadline. An absent instance whose declared date has passed is not created (`planAbsentInstance`; GCP would refuse).
+- **A limit that differs on an existing instance is reconciled only where the machine is stopped anyway**, because
+  `set-scheduling` only works on a `TERMINATED` instance (its own help): `SetSchedulingStep` goes first on a stopped
+  instance, right after the stop when a `PoweredOff` declaration or a permitted resize already stops a running one,
+  and otherwise the check is a `Failure` and `up` a throw naming both limits (the scopes precedent; the remedy is to
+  stop it, after which the next `up` sets the limit and starts it). `set-scheduling` also clears the other kind of
+  limit. A date that has passed is a deadline whatever the instance holds. Removing the option does **not** clear the
+  limit on the instance (`NoRunLimit` asks nothing): GCP keeps stopping it and the node keeps starting it until
+  `gcloud compute instances set-scheduling --clear-max-run-duration` is run by hand on the stopped instance.
+- **Composition with `MayStopToResize`.** A permitted resize of an expired, stopped instance sets the type and leaves
+  it off; an expired `RUNNING` one is not stopped to resize (a reason); a resize that stops the machine anyway also
+  sets a differing limit in that window.
+- **Starting an expired instance again is a new declaration** (another duration, a later date: `up` sets it on the
+  stopped instance and starts it), or for a duration a start by hand, which moves the deadline. `force` on an unchanged
+  declaration starts nothing. Known wart: if the start fails right after a successful `set-scheduling` of a duration
+  and the previous start is more than that duration ago, the next pass reads the instance as expired and leaves it off.
+  A hand-stopped instance is likewise left off once its deadline passes; before it, it is started as before.
+- An unreadable limit (`parseLiveRunLimit`: not a JSON object, or a field present and not a number / RFC 3339 date; the
+  describe failed; no `lastStartTimestamp` on an instance holding the duration) is `RunLimitUndetermined`: a
+  `Failure`/throw, never "expired" and never a reason to start or set anything.
+- `DELETE` as the action is not offered. An instance holding it reads as a differing limit.
+Layer 0 only (`Test/GcpSpec.hs`, "Compute.instanceRunLimit": HUnit cases and QuickCheck properties over the rendered
+arguments, the parser, the verdict over time, the check and the plan, including "before the deadline the verdict is
+today's for every status" and "without a limit, for every status, exit code and time"). **Not run**: anything against
+GCP. The flag names, `set-scheduling` needing a stopped instance and the fate of `terminationTimestamp` are from
+`gcloud ... --help` (SDK 573, read locally) and GCP's "limit the run time of a VM" page; the `describe` field names are
+from the SDK's v1 API messages; **the JSON that `describe --format=json(...)` really prints was never observed** (the
+parser accepts seconds as a string or a number and dates with `Z` or an offset), nor was `--clear-termination-time`
+beside `--max-run-duration` on an instance holding neither, nor what `lastStartTimestamp` reads after a `set-scheduling`.
+The IO sequencing in `gceInstance` has no test, as for the machine type. `salmon-gcp-toy` has no flag for a limit (its
+later nodes need the VM up), so the run that would show a machine staying off under `serve` needs a small declaration
+of its own.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another

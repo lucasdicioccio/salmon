@@ -1036,6 +1036,7 @@ peerInstance spec vm peer =
               Compute.instanceServiceAccount = Nothing
             , Compute.instanceScopes = Compute.DefaultScopes
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
             }
 
 {- | Serves one page naming the project, under a transient systemd unit so it
@@ -1095,6 +1096,7 @@ gceInstance spec vm =
         , Compute.instancePower = Compute.PoweredOn
         , Compute.instanceScopes = if spec.tier >= 3 then Compute.DeclaredScopes ["cloud-platform"] else Compute.DefaultScopes
         , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+        , Compute.instanceRunLimit = Compute.NoRunLimit
         }
 
 -------------------------------------------------------------------------------

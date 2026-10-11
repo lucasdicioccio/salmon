@@ -307,4 +307,5 @@ vmConfig host =
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
             }
