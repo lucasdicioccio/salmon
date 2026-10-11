@@ -1489,6 +1489,41 @@ cleared by a success, down; timer and no stamp: run then skip). Those user-scope
 were run on their own from a repl. Not run: system scope (root, `User=`), an actual reboot, a `Persistent=true` timer
 firing, and `serve` tending it.
 
+`Job.launchedRun` (`launchedJob` is it standing on `jobService`) is `completedRun` for a job too long to wait for: the
+same declaration and the same `Ref` (`"systemd-job-run"` and the unit, so declaring both for one unit is a conflict),
+whose `up` is `systemctl start --no-block` (new `SystemCtlCall` `StartUnitNoBlock`) and returns. `runJob`,
+`completedRun` and every rendered unit are what they were (their `help`/`notes`/`ref` and `lastRunProperties` are
+written out in `Test/SystemdJobSpec.hs`); `checkLastRun` only moved its reading into `readRun`. Three pure steps:
+`classifyRun` (a `RunState`: `interpretLastRun` keeping its branches apart, plus *when* a failure happened, from
+`InactiveEnterTimestamp`, or from `STAMP.running`'s time where systemd forgot), `launchDecision` (what `up` does) and
+`runOutcome` (how it reads after). The check is `runVerdict . classifyRun`, which a property holds equal to
+`interpretLastRun` for every input, so it is `Unknown` while the job runs. Load-bearing: **a start is queued only for a
+job at rest whose last run does not count** (never run, older than a file in `completionWritten`, or failed *before*
+such a file was written). A running job is left alone, a completed one is not run again, and **a failed run is
+reported (`RunFailed`) and not retried** until something it stands on is written after the failure (or the operator
+runs `reset-failed` and removes `STAMP.running`): unlike `completedRun`, whose `up` re-runs a failed job at every pass,
+since here a pass that asks must not be a job run twice. A failure whose time is not known is reported, never retried.
+**A stamp is required** (`launchProblems`, thrown as `CannotLaunch` at `up`): with nothing referring to the unit
+systemd forgets a successful run as it ends and the next pass would start it again. **"In progress" is a thrown
+`RunInProgress`**, because a driver knows an `up` as done or failed and nothing between: dependants are not run
+against an unfinished job, the pass exits non-zero, and the report's text says "in progress, neither failed nor
+done". A third outcome in the drivers and the report vocabulary would be the honest version of this and is not built
+(it touches `UpDown`/`Concurrent`/`Serve`, the JSON reports and `/openapi.json`). `Polling` (`noWait` by default; a
+wait shows in `notes`, none renders nothing) is a bounded wait inside `up`: it asks again every `pollingEvery` seconds
+for at most `pollingWait`. There is no reconnection in it: each pass is its own call, so a dropped link costs a pass
+and not the run, and "one command that returns when the job is over" is the caller repeating the pass. The read right
+after the start can come before systemd shows the queued run, so there a state that would be started from reads as
+pending, not as a reason to start another (`runOutcome`). `down` removes the stamps and stops nothing (`jobService`'s
+`down` stops a run). Run: Layer 0 (HUnit on `show` lines captured from systemd 255 around a real `start --no-block`,
+and QuickCheck properties over generated `show` output and evidence), and one `userTests` case against this user's
+systemd 255 from a repl (started and returned while the unit is `activating`; a second pass starts nothing; found
+completed and skipped; a bounded wait seeing a run through; a failing job found failed by a later pass and not run
+again, also after `reset-failed`; run again after a watched file is written; repaired; down). Not run: system scope,
+over ssh or with a link actually dropping, a reboot mid-run, a job longer than a few seconds, a container job
+(`launchedRun (Quadlet.containerCompletion c)` injected with `quadletJob` is the composition, untried), `run serve`
+tending it (its `up` throws while the job runs, so what the supervisor's retries look like there is unseen), and
+the concurrent driver.
+
 The container job has the same two halves. `Quadlet.containerStamp` (off by default; refused by `containerProblems` on
 a `LongRunning` container, where `ExecStartPost` would mean "ready", not "finished") renders the same two lines in the
 quadlet's `[Service]`, which podman's generator keeps around its own `ExecStart=`; they run on the *host*, as whoever

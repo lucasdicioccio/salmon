@@ -294,6 +294,11 @@ data SystemCtlCall
       -- exited and fails if it did; a unit already running is joined, where
       -- 'Up' (@restart@) would kill it first
       StartUnit Scope UnitTarget
+    | -- | @start --no-block@: the start is queued and the call returns
+      -- without waiting for the unit, so it says nothing about how a
+      -- @Type=oneshot@ unit's command went. A unit already starting or
+      -- queued is left as it is.
+      StartUnitNoBlock Scope UnitTarget
     | -- | @disable --now@: stops the unit and removes what 'Enable' linked
       Disable Scope UnitTarget
     | -- | @mask --now@: stops the unit and points it at @\/dev\/null@
@@ -309,6 +314,7 @@ callSystemctl = Command go
     go (Up sc u) = proc "systemctl" (scopeArgs sc <> ["restart", Text.unpack u])
     go (Stop sc u) = proc "systemctl" (scopeArgs sc <> ["stop", Text.unpack u])
     go (StartUnit sc u) = proc "systemctl" (scopeArgs sc <> ["start", Text.unpack u])
+    go (StartUnitNoBlock sc u) = proc "systemctl" (scopeArgs sc <> ["start", "--no-block", Text.unpack u])
     go (Disable sc u) = proc "systemctl" (scopeArgs sc <> ["disable", "--now", Text.unpack u])
     go (Mask sc u) = proc "systemctl" (scopeArgs sc <> ["mask", "--now", Text.unpack u])
     go (Unmask sc u) = proc "systemctl" (scopeArgs sc <> ["unmask", Text.unpack u])

@@ -48,6 +48,14 @@ collected the moment the run ends and reads exactly like one never run. And
 nothing survives a reboot. 'jobStamp' is for the cases that leaves (a job
 with no timer; a verdict that must hold across a reboot): the unit then
 records its own runs in two files the check reads beside systemd's answer.
+
+'runJob' and 'completedRun' /wait/: for a job of half an hour that is one
+call held for half an hour, and over ssh a dropped link fails the pass
+although the unit goes on and ends well. 'launchedRun' is the same
+declaration ("this job has run to completion") for such a job: its @up@
+queues the start and returns, and the answer comes from asking again. A pass
+that finds the job running starts nothing and says so ('RunInProgress');
+see 'launchedRun' for what that looks like to a driver.
 -}
 module Salmon.Builtin.Nodes.Systemd.Job (
     -- * a job
@@ -89,6 +97,28 @@ module Salmon.Builtin.Nodes.Systemd.Job (
     completedJob,
     completedScheduledJob,
 
+    -- * a run started and asked about later
+    RunState (..),
+    classifyRun,
+    runVerdict,
+    runStateProperties,
+    readRunState,
+    Launch (..),
+    launchDecision,
+    Outcome (..),
+    runOutcome,
+    Polling (..),
+    noWait,
+    pollDelays,
+    launchProblems,
+    launchNotes,
+    CannotLaunch (..),
+    RunInProgress (..),
+    RunFailed (..),
+    RunUndetermined (..),
+    launchedRun,
+    launchedJob,
+
     -- * shared with other unit-writing nodes
     unitDirectory,
     unitFile,
@@ -99,6 +129,7 @@ module Salmon.Builtin.Nodes.Systemd.Job (
     UnitNotLoaded (..),
 ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, throwIO)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (isAlphaNum, isAscii)
@@ -734,7 +765,13 @@ not answering (or not knowing @--timestamp@, which is systemd 247's) is
 'Unknown'.
 -}
 checkLastRun :: Completion -> IO CheckResult
-checkLastRun c = do
+checkLastRun c = maybe Unknown (uncurry interpretLastRun) <$> readRun lastRunProperties c
+
+{- | The files' times and @systemctl show@'s lines for these properties;
+'Nothing' when @systemctl@ did not answer.
+-}
+readRun :: [String] -> Completion -> IO (Maybe (RunEvidence, [Text]))
+readRun properties c = do
     written <- fmap catMaybes (forM c.completionWritten (\path -> fmap (fmap ((,) path)) (modified path)))
     succeeded <- maybe (pure Nothing) modified c.completionStamp
     started <- maybe (pure Nothing) (modified . stampRunning) c.completionStamp
@@ -744,16 +781,13 @@ checkLastRun c = do
                 "systemctl"
                 ( Systemd.scopeArgs c.completionScope
                     <> ["show", Text.unpack c.completionUnit, "--timestamp=us+utc"]
-                    <> map ("--property=" <>) lastRunProperties
+                    <> map ("--property=" <>) properties
                 )
             )
             ""
     pure $ case code of
-        ExitSuccess ->
-            interpretLastRun
-                (RunEvidence written succeeded started)
-                (Text.lines (Text.pack out))
-        ExitFailure _ -> Unknown
+        ExitSuccess -> Just (RunEvidence written succeeded started, Text.lines (Text.pack out))
+        ExitFailure _ -> Nothing
   where
     modified :: FilePath -> IO (Maybe UTCTime)
     modified path = do
@@ -791,13 +825,18 @@ completedRun r systemctl c =
                 , ref = mkRef "systemd-job-run" target
                 , check = checkLastRun c
                 , up = start
-                , down = forM_ c.completionStamp $ \s ->
-                    forM_ [s, stampRunning s] $ \path -> do
-                        present <- doesFileExist path
-                        when present (removeFile path)
+                , down = removeStamps c
                 }
   where
     target = c.completionUnit
+
+-- | Removes the stamp files, the one thing a run leaves that is a run node's.
+removeStamps :: Completion -> IO ()
+removeStamps c =
+    forM_ c.completionStamp $ \s ->
+        forM_ [s, stampRunning s] $ \path -> do
+            present <- doesFileExist path
+            when present (removeFile path)
 
 -- | 'completedRun' for a 'Job', standing on its 'jobService'.
 completedJob ::
@@ -821,3 +860,334 @@ completedScheduledJob ::
     Op
 completedScheduledJob r systemctl t j schedules =
     completedRun r systemctl (jobCompletion j) `inject` scheduledJob r systemctl t j schedules
+
+-------------------------------------------------------------------------------
+
+{- | Where a job's runs stand, as much of it as @up@ needs to decide whether
+to start one. 'interpretLastRun' folds the same reading into a
+'CheckResult'; 'runVerdict' of this is that answer, for every input.
+-}
+data RunState
+    = -- | systemd does not hold the unit, and why
+      NotLoaded Text
+    | -- | a run is under way (or the unit is otherwise between states)
+      Running
+    | -- | the last run failed, and how. The path is a file written /after/
+      -- that failure, if there is one: somebody changed what the job stands
+      -- on since, so the failure is of a job that is no longer the one
+      -- declared.
+      LastFailed Text (Maybe FilePath)
+    | -- | systemd answered with a timestamp that cannot be read, or did not
+      -- answer
+      Unreadable
+    | -- | there is no record of a successful run
+      NeverRan
+    | -- | the last successful run started before this file was written
+      Outdated FilePath
+    | -- | the last run succeeded, after everything was written
+      Succeeded
+    deriving (Eq, Show)
+
+{- | 'lastRunProperties' and when the unit last came to rest:
+@InactiveEnterTimestamp@ is, for a failed unit, when the run failed (seen on
+systemd 255; it is empty while the unit is @activating@).
+-}
+runStateProperties :: [String]
+runStateProperties = lastRunProperties <> ["InactiveEnterTimestamp"]
+
+{- | 'interpretLastRun', keeping what it found apart. The branches are its
+branches in its order; the one thing added is /when/ a failure happened
+(@InactiveEnterTimestamp@, or the running stamp's time where systemd has
+forgotten), so that a file written since can be told from one written
+before.
+-}
+classifyRun :: RunEvidence -> [Text] -> RunState
+classifyRun evidence ls
+    | loadState /= Just "loaded" =
+        NotLoaded (maybe "systemctl said nothing about the unit's load state" ("the unit is " <>) loadState)
+    | activeState `elem` map Just ["activating", "deactivating", "reloading"] = Running
+    | activeState == Just "failed" || maybe False (/= "success") result =
+        LastFailed
+            ( "the last run failed: Result="
+                <> fromMaybe "?" result
+                <> maybe "" (", exit status " <>) (property "ExecMainStatus")
+            )
+            (writtenSince =<< failedAt)
+    | unsucceeded = LastFailed "the last run that started did not succeed" (writtenSince =<< evidence.evidenceStarted)
+    | otherwise = case timestamp "ExecMainStartTimestamp" of
+        Nothing -> Unreadable
+        Just started -> case catMaybes [started, evidence.evidenceSucceeded] of
+            [] -> NeverRan
+            runs -> maybe Succeeded Outdated (writtenSince (maximum runs))
+  where
+    loadState = property "LoadState"
+    activeState = property "ActiveState"
+    result = property "Result"
+
+    unsucceeded :: Bool
+    unsucceeded = case (evidence.evidenceStarted, evidence.evidenceSucceeded) of
+        (Just started, Just succeeded) -> started > succeeded
+        (Just _, Nothing) -> True
+        (Nothing, _) -> False
+
+    -- when systemd saw the run fail; failing that, when the run that left
+    -- no stamp started
+    failedAt :: Maybe UTCTime
+    failedAt = case timestamp "InactiveEnterTimestamp" of
+        Just (Just at) -> Just at
+        _ | unsucceeded -> evidence.evidenceStarted
+        _ -> Nothing
+
+    writtenSince :: UTCTime -> Maybe FilePath
+    writtenSince at = case [path | (path, written) <- evidence.evidenceWritten, written > at] of
+        (path : _) -> Just path
+        [] -> Nothing
+
+    -- 'Nothing' is a timestamp that could not be read, @Just Nothing@ none
+    timestamp :: Text -> Maybe (Maybe UTCTime)
+    timestamp name = case property name of
+        Nothing -> Just Nothing
+        Just "n/a" -> Just Nothing
+        Just raw -> Just <$> parseTimestamp raw
+
+    property :: Text -> Maybe Text
+    property name =
+        case [Text.strip (Text.drop 1 v) | l <- ls, let (k, v) = Text.breakOn "=" l, k == name] of
+            (x : _) | not (Text.null x) -> Just x
+            _ -> Nothing
+
+-- | What a check answers for a 'RunState': 'interpretLastRun''s answer.
+runVerdict :: RunState -> CheckResult
+runVerdict (NotLoaded why) = Failure why
+runVerdict Running = Unknown
+runVerdict (LastFailed why _) = Failure why
+runVerdict Unreadable = Unknown
+runVerdict NeverRan = Failure "there is no record of a successful run"
+runVerdict (Outdated path) = Failure ("no run has succeeded since " <> Text.pack path <> " was written")
+runVerdict Succeeded = Completed
+
+-- | Asks systemd and the filesystem, then 'classifyRun'.
+readRunState :: Completion -> IO RunState
+readRunState c = maybe Unreadable (uncurry classifyRun) <$> readRun runStateProperties c
+
+-- | What 'launchedRun''s @up@ does about a 'RunState'.
+data Launch
+    = -- | queue a start
+      Start
+    | -- | a run is under way: start nothing
+      LeaveRunning
+    | -- | the job has run: start nothing
+      LeaveDone
+    | -- | the last run failed and nothing was written since: start nothing, fail
+      ReportFailure Text
+    | -- | what is there cannot be read: start nothing, fail
+      CannotTell
+    deriving (Eq, Show)
+
+{- | A start is queued only for a job that is at rest and whose last run does
+not count: never run, older than a file it stands on, or failed /before/
+such a file was written. A run under way is never started over, a completed
+job is never run again, and a failure nobody has answered is reported and
+not retried: a pass asking twice must not be a job run twice.
+
+A unit systemd does not hold is started all the same, for @systemctl@ to
+refuse and say why.
+-}
+launchDecision :: RunState -> Launch
+launchDecision (NotLoaded _) = Start
+launchDecision Running = LeaveRunning
+launchDecision (LastFailed _ (Just _)) = Start
+launchDecision (LastFailed why Nothing) = ReportFailure why
+launchDecision Unreadable = CannotTell
+launchDecision NeverRan = Start
+launchDecision (Outdated _) = Start
+launchDecision Succeeded = LeaveDone
+
+-- | How a run that was started, or found running, stands when asked again.
+data Outcome
+    = -- | it ran to completion
+      Finished
+    | -- | it has not ended as far as can be seen: running, or queued and not
+      -- yet shown as running by systemd
+      Pending
+    | -- | it failed
+      Broken Text
+    | -- | what is there cannot be read
+      Undetermined
+    deriving (Eq, Show)
+
+{- | Read after a start was queued or a run was found under way, so a state
+'launchDecision' would start from is the moment before systemd shows the
+queued run, not a reason to start another.
+-}
+runOutcome :: RunState -> Outcome
+runOutcome st = case launchDecision st of
+    LeaveDone -> Finished
+    ReportFailure why -> Broken why
+    CannotTell -> Undetermined
+    LeaveRunning -> Pending
+    Start -> Pending
+
+{- | How long 'launchedRun''s @up@ stays to see the run end. 'noWait' is the
+starting point.
+-}
+data Polling
+    = Polling
+    { pollingWait :: Int
+    -- ^ seconds @up@ may stay asking, at most; none or less is "ask once
+    -- and return"
+    , pollingEvery :: Int
+    -- ^ seconds between two questions; less than one is one
+    }
+    deriving (Eq, Show)
+
+-- | Start and return: the answer is a later pass's.
+noWait :: Polling
+noWait = Polling{pollingWait = 0, pollingEvery = 5}
+
+{- | The pauses between questions, in seconds: each at most 'pollingEvery',
+together exactly 'pollingWait'.
+-}
+pollDelays :: Polling -> [Int]
+pollDelays p = go (max 0 p.pollingWait)
+  where
+    every = max 1 p.pollingEvery
+    go 0 = []
+    go left = let pause = min every left in pause : go (left - pause)
+
+{- | Why this run cannot be started and asked about later. It needs a stamp:
+with nothing referring to the unit systemd forgets a successful run as it
+ends, and a later pass would find a job that never ran and start it a
+second time. (A waiting timer keeps the record too, but not across a
+reboot.)
+-}
+launchProblems :: Completion -> [Text]
+launchProblems c =
+    ["a run that is not waited for needs a stamp to be found completed later (jobStamp)" | Nothing <- [c.completionStamp]]
+
+-- | 'launchedRun''s notes: 'completedRun''s, and the wait when there is one.
+launchNotes :: Polling -> Completion -> [Text]
+launchNotes polling c =
+    mconcat
+        [ ["newer than: " <> Text.pack path | path <- c.completionWritten]
+        , ["stamp: " <> Text.pack s | s <- maybeToList c.completionStamp]
+        , [ "waits: up to " <> Text.pack (show polling.pollingWait) <> "s, asking every " <> Text.pack (show (max 1 polling.pollingEvery)) <> "s"
+          | polling.pollingWait > 0
+          ]
+        ]
+
+-- | The run cannot be declared this way; see 'launchProblems'.
+data CannotLaunch = CannotLaunch !Systemd.UnitTarget ![Text]
+    deriving (Show)
+
+instance Exception CannotLaunch
+
+{- | The job is running and @up@ did not stay to see it end. Not a failure of
+the job: the next pass asks again.
+-}
+newtype RunInProgress = RunInProgress Systemd.UnitTarget
+
+instance Show RunInProgress where
+    show (RunInProgress target) =
+        "RunInProgress: " <> Text.unpack target <> " is still running (in progress, neither failed nor done); a later pass will find how it ended"
+
+instance Exception RunInProgress
+
+-- | The job's last run failed and nothing it stands on was written since.
+data RunFailed = RunFailed !Systemd.UnitTarget !Text
+    deriving (Show)
+
+instance Exception RunFailed
+
+-- | Neither systemd nor the stamps said where the job stands; nothing was started.
+newtype RunUndetermined = RunUndetermined Systemd.UnitTarget
+    deriving (Show)
+
+instance Exception RunUndetermined
+
+{- | A job that has run, started without being waited for: 'completedRun'
+whose @up@ is @systemctl start --no-block@ and returns.
+
+The check is 'completedRun''s ('runVerdict' of 'readRunState'): 'Completed'
+once a run succeeded after everything in 'completionWritten' was written,
+'Unknown' while a run is under way, a 'Failure' otherwise.
+
+@up@ reads the same state and follows 'launchDecision': it queues a start
+for a job at rest whose last run does not count, starts nothing for a job
+that is running or has run, and for a job whose last run failed throws
+'RunFailed' /without/ running it again (write one of the files it stands
+on, which is what fixing it usually is, or @systemctl reset-failed@ and
+remove @STAMP.running@, to have it run again). It then asks again, for up
+to 'pollingWait' seconds, and:
+
+* returns if the run succeeded;
+* throws 'RunFailed' if it failed;
+* throws 'RunInProgress' if it is still running.
+
+The last one is how "in progress" reaches a driver, which knows a node's
+@up@ as done or failed and nothing between: what stands on the job is not
+run against a job that has not finished, the pass ends unsuccessful, and
+the report names 'RunInProgress' and not a failure of the job. A later pass
+finds the run under way (and starts nothing), completed (a skip) or failed.
+Each pass is a call of its own, so a link that drops costs a pass and not
+the run; a caller wanting one command that returns when the job is over
+repeats the pass, with a 'pollingWait' as long as it cares to hold one call.
+
+The 'Completion' has to name a stamp ('launchProblems'): @up@ throws
+'CannotLaunch' without one. Keyed like 'runJob' and 'completedRun', being
+the same effect site; no dependency, the caller injects what installs the
+unit or uses 'launchedJob'. @down@ removes the stamp files and stops
+nothing: a run under way is the installing node's to stop.
+-}
+launchedRun ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Polling ->
+    Completion ->
+    Op
+launchedRun r systemctl polling c =
+    withSystemctl r systemctl (Systemd.StartUnitNoBlock c.completionScope target) $ \start ->
+        op "systemd-job-launched" nodeps $ \actions ->
+            actions
+                { help = "has " <> target <> " run to completion since it was last changed, started without waiting for it"
+                , notes = launchNotes polling c
+                , ref = mkRef "systemd-job-run" target
+                , check = runVerdict <$> readRunState c
+                , up = launch start
+                , down = removeStamps c
+                }
+  where
+    target = c.completionUnit
+
+    launch :: IO () -> IO ()
+    launch start = do
+        let problems = launchProblems c
+        unless (null problems) $ throwIO (CannotLaunch target problems)
+        found <- readRunState c
+        case launchDecision found of
+            Start -> start >> settle (pollDelays polling)
+            LeaveRunning -> settle (pollDelays polling)
+            LeaveDone -> pure ()
+            ReportFailure why -> throwIO (RunFailed target why)
+            CannotTell -> throwIO (RunUndetermined target)
+
+    settle :: [Int] -> IO ()
+    settle pauses = do
+        outcome <- runOutcome <$> readRunState c
+        case (outcome, pauses) of
+            (Finished, _) -> pure ()
+            (Broken why, _) -> throwIO (RunFailed target why)
+            (_, pause : rest) -> threadDelay (pause * 1000000) >> settle rest
+            (Pending, []) -> throwIO (RunInProgress target)
+            (Undetermined, []) -> throwIO (RunUndetermined target)
+
+-- | 'launchedRun' for a 'Job', standing on its 'jobService'.
+launchedJob ::
+    Reporter Systemd.Report ->
+    Track' (Binary "systemctl") ->
+    Track' Job ->
+    Polling ->
+    Job ->
+    Op
+launchedJob r systemctl t polling j =
+    launchedRun r systemctl polling (jobCompletion j) `inject` jobService r systemctl t j
