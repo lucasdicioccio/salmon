@@ -102,7 +102,7 @@ concurrently. See @Test.DeferredSpec@.
 -}
 remoteCallNode :: Track' directive -> directive -> Op -> Op
 remoteCallNode simulate directive call =
-    call{node = fmap mark call.node}
+    amendNode mark call
   where
     mark ext = ext{dynamics = toDyn (CLI.RemoteOp (run simulate directive)) : ext.dynamics}
 

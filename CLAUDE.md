@@ -134,7 +134,7 @@ None enforced by types; every builtin follows them.
   (same file, `ref`, `help`, `notes`), usually pinned by hash in the specs, because a changed
   representative or unit file restarts running services.
 - Directories shared by many nodes are their own node, created and never removed.
-- An `fmap` over an `Op` reaches its dependencies too; apply extras to the one node.
+- An `fmap` over an `Op` reaches its dependencies too; apply extras to the one node with `amendNode`.
 - Prefer amending `defaultSupervision` over spelling out every field.
 
 ## The seed → directive → ops CLI
