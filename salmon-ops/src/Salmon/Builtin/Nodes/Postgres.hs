@@ -4,9 +4,15 @@
 module Salmon.Builtin.Nodes.Postgres where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception, IOException, throwIO, try)
 import Control.Monad (unless, when)
+import qualified Crypto.Hash as Hash
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Bits (xor)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
+import Data.Char (isAscii)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -307,6 +313,10 @@ instance Show Password where
 newtype User = User {userRole :: RoleName}
     deriving (Show, ToJSON, FromJSON)
 
+{- | A login role with this password. Its check is 'checkUserPassword': a
+role whose password was changed outside salmon is a 'Failure' naming the
+role, not a node that re-applies blindly every pass.
+-}
 user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
 user r server psql port user pwd =
     withBinary psql (psqlAdminRun_Sudo port) (CreateUser user.userRole pwd) $ \up ->
@@ -314,11 +324,18 @@ user r server psql port user pwd =
             actions
                 { ref = mkRef "pg-user" user.userRole
                 , help = Text.unwords ["create user", user.userRole]
+                , check = checkUserPassword port user.userRole (pure pwd)
                 , up = up r'
                 }
   where
     r' = contramap (PGCreateUser user) r
 
+{- | A login role whose password is the content of a file, read at @check@
+and @up@ time (never at graph build). Its check is 'checkUserPassword': the
+password the cluster holds is compared with the file, so a rotation (a new
+file) and a drift (a role altered by hand, restored from a backup) both show
+as a 'Failure' before @up@ puts the file's password back.
+-}
 userPassFile :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> File "passfile" -> User -> Op
 userPassFile r server psql port genpass user =
     withFile genpass $ \passfile ->
@@ -326,6 +343,7 @@ userPassFile r server psql port genpass user =
             actions
                 { ref = mkRef "pg-user" user.userRole
                 , help = Text.unwords ["set user password for", user.userRole, "from file at", Text.pack passfile]
+                , check = checkUserPassword port user.userRole (readPassword passfile)
                 , up = do
                     up =<< fmap Password (Text.readFile passfile)
                 }
@@ -333,6 +351,138 @@ userPassFile r server psql port genpass user =
     r' = contramap (PGSetUserPass user) r
     runningServer = run server localServer
     up pass = untrackedExec (psqlAdminRun_Sudo port) (CreateUser user.userRole pass) "" r'
+
+{- | The check of a @pg-user@ node: does the role exist, may it log in, and
+is its password the declared one.
+
+PostgreSQL never gives a password back, only the verifier it keeps in
+@pg_authid.rolpassword@ (SCRAM-SHA-256 since 14, MD5 before). The declared
+password is run through that same verifier's parameters here and the
+results compared: no login as the role is attempted, so the check is the
+same whatever @pg_hba.conf@ allows, and leaves no failed authentication in
+the server's log. The reading is 'interpretRoleAuthRow', which is pure.
+
+'Unknown' when the cluster cannot be asked or the password cannot be read
+(the file is not there yet): acts like a 'Failure' for @run up@, which then
+does what it did before this check existed.
+
+Nothing secret leaves this function: the query names the role only, and a
+'Failure' says what differs, never a verifier or anything computed from the
+password.
+-}
+checkUserPassword :: Port -> RoleName -> IO Password -> IO CheckResult
+checkUserPassword port name readPass = do
+    pass <- try readPass :: IO (Either IOException Password)
+    case pass of
+        Left _ -> pure Unknown
+        Right pwd -> either (const Unknown) (interpretRoleAuthRow name pwd) <$> psqlQuery_Sudo port (roleAuthSql name)
+
+{- | One row, @t|VERIFIER@ or @f|VERIFIER@ (empty for a role without a
+password), or none when the role does not exist. @pg_authid@, not
+@pg_roles@: the latter shows the password as @********@. Needs a superuser,
+which the @postgres@ OS user is.
+
+The role is matched by its exact name, as 'CreateUser''s own existence test
+does: a name with upper case letters, which 'CreateUser' leaves unquoted and
+PostgreSQL folds, is never found and the check fails every pass (and @up@
+runs every pass, as it did without a check).
+-}
+roleAuthSql :: RoleName -> Text
+roleAuthSql name =
+    "SELECT CASE WHEN rolcanlogin THEN 't' ELSE 'f' END, coalesce(rolpassword, '') FROM pg_authid WHERE rolname = "
+        <> quoteLiteral name
+
+{- | The verdict on 'roleAuthSql''s output for this declared password.
+
+* No row: 'Failure', the role does not exist.
+* @NOLOGIN@: 'Failure', since @up@ declares @LOGIN@.
+* No password: 'Failure'.
+* A verifier the password matches: 'Success'.
+* A verifier the password does not match: 'Failure'.
+* A verifier this cannot recompute (an unknown scheme, a SCRAM one for a
+  password that is not pure ASCII, which PostgreSQL first normalizes with
+  SASLprep, or an absurd iteration count): 'Unknown'.
+-}
+interpretRoleAuthRow :: RoleName -> Password -> Text -> CheckResult
+interpretRoleAuthRow name pwd out =
+    case Text.lines (Text.strip out) of
+        [] -> Failure ("role " <> name <> " does not exist")
+        (row : _) -> case Text.breakOn "|" row of
+            (canLogin, rest)
+                | canLogin /= "t" -> Failure ("role " <> name <> " cannot log in")
+                | otherwise -> case Text.drop 1 rest of
+                    "" -> Failure ("role " <> name <> " has no password")
+                    verifier -> case matchesVerifier name pwd verifier of
+                        Just True -> Success
+                        Just False -> Failure ("the password of role " <> name <> " is not the declared one")
+                        Nothing -> Unknown
+
+{- | Whether the password is the one this verifier was made from; 'Nothing'
+when that cannot be told here (see 'interpretRoleAuthRow').
+-}
+matchesVerifier :: RoleName -> Password -> Text -> Maybe Bool
+matchesVerifier name pwd verifier
+    | Just hex <- Text.stripPrefix "md5" verifier
+    , Text.length hex == 32 =
+        Just (md5Verifier name pwd == verifier)
+    | Just params <- Text.stripPrefix "SCRAM-SHA-256$" verifier =
+        case Text.splitOn "$" params of
+            [iterSalt, keys]
+                | (iterText, saltText) <- Text.breakOn ":" iterSalt
+                , [(iters, "")] <- reads (Text.unpack iterText)
+                , iters > 0
+                , iters <= maxScramIterations
+                , Right salt <- Base64.decode (Text.encodeUtf8 (Text.drop 1 saltText))
+                , Text.all isAscii pwd.revealPassword ->
+                    Just (Text.splitOn ":" keys == scramKeys iters salt pwd)
+            _ -> Nothing
+    | otherwise = Nothing
+
+{- | A verifier asking for more rounds than this is answered 'Unknown'
+rather than computed: the check runs every pass, and PostgreSQL's own
+default is 4096.
+-}
+maxScramIterations :: Int
+maxScramIterations = 1000000
+
+-- | PostgreSQL's MD5 verifier: @md5@ and the hex MD5 of the password followed by the role name.
+md5Verifier :: RoleName -> Password -> Text
+md5Verifier name pwd =
+    "md5" <> Text.pack (show (Hash.hashWith Hash.MD5 (Text.encodeUtf8 (pwd.revealPassword <> name))))
+
+{- | A SCRAM-SHA-256 verifier as PostgreSQL writes it,
+@SCRAM-SHA-256$ITERATIONS:SALT$STOREDKEY:SERVERKEY@ (RFC 5802, RFC 7677),
+for a pure-ASCII password, which PostgreSQL uses as it is.
+-}
+scramVerifier :: Int -> ByteString.ByteString -> Password -> Text
+scramVerifier iters salt pwd =
+    "SCRAM-SHA-256$"
+        <> Text.pack (show iters)
+        <> ":"
+        <> Text.decodeUtf8 (Base64.encode salt)
+        <> "$"
+        <> Text.intercalate ":" (scramKeys iters salt pwd)
+
+-- | @[StoredKey, ServerKey]@, base64, as in the verifier.
+scramKeys :: Int -> ByteString.ByteString -> Password -> [Text]
+scramKeys iters salt pwd =
+    fmap (Text.decodeUtf8 . Base64.encode) [SHA256.hash clientKey, serverKey]
+  where
+    salted = pbkdf2Sha256 (Text.encodeUtf8 pwd.revealPassword) salt iters
+    clientKey = SHA256.hmac salted "Client Key"
+    serverKey = SHA256.hmac salted "Server Key"
+
+{- | PBKDF2-HMAC-SHA256 with a 32-byte output, the one block SCRAM-SHA-256
+needs: @U1 = HMAC(P, S || 1)@, @Ui = HMAC(P, Ui-1)@, their XOR.
+-}
+pbkdf2Sha256 :: ByteString.ByteString -> ByteString.ByteString -> Int -> ByteString.ByteString
+pbkdf2Sha256 pass salt iters = go (iters - 1) u1 u1
+  where
+    u1 = SHA256.hmac pass (salt <> ByteString.pack [0, 0, 0, 1])
+    go 0 _ acc = acc
+    go n u acc =
+        let u' = SHA256.hmac pass u
+         in go (n - 1 :: Int) u' (ByteString.pack (ByteString.zipWith xor acc u'))
 
 data Group = Group {groupRole :: RoleName}
     deriving (Show, Generic)
