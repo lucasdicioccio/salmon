@@ -35,6 +35,7 @@ guide_order() {
     serve-supervision) echo 140 ;;
     postgres-pair) echo 150 ;;
     gcp-toy-validation) echo 160 ;;
+    salmon-apps) echo 165 ;;
     comparison) echo 170 ;;
     *) echo 199 ;;
   esac
