@@ -72,7 +72,11 @@ buildContextAndTarget = requireExecutable "podman" $
         assertBool "down removed the image" (gone /= ExitSuccess)
 
 pullAndRun :: IO ()
-pullAndRun = requireExecutable "podman" $
-    withContainer (Podman.Image "alpine:latest") (Podman.PortMapping "18080" "80" Podman.TCPPort) $ \cid -> do
+pullAndRun = requireExecutable "podman" $ do
+    -- Not a fixed host port: it used to be 18080, and two runs of the suite
+    -- on one host (or a container a killed run left up) then made this fail
+    -- at `podman run` with "address already in use".
+    hostPort <- freeTcpPort
+    withContainer (Podman.Image "alpine:latest") (Podman.PortMapping hostPort "80" Podman.TCPPort) $ \cid -> do
         (code, out, _) <- readProcessWithExitCode "podman" ["inspect", "--format", "{{.State.Running}}", cid] ""
         assertBool "podman reports the container as Running" (code == ExitSuccess && "true" `isInfixOf` out)
