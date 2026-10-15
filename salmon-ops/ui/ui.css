@@ -287,6 +287,97 @@ button.danger { color: var(--danger); }
 #list li .ref { font-size: 11px; }
 #list li .deps { font-size: 11px; color: inherit; opacity: .8; }
 
+/* the rows view (opt-in): topological rows, dependency edges in a gutter */
+
+#view-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+#rows {
+  flex: 1;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  overflow: hidden;
+}
+#rows[hidden] { display: none; }
+
+#rows-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+#rows-bar select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
+#rows-bar .rows-hint { margin-left: auto; }
+
+#rows-scroll { flex: 1; overflow: auto; }
+
+#rows .row {
+  display: grid;
+  grid-template-columns: var(--gutter, 26px) 132px minmax(180px, 2fr) 190px minmax(140px, 3fr);
+  align-items: center;
+  column-gap: 10px;
+  height: 30px; /* ROW_H in ui.js: the gutter is drawn on this pitch */
+  padding-right: 10px;
+  white-space: nowrap;
+}
+#rows .row > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+#rows .rows-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+}
+
+#rows-body { position: relative; }
+#rows-gutter { position: absolute; top: 0; left: 0; pointer-events: none; }
+#rows-gutter path { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+#rows-gutter path.indirect { stroke-dasharray: 3 3; }
+#rows-gutter path.hi { stroke: var(--accent); stroke-width: 2.2; }
+#rows-gutter circle { fill: var(--pending); stroke: var(--pending-fg); stroke-width: 1.2; }
+#rows-gutter circle.stale { fill: var(--stale); stroke: var(--stale-fg); }
+#rows-gutter circle.converged { fill: var(--converged); stroke: var(--converged-fg); }
+#rows-gutter circle.errored { fill: var(--errored); stroke: var(--errored-fg); }
+#rows-gutter circle.blocked { fill: var(--blocked); stroke: var(--blocked-fg); }
+#rows-gutter circle.retiring { fill: var(--retiring); stroke: var(--retiring-fg); stroke-dasharray: 2 1.5; }
+
+#rows-list { list-style: none; margin: 0; padding: 0; }
+#rows-list li { cursor: pointer; border-bottom: 1px solid var(--line); }
+#rows-list li:hover { background: var(--bg); }
+#rows-list li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#rows-list li.selected { background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
+#rows-list li.touched .name { box-shadow: inset 0 -2px 0 var(--touch); }
+#rows-list .state {
+  justify-self: start;
+  max-width: 100%;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 12px;
+  background: var(--pending);
+  color: var(--pending-fg);
+}
+#rows-list li.stale .state { background: var(--stale); color: var(--stale-fg); }
+#rows-list li.converged .state { background: var(--converged); color: var(--converged-fg); }
+#rows-list li.errored .state { background: var(--errored); color: var(--errored-fg); }
+#rows-list li.blocked .state { background: var(--blocked); color: var(--blocked-fg); }
+#rows-list li.retiring .state { background: var(--retiring); color: var(--retiring-fg); }
+#rows-list .ref { font-size: 11px; color: var(--muted); }
+#rows-list .shorthand { font-weight: 600; }
+#rows-list .since { font-size: 12px; }
+#rows-list li.running .since { color: var(--accent); }
+#rows-list .progress { font-size: 12px; }
+
 /* the side panel ----------------------------------------------------- */
 
 #panel {
@@ -441,6 +532,11 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
 @media (max-width: 700px) {
   #graph-viewport, #legend { display: none; }
   #list { display: block; padding: 0; margin: 0; list-style: none; }
+  /* chosen, the rows view replaces the narrow list too */
+  body.view-rows #list { display: none; }
+  #rows .row { grid-template-columns: var(--gutter, 26px) 96px minmax(120px, 1fr) 96px; }
+  #rows .row > :nth-child(5) { display: none; }
+  #rows-bar .rows-hint { display: none; }
   #main { flex-direction: column; }
   #panel { width: auto; border-left: 0; border-top: 1px solid var(--line); max-height: 50vh; }
   #graph-wrap { padding: 16px; }

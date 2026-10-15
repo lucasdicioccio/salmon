@@ -1126,6 +1126,33 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   build's 11 events with `status: null`; the real `ui.js` run under node against that `/dag`, a pin
   remembered, refilled the window with the 11 lines and took none of the replayed events twice;
   master's `ui.js` showed it empty). Not looked at in a browser.
+  **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
+  opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
+  in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and
+  the only change to the default page is that button). One row per node in a topological order
+  computed in the page (Kahn, ties in `/dag`'s order, since `dagOrder` is not dependency-first;
+  what a cycle keeps from being ready is appended), with state, `#short` and shorthand, a "since"
+  cell and a "progress" cell, and on the left a gutter drawn like `git log --graph`: a node's lane
+  runs from its row to its last dependant's, a node takes the lane of a dependency that ends on its
+  row (so a chain is one straight line), else the lowest free lane; lanes narrow past 280px rather
+  than widen the gutter. Same selection, panel and edge highlight as the graph. A filter by state
+  keeps the edges through hidden rows as dashed lines to the nearest shown dependencies. **No
+  server change, so its times are the page's own**: a state is stamped when the page sees it
+  change (a node in the first `/dag` has no "since"; one in a later `/dag` was just declared), a
+  run is timed from `eval` to `done`/`failed` as they arrive, and a run already under way in a
+  node's `tail` when the page first sees the node is shown as a lower bound (`running ≥ 3s`). A
+  page reload loses them; a re-fetch of `/dag` keeps them. "progress" is the node's last
+  `msg|` line (`NodeLog.say`) since its last `eval`, from the stream or seeded from `tail`; for a
+  node that said nothing it shows the last failure reason, muted. The hidden view is not drawn
+  (switching calls `render()`), and the graph's first fit waits until its viewport has a size. Run:
+  the pure parts (`topoOrder`, `shownDeps`, `gutterLayout`, `tailRun`) extracted and checked under
+  node on 200 random DAGs (dependencies precede, filtered edges are nearest shown ancestors, no two
+  nodes share a lane over overlapping spans) and a 20k-node layered graph (~60ms, 101 lanes); the
+  page in a private headless Chrome against `salmon-ops-serve-fixture run serve --http` (via
+  `socat` to TCP) with `--build`, a seed failing under `/proc` (errored, blocked), the filter,
+  selection, reload and a 600px width. Not done: server-side timestamps (would need `/dag` or
+  `/status`, the openapi document and the goldens), a time-axis strip; the Rust client and
+  `salmon-tui` have no rows view.
   Test/ServeEventsSpec.hs`: a
   seeded (`SALMON_EVENTS_SEED`) mid-pass disconnect-and-`?since=` equals an uninterrupted
   subscription; strictly increasing numbers across the three streams with `supervise on` and
