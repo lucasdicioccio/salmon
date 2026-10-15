@@ -198,7 +198,11 @@ would otherwise run on every member.
     a *new* scope (`patroniArchiveRecovering`). Rendered; never run.
   - Shown in a container (`Test.PgBackRestSpec`, Layer 2): recovery to a
     timestamp on a plain cluster, and a second Patroni member made by
-    pgBackRest rather than by a base backup. T7 on the three VMs is not run.
+    pgBackRest rather than by a base backup.
+  - Shown on the three VMs (`Test.PatroniArchiveVmsSpec`, Layer 3): the same
+    second member, on its own guest, with etcd on a third. The repository is
+    copied to that guest after the backup, standing in for a shared mount;
+    etcd's join phase (T7's other half) is not part of it.
   - Two defects in the Patroni builtin surfaced on the way, both from keeping
     the configuration outside the data directory: `bootstrap.pg_hba` never
     reaches a replica (now `postgresql.pg_hba`), and Patroni does not create
@@ -299,7 +303,8 @@ appears in a directive" is a rule rather than a guideline.
 3. **`Patroni`** plus the cluster-wide config node; T1, T3, T4.
 4. **Routing:** multi-host connection strings first, then HAProxy; T2, T6.
 5. **Archive and PITR** (pgBackRest or WAL-G), and backups on one member; T7.
-   *pgBackRest builtin and the Patroni wiring are in; T7 itself is not run.*
+   *pgBackRest builtin and the Patroni wiring are in; T7's replica from the
+   archive runs on the VMs, its etcd join does not.*
 6. **The opt-in preferred leader.**
 
 ## Open questions

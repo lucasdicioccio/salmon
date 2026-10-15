@@ -507,7 +507,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `backup-standby` and a second pg host, not rendered. `Test/PgBackRestSpec.hs` Layer 2 runs the
   rendered words in a container: PITR to a timestamp on a plain cluster, and two Patroni members
   on one etcd where the second is asserted (from Patroni's log) to have been made by pgBackRest.
-  The filesystem nodes themselves and S3 are not exercised there.
+  The filesystem nodes themselves and S3 are not exercised there. `Test/PatroniArchiveVmsSpec.hs`
+  is T7 on the three-VM harness, driven the same way (pure output over ssh, `Patroni.checkMember`
+  from the host): etcd on guest 2, the first member and the backup on guest 1, a configuration-only
+  member on guest 3. The repository is *copied* from guest 1 to guest 3 after the backup (the
+  guests have no shared mount), so the "every member reads one repository" half is simulated. On
+  these 9p-root guests etcd cannot keep its data under `/var/lib` (bbolt's `mmap` fails) nor on
+  `/run` (smaller than its 64 MB WAL preallocation); it uses `/dev/shm`. The Patroni harness uses
+  its own addresses (`10.99.0.11`-`.13`), apart from the other VM specs' `.2`-`.5`.
 - **`Actions/UpDown.hs`** implements graph execution. Both directions run the same way: `expand`
   the `OpGraph` to a `Cofree Graph`, collapse that to a `Ref`-keyed DAG with `Salmon.Op.Dag`
   (below), then walk it. `upDag` walks it in dependency order — a node is applied once everything

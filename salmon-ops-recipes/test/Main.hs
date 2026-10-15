@@ -51,6 +51,7 @@ import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
 import qualified Test.PatroniSpec as PatroniSpec
 import qualified Test.PatroniPreferredLeaderSpec as PatroniPreferredLeaderSpec
+import qualified Test.PatroniArchiveVmsSpec as PatroniArchiveVmsSpec
 import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
@@ -126,6 +127,7 @@ main =
                 , PgBackupSpec.tests
                 , PgPairDemoSpec.tests
                 , PatroniHarnessSpec.tests
+                , PatroniArchiveVmsSpec.vmTests
                 , -- the user's own systemd manager and podman
                   QuadletUserSpec.tests
                 , SystemdJobSpec.userTests
@@ -176,6 +178,7 @@ main =
             , EtcdSpec.tests
             , PatroniSpec.tests
             , PatroniPreferredLeaderSpec.tests
+            , PatroniArchiveVmsSpec.tests
             , PgBackRestSpec.tests
             , PostgresPairSpec.tests
             , PostgresPairPrereqsSpec.tests
