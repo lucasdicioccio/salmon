@@ -54,8 +54,9 @@ no mapping and changes nothing on the gateway; what the evidence does not
 settle is @unknown@.
 
 Not done (follow-ups in the feature): the filtering half of the NAT type.
-The @natpmpc@ parser follows the
-tool's documented output and has no captured fixture yet.
+The @natpmpc@ parser's no-answer case is pinned by a captured run
+(@test/fixtures/natpmpc-no-answer.txt@); its answer case still follows the
+tool's source, not a capture.
 -}
 module Report (
     main,
