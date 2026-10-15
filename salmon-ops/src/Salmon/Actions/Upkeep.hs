@@ -203,6 +203,7 @@ module Salmon.Actions.Upkeep (
     supervisorStatuses,
     supervisorMailboxes,
     supervisorTending,
+    supervisorThreads,
     instruct,
 
     -- * Machines that outlive a supervisor
@@ -215,9 +216,9 @@ module Salmon.Actions.Upkeep (
     Report (..),
 ) where
 
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async, async, cancel, poll, waitCatch, waitCatchSTM, withAsync)
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent (ThreadId, forkIO, threadDelay)
+import Control.Concurrent.Async (Async, async, asyncThreadId, cancel, poll, waitCatch, waitCatchSTM, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, orElse, readTVar, readTVarIO, registerDelay, retry, writeTVar)
 import Control.Exception (SomeAsyncException, SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Monad (filterM, forM, forM_, unless, void, when)
@@ -593,6 +594,12 @@ supervisorMailboxes = fmap machineMailbox . supMachines
 -- | Which nodes are being tended, and which way each.
 supervisorTending :: Supervisor ext -> Map Ref Direction
 supervisorTending = fmap machineDirection . supMachines
+
+{- | The thread running each node's machine. For a caller measuring what a
+machine costs (its stack, see 'napTimer'); nothing here needs it.
+-}
+supervisorThreads :: Supervisor ext -> Map Ref ThreadId
+supervisorThreads = fmap (asyncThreadId . machineThread) . supMachines
 
 {- | Tell one node something. 'False' if the node has no machine here, or if
 its mailbox was full and an older instruction had to be evicted to make room
@@ -1793,12 +1800,39 @@ standby ctx dir =
                 broken <- readTVar (underFailed u)
                 if any (`Set.member` broken) watched then retry else pure Elapsed
 
+{- | 'registerDelay', run on a short-lived thread of its own rather than on
+the machine's.
+
+This is about memory, not time. Registering a timeout inserts into the
+runtime's timer queue, and that insertion runs on the calling thread and is
+deeper the more timeouts are outstanding — with every machine of a large
+supervisor napping at once, deep enough to overflow a thread's first stack
+chunk (1 KiB). An overflowing thread is moved, frames and all, onto a fresh
+chunk of @+RTS -kc@ (32 KiB by default) and stays there once the insertion
+has returned, because nothing it does afterwards ever returns past the frames
+that moved with it. One such chunk per machine was nearly all of what a
+supervisor retained: about 32 KiB a node, so 100 000 tended nodes did not fit
+in a 4 GB heap. A thread that only registers and exits takes the deep frames
+with it, and the machine keeps the stack it started with. See
+@resources\/graph-profiles.md@, finding 6.
+
+Costs one thread creation per nap. Naps are taken on the delay ladder
+('delayFloor' and up), so that is noise next to the nap itself. Whatever
+'registerDelay' throws (it refuses to run without @-threaded@) is rethrown
+here, on the machine, as it was before.
+-}
+napTimer :: Micros -> IO (TVar Bool)
+napTimer d = do
+    box <- newEmptyMVar
+    _ <- forkIO (try @SomeException (registerDelay (unMicros d)) >>= putMVar box)
+    either throwIO pure =<< takeMVar box
+
 {- | Sleep, unless an instruction arrives or the supervisor stops — so an
 instruction is never queued behind a 60s nap.
 -}
 naptime :: Ctx ext -> Micros -> IO Wake
 naptime ctx d = do
-    timer <- registerDelay (unMicros d)
+    timer <- napTimer d
     atomically $
         halting HeedHalt ctx $
             listen ctx $ do
@@ -1810,7 +1844,7 @@ any dependency that opted into demoting this node.
 -}
 napWatching :: Ctx ext -> Armed -> Micros -> IO Wake
 napWatching ctx armed d = do
-    timer <- registerDelay (unMicros d)
+    timer <- napTimer d
     atomically $
         halting HeedHalt ctx $
             crossing ctx armed $
@@ -1840,7 +1874,7 @@ minute long.
 -}
 naptimeHolding :: Ctx ext -> Async ExitCode -> Armed -> Micros -> IO Wake
 naptimeHolding ctx running armed d = do
-    timer <- registerDelay (unMicros d)
+    timer <- napTimer d
     atomically $
         halting IgnoreHalt ctx $
             crossing ctx armed $

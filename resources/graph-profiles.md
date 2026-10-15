@@ -6,8 +6,9 @@ by the `graph-profiles` benchmark in `salmon-ops-recipes` over the synthetic gra
 other work was using. Read the growth and the order of magnitude, not the third digit.
 
 This document reports. The super-linear findings are listed with what was measured and,
-separately, what reading the code suggests is the cause. Two have been fixed since: finding 5
-(the client model's teardown: see "Since fixed" below) and finding 1 (`foldDag` per path: see
+separately, what reading the code suggests is the cause. Three have been fixed since: finding 5
+(the client model's teardown) and finding 6 (what a tended node retains), both under "Since
+fixed" below, and finding 1 (`foldDag` per path: see
 "After the per-node fold", which gives the fold, `query plan` and the `serve` loop before and
 after, and what else changed). The others stand as measured, and the findings and the two big
 tables below are the 2026-10-10 run, left as measured.
@@ -145,7 +146,8 @@ not itself profiled.
    and 1.0 GB allocated at 30 000 (fan), 2.0 s at 30 000 (tree2); at 100 000 the heap bound was
    hit on both. Over managed nodes on a fan it is abandoned at 3 000. A `serve` loop over tree2
    hit the heap bound at 100 000 as well (260 ms to record and 1.1 s for the first pass at
-   30 000).
+   30 000). **Explained and fixed since** (32 KiB of thread stack a machine, from registering
+   its nap timer): see "Since fixed".
 7. **Per node, where nothing above applies:** the sequential walks cost about 8 to 10 µs a node at 100 000
    (25 s at 1 000 000), `fromMagma` and `mergeDag` 10 to 14 µs, expansion alone 0.3 to 1.5 µs an
    occurrence, the ledger reads well under a microsecond a node. A rewrite of sixteen batches
@@ -167,7 +169,7 @@ One per finding worth fixing, in the order the numbers suggest. The first and th
 4. Listed paths that do not cost depth per node (finding 4): shared prefixes, a length cap, or
    listing on request.
 5. `Client.Model.step` removing a node without filtering the order list (finding 5). **Done.**
-6. What a tended node retains (finding 6): not investigated beyond the heap bound being hit.
+6. What a tended node retains (finding 6). **Done**: see "Since fixed".
 
 ### Since fixed
 
@@ -209,6 +211,57 @@ What this does not say:
   change only (`client-fromdag-after.tsv`), so the comparison is with the original run of the day
   before under another load: allocation is up by 11 to 15 % (27 to 31 MB at 10 000 on a chain, 289
   to 322 MB at 100 000 on tree2), and the times (25 to 33 ms, 470 to 802 ms) are not comparable.
+
+**Finding 6, what a tended node retains** (2026-10-15). A heap profile by closure type (`+RTS
+-hT`) of `startUpkeep` over 30 000 settled nodes of tree2 put 949 MB of the 1.05 GB live in
+`STACK` objects: 31.6 kB a machine, the runtime's 32 KiB stack chunk (`+RTS -kc`). Cloning the
+machines' stacks (`GHC.Stack.CloneStack`, `ghc-heap`'s `decodeStack`) showed a machine at rest
+is 15 frames, inside the 1 KiB chunk a thread starts with; yet from about a thousand nodes up
+nearly every machine's only chunk was a 4 093-word one. The cause is `registerDelay`, which each
+machine calls for every nap: it inserts into the runtime's timer queue *on the calling thread*,
+deeper the more timeouts are outstanding. A machine overflowing its first chunk there is moved,
+frames and all, to a 32 KiB chunk, and never returns past those frames, so it keeps it. (A bare
+program of threads that each `registerDelay` and block shows the same: 2 % of them at 10 000,
+and 100 000 of them exhaust a 1 GB heap.) The nap's timeout is now registered on a short-lived
+thread of its own (`Upkeep.napTimer`, one `forkIO` a nap); the machine keeps its 1 KiB chunk.
+After, at 30 000: 115 MB live, `STACK` 27 MB, about 3.9 kB a node, the largest remaining item
+being closures (`FUN`, 24 MB).
+
+Run, before (master `8184fb1`) and after, same machine as above, 2026-10-15, load average 4 to 19
+from other work (the first, wider run was during the higher load), budget 6 s, heap 4 GB:
+
+```sh
+cabal bench salmon-ops-recipes:graph-profiles --benchmark-options='--max-size 100000 --budget 6 \
+  --heap 4g --only "tend nodes" --only "bring nodes" --shape tree2 --out rows.tsv'
+```
+
+twice each side, alternating (`resources/graph-profiles/upkeep-retention-{before,after}.tsv`), and
+once more over `upkeep` and `loop` on chain, fan and tree2 (not checked in). Peak memory is the
+series process's own `max_mem_in_use_bytes`.
+
+| tree2 | before | after |
+|---|---|---|
+| settled, `startUpkeep` at 30 000 | 5.9 s / 4.2 s, 1.3 / 1.1 GB allocated | 2.1 s / 1.8 s, 322 MB allocated |
+| settled, largest size reached | 30 000 (budget, both runs); heap bound at 100 000 in the wide run | 100 000: 8.8 s, 1.1 GB allocated |
+| settled, peak memory in use | 1 144 MiB at 30 000 | 250 MiB at 30 000, 1 016 MiB at 100 000 |
+| unsettled, until every machine is stable at 30 000 | 4.7 s / 4.1 s, 1.0 / 1.1 GB allocated | 1.5 s / 1.4 s, 195 MB allocated |
+| unsettled, largest size reached | 30 000 (budget); heap bound at 100 000 in the wide run | 30 000 (budget once, timeout at 100 000 once) |
+
+Fan, settled, in the wide run: 30 000 and 1 147 MiB before, 100 000 and 1 008 MiB after. The
+`serve` loop over tree2 no longer hits the heap bound at 100 000 (`exit 251` before); it stops
+on the budget at 30 000, its first pass taking 2.5 s.
+
+What this does not say:
+
+- **Times are noisy; the memory is not.** The load moved by a factor of four between runs and
+  some "after" times in the wide run are slower than "before" for series the change cannot
+  touch (`loop: clear`, `record a declaration`). Read the allocation and the peak memory.
+- **Unsettled at 100 000 is still not reached**, now by time rather than memory. Not
+  investigated.
+- **The managed series and chain are unchanged in regime**: chain is bounded by `Dag.stuck`
+  (finding 2) at a few thousand nodes before memory matters, and a managed node holds its
+  action's thread too.
+- *Not run:* real nodes, a failing or restarting node, `+RTS -N`, anything above 100 000.
 
 ## After the per-node fold
 
@@ -276,7 +329,8 @@ What the numbers say, and what they do not:
 - `Model.step` for the `upkeep` and `output` event kinds; `Model.rebase`.
 - The HTTP server itself, the event ring, the socket listener, TLS, pull mode: only the pure
   renders behind `/dag` and `/status` and the status sink's document were timed.
-- A supervisor that is tending: only start, settle and stop. No node here ever fails, restarts,
+- A supervisor that is tending: only start, settle and stop (and, for finding 6, a heap profile
+  of the settled series at 30 000). No node here ever fails, restarts,
   or is watched by a real `check`.
 - More than one capability (`+RTS -N`), profiling builds, and any real node (no process is
   spawned, no file is written).

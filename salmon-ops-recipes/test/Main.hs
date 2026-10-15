@@ -77,6 +77,7 @@ import qualified Test.QuadletUserSpec as QuadletUserSpec
 import qualified Test.SystemdJobSpec as SystemdJobSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
+import qualified Test.UpkeepRetentionSpec as UpkeepRetentionSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
 import qualified Test.WindowSpec as WindowSpec
 
@@ -194,5 +195,6 @@ main =
             , SystemdSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests
+            , UpkeepRetentionSpec.tests
             , WindowSpec.tests
             ]

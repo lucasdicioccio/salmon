@@ -378,10 +378,11 @@ declaration with it; **fixed since**, see `Op/Dag.hs` below: 100 000 nodes of di
 in about 2 s); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
 `startUpkeep` (chain of 3 000: 2 s); a node with many edges is quadratic in `record`,
 `fromMagma`, `transposeOf` and `Query.outline`; listed paths cost depth per node in time and
-memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes does
-not fit in 4 GB. Only the `foldDag` and `Client.Model.step` ones are fixed (see `Op/Dag.hs` and
-`Client/Model.hs` below; the latter's before and after rows are
-`client-step-{before,after}.tsv`, the former's `folddag-per-node-{before,after}.tsv`). The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
+memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes did
+not fit in 4 GB. The `foldDag`, `Client.Model.step` and supervisor ones are fixed (see
+`Op/Dag.hs`, `Client/Model.hs` and `Actions/Upkeep.hs` below; their before and after rows are
+`folddag-per-node-{before,after}.tsv`, `client-step-{before,after}.tsv` and
+`upkeep-retention-{before,after}.tsv`). The ordinary suite has a guard (`Test.GraphScaleSpec`): outline,
 a selector, listed paths, `fromMagma`, `mergeDag`, `stuck` and the walks over the three sharing
 shapes at 600 nodes within a minute each, which tells per-node from per-path and times
 nothing. *Not run:* more than one capability, real nodes, a tending supervisor, the HTTP server
@@ -673,6 +674,28 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   records its failures where no dependant reads them, and the first time it takes a path that
   heeds the halt flag (which, before `RestForOne`, it never did) it reads one that is
   permanently set and quietly exits, orphaning the process it holds.
+  **What a machine costs to keep is its thread's stack, so nothing deep may run on it.** A
+  machine's resting stack is 15 frames, under the runtime's first 1 KiB chunk; a thread that
+  ever goes past that chunk is moved, frames and all, onto a `+RTS -kc` chunk (32 KiB) and
+  stays there, since a machine never returns past those frames. `registerDelay` did exactly
+  that: the insertion into the runtime's timer queue runs on the caller and deepens with the
+  number of timeouts outstanding, so from about a thousand tended nodes up nearly every machine
+  held 32 KiB (`STACK` was 949 MB of 1.05 GB live at 30 000 nodes; 100 000 did not fit in
+  4 GB). Every nap's timeout is now registered by `napTimer` on a short-lived thread of its own
+  (one `forkIO` per nap; the watchdog's single loop still calls `registerDelay` itself). After:
+  about 3.9 kB live a node at 30 000 (`STACK` 27 MB), and 100 000 settled nodes in about 1 GB.
+  The one other cost per nap is that thread; nothing else changed. `supervisorThreads` exposes
+  the machines' threads for a caller measuring them. *Guarded by* `Test.UpkeepRetentionSpec`
+  (clones every machine's stack at 3 000 nodes and compares with a fresh thread's; fails
+  without the change, 2 500 to 2 750 of 3 000 machines at 4 093 words), with a unit case per
+  fixture shape and a QuickCheck property (random graphs up to 40 nodes, a random script of
+  `Recheck`/`Force`/`Satisfy`/`Pause`/`Resume`, checked for convergence, dependency order by a
+  causal log of `check`/`up` entries, no unforced `up` under a satisfied check, and a clean
+  stop). Anything new that runs on a machine and recurses with the size of the graph (a `Map`
+  built there rather than in `startUpkeep`, a fold over every node) brings the 32 KiB back.
+  Measured: `startUpkeep`/stable/`stopUpkeep` in-process over no-op nodes, before and after,
+  `resources/graph-profiles.md` "Finding 6". *Not run:* real nodes, failing or restarting
+  nodes, managed nodes beyond the benchmark's hold/adopt series, `+RTS -N`.
 - **`Op/Supervision.hs`** is the per-node policy the above reads: `Restart`
   (`Always`/`OnFailure`/`Never`, default `OnFailure`), a `Strategy`
   (`OneForOne`/`RestForOne`, default `OneForOne`) and an optional watchdog, carried on
