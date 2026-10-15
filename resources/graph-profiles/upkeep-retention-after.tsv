@@ -1,0 +1,79 @@
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	100	100	99	100	0.003169	1040168	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	100	100	99	100	0.000086	23360	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	100	100	99	100	0.000257	47304	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	300	300	299	300	0.011278	3247688	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	300	300	299	300	0.000287	71760	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	300	300	299	300	0.000510	127216	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	1000	1000	999	1000	0.046135	10104216	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	1000	1000	999	1000	0.001424	399872	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	1000	1000	999	1000	0.001798	1204176	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	3000	3000	2999	3000	0.173701	31561888	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	3000	3000	2999	3000	0.009801	1187600	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	3000	3000	2999	3000	0.014922	4083368	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	10000	10000	9999	10000	0.662328	104413280	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	10000	10000	9999	10000	0.003718	2086728	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	10000	10000	9999	10000	0.045113	22612168	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	30000	30000	29999	30000	2.074637	322262824	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	30000	30000	29999	30000	0.015322	6246704	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	30000	30000	29999	30000	0.170140	101018088	ok
+upkeep	tend nodes already up (settled)		nodes	tree2	30000	30000	29999	30000	0.000000	0	stop:budget
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	100	100	99	100	0.003784	923192	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	100	100	99	100	0.002222	407744	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	100	100	99	100	0.000424	47944	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	300	300	299	300	0.009990	2731296	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	300	300	299	300	0.005627	1396344	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	300	300	299	300	0.000521	126544	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	1000	1000	999	1000	0.031551	9462312	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	1000	1000	999	1000	0.017806	4819616	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	1000	1000	999	1000	0.001467	418336	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	3000	3000	2999	3000	0.163703	29956592	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	3000	3000	2999	3000	0.062971	15065632	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	3000	3000	2999	3000	0.004362	1246648	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	10000	10000	9999	10000	0.676498	104960344	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	10000	10000	9999	10000	0.316610	53707888	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	10000	10000	9999	10000	0.033592	4154032	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	30000	30000	29999	30000	1.998172	329201160	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	30000	30000	29999	30000	1.527937	195952448	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	30000	30000	29999	30000	0.109441	15105448	ok
+upkeep	bring nodes up (unsettled)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:timeout
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	100	100	99	100	0.006205	1040168	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	100	100	99	100	0.000021	22504	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	100	100	99	100	0.000211	47944	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	300	300	299	300	0.006637	3255312	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	300	300	299	300	0.000121	64960	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	300	300	299	300	0.000359	126576	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	1000	1000	999	1000	0.028553	9478440	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	1000	1000	999	1000	0.000613	215816	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	1000	1000	999	1000	0.003551	1806672	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	3000	3000	2999	3000	0.134072	31511952	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	3000	3000	2999	3000	0.006083	1185304	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	3000	3000	2999	3000	0.008343	4115776	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	10000	10000	9999	10000	0.556564	109056080	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	10000	10000	9999	10000	0.017333	3694392	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	10000	10000	9999	10000	0.046248	17405632	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	30000	30000	29999	30000	1.802570	320536160	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	30000	30000	29999	30000	0.012542	6288592	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	30000	30000	29999	30000	0.171575	102335464	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	tree2	100000	100000	99999	100000	8.823968	1130557976	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	tree2	100000	100000	99999	100000	0.146337	21173832	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	tree2	100000	100000	99999	100000	1.618380	628140376	ok
+upkeep	tend nodes already up (settled)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:budget
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	100	100	99	100	0.002848	940832	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	100	100	99	100	0.002875	382064	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	100	100	99	100	0.000251	48160	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	300	300	299	300	0.008214	2730392	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	300	300	299	300	0.003670	1401304	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	300	300	299	300	0.000462	127216	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	1000	1000	999	1000	0.034097	9462384	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	1000	1000	999	1000	0.016254	4819616	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	1000	1000	999	1000	0.001371	417736	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	3000	3000	2999	3000	0.137453	29933496	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	3000	3000	2999	3000	0.058172	15097528	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	3000	3000	2999	3000	0.005339	1246648	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	10000	10000	9999	10000	0.791998	105007520	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	10000	10000	9999	10000	0.356945	53692088	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	10000	10000	9999	10000	0.046587	4151984	ok
+upkeep	bring nodes up (unsettled)	startUpkeep	nodes	tree2	30000	30000	29999	30000	2.337525	328693512	ok
+upkeep	bring nodes up (unsettled)	until every machine is stable	nodes	tree2	30000	30000	29999	30000	1.382573	194405528	ok
+upkeep	bring nodes up (unsettled)	stopUpkeep	nodes	tree2	30000	30000	29999	30000	0.116940	14782256	ok
+upkeep	bring nodes up (unsettled)		nodes	tree2	30000	30000	29999	30000	0.000000	0	stop:budget
