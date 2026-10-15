@@ -312,6 +312,17 @@ containers (see `salmon-ops-recipes/test/Test/Harness.hs` and `Test.PostgresInit
 pattern) — those need a working `podman` on the machine running the tests and are skipped loudly
 if it's missing.
 
+`withContainer` publishes the host port its caller names, and a fixed port is shared by every
+run of the suite on the host: `Test.PodmanSpec` used `18080` and failed on 2026-10-15 with a bare
+"starting the sandbox container failed", which was `podman run` exiting 126 on `rootlessport
+listen tcp 0.0.0.0:18080: bind: address already in use` (reproduced by holding a port with a
+listener; what held 18080 that morning was not identified, and it was free again by 09:43). Since
+then a failed pull or run fails with each failed podman command's argv, exit code and stderr
+(`podmanFailures`), plus a hint when the port is taken; a run that fails at start has its
+Created container removed (before, `bracket` never got the name, and each failure leaked one).
+`Test.PodmanSpec` takes a kernel-chosen port (`freeTcpPort`); the Postgres/pgBackRest/pg_textsearch
+specs still use fixed ports 15432-15441, each its own, so two concurrent suites still clash there.
+
 **Synthetic graphs for scale (`salmon-ops-recipes/test/Test/GraphFixture.hs`).** A generator
 `generateWith options shape size seed :: Op` for testing scale on purpose. It is a recursive
 unfold: `successors` maps a node number to the numbers it depends on (node 0 is the root, a

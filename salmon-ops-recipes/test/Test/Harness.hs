@@ -34,6 +34,8 @@ module Test.Harness (
     -- * podman-backed sandboxes (Layer 2)
     podmanTrack,
     withContainer,
+    freeTcpPort,
+    podmanFailures,
     podmanExec_,
     podmanExecCapture,
 
@@ -59,14 +61,17 @@ module Test.Harness (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket, bracket_)
+import Control.Exception (bracket, bracket_, onException)
 import Control.Monad (forM_, unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
+import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef
 import qualified Data.ByteString.Lazy as LByteString
 import Data.List (isInfixOf)
 import qualified Data.List as List
+import Data.Maybe (mapMaybe)
 import qualified Data.Text as Text
+import qualified Network.Socket as Socket
 import Numeric (showHex)
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (downTree, upTree)
@@ -88,7 +93,7 @@ import System.IO (Handle, hPutStrLn, stderr)
 import System.Posix.IO (FdOption (CloseOnExec), createPipe, fdToHandle, setFdOption)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.User (getEffectiveUserID, getLoginName)
-import System.Process (readProcessWithExitCode)
+import System.Process (CmdSpec (..), CreateProcess (cmdspec), readProcessWithExitCode)
 
 -- | Build a reporter that accumulates every emitted value, in order, plus a
 -- way to read them back out. Good enough for single-threaded test runs.
@@ -217,16 +222,83 @@ withContainer img pm act =
     bringUp :: IO (String, Op)
     bringUp = do
         cname <- freshContainerName
-        (reporter, _) <- capture
+        (reporter, readBack) <- capture
         let reg = Podman.dockerRegistry
             opts = Podman.noRunOptions{Podman.runPorts = [pm]}
             pullOp = Podman.pullImage reporter podmanTrack reg img
             runOp = Podman.runContainer reporter podmanTrack reg img cname opts
+            failWith what = do
+                failures <- podmanFailures <$> readBack
+                fail $
+                    "withContainer: "
+                        <> what
+                        <> " failed"
+                        <> concatMap ("\n  " <>) failures
+                        <> portHint failures
         pullOk <- runUp pullOp
-        unless pullOk (fail "withContainer: pulling the sandbox image failed")
-        runOk <- runUp runOp
-        unless runOk (fail "withContainer: starting the sandbox container failed")
+        unless pullOk (failWith "pulling the sandbox image")
+        -- A `podman run` that fails at start leaves the container behind,
+        -- Created, under a name 'bracket' never hands to 'cleanup': remove it
+        -- here, or every failed run leaks one.
+        runOk <- runUp runOp `onException` runDown runOp
+        unless runOk $ do
+            _ <- runDown runOp
+            failWith "starting the sandbox container"
         pure (Text.unpack (Podman.getContainerName cname), runOp)
+
+    portHint :: [String] -> String
+    portHint failures
+        | any ("address already in use" `isInfixOf`) failures =
+            "\n  host port "
+                <> Text.unpack (Podman.portOnHost pm)
+                <> " is taken: another run of the suite on this host, or a container left over from a killed one"
+                <> " (podman ps -a --filter name=salmon-ops-recipes-test-)"
+        | otherwise = ""
+
+{- | Every podman command in a captured trace that exited non-zero, as its
+argv, exit code and stderr: what 'withContainer' says when it fails, instead
+of a bare "failed".
+-}
+podmanFailures :: [Podman.Report] -> [String]
+podmanFailures = mapMaybe (failed . binaryReport)
+  where
+    binaryReport :: Podman.Report -> Maybe Binary.Report
+    binaryReport r = case r of
+        Podman.PullImage _ _ b -> Just b
+        Podman.BuildImage _ _ b -> Just b
+        Podman.PushImage _ _ b -> Just b
+        Podman.LoginRegistry{} -> Nothing
+        Podman.LogoutRegistry _ _ b -> Just b
+        Podman.RunContainer _ _ _ _ b -> Just b
+        Podman.CreateNetwork _ b -> Just b
+        Podman.RemoveImage _ _ b -> Just b
+        Podman.RemoveBuiltImage _ b -> Just b
+        Podman.RemoveContainer _ b -> Just b
+        Podman.RemoveNetwork _ b -> Just b
+
+    failed :: Maybe Binary.Report -> Maybe String
+    failed (Just (Binary.Requested _ b)) = failed (Just b)
+    failed (Just (Binary.CommandStopped p (ExitFailure n) _ err)) =
+        Just (unwords (argv p) <> " exited " <> show n <> ": " <> ByteString.unpack (trimEnd err))
+    failed _ = Nothing
+
+    argv p = case cmdspec p of
+        RawCommand exe args -> exe : args
+        ShellCommand cmd -> [cmd]
+
+    trimEnd = ByteString.dropWhileEnd (`elem` (" \n\r\t" :: String))
+
+{- | A TCP port nothing listens on right now, from the kernel: bind port 0 on
+every address (as podman's rootlessport binds a published port), read it
+back, close. Still a race with whatever binds next, but no longer one fixed
+number shared by every concurrent run of the suite on the host.
+-}
+freeTcpPort :: IO Text.Text
+freeTcpPort =
+    bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \sock -> do
+        Socket.bind sock (Socket.SockAddrInet 0 0)
+        port <- Socket.socketPort sock
+        pure (Text.pack (show port))
 
 -- | CPU time at picosecond resolution is more than enough entropy to keep
 -- concurrent\/successive test containers from colliding on a name.
