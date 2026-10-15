@@ -59,6 +59,10 @@ for the argument, and [the Postgres pair guide](/docs-postgres-pair.html) for
 what it does and does not promise (it is an operator-decided failover, never
 an automatic one).
 
+Already using Ansible or Terraform, or Patroni or repmgr? [**How salmon
+compares**](/docs-comparison.html) sets it next to them: what it does that
+they do not, and when one of them is the better choice.
+
 The code is on GitHub at
 [`lucasdicioccio/salmon`](https://github.com/lucasdicioccio/salmon). It is a
 Haskell cabal multi-package project: `salmon-core` (the graph model, no IO),
@@ -95,6 +99,8 @@ just spawned), and the actions the input language offers on it:
   supervision, the HTTP API, the web UI, pull mode and the status sink.
 - [**A Postgres pair**](/docs-postgres-pair.html) — a primary that is a
   declaration, not a discovery: switchover, refused failovers, rejoins.
+- [**How it compares**](/docs-comparison.html) — next to Ansible/Terraform
+  and Patroni/repmgr, and when to choose one of those instead.
 - [**Builtins, recipes and binaries**](/builtins.html) — every node module,
   recipe and shipped binary, one line each.
 - [**Guides**](/docs.html) and [**Specs**](/specs.html) — the documentation

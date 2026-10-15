@@ -59,6 +59,10 @@ published here.
 - [**Validating the GCP builtins against a real project**](/docs-gcp-toy-validation.html)
   — the playbook for exercising the `Gcp.*` builtins in a sandbox you are
   willing to destroy, with the `salmon-gcp-toy` binary.
+- [**Salmon next to Ansible, Terraform, Patroni and repmgr**](/docs-comparison.html)
+  — what salmon does that a general provisioner or a Postgres HA tool does
+  not, what they do that salmon does not, and when to choose one of them
+  instead.
 
 One more document exists only in the repository:
 
