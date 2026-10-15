@@ -928,11 +928,14 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                             traverse_ (`StatusSink.sinkObserver` acc) msink
                         more = foldMap (pure . Socket.listenerProducer) mlistener <> foldMap (pure . Http.serverProducer) mserver
                         -- what a node says while it works: to the loop's own
-                        -- reporter (text or JSON, as `fmt` says) and, with a
-                        -- server, to /events on the `output` stream
+                        -- reporter (text or JSON, as `fmt` says), with a
+                        -- server to /events on the `output` stream, and with
+                        -- a socket to the client whose command it belongs to
                         nodeLogR = maybe id (\srv nr -> reportBoth nr (Http.serverNodeLogReporter srv)) mserver (Tagged.nodeLogStream tagged)
-                    void . NodeLog.withSink nodeLogR $
-                        Serve.serveObserved
+                        saidR = maybe id (\listener sr -> reportBoth sr (Socket.listenerNodeLogReporter listener)) mlistener (contramap Serve.attributed nodeLogR)
+                    void $
+                        Serve.serveSaying
+                            saidR
                             observe
                             rewrites
                             limit

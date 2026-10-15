@@ -55,6 +55,7 @@ tests =
         "Salmon.Reporter.Tagged"
         [ testGroup "golden JSON, one per constructor" [testCase name (golden rep expected) | (name, rep, expected) <- goldens]
         , testCase "Tagged adds a stream to the inner object and nothing else" taggedOrigin
+        , testCase "taggedNode is the ref the encoding names, looking through a nested report" taggedNodeAgrees
         , testCase "a Ref encodes as its short tag and its full text" refShape
         , testCase "a Mode encodes as the word status prints" modeShape
         , testCase "the text reporters print the same lines beside a JSON one as they do alone" textUnchangedBesideJson
@@ -134,6 +135,26 @@ golden tagged expectedText = do
     -- what 'Tagged' adds on top.
     stripOrigin (Object o) = Object (KeyMap.delete "stream" o)
     stripOrigin v = v
+
+{- | What a per-node tail is keyed by ('Tagged.taggedNode') against what a
+client reading the event would key it by: the top-level @ref@, else the
+nested report's. Over every golden, so a new constructor is checked as soon
+as it has one. -}
+taggedNodeAgrees :: Assertion
+taggedNodeAgrees =
+    sequence_
+        [ assertEqual ("the node of " <> name) (encodedRef (toJSON rep)) (unRef <$> Tagged.taggedNode rep)
+        | (name, rep, _) <- goldens ++ [("tended", Tagged.FromServe (Serve.Tended (Upkeep.Output fixtureAct "x")), "")]
+        ]
+  where
+    encodedRef v = case fullRef v of
+        Just r -> Just r
+        Nothing -> encodedRef =<< at "report" v
+    fullRef v = at "ref" v >>= at "full" >>= asText
+    at k (Object o) = KeyMap.lookup k o
+    at _ _ = Nothing
+    asText (String t) = Just t
+    asText _ = Nothing
 
 -------------------------------------------------------------------------------
 

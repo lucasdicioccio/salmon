@@ -129,6 +129,7 @@ module Salmon.Actions.Serve (
     serveAttributed,
     serveFollowing,
     serveObserved,
+    serveSaying,
     Followed (..),
     AppliedDocument (..),
     Mode (..),
@@ -212,6 +213,7 @@ import Salmon.Actions.UpDown (Requirement (..))
 -- imported with their field selectors: OverloadedRecordDot only solves
 -- HasField for fields that are in scope.
 import Salmon.Builtin.Extension (Extension (..), Op, Track', evalDeps)
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Actions (Act (..), ShortHand)
 import Salmon.Op.Concurrency (ConcurrencyLimit)
 import Salmon.Op.Configure (Configure, gen)
@@ -1695,6 +1697,40 @@ serveObserved ::
 serveObserved observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
     serveLoop observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+  where
+    stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
+    stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
+
+{- | 'serveObserved', with a listener for what nodes say while they work
+("Salmon.Builtin.NodeLog"), registered for as long as the loop runs and
+stamped from the same "line being handled" cell as every report: a line a
+node says during the pass a command started belongs to whoever typed the
+command, one said while it is being tended between commands to nobody. That
+is what lets a socket client be sent the lines of its own commands
+("Salmon.Actions.Serve.Socket"). One caveat the cell carries for reports too:
+a held action that says something while a command is being handled is
+stamped with that command.
+-}
+serveSaying ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    Reporter (Attributed NodeLog.Line) ->
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveSaying said observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
+    handling <- newIORef Nothing
+    NodeLog.withSink (stamp handling said) $
+        serveLoop observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)

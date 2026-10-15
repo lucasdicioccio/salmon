@@ -199,13 +199,15 @@ function storePins() {
 
 // After every /dag: a window for a node that is no longer there closes (the
 // node was retired and pruned), and the pins remembered from a previous page
-// load are opened for the nodes that are. The ring the snapshot carries is
-// the backlog a window is seeded from, but only when it has nothing yet:
-// lines that arrived live since are newer than that snapshot.
+// load are opened for the nodes that are. Every open window is then topped
+// up from the node's `tail` (the newest events about it, as /events sent
+// them, none above the snapshot's seq): a window only takes the events
+// numbered above the last one it shows, so a reload fills a fresh window and
+// a resubscription fills whatever the old stream missed, each line once.
 function reconcileTails() {
   for (const ref of storedPins()) {
     if (state.nodes.has(ref) && !state.tails.has(ref) && state.tails.size < TAIL_MAX_WINDOWS) {
-      state.tails.set(ref, { lines: [], paused: false, held: [], pre: null });
+      state.tails.set(ref, newTail());
     }
   }
   for (const ref of [...state.tails.keys()]) {
@@ -214,13 +216,31 @@ function reconcileTails() {
       state.tails.delete(ref);
       continue;
     }
-    const t = state.tails.get(ref);
-    if (t.lines.length === 0 && n.status && Array.isArray(n.status.output)) {
-      t.lines = n.status.output.slice(-TAIL_MAX_LINES);
-    }
+    seedTail(state.tails.get(ref), n);
   }
   storePins();
   renderDock();
+}
+
+// `seq` is the number of the newest event the window shows
+function newTail() {
+  return { lines: [], paused: false, held: [], pre: null, seq: 0 };
+}
+
+function seedTail(t, n) {
+  if (Array.isArray(n.tail)) {
+    for (const e of n.tail) {
+      if (typeof e.seq !== "number" || e.seq <= t.seq) continue;
+      const line = tailLineOf(e);
+      if (line === null) continue;
+      t.lines.push(line);
+      t.seq = e.seq;
+    }
+    if (t.lines.length > TAIL_MAX_LINES) t.lines.splice(0, t.lines.length - TAIL_MAX_LINES);
+  } else if (t.lines.length === 0 && n.status && Array.isArray(n.status.output)) {
+    // a server from before /dag carried `tail`: the held action's ring
+    t.lines = n.status.output.slice(-TAIL_MAX_LINES);
+  }
 }
 
 function toggleTail(ref) {
@@ -229,29 +249,56 @@ function toggleTail(ref) {
   } else {
     // the oldest pin makes room
     if (state.tails.size >= TAIL_MAX_WINDOWS) state.tails.delete(state.tails.keys().next().value);
+    const t = newTail();
     const n = state.nodes.get(ref);
-    const seed = n && n.status && Array.isArray(n.status.output) ? n.status.output.slice(-TAIL_MAX_LINES) : [];
-    state.tails.set(ref, { lines: seed, paused: false, held: [], pre: null });
+    if (n) seedTail(t, n);
+    state.tails.set(ref, t);
   }
   storePins();
   renderDock();
   renderPanel();
 }
 
+// What a window shows for one event about its node, live or from a `tail`:
+// the same text either way. null for an event a window does not show.
+function tailLineOf(e) {
+  switch (e.stream) {
+    case "output":
+      return outputLine(e);
+    case "updown":
+      return `[updown] ${formatUpDownLine(e)}`;
+    case "upkeep":
+      return e.kind === "acted" && e.report ? `[updown] ${formatUpDownLine(e.report)}` : `[upkeep] ${formatUpkeepLine(e)}`;
+    default:
+      return null;
+  }
+}
+
 // The `output` stream carries two kinds: `output`, a line a held (`managed`)
 // action wrote, and `log`, a line any node said while its `up` was running:
 // a streamed command's stdout or stderr, or a progress message of its own.
-function applyOutput(e) {
-  if (!e.ref || typeof e.line !== "string") return;
+function outputLine(e) {
+  if (typeof e.line !== "string") return null;
   const mark = e.kind === "log" && e.channel === "stderr" ? "err| " : e.kind === "log" && e.channel === "message" ? "msg| " : "";
-  pushTailLine(e.ref.full, mark + e.line);
+  return mark + e.line;
+}
+
+function applyOutput(e) {
+  if (!e.ref) return;
+  const line = outputLine(e);
+  if (line !== null) pushTailLine(e.ref.full, line, e.seq);
 }
 
 // Shared by a managed action's raw output and by the formatted updown/upkeep
-// report lines below; a no-op if that ref has no open tail window.
-function pushTailLine(ref, line) {
+// report lines below; a no-op if that ref has no open tail window, or if the
+// window already shows the event (seeded from a `tail` that had it).
+function pushTailLine(ref, line, seq) {
   const t = state.tails.get(ref);
   if (!t) return;
+  if (typeof seq === "number") {
+    if (seq <= t.seq) return;
+    t.seq = seq;
+  }
   // paused holds the view still; what arrives meanwhile is kept for resume
   const into = t.paused ? t.held : t.lines;
   into.push(line);
@@ -370,7 +417,7 @@ function applyServe(e) {
       scheduleReload();
       break;
     case "tended":
-      if (e.report) applyUpkeep({ ...e.report, stream: "upkeep" });
+      if (e.report) applyUpkeep({ ...e.report, stream: "upkeep", seq: e.seq });
       break;
     default:
       break;
@@ -382,7 +429,7 @@ function nodeOf(e) {
 }
 
 function applyUpDown(e) {
-  if (e.ref) pushTailLine(e.ref.full, `[updown] ${formatUpDownLine(e)}`);
+  if (e.ref) pushTailLine(e.ref.full, `[updown] ${formatUpDownLine(e)}`, e.seq);
   const n = nodeOf(e);
   if (!n) return;
   n.last = e.kind;
@@ -417,10 +464,10 @@ function applyUpDown(e) {
 
 function applyUpkeep(e) {
   if (e.kind === "acted" && e.report) {
-    applyUpDown({ ...e.report, stream: "updown" });
+    applyUpDown({ ...e.report, stream: "updown", seq: e.seq });
     return;
   }
-  if (e.ref) pushTailLine(e.ref.full, `[upkeep] ${formatUpkeepLine(e)}`);
+  if (e.ref) pushTailLine(e.ref.full, `[upkeep] ${formatUpkeepLine(e)}`, e.seq);
   const n = nodeOf(e);
   if (!n) return;
   n.last = e.kind;

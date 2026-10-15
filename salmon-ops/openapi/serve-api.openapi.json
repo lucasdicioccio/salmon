@@ -711,6 +711,12 @@
               "$ref": "#/components/schemas/Ref"
             }
           },
+          "tail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventData"
+            }
+          },
           "conflict": {
             "type": "object",
             "properties": {
@@ -738,9 +744,10 @@
           "notes",
           "dynamics",
           "dependencies",
-          "dependants"
+          "dependants",
+          "tail"
         ],
-        "description": "One node of the computed DAG. `conflict` is present while two live declarations disagree about the node. `paths` is at most 8 paths, the shortest first, as in a `status` node."
+        "description": "One node of the computed DAG. `conflict` is present while two live declarations disagree about the node. `paths` is at most 8 paths, the shortest first, as in a `status` node. `tail` is the newest events about this node, oldest first, exactly as `/events` sent them (each with its `seq`, none above the answer's `seq`): up to 256 of its `output` stream (a held action's lines, and what the node said while its `up` ran) and up to 64 of its `updown`/`upkeep` reports. It is what a view of one node is seeded from after a reload; unlike `status.output` (a tending machine's ring, snapshotted once per command) it includes what a one-shot `up` said during a pass."
       },
       "NodeDescription": {
         "type": "object",

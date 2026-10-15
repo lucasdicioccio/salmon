@@ -44,6 +44,7 @@ module Salmon.Reporter.Tagged (
     upkeepStream,
     followStream,
     nodeLogStream,
+    taggedNode,
 
     -- * Reporters
     reportJSONLines,
@@ -119,6 +120,60 @@ followStream = contramap FromFollow
 
 nodeLogStream :: Reporter Tagged -> Reporter NodeLog.Line
 nodeLogStream = contramap FromNode
+
+{- | The one node a report is about, when there is one: the @ref@ its object
+carries at the top level or, for a report nesting another ('Upkeep.Acted',
+'Serve.Tended'), the nested one's. What a per-node tail is keyed by
+("Salmon.Actions.Serve.Events"), so a client seeded from it sees the same
+lines a live tail of that node would have shown. @Test/ReportJsonSpec.hs@
+checks it against the encoding of every golden.
+-}
+taggedNode :: Tagged -> Maybe Ref
+taggedNode tagged = case tagged of
+    FromServe (Serve.Tended inner) -> upkeepNode inner
+    FromServe _ -> Nothing
+    FromUpDown rep -> updownNode rep
+    FromUpkeep rep -> upkeepNode rep
+    FromFollow _ -> Nothing
+    FromNode line -> Just line.lineRef
+  where
+    updownNode :: UpDown.Report Extension -> Maybe Ref
+    updownNode rep = case rep of
+        UpDown.Skip act -> about act
+        UpDown.Eval act -> about act
+        UpDown.Done act -> about act
+        UpDown.Failed act _ -> about act
+        UpDown.Blocked act -> about act
+        UpDown.Conflicting r _ _ -> Just r
+        UpDown.Instructed act _ -> about act
+        UpDown.DroppedInstructions act _ -> about act
+
+    upkeepNode :: Upkeep.Report Extension -> Maybe Ref
+    upkeepNode rep = case rep of
+        Upkeep.Acted inner -> updownNode inner
+        Upkeep.Upkeep act _ -> about act
+        Upkeep.Downkeep act _ -> about act
+        Upkeep.NextLook act _ _ -> about act
+        Upkeep.Wedged act _ -> about act
+        Upkeep.Unwedged act -> about act
+        Upkeep.Output act _ -> about act
+        Upkeep.Demoted act _ -> about act
+        Upkeep.Parked act -> about act
+        Upkeep.Reapplying act _ -> about act
+        Upkeep.Paused act -> about act
+        Upkeep.Resumed act -> about act
+        Upkeep.GaveUp act _ -> about act
+        Upkeep.Adopted act -> about act
+        Upkeep.Released act -> about act
+        Upkeep.Policy act _ _ -> about act
+        Upkeep.Untended act -> about act
+        Upkeep.Escaped act _ -> about act
+        Upkeep.Supervising _ _ -> Nothing
+        Upkeep.Retired _ -> Nothing
+        Upkeep.Holding _ -> Nothing
+
+    about :: Act Extension -> Maybe Ref
+    about act = Just act.extension.ref
 
 {- | The four text reporters, behind one 'Tagged' one. Dispatches and does
 nothing else, so whatever each of the four prints, it prints unchanged —

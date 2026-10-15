@@ -32,6 +32,7 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy.Char8 as LChar8
 import Data.Foldable (toList)
+import qualified Data.List as List
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -57,6 +58,9 @@ import System.Timeout (timeout)
 import qualified Test.ServeApi as Api
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
+import Test.Tasty.QuickCheck (Gen, Property, choose, counterexample, forAll, listOf, testProperty, (.&&.), (===))
+import qualified Test.Tasty.QuickCheck as QC
+import Data.List (nub)
 import Text.Read (readMaybe)
 
 import qualified Salmon.Actions.Follow as Follow
@@ -69,7 +73,7 @@ import qualified Salmon.Actions.Upkeep as Upkeep
 import Salmon.Builtin.Extension (Track', check, deps, down, help, nodeps, op, opAct, ref, up)
 import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Configure (Configure (..))
-import Salmon.Op.Ref (mkRef, unRef)
+import Salmon.Op.Ref (Ref, mkRef, unRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (contramap, runReporter)
 import qualified Salmon.Reporter.Tagged as Tagged
@@ -85,6 +89,9 @@ tests =
             [ testCase "replay is everything after since that the ring still holds; a gap when it does not" ringArithmetic
             , testCase "golden JSON for the gap event" gapGolden
             , testCase "an event is the Tagged object plus seq, plus origin when it belongs to a command" eventShape
+            , testProperty "a node's tail is the newest of each lane about it, oldest first" tailIsNewestPerLane
+            , testProperty "the nodes keeping a tail are the most recently heard from, at most the cap" tailKeepsRecentNodes
+            , testCase "a published event lands in its node's tail, a server event in none" publishFillsTails
             ]
         , testGroup
             "GET /events"
@@ -96,6 +103,7 @@ tests =
             , testCase "?stream= and ?origin= narrow the stream" filters
             , testCase "the pull-mode fetcher's reports are the follow stream: numbered with the rest, no origin, filterable" followStream
             , testCase "what a node says while it works is on the output stream: by ref, by channel, no origin" nodeLogStream
+            , testCase "a one-shot up's lines and reports are in /dag's tail afterwards, up to its seq" oneShotTail
             , testCase "an idle stream is kept alive, and a client hanging up drops its subscription" keepAliveAndCleanup
             ]
         ]
@@ -185,6 +193,66 @@ eventShape = do
         kind <- textAt ["kind"] v
         pure (stream, kind, seqOf v, textAt ["origin", "name"] v)
 
+-- a lane and a node, among a few, for each of a run of events numbered 1..
+tailRun :: Gen [(Int, Events.Lane)]
+tailRun = listOf ((,) <$> choose (0, 4) <*> QC.elements [Events.OutputLane, Events.ReportLane])
+
+tailConfig :: Int -> Int -> Int -> Events.Config
+tailConfig o r n = Events.defaultConfig{Events.configTailOutput = o, Events.configTailReports = r, Events.configTailNodes = n}
+
+tailRef :: Int -> Ref
+tailRef i = mkRef "events-tail" i
+
+recordRun :: Events.Config -> [(Int, Events.Lane)] -> Events.Tails
+recordRun cfg run =
+    List.foldl'
+        (\t (n, (i, lane)) -> Events.recordTail cfg (tailRef i) lane (Events.Event n Nothing (Events.Enqueued (show i))) t)
+        Events.emptyTails
+        (zip [1 ..] run)
+
+{- | With room for every node, a node's tail is the newest @o@ of its output
+events and the newest @r@ of its reports, merged oldest first: checked
+against the run itself, filtered and cut, for any bounds. -}
+tailIsNewestPerLane :: Property
+tailIsNewestPerLane =
+    forAll ((,,) <$> choose (0, 5) <*> choose (0, 5) <*> tailRun) $ \(o, r, run) ->
+        let tails = recordRun (tailConfig o r 16) run
+            numbered = zip [1 :: Word64 ..] run
+            expected i =
+                List.sort
+                    ( lastN o [n | (n, (j, Events.OutputLane)) <- numbered, j == i]
+                        <> lastN r [n | (n, (j, Events.ReportLane)) <- numbered, j == i]
+                    )
+         in QC.conjoin
+                [ counterexample ("node " <> show i) (fmap Events.eventSeq (Events.tailOf (tailRef i) tails) === expected i)
+                | i <- [0 .. 4]
+                ]
+  where
+    lastN k xs = drop (length xs - k) xs
+
+{- | Past the cap, the nodes keeping a tail are exactly the ones most recently
+heard from: a node quiet for longest is the one let go. -}
+tailKeepsRecentNodes :: Property
+tailKeepsRecentNodes =
+    forAll ((,) <$> choose (1, 5) <*> tailRun) $ \(cap, run) ->
+        let kept = Events.tailNodes (recordRun (tailConfig 3 3 cap) run)
+            recent = take cap (nub (reverse (fmap fst run)))
+         in (length kept <= cap) .&&. (List.sort kept === List.sort (fmap tailRef recent))
+
+publishFillsTails :: IO ()
+publishFillsTails = do
+    ev <- Events.newEvents Events.defaultConfig
+    let node = mkRef "events-tail-publish" ("n" :: Text)
+    _ <- Events.publish ev Nothing (Events.Enqueued "up n")
+    n2 <- Events.publish ev Nothing (Events.Reported (Tagged.FromNode (NodeLog.Line node NodeLog.Stdout "one")))
+    _ <- Events.publish ev Nothing (Events.Reported (Tagged.FromServe Serve.Started))
+    n4 <- Events.publish ev Nothing (Events.Reported (Tagged.FromNode (NodeLog.Line node NodeLog.Message "two")))
+    (lastSeq, tails) <- Events.snapshotTails ev
+    assertEqual "read with the last number" 4 lastSeq
+    assertEqual "only the node's own events, in order" [n2, n4] (fmap Events.eventSeq (Events.tailOf node tails))
+    assertEqual "and no other node has one" [node] (Events.tailNodes tails)
+    assertEqual "on the output lane" (Just (node, Events.OutputLane)) (Events.laneOf (Events.Reported (Tagged.FromNode (NodeLog.Line node NodeLog.Stdout "x"))))
+
 -------------------------------------------------------------------------------
 -- the thing served: counters per node name, and one node that is never satisfied
 
@@ -213,11 +281,20 @@ spyProgram upsRef = Track $ \spec ->
             actions
                 { ref = mkRef "events-node" name
                 , help = "node " <> Text.pack name
-                , up = bump name
+                , up = bump name >> when (chattyPrefix `List.isPrefixOf` name) (chatter name)
                 , down = pure ()
                 , check = if name == flakyName then pure (UpDown.Failure "never satisfied") else actions.check
                 }
     bump name = atomicModifyIORef' upsRef (\m -> (Map.insertWith (+) name 1 m, ()))
+    -- what a build says while it runs: a progress message, then a line of
+    -- its command's output
+    chatter name = do
+        NodeLog.say (mkRef "events-node" name) "compiling"
+        NodeLog.emit (NodeLog.Line (mkRef "events-node" name) NodeLog.Stdout ("built " <> Text.pack name))
+
+-- | A node whose name starts with this says two lines while its @up@ runs.
+chattyPrefix :: String
+chattyPrefix = "chatty"
 
 -------------------------------------------------------------------------------
 -- a running loop with an HTTP server
@@ -719,6 +796,36 @@ nodeLogStream =
         assertBool "only the output stream" (all ((== Just "output") . streamOf) tailed)
         without <- withEvents running "?since=0&stream=serve,updown,upkeep,server" (readUntil (hungUpFrom marker))
         assertBool "and not there when not asked for" (all ((/= Just "output") . streamOf) without)
+
+{- | The owner's case: an operation said something while its @up@ ran, during
+the pass of an @up@ command, and a client opens (or reloads) the page
+afterwards. @\/dag@'s @tail@ for that node has the lines and the pass's
+reports, numbered no higher than the answer's @seq@, so following
+@?since=@ that number shows none of them twice. -}
+oneShotTail :: IO ()
+oneShotTail =
+    withRunning $ \running -> do
+        _ <- sync running "supervise off"
+        let name = chattyPrefix <> "-tail"
+            node = mkRef "events-node" name
+        _ <- NodeLog.withSink (Http.serverNodeLogReporter (runningServer running)) (sync running ("up " <> name))
+        (_, dag) <- get running "/dag"
+        s <- maybe (assertFailure "no seq on /dag") pure (seqOf dag)
+        tailOfNode <- case [n | n <- maybe [] arrayOf (field "nodes" dag), textAt ["ref", "full"] n == Just (unRef node)] of
+            [n] -> pure (maybe [] arrayOf (field "tail" n))
+            ns -> assertFailure ("one node expected, got " <> show (length ns))
+        assertEqual
+            "the pass's reports and what the node said, in order"
+            [("updown", "eval", Nothing), ("output", "log", Just "compiling"), ("output", "log", Just ("built " <> Text.pack name)), ("updown", "done", Nothing)]
+            [(maybe "" id (textAt ["stream"] e), kindOf e, textAt ["line"] e) | e <- tailOfNode]
+        let seqs = mapMaybe seqOf tailOfNode
+        assertEqual "every one numbered" (length tailOfNode) (length seqs)
+        assertBool "strictly increasing" (and (zipWith (<) seqs (drop 1 seqs)))
+        assertBool "none above the snapshot's seq" (all (<= s) seqs)
+        -- and a client following from the snapshot sees none of them again
+        (_, marker) <- async running "history"
+        after <- withEvents running ("?since=" <> show s) (readUntil (hungUpFrom marker))
+        assertBool "nothing about the node after the snapshot" (all ((/= Just (unRef node)) . textAt ["ref", "full"] . sseData) after)
 
 keepAliveAndCleanup :: IO ()
 keepAliveAndCleanup =
