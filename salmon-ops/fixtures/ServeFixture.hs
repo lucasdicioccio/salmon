@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -99,16 +100,29 @@ That is a fix rather than the original behaviour. Until (I1) in
 process outright: the check was consulted, it said the effect was in place,
 and the node settled into 'Salmon.Actions.Upkeep.Up' holding nothing at all.
 The flag stays because the rule it demonstrates is worth being able to see.
+
+= The @--build N@ half
+
+A node that has something to say while its @up@ runs, which no other node
+here does: a pretend build, a @\/bin\/sh@ loop printing @N@ steps a second
+apart on stdout and a warning per step on stderr, run with
+'Binary.streamed' routing, plus a progress message of its own
+('NodeLog.say'). Under @run serve --http@ its lines reach the web UI's tail
+window of that node live, and, from @\/dag@'s per-node @tail@, after a page
+reload too:
+
+> up --dir /tmp/play --name web --file index.html --build 5
 -}
 module Main (main) where
 
 import Control.Exception (throwIO)
+import Control.Monad (when)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import GHC.Generics (Generic)
-import Options.Applicative (execParser, fullDesc, header, info, long, many, metavar, progDesc, strOption, switch, value)
+import Options.Applicative (auto, execParser, fullDesc, header, info, long, many, metavar, option, progDesc, strOption, switch, value)
 import qualified Options.Applicative as Opt
 import Options.Generic (ParseRecord (..))
 import System.Directory (doesFileExist, removeFile)
@@ -117,14 +131,16 @@ import System.Process (proc)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Builtin.CommandLine as CLI
-import Salmon.Builtin.Extension (Op, Track', check, deps, down, dynamics, help, managed, notes, op, ref, up)
+import Salmon.Builtin.Extension (Op, Track', check, deps, down, dynamics, help, ignoreTrack, managed, nodeps, notes, op, ref, up)
+import qualified Salmon.Builtin.NodeLog as NodeLog
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (reportIf, reportPrint)
+import Salmon.Reporter (reportIf, reportPrint, silent)
 
 -------------------------------------------------------------------------------
 
@@ -136,6 +152,7 @@ data Seed = Seed
     , seedDaemon :: Bool
     , seedGreeting :: Text
     , seedStaleCheck :: Bool
+    , seedBuild :: Int
     }
     deriving (Generic, Show)
 
@@ -156,6 +173,7 @@ instance ParseRecord Seed where
                 ( long "stale-check"
                     <> Opt.help "give the daemon a plausible-but-stale check (\"my log exists\"), which a bounce then ignores. See (I1)."
                 )
+            <*> option auto (long "build" <> metavar "N" <> value 0 <> Opt.help "also run a pretend build printing N steps, streamed, so a tail has lines (0: none)")
 
 -- | The hermetic directive: same shape as the seed here, but that's a
 -- coincidence of how trivial this fixture is — the point of the type is that
@@ -164,6 +182,8 @@ data Spec = Spec
     { specRoot :: FilePath
     , specFiles :: [FilePath]
     , specDaemon :: Maybe DaemonSpec
+    , specBuild :: Maybe Int
+    -- ^ the @--build N@ half, absent when not asked for
     }
     deriving (Eq, Show, Generic)
 
@@ -205,10 +225,11 @@ configure = Configure $ \seed ->
                                 , daemonStaleCheck = seed.seedStaleCheck
                                 }
                 )
+                (if seed.seedBuild > 0 then Just seed.seedBuild else Nothing)
 
 program :: Track' Spec
 program = Track $ \spec ->
-    op "serve-fixture-bundle" (deps (fmap fileOp spec.specFiles <> foldMap (pure . daemonOp) spec.specDaemon)) $ \actions ->
+    op "serve-fixture-bundle" (deps (fmap fileOp spec.specFiles <> foldMap (pure . daemonOp) spec.specDaemon <> foldMap (pure . buildOp spec.specRoot) spec.specBuild)) $ \actions ->
         actions{ref = mkRef "serve-fixture-bundle" (spec.specRoot, spec.specFiles, fmap daemonConf spec.specDaemon)}
   where
     fileOp :: FilePath -> Op
@@ -319,6 +340,39 @@ daemonOp d =
     chatter = reportIf notWrote reportPrint
     notWrote Daemon.Wrote{} = False
     notWrote _ = True
+
+-------------------------------------------------------------------------------
+-- the --build half: a node that says things while its `up` runs
+
+shCommand :: Binary.Command "sh" String
+shCommand = Binary.Command (\script -> proc "/bin/sh" ["-c", script])
+
+{- | A pretend build. No @check@, so it is 'Immaterial': applied by the pass
+that brings it up, then parked by its machine rather than re-run. Not
+attached to the bundle directory, since it writes nothing.
+-}
+buildOp :: FilePath -> Int -> Op
+buildOp root n =
+    Binary.withBinaryWith Binary.streamed ignoreTrack shCommand script $ \run ->
+        op "fixture-build" nodeps $ \actions ->
+            actions
+                { help = Text.pack ("a pretend build for " <> root <> ", " <> show n <> " steps")
+                , ref = self
+                , up = do
+                    NodeLog.say self (Text.pack ("building " <> show n <> " steps"))
+                    run silent
+                    when (n > 0) $ NodeLog.say self "built"
+                }
+  where
+    self = mkRef "fixture-build" (root, n)
+    script =
+        mconcat
+            [ "for i in $(seq 1 "
+            , show n
+            , "); do echo \"step $i/"
+            , show n
+            , "\"; echo \"warning: step $i is pretend\" >&2; sleep 1; done"
+            ]
 
 -------------------------------------------------------------------------------
 

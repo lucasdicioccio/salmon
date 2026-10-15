@@ -61,11 +61,15 @@ covers one and not the other:
     replaces the lot.
   * @log@, a line a node said during a one-shot @up@
     ("Salmon.Builtin.NodeLog": a streamed command's output, or its own
-    progress message). No snapshot has these — they are not in the ring —
-    so they are kept apart in 'nodeSaid' with a stamp of their own
-    ('nodeSaidSeq'), and 'rebase' carries them onto the fresh snapshot
-    rather than losing a build's tail to the re-read every @declared@
-    asks for.
+    progress message). They are not in the ring; a @\/dag@ answer carries
+    them in the node's @tail@ (the newest events about it, none numbered
+    above the answer's @seq@), and one from before that field existed does
+    not have them at all. So they are kept apart in 'nodeSaid' with a
+    stamp of their own ('nodeSaidSeq'): seeded from @tail@ at the
+    snapshot's number when there is one, and 'rebase' keeps whichever of
+    the old and the fresh is current to the later number, so a re-read
+    every @declared@ asks for neither loses a build's tail nor repeats
+    it.
 
 Neither moves 'nodeLastKind': a line is not something that happened to
 the node's convergence, and a table whose last column reads @log@ for the
@@ -146,7 +150,7 @@ import qualified Data.IntMap.Strict as IntMap
 import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
@@ -344,8 +348,8 @@ order and mode are the fresh snapshot's; the loop-level fields, their
 stamp and the last event are the old model's; the cursor is the higher of
 the two; and the resync request is answered. See the module header for
 why the loop's part is not simply the snapshot's. What a node said
-('nodeSaid') is the old model's too, for the nodes the fresh snapshot
-still has: no snapshot carries it.
+('nodeSaid') is the old model's unless the fresh snapshot's is current to a later number
+(so always the old model's against a server whose @\/dag@ has no @tail@).
 -}
 rebase :: Model -> Model -> Model
 rebase old fresh =
@@ -361,8 +365,8 @@ rebase old fresh =
   where
     keepSaid :: RefId -> Node -> Node
     keepSaid r n = case Map.lookup r old.modelNodes of
-        Just o -> n{nodeSaid = o.nodeSaid, nodeSaidSeq = o.nodeSaidSeq}
-        Nothing -> n
+        Just o | not (n.nodeSaidSeq > o.nodeSaidSeq) -> n{nodeSaid = o.nodeSaid, nodeSaidSeq = o.nodeSaidSeq}
+        _ -> n
 
 {- | A model from a @\/dag@ answer. 'Left' names what is missing; a @\/dag@
 answer always has @nodes@ and @seq@, so a 'Left' is a wrong URL, not a
@@ -396,6 +400,17 @@ fromDag v = do
     nodeOf :: Word64 -> Value -> Either String Node
     nodeOf seqNo n = do
         r <- maybe (Left ("a node without a ref: " <> show n)) Right (refAt ["ref"] n)
+        let tailEvents = arrayAt ["tail"] n
+            hasTail = isJust tailEvents
+            -- what the node said, as 'step' would have folded it live
+            saidIn =
+                lastKept
+                    [ channelMark (textAt ["channel"] e) <> line
+                    | e <- fromMaybe [] tailEvents
+                    , textAt ["stream"] e == Just "output"
+                    , textAt ["kind"] e == Just "log"
+                    , Just line <- [textAt ["line"] e]
+                    ]
         pure
             Node
                 { nodeRef = r
@@ -406,8 +421,8 @@ fromDag v = do
                 , nodeConvergence = fromMaybe "?" (textAt ["convergence"] n)
                 , nodeCheck = checkAt ["status", "check"] n
                 , nodeOutput = maybe [] (mapMaybe asText) (arrayAt ["status", "output"] n)
-                , nodeSaid = []
-                , nodeSaidSeq = 0
+                , nodeSaid = saidIn
+                , nodeSaidSeq = if hasTail then seqNo else 0
                 , nodeError = Nothing
                 , nodeLastKind = Nothing
                 , nodeLastSeq = Nothing
@@ -521,6 +536,10 @@ nodesInOrder m = mapMaybe (`Map.lookup` m.modelNodes) (orderToList m.modelOrder)
 
 lookupNode :: RefId -> Model -> Maybe Node
 lookupNode r m = Map.lookup r m.modelNodes
+
+-- | The last 'outputKept' of some lines.
+lastKept :: [a] -> [a]
+lastKept xs = drop (length xs - outputKept) xs
 
 -- | How many lines of 'nodeOutput' and of 'nodeSaid' a node's view keeps.
 outputKept :: Int

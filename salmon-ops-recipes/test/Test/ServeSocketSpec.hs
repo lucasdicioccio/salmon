@@ -44,13 +44,14 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 import qualified Salmon.Actions.Serve as Serve
-import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
+import Salmon.Actions.Serve (Attributed (..), Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.Serve.Socket as Socket
 import Salmon.Builtin.Extension (Track', deps, down, nodeps, op, ref, up)
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (silent)
+import Salmon.Reporter (reportIf, silent)
 import qualified Salmon.Reporter.Tagged as Tagged
 
 import Test.Harness (capture, privatePipe, withTempDir)
@@ -63,6 +64,7 @@ tests =
         , testCase "a client hanging up is reported and does not end the loop" hangUpDoesNotEndTheLoop
         , testCase "`quit` from a client ends the loop" quitFromAClientEndsTheLoop
         , testCase "a client that half-closes after typing still gets its reports" halfCloseStillAnswered
+        , testCase "what a node says during a client's command reaches that client, and no other" nodeLinesReachTheirClient
         , testCase "the socket is owner-only, refused while live, replaced when stale, refused when too long" socketFileRules
         ]
 
@@ -88,10 +90,23 @@ spyProgram upsRef downsRef = Track $ \spec ->
         op "socket-node" nodeps $ \actions ->
             actions
                 { ref = mkRef "socket-node" name
-                , up = bump upsRef name
+                , up = bump upsRef name >> when (isChatty name) (chatter name)
                 , down = bump downsRef name
                 }
     bump r name = atomicModifyIORef' r (\m -> (Map.insertWith (+) name 1 m, ()))
+    chatter name = do
+        NodeLog.say (mkRef "socket-node" name) "compiling"
+        NodeLog.emit (NodeLog.Line (mkRef "socket-node" name) NodeLog.Stdout ("built " <> Text.pack name))
+
+-- | A node whose name starts with @chatty@ says two lines while its @up@ runs.
+isChatty :: String -> Bool
+isChatty = (== "chatty") . take 6
+
+{- | The node lines this spec's listener is handed: the registry is
+process-wide and other suites say things while these run, so only the lines
+of this spec's own chatty nodes. -}
+oursOnly :: NodeLog.Line -> Bool
+oursOnly line = line.lineRef `elem` [mkRef "socket-node" n | n <- ["chatty-a", "chatty-b" :: String]]
 
 -------------------------------------------------------------------------------
 -- a running loop with a listener
@@ -121,9 +136,12 @@ withRunning act =
         downsRef <- newIORef Map.empty
         Socket.withUnixListener path $ \listener -> do
             let (serveR, updownR) = Socket.listenerReporters listener own
+                saidR = reportIf (\(Attributed _ line) -> oursOnly line) (Socket.listenerNodeLogReporter listener)
             _ <- forkIO $ do
                 w <-
-                    Serve.serveAttributed
+                    Serve.serveSaying
+                        saidR
+                        (const (pure ()))
                         []
                         Nothing
                         True
@@ -230,6 +248,33 @@ kindsSeen :: Client -> IO [Text]
 kindsSeen c = fmap kindOf . reverse <$> readIORef (clientSeen c)
 
 -------------------------------------------------------------------------------
+
+{- | Item 2 of the tail work: a socket client is sent what a node said while
+the pass its own line started ran ("Salmon.Builtin.NodeLog", stamped by
+'Serve.serveSaying'), as the @output@\/@log@ objects @--json@ prints, before
+the pass's end; a second client's command, which says nothing, reads none of
+them. -}
+nodeLinesReachTheirClient :: IO ()
+nodeLinesReachTheirClient =
+    withRunning $ \running ->
+        withClient running $ \a -> withClient running $ \b -> do
+            _ <- ask a "supervise off" "supervised"
+            _ <- ask a "up chatty-a" "converge-stop"
+            bKinds <- ask b "up plain-b" "converge-stop"
+            seenA <- reverse <$> readIORef (clientSeen a)
+            let logs = [v | v <- seenA, kindOf v == "log"]
+            assertEqual
+                "A read what its node said, in order, by channel"
+                [(Just "message", Just "compiling"), (Just "stdout", Just "built chatty-a")]
+                [(textField "channel" v, textField "line" v) | v <- logs]
+            assertBool "on the output stream" (all ((== Just "output") . textField "stream") logs)
+            assertBool "before its pass ended" ("converge-stop" `notElem` takeWhile (/= "log") (fmap kindOf seenA))
+            assertBool ("B read none of it: " <> show bKinds) ("log" `notElem` bKinds)
+  where
+    textField k (Object o) = case KeyMap.lookup k o of
+        Just (String t) -> Just t
+        _ -> Nothing
+    textField _ _ = Nothing
 
 {- | The script both halves of the comparison run: A declares and asks for
 history, B asks for status and retires; each waits for the previous

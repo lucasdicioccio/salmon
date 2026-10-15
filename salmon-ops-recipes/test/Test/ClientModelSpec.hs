@@ -78,6 +78,7 @@ tests =
             , testCase "the SSE parser reads what the server renders" sseParser
             , testCase "the rendered rows and header" rendering
             , testCase "the output stream: a held action's lines join the ring, a one-shot up's lines are kept across a re-read" outputFolded
+            , testCase "a /dag tail seeds what a node said; a rebase keeps whichever is later" saidFromTail
             , testCase "the fixture the Rust client is tested on is this recorded pass" sharedFixture
             ]
         , testGroup
@@ -353,6 +354,43 @@ outputFolded = do
   where
     lastOf [] = Nothing
     lastOf xs = Just (last xs)
+
+{- | A @\/dag@ answer whose node carries a @tail@ (what @\/events@ sent about
+it, none above the answer's @seq@): its @log@ lines seed 'nodeSaid', current
+to the snapshot's number, so the same lines replayed are not said twice and
+a page opened after a build still shows it. A rebase keeps whichever side is
+current to the later number.
+-}
+saidFromTail :: IO ()
+saidFromTail = do
+    let builder = mkRef "client-model-spec" ("tailed" :: Text)
+        rid = RefId (shortRef builder) (unRef builder)
+        refJson = object ["short" .= shortRef builder, "full" .= unRef builder]
+        said seqNo channel line = Events.eventValue (Events.Event seqNo Nothing (Events.Reported (Tagged.FromNode (NodeLog.Line builder channel line))))
+        eval = object ["stream" .= ("updown" :: Text), "kind" .= ("eval" :: Text), "seq" .= (6 :: Int), "ref" .= refJson]
+        lines3 = [said 7 NodeLog.Stdout "STEP 1/2: FROM scratch", said 8 NodeLog.Stderr "warning: no cache", said 9 NodeLog.Message "waiting for ssh"]
+        node tl = case nodeValue "x" "the-builder" [] of
+            Object o -> Object (KeyMap.insert "ref" refJson (KeyMap.insert "tail" (toJSON (tl :: [Value])) o))
+            v -> v
+        dagAt :: Int -> [Value] -> Value
+        dagAt seqNo tl = object ["mode" .= ("interactive" :: Text), "seq" .= seqNo, "nodes" .= [node tl]]
+        view m = maybe (assertFailure "no tailed node") pure (Model.lookupNode rid m)
+        load v = either (assertFailure . ("snapshot: " <>)) pure (Model.fromDag v)
+    m <- load (dagAt 12 (eval : lines3))
+    n <- view m
+    assertEqual "the tail's log lines, marked by channel" ["STEP 1/2: FROM scratch", "err| warning: no cache", "msg| waiting for ssh"] n.nodeSaid
+    assertEqual "current to the snapshot" 12 n.nodeSaidSeq
+    assertEqual "replayed, they are not said twice" (Just n.nodeSaid) (nodeSaid <$> Model.lookupNode rid (fold m lines3))
+    -- an older model that folded the same lines live, rebased onto it
+    m0 <- load (dagAt 5 [])
+    let live = fold m0 lines3
+    r <- view (Model.rebase live m)
+    assertEqual "the snapshot is the later: its lines" (n.nodeSaid, 12) (r.nodeSaid, r.nodeSaidSeq)
+    -- a model that has heard more than the snapshot keeps what it heard
+    let ahead = fold m [said 13 NodeLog.Stdout "STEP 2/2: COPY"]
+    a <- view ahead
+    r' <- view (Model.rebase ahead m)
+    assertEqual "the model is the later: its lines" (a.nodeSaid, 13) (r'.nodeSaid, r'.nodeSaidSeq)
 
 {- | @rs\/fixtures\/client-model.json@ against this module: its @snapshot@
 and @recorded@ are 'snapshot' and 'recorded' object for object, and its

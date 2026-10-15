@@ -187,6 +187,7 @@ module Salmon.Actions.Serve.Http (
     WorldView (..),
     viewWorld,
     dagValue,
+    dagValueWith,
     application,
 ) where
 
@@ -904,7 +905,15 @@ the read, the same value @\/status@ opens with, so a client knows which
 guarantees the nodes it is looking at are under.
 -}
 dagValue :: Serve.Mode -> WorldView -> Value
-dagValue mode v =
+dagValue = dagValueWith Events.emptyTails
+
+{- | 'dagValue' with each node's @tail@ ('Events.tailOf'): the newest events
+about it, as @\/events@ sent them, which is what a client opening or
+reloading a view of the node is seeded from. Read with the sequence number
+('Events.snapshotTails'), so they stop exactly at the answer's @seq@.
+-}
+dagValueWith :: Events.Tails -> Serve.Mode -> WorldView -> Value
+dagValueWith tails mode v =
     object
         [ "mode" .= mode
         , "nodes"
@@ -924,6 +933,7 @@ dagValue mode v =
                    , "dynamics" .= rep.repDynamics
                    , "dependencies" .= fmap refValue (Dag.dependenciesOf dag r)
                    , "dependants" .= fmap refValue (Dag.dependantsOf dag r)
+                   , "tail" .= fmap Events.eventValue (Events.tailOf r tails)
                    ]
                 ++ [ "conflict" .= object ["kept" .= representativeValue c.conflictKept, "replaced" .= representativeValue c.conflictReplaced]
                    | Just col <- [Map.lookup r (viewConflicts v)]
@@ -985,9 +995,9 @@ renderStructured verb seed = unwords (verb : fmap word seed)
 application :: Server -> Application
 application server req respond =
     case (Wai.requestMethod req, Wai.pathInfo req) of
-        ("GET", ["dag"]) -> withView $ \seqNo v -> do
+        ("GET", ["dag"]) -> withTailsView $ \seqNo tails v -> do
             mode <- serverMode server
-            respond (json HTTP.status200 (withSeq seqNo (dagValue mode v)))
+            respond (json HTTP.status200 (withSeq seqNo (dagValueWith tails mode v)))
         ("GET", ["status"]) -> withView $ \seqNo v -> do
             mode <- serverMode server
             respond (json HTTP.status200 (withSeq seqNo (toJSON (FromServe (Serve.StatusReport mode (Map.toList (viewNodes v)) (viewPaths v))))))
@@ -1033,6 +1043,17 @@ application server req respond =
             Just readView -> do
                 seqNo <- Events.lastSequence (serverEvents server)
                 readView >>= k seqNo
+
+    -- 'withView', with the per-node tails read in the same transaction as
+    -- the number, so they hold exactly the events up to it.
+    withTailsView :: (Word64 -> Events.Tails -> WorldView -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
+    withTailsView k = do
+        mread <- readTVarIO (serverView server)
+        case mread of
+            Nothing -> respond (failure HTTP.status503 "the loop has not started")
+            Just readView -> do
+                (seqNo, tails) <- Events.snapshotTails (serverEvents server)
+                readView >>= k seqNo tails
 
     withSeq :: Word64 -> Value -> Value
     withSeq n (Object o) = Object (KeyMap.insert "seq" (toJSON n) o)

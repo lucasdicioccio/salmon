@@ -46,6 +46,7 @@ module Salmon.Actions.Serve.Socket (
     -- * Plugging into the loop
     listenerProducer,
     listenerReporters,
+    listenerNodeLogReporter,
 ) where
 
 import Control.Concurrent (forkIO, killThread)
@@ -67,6 +68,7 @@ import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Line (..), Origin (..), Producer (..))
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension (Extension)
+import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Reporter
 import Salmon.Reporter.Tagged (Tagged (..), reportJSONLines)
 
@@ -249,30 +251,43 @@ listenerReporters l own = (serveR, updownR)
     serveR :: Reporter (Attributed Serve.Report)
     serveR = ReporterM $ \(Attributed origin rep) -> do
         runReporter own (FromServe rep)
-        forM_ origin (echo (FromServe rep))
+        forM_ origin (echoTo l (FromServe rep))
         case rep of
-            Serve.HungUp gone -> disconnect gone
+            Serve.HungUp gone -> disconnectClient l gone
             _ -> pure ()
 
     updownR :: Reporter (Attributed (UpDown.Report Extension))
     updownR = ReporterM $ \(Attributed origin rep) -> do
         runReporter own (FromUpDown rep)
-        forM_ origin (echo (FromUpDown rep))
+        forM_ origin (echoTo l (FromUpDown rep))
 
-    echo :: Tagged -> Origin -> IO ()
-    echo tagged origin = do
-        clients <- readTVarIO (listenerClients l)
-        forM_ (Map.lookup origin clients) $ \h -> do
-            r <- tryIO (runReporter (reportJSONLines h) tagged)
-            case r of
-                Right () -> pure ()
-                Left _ -> disconnect origin
+{- | What a node said while it worked ("Salmon.Builtin.NodeLog"), sent to the
+client whose command the line belongs to, as the @output@\/@log@ object
+@--json@ prints: stamped by 'Serve.serveSaying', so a line said during the
+pass a client's line started reaches that client, and one said while a node
+is tended between commands reaches none. Only the echo: the loop's own
+reporter is composed beside this by the caller, as it already prints these
+lines.
+-}
+listenerNodeLogReporter :: Listener -> Reporter (Attributed NodeLog.Line)
+listenerNodeLogReporter l = ReporterM $ \(Attributed origin line) ->
+    forM_ origin (echoTo l (FromNode line))
 
-    disconnect :: Origin -> IO ()
-    disconnect origin = do
-        mh <- atomically $ do
-            clients <- readTVar (listenerClients l)
-            let (mh, clients') = Map.updateLookupWithKey (\_ _ -> Nothing) origin clients
-            writeTVar (listenerClients l) clients'
-            pure mh
-        forM_ mh (void . tryIO . hClose)
+-- | Write one report to the client of an origin, hanging it up if that fails.
+echoTo :: Listener -> Tagged -> Origin -> IO ()
+echoTo l tagged origin = do
+    clients <- readTVarIO (listenerClients l)
+    forM_ (Map.lookup origin clients) $ \h -> do
+        r <- tryIO (runReporter (reportJSONLines h) tagged)
+        case r of
+            Right () -> pure ()
+            Left _ -> disconnectClient l origin
+
+disconnectClient :: Listener -> Origin -> IO ()
+disconnectClient l origin = do
+    mh <- atomically $ do
+        clients <- readTVar (listenerClients l)
+        let (mh, clients') = Map.updateLookupWithKey (\_ _ -> Nothing) origin clients
+        writeTVar (listenerClients l) clients'
+        pure mh
+    forM_ mh (void . tryIO . hClose)

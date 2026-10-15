@@ -1039,13 +1039,43 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   callback is reported as `Upkeep.Output act line` — beside going into the node's ring, which stays the
   bounded backlog `/dag`'s `status.output` seeds a late client from — and filed on its own `output`
   stream (`{stream: "output", kind: "output", ref, line}`), so `?stream=output` is a tail and a client
-  that filters to `upkeep` never reads a line. Not printed as text on a terminal. The web UI's dock
-  (`ui.js`: `toggleTail`, `applyOutput`) pins up to four windows, remembers the pinned refs in
-  `localStorage`, seeds a window from the ring only while it is empty, and closes one whose node is
-  gone from the next `/dag`. The same stream carries a second kind, `log` (`{stream: "output", kind: "log",
-  ref, channel, line}`, `Tagged.FromNode`): a line any node said while its `up` was running, see
-  `Builtin/NodeLog.hs` below. Those have no `node` object, no `origin`, are never collected by a sync
-  `POST`, and are not in the ring `/dag` seeds a window from (the ring is a held action's).
+  that filters to `upkeep` never reads a line. Not printed as text on a terminal. The same stream carries
+  a second kind, `log` (`{stream: "output", kind: "log", ref, channel, line}`, `Tagged.FromNode`): a line
+  any node said while its `up` was running, see `Builtin/NodeLog.hs` below. Those have no `node` object,
+  no `origin` on `/events`, are never collected by a sync `POST`, and are not in the machine ring.
+  **Per-node tails** (feature af1b16f9): beside the shared ring, `publish` keeps, in the same STM
+  transaction, every event about one node (`Tagged.taggedNode`, which looks through `acted`/`tended`)
+  in that node's own tail: the newest `configTailOutput` (256) of its `output` stream and, in a lane
+  of their own, the newest `configTailReports` (64) `updown`/`upkeep` reports, so a node polled every
+  few seconds does not push a build's output out with `next-look`s. At most `configTailNodes` (4096)
+  nodes keep one; past that the quietest for longest goes (a loop whose declarations keep minting
+  refs stays bounded). `/dag` reads the tails with `seq` in one transaction (`snapshotTails`) and
+  gives each node `tail`: the events as `/events` sent them, none above the answer's `seq`. That,
+  not `status.output`, is what a view of one node is seeded from, and the reason is load-bearing:
+  `status.output` is a *tending machine's* ring, snapshotted by `stopTending` once per command, so it
+  is `null` for a node only a pass has touched and one command stale otherwise, and a pass's
+  one-shot `up` (`Concurrent`) has no ring that outlives the walk. Putting the lines in the machine
+  ring (the note's first idea, an edit in `Upkeep`'s one-shot attempt) would have covered only
+  re-applies under tending, not the `up` an operator types. The web UI's dock (`ui.js`: `toggleTail`,
+  `seedTail`, `tailLineOf`, `pushTailLine`) pins up to four windows, remembers the pinned refs in
+  `localStorage`, closes one whose node is gone from the next `/dag`, and keeps per window the
+  number of the newest event it shows: after every `/dag` each window takes the `tail` events above
+  that number and a live event at or below it is dropped, so a reload refills a window with exactly
+  what live showed (lines and `[updown]`/`[upkeep]` report lines, formatted by the same function) and
+  a resubscription fills what the closed stream missed, each once. Against a server with no `tail`
+  it falls back to `status.output` for an empty window, as before. `Client.Model.fromDag` seeds
+  `nodeSaid` from the `tail`'s `log` events at the snapshot's number, and `rebase` keeps the old
+  model's unless the fresh one is current to a later number. The Rust client (`rs/`) does not read
+  `tail` (nor fold `output`). Tests: `Test/ServeEventsSpec.hs` (QuickCheck: a tail is the newest of
+  each lane against the run filtered and cut; past the cap the kept nodes are the most recently
+  heard from; and, Layer 1, a one-shot `up`'s `log` lines and its `eval`/`done` are in `/dag`'s tail
+  afterwards, numbered up to its `seq`, with nothing about the node after it on `?since=`),
+  `Test/ReportJsonSpec.hs` (`taggedNode` against every golden's encoding), `Test/ClientModelSpec.hs`
+  (`saidFromTail`). Run by hand: `salmon-ops-serve-fixture run serve --http` with `--build 3`
+  (`/events` carried the lines a second apart while the command ran; `/dag` afterwards had the
+  build's 11 events with `status: null`; the real `ui.js` run under node against that `/dag`, a pin
+  remembered, refilled the window with the 11 lines and took none of the replayed events twice;
+  master's `ui.js` showed it empty). Not looked at in a browser.
   Test/ServeEventsSpec.hs`: a
   seeded (`SALMON_EVENTS_SEED`) mid-pass disconnect-and-`?since=` equals an uninterrupted
   subscription; strictly increasing numbers across the three streams with `supervise on` and
@@ -1292,9 +1322,9 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `tailLines` under the expanded node (what was said, else the ring), control characters
   blanked. Tested at Layer 0 only (`outputFolded`, the `log` events encoded by the server's own
   `Tagged.FromNode`); the TUI pane has not been looked at against a running `serve`, and the Rust
-  client (`rs/`) does not fold this stream. Still open: a one-shot `up`'s lines never enter the
-  server's ring, so a client that connects after they were said sees them only while `/events`
-  still replays them. `renderNodeRow`/`renderHeader` are the
+  client (`rs/`) does not fold this stream. A `/dag` answer's per-node `tail` (see `Events` above)
+  seeds `nodeSaid` with what a one-shot `up` said, so a client connecting afterwards sees it.
+  `renderNodeRow`/`renderHeader` are the
   text a terminal shows, kept here so `Test/ClientModelSpec.hs` can assert on it: a recorded
   pass folded onto a snapshot, replay and rebase, the SSE parser against what `Events` renders,
   and, at Layer 1, the client itself against a real `withHttpServer` (`dag`, `commandAsync`,
@@ -1388,8 +1418,25 @@ removed on the way out) rather than threaded through 106 `up` sites; with no sin
 `output`, kind `log`; as text, `  [<short ref>] out| line` (`err|`, `msg|`). Lines are handed to sinks under one lock
 but are not serialised against the drivers' own reports, so a sink writes each line in one call. What is said is public
 like report text: never a secret. `run up`/`run down`/`run serve` also set stdout to line buffering, since a pass
-redirected to a file otherwise reported in 8k blocks. Not done: `--listen` clients do not receive these lines, and the
-line carries no shorthand (only the ref).
+redirected to a file otherwise reported in 8k blocks. Under `run serve` the sink is registered by `Serve.serveSaying`,
+which stamps each line from the loop's "line being handled" cell like every report: so a `--listen` client is sent
+the lines said during the pass its own command started (`Socket.listenerNodeLogReporter`, the `--json` object), and
+lines said while a node is tended between commands reach no client (a held action saying something while a command is
+handled is stamped with that command, as its reports are). `/events` still carries them with no `origin`. Tested in
+`Test/ServeSocketSpec.hs` (`nodeLinesReachTheirClient`) and by hand with `socat` against the serve fixture's
+`--build`. Not done: the line carries no shorthand (only the ref).
+
+**Default routing, and why ordinary builtins have empty tails** (finding of feature af1b16f9, a proposal, not done):
+every command is `captured` unless its node opts in, and the only opt-ins are `Podman.BuildOptions.buildOutput`
+(default `captured`), `ClipCpp`'s cmake and the `Self` remote modes. So an ordinary builtin says nothing while it
+runs, and its tail is the `[updown] eval`/`done`/`failed: ...` report lines only (a failure's text carries what was
+captured, stdout and stderr, through `CommandFailed`). That is why the owner saw empty tails. Proposed, for the owner to
+decide: (1) no global flip, for the secrets reason above; (2) opt in, node by node, the long-running commands whose
+output is plainly not secret: Debian package installs, `podman build`/`pull`, `systemctl` start/restart, `git clone`,
+`cabal build`, certificate *requests* (not key material), by changing their default `Routing` to `streamed`; output
+routing is not part of `notes`, so this renders nothing differently and restarts nothing, but it does change what
+`run up` prints, which is why it is a decision; (3) leave `captured` every command that reads or prints a credential
+(`gcloud secrets`, `psql` with statements, `SecretDelivery`, registry logins, `wg`/`netbird` keys, token CLIs).
 
 `Binary.Routing` is where a command's stdout and stderr go, a `Sink` each, chosen per command by the node author:
 `Capture` (whole, in memory, until exit: the default, and what `withBinary`/`withBinaryStdin`/`untrackedExec` still
