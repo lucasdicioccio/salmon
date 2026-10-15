@@ -15,7 +15,8 @@ so a scenario that killed a leader leaves the next one a cluster with a
 history. 'withPatroniVms' therefore /normalizes/ each guest on the way in
 ('resetGuest') instead of assuming a blank machine: it stops the three
 services and removes what they persist (etcd's data, Patroni's cluster
-directory, the Postgres cluster the package created). It starts nothing:
+directory, the Postgres cluster the package created, pgBackRest's
+repository). It starts nothing:
 what runs where is the scenario's declaration.
 -}
 module Test.PatroniVms (
@@ -43,9 +44,14 @@ patroniRootfs =
     | n <- [1 .. 3 :: Int]
     ]
 
--- | The guests' addresses on the shared test bridge, in the order of 'patroniRootfs'.
+{- | The guests' addresses on the shared test bridge, in the order of
+'patroniRootfs'. Their own, not 'testVmAddr'..'testVmAddr3': the serialized
+group keeps one suite's guests apart, but the host is shared, and a guest
+another run left on @10.99.0.2@ would answer for this one (failing its ssh,
+whose CA is per boot) rather than collide visibly.
+-}
 patroniAddrs :: [Text]
-patroniAddrs = [testVmAddr, testVmAddr2, testVmAddr3]
+patroniAddrs = ["10.99.0.11", "10.99.0.12", "10.99.0.13"]
 
 {- | Skips loudly rather than failing when the machine cannot run these:
 qemu, the bridge privileges, and the three rootfses.
@@ -101,6 +107,8 @@ resetGuest vm = do
                 , "systemctl disable patroni haproxy etcd 2>/dev/null || true;"
                 , "pkill -u postgres 2>/dev/null || true;"
                 , "rm -rf /var/lib/etcd/* /var/lib/postgresql/*/main /etc/postgresql/*/main;"
+                , -- a stanza holds the system identifier of the cluster that made it
+                  "rm -rf /var/lib/pgbackrest/* /var/log/pgbackrest/*;"
                 , "rm -f /etc/patroni/*.yml /etc/patroni.yml"
                 ]
             ]

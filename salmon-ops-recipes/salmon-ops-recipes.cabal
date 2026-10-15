@@ -146,6 +146,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PatroniSpec
                     , Test.PatroniPreferredLeaderSpec
                     , Test.PgPairDemoSpec
+                    , Test.PatroniArchiveVmsSpec
                     , Test.PatroniHarnessSpec
                     , Test.PatroniVms
                     , Test.PostgresPairSpec

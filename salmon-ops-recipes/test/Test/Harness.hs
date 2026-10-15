@@ -54,6 +54,7 @@ module Test.Harness (
     withVmAt,
     VmAccess (..),
     sshToVm,
+    sshArgv,
     quoteForRemoteShell,
     scpToVm,
     testHarnessUser,
@@ -734,9 +735,13 @@ ensureVmSshAccess tmpdir rootfs = do
 -- 'quoteForRemoteShell' before it goes in 'args' — see that function's
 -- haddock for why this isn't done unconditionally for every element here.
 sshToVm :: VmAccess -> [String] -> IO (ExitCode, String, String)
-sshToVm access args =
-    readProcessWithExitCode
-        "ssh"
+sshToVm access args = readProcessWithExitCode "ssh" (sshArgv access args) ""
+
+{- | The arguments 'sshToVm' hands @ssh@, for a caller that has to start the
+process itself (e.g. to connect two guests' stdin and stdout through the host).
+-}
+sshArgv :: VmAccess -> [String] -> [String]
+sshArgv access args =
         ( [ "-o"
           , "BatchMode=yes"
           , "-o"
@@ -751,7 +756,6 @@ sshToVm access args =
           ]
             <> args
         )
-        ""
 
 {- | Single-quotes a string so it survives 'sshToVm''s ssh-level space-join
 as one remote token, e.g. a whole SQL statement or @bash -c@ script that
