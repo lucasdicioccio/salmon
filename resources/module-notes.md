@@ -431,7 +431,13 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it** (see `Actions/Upkeep.hs`); the one-shot drivers call `up`, so a node with no meaningful
   `up` should throw from it rather than no-op. `Op = OpGraph Identity Actions'` is the type alias used everywhere in node/recipe
   code. Building a node normally goes through the `op :: ShortHand -> Identity (Graph Op) ->
-  (Extension -> Extension) -> Op` helper, starting from `noop`/`nodeps`/`deps`.
+  (Extension -> Extension) -> Op` helper, starting from `noop`/`nodeps`/`deps`. To change one
+  node of an existing `Op` (add a `check`, a note, a different `help` to a builtin from outside
+  it), use `amendNode :: (Extension -> Extension) -> Op -> Op`: the record update `op` itself
+  does, leaving the predecessors as they were. An `fmap` over the `Op` is the hazard it avoids,
+  since `OpGraph`'s `Functor` reaches every dependency. An `Actionless` node comes back unchanged.
+  Pinned at Layer 0 by `Test.AmendNodeSpec`; `Self.remoteCallNode`, `Qemu`'s graceful `down` and
+  `Cloudrun.keptNode`/`noted` use it (same expression, nothing they render changed).
 - **`Nodes/Daemon.hs`** is the one builtin that fills in `managed`: a process salmon owns and
   keeps running, for where there is no systemd to hand the problem to (a container, a test
   harness, `specs/salmon-as-init.md`'s supervisor). `runDaemon` is the action, exposed so a node
