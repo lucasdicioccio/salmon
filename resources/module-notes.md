@@ -1109,6 +1109,12 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   a trailing `[fetched ... label=... id=... sha256=...]` — a typed line renders as before. The
   first round runs synchronously and stdin is held behind it (`Follow.gated`), so the first
   convergence is what the registry says, and what it found is injected at once.
+  **Tests publish registry documents by rename (`Test.Harness.replaceFile`), never in place**:
+  the fetcher runs in the test's process, GHC locks files per process, and a document that
+  stays malformed is re-read every round (its stamp is not kept), so an in-place write could
+  land mid-read and throw "resource busy (file is locked)" in the test (seen once on `main`
+  in "a document that cannot be read…"). The fetcher's side of the same lock is a contained
+  `FetchFailed`, pinned by "a document held open for writing is a failed fetch…".
   **When every later round runs, and when what it found reaches the loop, is
   `Actions/Follow/Scheduler.hs`** (milestone 3): a pure step over a small state (consecutive
   failures, the next round's deadline, a pending change and when it was first and last seen)

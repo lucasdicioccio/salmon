@@ -25,6 +25,7 @@ module Test.Harness (
 
     -- * scratch filesystem
     withTempDir,
+    replaceFile,
     privatePipe,
 
     -- * skipping tests when a precondition isn't met
@@ -62,6 +63,7 @@ import Control.Exception (bracket, bracket_)
 import Control.Monad (forM_, unless, void)
 import Control.Monad.Identity (Identity, runIdentity)
 import Data.IORef
+import qualified Data.ByteString.Lazy as LByteString
 import Data.List (isInfixOf)
 import qualified Data.List as List
 import qualified Data.Text as Text
@@ -78,10 +80,10 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Reporter (Reporter, ReporterM (..))
 import System.CPUTime (getCPUTime)
-import System.Directory (XdgDirectory (XdgConfig), canonicalizePath, createDirectoryIfMissing, findExecutable, getPermissions, getXdgDirectory, setOwnerExecutable, setPermissions)
+import System.Directory (XdgDirectory (XdgConfig), canonicalizePath, createDirectoryIfMissing, findExecutable, getPermissions, getXdgDirectory, renameFile, setOwnerExecutable, setPermissions)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO (Handle, hPutStrLn, stderr)
 import System.Posix.IO (FdOption (CloseOnExec), createPipe, fdToHandle, setFdOption)
 import System.IO.Temp (withSystemTempDirectory)
@@ -154,6 +156,21 @@ privatePipe = do
 -- | A fresh, auto-cleaned-up temp directory for filesystem-touching nodes.
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir = withSystemTempDirectory "salmon-ops-recipes-test"
+
+{- | Put these bytes at this path the way a publisher should: written to a
+dot-file beside it and renamed over it. Use it for any file a reader in the
+same process may have open at that moment (a @--follow@ registry document
+under a running fetcher): GHC locks files per process, so writing in place
+while another thread has the file open for reading throws "resource busy
+(file is locked)". A rename opens nothing and cannot be refused, and the
+reader sees the old bytes or the new ones, never half of each. The parent
+directory is created if missing. -}
+replaceFile :: FilePath -> LByteString.ByteString -> IO ()
+replaceFile path bytes = do
+    createDirectoryIfMissing True (takeDirectory path)
+    let tmp = takeDirectory path </> ("." <> takeFileName path <> ".tmp")
+    LByteString.writeFile tmp bytes
+    renameFile tmp path
 
 -- | Layer-2 tests need a real binary on PATH (podman, postgres, ...). Rather
 -- than failing the suite on a machine that doesn't have it, skip loudly:

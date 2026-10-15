@@ -17,7 +17,7 @@ module Test.FollowSpec (tests) where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
 import Control.Concurrent.STM (TChan, atomically, newTChanIO, readTChan, writeTChan)
-import Control.Exception (SomeException, throwIO, try)
+import Control.Exception (IOException, SomeException, finally, throwIO, try)
 import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode, toJSON)
 import qualified Data.ByteString.Lazy as LByteString
 import qualified Data.Map.Strict as Map
@@ -27,6 +27,7 @@ import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
+import System.IO (IOMode (..), hClose, openBinaryFile, withBinaryFile)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -44,7 +45,7 @@ import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (Reporter)
 
-import Test.Harness (capture, withTempDir)
+import Test.Harness (capture, replaceFile, withTempDir)
 
 tests :: TestTree
 tests =
@@ -55,6 +56,8 @@ tests =
         , testCase "a seed dropped from the document goes down" droppedSeedGoesDown
         , testCase "two labels: a seed stays up while any label still carries it" unionAcrossLabels
         , testCase "a document that cannot be read is reported and the loop keeps serving" malformedIsReported
+        , testCase "publishing while the fetcher is mid-read is not refused" publishUnderAReader
+        , testCase "a document held open for writing is a failed fetch, and is applied once released" lockedDocumentIsAFailedFetch
         , testCase "a seed the binary cannot parse or configure is reported and the rest is applied" badSeedIsContained
         , testCase "the document format round-trips and refuses what it does not understand" documentFormat
         ]
@@ -191,9 +194,15 @@ label t = either (error . Text.unpack) id (Follow.mkLabel t)
 
 -- | Write a document naming these seeds (one file name each) under a label.
 publish :: FilePath -> Label -> Text -> [[String]] -> IO ()
-publish root lbl did seeds = do
-    createDirectoryIfMissing True (registryDir root)
-    LByteString.writeFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds) Nothing))
+publish root lbl did seeds = writeDocument root lbl (encode (Document did (fmap SeedWords seeds) Nothing))
+
+{- | Put these bytes in place as a label's document, by 'replaceFile' (a
+rename) and never in place: the fetcher runs in this same process, and
+while a document stays malformed it re-reads it every round, so an in-place
+write would race its read (see 'publishUnderAReader'). The temp file's name
+starts with a dot, which no label can, so it is never a document. -}
+writeDocument :: FilePath -> Label -> LByteString.ByteString -> IO ()
+writeDocument root lbl = replaceFile (Follow.documentPath (registryDir root) lbl)
 
 -- | Poll until the condition holds, or fail after a generous bound.
 waitFor :: String -> IO Bool -> IO ()
@@ -325,8 +334,7 @@ unionAcrossLabels =
 malformedIsReported :: IO ()
 malformedIsReported =
     withTempDir $ \root -> do
-        createDirectoryIfMissing True (registryDir root)
-        LByteString.writeFile (Follow.documentPath (registryDir root) (label "web")) "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [{\"neither\": 1}]}"
+        writeDocument root (label "web") "{\"salmon\": 1, \"id\": \"x\", \"seeds\": [{\"neither\": 1}]}"
         (w, _, freports, ()) <- withFollowing root [label "web"] $ \d -> do
             waitFor "the complaint" (any isMalformed <$> followReports d)
             threadDelay (3 * interval)
@@ -341,6 +349,49 @@ malformedIsReported =
   where
     isMalformed Follow.Malformed{} = True
     isMalformed _ = False
+
+{- | The race behind "resource busy (file is locked)" in
+'malformedIsReported', made deterministic. GHC locks files per process:
+while one thread has a file open for reading, another cannot open it for
+writing. The fetcher runs in the test's process and, while a document stays
+malformed, re-reads it every round, so a test that rewrote the document in
+place could hit the fetcher mid-read. Holding a read handle stands in for
+that read: writing in place is refused, 'writeDocument' is not. -}
+publishUnderAReader :: IO ()
+publishUnderAReader =
+    withTempDir $ \root -> do
+        publish root (label "web") "web@1" [["a"]]
+        let path = Follow.documentPath (registryDir root) (label "web")
+        withBinaryFile path ReadMode $ \_ -> do
+            inPlace <- try (LByteString.writeFile path "{}") :: IO (Either IOException ())
+            assertBool "an in-place write under a reader is refused (what the old helper did)" (either (const True) (const False) inPlace)
+            publish root (label "web") "web@2" [["b"]]
+        doc <- eitherDecode <$> LByteString.readFile path
+        assertEqual "the renamed document is in place" (Right "web@2") (fmap docId (doc :: Either String Document))
+
+{- | The other side of the same lock, and the half that would be a defect in
+"Salmon.Actions.Follow" if it went wrong: the fetcher's read refused because
+this process has the document open for writing. That is a throw from the
+registry, which a round contains as 'Follow.FetchFailed'; the loop keeps
+serving and applies the document at the first round after it is released. -}
+lockedDocumentIsAFailedFetch :: IO ()
+lockedDocumentIsAFailedFetch =
+    withTempDir $ \root -> do
+        publish root (label "web") "web@1" [["a"]]
+        writer <- openBinaryFile (Follow.documentPath (registryDir root) (label "web")) AppendMode
+        (_, _, freports, ()) <-
+            flip finally (hClose writer) $
+                withFollowing root [label "web"] $ \d -> do
+                    waitFor "the failed fetch" (any isFetchFailed <$> followReports d)
+                    assertFile root "a" False
+                    hClose writer
+                    waitFor "the file" (fileExists root "a")
+        assertBool "the failed fetch names the lock" $
+            any (Text.isInfixOf "locked") [why | Follow.FetchFailed _ why <- freports]
+        assertEqual "one injection, once the document could be read" ["web@1"] [did | Follow.Injected _ did _ _ _ <- freports]
+  where
+    isFetchFailed Follow.FetchFailed{} = True
+    isFetchFailed _ = False
 
 {- | A seed the binary's own parser rejects (here, an empty word list) and a
 seed whose 'Configure' throws are both reported as bad seeds by the loop; the
