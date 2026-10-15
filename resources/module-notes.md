@@ -1186,7 +1186,23 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   touches the inbox, so no write ever stands a machine down, and a host gone quiet is one whose
   `written` is old, not one whose file says all is well. A write that fails is `Serve.SinkFailed`
   — once per run of failures, re-armed by the next success, emitted from the sink's thread and
-  attributed to nobody — and the loop keeps serving. The fetcher's `Applied` gained `appliedAt`
+  attributed to nobody — and the loop keeps serving. **Load-bearing: `writeNow` re-throws an
+  asynchronous exception** instead of reporting it. `withSink` ends the writer with `withAsync`'s
+  cancel, which waits uninterruptibly for the writer to be gone; when `writeNow` caught that cancel
+  as one more failed write (`SinkFailed ... AsyncCancelled`), the writer kept looping and the wait
+  never returned, so `quit` never returned either under `--status-sink`. The test could not be
+  interrupted either (in the hung runs SIGINT did nothing, and SIGTERM worked once and was
+  ignored twice). This was a product defect, not only a test
+  one. It was the Layer 0 hang (`StatusSinkSpec`'s two-host case, roughly 1 run in 100, more under
+  load, whenever the cancel landed mid-write). `Test/StatusSinkSpec.hs` pins it by making the
+  status read block, so the cancel always lands inside the write; `withHost` there runs the loop
+  on its own thread and fails after 20s instead of hanging. The two `ServeSpec` ticker shells that
+  were seen alive in hung runs were a consequence, not the cause: `quit` leaves a managed process
+  running, so every run kept them until the process exited, and one that lost the race with
+  its temp dir's removal outlived the suite. Those cases now let go of the ticker before
+  leaving (`releaseManaged`: `autoconverge on`, `clear`, then wait for `Released`), and
+  `withTickers` kills any recorded group that is still there. The shells spawn with `close_fds`,
+  and `withSession` uses `privatePipe` and still ends its loop when the body throws. The fetcher's `Applied` gained `appliedAt`
   and its cell is made by the caller (`Follow.newApplied`, beside `newMode`) so `Followed` can
   carry `followedApplied :: IO [AppliedDocument]`; the spec's "the sink is an op in the host's
   graph" was not done, because a node runs *in* a pass and the sink must write *after* it. The
