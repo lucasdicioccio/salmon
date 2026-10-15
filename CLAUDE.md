@@ -168,7 +168,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Processes, output routing, node logs, daemons | `Builtin/Nodes/{Binary,Daemon}.hs`, `Builtin/NodeLog.hs` | `specs/salmon-as-init.md` |
 | Postgres, replication, templates | `Nodes/Postgres.hs`, `SreBox.PostgresTemplate` | |
 | Postgres pair / switchover | `SreBox.PostgresPair`, `SreBox.PostgresPairPrereqs` | `specs/pg-switchover.md`, `resources/postgres-pair.md` |
-| Patroni, preferred leader, pgBackRest, HAProxy | `Nodes/{Patroni,Patroni/PreferredLeader,PgBackRest,Haproxy}.hs` | `specs/pg-patroni.md` |
+| Patroni, preferred leader, rolling maintenance, pgBackRest, HAProxy | `Nodes/{Patroni,Patroni/PreferredLeader,Patroni/RollingMaintenance,PgBackRest,Haproxy}.hs` | `specs/pg-patroni.md` |
 | systemd services, jobs, timers | `Nodes/Systemd.hs`, `Nodes/Systemd/Job.hs` | |
 | Podman, quadlets, registry logins | `Nodes/Podman.hs`, `Nodes/Podman/Quadlet.hs` | |
 | GCP (compute, DNS, load balancer, storage, secrets) | `Nodes/Gcp/` | `specs/gcloud-support.md`, `resources/gcp-toy-validation.md` |

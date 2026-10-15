@@ -491,6 +491,26 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   against an in-process warp fake of the REST API (`Test/PatroniPreferredLeaderSpec.hs`). **Never
   run against a real Patroni**: Patroni 4's exact `/cluster` fields, `/leader` codes and the
   `/switchover` auth behaviour are taken from its docs, not observed.
+  `Nodes/Patroni/RollingMaintenance.hs` (`rollingMaintenance`, spec "Rolling maintenance of
+  members") restarts every member that needs it: `pending_restart`, or a running `server_version`
+  (from each member's own `GET /patroni`) below the declared `rm_server_version`. Two nodes, so the
+  owner's 2026-09-26 decision is an edge plus a gate: `patroni-rolling-replicas` (replicas only, one
+  at a time) and `patroni-rolling-leader` (depends on it, `Window.disruptive`: the switchover and the
+  old leader's restart wait for `--maintenance-window`). `ref`s are the scope alone; members,
+  addresses and target version are in `notes`. A pure `step` over `/cluster` + `/config` + every
+  member's `/patroni` picks one action per observation (no progress file): any doubt (a member
+  unreadable, not healthy, undeclared, declared-but-absent, answering under another name or scope,
+  no leader, a `standby_leader`) is `Hold` (`Unknown`, nothing sent); then stale replicas by name;
+  then a stale leader is switched away from to `switchoverCandidates` (PreferredLeader's policy)
+  filtered to up-to-date members, or held with the leader left alone. A restart is `POST /restart
+  {"role":"replica"}`, so Patroni itself refuses to restart a member that leads. `up` re-observes
+  after each action and treats a `Hold` or the same step as settling for `rm_settle_seconds`
+  (`MaintenanceStuck` after); a `Hold` before any action throws `MaintenanceHeld`. A Patroni
+  package upgrade is not seen (restarting Postgres does not restart Patroni). Run: Layer 0 (step,
+  parsers, properties incl. a simulated run and a run killed after every step) and `check`/`up`
+  against three in-process warp fakes (`Test/PatroniRollingMaintenanceSpec.hs`). **Never run
+  against a real Patroni or the three-VM harness**: `/patroni`'s `server_version`/`patroni.name`
+  and `/restart`'s `role` condition are from Patroni's docs, not observed.
   `Nodes/PgBackRest.hs` is the continuous archive (pgBackRest chosen over WAL-G), i.e. PITR, which
   `SreBox.PostgresBackup`'s `pg_dump` cannot give. `pgbackrest.conf` is rendered (no credential:
   bucket keys and the cipher passphrase are a pre-provisioned `*.conf` fragment, only `chown`ed,

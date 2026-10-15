@@ -52,6 +52,7 @@ import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
 import qualified Test.PatroniSpec as PatroniSpec
 import qualified Test.PatroniPreferredLeaderSpec as PatroniPreferredLeaderSpec
+import qualified Test.PatroniRollingMaintenanceSpec as PatroniRollingMaintenanceSpec
 import qualified Test.PatroniArchiveVmsSpec as PatroniArchiveVmsSpec
 import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
@@ -180,6 +181,7 @@ main =
             , EtcdSpec.tests
             , PatroniSpec.tests
             , PatroniPreferredLeaderSpec.tests
+            , PatroniRollingMaintenanceSpec.tests
             , PatroniArchiveVmsSpec.tests
             , PgBackRestSpec.tests
             , PostgresPairSpec.tests

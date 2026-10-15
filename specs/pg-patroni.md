@@ -246,6 +246,13 @@ member is on an old version or pending a restart" and whose `up` walks that
 order from the controller. It must tolerate being killed halfway: the next pass
 re-observes and continues.
 
+*In as `Salmon.Builtin.Nodes.Patroni.RollingMaintenance`: two nodes (replicas;
+then the leader, `disruptive`, so the switchover waits for a maintenance
+window), driven over the REST API (`POST /restart {"role":"replica"}`,
+`POST /switchover`), with "old version" read as the running `server_version`
+in each member's `/patroni`. Layer 0 and in-process fakes only; not run on the
+three VMs. See `resources/module-notes.md`.*
+
 ## Gating risky operations
 
 Two guards the operator applies to operations that cannot be undone, both
