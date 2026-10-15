@@ -8,9 +8,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextError
-import System.Directory (doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -18,6 +18,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem
+import Salmon.Op.OpGraph (OpGraph (..))
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -77,7 +78,7 @@ systemdServiceWatching watched r systemctl t cfg =
         withCommand (Enable cfg.config_scope cfg.config_target) $ \enable ->
             withCommand (Up cfg.config_scope cfg.config_target) $ \up ->
                 withCommand (Stop cfg.config_scope cfg.config_target) $ \stop ->
-                    op "systemd-service" (deps [configContents, run t cfg]) $ \actions ->
+                    op "systemd-service" (deps [unitFileNode watched cfg, run t cfg]) $ \actions ->
                         actions
                             { help = "installs a systemd-unit and up it"
                             , ref = mkRef "systemd-unit" cfg.config_target
@@ -93,13 +94,46 @@ systemdServiceWatching watched r systemctl t cfg =
             g callbin = f (callbin (r' cmd))
          in
             withBinary systemctl callSystemctl cmd g
+
+{- | The unit file of a 'systemdServiceWatching': 'filecontents' at
+@config_unit_dir/config_target@, standing on a 'unitDirectory' rather than on
+'Salmon.Builtin.Nodes.Filesystem.dir'. The file node itself is what
+'filecontents' renders (same 'ref', @help@ and @notes@); only its
+predecessor differs.
+
+The directory is shared by every unit on the machine and
+'Salmon.Builtin.Nodes.Filesystem.dir''s @down@ refuses a non-empty directory
+on purpose, so with that node under it a @run down@ of one service among
+several removed the unit file and then reported the directory @Failed@,
+which also blocks the teardown of anything declared under the directory.
+-}
+unitFileNode :: [FilePath] -> Config -> Op
+unitFileNode watched cfg =
+    file{predecessors = deps [unitDirectory (takeDirectory unitPath)]}
+  where
+    file :: Op
+    file
+        | null watched = filecontents $ FileContents unitPath (render_config cfg)
+        | otherwise = filecontents $ FileContents unitPath (withWatchedFingerprint watched (render_config cfg))
     unitPath :: FilePath
     unitPath = cfg.config_unit_dir </> Text.unpack cfg.config_target
 
-    configContents :: Op
-    configContents
-        | null watched = filecontents $ FileContents unitPath (render_config cfg)
-        | otherwise = filecontents $ FileContents unitPath (withWatchedFingerprint watched (render_config cfg))
+{- | The directory unit files go in, shared by every unit on the machine:
+created if missing, left alone by @down@.
+'Salmon.Builtin.Nodes.Filesystem.dir' would refuse to go down while anything
+else is in it, which for this directory is always. One node per directory
+(@"systemd-unit-dir"@, keyed on the path), shared by authored services
+('unitFileNode') and jobs ("Salmon.Builtin.Nodes.Systemd.Job").
+-}
+unitDirectory :: FilePath -> Op
+unitDirectory path =
+    op "systemd-unit-dir" nodeps $ \actions ->
+        actions
+            { help = "ensures " <> Text.pack path <> " exists"
+            , notes = ["shared by every unit in it: down leaves it"]
+            , ref = mkRef "systemd-unit-dir" path
+            , up = createDirectoryIfMissing True path
+            }
 
 {- | The unit text, with a comment carrying a hash of the watched files'
 contents. A file that does not exist hashes as empty, so it appearing later
