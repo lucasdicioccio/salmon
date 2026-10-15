@@ -56,6 +56,7 @@ import qualified Test.PostgresPairSpec as PostgresPairSpec
 import qualified Test.PostgresPairPrereqsSpec as PostgresPairPrereqsSpec
 import qualified Test.PostgresSwitchoverSpec as PostgresSwitchoverSpec
 import qualified Test.PostgresTemplateSpec as PostgresTemplateSpec
+import qualified Test.PostgresUserSpec as PostgresUserSpec
 import qualified Test.PostgresTlsSpec as PostgresTlsSpec
 import qualified Test.PostgrestCloudRunSpec as PostgrestCloudRunSpec
 import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
@@ -111,6 +112,7 @@ main =
                 , -- these two shim PATH, which is process-global
                   PostgresInitSpec.tests
                 , PostgresTemplateSpec.sandboxTests
+                , PostgresUserSpec.sandboxTests
                 , MigratorTemplateSpec.tests
                 , PgBackRestSpec.sandboxTests
                 , PgTextSearchSpec.sandboxTests
@@ -176,6 +178,7 @@ main =
             , PostgresPairSpec.tests
             , PostgresPairPrereqsSpec.tests
             , PostgresTemplateSpec.tests
+            , PostgresUserSpec.tests
             , PostgresTlsSpec.tests
             , PostgrestCloudRunSpec.tests
             , QemuResolveKernelSpec.tests

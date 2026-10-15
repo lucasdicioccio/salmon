@@ -2236,6 +2236,29 @@ migrated in place. And **both can drop databases**, so each is marked in its com
 is the caller's to choose and nothing else says who made it. `database`, `cloneDatabase` and
 `template` share the `Ref` key `"pg-db" (port, name)`, because they are the same effect site.
 
+Roles (`Postgres.user`, `Postgres.userPassFile`, the `pg-user` node). **Its check compares the
+declared password with the verifier in `pg_authid.rolpassword`** (`checkUserPassword`, the pure
+reading in `interpretRoleAuthRow`): the declared password is run through the stored verifier's own
+parameters (SCRAM-SHA-256 iterations and salt, or MD5 salted by the role name) and the results
+compared. No login is attempted, so the answer does not depend on `pg_hba.conf` and leaves no failed
+authentication in the server log. Before it, the node had no check (`Immaterial`): it re-ran its
+`ALTER ROLE … PASSWORD` every pass, a drift or a rotation reported as a plain `Done`, and under
+`serve` it parked. Now a satisfied role is skipped (the deliberate behaviour change for existing
+callers), and a missing role, `NOLOGIN`, no password or another password is a `Failure` naming the
+role and nothing else (no verifier, no key, no password: pinned by property in
+`Test.PostgresUserSpec`). `Unknown`, so `up` runs as before, when the cluster cannot be asked, the
+passfile cannot be read yet, the verifier's scheme is not one of those two, the iteration count is
+above 1,000,000, or the password is not pure ASCII under SCRAM (PostgreSQL SASLpreps such a password
+first; that normalization is not reimplemented). PBKDF2 is computed here over `cryptohash-sha256`'s
+HMAC; the encoders are pinned against vectors from Python's `hashlib` and, at Layer 2, against
+PostgreSQL 15's own verifiers (create, drift by hand, rotation, `NOLOGIN`, MD5) in a podman
+container. The role is matched by exact name as `CreateUser`'s own existence guard is, so a name with
+upper case (which `CreateUser` leaves unquoted and PostgreSQL folds) is never found and `up` runs
+every pass, as before. `ref`, `help` and `notes` are unchanged. Not done: a `Supervision` policy
+(e.g. `RestForOne` so a migration or bouncer is bounced when a password is corrected) now that
+there is a check to drive it; `CreateReplicationUser`'s node has no such check yet; `up` still puts
+the password in `psql`'s argv (`-c … PASSWORD '…'`), which predates this.
+
 Streaming replication (`primaryReplicationSetup`/`standbyReplicationSetup`, and the switchover
 recipe sketched in `specs/pg-switchover.md` on top of them). **`standbyReplicationSetup` is the
 one builtin in the tree whose `up` runs `rm -rf` on somebody's data**, so what guards it is the
