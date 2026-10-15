@@ -1,6 +1,6 @@
 cabal-version:      2.4
 name:               salmon-ops-recipes
-version:            0.1.0.0
+version:            0.2.0.0
 synopsis:           Opinionated recipes built from Salmon builtins.
 description:        Higher-level recipes (postgres migrations, postgres primary/standby pairs, micro DNS, ...) composed from salmon-ops builtins.
 homepage:           https://lucasdicioccio.github.io/salmon/
@@ -71,7 +71,7 @@ library
                     , process
                     , process-extras
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.1.0.0
+                    , salmon-ops ^>=0.2.0.0
                     , text
                     , time
                     , tls
@@ -197,8 +197,8 @@ test-suite salmon-ops-recipes-test
                     , process-extras
                     , stm
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.1.0.0
-                    , salmon-ops-recipes ^>=0.1.0.0
+                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops-recipes ^>=0.2.0.0
                     , tasty
                     , tasty-hunit
                     , tasty-quickcheck
@@ -244,7 +244,7 @@ benchmark graph-profiles
                     , stm
                     , unix
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.1.0.0
+                    , salmon-ops ^>=0.2.0.0
                     , text
                     , time
     -- one capability, as the binaries in salmon-apps are built; -T for the
