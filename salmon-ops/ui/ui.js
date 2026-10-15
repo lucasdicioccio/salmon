@@ -45,6 +45,11 @@ const state = {
   zoom: { scale: 1, tx: 0, ty: 0 }, // the #viewport transform; world units are the raw layout() pixels
   zoomInit: false, // true once the first fit-to-view has run
   worldSize: null, // the current layout()'s {width, height}, for fitView
+  view: "graph", // "graph" (the default) or "rows", the opt-in list view
+  rowFilter: "", // a stateClass the rows view shows only, or "" for all
+  rowsFrame: null, // a pending requestAnimationFrame re-render of the rows
+  rowsTimer: null, // the rows view's once-a-second clock for its "since" cells
+  loadedOnce: false, // a node first seen in a later /dag was declared while watching
 };
 
 const MIN_ZOOM = 0.1;
@@ -93,10 +98,12 @@ async function loadDag() {
     // a snapshot is fetched on `declared` and `converge-stop`, mid-command,
     // and which command touched a node is this page's knowledge, not /dag's
     n.touched = before.has(n.ref.full) ? before.get(n.ref.full).touched : null;
+    carryClock(n, before.get(n.ref.full));
     state.nodes.set(n.ref.full, n);
     state.order.push(n.ref.full);
   }
   if (state.selected && !state.nodes.has(state.selected)) state.selected = null;
+  state.loadedOnce = true;
   reconcileTails();
   render();
   subscribe(dag.seq);
@@ -285,6 +292,13 @@ function outputLine(e) {
 
 function applyOutput(e) {
   if (!e.ref) return;
+  if (isProgress(e)) {
+    const n = nodeOf(e);
+    if (n) {
+      n.progress = e.line;
+      paintRow(n);
+    }
+  }
   const line = outputLine(e);
   if (line !== null) pushTailLine(e.ref.full, line, e.seq);
 }
@@ -436,22 +450,27 @@ function applyUpDown(e) {
   switch (e.kind) {
     case "eval":
       n.lastReason = null;
+      startRun(n);
       pulse(n);
       break;
     case "done":
       n.convergence = "converged";
+      endRun(n, true);
       pulse(n);
       break;
     case "skip":
       n.convergence = "converged";
+      endRun(n, false);
       break;
     case "failed":
       n.convergence = "errored";
       n.lastReason = e.error;
+      endRun(n, true);
       pulse(n);
       break;
     case "blocked":
       n.convergence = "blocked";
+      endRun(n, false);
       break;
     case "conflicting":
       n.lastReason = `conflicting: kept ${e.kept && e.kept.shorthand}, replaced ${e.replaced && e.replaced.shorthand}`;
@@ -640,8 +659,13 @@ function render() {
   renderHeader();
   const empty = state.order.length === 0;
   $("empty").hidden = !empty;
-  $("graph-viewport").style.display = empty ? "none" : "";
-  renderGraph();
+  const rows = state.view === "rows";
+  $("graph-viewport").style.display = empty || rows ? "none" : "";
+  $("rows").hidden = empty || !rows;
+  document.body.classList.toggle("view-rows", rows);
+  // the hidden view is not drawn: switching views calls render() again
+  if (rows) renderRows();
+  else renderGraph();
   renderList();
   renderPanel();
 }
@@ -738,6 +762,9 @@ function applyZoom() {
 // whatever the operator has already panned/zoomed to.
 function fitView() {
   const vp = $("graph-viewport");
+  // a hidden viewport (the rows view, an empty world) has no size to fit:
+  // leave the first fit for when it is shown
+  if (!state.zoomInit && vp.clientWidth === 0) return;
   const w = vp.clientWidth || 800;
   const h = vp.clientHeight || 500;
   const world = state.worldSize || { width: w, height: h };
@@ -782,6 +809,7 @@ function clip(s, n) {
 // Repaint one box (and its list row) from the node's current fields.
 function paintNode(n) {
   const cls = stateClass(n);
+  stampState(n, cls);
   if (n.el) {
     const g = n.el;
     g.setAttribute("class", `node ${cls}${n.touched ? " touched" : ""}${n.conflict ? " conflict" : ""}${state.selected === n.ref.full ? " selected" : ""}`);
@@ -798,6 +826,7 @@ function paintNode(n) {
     n.li.className = `${cls}${n.touched ? " touched" : ""}${state.selected === n.ref.full ? " selected" : ""}`;
     n.li.querySelector(".state").textContent = stateLine(n) + (lastLine(n) ? ` — ${lastLine(n)}` : "");
   }
+  paintRow(n);
   if (state.selected === n.ref.full) renderPanel();
 }
 
@@ -833,6 +862,449 @@ function highlightEdges() {
 }
 
 // ---------------------------------------------------------------------------
+// the rows view: opt-in, never the default. The same nodes as the graph, one
+// row each in a topological order (every node below all its dependencies,
+// ties kept in /dag's order), with the dependency edges drawn in a gutter on
+// the left the way `git log --graph` draws history: a node's lane runs down
+// from its row to its last dependant's, forking into each dependant on the
+// way, and a node with several dependencies is where their lanes merge.
+//
+// The "since" and "took" cells are this page's clock, not the server's:
+// /dag and /events carry no timestamps, so a state is stamped when the page
+// first sees it (a node already in the first /dag has no "since"), and a
+// run is timed from its `eval` to its `done`/`failed` as they arrive. A
+// reload of the page loses them; a re-fetch of /dag keeps them. "progress"
+// is the last message the node said (a `log` line on the `msg` channel)
+// since its last `eval`, seeded from /dag's `tail`.
+
+const ROW_H = 30;
+const LANE_W = 14;
+const GUTTER_MAX = 280; // past this many pixels of lanes, lanes narrow (down to 4px) instead
+const GUTTER_PAD = 6;
+const VIEW_STORE = "salmon-view";
+const STATE_CLASSES = ["pending", "stale", "converged", "errored", "blocked", "retiring"];
+
+function storedView() {
+  try {
+    return localStorage.getItem(VIEW_STORE) === "rows" ? "rows" : "graph";
+  } catch {
+    return "graph";
+  }
+}
+
+function setView(view, initial) {
+  state.view = view === "rows" ? "rows" : "graph";
+  const b = $("view-toggle");
+  b.setAttribute("aria-pressed", String(state.view === "rows"));
+  b.textContent = state.view === "rows" ? "graph" : "rows";
+  try {
+    if (state.view === "rows") localStorage.setItem(VIEW_STORE, "rows");
+    else localStorage.removeItem(VIEW_STORE);
+  } catch {
+    // a remembered view is a convenience
+  }
+  clearInterval(state.rowsTimer);
+  state.rowsTimer = state.view === "rows" ? setInterval(tickRows, 1000) : null;
+  if (state.view !== "rows") for (const n of state.nodes.values()) n.row = null;
+  if (!initial) render();
+}
+
+// --- the page's clock
+
+function carryClock(n, old) {
+  if (old) {
+    n.since = old.since;
+    n.sinceState = old.sinceState;
+    n.startedAt = old.startedAt;
+    n.startApprox = old.startApprox;
+    n.tookMs = old.tookMs;
+    n.tookApprox = old.tookApprox;
+    n.progress = old.progress;
+  } else {
+    // in the first /dag: the state's start is not known; later: just declared
+    n.since = state.loadedOnce ? Date.now() : null;
+    n.sinceState = stateClass(n);
+    // a run the tail says is under way began before this page heard of it
+    // (its `eval` came ahead of the /dag that has the node): timed from now,
+    // shown as a lower bound
+    const t = tailRun(n.tail);
+    n.startedAt = t.running ? Date.now() : null;
+    n.startApprox = t.running;
+    n.tookMs = null;
+    n.tookApprox = false;
+    n.progress = t.progress;
+  }
+}
+
+function stampState(n, cls) {
+  if (n.sinceState === cls) return;
+  n.sinceState = cls;
+  n.since = Date.now();
+}
+
+function startRun(n) {
+  n.startedAt = Date.now();
+  n.startApprox = false;
+  n.tookMs = null;
+  n.progress = null;
+}
+
+// `timed`: the run ended by doing something (done, failed), as opposed to
+// skipping it or being blocked
+function endRun(n, timed) {
+  if (timed && n.startedAt) {
+    n.tookMs = Date.now() - n.startedAt;
+    n.tookApprox = n.startApprox;
+  }
+  n.startedAt = null;
+}
+
+function isProgress(e) {
+  return e.stream === "output" && e.kind === "log" && e.channel === "message" && typeof e.line === "string";
+}
+
+// From a /dag `tail`: the last message said since the last `eval`, and
+// whether that `eval` is still waiting for its outcome.
+function tailRun(tail) {
+  let progress = null;
+  let running = false;
+  if (!Array.isArray(tail)) return { progress, running };
+  for (const e of tail) {
+    const kind = e.stream === "updown" ? e.kind : e.stream === "upkeep" && e.kind === "acted" && e.report ? e.report.kind : null;
+    if (kind === "eval") {
+      progress = null;
+      running = true;
+    } else if (kind === "done" || kind === "failed" || kind === "skip" || kind === "blocked") {
+      running = false;
+    } else if (isProgress(e)) {
+      progress = e.line;
+    }
+  }
+  return { progress, running };
+}
+
+function duration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return ms < 10000 ? `${(Math.max(0, ms) / 1000).toFixed(1)}s` : `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+function clockText(n, now) {
+  if (n.startedAt) return `running ${n.startApprox ? "≥ " : ""}${duration(now - n.startedAt)}`;
+  const parts = n.since ? [`${duration(now - n.since)} ago`] : [];
+  if (n.tookMs !== null && n.tookMs !== undefined) parts.push(`took ${n.tookApprox ? "≥ " : ""}${duration(n.tookMs)}`);
+  return parts.length ? parts.join(" · ") : "–";
+}
+
+function clockTitle(n) {
+  const at = (t) => new Date(t).toLocaleTimeString();
+  if (n.startedAt) return n.startApprox ? `started before ${at(n.startedAt)}, when this page first saw it` : `started at ${at(n.startedAt)}`;
+  if (!n.since) return "in this state since before the page loaded";
+  return `${n.sinceState} since ${at(n.since)}`;
+}
+
+function tickRows() {
+  const now = Date.now();
+  for (const n of state.nodes.values()) {
+    if (!n.row) continue;
+    n.row.querySelector(".since").textContent = clockText(n, now);
+  }
+}
+
+// --- order and gutter (pure: ids and a dependency function in, rows out)
+
+// Kahn's algorithm, ready nodes taken in `ids` order; whatever a cycle keeps
+// from ever being ready is appended in `ids` order (the drivers report it
+// Blocked).
+function topoOrder(ids, depsOf) {
+  const index = new Map(ids.map((id, i) => [id, i]));
+  const waiting = new Map();
+  const dependants = new Map();
+  for (const id of ids) {
+    const ds = depsOf(id).filter((d) => index.has(d) && d !== id);
+    waiting.set(id, ds.length);
+    for (const d of ds) (dependants.get(d) || dependants.set(d, []).get(d)).push(id);
+  }
+  // a binary heap of indices: the earliest ready node in `ids` comes first
+  const heap = [];
+  const push = (i) => {
+    heap.push(i);
+    let k = heap.length - 1;
+    while (k > 0) {
+      const p = (k - 1) >> 1;
+      if (heap[p] <= heap[k]) break;
+      [heap[p], heap[k]] = [heap[k], heap[p]];
+      k = p;
+    }
+  };
+  const pop = () => {
+    const top = heap[0];
+    const last = heap.pop();
+    if (heap.length) {
+      heap[0] = last;
+      let k = 0;
+      for (;;) {
+        const l = 2 * k + 1;
+        const r = l + 1;
+        let m = k;
+        if (l < heap.length && heap[l] < heap[m]) m = l;
+        if (r < heap.length && heap[r] < heap[m]) m = r;
+        if (m === k) break;
+        [heap[m], heap[k]] = [heap[k], heap[m]];
+        k = m;
+      }
+    }
+    return top;
+  };
+  ids.forEach((id, i) => {
+    if (waiting.get(id) === 0) push(i);
+  });
+  const out = [];
+  const done = new Set();
+  while (heap.length) {
+    const id = ids[pop()];
+    out.push(id);
+    done.add(id);
+    for (const t of dependants.get(id) || []) {
+      const w = waiting.get(t) - 1;
+      waiting.set(t, w);
+      if (w === 0) push(index.get(t));
+    }
+  }
+  for (const id of ids) if (!done.has(id)) out.push(id);
+  return out;
+}
+
+// The dependencies a shown row draws: its own, and for one that is filtered
+// out, the nearest shown nodes beneath it (`direct: false`, drawn dashed),
+// so filtering keeps "this needs that" visible through the hidden rows.
+function shownDeps(order, shown, depsOf) {
+  const reach = new Map(); // hidden id -> Set of shown ids beneath it
+  const visiting = new Set();
+  const beneath = (id) => {
+    if (reach.has(id)) return reach.get(id);
+    const acc = new Set();
+    if (visiting.has(id)) return acc;
+    visiting.add(id);
+    for (const d of depsOf(id)) {
+      if (shown.has(d)) acc.add(d);
+      else for (const x of beneath(d)) acc.add(x);
+    }
+    visiting.delete(id);
+    reach.set(id, acc);
+    return acc;
+  };
+  const out = new Map();
+  for (const id of order) {
+    if (!shown.has(id)) continue;
+    const ds = new Map();
+    for (const d of depsOf(id)) {
+      if (shown.has(d)) ds.set(d, true);
+      else for (const x of beneath(d)) if (!ds.has(x)) ds.set(x, false);
+    }
+    ds.delete(id);
+    out.set(id, ds);
+  }
+  return out;
+}
+
+// rows: shown ids, top to bottom; deps: id -> Map(dep -> direct). A node's
+// lane is held from its row to its last dependant's row; a node takes the
+// lane of a dependency that ends on its row when there is one (so a chain
+// is one straight line), else the lowest lane free at its row.
+function gutterLayout(rows, deps) {
+  const rowOf = new Map(rows.map((id, i) => [id, i]));
+  const lastRow = new Map();
+  rows.forEach((id, r) => {
+    for (const d of deps.get(id).keys()) {
+      const rd = rowOf.get(d);
+      if (rd !== undefined && rd < r) lastRow.set(d, Math.max(lastRow.get(d) ?? rd, r));
+    }
+  });
+  const laneEnd = []; // lane -> last row it is held to
+  const laneOf = new Map();
+  rows.forEach((id, r) => {
+    let lane = -1;
+    for (const d of deps.get(id).keys()) {
+      const l = laneOf.get(d);
+      if (l !== undefined && laneEnd[l] === r && lastRow.get(d) === r) {
+        lane = l;
+        break;
+      }
+    }
+    if (lane < 0) {
+      lane = laneEnd.findIndex((end) => end <= r);
+      if (lane < 0) lane = laneEnd.length;
+    }
+    laneEnd[lane] = Math.max(r, lastRow.get(id) ?? r);
+    laneOf.set(id, lane);
+  });
+  const edges = [];
+  rows.forEach((id, r) => {
+    for (const [d, direct] of deps.get(id)) {
+      const rd = rowOf.get(d);
+      if (rd === undefined || rd >= r) continue; // a cycle's back edge
+      edges.push({ from: d, to: id, fromRow: rd, toRow: r, fromLane: laneOf.get(d), toLane: laneOf.get(id), direct });
+    }
+  });
+  return { laneOf, lanes: Math.max(1, laneEnd.length), edges };
+}
+
+// --- drawing
+
+function rowsDepsOf(id) {
+  const n = state.nodes.get(id);
+  return n ? (n.dependencies || []).map((r) => r.full).filter((d) => state.nodes.has(d)) : [];
+}
+
+// a state change can move a row in or out of the filter: one re-render per frame
+function scheduleRows() {
+  if (state.rowsFrame !== null) return;
+  state.rowsFrame = requestAnimationFrame(() => {
+    state.rowsFrame = null;
+    if (state.view === "rows") renderRows();
+  });
+}
+
+function renderFilterOptions() {
+  const sel = $("rows-filter");
+  const counts = new Map(STATE_CLASSES.map((c) => [c, 0]));
+  for (const n of state.nodes.values()) counts.set(stateClass(n), (counts.get(stateClass(n)) || 0) + 1);
+  const opts = [["", `all (${state.nodes.size})`], ...STATE_CLASSES.map((c) => [c, `${c} (${counts.get(c) || 0})`])];
+  if (sel.options.length !== opts.length) {
+    sel.replaceChildren(...opts.map(([v]) => Object.assign(document.createElement("option"), { value: v })));
+  }
+  opts.forEach(([v, label], i) => {
+    sel.options[i].value = v;
+    sel.options[i].textContent = label;
+  });
+  sel.value = state.rowFilter;
+}
+
+function renderRows() {
+  const list = $("rows-list");
+  const gutter = $("rows-gutter");
+  list.replaceChildren();
+  gutter.replaceChildren();
+  for (const n of state.nodes.values()) n.row = null;
+  renderFilterOptions();
+  const order = topoOrder(state.order, rowsDepsOf);
+  const shown = new Set(order.filter((id) => !state.rowFilter || stateClass(state.nodes.get(id)) === state.rowFilter));
+  const rows = order.filter((id) => shown.has(id));
+  const deps = shownDeps(order, shown, rowsDepsOf);
+  const { laneOf, lanes, edges } = gutterLayout(rows, deps);
+  $("rows-count").textContent = state.rowFilter ? `${rows.length} of ${order.length} shown` : `${rows.length} nodes`;
+
+  const laneW = Math.max(4, Math.min(LANE_W, GUTTER_MAX / lanes));
+  const width = Math.ceil(lanes * laneW + 2 * GUTTER_PAD);
+  $("rows").style.setProperty("--gutter", `${width}px`);
+  gutter.setAttribute("width", width);
+  gutter.setAttribute("height", rows.length * ROW_H);
+  const x = (lane) => GUTTER_PAD + lane * laneW + laneW / 2;
+  const y = (row) => row * ROW_H + ROW_H / 2;
+  for (const e of edges) {
+    const x1 = x(e.fromLane);
+    const x2 = x(e.toLane);
+    const y1 = y(e.fromRow);
+    const y2 = y(e.toRow);
+    let d;
+    if (x1 === x2) {
+      d = `M ${x1} ${y1} L ${x2} ${y2}`;
+    } else {
+      // down the dependency's lane, then bend into the dependant on its row
+      const yb = Math.max(y1, y2 - ROW_H);
+      d = `M ${x1} ${y1} L ${x1} ${yb} C ${x1} ${y2 - ROW_H / 3}, ${x2} ${y2 - ROW_H / 2}, ${x2} ${y2}`;
+    }
+    const p = document.createElementNS(SVG, "path");
+    p.setAttribute("d", d);
+    if (!e.direct) p.setAttribute("class", "indirect");
+    p.dataset.from = e.from;
+    p.dataset.to = e.to;
+    gutter.appendChild(p);
+  }
+  const now = Date.now();
+  rows.forEach((id, r) => {
+    const n = state.nodes.get(id);
+    const dot = document.createElementNS(SVG, "circle");
+    dot.setAttribute("cx", x(laneOf.get(id)));
+    dot.setAttribute("cy", y(r));
+    dot.setAttribute("r", Math.min(4.5, Math.max(2, laneW / 2 - 0.5)));
+    gutter.appendChild(dot);
+
+    const li = document.createElement("li");
+    li.tabIndex = 0;
+    li.dataset.ref = id;
+    const gap = document.createElement("span");
+    const st = document.createElement("span");
+    st.className = "state";
+    const name = document.createElement("span");
+    name.className = "name";
+    const ref = document.createElement("span");
+    ref.className = "ref mono";
+    ref.textContent = `#${n.ref.short}`;
+    const sh = document.createElement("span");
+    sh.className = "shorthand";
+    sh.textContent = n.shorthand;
+    name.title = n.help || "";
+    name.append(ref, " ", sh);
+    const since = document.createElement("span");
+    since.className = "since mono";
+    since.textContent = clockText(n, now);
+    const progress = document.createElement("span");
+    progress.className = "progress";
+    li.append(gap, st, name, since, progress);
+    li.addEventListener("click", () => select(id));
+    li.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        select(id);
+      }
+    });
+    list.appendChild(li);
+    n.row = li;
+    n.dot = dot;
+    paintRow(n);
+  });
+  highlightRowEdges();
+}
+
+function paintRow(n) {
+  if (!n.row) {
+    // a node the filter hides that now matches it
+    if (state.view === "rows" && state.rowFilter && stateClass(n) === state.rowFilter) scheduleRows();
+    return;
+  }
+  const cls = stateClass(n);
+  if (state.rowFilter && cls !== state.rowFilter) {
+    scheduleRows();
+    return;
+  }
+  const li = n.row;
+  li.className = `row ${cls}${n.touched ? " touched" : ""}${state.selected === n.ref.full ? " selected" : ""}${n.startedAt ? " running" : ""}`;
+  const st = li.querySelector(".state");
+  st.textContent = n.machine ? `${cls} · ${n.machine}` : cls;
+  st.title = stateLine(n) + (lastLine(n) ? ` — ${lastLine(n)}` : "");
+  const since = li.querySelector(".since");
+  since.textContent = clockText(n, Date.now());
+  since.title = clockTitle(n);
+  const progress = li.querySelector(".progress");
+  const text = n.progress || (n.lastReason ? n.lastReason : "");
+  progress.textContent = text;
+  progress.title = text;
+  progress.classList.toggle("muted", !n.progress);
+  if (n.dot) n.dot.setAttribute("class", cls);
+}
+
+function highlightRowEdges() {
+  for (const p of $("rows-gutter").querySelectorAll("path")) {
+    p.classList.toggle("hi", state.selected !== null && (p.dataset.from === state.selected || p.dataset.to === state.selected));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // the side panel
 
 function select(id) {
@@ -841,6 +1313,7 @@ function select(id) {
   if (prev && state.nodes.has(prev)) paintNode(state.nodes.get(prev));
   if (state.selected) paintNode(state.nodes.get(state.selected));
   highlightEdges();
+  highlightRowEdges();
   renderPanel();
 }
 
@@ -1442,6 +1915,12 @@ $("reload").addEventListener("click", loadDag);
   $("zoom-reset").addEventListener("click", fitView);
 }
 
+$("view-toggle").addEventListener("click", () => setView(state.view === "rows" ? "graph" : "rows"));
+$("rows-filter").addEventListener("change", (ev) => {
+  state.rowFilter = ev.target.value;
+  renderRows();
+});
+
 for (const b of document.querySelectorAll("#actions button[data-line]")) {
   b.addEventListener("click", () => {
     if (b.dataset.confirm && !window.confirm(b.dataset.confirm)) return;
@@ -1501,4 +1980,5 @@ function signedOut() {
 }
 
 offerSignOut();
+setView(storedView(), true);
 loadDag();
