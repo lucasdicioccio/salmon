@@ -50,7 +50,7 @@ import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (Reporter)
 
-import Test.Harness (capture, withTempDir)
+import Test.Harness (capture, replaceFile, withTempDir)
 
 tests :: TestTree
 tests =
@@ -389,7 +389,7 @@ followingSigned =
             reg = root </> "reg"
             cache = root </> "cache"
             verifier = Signature.signedVerifier Signature.RefuseUnlabelled (anyLabel [Signature.publicKey key])
-            publish bytes = createDirectoryIfMissing True reg >> LByteString.writeFile (Follow.documentPath reg web) bytes
+            publish bytes = createDirectoryIfMissing True reg >> replaceFile (Follow.documentPath reg web) bytes
         good <- signFor key "web" (document "web@1" [["a"]])
         let evil = withDocument (retitle "web@evil") good
         publish good
@@ -545,7 +545,7 @@ plantedAtOtherLabel =
             reg = root </> "reg"
             cache = root </> "cache"
             verifier = Signature.signedVerifier Signature.RefuseUnlabelled (anyLabel [Signature.publicKey key])
-            publish bytes = createDirectoryIfMissing True reg >> LByteString.writeFile (Follow.documentPath reg prod) bytes
+            publish bytes = createDirectoryIfMissing True reg >> replaceFile (Follow.documentPath reg prod) bytes
         forCanary <- signFor key "canary" (document "canary@1" [["a"]])
         publish forCanary
         (_, sreports, freports, ()) <- withFollowing root reg verifier [prod] $ \d -> do

@@ -47,7 +47,7 @@ import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (Reporter)
 
-import Test.Harness (capture, withTempDir)
+import Test.Harness (capture, replaceFile, withTempDir)
 
 tests :: TestTree
 tests =
@@ -184,7 +184,7 @@ label t = either (error . Text.unpack) id (Follow.mkLabel t)
 publishAt :: FilePath -> Label -> Text -> Maybe UTCTime -> [[String]] -> IO ()
 publishAt root lbl did published seeds = do
     createDirectoryIfMissing True (registryDir root)
-    LByteString.writeFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds) published))
+    replaceFile (Follow.documentPath (registryDir root) lbl) (encode (Document did (fmap SeedWords seeds) published))
 
 publish :: FilePath -> Label -> Text -> [[String]] -> IO ()
 publish root lbl did = publishAt root lbl did Nothing

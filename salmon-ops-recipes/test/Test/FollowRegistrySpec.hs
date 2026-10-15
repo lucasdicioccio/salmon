@@ -57,7 +57,7 @@ import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (Reporter)
 
-import Test.Harness (capture, withTempDir)
+import Test.Harness (capture, replaceFile, withTempDir)
 
 tests :: TestTree
 tests =
@@ -515,7 +515,7 @@ verifyHook =
                 | "evil" `Text.isInfixOf` Text.decodeUtf8Lenient (LByteString.toStrict bytes) = pure (Left "mentions evil")
                 | otherwise = pure (Right bytes)
             knobs = Knobs (Just cache) refusing
-            publish bytes = createDirectoryIfMissing True reg >> LByteString.writeFile (Follow.documentPath reg web) bytes
+            publish bytes = createDirectoryIfMissing True reg >> replaceFile (Follow.documentPath reg web) bytes
         publish (document "web@1" [["a"]])
         (w, _, freports, ()) <- withFollowing root (Follow.directoryRegistry reg) knobs [web] $ \d -> do
             waitFor "the file" (fileExists root "a")
