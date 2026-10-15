@@ -161,7 +161,7 @@ setupWithGrace grace r rTap systemctl qemuBin ip cfg =
         `inject` LinuxBridge.tap rTap ip cfg.vm_tap
   where
     -- the unit's own @down@ (systemctl stop) still runs, after the guest had its chance
-    graceful o = o{node = fmap (\e -> e{down = void (shutdown grace cfg.vm_monitor_socket) >> e.down}) o.node}
+    graceful = amendNode (\e -> e{down = void (shutdown grace cfg.vm_monitor_socket) >> e.down})
 
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \_ -> op "qemu-setup" (deps [justInstall qemuBin]) id

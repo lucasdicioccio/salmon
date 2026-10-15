@@ -42,7 +42,7 @@ semantics regardless of whether a node is as small as "create a file" or as larg
   --token-file FILE [--cacert FILE]` — `salmon-tui PATH` reads `/dag` once, follows
   `/events`, and draws the node table with a `:` command line that is the only thing on the
   screen that touches the loop. `brick`/`vty` are dependencies of this package alone.
-  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); the filtering half of the NAT type is not done; the `natpmpc` parser has no captured fixture.
+  `salmon-report` (`Report.hs`) is a read-only capabilities report: `config --name N --tcp H:P --echo URL` then `run report [--json]`. Probes are ordinary `Op`s whose `check` files a `Finding` (question, yes/no/unknown, evidence, method) in a `Collector`; its private driver evaluates every `check` concurrently with a per-probe timeout and never calls `up`. No third-party default (the external address comes from the gateway or a declared `--echo`); the filtering half of the NAT type is not done; the `natpmpc` parser's no-answer case is pinned by one captured run (`salmon-apps/test/fixtures/natpmpc-no-answer.txt`: natpmpc 20230423, public-address request only, against a home router without NAT-PMP, gateway redacted to 192.0.2.1); its answer case (`Public IP address : A`) is still hand-written, no NAT-PMP gateway was available. That run took about 128 s to give up (nine retries, 250 ms doubling), longer than `run report`'s default 10 s `--timeout`, so against such a gateway the probe reports `unknown` (timeout) rather than `no` unless `--timeout` is raised.
   Port probes (`--nmap HOST:PORTS`, repeatable, pure half in `Report/Nmap.hs`): one unprivileged connect scan per
   declared target (`nmap -sT -Pn -n -oG - -p PORTS HOST`, shared by that target's probes through `once`) and one finding
   per port: open is `yes`, closed is `no`, filtered is `unknown` with its meaning (`-Pn`, so a host that is away shows
@@ -431,7 +431,13 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it** (see `Actions/Upkeep.hs`); the one-shot drivers call `up`, so a node with no meaningful
   `up` should throw from it rather than no-op. `Op = OpGraph Identity Actions'` is the type alias used everywhere in node/recipe
   code. Building a node normally goes through the `op :: ShortHand -> Identity (Graph Op) ->
-  (Extension -> Extension) -> Op` helper, starting from `noop`/`nodeps`/`deps`.
+  (Extension -> Extension) -> Op` helper, starting from `noop`/`nodeps`/`deps`. To change one
+  node of an existing `Op` (add a `check`, a note, a different `help` to a builtin from outside
+  it), use `amendNode :: (Extension -> Extension) -> Op -> Op`: the record update `op` itself
+  does, leaving the predecessors as they were. An `fmap` over the `Op` is the hazard it avoids,
+  since `OpGraph`'s `Functor` reaches every dependency. An `Actionless` node comes back unchanged.
+  Pinned at Layer 0 by `Test.AmendNodeSpec`; `Self.remoteCallNode`, `Qemu`'s graceful `down` and
+  `Cloudrun.keptNode`/`noted` use it (same expression, nothing they render changed).
 - **`Nodes/Daemon.hs`** is the one builtin that fills in `managed`: a process salmon owns and
   keeps running, for where there is no systemd to hand the problem to (a container, a test
   harness, `specs/salmon-as-init.md`'s supervisor). `runDaemon` is the action, exposed so a node
@@ -527,7 +533,14 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `backup-standby` and a second pg host, not rendered. `Test/PgBackRestSpec.hs` Layer 2 runs the
   rendered words in a container: PITR to a timestamp on a plain cluster, and two Patroni members
   on one etcd where the second is asserted (from Patroni's log) to have been made by pgBackRest.
-  The filesystem nodes themselves and S3 are not exercised there.
+  The filesystem nodes themselves and S3 are not exercised there. `Test/PatroniArchiveVmsSpec.hs`
+  is T7 on the three-VM harness, driven the same way (pure output over ssh, `Patroni.checkMember`
+  from the host): etcd on guest 2, the first member and the backup on guest 1, a configuration-only
+  member on guest 3. The repository is *copied* from guest 1 to guest 3 after the backup (the
+  guests have no shared mount), so the "every member reads one repository" half is simulated. On
+  these 9p-root guests etcd cannot keep its data under `/var/lib` (bbolt's `mmap` fails) nor on
+  `/run` (smaller than its 64 MB WAL preallocation); it uses `/dev/shm`. The Patroni harness uses
+  its own addresses (`10.99.0.11`-`.13`), apart from the other VM specs' `.2`-`.5`.
 - **`Actions/UpDown.hs`** implements graph execution. Both directions run the same way: `expand`
   the `OpGraph` to a `Cofree Graph`, collapse that to a `Ref`-keyed DAG with `Salmon.Op.Dag`
   (below), then walk it. `upDag` walks it in dependency order — a node is applied once everything

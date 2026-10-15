@@ -91,6 +91,7 @@ test-suite salmon-ops-recipes-test
     hs-source-dirs:   test
     other-modules:    Test.Harness
                     , Test.CheckSpec
+                    , Test.AmendNodeSpec
                     , Test.ClientModelReference
                     , Test.ClientModelSpec
                     , Test.ClientModelStepSpec
@@ -147,6 +148,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PatroniPreferredLeaderSpec
                     , Test.PatroniRollingMaintenanceSpec
                     , Test.PgPairDemoSpec
+                    , Test.PatroniArchiveVmsSpec
                     , Test.PatroniHarnessSpec
                     , Test.PatroniVms
                     , Test.PostgresPairSpec

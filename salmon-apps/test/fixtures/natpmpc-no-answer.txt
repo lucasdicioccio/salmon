@@ -1,0 +1,14 @@
+initnatpmp() returned 0 (SUCCESS)
+using gateway : 192.0.2.1
+sendpublicaddressrequest returned 2 (SUCCESS)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -100 (TRY AGAIN)
+readnatpmpresponseorretry returned -7 (FAILED)
+readnatpmpresponseorretry() failed : the gateway does not support nat-pmp
+  errno=11 'Resource temporarily unavailable'

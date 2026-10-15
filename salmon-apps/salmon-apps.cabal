@@ -14,6 +14,7 @@ category:           Development
 build-type:         Simple
 tested-with:        GHC == 9.10.3
 extra-doc-files:    CHANGELOG.md
+extra-source-files: test/fixtures/*.txt
 
 source-repository head
     type:     git

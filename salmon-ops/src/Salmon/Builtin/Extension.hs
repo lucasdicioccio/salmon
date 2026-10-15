@@ -170,10 +170,22 @@ noop short =
 
 op :: ShortHand -> Identity (Graph Op) -> (Extension -> Extension) -> Op
 op short pred f =
-    -- complicated implementation to say that we apply the modifier on Extension on top of a noop
-    let baseOp = (noop short){predecessors = pred}
-        baseNode = node baseOp
-     in baseOp{node = fmap f baseNode}
+    -- apply the modifier on Extension on top of a noop
+    amendNode f (noop short){predecessors = pred}
+
+{- | Amend this one node's 'Extension', leaving its predecessors exactly as
+they were: the way to add a @check@, a note or a different @help@ to a
+builtin from outside it.
+
+An 'fmap' over an 'Op' is not that: 'OpGraph' is a 'Functor' over the whole
+graph, so it rewrites every dependency too (two declarations sharing a
+directory node then disagree about it and fold as @Conflicting@). This is
+the record update 'op' itself does, given a name.
+
+An 'Actionless' node has no 'Extension' and is returned unchanged.
+-}
+amendNode :: (Extension -> Extension) -> Op -> Op
+amendNode f o = o{node = fmap f o.node}
 
 placeholder :: ShortHand -> Text -> Op
 placeholder short t = op short nodeps $ \actions ->

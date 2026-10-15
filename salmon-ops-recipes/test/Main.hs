@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Test.AptRepositorySpec as AptRepositorySpec
+import qualified Test.AmendNodeSpec as AmendNodeSpec
 import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ClientModelStepSpec as ClientModelStepSpec
@@ -52,6 +53,7 @@ import qualified Test.EtcdSpec as EtcdSpec
 import qualified Test.PatroniSpec as PatroniSpec
 import qualified Test.PatroniPreferredLeaderSpec as PatroniPreferredLeaderSpec
 import qualified Test.PatroniRollingMaintenanceSpec as PatroniRollingMaintenanceSpec
+import qualified Test.PatroniArchiveVmsSpec as PatroniArchiveVmsSpec
 import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
@@ -127,11 +129,13 @@ main =
                 , PgBackupSpec.tests
                 , PgPairDemoSpec.tests
                 , PatroniHarnessSpec.tests
+                , PatroniArchiveVmsSpec.vmTests
                 , -- the user's own systemd manager and podman
                   QuadletUserSpec.tests
                 , SystemdJobSpec.userTests
                 ]
             , CheckSpec.tests
+            , AmendNodeSpec.tests
             , ClientModelSpec.tests
             , ClientModelStepSpec.tests
             , ConcurrentSpec.tests
@@ -178,6 +182,7 @@ main =
             , PatroniSpec.tests
             , PatroniPreferredLeaderSpec.tests
             , PatroniRollingMaintenanceSpec.tests
+            , PatroniArchiveVmsSpec.tests
             , PgBackRestSpec.tests
             , PostgresPairSpec.tests
             , PostgresPairPrereqsSpec.tests

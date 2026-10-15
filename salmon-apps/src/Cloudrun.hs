@@ -139,7 +139,7 @@ import System.FilePath (isAbsolute, takeDirectory, (</>))
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Builtin.CommandLine as CLI
-import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, nodeps, notes, op, ref, up)
+import Salmon.Builtin.Extension (Extension, Op, Track', amendNode, check, deps, down, nodeps, notes, op, ref, up)
 import qualified Salmon.Builtin.Extension as Extension
 import qualified Salmon.Builtin.Nodes.Gcp.CloudRun as CloudRun
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
@@ -929,11 +929,11 @@ turnupGraph t =
 and that it says so. The one node: its dependencies are as they were.
 -}
 keptNode :: Op -> Op
-keptNode o = noted [keptNote] o{node = fmap (\e -> e{down = pure ()}) o.node}
+keptNode = noted [keptNote] . amendNode (\e -> e{down = pure ()})
 
 -- | The node as it was, saying this too. The one node.
 noted :: [Text] -> Op -> Op
-noted more o = o{node = fmap (\e -> e{notes = e.notes <> more}) o.node}
+noted more = amendNode (\e -> e{notes = e.notes <> more})
 
 {- | The same for a secret, which is two nodes when it has a version (the
 version's node declares the secret's own beneath it) and whose builtin note
