@@ -67,8 +67,8 @@ The code is on GitHub at
 [`lucasdicioccio/salmon`](https://github.com/lucasdicioccio/salmon). It is a
 Haskell cabal multi-package project: `salmon-core` (the graph model, no IO),
 `salmon-ops` (the builtin nodes and the drivers, one-shot and `serve`),
-`salmon-ops-recipes` (opinionated compositions) and `salmon-apps` (the
-binaries).
+`salmon-ops-recipes` (opinionated compositions) and `salmon-apps` ([the
+binaries](/docs-salmon-apps.html)).
 
 ## What it looks like
 
@@ -101,6 +101,8 @@ just spawned), and the actions the input language offers on it:
   declaration, not a discovery: switchover, refused failovers, rejoins.
 - [**How it compares**](/docs-comparison.html) — next to Ansible/Terraform
   and Patroni/repmgr, and when to choose one of those instead.
+- [**The binaries**](/docs-salmon-apps.html) — every `salmon-apps`
+  binary: what it is for, how to run it, and what of it has been run.
 - [**Builtins, recipes and binaries**](/builtins.html) — every node module,
   recipe and shipped binary, one line each.
 - [**Guides**](/docs.html) and [**Specs**](/specs.html) — the documentation

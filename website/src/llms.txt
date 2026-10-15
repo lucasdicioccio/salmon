@@ -6,6 +6,7 @@ The model (salmon-core): https://lucasdicioccio.github.io/salmon/docs-salmon-cor
 Writing and testing ops (cookbook): https://lucasdicioccio.github.io/salmon/docs-howto-ops.html
 run serve, convergence and supervision: https://lucasdicioccio.github.io/salmon/docs-serve-supervision.html
 Builtins, recipes and binaries: https://lucasdicioccio.github.io/salmon/builtins.html
+The salmon-apps binaries (one entry each, with what has been run): https://lucasdicioccio.github.io/salmon/docs-salmon-apps.html
 Guides index: https://lucasdicioccio.github.io/salmon/docs.html
 Specs index (design sketches, each with a Status line): https://lucasdicioccio.github.io/salmon/specs.html
 

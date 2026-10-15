@@ -249,7 +249,9 @@ above, where this project's own conventions get enforced:
 
 ## Binaries
 
-`salmon-apps/` — each one is a small `Main` over a recipe:
+`salmon-apps/` — each one is a small `Main` over a recipe; see
+[`resources/salmon-apps.md`](resources/salmon-apps.md) for one entry per binary, with a
+command line and what of it has been run:
 
 | Binary | Does |
 |---|---|
@@ -262,6 +264,9 @@ above, where this project's own conventions get enforced:
 | `salmon-toy-qemu-pg-ha` | the `salmon-pgpair` demo on three qemu guests, with a client that keeps writing while the primary moves |
 | `salmon-fleet` | the controller's side of pull mode: `status DIR` folds the hosts' status documents into one line per host; `keygen`/`sign` make signed documents |
 | `salmon-tui` | a terminal client for `run serve --http` (or `--http-tcp`) |
+| `salmon-report` | a read-only report of what a network can do: DNS delegation, ports, STUN/NAT mapping, inbound and hairpin reachability |
+| `salmon-patroni-rootfs` | the root filesystems of the three-VM Patroni test harness |
+| `salmon-docs-sync` | rebuild, commit and push the website (`docs/`) when its sources change |
 
 ### Installing a released binary
 
@@ -304,6 +309,9 @@ triggered by pushing a `vX.Y.Z` tag.
   the GCP builtins against a real, throwaway project with the `salmon-gcp-toy`
   binary: what it declares, how to read an `up`/`up`/`down` run, and what the
   automated (Layer 0) tests cannot tell you.
+- [`resources/salmon-apps.md`](resources/salmon-apps.md) — one entry per `salmon-apps`
+  binary: what it is for, its seed, a minimal command line, and what of it has
+  actually been run (and what is Layer 0 only).
 - [`resources/salmon-ops-patterns.md`](resources/salmon-ops-patterns.md) — recurring
   shapes worth reusing across recipes (e.g. a one-time privileged bootstrap).
 - [`specs/`](specs/) — design sketches, each headed by a `Status:` line saying
