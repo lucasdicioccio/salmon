@@ -24,6 +24,47 @@ target state (and back) instead of just running once. See
 [`resources/salmon-core.md`](resources/salmon-core.md) for the full model and where
 else it could be pointed.
 
+## Demo: move a Postgres primary while a client is writing
+
+[`salmon-toy-qemu-pg-ha`](resources/postgres-pair.md#watching-it-happen)
+builds three qemu guests for itself, runs a Postgres primary/standby pair
+(`salmon-pgpair`) on two of them and pgbouncer on the third, and keeps a
+client inserting through the bouncer. The primary is not discovered. It is
+one word in a declaration, and changing that word is the switchover:
+
+```sh
+t=$(cabal list-bin salmon-toy-qemu-pg-ha)
+
+sudo $t config prereqs             | sudo $t run up   # once, as root: three root filesystems
+$t config up --primary A --seed B  | $t run up        # once: the pair, A primary, B cloned from it
+$t config client --seconds 120     | $t run up &      # a client, writing through the bouncer
+$t config up --primary B           | $t run up        # the demo: declare B the primary
+```
+
+That last pass pauses the bouncer, stops A cleanly, checks that B has A's last
+record, promotes B, repoints and resumes the bouncer, and rejoins A as a
+standby with `pg_rewind`. When the client stops it prints three numbers. On
+the machine where the guide was written:
+
+```
+  inserts acknowledged through the bouncer: 460
+  inserts that came back an error:          0
+  acknowledged rows missing afterwards:     0
+```
+
+Then pause B's guest and declare `--primary A`: salmon **refuses**, because it
+cannot prove that nothing would be lost. Add `--may-discard B` and the refusal
+becomes a failover. Salmon never fails over on its own. The same pair is run
+against real VMs by the test suite, with crashed primaries, partitions and
+killed controllers (scenarios S1 to S8 in
+[`resources/postgres-pair.md`](resources/postgres-pair.md)). That guide also
+shows how to drive it live under `run serve --http` and lists what has not
+been run with the guests booted.
+
+How this compares with Ansible, Terraform, Patroni and repmgr, and when to
+choose one of them instead, is in
+[`resources/comparison.md`](resources/comparison.md).
+
 ## Packages
 
 This is a cabal multi-package project, layered strictly bottom-to-top:
@@ -255,6 +296,10 @@ triggered by pushing a `vX.Y.Z` tag.
   switchover does step by step, when the recipe refuses and why, and how to
   watch a client keep writing across one with the `salmon-toy-qemu-pg-ha`
   demo.
+- [`resources/comparison.md`](resources/comparison.md) — salmon next to
+  Ansible/Terraform (general provisioners) and Patroni/repmgr (Postgres HA):
+  what each one does that the others do not, and when to choose one of them
+  instead.
 - [`resources/gcp-toy-validation.md`](resources/gcp-toy-validation.md) — how to exercise
   the GCP builtins against a real, throwaway project with the `salmon-gcp-toy`
   binary: what it declares, how to read an `up`/`up`/`down` run, and what the
