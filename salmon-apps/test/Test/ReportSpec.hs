@@ -268,6 +268,12 @@ tests =
             assertEqual "" (NatpmpPublic "203.0.113.4") (parseNatpmpc "initnatpmp() returned 0 (SUCCESS)\nPublic IP address : 203.0.113.4\n")
         , testCase "natpmpc without gateway" $
             assertEqual "" NatpmpNoGateway (parseNatpmpc "Cannot get default gateway ip address")
+        , testCase "natpmpc against a gateway that does not answer (captured)" $ do
+            -- A real natpmpc 20230423 run (no mapping requested, only the
+            -- public-address request) against a home router without NAT-PMP;
+            -- the gateway address is replaced by 192.0.2.1.
+            out <- readFile "test/fixtures/natpmpc-no-answer.txt"
+            assertEqual "" NatpmpNoAnswer (parseNatpmpc (Text.pack out))
         , testCase "host:port" $ do
             assertEqual "" (Just ("example.org", 443)) (parseHostPort "example.org:443")
             assertEqual "" (Just ("::1", 80)) (parseHostPort "[::1]:80")
