@@ -98,6 +98,7 @@ library
                    , Salmon.Builtin.Nodes.Etcd
                    , Salmon.Builtin.Nodes.Patroni
                    , Salmon.Builtin.Nodes.Patroni.PreferredLeader
+                   , Salmon.Builtin.Nodes.Patroni.RollingMaintenance
                    , Salmon.Builtin.Nodes.PgBackRest
                    , Salmon.Builtin.Nodes.Postgres
                    , Salmon.Builtin.Nodes.ClipCpp
