@@ -12,7 +12,9 @@ usage: scripts/release-hackage.sh [options]
   --dry-run          do everything except the upload (sdist, build, test); no network upload
   --publish          upload as published releases instead of candidates, then tag locally
   --token-file FILE  file holding the Hackage API token (else \$HACKAGE_TOKEN; else cabal's own credentials)
-  --set-bounds       rewrite internal dependencies to ^>=VERSION in the .cabal files, then exit
+  --packages A,B     release only these packages (default: those whose version is not yet published
+                     on Hackage, asked of hackage.haskell.org; with --docs-only, all four)
+  --set-bounds       rewrite each internal dependency to ^>= that package's own version, then exit
   --no-docs          do not build or upload Haddock documentation
   --docs-only        build and upload only the Haddocks, for the version already in the .cabal
                      files: no package upload, no tag; publishes the docs unless --dry-run
@@ -24,12 +26,13 @@ usage: scripts/release-hackage.sh [options]
 USAGE
 }
 
-DRY=0 PUBLISH=0 TOKEN_FILE="" SET_BOUNDS=0 NO_DOCS=0 DOCS_ONLY=0 SKIP_TESTS=0 HEAVY=0 KEEP=0 YES=0
+DRY=0 PUBLISH=0 TOKEN_FILE="" ONLY="" SET_BOUNDS=0 NO_DOCS=0 DOCS_ONLY=0 SKIP_TESTS=0 HEAVY=0 KEEP=0 YES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
     --publish) PUBLISH=1 ;;
     --token-file) TOKEN_FILE="${2:?--token-file needs a file}"; shift ;;
+    --packages) ONLY="${2:?--packages needs a comma-separated list}"; shift ;;
     --set-bounds) SET_BOUNDS=1 ;;
     --no-docs) NO_DOCS=1 ;;
     --docs-only) DOCS_ONLY=1 ;;
@@ -52,36 +55,83 @@ die() { printf 'release-hackage: %s\n' "$*" >&2; exit 1; }
 
 version_of() { awk '/^version:/ {print $2; exit}' "$1/$1.cabal"; }
 
-# ---- 1. versions agree ------------------------------------------------------
-VERSION="$(version_of "${PACKAGES[0]}")"
-[ -n "$VERSION" ] || die "cannot read version of ${PACKAGES[0]}"
+# ---- 1. versions ------------------------------------------------------------
+# Packages may sit at different versions: one left unchanged since the last release keeps the
+# version already on Hackage and is not uploaded again. Every package is still sdisted and built
+# from its tarball below, since the others build against it.
+declare -A VER
 for p in "${PACKAGES[@]}"; do
-  v="$(version_of "$p")"
-  [ "$v" = "$VERSION" ] || die "version mismatch: $p is $v, ${PACKAGES[0]} is $VERSION"
+  VER[$p]="$(version_of "$p")"
+  [ -n "${VER[$p]}" ] || die "cannot read version of $p"
 done
-say "all packages at $VERSION"
 
 # ---- 2. internal bounds -----------------------------------------------------
 # An internal dependency line is "    , salmon-core" (bare) or "    , salmon-ops ^>=X".
+# Each must read "^>=" followed by that dependency's own version.
 INTERNAL='^[[:space:]]*,?[[:space:]]*salmon-(core|ops-recipes|ops)([[:space:]]|,|$)'
 if [ "$SET_BOUNDS" = 1 ]; then
   for p in "${PACKAGES[@]}"; do
-    sed -E -i "s/^([[:space:]]*,?[[:space:]]*salmon-(core|ops-recipes|ops))[[:space:]]*\$/\\1 ^>=$VERSION/" "$p/$p.cabal"
+    for dep in salmon-core salmon-ops salmon-ops-recipes; do
+      sed -E -i "s/^([[:space:]]*,?[[:space:]]*$dep)([[:space:]].*)?\$/\\1 ^>=${VER[$dep]}/" "$p/$p.cabal"
+    done
   done
-  echo "internal bounds set to ^>=$VERSION; review and commit the change, then re-run."
+  echo "internal bounds set to each dependency's own version; review and commit the change, then re-run."
   exit 0
 fi
 bad=0
 for p in "${PACKAGES[@]}"; do
   f="$p/$p.cabal"
   while IFS= read -r line; do
+    dep="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*,?[[:space:]]*(salmon-[a-z-]+).*/\1/')"
     case "$line" in
-      *"^>=$VERSION"*) ;;
-      *) printf '  %s: %s\n' "$f" "$line" >&2; bad=1 ;;
+      *"$dep ^>=${VER[$dep]}") ;;
+      *) printf '  %s: %s (want ^>=%s)\n' "$f" "$line" "${VER[$dep]}" >&2; bad=1 ;;
     esac
   done < <(grep -E "$INTERNAL" "$f" || true)
 done
-[ "$bad" = 0 ] || die "internal dependencies above lack ^>=$VERSION (run with --set-bounds, review, commit)"
+[ "$bad" = 0 ] || die "internal dependencies above lack ^>= their own version (run with --set-bounds, review, commit)"
+
+# ---- 2b. which packages are released ----------------------------------------
+# Default: those whose version is not yet published on Hackage (a candidate does not count, and
+# re-uploading one replaces it). --docs-only defaults to all of them. --packages overrides both.
+on_hackage() {   # prints 200 (published), 404 (not), or something else (could not tell)
+  curl -s -o /dev/null -w '%{http_code}' "https://hackage.haskell.org/package/$1-$2" || true
+}
+RELEASE=()
+if [ -n "$ONLY" ]; then
+  IFS=, read -r -a wanted <<< "$ONLY"
+  for w in "${wanted[@]}"; do
+    [ -n "${VER[$w]:-}" ] || die "--packages: unknown package $w"
+  done
+  for p in "${PACKAGES[@]}"; do   # keep dependency order
+    for w in "${wanted[@]}"; do [ "$w" = "$p" ] && RELEASE+=("$p"); done
+  done
+elif [ "$DOCS_ONLY" = 1 ]; then
+  RELEASE=("${PACKAGES[@]}")
+else
+  for p in "${PACKAGES[@]}"; do
+    code="$(on_hackage "$p" "${VER[$p]}")"
+    case "$code" in
+      200) echo "  $p-${VER[$p]} is already published on Hackage: not released again" ;;
+      404) RELEASE+=("$p") ;;
+      *) die "cannot tell whether $p-${VER[$p]} is on Hackage (HTTP '$code'); name the packages with --packages" ;;
+    esac
+  done
+fi
+[ "${#RELEASE[@]}" -gt 0 ] || die "nothing to release: every package's version is already on Hackage (bump a version, or --packages)"
+# The released packages share one version: it names the tag. (--docs-only uploads the docs of
+# each package at its own version and tags nothing, so it does not need one.)
+VERSION="${VER[${RELEASE[0]}]}"
+if [ "$DOCS_ONLY" != 1 ]; then
+  for p in "${RELEASE[@]}"; do
+    [ "${VER[$p]}" = "$VERSION" ] || die "version mismatch among released packages: $p is ${VER[$p]}, ${RELEASE[0]} is $VERSION"
+  done
+fi
+say "releasing$(for p in "${RELEASE[@]}"; do printf ' %s-%s' "$p" "${VER[$p]}"; done)"
+is_released() { case " ${RELEASE[*]} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+for p in "${PACKAGES[@]}"; do
+  is_released "$p" || echo "  $p stays at ${VER[$p]} (built from its tarball, not uploaded)"
+done
 
 # ---- 3. clean tree ----------------------------------------------------------
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -99,7 +149,7 @@ SDIST="$WORK/sdist"; mkdir -p "$SDIST"
 CHECK_FAILED=0
 
 for p in "${PACKAGES[@]}"; do
-  if [ "$DOCS_ONLY" != 1 ]; then
+  if [ "$DOCS_ONLY" != 1 ] && is_released "$p"; then
   say "cabal check $p"
   # warnings exit 0; errors ("Hackage would reject this package") fail the release,
   # except in a dry run, which reports them and carries on so the rest can be exercised.
@@ -121,11 +171,11 @@ ls -1 "$SDIST"
 say "unpacking tarballs"
 UNPACK="$WORK/unpacked"; mkdir -p "$UNPACK"
 for p in "${PACKAGES[@]}"; do
-  tar -xzf "$SDIST/$p-$VERSION.tar.gz" -C "$UNPACK"
+  tar -xzf "$SDIST/$p-${VER[$p]}.tar.gz" -C "$UNPACK"
 done
 {
   echo "packages:"
-  for p in "${PACKAGES[@]}"; do echo "  $UNPACK/$p-$VERSION"; done
+  for p in "${PACKAGES[@]}"; do echo "  $UNPACK/$p-${VER[$p]}"; done
   # carry the repo's solver tweaks (allow-newer), not its package list
   if [ -f cabal.project.local ]; then grep -v '^ignore-project' cabal.project.local || true; fi
 } > "$UNPACK/cabal.project"
@@ -155,7 +205,7 @@ DOCS_FAILED=0
 if [ "$NO_DOCS" = 1 ]; then
   say "docs skipped (--no-docs)"
 else
-  for p in "${PACKAGES[@]}"; do
+  for p in "${RELEASE[@]}"; do
     say "cabal haddock --haddock-for-hackage $p"
     out="$WORK/haddock-$p.log"
     ok=0
@@ -168,12 +218,12 @@ else
       # take the path cabal printed; fall back to searching the build directory
       # cabal prints the path on the line after "Documentation tarball created:", and also for
       # dependencies it documents on the way, so pick the line that names this package's tarball.
-      tb="$(grep -E "/$p-$VERSION-docs\\.tar\\.gz\$" "$out" | tail -n1 || true)"
+      tb="$(grep -E "/$p-${VER[$p]}-docs\\.tar\\.gz\$" "$out" | tail -n1 || true)"
       if [ -z "$tb" ] || [ ! -f "$tb" ]; then
-        tb="$(find "$BUILD" -name "$p-$VERSION-docs.tar.gz" -print -quit)"
+        tb="$(find "$BUILD" -name "$p-${VER[$p]}-docs.tar.gz" -print -quit)"
       fi
       if [ -n "$tb" ] && [ -f "$tb" ]; then
-        cp "$tb" "$DOCS/$p-$VERSION-docs.tar.gz"
+        cp "$tb" "$DOCS/$p-${VER[$p]}-docs.tar.gz"
         continue
       fi
       echo "release-hackage: cannot find the docs tarball for $p" >&2
@@ -197,12 +247,12 @@ if [ "$DRY" = 1 ]; then
   if [ "$DOCS_FAILED" = 1 ]; then echo "NOTE: haddock failed above; a real run would have stopped there."; fi
   if [ "$DOCS_ONLY" != 1 ]; then
     echo "would upload as $what, in this order:"
-    for p in "${PACKAGES[@]}"; do echo "  $p-$VERSION.tar.gz"; done
+    for p in "${RELEASE[@]}"; do echo "  $p-${VER[$p]}.tar.gz"; done
   fi
   if [ "$NO_DOCS" != 1 ]; then
     dwhat="the candidate"; if [ "$PUBLISH" = 1 ] || [ "$DOCS_ONLY" = 1 ]; then dwhat="the PUBLISHED release"; fi
     echo "would upload docs (cabal upload -d) to $dwhat, in this order:"
-    for p in "${PACKAGES[@]}"; do echo "  $p-$VERSION-docs.tar.gz"; done
+    for p in "${RELEASE[@]}"; do echo "  $p-${VER[$p]}-docs.tar.gz"; done
   fi
   if [ "$PUBLISH" = 1 ] && [ "$DOCS_ONLY" != 1 ]; then echo "would then run: git tag -a v$VERSION $COMMIT (never pushed)"; fi
   exit 0
@@ -222,27 +272,27 @@ if [ "$YES" != 1 ]; then
     d="docs to the candidate"; [ "$DOCS_PUBLISH" = 1 ] && d="docs to the PUBLISHED release"
     todo="${todo:+$todo and }$d"
   fi
-  printf 'Upload %s %s (%s), using %s? [y/N] ' "${PACKAGES[*]}" "$VERSION" "$todo" "$creds"
+  printf 'Upload %s (%s), using %s? [y/N] ' "$(for p in "${RELEASE[@]}"; do printf '%s-%s ' "$p" "${VER[$p]}"; done)" "$todo" "$creds"
   read -r ans; [ "$ans" = y ] || die "aborted"
 fi
 
 if [ "$DOCS_ONLY" != 1 ]; then
-  for p in "${PACKAGES[@]}"; do
-    say "upload $p $VERSION ($what)"
+  for p in "${RELEASE[@]}"; do
+    say "upload $p ${VER[$p]} ($what)"
     flags=()
     if [ -n "${HACKAGE_TOKEN:-}" ]; then flags+=(--token="$HACKAGE_TOKEN"); fi
     if [ "$PUBLISH" = 1 ]; then flags+=(--publish); fi
-    cabal upload ${flags[@]+"${flags[@]}"} "$SDIST/$p-$VERSION.tar.gz"
+    cabal upload ${flags[@]+"${flags[@]}"} "$SDIST/$p-${VER[$p]}.tar.gz"
   done
 fi
 
 if [ "$NO_DOCS" != 1 ]; then
-  for p in "${PACKAGES[@]}"; do
-    say "upload docs $p $VERSION"
+  for p in "${RELEASE[@]}"; do
+    say "upload docs $p ${VER[$p]}"
     flags=(-d)
     if [ -n "${HACKAGE_TOKEN:-}" ]; then flags+=(--token="$HACKAGE_TOKEN"); fi
     if [ "$DOCS_PUBLISH" = 1 ]; then flags+=(--publish); fi
-    cabal upload "${flags[@]}" "$DOCS/$p-$VERSION-docs.tar.gz"
+    cabal upload "${flags[@]}" "$DOCS/$p-${VER[$p]}-docs.tar.gz"
   done
 fi
 
