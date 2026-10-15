@@ -469,6 +469,22 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   it a `pg_hba.conf`), and `pgConfSeed` lays an empty `postgresql.conf` in the config directory
   once (Patroni renames it to `postgresql.base.conf` and dies on the rename, after `initdb`, if it
   is absent). Debian's `patroni` also needs `python3-etcd` to speak to etcd at all.
+  `Nodes/Patroni/PreferredLeader.hs` (`preferredLeader`) is the **opt-in** exception to "names no
+  leader": a separate node, never pulled in by `patroniMember`, because with supervision on it moves
+  the leader back after every failover. `ref` is the scope alone (two preferences for one cluster
+  collide as `Conflicting`); the member is in `help`/`notes`. `check` is `GET /leader` on the
+  preferred member, else a pure `decide` over `GET /cluster` + `GET /config`: a due switchover is
+  `Failure`, an ineligible target is `Unknown` (serve restarts nothing). `up` re-reads the cluster,
+  `POST /switchover {leader, candidate}` with basic auth from a pre-provisioned `user:password`
+  file read at `up` time, then polls `/leader`; an ineligible target throws `SwitchoverSkipped`
+  with nothing sent. Eligibility follows the Zalando operator: with `synchronous_mode` (`true` or
+  `quorum`, read from `/config` since `/cluster` cannot show a missing sync standby) only a
+  `sync_standby`/`quorum_standby`, never a fallback; otherwise `running`/`streaming`/`in archive
+  recovery`; never a `nofailover` member; no leader means wait. `switchoverCandidate` (lowest lag)
+  is exported for rolling maintenance. Run: Layer 0 (decision, parsers, properties) and `check`/`up`
+  against an in-process warp fake of the REST API (`Test/PatroniPreferredLeaderSpec.hs`). **Never
+  run against a real Patroni**: Patroni 4's exact `/cluster` fields, `/leader` codes and the
+  `/switchover` auth behaviour are taken from its docs, not observed.
   `Nodes/PgBackRest.hs` is the continuous archive (pgBackRest chosen over WAL-G), i.e. PITR, which
   `SreBox.PostgresBackup`'s `pg_dump` cannot give. `pgbackrest.conf` is rendered (no credential:
   bucket keys and the cipher passphrase are a pre-provisioned `*.conf` fragment, only `chown`ed,

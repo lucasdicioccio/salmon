@@ -50,6 +50,7 @@ import qualified Test.PgBouncerSpec as PgBouncerSpec
 import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
 import qualified Test.PatroniSpec as PatroniSpec
+import qualified Test.PatroniPreferredLeaderSpec as PatroniPreferredLeaderSpec
 import qualified Test.PatroniHarnessSpec as PatroniHarnessSpec
 import qualified Test.PgPairDemoSpec as PgPairDemoSpec
 import qualified Test.PostgresPairSpec as PostgresPairSpec
@@ -172,6 +173,7 @@ main =
             , HaproxySpec.tests
             , EtcdSpec.tests
             , PatroniSpec.tests
+            , PatroniPreferredLeaderSpec.tests
             , PgBackRestSpec.tests
             , PostgresPairSpec.tests
             , PostgresPairPrereqsSpec.tests

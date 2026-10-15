@@ -10,6 +10,9 @@ or configures a Postgres cluster, and nothing in it names a primary: no node's
 decision and a declaration that disagreed with it would be fighting its owner.
 Which member is the leader is reported by the check (in a failure's text,
 never as a verdict) and nothing more.
+The one, opt-in, exception is a /preference/ an operator declares on purpose:
+"Salmon.Builtin.Nodes.Patroni.PreferredLeader", a separate node that nothing
+here pulls in.
 
 __Layout.__ Postgresql-common's, as decided for this builtin: the data
 directory is @\/var\/lib\/postgresql\/V\/CLUSTER@, the configuration lives in
