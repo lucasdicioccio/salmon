@@ -1567,6 +1567,22 @@ generator in dry-run on the rendered file, and the page image built and served b
 of it against GCP** — system scope, the metadata login, the authenticated pull and the instance flags are still from
 documentation until the developer's tier-3 run.
 
+**`systemdService`'s unit file stands on `Systemd.unitDirectory`, not `Filesystem.dir`** (`Systemd.unitFileNode`).
+It was `Filesystem.filecontents` with its default predecessor, `Filesystem.dir` of the unit directory, whose `down`
+refuses a non-empty directory: so `run down` of one service among several removed the unit file and then reported
+`/etc/systemd/system` (or the user unit directory) `Failed`, blocking whatever stood under it. `unitDirectory` (moved
+here from `Systemd.Job`, which re-exports it) is created if missing and never removed, one node per directory keyed
+`"systemd-unit-dir"`, so authored services and jobs in one directory now share it without a `Conflicting` pair. The
+unit file node's `ref`/`help`/`notes` and the rendered file are unchanged (property-tested); what changes for an
+existing declaration is the predecessor, so under `serve` the old `"directory"` node of that path is retracted once
+and its `down` refuses, the same red line one last time (nothing restarts). Run for this: `Test/SystemdSpec.hs`
+"the unit directory" (a real `upTree`/`downTree` of the unit file in a temp directory holding another unit, the old
+shape reported `Failed` in the same setup, graph shape, QuickCheck properties). Not run: the service node's own
+`down` (`systemctl stop`) in that teardown. Other builtins with the same shape, found by a grep for literal `/etc` paths (not a full survey) and **not** changed:
+`Haproxy`'s config file (`Filesystem.dir` of `/etc/haproxy`, which the package also fills) and
+`SreBox.Initialize`'s `/etc/sudoers.d/salmon` (`Filesystem.dir` of `/etc/sudoers.d`); `CronTask` and
+`AptRepository` write their files without a directory node and are not affected.
+
 `Nodes/Systemd/Job.hs` is jobs under systemd, which `systemdService` cannot declare: its check wants `ActiveState=active`
 and its `up` restarts, so an idle oneshot unit reads as broken and is run at every pass. Three nodes, separate on
 purpose. `jobService` *installs* a `Type=oneshot` unit (no `[Install]`) and starts nothing: the check is

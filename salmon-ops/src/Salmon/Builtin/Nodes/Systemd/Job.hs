@@ -380,20 +380,12 @@ stopIfKnown scope target stop = do
         Failure why -> why
         _ -> ""
 
-{- | The directory unit files go in, shared by every unit on the machine:
-created if missing, left alone by @down@.
-'Salmon.Builtin.Nodes.Filesystem.dir' would refuse to go down while anything
-else is in it, which for this directory is always.
+{- | 'Systemd.unitDirectory': one node per unit directory, shared with the
+authored services of "Salmon.Builtin.Nodes.Systemd"; created if missing,
+left alone by @down@.
 -}
 unitDirectory :: FilePath -> Op
-unitDirectory path =
-    op "systemd-unit-dir" nodeps $ \actions ->
-        actions
-            { help = "ensures " <> Text.pack path <> " exists"
-            , notes = ["shared by every unit in it: down leaves it"]
-            , ref = mkRef "systemd-unit-dir" path
-            , up = createDirectoryIfMissing True path
-            }
+unitDirectory = Systemd.unitDirectory
 
 {- | A unit file: 'FS.filecontents' in a 'unitDirectory', refusing to write
 when there are problems, and reloading systemd after its @down@ removed the
