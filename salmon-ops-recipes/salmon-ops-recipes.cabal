@@ -144,6 +144,7 @@ test-suite salmon-ops-recipes-test
                     , Test.HaproxySpec
                     , Test.EtcdSpec
                     , Test.PatroniSpec
+                    , Test.PatroniPreferredLeaderSpec
                     , Test.PgPairDemoSpec
                     , Test.PatroniHarnessSpec
                     , Test.PatroniVms
