@@ -1,6 +1,10 @@
 module Salmon.Builtin.Nodes.Systemd where
 
+import Control.Exception (Exception, IOException, finally, throwIO, try)
+import Control.Monad (unless)
 import qualified Crypto.Hash.SHA256 as SHA256
+import Crypto.Random (getRandomBytes)
+import Data.Bits ((.&.))
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Char8 as C8
@@ -8,9 +12,14 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextError
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
+import System.IO (hClose)
+import System.IO.Error (isAlreadyExistsError)
+import System.Posix.Files (createLink, fileMode, fileSize, getFileStatus, setFileMode)
+import System.Posix.IO (createFile, fdToHandle)
+import System.Posix.Types (FileMode)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -73,12 +82,64 @@ systemdServiceWatching ::
     Track' Config ->
     Config ->
     Op
-systemdServiceWatching watched r systemctl t cfg =
+systemdServiceWatching = systemdServiceWatchingWith PlainDigest
+
+{- | 'systemdServiceWatching', with the watched files' digest keyed: the
+trailing comment is @# salmon-watches: hmac-sha256:BASE64@, an HMAC-SHA256
+under a key only the owner of the unit directory can read
+('unitWatchKeyNode', @\<config_unit_dir\>\/.salmon-watch.key@), instead of a
+plain SHA-256 of the files.
+
+Why it exists: a unit file is world-readable (so is @systemctl cat@), and the
+files a service watches are often the ones holding its secrets (a pgbouncer
+userlist, a patroni secrets file). A plain hash of them there lets any local
+user check guesses at a low-entropy secret offline. The keyed line detects
+the same changes and says nothing without the key. It is the mechanism
+"Salmon.Builtin.Nodes.Podman.Quadlet" uses for its env files, with the same
+key format and rules: made once, @0600@, never replaced, never removed by
+@down@ (a new key is a new line, so a restart, for every watching unit in
+the directory).
+
+It is a separate entry point rather than a change to
+'systemdServiceWatching' because moving an existing declaration from the
+plain line to the keyed one rewrites its unit file, and so __restarts the
+service once__. A caller opts in knowing that. With nothing watched it is
+'systemdService' exactly, and no key is read or made.
+-}
+systemdServiceWatchingKeyed ::
+    [FilePath] ->
+    Reporter Report ->
+    Track' (Binary "systemctl") ->
+    Track' Config ->
+    Config ->
+    Op
+systemdServiceWatchingKeyed = systemdServiceWatchingWith KeyedDigest
+
+{- | How the watched files' contents show in an authored unit file.
+'PlainDigest' is what 'systemdServiceWatching' has always written,
+'KeyedDigest' is 'systemdServiceWatchingKeyed''s.
+-}
+data WatchDigest
+    = -- | @# salmon-watches: BASE64@, a SHA-256 of 'watchedFrames'
+      PlainDigest
+    | -- | @# salmon-watches: hmac-sha256:BASE64@, under the unit directory's key
+      KeyedDigest
+    deriving (Eq, Show)
+
+systemdServiceWatchingWith ::
+    WatchDigest ->
+    [FilePath] ->
+    Reporter Report ->
+    Track' (Binary "systemctl") ->
+    Track' Config ->
+    Config ->
+    Op
+systemdServiceWatchingWith digest watched r systemctl t cfg =
     withCommand (DaemonReload cfg.config_scope) $ \reload ->
         withCommand (Enable cfg.config_scope cfg.config_target) $ \enable ->
             withCommand (Up cfg.config_scope cfg.config_target) $ \up ->
                 withCommand (Stop cfg.config_scope cfg.config_target) $ \stop ->
-                    op "systemd-service" (deps [unitFileNode watched cfg, run t cfg]) $ \actions ->
+                    op "systemd-service" (deps [unitFileNodeWith digest watched cfg, run t cfg]) $ \actions ->
                         actions
                             { help = "installs a systemd-unit and up it"
                             , ref = mkRef "systemd-unit" cfg.config_target
@@ -108,13 +169,28 @@ several removed the unit file and then reported the directory @Failed@,
 which also blocks the teardown of anything declared under the directory.
 -}
 unitFileNode :: [FilePath] -> Config -> Op
-unitFileNode watched cfg =
-    file{predecessors = deps [unitDirectory (takeDirectory unitPath)]}
+unitFileNode = unitFileNodeWith PlainDigest
+
+{- | 'unitFileNode' with the digest chosen. A 'KeyedDigest' file that watches
+something also stands on the directory's key ('unitWatchKeyNode'); with
+nothing watched the two digests give the same node.
+-}
+unitFileNodeWith :: WatchDigest -> [FilePath] -> Config -> Op
+unitFileNodeWith digest watched cfg =
+    file{predecessors = deps (unitDirectory unitDir : keyNode)}
   where
     file :: Op
     file
         | null watched = filecontents $ FileContents unitPath (render_config cfg)
-        | otherwise = filecontents $ FileContents unitPath (withWatchedFingerprint watched (render_config cfg))
+        | otherwise = case digest of
+            PlainDigest -> filecontents $ FileContents unitPath (withWatchedFingerprint watched (render_config cfg))
+            KeyedDigest -> filecontents $ FileContents unitPath (withKeyedWatchFingerprint (watchKeyFile unitDir) watched (render_config cfg))
+    keyNode :: [Op]
+    keyNode
+        | KeyedDigest <- digest, not (null watched) = [unitWatchKeyNode unitDir]
+        | otherwise = []
+    unitDir :: FilePath
+    unitDir = takeDirectory unitPath
     unitPath :: FilePath
     unitPath = cfg.config_unit_dir </> Text.unpack cfg.config_target
 
@@ -158,6 +234,118 @@ watchedFrames paths = concat <$> traverse framed paths
         exists <- doesFileExist path
         bytes <- if exists then ByteString.readFile path else pure ByteString.empty
         pure [C8.pack (path <> ":" <> show (ByteString.length bytes) <> ":"), bytes]
+
+{- | The unit text with the keyed line ('keyedWatchLine') under the key at
+the given path. Throws 'WatchKeyUnusable' when the key cannot be read: there
+is no fallback to a plain hash, which is the thing the key is there to avoid.
+-}
+withKeyedWatchFingerprint :: FilePath -> [FilePath] -> Text -> IO Text
+withKeyedWatchFingerprint keyPath paths unitText = do
+    key <- readWatchKeyAt keyPath
+    frames <- watchedFrames paths
+    pure (unitText <> keyedWatchLine key frames)
+
+{- | The trailing comment: @# salmon-watches: hmac-sha256:BASE64@, the
+HMAC-SHA256 under the key of what 'watchedFrames' read. Pure, and the whole
+of what the watched files leave in the file.
+-}
+keyedWatchLine :: ByteString.ByteString -> [ByteString.ByteString] -> Text
+keyedWatchLine key frames =
+    "# salmon-watches: hmac-sha256:" <> Text.decodeUtf8 (Base64.encode (SHA256.hmac key (ByteString.concat frames))) <> "\n"
+
+{- | Where a directory's watch key is: beside the units, so it has the
+directory's owner and lifetime. systemd and the quadlet generator load only
+names with a unit suffix they know, and leave this one alone.
+-}
+watchKeyFile :: FilePath -> FilePath
+watchKeyFile dir = dir </> ".salmon-watch.key"
+
+-- | The key is missing, unreadable or empty: its path, and which.
+data WatchKeyUnusable = WatchKeyUnusable !FilePath !Text
+    deriving (Show)
+
+instance Exception WatchKeyUnusable
+
+-- | The key at a path, stripped; 'WatchKeyUnusable' when there is none.
+readWatchKeyAt :: FilePath -> IO ByteString.ByteString
+readWatchKeyAt path = do
+    read_ <- try (ByteString.readFile path) :: IO (Either IOException ByteString.ByteString)
+    case read_ of
+        Left _ -> throwIO (WatchKeyUnusable path "the key of the watched files' digest cannot be read")
+        Right bytes
+            | ByteString.null (C8.strip bytes) -> throwIO (WatchKeyUnusable path "the key of the watched files' digest is empty")
+            | otherwise -> pure (C8.strip bytes)
+
+{- | Makes the key at a path if there is none, and makes it owner-only
+whatever it was.
+
+A key that exists is never replaced: a new key is a new digest, and so a
+restart, for everything watching under it. It is written to a temporary file
+created @0600@ and put in place with @link(2)@, which refuses an existing
+name, so of two processes making it at once one wins and both read the
+winner's.
+-}
+ensureWatchKeyAt :: FilePath -> IO ()
+ensureWatchKeyAt path = do
+    present <- doesFileExist path
+    unless present $ do
+        secret <- getRandomBytes 32 :: IO ByteString.ByteString
+        suffix <- getRandomBytes 6 :: IO ByteString.ByteString
+        let tmp = path <> ".tmp-" <> concatMap hex (ByteString.unpack suffix)
+        ( do
+                h <- fdToHandle =<< createFile tmp 0o600
+                ByteString.hPut h (Base64.encode secret <> "\n") `finally` hClose h
+                placed <- try (createLink tmp path)
+                case placed of
+                    Right () -> pure ()
+                    Left e
+                        | isAlreadyExistsError e -> pure ()
+                        | otherwise -> throwIO e
+            )
+            `finally` removeFile tmp
+    setFileMode path 0o600
+  where
+    hex w = [digits !! fromIntegral (w `div` 16), digits !! fromIntegral (w `mod` 16)]
+    digits = "0123456789abcdef" :: String
+
+{- | The verdict on a key file's mode and size, 'Nothing' for no file. A key
+others can read is a 'Failure' ('ensureWatchKeyAt' then closes it; it does
+not make a new one, see there).
+-}
+interpretWatchKey :: FilePath -> Maybe (FileMode, Integer) -> CheckResult
+interpretWatchKey path Nothing = Failure ("no key at " <> Text.pack path)
+interpretWatchKey path (Just (mode, size))
+    | size <= 0 = Failure ("the key at " <> Text.pack path <> " is empty")
+    | mode .&. 0o077 /= 0 = Failure ("the key at " <> Text.pack path <> " is readable by others than its owner")
+    | otherwise = Success
+
+-- | 'interpretWatchKey' of what is at the path now.
+checkWatchKeyAt :: FilePath -> IO CheckResult
+checkWatchKeyAt path = do
+    present <- doesFileExist path
+    if present
+        then do
+            st <- getFileStatus path
+            pure (interpretWatchKey path (Just (fileMode st, fromIntegral (fileSize st))))
+        else pure (interpretWatchKey path Nothing)
+
+{- | The watch key of a unit directory (@"systemd-unit-watch-key"@, keyed on
+the key's path): one node for every 'systemdServiceWatchingKeyed' unit there
+that watches a file. It stands on the directory and, like it, is never
+removed.
+-}
+unitWatchKeyNode :: FilePath -> Op
+unitWatchKeyNode dir =
+    op "systemd-unit-watch-key" (deps [unitDirectory dir]) $ \actions ->
+        actions
+            { help = "ensures " <> Text.pack path <> " exists, readable by its owner alone"
+            , notes = ["keys the digest of the files the units watch, shared by every unit there: down leaves it"]
+            , ref = mkRef "systemd-unit-watch-key" path
+            , check = checkWatchKeyAt path
+            , up = ensureWatchKeyAt path
+            }
+  where
+    path = watchKeyFile dir
 
 {- | Does this unit already exist, loaded as written, enabled and running?
 

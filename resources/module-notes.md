@@ -1662,7 +1662,8 @@ readable key throws `WatchKeyUnusable`, with no fallback to a plain hash (outsid
 rewrites each watching quadlet and reloads once. The old label stays on such a container (its owner's `podman inspect`
 only) until its next restart; `interpretRunning`'s failure text no longer quotes the running label. Costs: a container
 *job* that watches a file has its quadlet rewritten too, so `completedQuadletJob` runs it once more;
-`Systemd.systemdServiceWatching` still writes a plain hash into its (world-readable) unit file, not changed here; the
+`Systemd.systemdServiceWatching` still writes a plain hash into its (world-readable) unit file by default (the keyed
+form is the opt-in `systemdServiceWatchingKeyed`, see Systemd below; the key primitives now live in `Systemd`); the
 threat is a local user or a copy of those files, not root or the owner. `QuadletUserSpec` runs the upgrade in user
 scope (an old-style file, started, then the node: same `InvocationID` and container, then a rotated env file restarts
 it); system scope has not been run.
@@ -2807,6 +2808,23 @@ is picked up next pass). `PgBouncer.setup` is the first user. Note what the reac
 **restart**, which drops the connections a bouncer exists to hold — moving traffic gently is a
 `PAUSE`/`RELOAD`/`RESUME` for the node orchestrating the move (`specs/pg-switchover.md`), not
 something this node should try to do on its own.
+**The plain digest is a guessing aid, and the keyed one is opt-in.** The unit file is
+world-readable and the watched files are often secret (pgbouncer's userlist, Patroni's secrets
+file), so `# salmon-watches: BASE64` (a plain SHA-256 of `watchedFrames`) lets a local user check
+guesses at a low-entropy secret offline. `systemdServiceWatchingKeyed` writes
+`# salmon-watches: hmac-sha256:BASE64` instead (`keyedWatchLine`, the same construction and
+vector as Quadlet's) under `<config_unit_dir>/.salmon-watch.key` (`unitWatchKeyNode`,
+`systemd-unit-watch-key`: 32 random bytes, `0600`, made once with `link(2)`, never replaced,
+never removed by `down`), with no fallback to a plain hash when the key is unreadable
+(`WatchKeyUnusable`). The key primitives (`watchKeyFile`, `ensureWatchKeyAt`, `readWatchKeyAt`,
+`checkWatchKeyAt`, `interpretWatchKey`) moved here from Quadlet, which now delegates to them with
+the same text and behaviour. **It is not the default**, because moving an existing declaration to
+the keyed line rewrites its unit file and so restarts the service once, and there is no Quadlet-style
+adoption here: systemd keeps no copy of the loaded file to compare with, only `NeedDaemonReload`.
+So `systemdServiceWatching` (and its four callers: `PgBouncer`, `Haproxy`, `Patroni`, `Etcd`)
+renders exactly what it did, pinned in `Test/SystemdSpec.hs`; switching a caller is an owner
+decision (one restart per service). Layer 0 only: the keyed file and key are written by a real
+`upTree` in a temp directory, no systemd has loaded one.
 (I6): `EncodeFileContents` also carries `contentFingerprint :: a -> Maybe Text`, a pure,
 stable hash of the content an instance would write (`Nothing` by default — the `IO a` instance
 keeps it, since its whole point is that content isn't known until the encoder runs).
