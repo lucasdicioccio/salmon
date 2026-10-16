@@ -119,7 +119,9 @@ data RunCommand
       -- @--token-file@, all three or nothing. And whether every HTTP
       -- listener refuses @POST \/command@ (@--http-read-only@; 'False', the
       -- default, is every version before the flag; see 'Http.Access').
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool
+      -- Then the maintenance windows and @--override-window@, as for
+      -- 'RunUp' (see 'Serve.serveObservedWith' for what @serve@ does with them).
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool ![Text] !Bool
     deriving (Eq, Ord, Generic, Show)
 
 {- | The four flags that put the HTTP surface on a network, as typed. What
@@ -441,6 +443,8 @@ runCommandParser =
                     <> Options.Applicative.help
                         "Spectate-only HTTP: --http and --http-tcp serve the page, the reads and /events, and answer every POST /command with 403, so no HTTP request changes the declarations, the wanted nodes or supervision, or ends the loop. Stdin and --listen are unaffected."
                 )
+            <*> maintenanceWindowsP "Nodes marked disruptive are brought up only inside these windows (repeatable): outside them a pass skips them without counting them converged, `status` shows until when they are held, and a tended node waits for the next opening (a `force` still goes through). Teardowns are not held. DAY is Mon..Sun; a start later than the end crosses midnight; the zone is a fixed offset, UTC by default."
+            <*> overrideWindowP
     tcpOptionsP =
         TcpOptions
             <$> optional
@@ -630,18 +634,22 @@ runCommandParser =
                     <> Options.Applicative.help "Proceed even if the plan's directive digest doesn't match stdin."
                 )
             <*> reportFormatP
-            <*> many
-                ( option
-                    (eitherReader (\t -> either (Left . Text.unpack) (const (Right (Text.pack t))) (Window.parseWindow (Text.pack t))))
-                    ( long "maintenance-window"
-                        <> Options.Applicative.metavar "[DAY:]HH:MM-HH:MM[@UTC|@+HH:MM]"
-                        <> Options.Applicative.help "Nodes marked disruptive run only inside these windows (repeatable); outside them they are skipped and reported on stderr. DAY is Mon..Sun; a start later than the end crosses midnight; the zone is a fixed offset, UTC by default."
-                    )
+            <*> maintenanceWindowsP "Nodes marked disruptive run only inside these windows (repeatable); outside them they are skipped and reported on stderr. DAY is Mon..Sun; a start later than the end crosses midnight; the zone is a fixed offset, UTC by default."
+            <*> overrideWindowP
+    maintenanceWindowsP helpText =
+        many
+            ( option
+                (eitherReader (\t -> either (Left . Text.unpack) (const (Right (Text.pack t))) (Window.parseWindow (Text.pack t))))
+                ( long "maintenance-window"
+                    <> Options.Applicative.metavar "[DAY:]HH:MM-HH:MM[@UTC|@+HH:MM]"
+                    <> Options.Applicative.help helpText
                 )
-            <*> switch
-                ( long "override-window"
-                    <> Options.Applicative.help "Run disruptive nodes whatever the maintenance windows say."
-                )
+            )
+    overrideWindowP =
+        switch
+            ( long "override-window"
+                <> Options.Applicative.help "Run disruptive nodes whatever the maintenance windows say."
+            )
     reportFormatP =
         Options.Applicative.flag
             ReportText
@@ -799,7 +807,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly wins overrideWins)) -> do
             reportByLine
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let own = taggedFor fmt
@@ -947,7 +955,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         nodeLogR = maybe id (\srv nr -> reportBoth nr (Http.serverNodeLogReporter srv)) mserver (Tagged.nodeLogStream tagged)
                         saidR = maybe id (\listener sr -> reportBoth sr (Socket.listenerNodeLogReporter listener)) mlistener (contramap Serve.attributed nodeLogR)
                     void $
-                        Serve.serveSaying
+                        Serve.serveSayingWith
+                            (if overrideWins then Window.noWindows else Window.windowsAt (rights (map Window.parseWindow wins)))
                             saidR
                             observe
                             rewrites

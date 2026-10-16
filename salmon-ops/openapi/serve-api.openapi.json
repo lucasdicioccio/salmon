@@ -634,6 +634,17 @@
               "type": "string"
             }
           },
+          "held_until": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "selected": {
             "type": "boolean"
           },
@@ -650,7 +661,7 @@
           "status",
           "paths"
         ],
-        "description": "A node as `status` lists it. `selected` and `excluded` are present in a `query` report only. `paths` is at most 8 of the paths a `--select`/`--exclude` pattern can name the node by, the shortest first: a node under shared dependencies has more than can be listed, and a pattern built from one that is not listed still selects it."
+        "description": "A node as `status` lists it. `selected` and `excluded` are present in a `query` report only. `paths` is at most 8 of the paths a `--select`/`--exclude` pattern can name the node by, the shortest first: a node under shared dependencies has more than can be listed, and a pattern built from one that is not listed still selects it. `held_until` is present only while the node is held back by a maintenance window (`run serve --maintenance-window`): when the next window opens, or null if none ever does."
       },
       "Representative": {
         "type": "object",
@@ -1804,6 +1815,73 @@
           "ref",
           "node",
           "delay_us"
+        ]
+      },
+      "Upkeep_held": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "const": "upkeep"
+          },
+          "kind": {
+            "const": "held"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "until": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node",
+          "until"
+        ],
+        "description": "A node marked disruptive whose effect needs applying while no maintenance window (`run serve --maintenance-window`) is open: its `up` waits. `until` is when the next window opens (null only if none ever does). Said once per episode by the node's machine, and by a convergence pass (inside `tended`) for a node its gate held back."
+      },
+      "UpkeepUntagged_held": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "held"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          },
+          "until": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node",
+          "until"
         ]
       },
       "Upkeep_paused": {
@@ -3240,6 +3318,9 @@
             "$ref": "#/components/schemas/Upkeep_reapplying"
           },
           {
+            "$ref": "#/components/schemas/Upkeep_held"
+          },
+          {
             "$ref": "#/components/schemas/Upkeep_paused"
           },
           {
@@ -3335,6 +3416,9 @@
           },
           {
             "$ref": "#/components/schemas/UpkeepUntagged_reapplying"
+          },
+          {
+            "$ref": "#/components/schemas/UpkeepUntagged_held"
           },
           {
             "$ref": "#/components/schemas/UpkeepUntagged_paused"

@@ -600,8 +600,38 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   crossing midnight allowed, fixed UTC offset since there is no tz database) and `windowGate`, which
   `Skippable`s every node marked `disruptive` (a `Dynamic` marker, like `Supervision`) outside all windows
   and tells a callback when the next opens. The window belongs to the *invocation*, the opt-in to the node.
-  Wired into `run up` only (`--maintenance-window`, repeatable; `--override-window`); a held node is a `Skip`,
-  not a failure, so it does not block dependants. Not yet consulted by `run serve`/`Upkeep`, nor shown in `status`.
+  Under `run up` (`--maintenance-window`, repeatable; `--override-window`) a held node is a `Skip`,
+  not a failure, so it does not block dependants.
+  `run serve` takes the same two flags. The long-running drivers ask `holdOf :: Windows -> ext -> IO Hold`
+  (`Windows` = spans + clock + `windowsRecheck`, 60s from `windowsAt`; `noWindows` is the old behaviour, and
+  the clock is read only for a `disruptive` node). Entry points: `Serve.serveObservedWith`/`serveSayingWith`
+  and `Upkeep.startUpkeepWith`; the old names pass `noWindows`. **Only bringing a node up is held**, never a
+  teardown (same as `run down`). In serve's pass, `gateFor` asks the windows last, only for a node it would
+  otherwise apply. A held node is filed in a per-pass `heldNow` map, and `recorder` drops its `Skip`
+  instead of recording it `Converged` or printing it, saying `Tended (Upkeep.Held act until)` instead. The node stays outstanding:
+  `ConvergeStop` counts it as remaining. `NodeState.nodeHeld :: Maybe (Maybe UTCTime)` is set by that gate and
+  by a machine's `Held` report, and cleared by `setConvergence` (any later record). `status` appends
+  ` [held by maintenance window until T]` to the summary line and the JSON gains `held_until` (both only
+  while held, so nothing else renders differently). In Upkeep, `attemptFrom` asks `ctxHold` before acting.
+  When held, the check is still consulted (an effect already in place settles as usual). Otherwise
+  `heldBack` says `Held` once, leaves `Status` and `Tally` alone (like `awaiting`, so a never-up node's
+  dependants keep waiting), and re-asks every `ctxRecheck`. It goes ahead with its original `Intent` once a
+  window is open. `Recheck` re-asks now; **`Force` goes through a closed window**. An `up` already
+  running is never interrupted when a window closes: the question is asked before an `up` starts. An
+  adopted machine keeps the windows it started with. A held node is re-applied by its machine only while
+  supervision is on and the loop is idle. With `supervise off` it waits for the next `converge` inside a window,
+  and with `autoconverge off` it is untended like any other pending node. Openapi: `Upkeep_held`/
+  `UpkeepUntagged_held`, `NodeState.held_until`; goldens `Upkeep.Held` (with and without an opening) and
+  `Serve.StatusReport (held by a maintenance window)`.
+  **Run (Layer 0 only):** `Test.WindowSpec` (holdOf; Upkeep: waits/says Held once/applies when an injected
+  clock enters the window, a satisfied node is not held, `Force` goes through; serve: a pass holds the node
+  with `nodeHeld` and not `Converged`, `status` text says until when, the idle machine applies it once the
+  clock moves into the window), plus `ReportJsonSpec`, `ServeApiSpec`, `UpkeepSpec`, `ServeSpec`, `ServeModelSpec`,
+  `ServeEventsSpec`, `ServeSocketSpec`, `ServeHttpSpec`, `StatusSinkSpec`, `ClientModelSpec`, `ConcurrentSpec`,
+  `PatroniRollingMaintenanceSpec` unchanged and passing. **Not run:** the CLI flags on a real `serve` binary,
+  a real wall-clock window, the web UI/TUI/Rust client (none renders `held`/`held_until` yet: `Client.Model`
+  only records a machine's `held` as the node's last kind and ignores the pass's `tended` one, and
+  `rs/fixtures` were not regenerated), a qemu/Patroni rolling maintenance under `serve`.
 - **`Builtin/Guarded.hs`** (with `Op/Guard.hs`, the part `Dag` and `Upkeep` can import) is the pattern for an
   operation that cannot be undone, written once as a combinator over an existing node:
   `guarded :: Guarding -> IO Precondition -> Extension -> Extension`. Three rules.

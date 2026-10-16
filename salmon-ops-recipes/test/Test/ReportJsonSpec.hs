@@ -27,6 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LText
 import qualified Data.Text.Lazy.Encoding as LText
+import Data.Time (UTCTime (..), fromGregorian)
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
 import Test.Tasty (TestTree, testGroup)
@@ -68,6 +69,10 @@ tests =
 -- | The one node every golden is about.
 fixtureRef :: Ref
 fixtureRef = mkRef "report-json-spec" ("fixture" :: Text)
+
+-- | When a held node's next maintenance window opens.
+heldUntil :: UTCTime
+heldUntil = UTCTime (fromGregorian 2026 9 27) 7200
 
 -- | A second ref, for the reports that mention two.
 otherRef :: Ref
@@ -202,6 +207,8 @@ upkeepGoldens =
     , ("Upkeep.Demoted", Tagged.FromUpkeep (Upkeep.Demoted fixtureAct otherRef), "{\"kind\":\"demoted\"," <> about <> ",\"dependency\":" <> otherRefJson <> "}")
     , ("Upkeep.Parked", Tagged.FromUpkeep (Upkeep.Parked fixtureAct), "{\"kind\":\"parked\"," <> about <> "}")
     , ("Upkeep.Reapplying", Tagged.FromUpkeep (Upkeep.Reapplying fixtureAct (Micros 1000)), "{\"kind\":\"reapplying\"," <> about <> ",\"delay_us\":1000}")
+    , ("Upkeep.Held", Tagged.FromUpkeep (Upkeep.Held fixtureAct (Just heldUntil)), "{\"kind\":\"held\"," <> about <> ",\"until\":\"2026-09-27T02:00:00Z\"}")
+    , ("Upkeep.Held (no window ever opens)", Tagged.FromUpkeep (Upkeep.Held fixtureAct Nothing), "{\"kind\":\"held\"," <> about <> ",\"until\":null}")
     , ("Upkeep.Paused", Tagged.FromUpkeep (Upkeep.Paused fixtureAct), "{\"kind\":\"paused\"," <> about <> "}")
     , ("Upkeep.Resumed", Tagged.FromUpkeep (Upkeep.Resumed fixtureAct), "{\"kind\":\"resumed\"," <> about <> "}")
     , ("Upkeep.GaveUp", Tagged.FromUpkeep (Upkeep.GaveUp fixtureAct 5), "{\"kind\":\"gave-up\"," <> about <> ",\"failures\":5}")
@@ -264,6 +271,13 @@ serveGoldens =
         , Tagged.FromServe (Serve.StatusReport Serve.Interactive [(fixtureRef, tendedState), (otherRef, untendedState)] paths)
         , "{\"kind\":\"status\",\"mode\":\"interactive\",\"nodes\":[" <> tendedJson <> "," <> untendedJson <> "]}"
         )
+    ,
+        ( "Serve.StatusReport (held by a maintenance window)"
+        , Tagged.FromServe (Serve.StatusReport Serve.Interactive [(otherRef, heldState)] Map.empty)
+        , "{\"kind\":\"status\",\"mode\":\"interactive\",\"nodes\":[{\"ref\":"
+            <> otherRefJson
+            <> ",\"shorthand\":\"other-node\",\"help\":\"the other declaration\",\"direction\":\"up\",\"convergence\":\"pending\",\"status\":null,\"paths\":[],\"held_until\":\"2026-09-27T02:00:00Z\"}]}"
+        )
     , ("Serve.StatusReport (following)", Tagged.FromServe (Serve.StatusReport Serve.Following [] Map.empty), "{\"kind\":\"status\",\"mode\":\"following\",\"nodes\":[]}")
     , ("Serve.StatusReport (replay)", Tagged.FromServe (Serve.StatusReport Serve.Replay [] Map.empty), "{\"kind\":\"status\",\"mode\":\"replay\",\"nodes\":[]}")
     ,
@@ -315,6 +329,7 @@ serveGoldens =
                         , Status.statusEpoch = 2
                         , Status.statusOutput = Status.pushRing "second line" (Status.pushRing "first line" Status.emptyRing)
                         }
+            , Serve.nodeHeld = Nothing
             }
     untendedState =
         Serve.NodeState
@@ -323,7 +338,9 @@ serveGoldens =
             , Serve.nodeDirection = Status.TurnDown
             , Serve.nodeConvergence = Serve.Stale
             , Serve.nodeStatus = Nothing
+            , Serve.nodeHeld = Nothing
             }
+    heldState = untendedState{Serve.nodeDirection = Status.TurnUp, Serve.nodeConvergence = Serve.Pending, Serve.nodeHeld = Just (Just heldUntil)}
     tendedJson =
         "{\"ref\":"
             <> refJson
@@ -532,6 +549,7 @@ _upkeepCovered rep = case rep of
     Upkeep.Demoted{} -> ()
     Upkeep.Parked{} -> ()
     Upkeep.Reapplying{} -> ()
+    Upkeep.Held{} -> ()
     Upkeep.Paused{} -> ()
     Upkeep.Resumed{} -> ()
     Upkeep.GaveUp{} -> ()

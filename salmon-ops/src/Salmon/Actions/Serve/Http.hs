@@ -1000,7 +1000,7 @@ dagValueWith tails mode v =
     stateOf :: Ref -> Act Extension -> NodeState
     stateOf r act =
         Map.findWithDefault
-            (NodeState act.shorthand act.extension.help TurnDown Serve.Pending Nothing)
+            (NodeState act.shorthand act.extension.help TurnDown Serve.Pending Nothing Nothing)
             r
             (viewNodes v)
 

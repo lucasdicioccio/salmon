@@ -198,6 +198,7 @@ module Salmon.Actions.Upkeep (
     -- * Running
     Supervisor,
     startUpkeep,
+    startUpkeepWith,
     stopUpkeep,
     withUpkeep,
     supervisorStatuses,
@@ -231,6 +232,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Clock (UTCTime)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Records (HasField, getField)
@@ -247,6 +249,7 @@ import qualified Salmon.Op.Mailbox as Mailbox
 import Salmon.Op.Ref (Ref, unRef)
 import Salmon.Op.Status (Direction (..), Stability (..), Status (..), newStatus, note, settle, touch, unsettle, waitStability, wedged)
 import Salmon.Op.Supervision (Micros (..), Restart (..), Strategy (..), Supervision (..), millis, seconds, supervisionOf, toNanos)
+import Salmon.Op.Window (Hold (..), Windows (..), holdOf, noWindows, renderHold)
 import Salmon.Reporter
 
 -------------------------------------------------------------------------------
@@ -384,6 +387,13 @@ data Report ext
       -- of the log can tell "checked and found fine" from "never asked,
       -- just applied again" at a glance.
       Reapplying !(Act ext) !Micros
+    | -- | this node is 'Salmon.Op.Window.disruptive', its effect needs
+      -- applying, and no maintenance window is open: its @up@ waits until
+      -- the next one opens (the time, when there is one). Said once per
+      -- episode, not on every wake-up. @run serve@'s convergence pass says
+      -- it too, through 'Salmon.Actions.Serve.Tended', for a node its gate
+      -- held back.
+      Held !(Act ext) !(Maybe UTCTime)
     | -- | told to stop tending this node; its effect is left exactly as it is
       Paused !(Act ext)
     | Resumed !(Act ext)
@@ -640,7 +650,38 @@ startUpkeep ::
     (Ref -> Maybe Tend) ->
     Dag ext ->
     IO (Supervisor ext)
-startUpkeep report (Kept prior) tend dag = do
+startUpkeep = startUpkeepWith noWindows
+
+{- | 'startUpkeep' under maintenance windows: a node marked
+'Salmon.Op.Window.disruptive' whose effect needs applying while no window
+is open does not run its @up@; it waits for the next opening (see
+'Held'). Its check is still asked, so a node whose effect is in place
+settles as usual. 'Salmon.Op.Mailbox.Force' goes through regardless — an
+operator naming the node is the operator who means it — and nothing wanted
+down is held. With 'noWindows' this is 'startUpkeep'.
+
+An adopted machine keeps the windows of the supervisor that started it:
+the windows belong to the invocation, and an invocation does not change
+them while it runs.
+-}
+startUpkeepWith ::
+    forall ext.
+    ( HasField "up" ext (IO ())
+    , HasField "down" ext (IO ())
+    , HasField "managed" ext (Maybe ((Text -> IO ()) -> IO ExitCode))
+    , HasField "check" ext (IO CheckResult)
+    , HasField "ref" ext Ref
+    , HasField "help" ext Text
+    , HasField "notes" ext [Text]
+    , HasField "dynamics" ext [Dynamic]
+    ) =>
+    Windows ->
+    Reporter (Report ext) ->
+    Kept ext ->
+    (Ref -> Maybe Tend) ->
+    Dag ext ->
+    IO (Supervisor ext)
+startUpkeepWith windows report (Kept prior) tend dag = do
     -- reports are serialised for the same reason the concurrent one-shot
     -- driver serialises them: the caller's reporter is not assumed
     -- thread-safe, and interleaved multi-line reports are unreadable.
@@ -755,6 +796,8 @@ startUpkeep report (Kept prior) tend dag = do
                     , -- a node that /is/ a running process has no @up@ for a
                       -- guard to stand in front of. See "Salmon.Builtin.Guarded".
                       ctxGuard = if holds then Nothing else guardOf act.extension
+                    , ctxHold = holdOf windows act.extension
+                    , ctxRecheck = windowsRecheck windows
                     }
         -- A 'Settled' claim is about an effect that persists on its own, and
         -- a managed effect does not persist without a machine holding it. So
@@ -903,6 +946,12 @@ data Ctx ext = Ctx
     , ctxGuard :: !(Maybe Guard)
     -- ^ what this node declared about being an operation that cannot be
     -- undone, if it did. 'Nothing' for nearly every node.
+    , ctxHold :: IO Hold
+    -- ^ whether the maintenance windows let this node's @up@ run now.
+    -- 'Free' without reading a clock for every node that is not
+    -- 'Salmon.Op.Window.disruptive', and for all of them under 'noWindows'.
+    , ctxRecheck :: !Micros
+    -- ^ the longest a held node sleeps before asking 'ctxHold' again.
     }
 
 {- | What 'upping' is to do about the node's own check before acting.
@@ -1189,11 +1238,17 @@ upkeep standing ctx =
     attemptFrom d told intent tally
         | Just Satisfy <- override told = satisfy
         | otherwise = do
-            early <- case (ctxGuard ctx, intent, told `has` Force) of
-                (Just _, Consult, False) -> Just <$> runCheck act
+            -- a 'Force' is the operator meaning it, windows or not.
+            windowed <- if told `has` Force then pure Free else ctxHold ctx
+            -- a held node is still asked: an effect already in place has
+            -- nothing to hold back, and settles as it would have.
+            early <- case (ctxGuard ctx, intent, told `has` Force, windowed) of
+                (Just _, Consult, False, _) -> Just <$> runCheck act
+                (_, Consult, False, HeldUntil _) -> Just <$> runCheck act
                 _ -> pure Nothing
-            case early of
-                Just Unknown -> awaiting d tally
+            case (early, windowed) of
+                (Just Unknown, _) | isJust (ctxGuard ctx) -> awaiting d tally
+                (_, HeldUntil next) | not (maybe False satisfiedBy early) -> heldBack next d intent tally
                 _ -> do
                     say (Upkeep act Upping)
                     unsettle status TurnUp
@@ -1233,6 +1288,43 @@ upkeep standing ctx =
             Rearm{} -> awaiting d tally
             Told _ -> paused ctx told (awaiting d tally) (attemptFrom (soonIf told d) told Consult tally)
             Elapsed -> attemptFrom (relaxed d) told Consult tally
+
+    {- | A 'Salmon.Op.Window.disruptive' node whose effect needs applying,
+    outside every maintenance window: its @up@ does not run. Said once as
+    'Held', with the next opening; then the machine looks at the windows
+    again every 'ctxRecheck' (so a node goes ahead within that long of a
+    window opening, and a clock that jumped is noticed), and goes ahead
+    with the intent it came with once one is open.
+
+    Like 'awaiting', the node's 'Status' is left as it was — a node that has
+    never been up stays unsettled, so its dependants keep waiting rather
+    than coming up on top of a change that has not been made — and its
+    'Tally' is not touched: being held is not failing.
+    'Salmon.Op.Mailbox.Recheck' asks the windows now and
+    'Salmon.Op.Mailbox.Force' goes ahead regardless. -}
+    heldBack :: Maybe UTCTime -> Delay -> Intent -> Tally -> IO ()
+    heldBack next d intent tally = do
+        touch status
+        note status ("held by maintenance window " <> renderHold next)
+        say (Held act next)
+        napping next
+      where
+        napping opening = do
+            w <- naptime ctx (ctxRecheck ctx)
+            told <- announce ctx w
+            case w of
+                Halt -> pure ()
+                Ended _ -> pure ()
+                Demote _ -> napping opening
+                Rearm{} -> napping opening
+                Told _ -> paused ctx told (napping opening) (attemptFrom d told intent tally)
+                Elapsed -> do
+                    h <- ctxHold ctx
+                    case h of
+                        Free -> attemptFrom d [] intent tally
+                        HeldUntil until'
+                            | until' == opening -> napping opening
+                            | otherwise -> heldBack until' d intent tally
 
     {- | An @up@ that returns, leaving something behind that persists.
 
