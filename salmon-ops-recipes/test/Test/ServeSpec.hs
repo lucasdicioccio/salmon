@@ -16,7 +16,7 @@ module Test.ServeSpec (tests) where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, retry)
-import Control.Exception (IOException, throwIO, try)
+import Control.Exception (IOException, finally, onException, throwIO, try)
 import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy as LByteString
@@ -32,7 +32,8 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), Handle, IOMode (ReadMode), hClose, hPutStr, hPutStrLn, hSetBuffering, withFile)
 import System.IO.Temp (withSystemTempFile)
-import System.Process (createPipe, proc)
+import System.Posix.Signals (sigKILL, signalProcessGroup)
+import System.Process (CreateProcess (..), Pid, proc)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -55,9 +56,9 @@ import qualified Salmon.Op.Status as MachineStatus
 import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (ReporterM (..), silent)
+import Salmon.Reporter (Reporter, ReporterM (..))
 
-import Test.Harness (capture, withTempDir)
+import Test.Harness (capture, privatePipe, withTempDir)
 
 tests :: TestTree
 tests =
@@ -720,14 +721,22 @@ data Session = Session
     , sessionNodes :: !(TVar [UpDown.Report Extension])
     }
 
--- | Run the loop on its own thread over a pipe the body writes into.
+{- | Run the loop on its own thread over a pipe the body writes into.
+
+The pipe is 'privatePipe': a daemon a case starts is a child of this
+process, and one that inherited the write end would hold this loop's input
+open. A body that throws still ends the loop — it lets go of any managed
+process first, as 'releaseManaged' does, then types @quit@ and waits a
+bounded while for the loop to take it — so a failed case does not leave a
+loop tending its nodes, or a daemon running, for the rest of the suite.
+-}
 withSession :: Track' Spec -> FilePath -> (Session -> IO a) -> IO (a, World Spec Spec)
 withSession prog root body = do
     serveTrace <- newTVarIO []
     nodeTrace <- newTVarIO []
     let serveReporter = ReporterM (\rep -> atomically (modifyTVar' serveTrace (rep :)))
     let nodeReporter = ReporterM (\rep -> atomically (modifyTVar' nodeTrace (rep :)))
-    (readEnd, writeEnd) <- createPipe
+    (readEnd, writeEnd) <- privatePipe
     hSetBuffering writeEnd LineBuffering
     done <- newEmptyMVar
     _ <-
@@ -735,11 +744,31 @@ withSession prog root body = do
             w <- Serve.serveWith [] Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) prog readEnd
             putMVar done w
     let session = Session writeEnd serveTrace nodeTrace
-    result <- body session
+        abandon = do
+            _ <- try (mapM_ (hPutStrLn writeEnd) ["autoconverge on", "clear", "quit"]) :: IO (Either IOException ())
+            _ <- timeout 5000000 (takeMVar done)
+            _ <- try (hClose writeEnd) :: IO (Either IOException ())
+            pure ()
+    result <- body session `onException` abandon
     hPutStrLn writeEnd "quit"
     w <- expect "the loop to exit" (takeMVar done)
     hClose writeEnd
     pure (result, w)
+
+{- | Let go of every managed process the session holds, and wait until the
+loop has: @quit@ leaves such a process running, which is its promise, so a
+case whose daemon is still wanted at the end says so before leaving.
+@autoconverge on@ first because a @clear@ is deferred like anything else
+when it is off, and the release happens in the pass.
+-}
+releaseManaged :: Session -> IO ()
+releaseManaged session = do
+    before <- releases <$> readTVarIO session.sessionServe
+    hPutStrLn session.sessionIn "autoconverge on"
+    hPutStrLn session.sessionIn "clear"
+    awaitOn session.sessionServe (\rs -> releases rs > before)
+  where
+    releases rs = length [() | Serve.Tended (Upkeep.Released _) <- rs]
 
 -- | Block until the reports so far (oldest first) satisfy the predicate.
 awaitOn :: TVar [a] -> ([a] -> Bool) -> IO ()
@@ -898,9 +927,9 @@ not-yet-converged node uniformly" simplification would introduce.
 -}
 managedNodeStartsDespiteAutoConvergeOff :: IO ()
 managedNodeStartsDespiteAutoConvergeOff =
-    withTempDir $ \root -> do
+    withTempDir $ \root -> withTickers $ \tk -> do
         let ticks = root </> "ticks"
-        _ <- withSession (ticker ticks) root $ \session -> do
+        _ <- withSession (ticker tk ticks) root $ \session -> do
             hPutStrLn session.sessionIn "autoconverge off"
             awaitOn session.sessionServe (\rs -> not (null [() | Serve.AutoConverged False <- rs]))
             hPutStrLn session.sessionIn "up a"
@@ -908,7 +937,7 @@ managedNodeStartsDespiteAutoConvergeOff =
             -- no explicit `converge` is ever typed: the daemon's only route
             -- up is the idle tending loop, autoconverge notwithstanding.
             _ <- awaitTicks ticks 2
-            pure ()
+            releaseManaged session
         pure ()
 
 {- | @autoconverge@ is read fresh by 'tendOf' every time tending starts, not
@@ -1060,9 +1089,9 @@ Both halves are asserted the same way: whether the process is still writing.
 -}
 ownedProcessSurvivesCommands :: IO ()
 ownedProcessSurvivesCommands =
-    withTempDir $ \root -> do
+    withTempDir $ \root -> withTickers $ \tk -> do
         let ticks = root </> "ticks"
-        (_, w) <- withSession (ticker ticks) root $ \session -> do
+        (_, w) <- withSession (ticker tk ticks) root $ \session -> do
             hPutStrLn session.sessionIn "up a"
             awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 1)
             -- it is running
@@ -1100,12 +1129,12 @@ afterwards.
 -}
 adoptedDaemonFollowsItsConfig :: IO ()
 adoptedDaemonFollowsItsConfig =
-    withTempDir $ \root -> do
+    withTempDir $ \root -> withTickers $ \tk -> do
         there <- newIORef False
         attempts <- newIORef (0 :: Int)
         spawns <- newTVarIO (0 :: Int)
         let ticks = root </> "ticks"
-        _ <- withSession (tickerOnConfig ticks there attempts spawns) root $ \session -> do
+        _ <- withSession (tickerOnConfig tk ticks there attempts spawns) root $ \session -> do
             hPutStrLn session.sessionIn "up a"
             awaitOn session.sessionServe (\rs -> length [() | Serve.ConvergeStop _ _ <- rs] >= 1)
             awaitSpawns spawns 1
@@ -1118,6 +1147,7 @@ adoptedDaemonFollowsItsConfig =
             atomicModifyIORef' there (const (False, ()))
             awaitSpawns spawns 2
             assertEqual "the config node had put its own effect back first" 2 =<< readIORef attempts
+            releaseManaged session
         pure ()
 
 -- | How many times supervision has (re)started over at least one node.
@@ -1133,15 +1163,15 @@ awaitSpawns v n =
 'Salmon.Op.Supervision.RestForOne', which is the shape the whole strategy
 exists for: the config is rewritten, so what reads it has to be bounced.
 -}
-tickerOnConfig :: FilePath -> IORef Bool -> IORef Int -> TVar Int -> Track' Spec
-tickerOnConfig path there attempts spawns = Track $ \spec ->
+tickerOnConfig :: Tickers -> FilePath -> IORef Bool -> IORef Int -> TVar Int -> Track' Spec
+tickerOnConfig tk path there attempts spawns = Track $ \spec ->
     let cfg = watchedOp there attempts restForOne spec
      in op "ticker" (deps [cfg]) $ \actions ->
             actions
                 { ref = Daemon.daemonRef (tickerDaemon path)
                 , managed = Just $ \out -> do
                     atomically (modifyTVar' spawns (+ 1))
-                    Daemon.runDaemon silent (tickerDaemon path) out
+                    Daemon.runDaemon (recordSpawns tk) (tickerDaemon path) out
                 , up = throwIO (userError "the ticker cannot be brought up by a one-shot pass")
                 }
   where
@@ -1154,14 +1184,53 @@ what makes the test meaningful: if @serve@ ever routed this node through a
 convergence pass instead of to a machine, the pass would fail loudly rather
 than quietly do nothing.
 -}
-ticker :: FilePath -> Track' Spec
-ticker path = Track (const (Daemon.daemon silent (tickerDaemon path)))
+ticker :: Tickers -> FilePath -> Track' Spec
+ticker tk path = Track (const (Daemon.daemon (recordSpawns tk) (tickerDaemon path)))
 
+{- | @close_fds@: the shell is a child of the test process, which runs
+other groups at the same time, and would otherwise hold a copy of every
+descriptor they had open when it started (their pipes and sockets) for as
+long as it runs.
+-}
 tickerDaemon :: FilePath -> Daemon.Daemon
 tickerDaemon path =
     Daemon.defaultDaemon
         "ticker"
-        (proc "/bin/sh" ["-c", "while true; do echo tick >> " <> path <> "; sleep 0.05; done"])
+        (proc "/bin/sh" ["-c", "while true; do echo tick >> " <> path <> "; sleep 0.05; done"]){close_fds = True}
+
+{- | The ticker shells a case started, so that it can stop them on its way
+out however it ends.
+
+@quit@ leaves a managed process running (that is its promise), so a case
+that ends with its ticker still wanted — passing or not — would otherwise
+leave the shell writing into its temp dir. Worse, it races the temp dir's
+removal: a tick written between the file's removal and the directory's
+recreates the file, the removal gives up, and the shell, no longer failing,
+outlives the suite. So a case lets go of its ticker before it leaves
+('releaseManaged', and 'withSession' on a failure), and 'withTickers' kills
+whatever recorded process group is still there once the case is over, after
+checking that the pid is still one of these shells: the last resort for a
+loop that did not take its @clear@ in time.
+-}
+newtype Tickers = Tickers (IORef [Pid])
+
+withTickers :: (Tickers -> IO a) -> IO a
+withTickers act = do
+    ref <- newIORef []
+    act (Tickers ref) `finally` (readIORef ref >>= mapM_ stopTicker)
+  where
+    stopTicker pid = do
+        cmdline <- try (readFile ("/proc/" <> show pid <> "/cmdline")) :: IO (Either IOException String)
+        case cmdline of
+            Right cmd | "echo tick >> " `Data.List.isInfixOf` cmd -> do
+                _ <- try (signalProcessGroup sigKILL pid) :: IO (Either IOException ())
+                pure ()
+            _ -> pure ()
+
+recordSpawns :: Tickers -> Reporter Daemon.Report
+recordSpawns (Tickers ref) = ReporterM $ \rep -> case rep of
+    Daemon.Spawned _ (Just pid) -> atomicModifyIORef' ref (\ps -> (pid : ps, ()))
+    _ -> pure ()
 
 countTicks :: FilePath -> IO Int
 countTicks path = do
