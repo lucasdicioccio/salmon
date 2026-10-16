@@ -22,7 +22,7 @@ initialize r authorizedKey =
   where
     sudoerfile :: Op
     sudoerfile =
-        FS.filecontents
+        FS.filecontentsInSharedDir
             (FS.FileContents "/etc/sudoers.d/salmon" sudoercontent)
 
     sudoercontent :: Text

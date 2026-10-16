@@ -352,7 +352,7 @@ configuration bin c =
             , ref = mkRef "pgbackrest-config" c.pbr_config_file
             }
   where
-    conf = FS.filecontents (FS.FileContents c.pbr_config_file (renderConf c))
+    conf = FS.filecontentsInSharedDir (FS.FileContents c.pbr_config_file (renderConf c))
     owned path =
         FS.ownedFile (FS.FileOwnership path (Just c.pbr_user) Nothing (0o750 :: Posix.FileMode))
             `inject` FS.dir (FS.Directory path)

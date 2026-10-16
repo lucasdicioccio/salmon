@@ -450,7 +450,7 @@ patroniMember r systemctl patroniBin c =
             (deps [justInstall patroniBin, configFile, secrets, mask, pgConfSeed c])
             id
 
-    configFile = FS.filecontents (FS.FileContents (patroniFile c) (renderPatroni c))
+    configFile = FS.filecontentsInSharedDir (FS.FileContents (patroniFile c) (renderPatroni c))
 
     -- the credentials file is somebody else's to write; failing when it is missing is this node's job
     secrets = FS.ownedFile (FS.FileOwnership c.pat_secrets_file (Just c.pat_user) Nothing (0o600 :: Posix.FileMode))

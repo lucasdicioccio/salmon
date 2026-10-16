@@ -26,7 +26,7 @@ import qualified System.Posix.Types as Posix
 import qualified System.Posix.User as PosixUser
 import GHC.TypeLits (Symbol)
 import Salmon.Actions.UpDown (CheckResult (..), skipIfDirectoryIsMissing)
-import Salmon.Op.OpGraph (inject)
+import Salmon.Op.OpGraph (OpGraph (..), inject)
 import Salmon.Op.Supervision (defaultSupervision, supReapply, supervised)
 import Salmon.Op.Track
 import System.Directory
@@ -97,6 +97,55 @@ retainedDir directory =
   where
     path :: FilePath
     path = directory.directoryPath
+
+{- | A directory that is not salmon's alone: a system directory a package
+ships and fills (@\/etc\/haproxy@, @\/etc\/sudoers.d@, @\/etc\/pgbouncer@,
+an nginx @conf.d@), or one something else also writes into (a
+pre-provisioned credentials file next to a rendered config). Created if
+missing, like 'dir'; left alone by @down@.
+
+'dir''s @down@ refuses a non-empty directory on purpose, so a file declared
+in such a directory through 'filecontents' was removed cleanly and then its
+directory reported @Failed@, which also blocks the teardown of whatever was
+declared under it. Removing the directory would be wrong anyway: salmon
+cannot prove it made it.
+
+Its own kind (@"shared-directory"@, keyed on the path), so it never collides
+with a 'dir' of the same path; reapplies under supervision, as 'dir' does.
+The systemd and quadlet unit directories have nodes of the same shape
+('Salmon.Builtin.Nodes.Systemd.unitDirectory' and the quadlet's
+@unitDirNode@), which predate this one and keep their own refs.
+-}
+sharedDir :: Directory -> Op
+sharedDir directory =
+    op "shared-directory" nodeps $ \actions ->
+        actions
+            { help = Text.pack $ "ensures " <> path <> " exists, including subdirs"
+            , notes =
+                [ "create dir recursively"
+                , "shared with what salmon does not declare: down leaves it"
+                , "reapplies rather than parking under supervision; see supReapply"
+                ]
+            , ref = mkRef "shared-directory" path
+            , up = createDirectoryIfMissing True path
+            , dynamics = [supervised defaultSupervision{supReapply = True}]
+            }
+  where
+    path :: FilePath
+    path = directory.directoryPath
+
+{- | 'filecontents' standing on a 'sharedDir' of its enclosing directory
+instead of a 'dir'. The file node itself is exactly what 'filecontents'
+renders (same 'ref', @help@, @notes@, @check@, @up@ and @down@); only its
+predecessor differs. For a file in a directory holding things salmon does
+not declare, where 'dir''s @down@ would fail on what is left.
+-}
+filecontentsInSharedDir :: (EncodeFileContents a) => FileContents a -> Op
+filecontentsInSharedDir fcontents =
+    file{predecessors = deps [sharedDir (Directory (takeDirectory fcontents.filePath))]}
+  where
+    file :: Op
+    file = filecontents fcontents
 
 {- | A scratch directory salmon owns outright: 'down' removes it /and
 everything in it/. Opt-in, for a directory whose contents cannot be declared

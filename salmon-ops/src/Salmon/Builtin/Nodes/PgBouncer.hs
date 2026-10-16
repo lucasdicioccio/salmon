@@ -106,8 +106,8 @@ configFiles :: BouncerConfig -> Op
 configFiles cfg =
     op "pgbouncer-config" (deps [iniFile, userlistFile]) id
   where
-    iniFile = FS.filecontents $ FS.FileContents (configPath cfg) (renderIni cfg)
-    userlistFile = FS.filecontents $ FS.FileContents (userlistPath cfg) (renderUserlist cfg.bouncer_users)
+    iniFile = FS.filecontentsInSharedDir $ FS.FileContents (configPath cfg) (renderIni cfg)
+    userlistFile = FS.filecontentsInSharedDir $ FS.FileContents (userlistPath cfg) (renderUserlist cfg.bouncer_users)
 
 renderIni :: BouncerConfig -> Text
 renderIni cfg =

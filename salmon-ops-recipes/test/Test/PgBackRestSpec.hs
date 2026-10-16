@@ -33,12 +33,16 @@ import qualified Salmon.Builtin.Nodes.Patroni as Patroni
 import Salmon.Builtin.Nodes.PgBackRest
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import Test.Harness (podmanExec_, requireExecutable, withContainer)
+import Test.SharedDirSpec (assertOnSharedDir)
+import Salmon.Builtin.Extension (ignoreTrack)
 
 tests :: TestTree
 tests =
     testGroup
         "Salmon.Builtin.Nodes.PgBackRest"
-        [ testCase "the configuration names the repository, the retention and the cluster" $ do
+        [ testCase "the configuration file stands on a shared directory, which also holds conf.d" $
+            assertOnSharedDir "/etc/pgbackrest" (configuration ignoreTrack cfg)
+        , testCase "the configuration names the repository, the retention and the cluster" $ do
             has "[global]\nrepo1-type=posix\nrepo1-path=/srv/archive\nrepo1-retention-full=2\nlog-path=/var/log/pgbackrest\n"
             has "[demo]\npg1-path=/var/lib/postgresql/16/main\npg1-port=5432\n"
         , testCase "an S3 repository is rendered without any key" $ do

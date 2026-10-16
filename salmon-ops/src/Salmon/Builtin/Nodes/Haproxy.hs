@@ -297,7 +297,7 @@ configFiles cfg = case validate cfg of
                 , up = throwIO (InvalidConfig problems)
                 }
   where
-    cfgFile = FS.filecontents $ FS.FileContents (configPath cfg) (renderConfig cfg)
+    cfgFile = FS.filecontentsInSharedDir $ FS.FileContents (configPath cfg) (renderConfig cfg)
 
 {- | Installs haproxy, renders its config, and runs it as a systemd service.
 

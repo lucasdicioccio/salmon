@@ -18,6 +18,9 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Nodes.Etcd (TlsFiles (..))
 import Salmon.Builtin.Nodes.Patroni
 import Salmon.Builtin.Nodes.Systemd (interpretIsEnabled)
+import Salmon.Builtin.Extension (ignoreTrack)
+import Salmon.Reporter (silent)
+import Test.SharedDirSpec (assertOnSharedDir)
 
 tests :: TestTree
 tests =
@@ -77,6 +80,8 @@ tests =
             assertBool "enabled" (isFailure (interpretIsEnabled "enabled\n"))
             assertBool "runtime mask" (isFailure (interpretIsEnabled "masked-runtime\n"))
             assertEqual "nothing said" Unknown (interpretIsEnabled "")
+        , testCase "patroni.yml stands on a shared configuration directory, which also holds the pre-provisioned secrets" $
+            assertOnSharedDir "/etc/patroni" (patroniMember silent ignoreTrack ignoreTrack cfg)
         ]
   where
     rendered = Text.unpack (renderPatroni cfg)
