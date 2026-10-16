@@ -821,7 +821,7 @@ viewOf e =
 nodeStates :: Env -> Map.Map Ref NodeState
 nodeStates e =
     Map.map
-        (\act -> NodeState{nodeShorthand = act.shorthand, nodeHelp = act.extension.help, nodeDirection = Serve.TurnUp, nodeConvergence = Converged, nodeStatus = Nothing})
+        (\act -> NodeState{nodeShorthand = act.shorthand, nodeHelp = act.extension.help, nodeDirection = Serve.TurnUp, nodeConvergence = Converged, nodeStatus = Nothing, nodeHeld = Nothing})
         (dagNodes e.envDag)
 
 {- | The inputs of a render, forced. The listed paths are the expensive one

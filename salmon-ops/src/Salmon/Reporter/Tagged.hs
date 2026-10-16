@@ -160,6 +160,7 @@ taggedNode tagged = case tagged of
         Upkeep.Demoted act _ -> about act
         Upkeep.Parked act -> about act
         Upkeep.Reapplying act _ -> about act
+        Upkeep.Held act _ -> about act
         Upkeep.Paused act -> about act
         Upkeep.Resumed act -> about act
         Upkeep.GaveUp act _ -> about act
@@ -398,6 +399,7 @@ instance ToJSON (Upkeep.Report Extension) where
             Upkeep.Demoted act dep -> kind "demoted" : actPairs act ++ ["dependency" .= refValue dep]
             Upkeep.Parked act -> kind "parked" : actPairs act
             Upkeep.Reapplying act delay -> kind "reapplying" : actPairs act ++ ["delay_us" .= microsValue delay]
+            Upkeep.Held act next -> kind "held" : actPairs act ++ ["until" .= next]
             Upkeep.Paused act -> kind "paused" : actPairs act
             Upkeep.Resumed act -> kind "resumed" : actPairs act
             Upkeep.GaveUp act n -> kind "gave-up" : actPairs act ++ ["failures" .= n]
@@ -520,6 +522,8 @@ nodeStatePairs paths selection (r, st) =
     , "status" .= fmap statusValue st.nodeStatus
     , "paths" .= Map.findWithDefault [] r paths
     ]
+        -- only while held, so a node that is not reads exactly as before
+        ++ maybe [] (\next -> ["held_until" .= next]) st.nodeHeld
         ++ case selection of
             Nothing -> []
             Just (sel, exc) ->

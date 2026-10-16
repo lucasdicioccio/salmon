@@ -129,7 +129,9 @@ module Salmon.Actions.Serve (
     serveAttributed,
     serveFollowing,
     serveObserved,
+    serveObservedWith,
     serveSaying,
+    serveSayingWith,
     Followed (..),
     AppliedDocument (..),
     Mode (..),
@@ -232,6 +234,7 @@ import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Status (Direction (..))
 import qualified Salmon.Op.Status as MachineStatus
 import Salmon.Op.Supervision (Micros (..))
+import qualified Salmon.Op.Window as Window
 import Salmon.Op.Track (run)
 import Salmon.Reporter
 import qualified Salmon.Actions.Upkeep as Upkeep
@@ -294,6 +297,12 @@ data NodeState = NodeState
     -- the next time tending starts, which is what keeps its snapshot
     -- refreshing across commands too, rather than freezing at whenever it
     -- first started holding.
+    , nodeHeld :: !(Maybe (Maybe UTCTime))
+    -- ^ held back by the maintenance windows ('serveObservedWith'): the last
+    -- pass's gate, or the node's machine, found it due while no window was
+    -- open. The inner value is when the next window opens ('Nothing' if none
+    -- ever does). Cleared the next time the node is recorded as anything
+    -- (applied, found in place, failed...). Always 'Nothing' without windows.
     }
     deriving (Show)
 
@@ -816,6 +825,9 @@ renderReport rep =
                 , st.nodeShorthand
                 , renderVerdict st.nodeStatus
                 ]
+                -- appended rather than a column, so a node that is not held
+                -- prints exactly what it always did
+                <> maybe "" (\next -> " [held by maintenance window " <> Window.renderHold next <> "]") st.nodeHeld
         pathLines = case Map.findWithDefault [] r paths of
             [] -> ["     path: (none — not reached by any live declaration's graph)"]
             [p] -> ["     path: " <> p]
@@ -948,6 +960,11 @@ renderTended t =
                 <> unRef dep
                 <> " stopped being up"
             ]
+        -- said once per episode, so not filtered like 'NextLook': a node
+        -- that is due and is not being applied is what an operator wants to
+        -- see, with when it will be.
+        Upkeep.Held act next ->
+            ["serve: " <> act.shorthand <> " held by maintenance window " <> Window.renderHold next]
         Upkeep.Paused act -> ["serve: " <> act.shorthand <> " paused (its effect is untouched)"]
         Upkeep.Resumed act -> ["serve: " <> act.shorthand <> " resumed"]
         Upkeep.Policy act _ ignored ->
@@ -1694,9 +1711,36 @@ serveObserved ::
     Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
-serveObserved observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
+serveObserved = serveObservedWith Window.noWindows
+
+{- | 'serveObserved' under maintenance windows (@run serve
+--maintenance-window@). A node marked 'Window.disruptive' is brought up only
+while a window is open: outside every window a convergence pass skips it
+without recording it 'Converged' (so it stays outstanding, and @status@ says
+until when it is held: 'nodeHeld'), and its machine, when one tends it, waits
+for the next opening before running its @up@ ('Upkeep.startUpkeepWith').
+Nothing wanted down is held, and with 'Window.noWindows' this is
+'serveObserved'.
+-}
+serveObservedWith ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    Window.Windows ->
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveObservedWith windows observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
-    serveLoop observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+    serveLoop windows observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
@@ -1727,10 +1771,30 @@ serveSaying ::
     Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
-serveSaying said observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
+serveSaying = serveSayingWith Window.noWindows
+
+-- | 'serveSaying' under maintenance windows; see 'serveObservedWith'.
+serveSayingWith ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    Window.Windows ->
+    Reporter (Attributed NodeLog.Line) ->
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveSayingWith windows said observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
     NodeLog.withSink (stamp handling said) $
-        serveLoop observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+        serveLoop windows observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
@@ -1740,6 +1804,7 @@ serveSaying said observe rewrites limit autoConverge0 rAttributed nodeReporterAt
 serveLoop ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
+    Window.Windows ->
     (IO (World seed directive) -> IO ()) ->
     [Rewrite Extension] ->
     Maybe ConcurrencyLimit ->
@@ -1753,7 +1818,7 @@ serveLoop ::
     Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
-serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
+serveLoop windows observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
     world <- newIORef emptyWorld
     observe (readIORef world)
     tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
@@ -1866,7 +1931,8 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
                     kept <- readIORef (tendingKept tending)
                     forced <- Map.keysSet <$> readIORef (tendingPending tending)
                     sup <-
-                        Upkeep.startUpkeep
+                        Upkeep.startUpkeepWith
+                            windows
                             (tendReporter world computed)
                             kept
                             (tendOf auto forced w computed)
@@ -2081,6 +2147,12 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
             Upkeep.Downkeep{} -> pure ()
             Upkeep.NextLook{} -> pure ()
             Upkeep.Untended{} -> pure ()
+            -- recorded for @status@ as well as said; whatever the machine
+            -- records next about the node clears it ('setConvergence').
+            Upkeep.Held act next -> do
+                forM_ (Set.toList (Rewrite.membersOf computed act.extension.ref)) $ \rf ->
+                    atomicModifyIORef' world (\w -> (setHeld rf next w, ()))
+                runReporter r (Tended rep)
             _ -> runReporter r (Tended rep)
 
     {- | 'stateWriter', for a driver that tends both directions at once.
@@ -2347,13 +2419,16 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
         -- teardown first: a node being replaced by an incompatible one
         -- (different content, hence a different 'Ref') has to go before its
         -- successor is brought up.
+        -- the nodes this pass's gate held back for the maintenance windows,
+        -- so that their 'UpDown.Skip' is not taken for convergence.
+        heldNow <- newIORef Map.empty
         okDown <-
             if ndown == 0
                 then pure True
                 else
                     Concurrent.downDagConcurrent
-                        (gateFor world computed TurnDown restriction)
-                        (recorder world computed TurnDown restriction)
+                        (gateFor world computed TurnDown restriction heldNow)
+                        (recorder world computed TurnDown restriction heldNow)
                         Concurrent.noMailboxes
                         limit
                         dag
@@ -2362,8 +2437,8 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
                 then pure True
                 else
                     Concurrent.upDagConcurrent
-                        (gateFor world computed TurnUp restriction)
-                        (recorder world computed TurnUp restriction)
+                        (gateFor world computed TurnUp restriction heldNow)
+                        (recorder world computed TurnUp restriction heldNow)
                         Concurrent.noMailboxes
                         limit
                         dag
@@ -2377,26 +2452,43 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
     {- | Only touch what this pass is for: a node wanted the other way (it
     belongs to some other seed), already converged, or excluded by this
     pass's own 'restriction' (an explicit @converge --select\/--exclude@) is
-    left alone. -}
-    gateFor :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> UpDown.Gate Extension
-    gateFor world computed dir restriction = \act -> do
+    left alone.
+
+    And on the way up, a node the pass would touch but the maintenance
+    windows hold back ('Window.holdOf'): skipped, filed in @heldNow@ so
+    'recorder' does not take the skip for convergence, and marked 'nodeHeld'
+    for @status@. Asked after everything else, so the clock is read only
+    for a 'Window.disruptive' node this pass is actually about to apply. -}
+    gateFor :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> IORef (Map Ref (Maybe UTCTime)) -> UpDown.Gate Extension
+    gateFor world computed dir restriction heldNow = \act -> do
         w <- readIORef world
         -- a node a rewrite introduced has no 'NodeState' of its own; it is
         -- worth touching iff any of the declared nodes it stands in for is.
         -- For every other node 'membersOf' is the singleton of itself, so
         -- this is the same predicate it always was.
-        pure $
-            -- a node whose effect only exists while something holds it is
-            -- not this pass's business in either direction: bringing it up
-            -- needs a driver that can hold it (so its @up@ throws, on
-            -- purpose — see "Salmon.Builtin.Nodes.Daemon"), and taking it
-            -- down is 'settleManaged', which has already run.
-            if isJust act.extension.managed
-                then Skippable
-                else
-                    if any (wants w) (Set.toList (Rewrite.membersOf computed act.extension.ref))
-                        then Required
-                        else Skippable
+        let members = Set.toList (Rewrite.membersOf computed act.extension.ref)
+        let due =
+                -- a node whose effect only exists while something holds it is
+                -- not this pass's business in either direction: bringing it up
+                -- needs a driver that can hold it (so its @up@ throws, on
+                -- purpose — see "Salmon.Builtin.Nodes.Daemon"), and taking it
+                -- down is 'settleManaged', which has already run.
+                if isJust act.extension.managed
+                    then Skippable
+                    else
+                        if any (wants w) members
+                            then Required
+                            else Skippable
+        case (due, dir) of
+            (Required, TurnUp) -> do
+                hold <- Window.holdOf windows act.extension
+                case hold of
+                    Window.Free -> pure Required
+                    Window.HeldUntil next -> do
+                        atomicModifyIORef' heldNow (\m -> (Map.insert act.extension.ref next m, ()))
+                        forM_ members $ \rf -> atomicModifyIORef' world (\w' -> (setHeld rf next w', ()))
+                        pure Skippable
+            _ -> pure due
       where
         wants :: World seed directive -> Ref -> Bool
         wants w rf =
@@ -2407,8 +2499,18 @@ serveLoop observe rewrites limit autoConverge0 handling r nodeReporter parseSeed
                         && st.nodeConvergence /= Converged
                         && maybe True (Set.member rf) restriction
 
-    recorder :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> Reporter (UpDown.Report Extension)
-    recorder world computed dir restriction = reportBoth (stateWriter world computed dir restriction) nodeReporter
+    {- | A node 'gateFor' held back for the maintenance windows was skipped,
+    but is not converged and was not found in place: its 'UpDown.Skip' is
+    neither recorded nor printed, and the pass says 'Upkeep.Held' instead,
+    the same report its machine gives when it is the one holding. -}
+    recorder :: IORef (World seed directive) -> Rewritten Extension -> Direction -> Maybe (Set Ref) -> IORef (Map Ref (Maybe UTCTime)) -> Reporter (UpDown.Report Extension)
+    recorder world computed dir restriction heldNow = ReporterM $ \rep -> do
+        held <- case rep of
+            UpDown.Skip act -> fmap ((,) act) . Map.lookup act.extension.ref <$> readIORef heldNow
+            _ -> pure Nothing
+        case held of
+            Just (act, next) -> runReporter r (Tended (Upkeep.Held act next))
+            Nothing -> runReporter (reportBoth (stateWriter world computed dir restriction) nodeReporter) rep
 
     {- 'upTree'/'downTree' report an 'Eval' before running a node and, once
     it returns, exactly one of 'Done' (succeeded) or 'Failed' (threw) — so
@@ -2649,7 +2751,7 @@ retune w =
                 Just st
                     | st.nodeDirection == dir ->
                         st{nodeShorthand = sh, nodeHelp = hlp}
-                _ -> NodeState sh hlp dir Pending Nothing
+                _ -> NodeState sh hlp dir Pending Nothing Nothing
 
 {- | Drops what is finished, which is what keeps a long-lived @serve@
 bounded. Three rules that have to agree with each other:
@@ -2720,7 +2822,7 @@ setConvergence dir r c w =
     w{worldNodes = Map.adjust upd r w.worldNodes}
   where
     upd st
-        | st.nodeDirection == dir = st{nodeConvergence = c}
+        | st.nodeDirection == dir = st{nodeConvergence = c, nodeHeld = Nothing}
         | otherwise = st
 
 {- | 'setConvergence' against whichever direction the node is currently
@@ -2736,6 +2838,10 @@ setConvergenceHere r c w =
     case Map.lookup r w.worldNodes of
         Nothing -> w
         Just st -> setConvergence st.nodeDirection r c w
+
+-- | Held back by the maintenance windows until then; its convergence is untouched.
+setHeld :: Ref -> Maybe UTCTime -> World seed directive -> World seed directive
+setHeld r next w = w{worldNodes = Map.adjust (\st -> st{nodeHeld = Just next}) r w.worldNodes}
 
 -- | (nodes wanted up, nodes wanted down) that have not converged yet.
 pendingCounts :: World seed directive -> (Int, Int)

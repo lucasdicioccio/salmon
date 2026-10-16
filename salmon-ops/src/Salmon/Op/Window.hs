@@ -19,6 +19,15 @@ stays wanted: the gate says "not now", nothing is frozen, so the next pass
 inside the window applies it. Dependants of a skipped node are not blocked by
 that (a 'Skip' is not a failure); order, not success, is what edges carry.
 
+@run serve@ and "Salmon.Actions.Upkeep" take the same windows as a 'Windows'
+policy and ask 'holdOf' instead: a convergence pass skips a held node without
+recording it converged, and a tended node outside every window waits for the
+next opening instead of running its @up@ (its check is still asked: a node
+whose effect is already in place has nothing to hold back). Only bringing a
+node up is held; a teardown is not, under any driver. An @up@ already running
+when a window closes is never interrupted: the windows are asked before an
+@up@ starts, never during one.
+
 Time zones: a window carries a fixed UTC offset, because salmon-ops has no
 time-zone database. A zone with daylight saving needs its offsets spelled
 twice, as two windows.
@@ -39,6 +48,14 @@ module Salmon.Op.Window (
     -- * The gate
     windowGate,
     windowGateAt,
+
+    -- * A policy the long-running drivers consult
+    Windows (..),
+    noWindows,
+    windowsAt,
+    Hold (..),
+    holdOf,
+    renderHold,
 ) where
 
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
@@ -59,6 +76,7 @@ import GHC.Records (HasField, getField)
 import Text.Read (readMaybe)
 
 import Salmon.Actions.UpDown (Gate, Requirement (..))
+import Salmon.Op.Supervision (Micros, seconds)
 import Salmon.Op.Actions (Act (..))
 import Salmon.Builtin.Extension (Extension)
 import qualified Salmon.Builtin.Extension as Extension
@@ -215,4 +233,54 @@ windowGateAt clock ws onHeld = \act -> gate act
             if inAnyWindow ws now
                 then pure Required
                 else onHeld act (nextOpening ws now) >> pure Skippable
+
+{- | The windows of one invocation, as the long-running drivers (@run serve@
+and "Salmon.Actions.Upkeep") consult them: not a 'Gate' asked once per pass
+but a question asked again whenever a held node wakes.
+
+'windowsClock' is the wall clock in production and a test's own clock
+otherwise. 'windowsRecheck' is the longest a held node sleeps before asking
+the clock again, so a clock that jumps (a suspended host, an NTP step) is
+noticed within it rather than at an opening computed before the jump.
+-}
+data Windows = Windows
+    { windowsSpans :: [Window]
+    -- ^ empty: nothing is ever held
+    , windowsClock :: IO UTCTime
+    , windowsRecheck :: Micros
+    }
+
+-- | No windows: every node runs whenever it is due, as before windows existed.
+noWindows :: Windows
+noWindows = windowsAt []
+
+-- | These windows, on the wall clock, asked again at least once a minute.
+windowsAt :: [Window] -> Windows
+windowsAt ws = Windows ws getCurrentTime (seconds 60)
+
+-- | Whether a node may act now.
+data Hold
+    = -- | not disruptive, no windows, or a window is open
+      Free
+    | -- | held; the next window opens then ('Nothing' only if none ever does)
+      HeldUntil !(Maybe UTCTime)
+    deriving (Show, Eq)
+
+{- | Ask the windows about one node. A node not marked 'disruptive' is
+'Free' without the clock being read.
+-}
+holdOf :: (HasField "dynamics" ext [Dynamic]) => Windows -> ext -> IO Hold
+holdOf ws ext
+    | null ws.windowsSpans = pure Free
+    | not (isDisruptive ext) = pure Free
+    | otherwise = do
+        now <- ws.windowsClock
+        pure $
+            if inAnyWindow ws.windowsSpans now
+                then Free
+                else HeldUntil (nextOpening ws.windowsSpans now)
+
+-- | @until 2026-10-17 02:00:00 UTC@, or @until (never)@.
+renderHold :: Maybe UTCTime -> Text
+renderHold next = "until " <> maybe "(never)" (Text.pack . show) next
 
