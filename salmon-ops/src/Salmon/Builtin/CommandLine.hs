@@ -116,8 +116,10 @@ data RunCommand
       -- client to resume from (milestone 4; see "Salmon.Actions.Serve.Events").
       -- Last of all, the same HTTP over the network ('TcpOptions', milestone
       -- 8): @--http-tcp HOST:PORT@ with @--tls-cert@, @--tls-key@ and
-      -- @--token-file@, all three or nothing.
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions
+      -- @--token-file@, all three or nothing. And whether every HTTP
+      -- listener refuses @POST \/command@ (@--http-read-only@; 'False', the
+      -- default, is every version before the flag; see 'Http.Access').
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool
     deriving (Eq, Ord, Generic, Show)
 
 {- | The four flags that put the HTTP surface on a network, as typed. What
@@ -434,6 +436,11 @@ runCommandParser =
                 )
             <*> sinkOptionsP
             <*> tcpOptionsP
+            <*> switch
+                ( long "http-read-only"
+                    <> Options.Applicative.help
+                        "Spectate-only HTTP: --http and --http-tcp serve the page, the reads and /events, and answer every POST /command with 403, so no HTTP request changes the declarations, the wanted nodes or supervision, or ends the loop. Stdin and --listen are unaffected."
+                )
     tcpOptionsP =
         TcpOptions
             <$> optional
@@ -792,7 +799,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly)) -> do
             reportByLine
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let own = taggedFor fmt
@@ -820,6 +827,12 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         exitFailure
                     Right tok -> pure (Http.BindTls (Http.TlsBind t.tcpHost t.tcpPort t.tcpCertFile t.tcpKeyFile tok t.tcpSessionPolicy))
             let binds = [Http.BindUnix path | Just path <- [http]] ++ tlsBinds
+            -- a flag that would restrict nothing is refused, like the TLS
+            -- files without --http-tcp, rather than silently a no-op
+            when (httpReadOnly && null binds) $ do
+                hPutStrLn stderr "--http-read-only needs --http PATH or --http-tcp HOST:PORT to apply to; there is no HTTP listener without one"
+                exitFailure
+            let access = if httpReadOnly then Http.ReadOnly else Http.ReadWrite
             follow <- case (followDir, traverse Follow.mkLabel labels) of
                 (Nothing, _) | not (null followOptions.followKeys) -> do
                     hPutStrLn stderr "--follow-key needs a --follow REGISTRY whose documents it verifies"
@@ -913,7 +926,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
               -- own reports, and both hand everything on to the loop's own,
               -- which stays exactly as `fmt` says.
               withMaybe listen Socket.withUnixListener $ \mlistener ->
-                withMaybe (nonEmptyList binds) (\bs -> Http.withHttpServerOn Events.defaultConfig{Events.configRing = eventsRing} bs (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
+                withMaybe (nonEmptyList binds) (\bs -> Http.withHttpServerAccess Events.defaultConfig{Events.configRing = eventsRing} access bs (seedHelpText (parseRecord :: Parser seed)) (maybe (pure Serve.Interactive) Serve.followedMode onFetch)) $ \mserver -> do
                     -- exactly one line, once the listener is up, saying what
                     -- is now reachable from the network and on what terms
                     forM_ tcp $ \t ->

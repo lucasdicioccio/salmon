@@ -4,7 +4,7 @@
     "title": "salmon run serve",
     "version": "1",
     "summary": "The HTTP surface of `run serve --http PATH` and `--http-tcp HOST:PORT`",
-    "description": "Served on a unix socket (owner-only, no token) by `--http PATH`, and over TLS on a network by `--http-tcp` (every route needs `Authorization: Bearer <token>` or a session cookie from `/auth`). Both serve this same application on the same loop.\n\nReads (`/dag`, `/status`, `/history`, `/help/seed`) never enter the loop's input. Writes are `POST /command`. Motion between commands is visible only on `/events`.\n\nThe seed words in a command are binary-specific: their grammar is `GET /help/seed`, not something this document can enumerate.\n\nA client that wants to refuse a server it does not understand can read `info.version` here; the responses themselves carry no version yet."
+    "description": "Served on a unix socket (owner-only, no token) by `--http PATH`, and over TLS on a network by `--http-tcp` (every route needs `Authorization: Bearer <token>` or a session cookie from `/auth`). Both serve this same application on the same loop.\n\nReads (`/dag`, `/status`, `/history`, `/help/seed`) never enter the loop's input. Writes are `POST /command`, refused with 403 whatever the line when the server was started with `--http-read-only` (`GET /access` says which). Motion between commands is visible only on `/events`.\n\nThe seed words in a command are binary-specific: their grammar is `GET /help/seed`, not something this document can enumerate.\n\nA client that wants to refuse a server it does not understand can read `info.version` here; the responses themselves carry no version yet."
   },
   "servers": [
     {
@@ -140,7 +140,7 @@
       "post": {
         "operationId": "postCommand",
         "summary": "One line of the input language",
-        "description": "The line joins the loop's inbox with an origin minted per request (`PATH#n` on the unix socket, `ADDR:PORT#n` over TCP). Synchronous by default: answers, when the loop has handled the line, with every report stamped with that origin. `?async` answers at once with the number of the `enqueued` event. A synchronous `up` holds the request for the whole pass, so a UI should use `?async` and read the outcome off `/events`.",
+        "description": "The line joins the loop's inbox with an origin minted per request (`PATH#n` on the unix socket, `ADDR:PORT#n` over TCP). Synchronous by default: answers, when the loop has handled the line, with every report stamped with that origin. `?async` answers at once with the number of the `enqueued` event. A synchronous `up` holds the request for the whole pass, so a UI should use `?async` and read the outcome off `/events`. Under `run serve --http-read-only` every request is answered 403 before its body is read: nothing is queued or numbered.",
         "parameters": [
           {
             "name": "async",
@@ -203,12 +203,41 @@
               }
             }
           },
+          "403": {
+            "description": "the server is read-only (`--http-read-only`): it takes no command over HTTP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "the loop is not taking commands",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/access": {
+      "get": {
+        "operationId": "getAccess",
+        "summary": "Whether this server takes commands",
+        "description": "`read-write` by default; `read-only` under `run serve --http-read-only`, where `POST /command` answers 403 on every listener. The page reads it to hide its buttons. The loop's other inputs (stdin, `--listen`) are not restricted by it.",
+        "responses": {
+          "200": {
+            "description": "the answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessAnswer"
                 }
               }
             }
@@ -3690,6 +3719,21 @@
           }
         ],
         "description": "One line of the input language, or a verb and its seed words rendered to the very line the first form would have carried. A newline anywhere is refused: one command per request."
+      },
+      "AccessAnswer": {
+        "type": "object",
+        "properties": {
+          "access": {
+            "type": "string",
+            "enum": [
+              "read-write",
+              "read-only"
+            ]
+          }
+        },
+        "required": [
+          "access"
+        ]
       },
       "AsyncAnswer": {
         "type": "object",

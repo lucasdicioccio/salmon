@@ -150,6 +150,11 @@ over a unix socket (`--listen`), over HTTP with an event stream and a web UI
 (`salmon-tui`), or pull its declarations from a registry — a directory, git,
 HTTPS, DNS or a bucket, optionally signed (`--follow`, pull mode) — and report
 back through a status file (`--status-sink`, read by `salmon-fleet status`).
+To let people or pages watch without commanding, add `--http-read-only`: both
+HTTP listeners still serve the page, the reads and `/events`, but answer every
+`POST /command` with 403, so no HTTP request can change what the loop
+converges towards, its supervision, or end it (the page hides its buttons);
+stdin and `--listen` keep full control.
 See [`resources/serve-supervision.md`](resources/serve-supervision.md).
 
 ## The model, in one paragraph

@@ -14,7 +14,9 @@ and a browser signs in at `/auth` for a session cookie (`--session-lifetime`,
 `--session-idle`, sign-out at `/auth/logout`). Still open: the web UI's
 "Not yet" items under milestone 7 (a `Conflicting` pair side by side, batch
 and `RemoteOp` expansion, `history` as a timeline), client certificates and
-a read-only token. Kept as the design record. Companion to `specs/pull-mode.md` (which is about a host
+a read-only token. A read-only *server* exists: `run serve --http-read-only`
+refuses every `POST /command` on every HTTP listener (`GET /access` says so),
+which is the whole server rather than one token. Kept as the design record. Companion to `specs/pull-mode.md` (which is about a host
 *fetching* its declarations); this one is about *talking to* a running
 `serve` — a web UI, a terminal UI, tooling — and about finally showing the
 DAG as what it is while it is being converged and tended.
