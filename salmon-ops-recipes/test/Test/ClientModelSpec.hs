@@ -486,6 +486,10 @@ withRunning act =
                         Nothing
                         [Serve.stdinProducer stdinR, Http.serverProducer server]
                 putMVar worldVar w
+            -- the loop publishes its inbox from a thread it forks: wait for
+            -- it, or the first request can beat it and be answered 503
+            timeout (10 * 1000000) (Http.awaitLoop server)
+                >>= maybe (assertFailure "the loop did not start within 10s") pure
             client <- Client.newUnixClient path
             r <- act (Running stdinW worldVar client upsRef)
             _ <- try (hClose stdinW) :: IO (Either IOError ())

@@ -1250,6 +1250,36 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   but not `SOCK_CLOEXEC` (its `accept` does), and `process`'s `createPipe` is plain — which
   showed up as a loop whose stdin never hit EOF and a hung-up client whose socket stayed open;
   the spec marks its own fds.
+  **Startup window (load-bearing for every spec that forks a loop beside a server).** The
+  socket is bound before the loop runs, `serveLoop` installs the read accessor
+  (`serverObserver`) on its first line, and the inbox is published by `serverProducer` in a
+  thread the loop *forks*: until both are in, a read answers `503 "the loop has not started"`
+  and a command `503 "the loop is not taking commands"`. That is the server's correct answer
+  for that moment (production has the same window, microseconds wide; nothing gates the bind
+  on it), so the specs wait instead: `Http.awaitLoop server` (STM `retry` on both `TVar`s,
+  bounded by a 10s `timeout` in the harness) after the `forkIO` in `ServeHttpSpec`,
+  `ServeEventsSpec`, `ServeTlsSpec` and `ClientModelSpec`. Without it, the first `sync` of a
+  case raced the fork and the full Layer 0 suite under load failed 1-3 serve cases per run.
+  Separately, `ServeEventsSpec`'s ring-overflow case read `Events.lastSequence` right after
+  `?async history` was *queued*; under load the history's own events landed after that read
+  and the ring's window moved by two (`[21..28]` vs `[21..30]`); it now reads the number once
+  the marker's `hung-up` is on the stream. *Run (2026-10-16, 20-core host, 20 extra `yes`
+  CPU hogs, heavy group removed from `Main`):* full Layer 0 suite 5x before (9 serve-class
+  failures: 8x 503 on the first `sync`, 1x ring) and 6x after (0 serve-class); the six serve
+  specs alone (`ClientModel`, `ServeEvents`, `ServeHttp`, `ServeTls`, `ServeSocket`, `Serve`),
+  40 hogs, 20x before (14 targeted failures: 11x 503 on a first command, the client's text
+  being `Refused 503 "the loop is not taking commands"`, 3x ring) and 20x after (0). The
+  untargeted flakes in that subset, seen both before and after: `ServeSocketSpec` "two clients
+  interleaving" (own reporter saw 28 of 30), `ServeSpec` "up threw is retried" / "retired
+  declaration survives a failed down" (an extra attempt) / "`converge --select` restricted to
+  nothing", and `ServeTlsSpec`'s real 2s session expiry. Other flakes seen in the
+  same runs and *not* addressed: `EdgeListSpec` 100k fan over a minute, `UpkeepSpec`
+  pause/resume, supReapply and "a sibling in the middle of its own up" (10s timeouts), `ServeSpec` "retired declaration survives a failed
+  down" (teardown attempted twice), `PostgresPairPrereqsSpec` "Text file busy" on shimmed
+  scripts (ETXTBSY; likely, not confirmed: a shim exec'd while a child forked by another thread still
+  holds the shim's write fd),
+  `FollowRegistrySpec` dns, a `ServeTlsSpec` read with an unminted
+  cookie unanswered in 10s, and `QemuShutdownSpec`'s real-qemu run state.
   **`Actions/Serve/StatusSink.hs`** is milestone 5 of `specs/pull-mode.md`: `run serve
   --status-sink PATH|URL [--status-sink-interval S] [--status-sink-host NAME]` writes a JSON document
   about this host — `salmon-status: 1`, `host` (`--status-sink-host`, else `uname -n`), `written`, `mode`, `labels` (the document applied per
