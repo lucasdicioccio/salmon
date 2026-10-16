@@ -24,7 +24,11 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Bits ((.&.))
 import System.Directory (
+    copyFile,
     createDirectory,
+    createDirectoryLink,
+    getHomeDirectory,
+    renameDirectory,
     createDirectoryIfMissing,
     createFileLink,
     doesDirectoryExist,
@@ -33,15 +37,17 @@ import System.Directory (
     pathIsSymbolicLink,
     removeFile,
  )
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import qualified System.Posix.Files as Posix
 import qualified System.Posix.User as PosixUser
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
 import Salmon.Actions.UpDown (CheckResult (..), Report (..))
-import Salmon.Builtin.Extension (Extension)
-import Salmon.Op.Actions (shorthand)
+import Salmon.Builtin.Extension (Extension, Op, opAct)
+import Salmon.Builtin.Extension (help, notes, ref)
+import Salmon.Op.Actions (extension, shorthand)
+import Salmon.Op.Ref (mkRef)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 
 import Test.Harness (runDown, runUp, runUpCapturing, withTempDir)
@@ -73,6 +79,19 @@ tests =
             , testCase "up recurses into nested files and subdirectories" ownedUpChownsDescendants
             , testCase "ownedMode is applied to the top entry only, never descendants" ownedModeNotAppliedToDescendants
             , testCase "a dangling symlink inside the tree is chowned itself, never followed" ownedTreeDoesNotFollowSymlinks
+            ]
+        , testGroup
+            "scratchDir: down removes the tree, guarded by identity"
+            [ testCase "up, a file inside, down: gone, and a second down also succeeds" scratchAcceptance
+            , testCase "check: missing before up, Success after, and a second up is a no-op" scratchCheckAndIdempotentUp
+            , testCase "a directory salmon did not create is never taken over nor removed" scratchRefusesPreExisting
+            , testCase "a claim copied into a recreated directory does not match" scratchRefusesCopiedClaim
+            , testCase "a symlink at the path is refused, its target untouched" scratchRefusesSymlinkPath
+            , testCase "a symlink inside the tree is removed, never followed" scratchDoesNotFollowInnerSymlinks
+            , testCase "a deleted claim makes down refuse" scratchRefusesMissingClaim
+            , testCase "root, top-level, relative and dotted paths are refused" scratchPathRefusals
+            , testCase "the home directory and its ancestors are refused" scratchRefusesHome
+            , testCase "dir's rendering is unchanged by the new variant" dirRenderingUnchanged
             ]
         ]
 
@@ -332,3 +351,124 @@ evals rs = [shorthand act | Eval act <- rs, shorthand act == "file-contents"]
 
 skips :: [Report Extension] -> [Text]
 skips rs = [shorthand act | Skip act <- rs, shorthand act == "file-contents"]
+
+-------------------------------------------------------------------------------
+
+scratchAt :: FilePath -> Op
+scratchAt = FS.scratchDir . FS.Directory
+
+-- | The customer's acceptance criterion, verbatim.
+scratchAcceptance :: IO ()
+scratchAcceptance = withTempDir $ \d -> do
+    let dir = d </> "rig" </> "logs"
+    assertBool "up succeeded" =<< runUp (scratchAt dir)
+    createDirectoryIfMissing True (dir </> "nested")
+    writeFile (dir </> "child.log") "written by a child process\n"
+    writeFile (dir </> "nested" </> "app.pid") "4242\n"
+    assertBool "down succeeded" =<< runDown (scratchAt dir)
+    assertEqual "the directory is gone" False =<< doesDirectoryExist dir
+    assertBool "its parent stays" =<< doesDirectoryExist (d </> "rig")
+    assertBool "a second down also succeeds" =<< runDown (scratchAt dir)
+
+scratchCheckAndIdempotentUp :: IO ()
+scratchCheckAndIdempotentUp = withTempDir $ \d -> do
+    let dir = d </> "scratch"
+    before <- FS.checkScratchDir dir
+    assertBool ("missing before up: " <> show before) (isFailure before)
+    assertBool "up" =<< runUp (scratchAt dir)
+    writeFile (dir </> "kept.log") "x\n"
+    assertEqual "Success after up" Success =<< FS.checkScratchDir dir
+    assertBool "a second up succeeds" =<< runUp (scratchAt dir)
+    assertBool "and leaves the contents alone" =<< doesFileExist (dir </> "kept.log")
+
+scratchRefusesPreExisting :: IO ()
+scratchRefusesPreExisting = withTempDir $ \d -> do
+    let dir = d </> "theirs"
+    createDirectory dir
+    writeFile (dir </> "precious") "not salmon's\n"
+    assertEqual "up refuses to adopt it" False =<< runUp (scratchAt dir)
+    assertEqual "down refuses to remove it" False =<< runDown (scratchAt dir)
+    assertBool "the contents survive" =<< doesFileExist (dir </> "precious")
+    assertEqual "and no claim was written" False =<< doesFileExist (dir </> FS.scratchClaimFile)
+
+scratchRefusesCopiedClaim :: IO ()
+scratchRefusesCopiedClaim = withTempDir $ \d -> do
+    let dir = d </> "scratch"
+    assertBool "up" =<< runUp (scratchAt dir)
+    renameDirectory dir (d </> "moved-away")
+    createDirectory dir
+    copyFile (d </> "moved-away" </> FS.scratchClaimFile) (dir </> FS.scratchClaimFile)
+    writeFile (dir </> "precious") "someone else's\n"
+    assertEqual "down refuses: same path, same claim text, another inode" False =<< runDown (scratchAt dir)
+    assertBool "the contents survive" =<< doesFileExist (dir </> "precious")
+
+scratchRefusesSymlinkPath :: IO ()
+scratchRefusesSymlinkPath = withTempDir $ \d -> do
+    let target = d </> "target"
+    let link = d </> "link"
+    createDirectory target
+    writeFile (target </> "precious") "x\n"
+    createDirectoryLink target link
+    assertEqual "up refuses a symlink" False =<< runUp (scratchAt link)
+    assertEqual "down refuses a symlink" False =<< runDown (scratchAt link)
+    assertBool "the target survives" =<< doesFileExist (target </> "precious")
+    -- a dangling symlink is not absence either
+    let dangling = d </> "dangling"
+    createDirectoryLink (d </> "nowhere") dangling
+    assertEqual "up refuses a dangling symlink" False =<< runUp (scratchAt dangling)
+    assertBool "which stays a symlink" =<< pathIsSymbolicLink dangling
+
+scratchDoesNotFollowInnerSymlinks :: IO ()
+scratchDoesNotFollowInnerSymlinks = withTempDir $ \d -> do
+    let outside = d </> "outside"
+    let dir = d </> "scratch"
+    createDirectory outside
+    writeFile (outside </> "precious") "x\n"
+    assertBool "up" =<< runUp (scratchAt dir)
+    createDirectoryLink outside (dir </> "points-out")
+    assertBool "down" =<< runDown (scratchAt dir)
+    assertEqual "the tree is gone" False =<< doesDirectoryExist dir
+    assertBool "the symlink's target survives" =<< doesFileExist (outside </> "precious")
+
+scratchRefusesMissingClaim :: IO ()
+scratchRefusesMissingClaim = withTempDir $ \d -> do
+    let dir = d </> "scratch"
+    assertBool "up" =<< runUp (scratchAt dir)
+    removeFile (dir </> FS.scratchClaimFile)
+    writeFile (dir </> "something") "x\n"
+    assertEqual "down refuses" False =<< runDown (scratchAt dir)
+    assertBool "and deletes nothing" =<< doesFileExist (dir </> "something")
+
+scratchPathRefusals :: IO ()
+scratchPathRefusals = do
+    let refused p = assertBool ("refused: " <> p) (FS.scratchPathRefusal p /= Nothing)
+    mapM_ refused ["/", "/tmp", "/tmp/", "tmp/x", "", "/tmp/../etc/x", "/tmp/./x"]
+    assertEqual "a nested absolute path is fine" Nothing (FS.scratchPathRefusal "/tmp/x")
+    assertEqual "a deeper one too" Nothing (FS.scratchPathRefusal "/var/lib/rig/logs")
+
+scratchRefusesHome :: IO ()
+scratchRefusesHome = do
+    home <- getHomeDirectory
+    r <- FS.scratchPathRefusalIO home
+    assertBool ("home refused: " <> home) (r /= Nothing)
+    case FS.scratchPathRefusal home of
+        Just _ -> pure () -- e.g. /root: already refused as top-level
+        Nothing -> assertBool "home's parent refused" . (/= Nothing) =<< FS.scratchPathRefusalIO (takeDirectory home)
+
+-- | Pins what 'FS.dir' renders, so adding a variant never changes it (a
+-- changed representative restarts what stands on it).
+dirRenderingUnchanged :: IO ()
+dirRenderingUnchanged =
+    case opAct (FS.dir (FS.Directory "/srv/x")) of
+        Nothing -> assertBool "dir has an action" False
+        Just act -> do
+            assertEqual "shorthand" "directory" (shorthand act)
+            assertEqual "help" "ensures /srv/x exists, including subdirs" (help (extension act))
+            assertEqual "ref" (mkRef "directory" ("/srv/x" :: FilePath)) (ref (extension act))
+            assertEqual
+                "notes"
+                [ "create dir recursively"
+                , "does not delete contents of the directory"
+                , "reapplies rather than parking under supervision; see supReapply"
+                ]
+                (notes (extension act))

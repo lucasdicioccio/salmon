@@ -462,6 +462,29 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   Netfilter, CronTask, Rsync, etc). Look at `Filesystem.hs` as the canonical small example of the
   `op` pattern (a value type like `Directory`/`FileContents`, a smart constructor returning `Op`
   that fills in `help`/`notes`/`ref`/`up`/`down`).
+  `Filesystem` has three directory nodes with three `down`s: `dir` removes an *empty* directory
+  and throws on any other (a signal that something in it was not declared or did not go down),
+  `retainedDir` renames to a timestamped suffix, and **`scratchDir`** (opt-in, ref kind
+  `scratch-directory`) removes the whole tree, for contents nobody can declare (logs of child
+  processes, pid files, a transient dump; asked for by the projectz verification rig, whose own
+  `stateDirectory` did `removePathForcibly` behind a parent-name check). The recursive delete is
+  guarded by the directory's identity: `up` creates the leaf itself (never `createDirectoryIfMissing`
+  on the leaf, and never adopts a directory that is already there) and writes `.salmon-scratch-dir`
+  inside it with the declared path, device and inode; `down` deletes only when the path is, by
+  `lstat`, a real directory whose device and inode match that claim, so a copied claim, a directory
+  recreated at the same path or something mounted over it are refused. Also refused, at `up` as at
+  `down`: relative or `.`/`..` paths, `/` and top-level directories, `$HOME` and its ancestors, a
+  symlink at the path (dangling included), and a tree with a directory on another device
+  underneath (walked without following symlinks; symlinks inside are removed, never followed). It
+  has a real `check` (`Success` only for a matching claim), so a removed scratch directory is put
+  back under `serve`. Known gaps: a crash between `mkdir` and the claim write leaves a directory
+  that `up` refuses forever (manual `rmdir`, deliberately); something inside deleting the claim
+  makes `down` refuse; the device walk and the delete are not atomic. A node declared inside a
+  scratch directory must not stand on `dir` of the same path (as `filecontents` does via its
+  enclosing directory), since that `dir`'s own `down` fails on the non-empty tree. Run: Layer 0 in
+  temp dirs (`Test/FilesystemSpec.hs`: acceptance up/fill/down/down, pre-existing, copied claim,
+  symlinks, deleted claim, path refusals, home, and a pin of what `dir` renders). Not run: the
+  cross-device refusal (needs a mount) and any use under `serve`.
   `Nodes/Patroni.hs` (`patroniMember`, `specs/pg-patroni.md`) is Patroni as a member: Patroni owns
   Postgres, so nothing in it starts/promotes a cluster or names a primary in a `ref`/`help`/`notes`.
   It uses postgresql-common's layout and **masks** Debian's `postgresql@V-C` unit

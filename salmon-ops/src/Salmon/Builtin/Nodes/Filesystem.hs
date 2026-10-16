@@ -15,7 +15,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Bits ((.&.))
+import Control.Exception (IOException, try)
 import Control.Monad (when)
+import Data.List (isPrefixOf)
+import System.IO.Error (isDoesNotExistError)
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
 import Numeric (showOct)
 import qualified System.Posix.Files as Posix
@@ -94,6 +97,191 @@ retainedDir directory =
   where
     path :: FilePath
     path = directory.directoryPath
+
+{- | A scratch directory salmon owns outright: 'down' removes it /and
+everything in it/. Opt-in, for a directory whose contents cannot be declared
+(logs written by child processes, pid files, a transient dump) and whose
+teardown must leave nothing behind. 'dir' would refuse to remove it (non-empty)
+and 'retainedDir' would leave a timestamped copy behind on every @down@.
+
+A recursive delete destroys data, so it is guarded by the directory's
+__identity__, not by its path:
+
+* @up@ creates the leaf itself (never adopts one that is already there) and
+  then writes, inside it, an ownership claim ('scratchClaimFile') naming the
+  declared path and the directory's own device and inode numbers.
+* @down@ removes the tree only when the path is still /that/ directory: a
+  real directory (not a symlink), whose device and inode match the claim
+  inside it. A claim copied into another directory, a directory recreated by
+  someone else at the same path, or one mounted over it does not match, and
+  @down@ throws without deleting anything.
+* @down@ also refuses a tree that crosses into another filesystem (a mount
+  point or bind mount somewhere underneath): it walks the tree first, never
+  following a symlink, and compares every directory's device. Symlinks inside
+  the tree are removed themselves, never their targets.
+* Some paths are refused outright, at @up@ as at @down@: a relative path, one
+  with @.@ or @..@ components, @/@ and any top-level directory (@/tmp@,
+  @/var@), and the user's home or any of its ancestors ('scratchPathRefusal').
+
+@up@ also throws when the path exists without a matching claim: salmon never
+takes over a directory it cannot prove it made. A crash between the
+@mkdir@ and the claim write leaves exactly that state; recovering it is a
+manual @rmdir@, deliberately.
+
+A @down@ of an absent directory succeeds, as for 'dir', so a second @down@ is
+a no-op. The @check@ answers 'Success' when the directory is there with a
+matching claim, so a directory removed behind salmon's back is noticed (and
+put back) under @run serve@.
+
+Two things a caller should know. The claim file lives inside the directory,
+so whatever writes there must not delete it (if it does, @down@ refuses and
+says why). And nodes declared /inside/ a scratch directory should not stand
+on 'dir' of the same path (as 'filecontents' does through its enclosing
+directory): that is a second, differently-keyed node for the same path whose
+own @down@ fails on a non-empty directory.
+-}
+scratchDir :: Directory -> Op
+scratchDir directory =
+    op "scratch-directory" nodeps $ \actions ->
+        actions
+            { help = Text.pack $ "ensures " <> path <> " exists as a salmon-owned scratch directory"
+            , notes =
+                [ "create the directory and an ownership claim inside it"
+                , "down removes the whole tree, only if the claim matches the directory's device and inode"
+                , "never adopts a directory it did not create"
+                ]
+            , ref = mkRef "scratch-directory" path
+            , check = checkScratchDir path
+            , up = createScratchDir path
+            , down = removeScratchDir path
+            }
+  where
+    path :: FilePath
+    path = directory.directoryPath
+
+-- | The ownership claim 'scratchDir' writes inside the directory it creates.
+scratchClaimFile :: FilePath
+scratchClaimFile = ".salmon-scratch-dir"
+
+{- | Why a path may never be a 'scratchDir', if it may not. Pure part of the
+guard; 'scratchPathRefusalIO' adds the home directory.
+-}
+scratchPathRefusal :: FilePath -> Maybe String
+scratchPathRefusal path
+    | not (isAbsolute path) = Just "not an absolute path"
+    | any (`elem` [".", ".."]) components = Just "has . or .. components"
+    | length components < 3 = Just "is / or a top-level directory"
+    | otherwise = Nothing
+  where
+    -- splitDirectories "/a/b" == ["/", "a", "b"]
+    components = splitDirectories path
+
+scratchPathRefusalIO :: FilePath -> IO (Maybe String)
+scratchPathRefusalIO path = case scratchPathRefusal path of
+    Just r -> pure (Just r)
+    Nothing -> do
+        home <- either (const Nothing) Just <$> (try getHomeDirectory :: IO (Either IOException FilePath))
+        pure $ case home of
+            Just h
+                | isAbsolute h
+                , splitDirectories path `isPrefixOf` splitDirectories h ->
+                    Just "is the home directory or one of its ancestors"
+            _ -> Nothing
+
+-- | The claim's text: a fixed header, the declared path, device and inode.
+renderScratchClaim :: FilePath -> Posix.DeviceID -> Posix.FileID -> String
+renderScratchClaim path dev ino =
+    unlines
+        [ "salmon-scratch-dir v1"
+        , "path " <> path
+        , "device " <> show (toInteger dev)
+        , "inode " <> show (toInteger ino)
+        ]
+
+-- | What the path holds, as far as 'scratchDir' is concerned.
+data ScratchState
+    = ScratchAbsent
+    | ScratchOwned
+    | ScratchForeign String
+    deriving (Eq, Show)
+
+scratchState :: FilePath -> IO ScratchState
+scratchState path = do
+    refusal <- scratchPathRefusalIO path
+    case refusal of
+        Just r -> pure (ScratchForeign r)
+        Nothing -> do
+            -- lstat, so a dangling symlink is not mistaken for absence
+            lstat <- try (Posix.getSymbolicLinkStatus path) :: IO (Either IOException Posix.FileStatus)
+            case lstat of
+                Left e
+                    | isDoesNotExistError e -> pure ScratchAbsent
+                    | otherwise -> pure (ScratchForeign "cannot be inspected")
+                Right st
+                    | Posix.isSymbolicLink st -> pure (ScratchForeign "is a symbolic link")
+                    | not (Posix.isDirectory st) -> pure (ScratchForeign "is not a directory")
+                    | otherwise -> do
+                        let claim = path </> scratchClaimFile
+                        claimStat <- try (Posix.getSymbolicLinkStatus claim) :: IO (Either IOException Posix.FileStatus)
+                        case claimStat of
+                            Right cst | Posix.isRegularFile cst -> do
+                                there <- C8.unpack <$> ByteString.readFile claim
+                                pure $
+                                    if there == renderScratchClaim path (Posix.deviceID st) (Posix.fileID st)
+                                        then ScratchOwned
+                                        else ScratchForeign "its ownership claim does not match this directory"
+                            _ -> pure (ScratchForeign "has no salmon ownership claim")
+
+checkScratchDir :: FilePath -> IO CheckResult
+checkScratchDir path = do
+    s <- scratchState path
+    pure $ case s of
+        ScratchOwned -> Success
+        ScratchAbsent -> Failure ("missing: " <> Text.pack path)
+        ScratchForeign why -> Failure (Text.pack $ path <> " " <> why)
+
+createScratchDir :: FilePath -> IO ()
+createScratchDir path = do
+    s <- scratchState path
+    case s of
+        ScratchOwned -> pure ()
+        ScratchForeign why -> ioError (userError $ "refusing scratch directory " <> path <> ": " <> why)
+        ScratchAbsent -> do
+            createDirectoryIfMissing True (takeDirectory path)
+            -- not createDirectoryIfMissing: the leaf must be ours.
+            createDirectory path
+            st <- Posix.getSymbolicLinkStatus path
+            writeFile (path </> scratchClaimFile) (renderScratchClaim path (Posix.deviceID st) (Posix.fileID st))
+
+removeScratchDir :: FilePath -> IO ()
+removeScratchDir path = do
+    s <- scratchState path
+    case s of
+        ScratchAbsent -> pure ()
+        ScratchForeign why -> ioError (userError $ "refusing to remove " <> path <> ": " <> why)
+        ScratchOwned -> do
+            st <- Posix.getSymbolicLinkStatus path
+            crossing <- firstOtherDevice (Posix.deviceID st) path
+            case crossing of
+                Just p -> ioError (userError $ "refusing to remove " <> path <> ": " <> p <> " is on another filesystem")
+                Nothing -> removeDirectoryRecursive path
+
+-- | The first directory under @root@ whose device differs, never following
+-- a symlink.
+firstOtherDevice :: Posix.DeviceID -> FilePath -> IO (Maybe FilePath)
+firstOtherDevice dev root = listDirectory root >>= go . map (root </>)
+  where
+    go [] = pure Nothing
+    go (p : ps) = do
+        st <- Posix.getSymbolicLinkStatus p
+        if Posix.isDirectory st
+            then
+                if Posix.deviceID st /= dev
+                    then pure (Just p)
+                    else do
+                        below <- firstOtherDevice dev p
+                        maybe (go ps) (pure . Just) below
+            else go ps
 
 -- | Renames @path@ to @path@ suffixed with the current UTC timestamp. A
 -- no-op if @path@ is already gone.
