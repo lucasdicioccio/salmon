@@ -15,6 +15,7 @@ import qualified Test.EdgeListSpec as EdgeListSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.GraphFixtureSpec as GraphFixtureSpec
 import qualified Test.GraphScaleSpec as GraphScaleSpec
+import qualified Test.ListedPathsSpec as ListedPathsSpec
 import qualified Test.DebianPackageSpec as DebianPackageSpec
 import qualified Test.ClipCppSpec as ClipCppSpec
 import qualified Test.LlamaServerSpec as LlamaServerSpec
@@ -155,6 +156,7 @@ main =
             , EdgeListSpec.tests
             , GraphFixtureSpec.tests
             , GraphScaleSpec.tests
+            , ListedPathsSpec.tests
             , AptRepositorySpec.tests
             , DebianPackageSpec.tests
             , ClipCppSpec.tests

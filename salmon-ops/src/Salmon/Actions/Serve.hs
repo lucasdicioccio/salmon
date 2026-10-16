@@ -2958,7 +2958,12 @@ place: without this, a node was nameable only by its 'Ref' (opaque) or by
 guessing the path back from its 'nodeShorthand' and hoping there is exactly
 one node with that shorthand. A node reached by more than one seed, or twice
 within one seed's graph, can have more than one path, and any one is a valid
-selector. __At most 'Query.pathLimit' are listed__, the shortest: a shared
+selector. __A path longer than 'Query.pathCap' characters is shown as
+@**\/@ and its tail__ ('Query.renderListedPath'), still a pattern that
+selects the node (and maybe others), so that a node deep in a long chain
+does not cost its depth to list; shorter ones are unchanged, and are sorted
+before it by the full path's length, as they always were.
+__At most 'Query.pathLimit' are listed__, the shortest: a shared
 dependency is a path again under each node standing on it, so the number of
 paths doubles with every diamond above a node, and listing them all is what
 kept @\/dag@ and @\/status@ from ever answering on a 138-node graph. A
@@ -2970,9 +2975,9 @@ declaration's graph currently reaches by path at all, addressable only by its
 -}
 worldPaths :: World seed directive -> Map Ref [Text]
 worldPaths w =
-    Map.map (take Query.pathLimit . nub . sortOn Text.length) $
+    Map.map (take Query.pathLimit . nub . map Query.renderListedPath . sortOn (.listedWidth)) $
         Map.unionsWith
             (++)
-            [ Map.map (map (Text.intercalate "/")) (Query.outlinePaths Query.pathLimit (Query.outline ep.epochGraph))
+            [ Query.outlinePaths Query.pathLimit Query.pathCap (Query.outline ep.epochGraph)
             | ep <- w.worldEpochs
             ]

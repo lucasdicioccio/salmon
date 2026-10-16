@@ -111,6 +111,7 @@ import Salmon.Reporter.Tagged (Tagged (..))
 
 import Test.DagReference (foldDagPerOccurrence, stuckRounds)
 import Test.GraphFixture
+import Test.PathListReference (outlinePathsUncapped)
 
 -------------------------------------------------------------------------------
 -- options
@@ -499,11 +500,17 @@ quietly act =
 -- the operations
 
 {- | The paths @serve@ lists for each node ('Serve.worldPaths', for a world
-with one declaration): at most 'Query.pathLimit' per node.
+with one declaration): at most 'Query.pathLimit' per node, a path longer
+than 'Query.pathCap' shown as its tail.
 -}
 pathsOf :: Op -> Map.Map Ref [Text]
 pathsOf root =
-    Map.map (fmap (Text.intercalate "/")) (Query.outlinePaths Query.pathLimit (Query.outline (evalDeps root)))
+    Map.map (fmap Query.renderListedPath) (Query.outlinePaths Query.pathLimit Query.pathCap (Query.outline (evalDeps root)))
+
+-- | The same before the cap ("Test.PathListReference"): every path in full.
+pathsUncappedOf :: Op -> Map.Map Ref [Text]
+pathsUncappedOf root =
+    Map.map (fmap (Text.intercalate "/")) (outlinePathsUncapped Query.pathLimit (Query.outline (evalDeps root)))
 
 benches :: [Bench]
 benches =
@@ -730,6 +737,9 @@ queryBenches =
     , single "query" "paths per node (outline + outlinePaths, as worldPaths)" PerNode $ \e -> do
         root <- e.envFresh
         pure (evaluate (weighPaths (pathsOf root)))
+    , single "query" "paths per node, uncapped reference (outlinePathsUncapped)" PerNode $ \e -> do
+        root <- e.envFresh
+        pure (evaluate (weighPaths (pathsUncappedOf root)))
     , single "query" "resolveSelectors (select **, exclude **/n1/**)" PerNode $ \e -> do
         root <- e.envFresh
         pure $ do

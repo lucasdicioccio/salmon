@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | A cheap guard on how the graph operations scale: a few of them over the
@@ -42,6 +43,7 @@ tests =
         "graph operations at scale"
         [ testCase "dagOf builds what foldDag builds" dagOfMatchesTheFold
         , testCase "the outline, a selector and the listed paths of a shared graph are per node" outlineIsPerNode
+        , testCase "the listed paths of a deep chain do not cost its depth per node" listedPathsOfADeepChain
         , testCase "rebuilding and walking a shared graph is per node" walksArePerNode
         ]
 
@@ -95,8 +97,19 @@ outlineIsPerNode =
         assertEqual (label <> ": every node outlined") expected nodes
         selected <- within (label <> ": resolveSelectors") (evaluate (Set.size (fst (Query.resolveSelectors cograph ["**"] ["n0/n1"]))))
         assertEqual (label <> ": every node but one selected") (expected - 1) selected
-        listed <- within (label <> ": outlinePaths") (evaluate (Map.foldl' (\k ps -> k + length ps) 0 (Query.outlinePaths Query.pathLimit (Query.outline cograph))))
+        listed <- within (label <> ": outlinePaths") (evaluate (Map.foldl' (\k ps -> k + length ps) 0 (Query.outlinePaths Query.pathLimit Query.pathCap (Query.outline cograph))))
         assertBool (label <> ": at least one path per node, at most pathLimit") (listed >= expected && listed <= expected * Query.pathLimit)
+
+{- | A chain of twenty thousand nodes: the uncapped listing held one path of
+up to twenty thousand segments per node (about 1.2 GB of text, and minutes);
+capped at 'Query.pathCap' it is a few hundred characters a node.
+-}
+listedPathsOfADeepChain :: IO ()
+listedPathsOfADeepChain = do
+    let n = 20000
+        cograph = evalDeps (generate Chain n 3)
+    held <- within "chain: outlinePaths" (evaluate (Map.foldl' (\k ps -> k + sum [length p.listedSegments | p <- ps]) 0 (Query.outlinePaths Query.pathLimit Query.pathCap (Query.outline cograph))))
+    assertBool ("chain: segments held " <> show held <> ", at most a cap's worth per node") (held <= n * Query.pathCap `div` 2)
 
 walksArePerNode :: IO ()
 walksArePerNode =

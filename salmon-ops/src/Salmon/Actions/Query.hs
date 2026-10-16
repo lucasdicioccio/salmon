@@ -32,7 +32,10 @@ module Salmon.Actions.Query (
     outlineFirstPaths,
     matchOutline,
     pathLimit,
+    pathCap,
+    ListedPath (..),
     outlinePaths,
+    renderListedPath,
 
     -- * Resolving selectors against an expanded graph
     pathedRefs,
@@ -264,17 +267,76 @@ matchOutline pat o = go Set.empty Set.empty [(r, i) | r <- o.outlineRootsRev, i 
 pathLimit :: Int
 pathLimit = 8
 
-{- | At most @limit@ paths to each node, shortest first (by rendered length,
-then by segments): the head of what sorting 'pathedRefs' per 'Ref' gives.
-A node with more paths than that is reachable by paths not listed here, and
-a pattern built from one of those still selects it ('matchOutline').
+{- | The rendered length (as @\/a\/b@, one character per separator) above
+which a listed path is not spelled out in full: 'outlinePaths' keeps only
+its last segments and 'renderListedPath' shows them after a @**\/@.
+
+Counted in characters, not segments, for two reasons. The listing is ordered
+by rendered length first, so every path at or under the cap sorts before
+every path over it: the paths that are still spelled out are exactly the
+ones the uncapped listing had at or under the cap, in the same order and at
+the same positions. And characters are what a path costs to hold and to
+send, whatever its segments are called.
+
+256 so that a recipe's paths (a few dozen characters; the deepest a @serve@
+test asserts is 161) are left alone, while a node on a chain of thousands
+costs a few hundred characters a path instead of its depth. Not derived from
+a survey of real graphs: change it here.
+-}
+pathCap :: Int
+pathCap = 256
+
+{- | A path as 'outlinePaths' lists it.
+
+'listedWidth' is always the full path's rendered length (as @\/a\/b@), even
+when only its tail is kept, so a capped path still sorts by how long it
+really is. 'listedSegments' is every segment, root first, when
+'listedWidth' is at most the cap; otherwise ('listedCapped') it is the
+longest tail whose own rendered length is at most the cap, and never less
+than the node's own segment.
+-}
+data ListedPath = ListedPath
+    { listedWidth :: !Int
+    , listedCapped :: !Bool
+    , listedSegments :: ![Text]
+    }
+    deriving (Show, Eq)
+
+{- | What a listed path shows, the way 'Salmon.Actions.Serve.worldPaths'
+renders paths (segments joined by @\/@, no leading one): the path itself,
+or for a capped one @**\/@ and its tail. Either is a pattern that selects
+the node ('matchOutline'); a capped one may select other nodes as well.
+This is the one place that decides what a capped path looks like.
+-}
+renderListedPath :: ListedPath -> Text
+renderListedPath p
+    | p.listedCapped = "**/" <> Text.intercalate "/" p.listedSegments
+    | otherwise = Text.intercalate "/" p.listedSegments
+
+{- | @outlinePaths limit cap@: at most @limit@ paths to each node, shortest
+first by rendered length. A path whose rendered length is at most @cap@ is
+listed in full, and those are exactly, in the same order, what sorting
+'pathedRefs' per 'Ref' by (rendered length, segments) gives at or under
+@cap@. A longer path keeps only its tail (see 'ListedPath'): the capped
+paths listed are still the shortest by rendered length, but which of several
+of equal length are kept, and in what order, is decided step by step on what
+each step still has (their tails read from the node upwards), not over every
+path; two that leave the same tail show the same text and are listed once
+(the shorter), so a node can list fewer than @limit@ although it has more
+paths. A node with more paths
+than that is reachable by paths not listed here, and a pattern built from
+one of those still selects it ('matchOutline').
 
 Computed from the top down, each node's paths from those of the nodes above
 it; the shortest paths to a node extend shortest paths to the node above, so
-keeping @limit@ at each step loses none of the final ones.
+keeping @limit@ at each step loses none of the final ones that are spelled
+out. Each step handles at most @limit@ paths per edge of at most @cap@
+characters (plus the node's own segment) each, so the cost is per node and
+edge, not per node times its depth: on a chain the uncapped listing held
+nodes x depth segments.
 -}
-outlinePaths :: Int -> Outline -> Map Ref [[Text]]
-outlinePaths limit o = List.foldl' place Map.empty topDown
+outlinePaths :: Int -> Int -> Outline -> Map Ref [ListedPath]
+outlinePaths limit cap o = List.foldl' place Map.empty topDown
   where
     childrenOf ref = maybe [] (.entryChildrenRev) (Map.lookup ref o.outlineEntries)
 
@@ -296,24 +358,59 @@ outlinePaths limit o = List.foldl' place Map.empty topDown
             let (seen', done') = List.foldl' visit (Set.insert ref seen, done) (childrenOf ref)
              in (seen', ref : done')
 
-    place :: Map Ref [[Text]] -> Ref -> Map Ref [[Text]]
+    place :: Map Ref [ListedPath] -> Ref -> Map Ref [ListedPath]
     place acc ref = case Map.lookup ref o.outlineEntries of
         Nothing -> acc
         Just e ->
-            let own = [[e.entryShorthand] | ref `Set.member` roots]
+            let seg = e.entryShorthand
+                own = [extend seg (ListedPath 0 False []) | ref `Set.member` roots]
                 inherited =
-                    [ p <> [e.entryShorthand]
+                    [ extend seg p
                     | parent <- Map.findWithDefault [] ref parents
                     , p <- Map.findWithDefault [] parent acc
                     ]
              in Map.insert ref (shortest (own <> inherited)) acc
 
-    -- the @limit@ shortest of these paths, without repeats.
-    shortest :: [[Text]] -> [[Text]]
-    shortest = take limit . map snd . Set.toAscList . Set.fromList . map (\p -> (rendered p, p))
+    extend :: Text -> ListedPath -> ListedPath
+    extend seg p
+        | not p.listedCapped && width <= cap = ListedPath width False (p.listedSegments <> [seg])
+        | otherwise = ListedPath width True (tailWithin (p.listedSegments <> [seg]))
+      where
+        width = p.listedWidth + Text.length seg + 1
 
-    rendered :: [Text] -> Int
-    rendered p = sum (map Text.length p) + length p
+    -- the longest tail of these segments rendering in at most @cap@
+    -- characters, and at least the last one.
+    tailWithin :: [Text] -> [Text]
+    tailWithin segs = case reverse segs of
+        [] -> []
+        (lst : before) -> go [lst] (Text.length lst + 1) before
+      where
+        go kept _ [] = kept
+        go kept w (s : rest)
+            | w' <= cap = go (s : kept) w' rest
+            | otherwise = kept
+          where
+            w' = w + Text.length s + 1
+
+    -- the @limit@ shortest of these paths, without repeats. Spelled-out
+    -- paths compare as the uncapped listing did (length, then segments);
+    -- capped ones, all longer, by their tail from the node upwards. Capped
+    -- paths that leave the same tail show the same text whatever their
+    -- length, so only the shortest of them is kept (and the longer ones'
+    -- extensions would show one text again, so dropping them here drops
+    -- nothing a node below would list).
+    shortest :: [ListedPath] -> [ListedPath]
+    shortest = take limit . distinctTails Set.empty . Map.elems . Map.fromList . map (\p -> (key p, p))
+
+    distinctTails :: Set [Text] -> [ListedPath] -> [ListedPath]
+    distinctTails _ [] = []
+    distinctTails seen (p : ps)
+        | not p.listedCapped = p : distinctTails seen ps
+        | p.listedSegments `Set.member` seen = distinctTails seen ps
+        | otherwise = p : distinctTails (Set.insert p.listedSegments seen) ps
+
+    key :: ListedPath -> (Int, Bool, [Text])
+    key p = (p.listedWidth, p.listedCapped, if p.listedCapped then reverse p.listedSegments else p.listedSegments)
 
 -------------------------------------------------------------------------------
 

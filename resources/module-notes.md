@@ -1082,7 +1082,46 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   pattern as an automaton over (node, pattern suffix) pairs, so a glob still selects a node by *any*
   of its paths; `outlinePaths` keeps the `pathLimit` (8) shortest per node, which is all
   `Serve.worldPaths` — `status`, `query`, `/dag`, `/status`, the status sink — now shows; and
-  `outlineFirstPaths` is the deduped rendering. Two limits: a later occurrence of a `Ref` is looked
+  `outlineFirstPaths` is the deduped rendering.
+  **Listed paths have a length cap** (feature 7af0b6ec, the profiles' finding 4). A path is as
+  long as its node is deep, so listing even one path per node held nodes x depth segments (a
+  chain of 10 000: 7.5 s, 8 GB). `outlinePaths limit cap` returns `ListedPath`s: the full path's
+  rendered width (as `/a/b`) always, and every segment only when that width is at most `cap`;
+  over it, the longest tail that fits (never less than the node's own segment), shown by
+  `renderListedPath` as `**/tail`, a pattern that selects the node and maybe others. Defaults,
+  proposed by the implementer for the owner to review, each one place to change:
+  (1) `Query.pathCap = 256`, counted in **characters**, because the listing sorts by rendered
+  length first, so every path at or under the cap sorts before every path over it and the
+  spelled-out ones are exactly the uncapped listing's at or under the cap, same order, same
+  positions; and characters are what a path costs to hold and send. 256 was not derived from a
+  survey of real recipes' paths (none was made); the deepest path a `serve` test asserts, the
+  49-node diamond chain of `ServeHttpSpec`, is 161 wide and unaffected. (2) A deeper path
+  shows `**/` + tail (`renderListedPath`), not nothing, so the UI/TUI/Rust client still have a
+  pasteable selector; `#ref` stays the exact address. (3) Ties among capped paths of equal width
+  are broken by the tail read from the node upwards, step by step on what each step kept (not
+  over every path), and capped paths that leave the same tail are listed once (the shortest), so
+  a node can list fewer than 8. (4) **`query show` is not capped**: its lines are full paths by
+  definition, it is a one-shot command the operator asked for, and `--no-dedupe` is per path by
+  design; `query show --dedupe` still pays depth per node through `entryFirstPath`.
+  `worldPaths` now sorts by the full width (`listedWidth`) before rendering, so a capped text,
+  which is shorter, is never sorted ahead of a longer spelled-out path. The JSON shape is
+  unchanged (still strings), so `/openapi.json` and the goldens are untouched; only a path over
+  the cap renders differently (`QuerySpec`'s 60-diamond bottom node, 547 characters, now shows
+  `**/left/top/left/.../bottom`). The pre-cap function is `Test.PathListReference`
+  (`outlinePathsUncapped`), and `Test.ListedPathsSpec` holds the equivalence: QuickCheck over
+  `Test.GraphFixture` shapes (chain, fan, tree, diamonds, layered, random layered; up to 30
+  nodes) and random graphs with repeated shorthands of differing lengths, caps 1 to 200 and
+  unbounded, limits 1 to 8 — spelled-out paths equal the reference's at or under the cap; with
+  no cap reached the listing is the reference's; every exact path is a real root-to-node path and
+  every tail the longest fitting tail of a real path of that width, and each rendering selects
+  its node via `matchOutline`; the first width is the shortest path's; at most `limit`, no text
+  twice. Run at 10 000 cases each, green; the default run is 100. `GraphScaleSpec` adds a
+  20 000-node chain (about 1 s). Measured (`graph-profiles`, one run, shared machine; see
+  `resources/graph-profiles.md`, "After the path cap"): paths per node on a chain went from
+  10 000 nodes in 15 s and 11 GB to 100 000 in 4.5 s and 1.8 GB; `status` in the loop on a chain
+  of 3 000 from 0.6 s to 48 ms. Not covered: graphs over 30 nodes in the properties (the
+  reference lists every path), a cycle (the fixtures have none), and a shorthand that is itself
+  `**`. Two limits: a later occurrence of a `Ref` is looked
   at one level deep (what is new directly under it is merged, which covers a node named again with
   one more dependency; a difference further down is not seen), and a `Ref` met under two shorthands
   keeps the first. `Dag.foldDag` used to walk every occurrence at declaration, so a declaration was

@@ -1,0 +1,536 @@
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	100	100	99	100	0.001259	1513520	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	300	300	299	300	0.003267	5373408	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	1000	1000	999	1000	0.013512	18936608	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	3000	3000	2999	3000	0.062678	54931904	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	10000	10000	9999	10000	0.257716	183663816	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	30000	30000	29999	30000	1.103080	536104528	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	100000	100000	99999	100000	4.457938	1799214896	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:budget
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	chain	100	100	99	100	0.000812	1783312	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	chain	300	300	299	300	0.006925	11401528	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	chain	1000	1000	999	1000	0.101175	107453992	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	chain	3000	3000	2999	3000	1.499415	994520088	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	chain	10000	10000	9999	10000	15.396335	10916607640	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	chain	10000	10000	9999	10000	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	nodes	chain	100	100	99	100	0.000943	819328	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	chain	100	100	99	100	0.000013	32800	ok
+serve	loop	first pass, every node up	nodes	chain	100	100	99	100	0.002632	2318784	ok
+serve	loop	status	nodes	chain	100	100	99	100	0.000584	1161824	ok
+serve	loop	before the idle pass	nodes	chain	100	100	99	100	0.000014	31920	ok
+serve	loop	idle pass, nothing pending	nodes	chain	100	100	99	100	0.000071	79128	ok
+serve	loop	clear	nodes	chain	100	100	99	100	0.000003	2944	ok
+serve	loop	before the teardown pass	nodes	chain	100	100	99	100	0.000084	91240	ok
+serve	loop	teardown pass, every node down	nodes	chain	100	100	99	100	0.002735	2243224	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	chain	300	300	299	300	0.002243	2579984	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	chain	300	300	299	300	0.000026	99224	ok
+serve	loop	first pass, every node up	nodes	chain	300	300	299	300	0.014720	11165384	ok
+serve	loop	status	nodes	chain	300	300	299	300	0.003208	4305320	ok
+serve	loop	before the idle pass	nodes	chain	300	300	299	300	0.000026	87408	ok
+serve	loop	idle pass, nothing pending	nodes	chain	300	300	299	300	0.000208	233704	ok
+serve	loop	clear	nodes	chain	300	300	299	300	0.000003	2752	ok
+serve	loop	before the teardown pass	nodes	chain	300	300	299	300	0.000165	269816	ok
+serve	loop	teardown pass, every node down	nodes	chain	300	300	299	300	0.015483	11064808	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	chain	1000	1000	999	1000	0.007154	9161560	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	chain	1000	1000	999	1000	0.000081	313600	ok
+serve	loop	first pass, every node up	nodes	chain	1000	1000	999	1000	0.230400	42885032	ok
+serve	loop	status	nodes	chain	1000	1000	999	1000	0.009783	15365720	ok
+serve	loop	before the idle pass	nodes	chain	1000	1000	999	1000	0.000087	283408	ok
+serve	loop	idle pass, nothing pending	nodes	chain	1000	1000	999	1000	0.000774	785384	ok
+serve	loop	clear	nodes	chain	1000	1000	999	1000	0.000004	2752	ok
+serve	loop	before the teardown pass	nodes	chain	1000	1000	999	1000	0.000643	905496	ok
+serve	loop	teardown pass, every node down	nodes	chain	1000	1000	999	1000	0.229771	42440976	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	chain	3000	3000	2999	3000	0.036461	28847432	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	chain	3000	3000	2999	3000	0.000421	937600	ok
+serve	loop	first pass, every node up	nodes	chain	3000	3000	2999	3000	2.564632	134971408	ok
+serve	loop	status	nodes	chain	3000	3000	2999	3000	0.047511	44131280	ok
+serve	loop	before the idle pass	nodes	chain	3000	3000	2999	3000	0.000342	843408	ok
+serve	loop	idle pass, nothing pending	nodes	chain	3000	3000	2999	3000	0.002644	2350312	ok
+serve	loop	clear	nodes	chain	3000	3000	2999	3000	0.000005	2752	ok
+serve	loop	before the teardown pass	nodes	chain	3000	3000	2999	3000	0.002211	2710424	ok
+serve	loop	teardown pass, every node down	nodes	chain	3000	3000	2999	3000	2.142972	133703968	ok
+serve	loop		nodes	chain	3000	3000	2999	3000	0.000000	0	stop:budget
+render	GET /dag (dagValue + encode)		nodes	chain	100	100	99	100	0.001369	2373752	ok
+render	GET /dag (dagValue + encode)		nodes	chain	300	300	299	300	0.002773	7078072	ok
+render	GET /dag (dagValue + encode)		nodes	chain	1000	1000	999	1000	0.011359	23499168	ok
+render	GET /dag (dagValue + encode)		nodes	chain	3000	3000	2999	3000	0.035635	70536136	ok
+render	GET /dag (dagValue + encode)		nodes	chain	10000	10000	9999	10000	0.122078	235147384	ok
+render	GET /dag (dagValue + encode)		nodes	chain	30000	30000	29999	30000	0.442707	705410984	ok
+render	GET /dag (dagValue + encode)		nodes	chain	100000	100000	99999	100000	1.897259	2351694928	ok
+render	GET /dag (dagValue + encode)		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+render	GET /status (status report + encode)		nodes	chain	100	100	99	100	0.000568	1095232	ok
+render	GET /status (status report + encode)		nodes	chain	300	300	299	300	0.001163	3292496	ok
+render	GET /status (status report + encode)		nodes	chain	1000	1000	999	1000	0.004079	10929960	ok
+render	GET /status (status report + encode)		nodes	chain	3000	3000	2999	3000	0.011069	32818360	ok
+render	GET /status (status report + encode)		nodes	chain	10000	10000	9999	10000	0.039593	109354024	ok
+render	GET /status (status report + encode)		nodes	chain	30000	30000	29999	30000	0.116671	327740376	ok
+render	GET /status (status report + encode)		nodes	chain	100000	100000	99999	100000	0.524975	1092806304	ok
+render	GET /status (status report + encode)		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+render	status sink document (encode)		nodes	chain	100	100	99	100	0.000484	1109176	ok
+render	status sink document (encode)		nodes	chain	300	300	299	300	0.001150	3306488	ok
+render	status sink document (encode)		nodes	chain	1000	1000	999	1000	0.004762	10943568	ok
+render	status sink document (encode)		nodes	chain	3000	3000	2999	3000	0.016342	32832272	ok
+render	status sink document (encode)		nodes	chain	10000	10000	9999	10000	0.049654	109371096	ok
+render	status sink document (encode)		nodes	chain	30000	30000	29999	30000	0.104652	327758752	ok
+render	status sink document (encode)		nodes	chain	100000	100000	99999	100000	0.605627	1092831064	ok
+render	status sink document (encode)		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	100	100	99	100	0.000505	775696	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	300	300	299	300	0.001635	2446200	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	1000	1000	999	1000	0.007617	8570808	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	3000	3000	2999	3000	0.027623	26866648	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	10000	10000	9999	10000	0.132139	93671456	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	30000	30000	29999	30000	0.401324	293445576	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	100000	100000	99999	100000	1.748673	1019664064	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	100	100	99	100	0.000486	837528	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	300	300	299	300	0.001159	2656192	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	1000	1000	999	1000	0.005874	9358160	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	3000	3000	2999	3000	0.020911	29451344	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	10000	10000	9999	10000	0.093955	103156792	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	30000	30000	29999	30000	0.407120	324269344	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	100000	100000	99999	100000	1.785499	1131174792	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+serve	loop	record a declaration (expand, fold, ledger)	nodes	fan	100	100	99	100	0.000674	875192	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	fan	100	100	99	100	0.000010	32800	ok
+serve	loop	first pass, every node up	nodes	fan	100	100	99	100	0.001352	2224584	ok
+serve	loop	status	nodes	fan	100	100	99	100	0.000224	419928	ok
+serve	loop	before the idle pass	nodes	fan	100	100	99	100	0.000010	31920	ok
+serve	loop	idle pass, nothing pending	nodes	fan	100	100	99	100	0.000053	79128	ok
+serve	loop	clear	nodes	fan	100	100	99	100	0.000002	2944	ok
+serve	loop	before the teardown pass	nodes	fan	100	100	99	100	0.000049	91240	ok
+serve	loop	teardown pass, every node down	nodes	fan	100	100	99	100	0.000618	2171992	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	fan	300	300	299	300	0.002350	2785064	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	fan	300	300	299	300	0.000024	99224	ok
+serve	loop	first pass, every node up	nodes	fan	300	300	299	300	0.006006	10800264	ok
+serve	loop	status	nodes	fan	300	300	299	300	0.001119	1366112	ok
+serve	loop	before the idle pass	nodes	fan	300	300	299	300	0.000031	87408	ok
+serve	loop	idle pass, nothing pending	nodes	fan	300	300	299	300	0.000252	233704	ok
+serve	loop	clear	nodes	fan	300	300	299	300	0.000004	2752	ok
+serve	loop	before the teardown pass	nodes	fan	300	300	299	300	0.000207	269816	ok
+serve	loop	teardown pass, every node down	nodes	fan	300	300	299	300	0.004317	9509472	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	fan	1000	1000	999	1000	0.011247	9934136	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	fan	1000	1000	999	1000	0.000101	313600	ok
+serve	loop	first pass, every node up	nodes	fan	1000	1000	999	1000	0.026747	41586688	ok
+serve	loop	status	nodes	fan	1000	1000	999	1000	0.003688	4959920	ok
+serve	loop	before the idle pass	nodes	fan	1000	1000	999	1000	0.000064	283408	ok
+serve	loop	idle pass, nothing pending	nodes	fan	1000	1000	999	1000	0.000623	785384	ok
+serve	loop	clear	nodes	fan	1000	1000	999	1000	0.000003	2752	ok
+serve	loop	before the teardown pass	nodes	fan	1000	1000	999	1000	0.000465	905496	ok
+serve	loop	teardown pass, every node down	nodes	fan	1000	1000	999	1000	0.016149	41498008	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	fan	3000	3000	2999	3000	0.025530	31528512	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	fan	3000	3000	2999	3000	0.000232	937600	ok
+serve	loop	first pass, every node up	nodes	fan	3000	3000	2999	3000	0.083813	130456560	ok
+serve	loop	status	nodes	fan	3000	3000	2999	3000	0.013556	15946024	ok
+serve	loop	before the idle pass	nodes	fan	3000	3000	2999	3000	0.000231	843408	ok
+serve	loop	idle pass, nothing pending	nodes	fan	3000	3000	2999	3000	0.002167	2350312	ok
+serve	loop	clear	nodes	fan	3000	3000	2999	3000	0.000005	2752	ok
+serve	loop	before the teardown pass	nodes	fan	3000	3000	2999	3000	0.001566	2710424	ok
+serve	loop	teardown pass, every node down	nodes	fan	3000	3000	2999	3000	0.056518	130466552	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	fan	10000	10000	9999	10000	0.111445	111771952	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	fan	10000	10000	9999	10000	0.000753	3121600	ok
+serve	loop	first pass, every node up	nodes	fan	10000	10000	9999	10000	0.437737	446729544	ok
+serve	loop	status	nodes	fan	10000	10000	9999	10000	0.077478	57163792	ok
+serve	loop	before the idle pass	nodes	fan	10000	10000	9999	10000	0.001014	2803408	ok
+serve	loop	idle pass, nothing pending	nodes	fan	10000	10000	9999	10000	0.009411	7863872	ok
+serve	loop	clear	nodes	fan	10000	10000	9999	10000	0.000006	2752	ok
+serve	loop	before the teardown pass	nodes	fan	10000	10000	9999	10000	0.009676	9063984	ok
+serve	loop	teardown pass, every node down	nodes	fan	10000	10000	9999	10000	0.210265	138174832	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	fan	30000	30000	29999	30000	0.514634	353888184	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	fan	30000	30000	29999	30000	0.003398	9361600	ok
+serve	loop	first pass, every node up	nodes	fan	30000	30000	29999	30000	3.411064	1362662200	ok
+serve	loop	status	nodes	fan	30000	30000	29999	30000	0.290947	182991464	ok
+serve	loop	before the idle pass	nodes	fan	30000	30000	29999	30000	0.004748	8403408	ok
+serve	loop	idle pass, nothing pending	nodes	fan	30000	30000	29999	30000	0.043611	23510944	ok
+serve	loop	clear	nodes	fan	30000	30000	29999	30000	0.000009	2752	ok
+serve	loop	before the teardown pass	nodes	fan	30000	30000	29999	30000	0.036521	27115080	ok
+serve	loop	teardown pass, every node down	nodes	fan	30000	30000	29999	30000	0.915253	700329568	ok
+serve	loop		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:budget
+render	GET /dag (dagValue + encode)		nodes	fan	100	100	99	100	0.001100	2319464	ok
+render	GET /dag (dagValue + encode)		nodes	fan	300	300	299	300	0.002208	6996312	ok
+render	GET /dag (dagValue + encode)		nodes	fan	1000	1000	999	1000	0.010365	23191536	ok
+render	GET /dag (dagValue + encode)		nodes	fan	3000	3000	2999	3000	0.029041	69605296	ok
+render	GET /dag (dagValue + encode)		nodes	fan	10000	10000	9999	10000	0.113029	232034040	ok
+render	GET /dag (dagValue + encode)		nodes	fan	30000	30000	29999	30000	0.382010	695754944	ok
+render	GET /dag (dagValue + encode)		nodes	fan	100000	100000	99999	100000	1.420691	2319821712	ok
+render	GET /dag (dagValue + encode)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+render	GET /status (status report + encode)		nodes	fan	100	100	99	100	0.000303	1105032	ok
+render	GET /status (status report + encode)		nodes	fan	300	300	299	300	0.000738	3224360	ok
+render	GET /status (status report + encode)		nodes	fan	1000	1000	999	1000	0.003029	10706432	ok
+render	GET /status (status report + encode)		nodes	fan	3000	3000	2999	3000	0.008396	32029056	ok
+render	GET /status (status report + encode)		nodes	fan	10000	10000	9999	10000	0.034352	106809504	ok
+render	GET /status (status report + encode)		nodes	fan	30000	30000	29999	30000	0.115826	320095080	ok
+render	GET /status (status report + encode)		nodes	fan	100000	100000	99999	100000	0.399429	1067393904	ok
+render	GET /status (status report + encode)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+render	status sink document (encode)		nodes	fan	100	100	99	100	0.000247	1122432	ok
+render	status sink document (encode)		nodes	fan	300	300	299	300	0.000779	3238248	ok
+render	status sink document (encode)		nodes	fan	1000	1000	999	1000	0.003129	10716528	ok
+render	status sink document (encode)		nodes	fan	3000	3000	2999	3000	0.009944	32047368	ok
+render	status sink document (encode)		nodes	fan	10000	10000	9999	10000	0.050520	106818088	ok
+render	status sink document (encode)		nodes	fan	30000	30000	29999	30000	0.168462	320109080	ok
+render	status sink document (encode)		nodes	fan	100000	100000	99999	100000	0.434762	1067406560	ok
+render	status sink document (encode)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	100	100	99	100	0.000406	830760	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	300	300	299	300	0.001215	2691056	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	1000	1000	999	1000	0.005423	9584120	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	3000	3000	2999	3000	0.021057	30798840	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	10000	10000	9999	10000	0.094758	109341736	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	30000	30000	29999	30000	0.375038	346746664	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	100000	100000	99999	100000	1.871471	1226568152	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	100	100	99	100	0.000569	914024	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	300	300	299	300	0.001414	2991888	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	1000	1000	999	1000	0.006179	10752432	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	3000	3000	2999	3000	0.023913	34848288	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	10000	10000	9999	10000	0.108159	124645968	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	30000	30000	29999	30000	0.444355	397516568	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	100000	100000	99999	100000	2.431662	1415413400	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	nodes	tree2	100	100	99	100	0.000642	832384	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	tree2	100	100	99	100	0.000011	32800	ok
+serve	loop	first pass, every node up	nodes	tree2	100	100	99	100	0.001520	2357248	ok
+serve	loop	status	nodes	tree2	100	100	99	100	0.000278	472512	ok
+serve	loop	before the idle pass	nodes	tree2	100	100	99	100	0.000010	31920	ok
+serve	loop	idle pass, nothing pending	nodes	tree2	100	100	99	100	0.000057	81368	ok
+serve	loop	clear	nodes	tree2	100	100	99	100	0.000003	2944	ok
+serve	loop	before the teardown pass	nodes	tree2	100	100	99	100	0.000045	93480	ok
+serve	loop	teardown pass, every node down	nodes	tree2	100	100	99	100	0.001204	2258928	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	tree2	300	300	299	300	0.002442	2614264	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	tree2	300	300	299	300	0.000028	99224	ok
+serve	loop	first pass, every node up	nodes	tree2	300	300	299	300	0.006789	9794936	ok
+serve	loop	status	nodes	tree2	300	300	299	300	0.001441	1603688	ok
+serve	loop	before the idle pass	nodes	tree2	300	300	299	300	0.000034	87408	ok
+serve	loop	idle pass, nothing pending	nodes	tree2	300	300	299	300	0.000273	238904	ok
+serve	loop	clear	nodes	tree2	300	300	299	300	0.000003	2752	ok
+serve	loop	before the teardown pass	nodes	tree2	300	300	299	300	0.000226	275016	ok
+serve	loop	teardown pass, every node down	nodes	tree2	300	300	299	300	0.004964	6909960	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	tree2	1000	1000	999	1000	0.008943	9165048	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	tree2	1000	1000	999	1000	0.000067	313600	ok
+serve	loop	first pass, every node up	nodes	tree2	1000	1000	999	1000	0.021085	33124440	ok
+serve	loop	status	nodes	tree2	1000	1000	999	1000	0.004297	5949152	ok
+serve	loop	before the idle pass	nodes	tree2	1000	1000	999	1000	0.000063	283408	ok
+serve	loop	idle pass, nothing pending	nodes	tree2	1000	1000	999	1000	0.000598	785064	ok
+serve	loop	clear	nodes	tree2	1000	1000	999	1000	0.000003	2752	ok
+serve	loop	before the teardown pass	nodes	tree2	1000	1000	999	1000	0.000493	905176	ok
+serve	loop	teardown pass, every node down	nodes	tree2	1000	1000	999	1000	0.017936	25304536	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	tree2	3000	3000	2999	3000	0.023048	28990560	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	tree2	3000	3000	2999	3000	0.000214	937600	ok
+serve	loop	first pass, every node up	nodes	tree2	3000	3000	2999	3000	0.080487	107011496	ok
+serve	loop	status	nodes	tree2	3000	3000	2999	3000	0.017335	19806136	ok
+serve	loop	before the idle pass	nodes	tree2	3000	3000	2999	3000	0.000259	843408	ok
+serve	loop	idle pass, nothing pending	nodes	tree2	3000	3000	2999	3000	0.002046	2351672	ok
+serve	loop	clear	nodes	tree2	3000	3000	2999	3000	0.000004	2752	ok
+serve	loop	before the teardown pass	nodes	tree2	3000	3000	2999	3000	0.001644	2711784	ok
+serve	loop	teardown pass, every node down	nodes	tree2	3000	3000	2999	3000	0.075157	84172960	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	tree2	10000	10000	9999	10000	0.115485	101742032	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	tree2	10000	10000	9999	10000	0.001033	3121600	ok
+serve	loop	first pass, every node up	nodes	tree2	10000	10000	9999	10000	0.397769	361855792	ok
+serve	loop	status	nodes	tree2	10000	10000	9999	10000	0.102020	72593992	ok
+serve	loop	before the idle pass	nodes	tree2	10000	10000	9999	10000	0.001290	2803408	ok
+serve	loop	idle pass, nothing pending	nodes	tree2	10000	10000	9999	10000	0.010242	7830952	ok
+serve	loop	clear	nodes	tree2	10000	10000	9999	10000	0.000010	2752	ok
+serve	loop	before the teardown pass	nodes	tree2	10000	10000	9999	10000	0.009564	9031064	ok
+serve	loop	teardown pass, every node down	nodes	tree2	10000	10000	9999	10000	0.463063	281776224	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	tree2	30000	30000	29999	30000	0.598748	319512328	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	tree2	30000	30000	29999	30000	0.004466	9361600	ok
+serve	loop	first pass, every node up	nodes	tree2	30000	30000	29999	30000	1.374983	1082333944	ok
+serve	loop	status	nodes	tree2	30000	30000	29999	30000	0.498621	235572472	ok
+serve	loop	before the idle pass	nodes	tree2	30000	30000	29999	30000	0.006328	8403408	ok
+serve	loop	idle pass, nothing pending	nodes	tree2	30000	30000	29999	30000	0.051578	23503864	ok
+serve	loop	clear	nodes	tree2	30000	30000	29999	30000	0.000010	2752	ok
+serve	loop	before the teardown pass	nodes	tree2	30000	30000	29999	30000	0.051072	27108000	ok
+serve	loop	teardown pass, every node down	nodes	tree2	30000	30000	29999	30000	1.952202	857198712	ok
+serve	loop		nodes	tree2	0	1	0	1	0.000000	0	stop:exit 251
+render	GET /dag (dagValue + encode)		nodes	tree2	100	100	99	100	0.000570	2323712	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	300	300	299	300	0.002060	7013456	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	1000	1000	999	1000	0.008871	23289264	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	3000	3000	2999	3000	0.025038	69844576	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	10000	10000	9999	10000	0.086061	232871304	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	30000	30000	29999	30000	0.319477	698889136	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	100000	100000	99999	100000	1.426226	2331157528	ok
+render	GET /dag (dagValue + encode)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+render	GET /status (status report + encode)		nodes	tree2	100	100	99	100	0.000395	1110384	ok
+render	GET /status (status report + encode)		nodes	tree2	300	300	299	300	0.001232	3228208	ok
+render	GET /status (status report + encode)		nodes	tree2	1000	1000	999	1000	0.002892	10730672	ok
+render	GET /status (status report + encode)		nodes	tree2	3000	3000	2999	3000	0.008166	32130744	ok
+render	GET /status (status report + encode)		nodes	tree2	10000	10000	9999	10000	0.033280	107246040	ok
+render	GET /status (status report + encode)		nodes	tree2	30000	30000	29999	30000	0.107537	321825016	ok
+render	GET /status (status report + encode)		nodes	tree2	100000	100000	99999	100000	0.415431	1074257584	ok
+render	GET /status (status report + encode)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+render	status sink document (encode)		nodes	tree2	100	100	99	100	0.000326	1120440	ok
+render	status sink document (encode)		nodes	tree2	300	300	299	300	0.000700	3238416	ok
+render	status sink document (encode)		nodes	tree2	1000	1000	999	1000	0.002703	10747616	ok
+render	status sink document (encode)		nodes	tree2	3000	3000	2999	3000	0.008214	32147776	ok
+render	status sink document (encode)		nodes	tree2	10000	10000	9999	10000	0.032643	107255600	ok
+render	status sink document (encode)		nodes	tree2	30000	30000	29999	30000	0.111402	321840344	ok
+render	status sink document (encode)		nodes	tree2	100000	100000	99999	100000	0.471078	1074267720	ok
+render	status sink document (encode)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	100	100	132	34359738365	0.002833	6114840	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	300	298	396	1e30	0.016553	33642816	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	1000	1000	1332	1e100	0.073788	129030480	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	3000	2998	3996	1e301	0.213673	355016928	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	10000	10000	13332	1e1003	0.670123	1146464432	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	30000	29998	39996	1e3010	2.410347	3154114232	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	30000	29998	39996	1e3010	0.000000	0	stop:budget
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	diamonds2	100	100	132	34359738365	0.003076	6011512	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	diamonds2	300	298	396	1e30	0.030463	44383184	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	diamonds2	1000	1000	1332	1e100	0.372981	461656280	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	diamonds2	3000	2998	3996	1e301	3.895895	4058632776	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	diamonds2	3000	2998	3996	1e301	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	nodes	diamonds2	100	100	132	34359738365	0.000915	1283264	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	diamonds2	100	100	132	34359738365	0.000010	32800	ok
+serve	loop	first pass, every node up	nodes	diamonds2	100	100	132	34359738365	0.001810	2352456	ok
+serve	loop	status	nodes	diamonds2	100	100	132	34359738365	0.003837	5632232	ok
+serve	loop	before the idle pass	nodes	diamonds2	100	100	132	34359738365	0.000012	31920	ok
+serve	loop	idle pass, nothing pending	nodes	diamonds2	100	100	132	34359738365	0.000054	80168	ok
+serve	loop	clear	nodes	diamonds2	100	100	132	34359738365	0.000002	2944	ok
+serve	loop	before the teardown pass	nodes	diamonds2	100	100	132	34359738365	0.000040	92280	ok
+serve	loop	teardown pass, every node down	nodes	diamonds2	100	100	132	34359738365	0.001372	2345824	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	diamonds2	300	298	396	1e30	0.001647	3909456	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	diamonds2	300	298	396	1e30	0.000021	94576	ok
+serve	loop	first pass, every node up	nodes	diamonds2	300	298	396	1e30	0.012341	11214608	ok
+serve	loop	status	nodes	diamonds2	300	298	396	1e30	0.022360	32184688	ok
+serve	loop	before the idle pass	nodes	diamonds2	300	298	396	1e30	0.000024	86848	ok
+serve	loop	idle pass, nothing pending	nodes	diamonds2	300	298	396	1e30	0.000169	235696	ok
+serve	loop	clear	nodes	diamonds2	300	298	396	1e30	0.000003	2752	ok
+serve	loop	before the teardown pass	nodes	diamonds2	300	298	396	1e30	0.000134	271568	ok
+serve	loop	teardown pass, every node down	nodes	diamonds2	300	298	396	1e30	0.008417	11081360	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	diamonds2	1000	1000	1332	1e100	0.007960	13717888	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	diamonds2	1000	1000	1332	1e100	0.000091	317624	ok
+serve	loop	first pass, every node up	nodes	diamonds2	1000	1000	1332	1e100	0.108967	43326896	ok
+serve	loop	status	nodes	diamonds2	1000	1000	1332	1e100	0.060877	124163728	ok
+serve	loop	before the idle pass	nodes	diamonds2	1000	1000	1332	1e100	0.000076	283408	ok
+serve	loop	idle pass, nothing pending	nodes	diamonds2	1000	1000	1332	1e100	0.000554	787344	ok
+serve	loop	clear	nodes	diamonds2	1000	1000	1332	1e100	0.000003	2752	ok
+serve	loop	before the teardown pass	nodes	diamonds2	1000	1000	1332	1e100	0.000448	907456	ok
+serve	loop	teardown pass, every node down	nodes	diamonds2	1000	1000	1332	1e100	0.098730	42818896	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	diamonds2	3000	2998	3996	1e301	0.032979	42723600	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	diamonds2	3000	2998	3996	1e301	0.000196	936976	ok
+serve	loop	first pass, every node up	nodes	diamonds2	3000	2998	3996	1e301	1.185366	136195040	ok
+serve	loop	status	nodes	diamonds2	3000	2998	3996	1e301	0.209507	340145456	ok
+serve	loop	before the idle pass	nodes	diamonds2	3000	2998	3996	1e301	0.000275	842848	ok
+serve	loop	idle pass, nothing pending	nodes	diamonds2	3000	2998	3996	1e301	0.001927	2345696	ok
+serve	loop	clear	nodes	diamonds2	3000	2998	3996	1e301	0.000004	2752	ok
+serve	loop	before the teardown pass	nodes	diamonds2	3000	2998	3996	1e301	0.001671	2705568	ok
+serve	loop	teardown pass, every node down	nodes	diamonds2	3000	2998	3996	1e301	1.101078	135149288	ok
+serve	loop		nodes	diamonds2	10000	10000	13332	1e1003	0.000000	0	stop:timeout
+render	GET /dag (dagValue + encode)		nodes	diamonds2	100	100	132	34359738365	0.001315	3007960	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	300	298	396	1e30	0.005109	9135024	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	1000	1000	1332	1e100	0.016096	31020528	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	3000	2998	3996	1e301	0.049773	92657976	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	10000	10000	13332	1e1003	0.177509	308495896	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	30000	29998	39996	1e3010	0.629596	923884032	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	100000	100000	133332	1e10034	2.695961	3078467992	ok
+render	GET /dag (dagValue + encode)		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:budget
+render	GET /status (status report + encode)		nodes	diamonds2	100	100	132	34359738365	0.000760	1543536	ok
+render	GET /status (status report + encode)		nodes	diamonds2	300	298	396	1e30	0.002536	4820800	ok
+render	GET /status (status report + encode)		nodes	diamonds2	1000	1000	1332	1e100	0.008465	16435928	ok
+render	GET /status (status report + encode)		nodes	diamonds2	3000	2998	3996	1e301	0.025916	48868320	ok
+render	GET /status (status report + encode)		nodes	diamonds2	10000	10000	13332	1e1003	0.095296	162567528	ok
+render	GET /status (status report + encode)		nodes	diamonds2	30000	29998	39996	1e3010	0.236830	485879432	ok
+render	GET /status (status report + encode)		nodes	diamonds2	100000	100000	133332	1e10034	0.830306	1618419680	ok
+render	GET /status (status report + encode)		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+render	status sink document (encode)		nodes	diamonds2	100	100	132	34359738365	0.000752	1557528	ok
+render	status sink document (encode)		nodes	diamonds2	300	298	396	1e30	0.002430	4838776	ok
+render	status sink document (encode)		nodes	diamonds2	1000	1000	1332	1e100	0.007885	16449224	ok
+render	status sink document (encode)		nodes	diamonds2	3000	2998	3996	1e301	0.024321	48886088	ok
+render	status sink document (encode)		nodes	diamonds2	10000	10000	13332	1e1003	0.078911	162575648	ok
+render	status sink document (encode)		nodes	diamonds2	30000	29998	39996	1e3010	0.236213	485891760	ok
+render	status sink document (encode)		nodes	diamonds2	100000	100000	133332	1e10034	0.921245	1618445168	ok
+render	status sink document (encode)		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	100	97	184	32761	0.001793	3334976	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	300	297	584	1099511627769	0.012606	17107280	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	1000	993	1976	1e38	0.099157	136674912	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	3000	2993	5976	1e113	0.332913	463786736	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	10000	9993	19976	1e376	1.504998	1596161736	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	30000	29993	59976	1e1129	3.741282	4489765072	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	30000	29993	59976	1e1129	0.000000	0	stop:budget
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	layered8x2	100	97	184	32761	0.001803	3302816	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	layered8x2	300	297	584	1099511627769	0.012373	17239376	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	layered8x2	1000	993	1976	1e38	0.138262	129803032	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	layered8x2	3000	2993	5976	1e113	1.282677	1006654128	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	layered8x2	10000	9993	19976	1e376	17.889395	10537715904	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	layered8x2	10000	9993	19976	1e376	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	nodes	layered8x2	100	97	184	32761	0.002285	1982224	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	layered8x2	100	97	184	32761	0.000018	31864	ok
+serve	loop	first pass, every node up	nodes	layered8x2	100	97	184	32761	0.002767	2317616	ok
+serve	loop	status	nodes	layered8x2	100	97	184	32761	0.002018	2244056	ok
+serve	loop	before the idle pass	nodes	layered8x2	100	97	184	32761	0.000021	31080	ok
+serve	loop	idle pass, nothing pending	nodes	layered8x2	100	97	184	32761	0.000092	75656	ok
+serve	loop	clear	nodes	layered8x2	100	97	184	32761	0.000004	2944	ok
+serve	loop	before the teardown pass	nodes	layered8x2	100	97	184	32761	0.000071	87408	ok
+serve	loop	teardown pass, every node down	nodes	layered8x2	100	97	184	32761	0.001987	2227576	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	layered8x2	300	297	584	1099511627769	0.006470	6552664	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	layered8x2	300	297	584	1099511627769	0.000057	94264	ok
+serve	loop	first pass, every node up	nodes	layered8x2	300	297	584	1099511627769	0.010688	9957784	ok
+serve	loop	status	nodes	layered8x2	300	297	584	1099511627769	0.015938	13521880	ok
+serve	loop	before the idle pass	nodes	layered8x2	300	297	584	1099511627769	0.000051	86568	ok
+serve	loop	idle pass, nothing pending	nodes	layered8x2	300	297	584	1099511627769	0.000323	233304	ok
+serve	loop	clear	nodes	layered8x2	300	297	584	1099511627769	0.000006	2752	ok
+serve	loop	before the teardown pass	nodes	layered8x2	300	297	584	1099511627769	0.000255	269056	ok
+serve	loop	teardown pass, every node down	nodes	layered8x2	300	297	584	1099511627769	0.012129	9682200	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	layered8x2	1000	993	1976	1e38	0.024890	22967384	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	layered8x2	1000	993	1976	1e38	0.000139	315440	ok
+serve	loop	first pass, every node up	nodes	layered8x2	1000	993	1976	1e38	0.082592	40968400	ok
+serve	loop	status	nodes	layered8x2	1000	993	1976	1e38	0.127172	124422096	ok
+serve	loop	before the idle pass	nodes	layered8x2	1000	993	1976	1e38	0.000151	281448	ok
+serve	loop	idle pass, nothing pending	nodes	layered8x2	1000	993	1976	1e38	0.001106	773352	ok
+serve	loop	clear	nodes	layered8x2	1000	993	1976	1e38	0.000007	2752	ok
+serve	loop	before the teardown pass	nodes	layered8x2	1000	993	1976	1e38	0.000889	892624	ok
+serve	loop	teardown pass, every node down	nodes	layered8x2	1000	993	1976	1e38	0.072744	43292624	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	layered8x2	3000	2993	5976	1e113	0.101243	71601320	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	layered8x2	3000	2993	5976	1e113	0.000460	935416	ok
+serve	loop	first pass, every node up	nodes	layered8x2	3000	2993	5976	1e113	0.588125	117441784	ok
+serve	loop	status	nodes	layered8x2	3000	2993	5976	1e113	0.490404	426571056	ok
+serve	loop	before the idle pass	nodes	layered8x2	3000	2993	5976	1e113	0.000591	841448	ok
+serve	loop	idle pass, nothing pending	nodes	layered8x2	3000	2993	5976	1e113	0.004276	2344768	ok
+serve	loop	clear	nodes	layered8x2	3000	2993	5976	1e113	0.000011	2752	ok
+serve	loop	before the teardown pass	nodes	layered8x2	3000	2993	5976	1e113	0.003398	2704040	ok
+serve	loop	teardown pass, every node down	nodes	layered8x2	3000	2993	5976	1e113	0.587265	138069280	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	layered8x2	10000	9993	19976	1e376	0.394159	246341920	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	layered8x2	10000	9993	19976	1e376	0.001982	3119416	ok
+serve	loop	first pass, every node up	nodes	layered8x2	10000	9993	19976	1e376	7.250713	406374720	ok
+serve	loop	status	nodes	layered8x2	10000	9993	19976	1e376	1.758185	1471548488	ok
+serve	loop	before the idle pass	nodes	layered8x2	10000	9993	19976	1e376	0.001730	2801448	ok
+serve	loop	idle pass, nothing pending	nodes	layered8x2	10000	9993	19976	1e376	0.015244	7844240	ok
+serve	loop	clear	nodes	layered8x2	10000	9993	19976	1e376	0.000014	2752	ok
+serve	loop	before the teardown pass	nodes	layered8x2	10000	9993	19976	1e376	0.013591	9043512	ok
+serve	loop	teardown pass, every node down	nodes	layered8x2	10000	9993	19976	1e376	7.120172	476044688	ok
+serve	loop		nodes	layered8x2	10000	9993	19976	1e376	0.000000	0	stop:budget
+render	GET /dag (dagValue + encode)		nodes	layered8x2	100	97	184	32761	0.001544	3099576	ok
+render	GET /dag (dagValue + encode)		nodes	layered8x2	300	297	584	1099511627769	0.005976	9921600	ok
+render	GET /dag (dagValue + encode)		nodes	layered8x2	1000	993	1976	1e38	0.020218	34351448	ok
+render	GET /dag (dagValue + encode)		nodes	layered8x2	3000	2993	5976	1e113	0.068225	104659056	ok
+render	GET /dag (dagValue + encode)		nodes	layered8x2	10000	9993	19976	1e376	0.262452	350798456	ok
+render	GET /dag (dagValue + encode)		nodes	layered8x2	30000	29993	59976	1e1129	0.763238	1053750696	ok
+render	GET /dag (dagValue + encode)		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:inputs
+render	GET /status (status report + encode)		nodes	layered8x2	100	97	184	32761	0.000740	1383424	ok
+render	GET /status (status report + encode)		nodes	layered8x2	300	297	584	1099511627769	0.001986	4429952	ok
+render	GET /status (status report + encode)		nodes	layered8x2	1000	993	1976	1e38	0.009483	15920608	ok
+render	GET /status (status report + encode)		nodes	layered8x2	3000	2993	5976	1e113	0.029415	48977656	ok
+render	GET /status (status report + encode)		nodes	layered8x2	10000	9993	19976	1e376	0.099653	164745360	ok
+render	GET /status (status report + encode)		nodes	layered8x2	30000	29993	59976	1e1129	0.326210	495195112	ok
+render	GET /status (status report + encode)		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:inputs
+render	status sink document (encode)		nodes	layered8x2	100	97	184	32761	0.000619	1397488	ok
+render	status sink document (encode)		nodes	layered8x2	300	297	584	1099511627769	0.002069	4444264	ok
+render	status sink document (encode)		nodes	layered8x2	1000	993	1976	1e38	0.010241	15938776	ok
+render	status sink document (encode)		nodes	layered8x2	3000	2993	5976	1e113	0.030117	48986256	ok
+render	status sink document (encode)		nodes	layered8x2	10000	9993	19976	1e376	0.099974	164759984	ok
+render	status sink document (encode)		nodes	layered8x2	30000	29993	59976	1e1129	0.323656	495209296	ok
+render	status sink document (encode)		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:inputs
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	100	97	272	2125761	0.007113	5685224	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	300	297	872	1e18	0.032264	26855864	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	1000	993	2960	1e59	0.190435	200154976	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	3000	2993	8960	1e179	0.655595	675413632	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	10000	9993	29960	1e596	2.349726	2324222264	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	10000	9993	29960	1e596	0.000000	0	stop:budget
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	random8x3	100	97	272	2125761	0.004864	5529136	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	random8x3	300	297	872	1e18	0.029548	26476784	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	random8x3	1000	993	2960	1e59	0.282827	180957056	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	random8x3	3000	2993	8960	1e179	2.718599	1329553080	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	random8x3	3000	2993	8960	1e179	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	nodes	random8x3	100	97	272	2125761	0.007867	3819688	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	random8x3	100	97	272	2125761	0.000025	31864	ok
+serve	loop	first pass, every node up	nodes	random8x3	100	97	272	2125761	0.003842	2339544	ok
+serve	loop	status	nodes	random8x3	100	97	272	2125761	0.003531	3092792	ok
+serve	loop	before the idle pass	nodes	random8x3	100	97	272	2125761	0.000025	31080	ok
+serve	loop	idle pass, nothing pending	nodes	random8x3	100	97	272	2125761	0.000109	75376	ok
+serve	loop	clear	nodes	random8x3	100	97	272	2125761	0.000005	2944	ok
+serve	loop	before the teardown pass	nodes	random8x3	100	97	272	2125761	0.000086	87128	ok
+serve	loop	teardown pass, every node down	nodes	random8x3	100	97	272	2125761	0.002586	2382616	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	random8x3	300	297	872	1e18	0.017356	12897664	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	random8x3	300	297	872	1e18	0.000049	94264	ok
+serve	loop	first pass, every node up	nodes	random8x3	300	297	872	1e18	0.014632	11848280	ok
+serve	loop	status	nodes	random8x3	300	297	872	1e18	0.023894	18056592	ok
+serve	loop	before the idle pass	nodes	random8x3	300	297	872	1e18	0.000058	86568	ok
+serve	loop	idle pass, nothing pending	nodes	random8x3	300	297	872	1e18	0.000360	234704	ok
+serve	loop	clear	nodes	random8x3	300	297	872	1e18	0.000006	2752	ok
+serve	loop	before the teardown pass	nodes	random8x3	300	297	872	1e18	0.000288	270456	ok
+serve	loop	teardown pass, every node down	nodes	random8x3	300	297	872	1e18	0.011714	8472944	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	random8x3	1000	993	2960	1e59	0.068922	45050984	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	random8x3	1000	993	2960	1e59	0.000149	315440	ok
+serve	loop	first pass, every node up	nodes	random8x3	1000	993	2960	1e59	0.110056	45875952	ok
+serve	loop	status	nodes	random8x3	1000	993	2960	1e59	0.181677	169808848	ok
+serve	loop	before the idle pass	nodes	random8x3	1000	993	2960	1e59	0.000143	281448	ok
+serve	loop	idle pass, nothing pending	nodes	random8x3	1000	993	2960	1e59	0.001108	777112	ok
+serve	loop	clear	nodes	random8x3	1000	993	2960	1e59	0.000007	2752	ok
+serve	loop	before the teardown pass	nodes	random8x3	1000	993	2960	1e59	0.001801	896384	ok
+serve	loop	teardown pass, every node down	nodes	random8x3	1000	993	2960	1e59	0.093795	45403376	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	random8x3	3000	2993	8960	1e179	0.172911	139268584	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	random8x3	3000	2993	8960	1e179	0.000500	935416	ok
+serve	loop	first pass, every node up	nodes	random8x3	3000	2993	8960	1e179	0.674676	119053320	ok
+serve	loop	status	nodes	random8x3	3000	2993	8960	1e179	0.557565	583043248	ok
+serve	loop	before the idle pass	nodes	random8x3	3000	2993	8960	1e179	0.000487	841448	ok
+serve	loop	idle pass, nothing pending	nodes	random8x3	3000	2993	8960	1e179	0.004168	2342208	ok
+serve	loop	clear	nodes	random8x3	3000	2993	8960	1e179	0.000011	2752	ok
+serve	loop	before the teardown pass	nodes	random8x3	3000	2993	8960	1e179	0.003547	2701480	ok
+serve	loop	teardown pass, every node down	nodes	random8x3	3000	2993	8960	1e179	0.699728	144183432	ok
+serve	loop		nodes	random8x3	10000	9993	29960	1e596	0.000000	0	stop:timeout
+render	GET /dag (dagValue + encode)		nodes	random8x3	100	97	272	2125761	0.003037	3676608	ok
+render	GET /dag (dagValue + encode)		nodes	random8x3	300	297	872	1e18	0.006700	11680752	ok
+render	GET /dag (dagValue + encode)		nodes	random8x3	1000	993	2960	1e59	0.025346	40309128	ok
+render	GET /dag (dagValue + encode)		nodes	random8x3	3000	2993	8960	1e179	0.082481	122623488	ok
+render	GET /dag (dagValue + encode)		nodes	random8x3	10000	9993	29960	1e596	0.325693	410958280	ok
+render	GET /dag (dagValue + encode)		nodes	random8x3	30000	29993	89960	1e1789	0.879393	1234347712	ok
+render	GET /dag (dagValue + encode)		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:inputs
+render	GET /status (status report + encode)		nodes	random8x3	100	97	272	2125761	0.000602	1399928	ok
+render	GET /status (status report + encode)		nodes	random8x3	300	297	872	1e18	0.002395	4447200	ok
+render	GET /status (status report + encode)		nodes	random8x3	1000	993	2960	1e59	0.008918	15929904	ok
+render	GET /status (status report + encode)		nodes	random8x3	3000	2993	8960	1e179	0.030475	48902152	ok
+render	GET /status (status report + encode)		nodes	random8x3	10000	9993	29960	1e596	0.099587	164503104	ok
+render	GET /status (status report + encode)		nodes	random8x3	30000	29993	89960	1e1789	0.303320	494339392	ok
+render	GET /status (status report + encode)		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:inputs
+render	status sink document (encode)		nodes	random8x3	100	97	272	2125761	0.000712	1414184	ok
+render	status sink document (encode)		nodes	random8x3	300	297	872	1e18	0.002421	4461176	ok
+render	status sink document (encode)		nodes	random8x3	1000	993	2960	1e59	0.011918	15943928	ok
+render	status sink document (encode)		nodes	random8x3	3000	2993	8960	1e179	0.041364	48914616	ok
+render	status sink document (encode)		nodes	random8x3	10000	9993	29960	1e596	0.105045	164497912	ok
+render	status sink document (encode)		nodes	random8x3	30000	29993	89960	1e1789	0.452261	494346664	ok
+render	status sink document (encode)		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:inputs
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	100	97	2080	33825	0.059705	135649464	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	300	289	8224	36319351833633	0.465608	923421464	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	1000	993	30752	1e46	2.919357	3959712648	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	1000	993	30752	1e46	0.000000	0	stop:budget
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	dense32	100	97	2080	33825	0.068073	133997400	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	dense32	300	289	8224	36319351833633	0.485384	912211576	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	dense32	1000	993	30752	1e46	2.718445	3914099240	ok
+query	paths per node, uncapped reference (outlinePathsUncapped)		nodes	dense32	1000	993	30752	1e46	0.000000	0	stop:budget
+serve	loop	record a declaration (expand, fold, ledger)	nodes	dense32	100	97	2080	33825	0.119748	142553720	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	dense32	100	97	2080	33825	0.000019	31864	ok
+serve	loop	first pass, every node up	nodes	dense32	100	97	2080	33825	0.011651	8929232	ok
+serve	loop	status	nodes	dense32	100	97	2080	33825	0.025737	15560416	ok
+serve	loop	before the idle pass	nodes	dense32	100	97	2080	33825	0.000034	31080	ok
+serve	loop	idle pass, nothing pending	nodes	dense32	100	97	2080	33825	0.000112	77496	ok
+serve	loop	clear	nodes	dense32	100	97	2080	33825	0.000004	2944	ok
+serve	loop	before the teardown pass	nodes	dense32	100	97	2080	33825	0.000080	89248	ok
+serve	loop	teardown pass, every node down	nodes	dense32	100	97	2080	33825	0.008406	7699928	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	dense32	300	289	8224	36319351833633	0.942135	957711304	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	dense32	300	289	8224	36319351833633	0.000075	91768	ok
+serve	loop	first pass, every node up	nodes	dense32	300	289	8224	36319351833633	0.049175	29809192	ok
+serve	loop	status	nodes	dense32	300	289	8224	36319351833633	0.248932	105396992	ok
+serve	loop	before the idle pass	nodes	dense32	300	289	8224	36319351833633	0.000079	84328	ok
+serve	loop	idle pass, nothing pending	nodes	dense32	300	289	8224	36319351833633	0.000310	227024	ok
+serve	loop	clear	nodes	dense32	300	289	8224	36319351833633	0.000007	2752	ok
+serve	loop	before the teardown pass	nodes	dense32	300	289	8224	36319351833633	0.000251	261816	ok
+serve	loop	teardown pass, every node down	nodes	dense32	300	289	8224	36319351833633	0.038764	28823008	ok
+serve	loop	record a declaration (expand, fold, ledger)	nodes	dense32	1000	993	30752	1e46	3.472075	3946683776	ok
+serve	loop	before the first pass (rewrite, worldDag)	nodes	dense32	1000	993	30752	1e46	0.000204	315472	ok
+serve	loop	first pass, every node up	nodes	dense32	1000	993	30752	1e46	0.268513	109406152	ok
+serve	loop	status	nodes	dense32	1000	993	30752	1e46	2.499181	586988104	ok
+serve	loop	before the idle pass	nodes	dense32	1000	993	30752	1e46	0.000130	281448	ok
+serve	loop	idle pass, nothing pending	nodes	dense32	1000	993	30752	1e46	0.001033	774752	ok
+serve	loop	clear	nodes	dense32	1000	993	30752	1e46	0.000007	2752	ok
+serve	loop	before the teardown pass	nodes	dense32	1000	993	30752	1e46	0.000843	894024	ok
+serve	loop	teardown pass, every node down	nodes	dense32	1000	993	30752	1e46	0.191798	107235304	ok
+serve	loop		nodes	dense32	1000	993	30752	1e46	0.000000	0	stop:budget
+render	GET /dag (dagValue + encode)		nodes	dense32	100	97	2080	33825	0.007481	14403392	ok
+render	GET /dag (dagValue + encode)		nodes	dense32	300	289	8224	36319351833633	0.029152	55251840	ok
+render	GET /dag (dagValue + encode)		nodes	dense32	1000	993	30752	1e46	0.106693	205389920	ok
+render	GET /dag (dagValue + encode)		nodes	dense32	3000	2977	94240	1e139	0.000000	0	stop:inputs
+render	GET /status (status report + encode)		nodes	dense32	100	97	2080	33825	0.000812	1303088	ok
+render	GET /status (status report + encode)		nodes	dense32	300	289	8224	36319351833633	0.001711	4139192	ok
+render	GET /status (status report + encode)		nodes	dense32	1000	993	30752	1e46	0.008379	14860232	ok
+render	GET /status (status report + encode)		nodes	dense32	3000	2977	94240	1e139	0.000000	0	stop:inputs
+render	status sink document (encode)		nodes	dense32	100	97	2080	33825	0.000735	1317048	ok
+render	status sink document (encode)		nodes	dense32	300	289	8224	36319351833633	0.001690	4153392	ok
+render	status sink document (encode)		nodes	dense32	1000	993	30752	1e46	0.007852	14878256	ok
+render	status sink document (encode)		nodes	dense32	3000	2977	94240	1e139	0.038725	47469688	ok
+render	status sink document (encode)		nodes	dense32	10000	9985	318496	1e469	0.000000	0	stop:inputs
