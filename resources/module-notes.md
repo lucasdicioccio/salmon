@@ -323,6 +323,36 @@ Created container removed (before, `bracket` never got the name, and each failur
 `Test.PodmanSpec` takes a kernel-chosen port (`freeTcpPort`); the Postgres/pgBackRest/pg_textsearch
 specs still use fixed ports 15432-15441, each its own, so two concurrent suites still clash there.
 
+**Executable stand-ins are written by a child (`Test.Harness.writeExecutable`).** A spec that
+writes a script and then execs it (or has the code under test exec it through `PATH`) failed
+now and then with `bad interpreter: Text file busy` (ETXTBSY): `PostgresPairPrereqsSpec`'s
+`sudo`/`psql`/`pg_lsclusters` stand-ins, `ClipCppSpec`'s `embed` stub. Cause, checked with
+strace: GHC's `openFile`/`writeFile` opens with `O_WRONLY|O_CREAT|O_NOCTTY|O_NONBLOCK`, no
+`O_CLOEXEC`, and `process` spawns through `clone(CLONE_VM|CLONE_VFORK)` without `close_fds`, so a
+child another group spawns while the script is open for writing keeps that write descriptor
+until the child exits; exec'ing an inode anything holds open for writing is ETXTBSY.
+Write-then-rename does not help (same inode); `O_CLOEXEC` alone leaves the fork-to-exec window
+of every other child. `writeExecutable` has `sh -c 'cat > "$1" && chmod 755 "$1"'` write it, so
+the test process never holds the write end (the approach `PgTextSearchSpec` already used;
+`GcpSpec` instead has bash read its fake `gcloud` as a script, which also works). The
+podman `withShimmedPath` shims use it too. *What was run:* a standalone GHC reproducer (one
+thread writes and execs a stand-in, four spawn `sleep 0.02` in a loop, `-N4`): `writeFile`
+2000 runs 57 ETXTBSY and 4000 runs 48; a child writing it 2000 + 4000 runs, 0; an
+`O_CLOEXEC` `openFd` 4000 runs, 0 (the remaining window is narrow, not closed). The suite
+(2026-10-16, Layer 0 only: a temporary Main without the serialized heavy group and
+`QemuShutdownSpec`): the stand-in specs plus the spawn-heavy ones (`-p` PostgresPairPrereqs,
+ClipCpp, Binary, Daemon, Concurrent, Upkeep, Serve; `-j 8`; 20 busy-loop CPU hogs), 40 runs
+each: before, 7 runs with ETXTBSY (`pg_lsclusters`, clip `extract`); after, 0. Whole Layer 0
+suite, no hogs, 10 runs each: before 1 run with ETXTBSY, after 0. Both binaries also failed
+6-7 of those 10 runs on `Serve.Http`/`Serve.Socket`/`Upkeep` timing tests (503 on sync, timed-out
+hang-ups) on a host at load 10-20; that is a separate flake, not touched here. Not run: the
+heavy group (podman `withShimmedPath`, `PgTextSearchSpec.sandboxTests`).
+*Not fixed:* `Salmon.Builtin.Nodes.Filesystem`'s `up` (`ByteString.writeFile`) has the same
+shape in the product: under `run up` on the concurrent driver or `serve`, a node's child forked
+while another node writes a file inherits the write fd; if that file is later exec'd (a
+rendered backup script, say) and the child is long-lived (a `managed` daemon), the exec fails
+with ETXTBSY until the child exits. Not reproduced; an owner decision.
+
 **Synthetic graphs for scale (`salmon-ops-recipes/test/Test/GraphFixture.hs`).** A generator
 `generateWith options shape size seed :: Op` for testing scale on purpose. It is a recursive
 unfold: `successors` maps a node number to the numbers it depends on (node 0 is the root, a

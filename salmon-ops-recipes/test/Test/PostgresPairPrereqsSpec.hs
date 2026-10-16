@@ -18,7 +18,7 @@ module Test.PostgresPairPrereqsSpec (tests) where
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (createDirectoryIfMissing, doesFileExist, getPermissions, setPermissions, setOwnerExecutable)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -27,6 +27,8 @@ import System.Posix.Files (fileMode, getFileStatus, intersectFileModes, accessMo
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcess)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+
+import Test.Harness (writeExecutable)
 
 -- the field selectors are named so that GHC can solve the HasField
 -- constraints `Dag.sameRepresentative` carries.
@@ -302,11 +304,9 @@ runWith bin script = do
         (proc "bash" ["-c", script]){env = Just (("PATH", path) : filter ((/= "PATH") . fst) environment)}
         ""
 
+-- | Written by a child, see 'writeExecutable': these are exec'd through @PATH@.
 standIn :: FilePath -> [String] -> IO ()
-standIn path body = do
-    writeFile path (unlines ("#!/bin/bash" : body))
-    perms <- getPermissions path
-    setPermissions path (setOwnerExecutable True perms)
+standIn path body = writeExecutable path (unlines ("#!/bin/bash" : body))
 
 modeOf :: FilePath -> IO Int
 modeOf path = fromIntegral . intersectFileModes accessModes . fileMode <$> getFileStatus path
