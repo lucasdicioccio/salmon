@@ -19,6 +19,10 @@ QuickCheck properties that the file node renders what it rendered before.
 -}
 module Test.SystemdSpec (tests) where
 
+import Control.Exception (try)
+import Data.Bits ((.&.))
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as C8
 import Data.Foldable (toList)
 import Data.Functor.Identity (runIdentity)
 import Data.List (intercalate, nub, sort)
@@ -27,7 +31,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath ((</>))
-import Test.QuickCheck (Gen, counterexample, elements, forAll, listOf1, (.&&.), (===))
+import System.IO (readFile')
+import System.Posix.Files (fileMode, getFileStatus, setFileMode)
+import Test.QuickCheck (Gen, counterexample, elements, forAll, ioProperty, listOf, listOf1, (.&&.), (===), (==>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 import Test.Tasty.QuickCheck (testProperty)
@@ -37,6 +43,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
+import qualified Salmon.Builtin.Nodes.Podman.Quadlet as Quadlet
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
 import Salmon.Op.Actions (Act (..))
@@ -57,6 +64,7 @@ tests =
         , testCase "a unit systemd has never heard of is not satisfied" unknownUnitIsFailure
         , testCase "properties are read by name, not by position" orderIndependent
         , testGroup "watched config files" watchedTests
+        , testGroup "the watched files' keyed digest" keyedTests
         , testGroup "the unit directory" unitDirTests
         ]
 
@@ -205,6 +213,169 @@ watchedTests =
   where
     unit :: Text
     unit = "[Unit]\nDescription=a service\n\n[Service]\nExecStart=/bin/true\n"
+
+{- | 'Systemd.systemdServiceWatchingKeyed': the same change detection as the
+plain line, with nothing in the (world-readable) unit file that lets a reader
+check guesses at the watched files without the directory's key. And the
+opt-in itself: 'Systemd.systemdServiceWatching' renders what it rendered
+before, byte for byte and node for node.
+-}
+keyedTests :: [TestTree]
+keyedTests =
+    [ testCase "the keyed line is HMAC-SHA256, and the one quadlets write" $ do
+        let frames = ["/etc/app/env:17:", "PASSWORD=hunter2\n"]
+        -- the vector Test.QuadletSpec pins (python's hmac): the two share it
+        assertEqual
+            ""
+            "# salmon-watches: hmac-sha256:1gecq1WMRz2R6OrB2pYA4e6aQiTPtJ9JB4aWUWugcz0=\n"
+            (Systemd.keyedWatchLine "key one" frames)
+        assertEqual "" (Systemd.keyedWatchLine "key one" frames) (Quadlet.keyedWatchLine "key one" frames)
+    , testCase "the keyed unit carries no plain hash of the watched file, nor its contents" $ withTempDir $ \dir -> do
+        let ini = dir </> "userlist.txt"
+            key = Systemd.watchKeyFile dir
+        Systemd.ensureWatchKeyAt key
+        writeFile ini "\"u\" \"hunter2\"\n"
+        plain <- Systemd.withWatchedFingerprint [ini] ""
+        keyed <- Systemd.withKeyedWatchFingerprint key [ini] unit
+        assertBool (Text.unpack keyed) (unit `Text.isPrefixOf` keyed)
+        assertBool (Text.unpack keyed) ("# salmon-watches: hmac-sha256:" `Text.isInfixOf` keyed)
+        assertBool "the plain digest is in the unit" (not (plainDigest plain `Text.isInfixOf` keyed))
+        assertBool "the secret is in the unit" (not ("hunter2" `Text.isInfixOf` keyed))
+    , testCase "a changed file changes the keyed unit, an unchanged one does not" $ withTempDir $ \dir -> do
+        let ini = dir </> "pgbouncer.ini"
+            key = Systemd.watchKeyFile dir
+        Systemd.ensureWatchKeyAt key
+        writeFile ini "[databases]\nx = host=a\n"
+        before <- Systemd.withKeyedWatchFingerprint key [ini] unit
+        again <- Systemd.withKeyedWatchFingerprint key [ini] unit
+        writeFile ini "[databases]\nx = host=b\n"
+        after <- Systemd.withKeyedWatchFingerprint key [ini] unit
+        assertEqual "" before again
+        assertBool "the unit did not change with the config" (before /= after)
+    , testCase "no key, no unit: there is no fallback to a plain hash" $ withTempDir $ \dir -> do
+        let ini = dir </> "conf"
+            key = Systemd.watchKeyFile dir
+        writeFile ini "anything"
+        rendered <- try (Systemd.withKeyedWatchFingerprint key [ini] unit)
+        case rendered of
+            Left (Systemd.WatchKeyUnusable path _) -> assertEqual "" key path
+            Right out -> assertBool ("rendered without a key: " <> Text.unpack out) False
+    , testCase "the key is made once, owner-only, and never replaced" $ withTempDir $ \dir -> do
+        let key = Systemd.watchKeyFile dir
+        Systemd.ensureWatchKeyAt key
+        first <- readFile' key
+        mode <- fileMode <$> getFileStatus key
+        assertEqual "the key is readable by others" 0 (mode .&. 0o077)
+        assertEqual "" Success =<< Systemd.checkWatchKeyAt key
+        setFileMode key 0o644
+        assertBool "a world-readable key passed its check" . isFailure =<< Systemd.checkWatchKeyAt key
+        Systemd.ensureWatchKeyAt key
+        second <- readFile' key
+        assertEqual "the key was replaced" first second
+        assertEqual "" Success =<< Systemd.checkWatchKeyAt key
+    , testCase "a keyed service, up for real (no systemd): the file has the keyed line and the key is 0600" $ withTempDir $ \dir -> do
+        let ini = dir </> "conf"
+            cfg = service dir "mine.service"
+        writeFile ini "secret: hunter2\n"
+        ok <- runUp (Systemd.unitFileNodeWith Systemd.KeyedDigest [ini] cfg)
+        assertBool "up failed" ok
+        key <- readKey (Systemd.watchKeyFile dir)
+        written <- Text.pack <$> readFile' (dir </> "mine.service")
+        frames <- Systemd.watchedFrames [ini]
+        assertEqual "" (Systemd.render_config cfg <> Systemd.keyedWatchLine key frames) written
+        mode <- fileMode <$> getFileStatus (Systemd.watchKeyFile dir)
+        assertEqual "the key is readable by others" 0 (mode .&. 0o077)
+    , testCase "the default is unchanged, up for real: the plain line, and no key made" $ withTempDir $ \dir -> do
+        let ini = dir </> "conf"
+            cfg = service dir "mine.service"
+        writeFile ini "secret: hunter2\n"
+        ok <- runUp (Systemd.unitFileNode [ini] cfg)
+        assertBool "up failed" ok
+        written <- Text.pack <$> readFile' (dir </> "mine.service")
+        expected <- Systemd.withWatchedFingerprint [ini] (Systemd.render_config cfg)
+        assertEqual "" expected written
+        assertBool "a key was made for the plain digest" . not =<< doesFileExist (Systemd.watchKeyFile dir)
+    , testCase "a keyed service's graph adds the key, once for the directory" $ do
+        let svc n = Systemd.systemdServiceWatchingKeyed ["/etc/" <> Text.unpack n <> ".conf"] silent ignoreTrack ignoreTrack (service "/etc/systemd/system" n)
+            dag = Dag.foldDag Dag.sameRepresentative (evalDeps (op "both" (deps [svc "a.service", svc "b.service"]) id))
+        assertEqual "" 0 (length (Dag.dagConflicts dag))
+        assertEqual
+            ""
+            ["both", "file-contents", "file-contents", "systemd-service", "systemd-service", "systemd-unit-dir", "systemd-unit-watch-key"]
+            (sort [act.shorthand | act <- Map.elems (Dag.dagNodes dag)])
+    , testProperty "systemdServiceWatching renders the nodes it rendered before (the plain digest is the default)" $
+        forAll genCase $ \(d, name, watched) ->
+            let cfg = service d name
+                path = d </> Text.unpack name
+                before
+                    | null watched = FS.filecontents (FS.FileContents path (Systemd.render_config cfg))
+                    | otherwise = FS.filecontents (FS.FileContents path (Systemd.withWatchedFingerprint watched (Systemd.render_config cfg)))
+                now = Systemd.systemdServiceWatching watched silent ignoreTrack ignoreTrack cfg
+                fileOf :: Op -> [Op]
+                fileOf o = [p | p <- toList (runIdentity o.predecessors), fmap (.shorthand) (opAct p) == Just "file-contents"]
+             in map describeFull (fileOf now) === [describeFull before]
+                    .&&. describeAll (Systemd.unitFileNode watched cfg) === [describeHead before, ("systemd-unit-dir", mkRef "systemd-unit-dir" d)]
+    , testProperty "with nothing watched, keyed and plain are the same nodes and no key" $
+        forAll genCase $ \(d, name, _) ->
+            let cfg = service d name
+             in describeAll (Systemd.unitFileNodeWith Systemd.KeyedDigest [] cfg) === describeAll (Systemd.unitFileNode [] cfg)
+    , testProperty "a keyed file's node is the plain one's, standing on the key as well" $
+        forAll genCase $ \(d, name, watched) ->
+            let cfg = service d name
+                keyed = describeAll (Systemd.unitFileNodeWith Systemd.KeyedDigest watched cfg)
+             in not (null watched) ==>
+                    take 1 keyed === take 1 (describeAll (Systemd.unitFileNode watched cfg))
+                        .&&. sort (drop 1 keyed) === sort [("systemd-unit-dir", mkRef "systemd-unit-dir" d), ("systemd-unit-watch-key", mkRef "systemd-unit-watch-key" (d </> ".salmon-watch.key"))]
+    , testProperty "the keyed line never holds the watched bytes or their plain digest, and moves with them" $
+        forAll genSecret $ \(secret, other) -> ioProperty $ withTempDir $ \dir -> do
+            let ini = dir </> "secrets"
+                key = Systemd.watchKeyFile dir
+            Systemd.ensureWatchKeyAt key
+            writeFile ini ("secret:" <> secret)
+            plain <- Systemd.withWatchedFingerprint [ini] ""
+            keyed <- Systemd.withKeyedWatchFingerprint key [ini] ""
+            again <- Systemd.withKeyedWatchFingerprint key [ini] ""
+            writeFile ini ("secret:" <> other)
+            moved <- Systemd.withKeyedWatchFingerprint key [ini] ""
+            pure $
+                counterexample (Text.unpack keyed) $
+                    not (Text.pack ("secret:" <> secret) `Text.isInfixOf` keyed)
+                        .&&. not (plainDigest plain `Text.isInfixOf` keyed)
+                        .&&. keyed === again
+                        .&&. (secret /= other ==> keyed /= moved)
+    ]
+  where
+    unit :: Text
+    unit = "[Unit]\nDescription=a service\n\n[Service]\nExecStart=/bin/true\n"
+
+    -- the base64 of a plain line, without its comment prefix
+    plainDigest :: Text -> Text
+    plainDigest = Text.drop (Text.length "# salmon-watches: ") . Text.strip
+
+    readKey :: FilePath -> IO ByteString.ByteString
+    readKey path = C8.strip <$> ByteString.readFile path
+
+    -- the node, then its predecessors, by shorthand and ref
+    describeAll :: Op -> [(Text, Ref)]
+    describeAll o = [describeHead x | x <- o : toList (runIdentity o.predecessors)]
+
+    describeHead :: Op -> (Text, Ref)
+    describeHead o = maybe ("", mkRef "none" ("" :: Text)) (\act -> (act.shorthand, act.extension.ref)) (opAct o)
+
+    -- what the fold compares a representative on, short of dynamics
+    describeFull :: Op -> Maybe (Text, Ref, Text, [Text])
+    describeFull o = fmap (\act -> (act.shorthand, act.extension.ref, act.extension.help, act.extension.notes)) (opAct o)
+
+    genCase :: Gen (FilePath, Text, [FilePath])
+    genCase = do
+        d <- ("/" <>) . intercalate "/" <$> listOf1 (listOf1 (elements "abcxyz-_."))
+        name <- (\s -> Text.pack s <> ".service") <$> listOf1 (elements "abcxyz0123-_@")
+        watched <- listOf (("/etc/" <>) <$> listOf1 (elements "abc.-"))
+        pure (d, name, watched)
+
+    -- ':' and ' ' are not base64, so the prefixed secret cannot show in a digest by chance
+    genSecret :: Gen (String, String)
+    genSecret = (,) <$> listOf1 (elements "abc xyz019") <*> listOf1 (elements "abc xyz019")
 
 shown :: [Text] -> CheckResult
 shown = Systemd.interpretShow

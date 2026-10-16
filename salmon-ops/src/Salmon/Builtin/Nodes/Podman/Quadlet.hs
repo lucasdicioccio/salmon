@@ -190,7 +190,7 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
     ensureWatchKey,
     interpretWatchKey,
     keyedWatchLine,
-    WatchKeyUnusable (..),
+    Systemd.WatchKeyUnusable (..),
     watchedFiles,
     containerProblems,
     interpretShow,
@@ -209,14 +209,9 @@ module Salmon.Builtin.Nodes.Podman.Quadlet (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, IOException, SomeException, bracket, finally, onException, throwIO, try)
+import Control.Exception (Exception, SomeException, bracket, onException, throwIO, try)
 import Control.Monad (unless, when)
-import qualified Crypto.Hash.SHA256 as SHA256
-import Crypto.Random (getRandomBytes)
-import Data.Bits ((.&.))
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Base64 as Base64
-import qualified Data.ByteString.Char8 as C8
 import Data.Char (isOctDigit, isSpace)
 import Data.List (find)
 import Data.Maybe (maybeToList)
@@ -225,13 +220,11 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.Clock (getMonotonicTimeNSec)
 import Numeric (readOct)
+import qualified Network.Socket as Net
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, removeDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
-import System.IO (hClose)
-import System.IO.Error (isAlreadyExistsError)
-import System.Posix.Files (createLink, fileMode, fileSize, getFileStatus, setFileMode)
-import System.Posix.IO (createFile, fdToHandle)
+import System.Posix.Files (setFileMode)
 import System.Posix.Types (FileMode)
 import System.Process (proc, readCreateProcessWithExitCode)
 import Text.Read (readMaybe)
@@ -704,10 +697,11 @@ renderWatching fingerprint c = case watchedFiles c of
 {- | The trailing comment: @# salmon-watches: hmac-sha256:BASE64@, the
 HMAC-SHA256 under the key of what 'Systemd.watchedFrames' read. Pure, and
 the whole of what the watched files leave in the quadlet.
+It is 'Systemd.keyedWatchLine', which 'Systemd.systemdServiceWatchingKeyed'
+writes into authored units too.
 -}
 keyedWatchLine :: ByteString.ByteString -> [ByteString.ByteString] -> Text
-keyedWatchLine key frames =
-    "# salmon-watches: hmac-sha256:" <> Text.decodeUtf8 (Base64.encode (SHA256.hmac key (ByteString.concat frames))) <> "\n"
+keyedWatchLine = Systemd.keyedWatchLine
 
 {- | Where the key of this container's directory is: beside the quadlets, so
 it has the directory's owner (root for 'systemQuadletDir', the user for a
@@ -715,23 +709,10 @@ user's) and its lifetime. The generator reads only the extensions it knows
 and leaves this file alone.
 -}
 watchKeyPath :: Container -> FilePath
-watchKeyPath c = c.containerUnitDir </> ".salmon-watch.key"
-
--- | The key is missing, unreadable or empty: its path, and which.
-data WatchKeyUnusable = WatchKeyUnusable !FilePath !Text
-    deriving (Show)
-
-instance Exception WatchKeyUnusable
+watchKeyPath c = Systemd.watchKeyFile c.containerUnitDir
 
 readWatchKey :: Container -> IO ByteString.ByteString
-readWatchKey c = do
-    let path = watchKeyPath c
-    read_ <- try (ByteString.readFile path) :: IO (Either IOException ByteString.ByteString)
-    case read_ of
-        Left _ -> throwIO (WatchKeyUnusable path "the key of the watched files' digest cannot be read")
-        Right bytes
-            | ByteString.null (C8.strip bytes) -> throwIO (WatchKeyUnusable path "the key of the watched files' digest is empty")
-            | otherwise -> pure (C8.strip bytes)
+readWatchKey c = Systemd.readWatchKeyAt (watchKeyPath c)
 
 {- | Makes the key if there is none, and makes it owner-only whatever it was.
 
@@ -739,42 +720,17 @@ A key that exists is never replaced: a new key is a new fingerprint, and so a
 restart, for every quadlet in the directory. It is written to a temporary
 file created @0600@ and put in place with @link(2)@, which refuses an
 existing name, so of two processes making it at once one wins and both read
-the winner's.
+the winner's ('Systemd.ensureWatchKeyAt').
 -}
 ensureWatchKey :: Container -> IO ()
-ensureWatchKey c = do
-    present <- doesFileExist path
-    unless present $ do
-        secret <- getRandomBytes 32 :: IO ByteString.ByteString
-        suffix <- getRandomBytes 6 :: IO ByteString.ByteString
-        let tmp = path <> ".tmp-" <> concatMap hex (ByteString.unpack suffix)
-        ( do
-                h <- fdToHandle =<< createFile tmp 0o600
-                ByteString.hPut h (Base64.encode secret <> "\n") `finally` hClose h
-                placed <- try (createLink tmp path)
-                case placed of
-                    Right () -> pure ()
-                    Left e
-                        | isAlreadyExistsError e -> pure ()
-                        | otherwise -> throwIO e
-            )
-            `finally` removeFile tmp
-    setFileMode path 0o600
-  where
-    path = watchKeyPath c
-    hex w = [digits !! fromIntegral (w `div` 16), digits !! fromIntegral (w `mod` 16)]
-    digits = "0123456789abcdef" :: String
+ensureWatchKey c = Systemd.ensureWatchKeyAt (watchKeyPath c)
 
 {- | The verdict on the key file's mode and size, 'Nothing' for no file. A
 key others can read is a 'Failure' ('ensureWatchKey' then closes it; it does
 not make a new one, see there).
 -}
 interpretWatchKey :: FilePath -> Maybe (FileMode, Integer) -> CheckResult
-interpretWatchKey path Nothing = Failure ("no key at " <> Text.pack path)
-interpretWatchKey path (Just (mode, size))
-    | size <= 0 = Failure ("the key at " <> Text.pack path <> " is empty")
-    | mode .&. 0o077 /= 0 = Failure ("the key at " <> Text.pack path <> " is readable by others than its owner")
-    | otherwise = Success
+interpretWatchKey = Systemd.interpretWatchKey
 
 {- | The key of 'containerUnitDir', one node for every quadlet there that
 watches a file. It stands on the directory and, like it, is never removed.
@@ -786,13 +742,7 @@ watchKeyNode c =
             { help = "ensures " <> Text.pack path <> " exists, readable by its owner alone"
             , notes = ["keys the digest of the files the quadlets watch, shared by every quadlet there: down leaves it"]
             , ref = mkRef "podman-quadlet-key" path
-            , check = do
-                present <- doesFileExist path
-                if present
-                    then do
-                        st <- getFileStatus path
-                        pure (interpretWatchKey path (Just (fileMode st, fromIntegral (fileSize st))))
-                    else pure (interpretWatchKey path Nothing)
+            , check = Systemd.checkWatchKeyAt path
             , up = ensureWatchKey c
             }
   where
