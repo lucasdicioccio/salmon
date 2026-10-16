@@ -163,6 +163,7 @@ test-suite salmon-ops-recipes-test
                     , Test.QemuShutdownSpec
                     , Test.QemuSmokeSpec
                     , Test.QuerySpec
+                    , Test.ReadinessSpec
                     , Test.RemoteOutputSpec
                     , Test.ReportJsonSpec
                     , Test.RewriteSpec

@@ -67,6 +67,7 @@ import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuShutdownSpec as QemuShutdownSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
+import qualified Test.ReadinessSpec as ReadinessSpec
 import qualified Test.RemoteOutputSpec as RemoteOutputSpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
@@ -193,6 +194,7 @@ main =
             , QemuResolveKernelSpec.tests
             , QemuShutdownSpec.tests
             , QuerySpec.tests
+            , ReadinessSpec.tests
             , ReportJsonSpec.tests
             , RewriteSpec.tests
             , ServeEventsSpec.tests
