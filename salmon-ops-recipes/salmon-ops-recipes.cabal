@@ -114,6 +114,7 @@ test-suite salmon-ops-recipes-test
                     , Test.BinaryOutputSpec
                     , Test.BinarySpec
                     , Test.DaemonSpec
+                    , Test.DetachedSpec
                     , Test.DagSpec
                     , Test.DagPerNodeSpec
                     , Test.DagReference

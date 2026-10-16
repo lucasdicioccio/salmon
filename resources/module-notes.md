@@ -457,6 +457,32 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   cancelled, and under `run down` this process never held one, so there is genuinely nothing to
   stop. See `Test/DaemonSpec.hs`, which covers exactly the parts a fake `IO ExitCode` cannot:
   signals, groups, and pipes.
+- **`Nodes/Detached.hs`** (`detached`) is the one-shot counterpart of `Daemon`: a process that
+  outlives the `run up` that started it, stopped later by a `run down` in another process (a
+  developer's rig, a bench, a machine with no unit manager). Asked for by a customer who had
+  written it themselves. `up` starts the command in a **new session**, stdin `/dev/null`
+  (`Binary.detachedStdin`), stdout+stderr appended to a log file, `close_fds`, optional cwd and
+  env overlay, and writes a pid file; it does not wait. Under `serve` the child stays salmon's,
+  and a forked `waitForProcess` reaps it. **It reopens the pidfile non-goal of
+  `specs/per-node-state-machines.md`, with identity rather than `kill -0`**: the pid file holds
+  (line 1) the pid and (line 2, JSON) the start time from `/proc/PID/stat` field 22, the boot id
+  and the argv it was started with (and cwd). A process is *ours* only when all of them still
+  hold against `/proc` and it is not a zombie; otherwise the pid file is **forgotten (removed,
+  `Forgot` reported), never signalled**, and a bare pid is never a record. Stop is `Daemon.Stop`
+  (shared type): signal the group (when it still leads it), grace, `SIGKILL`, grace, re-proving
+  identity before each signal; `down` throws `StillRunning` if it survived. `check` is `Success`
+  for ours-and-as-declared, `Failure` with a reason otherwise: ours but started with another argv
+  or cwd is `Drifted`, and `up` stops it (identity-checked) before starting the new one, so a
+  changed declaration does not orphan the old process. `detached_restartOnReplacedBinary`
+  (off by default) also fails `check` when `/proc/PID/exe` reads `(deleted)`. Env values never
+  reach `notes` or the pid file (names only), so an env-only change is not noticed until the
+  next restart. Not for a program that rewrites its own argv (a process title): it never reads
+  as ours, and `up` would start a second one. Readiness is a `Readiness.waitUntil` after it.
+  Linux only. **Layer 0** (`Test/DetachedSpec.hs`, real `sleep`/`sh` children in a temp dir:
+  up/skip/down, kill then up, four kinds of unrelated pid file signalled nothing, TERM ignored ->
+  group killed, argv drift replaced). **Not run:** a real binary's `run up` exiting with the
+  process left behind (the in-process tests only show the new session), a reboot with a stale
+  pid file (covered only by a forged boot id), anything under `serve`.
 - **Builtin nodes** live under `salmon-ops/src/Salmon/Builtin/Nodes/` — one module per concern
   (Filesystem, Systemd, Debian.Package, Podman, Postgres, WireGuard, Certificates, Ssh, Git,
   Netfilter, CronTask, Rsync, etc). Look at `Filesystem.hs` as the canonical small example of the

@@ -165,7 +165,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Guarded risky operations (preconditions, park, hold siblings) | `Builtin/Guarded.hs`, `Op/Guard.hs` | `specs/pg-patroni.md` |
 | Query, selectors, rewrites | `Actions/Query.hs`, `Op/Rewrite.hs` | `specs/advance-querying.md` |
 | Graph fixture and scaling profiles | `Test.GraphFixture`, `salmon-ops-recipes/bench/GraphProfiles.hs` | `resources/graph-profiles.md` |
-| Processes, output routing, node logs, daemons | `Builtin/Nodes/{Binary,Daemon}.hs`, `Builtin/NodeLog.hs` | `specs/salmon-as-init.md` |
+| Processes, output routing, node logs, daemons | `Builtin/Nodes/{Binary,Daemon,Detached}.hs`, `Builtin/NodeLog.hs` | `specs/salmon-as-init.md` |
 | Postgres, replication, templates | `Nodes/Postgres.hs`, `SreBox.PostgresTemplate` | |
 | Postgres pair / switchover | `SreBox.PostgresPair`, `SreBox.PostgresPairPrereqs` | `specs/pg-switchover.md`, `resources/postgres-pair.md` |
 | Patroni, preferred leader, rolling maintenance, pgBackRest, HAProxy | `Nodes/{Patroni,Patroni/PreferredLeader,Patroni/RollingMaintenance,PgBackRest,Haproxy}.hs` | `specs/pg-patroni.md` |
