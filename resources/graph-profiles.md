@@ -6,7 +6,8 @@ by the `graph-profiles` benchmark in `salmon-ops-recipes` over the synthetic gra
 other work was using. Read the growth and the order of magnitude, not the third digit.
 
 This document reports. The super-linear findings are listed with what was measured and,
-separately, what reading the code suggests is the cause. Four have been fixed since: finding 5
+separately, what reading the code suggests is the cause. Five have been fixed since: finding 4
+(the listed paths, see "After the path cap"), finding 5
 (the client model's teardown) and finding 6 (what a tended node retains), both under "Since
 fixed" below, finding 1 (`foldDag` per path: see
 "After the per-node fold", which gives the fold, `query plan` and the `serve` loop before and
@@ -170,7 +171,7 @@ One per finding worth fixing, in the order the numbers suggest. The first, secon
    `transposeOf` and `Query.outline` (finding 3). **Done**: see "After the edge lists". The
    wake-up cost of a node waiting on many neighbours is a separate question, not touched.
 4. Listed paths that do not cost depth per node (finding 4): shared prefixes, a length cap, or
-   listing on request.
+   listing on request. **Done, as a length cap: see "After the path cap".**
 5. `Client.Model.step` removing a node without filtering the order list (finding 5). **Done.**
 6. What a tended node retains (finding 6). **Done**: see "Since fixed".
 
@@ -452,6 +453,50 @@ What the numbers say, and what they do not:
   average.
 - **Not measured:** the `serve` passes (they go through the concurrent walk and were not re-run);
   the 1 000 000-node run; a quiet machine.
+
+## After the path cap
+
+`Query.outlinePaths` keeps a path in full only while it renders in at most `Query.pathCap` (256)
+characters; a longer one keeps its length and the tail that fits, and `serve` shows it as
+`**/tail`. Paths at or under the cap are listed as before (same set, order and positions:
+`Test.ListedPathsSpec` against `Test.PathListReference`, the function as it was). `query show` is
+not capped. See `resources/module-notes.md`, "Listed paths have a length cap", for the choices.
+
+**What was run.** One run, 2026-10-16, same machine, budget 6 s, cap 100 000 nodes, load average
+2 to 5 from other work:
+
+```sh
+cabal bench salmon-ops-recipes:graph-profiles --benchmark-options='--max-size 100000 --budget 6 \
+  --heap 4g --only "paths per node" --only "GET /dag" --only "GET /status" \
+  --only "status sink document" --only "loop" --out rows.tsv'
+```
+
+The rows are `resources/graph-profiles/path-cap.tsv`. "Before" for the paths per node is the
+uncapped reference measured in the same process run (a new row, `paths per node, uncapped
+reference`); for `status` in the loop it is the 2026-10-10 table above (another day, another
+load). **Indicative**, as everything here.
+
+| operation | | chain | diamonds2 | layered8x2 | random8x3 |
+|---|---|---|---|---|---|
+| paths per node | uncapped | n^2.2, 10.0k: 15.4 s, 10.9 GB | n^2.1, 3.0k: 3.9 s, 4.1 GB | n^2.1, 10.0k: 17.9 s, 10.5 GB | n^1.8, 3.0k: 2.7 s, 1.3 GB |
+| | capped | n^1.2, 100.0k: 4.5 s, 1.8 GB | n^1.0, 30.0k: 2.4 s, 3.2 GB | n^1.1, 30.0k: 3.7 s, 4.5 GB | n^1.2, 10.0k: 2.3 s, 2.3 GB |
+| loop: status | 2026-10-10 | n^2.2, 3.0k: 595 ms, 730 MB | 58 nodes (fold) | 145 nodes (fold) | 89 nodes (fold) |
+| | capped | n^1.2, 3.0k: 48 ms, 44 MB | n^1.1, 3.0k: 210 ms, 340 MB | n^1.3, 10.0k: 1.8 s, 1.5 GB | n^1.5, 3.0k: 558 ms, 583 MB |
+
+What the numbers say, and what they do not:
+
+- **The listed paths are per node on the deep shapes.** The chain went from 10 000 nodes in 15 s
+  and 11 GB (`n^2.2`) to 100 000 in 4.5 s (`n^1.2`); layered8x2 from 10 000 in 18 s to 30 000 in
+  3.7 s. fan and tree2 are shallow and were already per node; dense32 stops at about 1 000 on
+  both, on its outline (finding 3's note on dense32), not on the paths.
+- **`status` inside the loop is no longer the wall on a chain**: 48 ms at 3 000 where it was
+  0.6 s; the loop series now end on the passes (`stuck`, finding 2) and the declaration timeout.
+- **`/dag`, `/status` and the status sink reach the cap on chain and diamonds2** (1.9 s, 0.5 s
+  and 0.6 s at 100 000 on a chain); on layered8x2, random8x3 and dense32 they still end as
+  `inputs`, building the outline and the paths, not rendering them.
+- **Still costs depth per node:** `query show --dedupe` (`outlineFirstPaths`, not capped by
+  choice) was not re-measured.
+- **Not measured:** the 1 000 000-node run; a quiet machine.
 
 ## Not measured
 

@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+
 {- | Layer 0 coverage for "Salmon.Actions.Query" per @specs/advance-querying.md@:
 pattern matching, selector resolution against a graph with a repeated
 subtree (the same @Ref@ reachable at two paths — the "passwordless"/"chown"
@@ -29,6 +31,7 @@ import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Reporter (silent)
 
 import Test.Harness (runUpCapturing)
+import Test.PathListReference (outlinePathsUncapped)
 
 tests :: TestTree
 tests =
@@ -227,7 +230,8 @@ outlineAgreesWithTheListing =
         assertEqual (name <> ": one first path per node") (Set.size (Query.outlineRefs o)) (length (Query.outlineFirstPaths o))
         let width path = sum (map Text.length path) + length path
             listed = Map.map (take 3 . map snd . Set.toAscList) (Map.fromListWith Set.union [(r, Set.singleton (width path, path)) | (path, r) <- entries])
-        assertEqual (name <> ": the three shortest paths per node") listed (Query.outlinePaths 3 o)
+        assertEqual (name <> ": the three shortest paths per node") listed (outlinePathsUncapped 3 o)
+        assertEqual (name <> ": and the same, none capped, at the default cap") (Map.map (map (False,)) listed) (Map.map (map (\p -> (Query.listedCapped p, Query.listedSegments p))) (Query.outlinePaths 3 Query.pathCap o))
 
 {- | The shape 'SreBox.PostgresPairPrereqs' relies on: a node named a second
 time, same 'Ref', with one more dependency. The first occurrence is the one
@@ -256,15 +260,22 @@ outlineOnADiamondChain = do
         (everything, _) = Query.resolveSelectors cograph [] []
         (underTheFirstRight, _) = Query.resolveSelectors cograph ["/top/right/**"] []
         (byALongPath, _) = Query.resolveSelectors cograph [Text.concat (replicate 60 "/top/right") <> "/bottom"] []
-        paths = Query.outlinePaths Query.pathLimit o
+        paths = Query.outlinePaths Query.pathLimit Query.pathCap o
+        leftAllTheWay = concat (replicate 60 ["top", "left"]) <> ["bottom"]
     assertEqual "every node, once" 181 (Set.size everything)
     assertEqual "everything but the first top and its left" 179 (Set.size underTheFirstRight)
     assertEqual "a path that is the longest of 2^60 still selects its node" (Set.singleton bottom) byALongPath
     assertEqual "a path per node at least" 181 (Map.size (Map.filter (not . null) paths))
     assertEqual "and no more than the limit" Query.pathLimit (maximum (map length (Map.elems paths)))
     assertEqual
-        "the shortest path to the bottom goes left all the way"
-        (Just (concat (replicate 60 ["top", "left"]) <> ["bottom"]))
+        "the shortest path to the bottom goes left all the way (uncapped reference)"
+        (Just leftAllTheWay)
+        (fmap head (Map.lookup bottom (outlinePathsUncapped Query.pathLimit o)))
+    -- 547 characters, over the cap: listed as its last 255 characters'
+    -- worth of segments, still sorted first by its full length.
+    assertEqual
+        "listed capped: its full length and the tail that fits the cap"
+        (Just (Query.ListedPath 547 True (["left"] <> concat (replicate 27 ["top", "left"]) <> ["bottom"])))
         (fmap head (Map.lookup bottom paths))
     assertEqual "deduped rendering is one line per node" 181 (length (Query.renderAnnotated cograph Set.empty Set.empty True False))
 

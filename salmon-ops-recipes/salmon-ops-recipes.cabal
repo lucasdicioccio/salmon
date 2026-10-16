@@ -123,6 +123,8 @@ test-suite salmon-ops-recipes-test
                     , Test.GraphFixture
                     , Test.GraphFixtureSpec
                     , Test.GraphScaleSpec
+                    , Test.ListedPathsSpec
+                    , Test.PathListReference
                     , Test.DeferredSpec
                     , Test.DownTreeSpec
                     , Test.FilesystemSpec
@@ -246,6 +248,7 @@ benchmark graph-profiles
     hs-source-dirs:   bench test
     other-modules:    Test.GraphFixture
                     , Test.DagReference
+                    , Test.PathListReference
     build-depends:    base >=4.16.3.0 && <4.22
                     , aeson
                     , bytestring
