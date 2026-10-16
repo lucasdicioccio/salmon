@@ -117,6 +117,8 @@ test-suite salmon-ops-recipes-test
                     , Test.DagSpec
                     , Test.DagPerNodeSpec
                     , Test.DagReference
+                    , Test.EdgeListReference
+                    , Test.EdgeListSpec
                     , Test.GraphFixture
                     , Test.GraphFixtureSpec
                     , Test.GraphScaleSpec

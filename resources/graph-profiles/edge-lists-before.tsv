@@ -1,0 +1,419 @@
+fold	expand + foldDag		nodes	chain	100	100	99	100	0.000779	683328	ok
+fold	expand + foldDag		nodes	chain	300	300	299	300	0.000955	2220936	ok
+fold	expand + foldDag		nodes	chain	1000	1000	999	1000	0.002871	8077272	ok
+fold	expand + foldDag		nodes	chain	3000	3000	2999	3000	0.011631	25878640	ok
+fold	expand + foldDag		nodes	chain	10000	10000	9999	10000	0.051034	92310992	ok
+fold	expand + foldDag		nodes	chain	30000	30000	29999	30000	0.199236	293576352	ok
+fold	expand + foldDag		nodes	chain	100000	100000	99999	100000	0.993181	1039899128	ok
+fold	expand + foldDag		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	100	100	99	100	0.000395	617488	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	300	300	299	300	0.000909	1998936	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	1000	1000	999	1000	0.002317	7249912	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	3000	3000	2999	3000	0.008656	23108400	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	10000	10000	9999	10000	0.040864	82196272	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	30000	30000	29999	30000	0.152229	260802176	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	100000	100000	99999	100000	0.735946	921898024	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	fromMagma		nodes	chain	100	100	99	100	0.000220	304968	ok
+dag	fromMagma		nodes	chain	300	300	299	300	0.000817	1094888	ok
+dag	fromMagma		nodes	chain	1000	1000	999	1000	0.002662	4318584	ok
+dag	fromMagma		nodes	chain	3000	3000	2999	3000	0.007506	14665400	ok
+dag	fromMagma		nodes	chain	10000	10000	9999	10000	0.033429	55787880	ok
+dag	fromMagma		nodes	chain	30000	30000	29999	30000	0.139762	186496432	ok
+dag	fromMagma		nodes	chain	100000	100000	99999	100000	0.693133	689610648	ok
+dag	fromMagma		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	mergeDag into an empty Dag		nodes	chain	100	100	99	100	0.000198	217720	ok
+dag	mergeDag into an empty Dag		nodes	chain	300	300	299	300	0.000423	799976	ok
+dag	mergeDag into an empty Dag		nodes	chain	1000	1000	999	1000	0.001623	3191416	ok
+dag	mergeDag into an empty Dag		nodes	chain	3000	3000	2999	3000	0.006232	10937096	ok
+dag	mergeDag into an empty Dag		nodes	chain	10000	10000	9999	10000	0.029068	41627176	ok
+dag	mergeDag into an empty Dag		nodes	chain	30000	30000	29999	30000	0.131680	139052648	ok
+dag	mergeDag into an empty Dag		nodes	chain	100000	100000	99999	100000	0.684170	515986408	ok
+dag	mergeDag into an empty Dag		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	mergeDag onto itself		nodes	chain	100	100	99	100	0.000106	218344	ok
+dag	mergeDag onto itself		nodes	chain	300	300	299	300	0.000401	791288	ok
+dag	mergeDag onto itself		nodes	chain	1000	1000	999	1000	0.002009	3140872	ok
+dag	mergeDag onto itself		nodes	chain	3000	3000	2999	3000	0.006158	10892984	ok
+dag	mergeDag onto itself		nodes	chain	10000	10000	9999	10000	0.027295	41327992	ok
+dag	mergeDag onto itself		nodes	chain	30000	30000	29999	30000	0.112926	138805688	ok
+dag	mergeDag onto itself		nodes	chain	100000	100000	99999	100000	0.669402	548826552	ok
+dag	mergeDag onto itself		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+rewrite	one batch of a tenth of the nodes		nodes	chain	100	100	99	100	0.000113	169504	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	300	300	299	300	0.000443	550600	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	1000	1000	999	1000	0.001529	2135432	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	3000	3000	2999	3000	0.003439	8366048	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	10000	10000	9999	10000	0.021657	48146632	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	30000	30000	29999	30000	0.119255	415244112	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	100000	100000	99999	100000	1.144680	4515349560	ok
+rewrite	one batch of a tenth of the nodes		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+query	outline		nodes	chain	100	100	99	100	0.000107	515368	ok
+query	outline		nodes	chain	300	300	299	300	0.000343	1602320	ok
+query	outline		nodes	chain	1000	1000	999	1000	0.001411	5521872	ok
+query	outline		nodes	chain	3000	3000	2999	3000	0.005215	17104072	ok
+query	outline		nodes	chain	10000	10000	9999	10000	0.021973	58838376	ok
+query	outline		nodes	chain	30000	30000	29999	30000	0.084122	182166584	ok
+query	outline		nodes	chain	100000	100000	99999	100000	0.351654	625743936	ok
+query	outline		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	100	100	99	100	0.000601	1425800	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	300	300	299	300	0.002439	8624656	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	1000	1000	999	1000	0.031389	78510560	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	3000	3000	2999	3000	0.433623	739466488	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	10000	10000	9999	10000	5.906573	8105558928	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	chain	10000	10000	9999	10000	0.000000	0	stop:budget
+fold	expand + foldDag		nodes	fan	100	100	99	100	0.000318	965896	ok
+fold	expand + foldDag		nodes	fan	300	300	299	300	0.001528	4741048	ok
+fold	expand + foldDag		nodes	fan	1000	1000	999	1000	0.011327	35992096	ok
+fold	expand + foldDag		nodes	fan	3000	3000	2999	3000	0.089055	277506704	ok
+fold	expand + foldDag		nodes	fan	10000	10000	9999	10000	1.051273	2890958512	ok
+fold	expand + foldDag		nodes	fan	30000	30000	29999	30000	12.565656	25489050064	ok
+fold	expand + foldDag		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:budget
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	100	100	99	100	0.000347	900056	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	300	300	299	300	0.002027	4519048	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	1000	1000	999	1000	0.016413	35163912	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	3000	3000	2999	3000	0.126500	274801176	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	10000	10000	9999	10000	1.176333	2881073168	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	30000	30000	29999	30000	12.161608	25457026288	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	fan	30000	30000	29999	30000	0.000000	0	stop:budget
+dag	fromMagma		nodes	fan	100	100	99	100	0.000402	832536	ok
+dag	fromMagma		nodes	fan	300	300	299	300	0.002159	6040344	ok
+dag	fromMagma		nodes	fan	1000	1000	999	1000	0.013314	60046968	ok
+dag	fromMagma		nodes	fan	3000	3000	2999	3000	0.130870	616696040	ok
+dag	fromMagma		nodes	fan	10000	10000	9999	10000	2.126367	7145917992	ok
+dag	fromMagma		nodes	fan	10000	10000	9999	10000	0.000000	0	stop:budget
+dag	mergeDag into an empty Dag		nodes	fan	100	100	99	100	0.000208	468688	ok
+dag	mergeDag into an empty Dag		nodes	fan	300	300	299	300	0.001424	3204688	ok
+dag	mergeDag into an empty Dag		nodes	fan	1000	1000	999	1000	0.012342	30711472	ok
+dag	mergeDag into an empty Dag		nodes	fan	3000	3000	2999	3000	0.102949	261260080	ok
+dag	mergeDag into an empty Dag		nodes	fan	10000	10000	9999	10000	1.423832	2835194320	ok
+dag	mergeDag into an empty Dag		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:timeout
+dag	mergeDag onto itself		nodes	fan	100	100	99	100	0.000767	223048	ok
+dag	mergeDag onto itself		nodes	fan	300	300	299	300	0.004563	828104	ok
+dag	mergeDag onto itself		nodes	fan	1000	1000	999	1000	0.025201	3522408	ok
+dag	mergeDag onto itself		nodes	fan	3000	3000	2999	3000	0.214308	11996168	ok
+dag	mergeDag onto itself		nodes	fan	10000	10000	9999	10000	2.109707	45295224	ok
+dag	mergeDag onto itself		nodes	fan	10000	10000	9999	10000	0.000000	0	stop:budget
+rewrite	one batch of a tenth of the nodes		nodes	fan	100	100	99	100	0.000245	185592	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	300	300	299	300	0.000787	600904	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	1000	1000	999	1000	0.003540	2150152	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	3000	3000	2999	3000	0.010209	6874520	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	10000	10000	9999	10000	0.047255	24463464	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	30000	30000	29999	30000	0.297792	77734232	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	100000	100000	99999	100000	1.079079	274654536	ok
+rewrite	one batch of a tenth of the nodes		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+query	outline		nodes	fan	100	100	99	100	0.000303	496856	ok
+query	outline		nodes	fan	300	300	299	300	0.001932	1521008	ok
+query	outline		nodes	fan	1000	1000	999	1000	0.015712	5161168	ok
+query	outline		nodes	fan	3000	3000	2999	3000	0.122681	15788248	ok
+query	outline		nodes	fan	10000	10000	9999	10000	1.794417	53600840	ok
+query	outline		nodes	fan	30000	30000	29999	30000	14.996060	164080808	ok
+query	outline		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:budget
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	100	100	99	100	0.000502	727712	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	300	300	299	300	0.002439	2282416	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	1000	1000	999	1000	0.019478	7950824	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	3000	3000	2999	3000	0.152085	24820448	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	10000	10000	9999	10000	1.449842	86115384	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	30000	30000	29999	30000	8.017153	268788752	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	fan	30000	30000	29999	30000	0.000000	0	stop:budget
+fold	expand + foldDag		nodes	tree2	100	100	99	100	0.000228	693312	ok
+fold	expand + foldDag		nodes	tree2	300	300	299	300	0.000803	2249096	ok
+fold	expand + foldDag		nodes	tree2	1000	1000	999	1000	0.003764	8080712	ok
+fold	expand + foldDag		nodes	tree2	3000	3000	2999	3000	0.014893	25983152	ok
+fold	expand + foldDag		nodes	tree2	10000	10000	9999	10000	0.061447	92593664	ok
+fold	expand + foldDag		nodes	tree2	30000	30000	29999	30000	0.229459	294083816	ok
+fold	expand + foldDag		nodes	tree2	100000	100000	99999	100000	1.592390	1044429560	ok
+fold	expand + foldDag		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	100	100	99	100	0.000853	627376	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	300	300	299	300	0.002888	2025800	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	1000	1000	999	1000	0.010429	7267440	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	3000	3000	2999	3000	0.032144	23265104	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	10000	10000	9999	10000	0.137765	82692816	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	30000	30000	29999	30000	0.560495	262120672	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	100000	100000	99999	100000	1.740045	928245336	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	fromMagma		nodes	tree2	100	100	99	100	0.000249	301288	ok
+dag	fromMagma		nodes	tree2	300	300	299	300	0.000928	1081528	ok
+dag	fromMagma		nodes	tree2	1000	1000	999	1000	0.004305	4277176	ok
+dag	fromMagma		nodes	tree2	3000	3000	2999	3000	0.016316	14676328	ok
+dag	fromMagma		nodes	tree2	10000	10000	9999	10000	0.073160	55593784	ok
+dag	fromMagma		nodes	tree2	30000	30000	29999	30000	0.334068	185624200	ok
+dag	fromMagma		nodes	tree2	100000	100000	99999	100000	1.485719	687599752	ok
+dag	fromMagma		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	mergeDag into an empty Dag		nodes	tree2	100	100	99	100	0.000188	219168	ok
+dag	mergeDag into an empty Dag		nodes	tree2	300	300	299	300	0.000706	801600	ok
+dag	mergeDag into an empty Dag		nodes	tree2	1000	1000	999	1000	0.003003	3186720	ok
+dag	mergeDag into an empty Dag		nodes	tree2	3000	3000	2999	3000	0.011484	11038368	ok
+dag	mergeDag into an empty Dag		nodes	tree2	10000	10000	9999	10000	0.066019	41939040	ok
+dag	mergeDag into an empty Dag		nodes	tree2	30000	30000	29999	30000	0.313950	139820448	ok
+dag	mergeDag into an empty Dag		nodes	tree2	100000	100000	99999	100000	1.439067	520585584	ok
+dag	mergeDag into an empty Dag		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	mergeDag onto itself		nodes	tree2	100	100	99	100	0.000241	220744	ok
+dag	mergeDag onto itself		nodes	tree2	300	300	299	300	0.000897	793832	ok
+dag	mergeDag onto itself		nodes	tree2	1000	1000	999	1000	0.003576	3156816	ok
+dag	mergeDag onto itself		nodes	tree2	3000	3000	2999	3000	0.013384	10836584	ok
+dag	mergeDag onto itself		nodes	tree2	10000	10000	9999	10000	0.059217	41494408	ok
+dag	mergeDag onto itself		nodes	tree2	30000	30000	29999	30000	0.283198	149941672	ok
+dag	mergeDag onto itself		nodes	tree2	100000	100000	99999	100000	1.147004	550674312	ok
+dag	mergeDag onto itself		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+rewrite	one batch of a tenth of the nodes		nodes	tree2	100	100	99	100	0.000112	173672	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	300	300	299	300	0.000365	554144	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	1000	1000	999	1000	0.001555	2173720	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	3000	3000	2999	3000	0.007091	8312656	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	10000	10000	9999	10000	0.041749	48787992	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	30000	30000	29999	30000	0.206156	414513608	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	100000	100000	99999	100000	2.444178	4515872520	ok
+rewrite	one batch of a tenth of the nodes		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:budget
+query	outline		nodes	tree2	100	100	99	100	0.000303	520552	ok
+query	outline		nodes	tree2	300	300	299	300	0.000762	1621792	ok
+query	outline		nodes	tree2	1000	1000	999	1000	0.002882	5561712	ok
+query	outline		nodes	tree2	3000	3000	2999	3000	0.010766	17313480	ok
+query	outline		nodes	tree2	10000	10000	9999	10000	0.048776	59498328	ok
+query	outline		nodes	tree2	30000	30000	29999	30000	0.206607	183961912	ok
+query	outline		nodes	tree2	100000	100000	99999	100000	0.967278	633508992	ok
+query	outline		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	100	100	99	100	0.000473	804776	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	300	300	299	300	0.001733	2613072	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	1000	1000	999	1000	0.007917	9327856	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	3000	3000	2999	3000	0.030988	30018856	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	10000	10000	9999	10000	0.129556	106741752	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	30000	30000	29999	30000	0.471598	338946680	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	100000	100000	99999	100000	2.133617	1200564416	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:budget
+fold	expand + foldDag		nodes	diamonds2	100	100	132	34359738365	0.000406	1127184	ok
+fold	expand + foldDag		nodes	diamonds2	300	298	396	1e30	0.001369	3581576	ok
+fold	expand + foldDag		nodes	diamonds2	1000	1000	1332	1e100	0.007289	12789072	ok
+fold	expand + foldDag		nodes	diamonds2	3000	2998	3996	1e301	0.031263	40286264	ok
+fold	expand + foldDag		nodes	diamonds2	10000	10000	13332	1e1003	0.147235	141394568	ok
+fold	expand + foldDag		nodes	diamonds2	30000	29998	39996	1e3010	0.548189	443824616	ok
+fold	expand + foldDag		nodes	diamonds2	100000	100000	133332	1e10034	2.492843	1550232552	ok
+fold	expand + foldDag		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:budget
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	15	13	16	61	0.000273	347544	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	21	19	24	253	0.000832	1449800	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	24	22	28	509	0.001241	3070344	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	30	28	36	2045	0.004801	12339040	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	36	34	44	8189	0.023086	50793344	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	39	37	48	16381	0.043030	99849208	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	45	43	56	65533	0.157828	405843384	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	51	49	64	262141	0.639114	1603911488	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	54	52	68	524285	1.372039	3344750672	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	60	58	76	2097149	5.743002	13390536552	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	diamonds2	60	58	76	2097149	0.000000	0	stop:budget
+dag	fromMagma		nodes	diamonds2	100	100	132	34359738365	0.000238	345960	ok
+dag	fromMagma		nodes	diamonds2	300	298	396	1e30	0.000880	1244520	ok
+dag	fromMagma		nodes	diamonds2	1000	1000	1332	1e100	0.004146	4971504	ok
+dag	fromMagma		nodes	diamonds2	3000	2998	3996	1e301	0.015199	17085720	ok
+dag	fromMagma		nodes	diamonds2	10000	10000	13332	1e1003	0.069963	64818024	ok
+dag	fromMagma		nodes	diamonds2	30000	29998	39996	1e3010	0.325228	216542328	ok
+dag	fromMagma		nodes	diamonds2	100000	100000	133332	1e10034	1.946217	802628712	ok
+dag	fromMagma		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+dag	mergeDag into an empty Dag		nodes	diamonds2	100	100	132	34359738365	0.000190	250816	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	300	298	396	1e30	0.000734	916816	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	1000	1000	1332	1e100	0.003318	3690976	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	3000	2998	3996	1e301	0.012839	12653008	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	10000	10000	13332	1e1003	0.059294	48226768	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	30000	29998	39996	1e3010	0.282124	161231200	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	100000	100000	133332	1e10034	1.391403	598663024	ok
+dag	mergeDag into an empty Dag		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+dag	mergeDag onto itself		nodes	diamonds2	100	100	132	34359738365	0.000195	248704	ok
+dag	mergeDag onto itself		nodes	diamonds2	300	298	396	1e30	0.000719	898592	ok
+dag	mergeDag onto itself		nodes	diamonds2	1000	1000	1332	1e100	0.003143	3626232	ok
+dag	mergeDag onto itself		nodes	diamonds2	3000	2998	3996	1e301	0.012912	12478880	ok
+dag	mergeDag onto itself		nodes	diamonds2	10000	10000	13332	1e1003	0.061869	47642656	ok
+dag	mergeDag onto itself		nodes	diamonds2	30000	29998	39996	1e3010	0.307519	170435952	ok
+dag	mergeDag onto itself		nodes	diamonds2	100000	100000	133332	1e10034	1.993879	629889600	ok
+dag	mergeDag onto itself		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	100	100	132	34359738365	0.000118	194456	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	300	298	396	1e30	0.000377	636256	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	1000	1000	1332	1e100	0.001585	2645736	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	3000	2998	3996	1e301	0.007061	11198768	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	10000	10000	13332	1e1003	0.047795	84331992	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	30000	29998	39996	1e3010	0.297272	720290472	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	100000	100000	133332	1e10034	2.873202	7968648896	ok
+rewrite	one batch of a tenth of the nodes		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:budget
+query	outline		nodes	diamonds2	100	100	132	34359738365	0.000401	896976	ok
+query	outline		nodes	diamonds2	300	298	396	1e30	0.000835	2757080	ok
+query	outline		nodes	diamonds2	1000	1000	1332	1e100	0.003964	9484064	ok
+query	outline		nodes	diamonds2	3000	2998	3996	1e301	0.015252	29124104	ok
+query	outline		nodes	diamonds2	10000	10000	13332	1e1003	0.070687	99296432	ok
+query	outline		nodes	diamonds2	30000	29998	39996	1e3010	0.269469	304447352	ok
+query	outline		nodes	diamonds2	100000	100000	133332	1e10034	1.047946	1036315544	ok
+query	outline		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	100	100	132	34359738365	0.003150	5771248	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	300	298	396	1e30	0.035295	42545768	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	1000	1000	1332	1e100	0.447899	442299720	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	3000	2998	3996	1e301	5.020304	3888578944	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	diamonds2	3000	2998	3996	1e301	0.000000	0	stop:budget
+fold	expand + foldDag		nodes	layered8x2	100	97	184	32761	0.000615	1844064	ok
+fold	expand + foldDag		nodes	layered8x2	300	297	584	1099511627769	0.002731	6286224	ok
+fold	expand + foldDag		nodes	layered8x2	1000	993	1976	1e38	0.013142	22314112	ok
+fold	expand + foldDag		nodes	layered8x2	3000	2993	5976	1e113	0.046320	70310608	ok
+fold	expand + foldDag		nodes	layered8x2	10000	9993	19976	1e376	0.194279	244014984	ok
+fold	expand + foldDag		nodes	layered8x2	30000	29993	59976	1e1129	0.777157	758665584	ok
+fold	expand + foldDag		nodes	layered8x2	100000	99993	199976	1e3763	2.871381	2619521840	ok
+fold	expand + foldDag		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:budget
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	32	25	40	57	0.000139	347440	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	48	41	72	249	0.000585	1552608	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	56	49	88	505	0.001134	3121632	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	72	65	120	2041	0.004899	12752576	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	88	81	152	8185	0.020429	51777328	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	96	89	168	16377	0.044168	103213168	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	112	105	200	65529	0.177206	428022016	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	128	121	232	262137	0.756662	1715032424	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	136	129	248	524281	1.501774	3377689264	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	152	145	280	2097145	7.240628	13968339624	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	layered8x2	152	145	280	2097145	0.000000	0	stop:budget
+dag	fromMagma		nodes	layered8x2	100	97	184	32761	0.000324	428544	ok
+dag	fromMagma		nodes	layered8x2	300	297	584	1099511627769	0.001158	1583808	ok
+dag	fromMagma		nodes	layered8x2	1000	993	1976	1e38	0.005233	6379728	ok
+dag	fromMagma		nodes	layered8x2	3000	2993	5976	1e113	0.021349	21923088	ok
+dag	fromMagma		nodes	layered8x2	10000	9993	19976	1e376	0.099661	83097792	ok
+dag	fromMagma		nodes	layered8x2	30000	29993	59976	1e1129	0.461400	277005072	ok
+dag	fromMagma		nodes	layered8x2	100000	99993	199976	1e3763	2.222504	1028783664	ok
+dag	fromMagma		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:budget
+dag	mergeDag into an empty Dag		nodes	layered8x2	100	97	184	32761	0.000343	300136	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	300	297	584	1099511627769	0.000900	1148680	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	1000	993	1976	1e38	0.004130	4627384	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	3000	2993	5976	1e113	0.016279	16108600	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	10000	9993	19976	1e376	0.075638	61601320	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	30000	29993	59976	1e1129	0.346994	206320456	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	100000	99993	199976	1e3763	1.609278	766180792	ok
+dag	mergeDag into an empty Dag		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:cap
+dag	mergeDag onto itself		nodes	layered8x2	100	97	184	32761	0.000356	286240	ok
+dag	mergeDag onto itself		nodes	layered8x2	300	297	584	1099511627769	0.000915	1100672	ok
+dag	mergeDag onto itself		nodes	layered8x2	1000	993	1976	1e38	0.003966	4483816	ok
+dag	mergeDag onto itself		nodes	layered8x2	3000	2993	5976	1e113	0.015430	15650672	ok
+dag	mergeDag onto itself		nodes	layered8x2	10000	9993	19976	1e376	0.076381	60025264	ok
+dag	mergeDag onto itself		nodes	layered8x2	30000	29993	59976	1e1129	0.336636	212294096	ok
+dag	mergeDag onto itself		nodes	layered8x2	100000	99993	199976	1e3763	1.487339	786835792	ok
+dag	mergeDag onto itself		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:cap
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	100	97	184	32761	0.000225	236608	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	300	297	584	1099511627769	0.000527	844464	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	1000	993	1976	1e38	0.002387	3796272	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	3000	2993	5976	1e113	0.012115	18801288	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	10000	9993	19976	1e376	0.088996	175215264	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	30000	29993	59976	1e1129	0.632322	1601659104	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	100000	99993	199976	1e3763	6.590023	17857307096	ok
+rewrite	one batch of a tenth of the nodes		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:budget
+query	outline		nodes	layered8x2	100	97	184	32761	0.000428	1511912	ok
+query	outline		nodes	layered8x2	300	297	584	1099511627769	0.001700	5062816	ok
+query	outline		nodes	layered8x2	1000	993	1976	1e38	0.007372	17559080	ok
+query	outline		nodes	layered8x2	3000	2993	5976	1e113	0.029110	54101344	ok
+query	outline		nodes	layered8x2	10000	9993	19976	1e376	0.121869	183777088	ok
+query	outline		nodes	layered8x2	30000	29993	59976	1e1129	0.432324	560141312	ok
+query	outline		nodes	layered8x2	100000	99993	199976	1e3763	1.739597	1895163248	ok
+query	outline		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:cap
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	100	97	184	32761	0.001676	3211280	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	300	297	584	1099511627769	0.011833	16753856	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	1000	993	1976	1e38	0.127652	125708352	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	3000	2993	5976	1e113	2.258959	973135040	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	layered8x2	3000	2993	5976	1e113	0.000000	0	stop:budget
+fold	expand + foldDag		nodes	random8x3	100	97	272	2125761	0.002086	3672920	ok
+fold	expand + foldDag		nodes	random8x3	300	297	872	1e18	0.007109	12624344	ok
+fold	expand + foldDag		nodes	random8x3	1000	993	2960	1e59	0.032985	44475776	ok
+fold	expand + foldDag		nodes	random8x3	3000	2993	8960	1e179	0.102401	138366760	ok
+fold	expand + foldDag		nodes	random8x3	10000	9993	29960	1e596	0.408864	474771504	ok
+fold	expand + foldDag		nodes	random8x3	30000	29993	89960	1e1789	1.316842	1459716792	ok
+fold	expand + foldDag		nodes	random8x3	100000	99993	299960	1e5964	5.005300	4983919544	ok
+fold	expand + foldDag		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:budget
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	24	17	32	33	0.000141	197928	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	32	25	56	105	0.000498	644560	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	48	41	104	969	0.002384	6188400	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	56	49	128	2913	0.007698	18014768	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	64	57	152	8745	0.023361	54761424	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	72	65	176	26241	0.073723	168903088	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	80	73	200	78729	0.230363	511951072	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	88	81	224	236193	0.715447	1511622176	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	96	89	248	708585	2.081012	4491521384	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	random8x3	96	89	248	708585	0.000000	0	stop:budget
+dag	fromMagma		nodes	random8x3	100	97	272	2125761	0.000426	562976	ok
+dag	fromMagma		nodes	random8x3	300	297	872	1e18	0.001710	2160696	ok
+dag	fromMagma		nodes	random8x3	1000	993	2960	1e59	0.007668	8687704	ok
+dag	fromMagma		nodes	random8x3	3000	2993	8960	1e179	0.031220	29680760	ok
+dag	fromMagma		nodes	random8x3	10000	9993	29960	1e596	0.152897	112653248	ok
+dag	fromMagma		nodes	random8x3	30000	29993	89960	1e1789	0.694357	375209552	ok
+dag	fromMagma		nodes	random8x3	100000	99993	299960	1e5964	3.348341	1387739320	ok
+dag	fromMagma		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:budget
+dag	mergeDag into an empty Dag		nodes	random8x3	100	97	272	2125761	0.000282	403656	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	300	297	872	1e18	0.001114	1546096	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	1000	993	2960	1e59	0.005057	6244568	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	3000	2993	8960	1e179	0.020330	21633168	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	10000	9993	29960	1e596	0.091919	82769832	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	30000	29993	89960	1e1789	0.422753	276814680	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	100000	99993	299960	1e5964	1.898162	1026993872	ok
+dag	mergeDag into an empty Dag		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:cap
+dag	mergeDag onto itself		nodes	random8x3	100	97	272	2125761	0.000447	362080	ok
+dag	mergeDag onto itself		nodes	random8x3	300	297	872	1e18	0.001101	1420928	ok
+dag	mergeDag onto itself		nodes	random8x3	1000	993	2960	1e59	0.004978	5816200	ok
+dag	mergeDag onto itself		nodes	random8x3	3000	2993	8960	1e179	0.019247	20412752	ok
+dag	mergeDag onto itself		nodes	random8x3	10000	9993	29960	1e596	0.088244	78515776	ok
+dag	mergeDag onto itself		nodes	random8x3	30000	29993	89960	1e1789	0.406265	275031968	ok
+dag	mergeDag onto itself		nodes	random8x3	100000	99993	299960	1e5964	1.862665	1022058928	ok
+dag	mergeDag onto itself		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:cap
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	100	97	272	2125761	0.000193	316696	ok
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	300	297	872	1e18	0.000715	1210824	ok
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	1000	993	2960	1e59	0.003494	5735520	ok
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	3000	2993	8960	1e179	0.017916	31245176	ok
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	10000	9993	29960	1e596	0.143751	337945776	ok
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	30000	29993	89960	1e1789	2.388980	3085854904	ok
+rewrite	one batch of a tenth of the nodes		nodes	random8x3	30000	29993	89960	1e1789	0.000000	0	stop:budget
+query	outline		nodes	random8x3	100	97	272	2125761	0.001016	3137656	ok
+query	outline		nodes	random8x3	300	297	872	1e18	0.003920	10681760	ok
+query	outline		nodes	random8x3	1000	993	2960	1e59	0.016717	37132496	ok
+query	outline		nodes	random8x3	3000	2993	8960	1e179	0.064813	113899016	ok
+query	outline		nodes	random8x3	10000	9993	29960	1e596	0.252837	384962376	ok
+query	outline		nodes	random8x3	30000	29993	89960	1e1789	0.844322	1167157704	ok
+query	outline		nodes	random8x3	100000	99993	299960	1e5964	3.043387	3928430248	ok
+query	outline		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:budget
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	100	97	272	2125761	0.002773	5445624	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	300	297	872	1e18	0.017486	26022272	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	1000	993	2960	1e59	0.159748	176961216	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	3000	2993	8960	1e179	1.473566	1296361424	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	10000	9993	29960	1e596	15.070374	13220592328	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	random8x3	10000	9993	29960	1e596	0.000000	0	stop:budget
+fold	expand + foldDag		nodes	dense32	100	97	2080	33825	0.044918	144801432	ok
+fold	expand + foldDag		nodes	dense32	300	289	8224	36319351833633	0.366832	967569192	ok
+fold	expand + foldDag		nodes	dense32	1000	993	30752	1e46	1.477660	3986501232	ok
+fold	expand + foldDag		nodes	dense32	3000	2977	94240	1e139	6.804342	12512562080	ok
+fold	expand + foldDag		nodes	dense32	3000	2977	94240	1e139	0.000000	0	stop:budget
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	dense32	64	33	32	33	0.000074	222288	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	dense32	96	65	1056	1057	0.003342	8657080	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	dense32	128	97	2080	33825	0.109531	230895448	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	dense32	160	129	3104	1082401	3.714448	7519270624	ok
+fold	expand + foldDagPerOccurrence (the fold before it went per node)		occurrences	dense32	160	129	3104	1082401	0.000000	0	stop:budget
+dag	fromMagma		nodes	dense32	100	97	2080	33825	0.004655	8138592	ok
+dag	fromMagma		nodes	dense32	300	289	8224	36319351833633	0.017101	35132928	ok
+dag	fromMagma		nodes	dense32	1000	993	30752	1e46	0.079533	143159616	ok
+dag	fromMagma		nodes	dense32	3000	2977	94240	1e139	0.318780	468230400	ok
+dag	fromMagma		nodes	dense32	10000	9985	318496	1e469	1.591475	1698581136	ok
+dag	fromMagma		nodes	dense32	30000	29985	958496	1e1410	6.590730	5428436112	ok
+dag	fromMagma		nodes	dense32	30000	29985	958496	1e1410	0.000000	0	stop:budget
+dag	mergeDag into an empty Dag		nodes	dense32	100	97	2080	33825	0.002541	5597848	ok
+dag	mergeDag into an empty Dag		nodes	dense32	300	289	8224	36319351833633	0.011530	24035080	ok
+dag	mergeDag into an empty Dag		nodes	dense32	1000	993	30752	1e46	0.050505	97828504	ok
+dag	mergeDag into an empty Dag		nodes	dense32	3000	2977	94240	1e139	0.170466	321640312	ok
+dag	mergeDag into an empty Dag		nodes	dense32	10000	9985	318496	1e469	0.570080	1171331080	ok
+dag	mergeDag into an empty Dag		nodes	dense32	30000	29985	958496	1e1410	1.842848	3757019272	ok
+dag	mergeDag into an empty Dag		nodes	dense32	100000	99969	3197984	1e4702	0.000000	0	stop:timeout
+dag	mergeDag onto itself		nodes	dense32	100	97	2080	33825	0.001382	1908784	ok
+dag	mergeDag onto itself		nodes	dense32	300	289	8224	36319351833633	0.006465	9485280	ok
+dag	mergeDag onto itself		nodes	dense32	1000	993	30752	1e46	0.030307	43927152	ok
+dag	mergeDag onto itself		nodes	dense32	3000	2977	94240	1e139	0.116609	156456112	ok
+dag	mergeDag onto itself		nodes	dense32	10000	9985	318496	1e469	0.461035	617710152	ok
+dag	mergeDag onto itself		nodes	dense32	30000	29985	958496	1e1410	1.609033	2093248336	ok
+dag	mergeDag onto itself		nodes	dense32	100000	99969	3197984	1e4702	0.000000	0	stop:timeout
+rewrite	one batch of a tenth of the nodes		nodes	dense32	100	97	2080	33825	0.001182	3140112	ok
+rewrite	one batch of a tenth of the nodes		nodes	dense32	300	289	8224	36319351833633	0.006147	14042424	ok
+rewrite	one batch of a tenth of the nodes		nodes	dense32	1000	993	30752	1e46	0.035872	70086256	ok
+rewrite	one batch of a tenth of the nodes		nodes	dense32	3000	2977	94240	1e139	0.158201	429530824	ok
+rewrite	one batch of a tenth of the nodes		nodes	dense32	10000	9985	318496	1e469	1.188951	3982944128	ok
+rewrite	one batch of a tenth of the nodes		nodes	dense32	30000	29985	958496	1e1410	8.678097	33702278368	ok
+rewrite	one batch of a tenth of the nodes		nodes	dense32	30000	29985	958496	1e1410	0.000000	0	stop:budget
+query	outline		nodes	dense32	100	97	2080	33825	0.027516	126873264	ok
+query	outline		nodes	dense32	300	289	8224	36319351833633	0.187401	860752008	ok
+query	outline		nodes	dense32	1000	993	30752	1e46	0.881873	3549223456	ok
+query	outline		nodes	dense32	3000	2977	94240	1e139	2.951822	11130563504	ok
+query	outline		nodes	dense32	3000	2977	94240	1e139	0.000000	0	stop:budget
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	100	97	2080	33825	0.031410	134327816	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	300	289	8224	36319351833633	0.256554	916559240	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	1000	993	30752	1e46	1.388675	3932557080	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	3000	2977	94240	1e139	13.157199	13693556064	ok
+query	paths per node (outline + outlinePaths, as worldPaths)		nodes	dense32	3000	2977	94240	1e139	0.000000	0	stop:budget
