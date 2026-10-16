@@ -171,6 +171,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Patroni, preferred leader, rolling maintenance, pgBackRest, HAProxy | `Nodes/{Patroni,Patroni/PreferredLeader,Patroni/RollingMaintenance,PgBackRest,Haproxy}.hs` | `specs/pg-patroni.md` |
 | systemd services, jobs, timers | `Nodes/Systemd.hs`, `Nodes/Systemd/Job.hs` | |
 | Podman, quadlets, registry logins | `Nodes/Podman.hs`, `Nodes/Podman/Quadlet.hs` | |
+| Waiting for a service to answer (probe, deadline) | `Nodes/Readiness.hs` | |
 | GCP (compute, DNS, load balancer, storage, secrets) | `Nodes/Gcp/` | `specs/gcloud-support.md`, `resources/gcp-toy-validation.md` |
 | Secrets delivery, deferred sub-graphs | `Nodes/{SecretDelivery,Deferred}.hs` | |
 | pg_turret log shipping (experimental package, Layer 0 only) | `Nodes/PgTurret.hs` in `salmon-ops-recipes-experimental` | |

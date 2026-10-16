@@ -1754,7 +1754,22 @@ node's `notes`; `Nothing`, the default, is the node as it was, pinned in `Quadle
 unchanged, so a later pass sampling a crash-looping unit while `active` still skips it; nothing is rolled back (the old
 container is gone by then); `Notify=healthy`/`HealthCmd` (podman 5) is not rendered; refused on a job. `awaitReady`
 runs in tests against a scripted unit and clock only: the real `systemctl` sampling, both probes and the node's `up`
-with readiness have not been run against a container.
+with readiness have not been run against a container. `Probe`, `describeProbe` and `runProbe` now live in
+`Nodes/Readiness.hs` (re-exported here unchanged; the described text is pinned in `ReadinessSpec`).
+
+`Nodes/Readiness.hs` (`waitUntil`) is the stand-alone wait for a service started by someone else (`podman run -d`, a
+detached process, a unit): a node whose `check` asks a probe once and whose `up` asks every `waitEvery` ms (250 by
+default) until yes or `waitDeadline` seconds, then throws `NotReadyInTime`, so its dependants are `Blocked`. The
+question is a `Probe` (`untilProbe`; `pgIsReady HOST PORT` is the host's `pg_isready --quiet`, `podmanExec NAME CMD
+ARGS` asks inside a container) or any `IO Bool` (`untilIO`, e.g. an HTTP health check the caller writes). A "no" from
+`check` is `Unknown`, not `Failure`: the node cannot make the service answer, so under `serve` it restarts nothing (the
+node running the service is the one whose check should notice it gone); under `run up` it means "wait". `down` does
+nothing. The `Ref` is `wait-until` + the author's key alone; the probe's text is in `help`/`notes`, so it must carry no
+secret on its argv. Each attempt is cut at 5s or the time left (at least 100ms), and a throw is "no"; command probes
+run with a closed stdin pipe. It is new, so no existing declaration renders differently. Run: Layer 0 only
+(`ReadinessSpec`: in-process `IO Bool` probes through `upTree` — turns true after 2s is `Done`, never true with a 1s
+deadline is `Failed` + dependant `Blocked`, already true is `Skip` — the poll loop on a fake clock, and `true`/`false`
+as command probes). Not run: `pg_isready`, `podman exec` or a TCP probe against a real service.
 `containerBinds` (`Bind`, `bind HOST GUEST` to start from) is a bind mount that says what `containerVolumes` cannot:
 `:U`/`:z`/`:Z` after the access mode (`renderBind`, one more `Volume=` line after the plain ones), and a host
 directory created ahead of the quadlet file by `hostDirNode` (`podman-quadlet-bind-dir`, keyed on the path), with an

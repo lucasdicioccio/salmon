@@ -225,7 +225,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.Clock (getMonotonicTimeNSec)
 import Numeric (readOct)
-import qualified Network.Socket as Net
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, removeDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
@@ -235,7 +234,6 @@ import System.Posix.Files (createLink, fileMode, fileSize, getFileStatus, setFil
 import System.Posix.IO (createFile, fdToHandle)
 import System.Posix.Types (FileMode)
 import System.Process (proc, readCreateProcessWithExitCode)
-import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -244,6 +242,7 @@ import Salmon.Builtin.Nodes.Binary (Binary, withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Podman as Podman
+import Salmon.Builtin.Nodes.Readiness (Probe (..), describeProbe, runProbe)
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import qualified Salmon.Builtin.Nodes.Systemd.Job as Job
 import Salmon.Op.OpGraph (OpGraph (..), inject)
@@ -266,17 +265,6 @@ data Lifetime
       LongRunning
     | -- | a job: @Type=oneshot@, the unit is done when the command exits
       RunToCompletion
-    deriving (Eq, Ord, Show)
-
-{- | A question asked from the machine salmon runs on, as whoever runs it,
-whose answer "yes" means the service does its job.
--}
-data Probe
-    = -- | a TCP connection to this host and port is accepted (a published port)
-      ProbeTcp Text Int
-    | -- | this command exits 0. It is run on the /host/; one asking inside
-      -- the container is @ProbeCommand "podman" ["exec", NAME, ...]@
-      ProbeCommand FilePath [Text]
     deriving (Eq, Ord, Show)
 
 {- | What 'quadletContainer''s @up@ waits for after the restart, before it
@@ -313,10 +301,6 @@ describeReadiness rd =
             <> ["active with no restart for " <> seconds rd.readyHold]
   where
     seconds n = Text.pack (show n) <> "s"
-
-describeProbe :: Probe -> Text
-describeProbe (ProbeTcp host port) = "tcp " <> host <> ":" <> Text.pack (show port) <> " accepts"
-describeProbe (ProbeCommand cmd args) = "`" <> Text.unwords (Text.pack cmd : args) <> "` exits 0"
 
 -- | The SELinux relabelling podman does on a bind's host path.
 data Relabel
@@ -1609,28 +1593,6 @@ systemWaiting c =
         , waitSleep = \ms -> threadDelay (ms * 1000)
         , waitNow = (\ns -> fromIntegral (ns `div` 1000000)) <$> getMonotonicTimeNSec
         }
-
--- | One attempt, cut at five seconds; anything thrown is "no".
-runProbe :: Probe -> IO Bool
-runProbe probe = do
-    answer <- timeout 5000000 (try attempt) :: IO (Maybe (Either SomeException Bool))
-    pure $ case answer of
-        Just (Right ok) -> ok
-        _ -> False
-  where
-    attempt :: IO Bool
-    attempt = case probe of
-        ProbeCommand cmd args -> do
-            (code, _out, _err) <- readCreateProcessWithExitCode (proc cmd (map Text.unpack args)) ""
-            pure (code == ExitSuccess)
-        ProbeTcp host port -> do
-            let hints = Net.defaultHints{Net.addrSocketType = Net.Stream}
-            addrs <- Net.getAddrInfo (Just hints) (Just (Text.unpack host)) (Just (show port))
-            case addrs of
-                [] -> pure False
-                addr : _ ->
-                    bracket (Net.openSocket addr) Net.close $ \sock ->
-                        True <$ Net.connect sock (Net.addrAddress addr)
 
 -- | A container that was restarted and is not ready: its unit, and why.
 data NotReady = NotReady !Systemd.UnitTarget !Text
