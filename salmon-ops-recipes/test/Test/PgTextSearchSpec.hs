@@ -51,7 +51,7 @@ import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Reporter (silent)
 
-import Test.Harness (podmanExec_, requireExecutable, runDown, runUp, withContainer, withShimmedPath, withTempDir)
+import Test.Harness (podmanExec_, requireExecutable, runDown, runUp, withContainer, withShimmedPath, withTempDir, writeExecutable)
 
 -------------------------------------------------------------------------------
 -- what was read upstream
@@ -924,18 +924,10 @@ sandbox = requireExecutable "podman" $ requireAll ["dpkg-deb", "dpkg", "unzip", 
         unless (code == ExitSuccess) $ assertFailure ("podman cp " <> src <> " failed:\n" <> out <> err)
         sh_ cid ("chown root:root '" <> dst <> "' && chmod a+rX '" <> dst <> "'")
 
-{- | A @pg_config@ that names two directories. Written by a child, not by
-this process: the suite runs its groups in parallel, and exec'ing a file
-another test's fork still holds open for writing is ETXTBSY.
--}
+-- | A @pg_config@ that names two directories, written by a child (see 'writeExecutable').
 standInPgConfig :: FilePath -> FilePath -> FilePath -> IO ()
-standInPgConfig path lib share = do
-    (code, out, err) <-
-        readProcessWithExitCode
-            "sh"
-            ["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh", path]
-            (unlines ["#!/bin/sh", "case \"$1\" in", "  --pkglibdir) echo '" <> lib <> "' ;;", "  --sharedir) echo '" <> share <> "' ;;", "  *) exit 2 ;;", "esac"])
-    unless (code == ExitSuccess) $ assertFailure ("writing the stand-in pg_config failed:\n" <> out <> err)
+standInPgConfig path lib share =
+    writeExecutable path (unlines ["#!/bin/sh", "case \"$1\" in", "  --pkglibdir) echo '" <> lib <> "' ;;", "  --sharedir) echo '" <> share <> "' ;;", "  *) exit 2 ;;", "esac"])
 
 requireAll :: [String] -> IO () -> IO ()
 requireAll names act = do

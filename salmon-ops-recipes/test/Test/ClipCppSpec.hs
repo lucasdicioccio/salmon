@@ -23,7 +23,6 @@ import Data.List (nub, sort)
 import qualified Data.Text as Text
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory)
 import System.FilePath ((</>))
-import System.Posix.Files (setFileMode)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 
@@ -34,7 +33,7 @@ import Salmon.Builtin.Nodes.ClipCpp
 import Salmon.Builtin.Nodes.Debian.Package (Package (..))
 import Salmon.Op.Eval (expand)
 import Salmon.Reporter (silent)
-import Test.Harness (requireExecutable, runUp, withTempDir)
+import Test.Harness (requireExecutable, runUp, withTempDir, writeExecutable)
 
 source :: ClipSource
 source = clipSourceAt "/opt/clip"
@@ -246,8 +245,7 @@ stubbed = requireExecutable "sh" $ withTempDir $ \tmp -> do
     createDirectoryIfMissing True (tmp </> "clip" </> "build" </> "bin")
     ByteString.writeFile fixtureFile fixture
     writeFile image ""
-    writeFile (clipExtractBinary src) (stubScript logFile fixtureFile)
-    setFileMode (clipExtractBinary src) 0o755
+    writeExecutable (clipExtractBinary src) (stubScript logFile fixtureFile)
 
     assertEqual "no model yet" (Left ("no model at " <> Text.pack (tmp </> "model.gguf"))) =<< embed c (EmbedText "x")
     writeFile (tmp </> "model.gguf") ""

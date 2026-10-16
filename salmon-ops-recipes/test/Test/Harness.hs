@@ -26,6 +26,7 @@ module Test.Harness (
     -- * scratch filesystem
     withTempDir,
     replaceFile,
+    writeExecutable,
     privatePipe,
 
     -- * skipping tests when a precondition isn't met
@@ -86,7 +87,7 @@ import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
 import Salmon.Reporter (Reporter, ReporterM (..))
 import System.CPUTime (getCPUTime)
-import System.Directory (XdgDirectory (XdgConfig), canonicalizePath, createDirectoryIfMissing, findExecutable, getPermissions, getXdgDirectory, renameFile, setOwnerExecutable, setPermissions)
+import System.Directory (XdgDirectory (XdgConfig), canonicalizePath, createDirectoryIfMissing, findExecutable, getXdgDirectory, renameFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -177,6 +178,27 @@ replaceFile path bytes = do
     let tmp = takeDirectory path </> ("." <> takeFileName path <> ".tmp")
     LByteString.writeFile tmp bytes
     renameFile tmp path
+
+{- | Write an executable stand-in (a script some test will exec, or have the
+code under test exec through @PATH@), mode 0755. Use it, never 'writeFile'
+then a chmod, for any file that is executed afterwards.
+
+The bytes are written by a child (@sh -c 'cat > ...'@), not by this process.
+GHC opens files without @O_CLOEXEC@, the suite runs its groups in parallel in
+one process, and nothing passes @close_fds@: a child another group spawns
+while this process holds the script open for writing inherits that
+descriptor and keeps it until it exits, and exec'ing a file anything holds
+open for writing fails with ETXTBSY ("Text file busy"). Marking the handle
+close-on-exec would only narrow that to the window between another child's
+fork and its exec; writing in a child leaves no copy of the write end in
+this process for anyone to inherit. A write-then-rename does not help: the
+rename keeps the inode, and the inode is what is busy.
+-}
+writeExecutable :: FilePath -> String -> IO ()
+writeExecutable path body = do
+    (code, out, err) <- readProcessWithExitCode "sh" ["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh", path] body
+    unless (code == ExitSuccess) $
+        ioError (userError ("writing the executable " <> path <> " failed:\n" <> out <> err))
 
 -- | Layer-2 tests need a real binary on PATH (podman, postgres, ...). Rather
 -- than failing the suite on a machine that doesn't have it, skip loudly:
@@ -349,8 +371,7 @@ withShimmedPath containerId commands act =
   where
     writeShim :: FilePath -> String -> IO ()
     writeShim dir cmd = do
-        let path = dir </> cmd
-        writeFile path $
+        writeExecutable (dir </> cmd) $
             unlines
                 [ -- Absolute shebang on purpose: `#!/usr/bin/env bash` would
                   -- have `env` resolve "bash" via the (now shim-prepended)
@@ -360,8 +381,6 @@ withShimmedPath containerId commands act =
                   "#!/bin/bash"
                 , "exec podman exec -i " <> containerId <> " " <> cmd <> " \"$@\""
                 ]
-        perms <- getPermissions path
-        setPermissions path (setOwnerExecutable True perms)
 
 withPrependedPath :: FilePath -> IO a -> IO a
 withPrependedPath dir act = do
