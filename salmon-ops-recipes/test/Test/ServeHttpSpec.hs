@@ -56,6 +56,7 @@ import qualified Test.ServeApi as Api
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.Query as Query
+import qualified Salmon.Actions.Serve.Events as Events
 import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 import Salmon.Builtin.Extension (Op, Track', deps, down, help, nodeps, op, ref, up)
@@ -85,6 +86,7 @@ tests =
         , testCase "GET / is the web UI's page, /ui/* its files, and a missing one is 404" theWebUi
         , testCase "two seeds colliding on one ref: /dag carries the kept and replaced pair while both are wanted" conflictingPairOnDag
         , testCase "a chain of diamonds: /dag, /status, status, a --select and a status-sink write all answer" diamondChainAnswers
+        , testCase "--http-read-only: every POST /command is 403, reads and stdin still work; read-write by default" readOnlyRefusesCommands
         ]
 
 -------------------------------------------------------------------------------
@@ -187,7 +189,11 @@ withRunning = withRunningMode (pure Serve.Interactive)
 
 -- | 'withRunning' with the server's mode accessor chosen by the test.
 withRunningMode :: IO Serve.Mode -> (Running -> IO a) -> IO a
-withRunningMode mode act =
+withRunningMode = withRunningAccess Http.ReadWrite
+
+-- | 'withRunningMode' with the server's 'Http.Access' chosen.
+withRunningAccess :: Http.Access -> IO Serve.Mode -> (Running -> IO a) -> IO a
+withRunningAccess access mode act =
     withTempDir $ \dir -> do
         let path = dir </> "serve.http"
         (stdinR, stdinW) <- privatePipe
@@ -196,7 +202,7 @@ withRunningMode mode act =
         upsRef <- newIORef Map.empty
         downsRef <- newIORef Map.empty
         slow <- Slow <$> newEmptyMVar <*> newEmptyMVar
-        Http.withHttpServer path seedHelp mode $ \server -> do
+        Http.withHttpServerAccess Events.defaultConfig access [Http.BindUnix path] seedHelp mode $ \server -> do
             let base = (contramap attributed (Tagged.serveStream own), contramap attributed (Tagged.updownStream own))
                 (serveR, updownR) = Http.serverReporters server base
             _ <- forkIO $ do
@@ -710,6 +716,45 @@ theOtherReads =
         assertEqual "wrong method" 405 mna
         (bad, _) <- post running "/command" "status\nhistory"
         assertEqual "two lines in one body" 400 bad
+
+{- | @--http-read-only@: nothing typed over HTTP reaches the loop, whatever
+the line (a declaration, @clear@, @quit@, even @status@), sync, async or as
+a JSON body; the reads answer and stdin still declares. Without the flag
+@\/access@ says read-write.
+-}
+readOnlyRefusesCommands :: IO ()
+readOnlyRefusesCommands = do
+    withRunning $ \running -> do
+        (code, v) <- get running "/access"
+        assertEqual "access status" 200 code
+        assertEqual "the default is read-write" (Just "read-write") (textAt ["access"] v)
+    (ups, w) <- withRunningAccess Http.ReadOnly (pure Serve.Interactive) $ \running -> do
+        (code, v) <- get running "/access"
+        assertEqual "access status" 200 code
+        assertEqual "the server says it is read-only" (Just "read-only") (textAt ["access"] v)
+        forM_ ["up n1", "clear", "quit", "supervise off", "converge", "status"] $ \l -> do
+            (sc, sv) <- post running "/command" l
+            assertEqual ("sync " <> l) 403 sc
+            assertBool ("the refusal says why: " <> show sv) (maybe False ("read-only" `Text.isInfixOf`) (textAt ["error"] sv))
+            (ac, _) <- post running "/command?async" l
+            assertEqual ("async " <> l) 403 ac
+        (jc, _) <- postAs running "application/json" "{\"verb\": \"up\", \"seed\": [\"n1\"]}"
+        assertEqual "a JSON body" 403 jc
+        -- the reads still answer, and nothing above declared anything
+        (hc, hist) <- get running "/history"
+        assertEqual "history status" 200 hc
+        assertEqual "no declaration came in over HTTP" 0 (length (maybe [] arrayOf (field "seeds" hist)))
+        (dc, _) <- get running "/dag"
+        assertEqual "dag status" 200 dc
+        (mna, _) <- post running "/access" "status"
+        assertEqual "access takes no POST" 405 mna
+        -- the operator's own channel is not the HTTP server's to restrict
+        hPutStr (runningStdin running) "up n1\n"
+        w <- finish running
+        ups <- readIORef (runningUps running)
+        pure (ups, w)
+    assertEqual "stdin's declaration was applied, and only it" (Map.fromList [("n1", 1)]) ups
+    assertEqual "one declaration in the world" 1 (length w.worldEpochs)
 
 theWebUi :: IO ()
 theWebUi =

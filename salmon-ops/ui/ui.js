@@ -32,6 +32,7 @@ const state = {
   order: [], // full refs in dagOrder
   seq: 0,
   mode: "–",
+  readOnly: false, // GET /access said read-only (serve --http-read-only)
   converge: null, // last converge-stop {ok, remaining}
   selected: null, // full ref
   source: null, // the EventSource
@@ -1349,6 +1350,7 @@ function renderPanel() {
   for (const verb of ["force", "recheck", "pause", "resume"]) {
     const b = document.createElement("button");
     b.type = "button";
+    b.className = "write";
     b.textContent = verb;
     b.title = `${verb} --select #${n.ref.short}`;
     b.addEventListener("click", () => post(`${verb} --select ${quote("#" + n.ref.short)}`));
@@ -1519,6 +1521,10 @@ function quote(w) {
 async function post(line) {
   line = String(line).trim();
   if (!line) return null;
+  if (state.readOnly) {
+    toast(`read-only view: not sent — ${line}`, "bad");
+    return null;
+  }
   let r;
   let body;
   try {
@@ -1794,6 +1800,7 @@ function renderHistory() {
     if (s.active) {
       const b = document.createElement("button");
       b.type = "button";
+      b.className = "write";
       b.textContent = "down";
       b.title = `down ${words}`;
       b.addEventListener("click", () => post(`down ${words}`));
@@ -1971,6 +1978,23 @@ async function offerSignOut() {
   }
 }
 
+// Under serve --http-read-only every POST /command is refused, so the page
+// hides whatever would send one (`.write`). Not knowing leaves them shown:
+// the server refuses either way, and this is only about not offering it.
+async function checkAccess() {
+  try {
+    const r = await fetch("access", { cache: "no-store" });
+    if (r.status === 401) return signedOut();
+    if (r.ok && (await r.json()).access === "read-only") {
+      state.readOnly = true;
+      document.body.classList.add("spectate");
+    }
+  } catch {
+    // shown buttons, refused by the server, is the worst case
+  }
+  return null;
+}
+
 // A 401 means the session ended — signed out in another tab, expired, or
 // the server restarted — and the sign-in page is the only thing that fixes it.
 function signedOut() {
@@ -1980,5 +2004,6 @@ function signedOut() {
 }
 
 offerSignOut();
+checkAccess();
 setView(storedView(), true);
 loadDag();

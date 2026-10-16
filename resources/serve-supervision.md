@@ -1209,7 +1209,20 @@ unix socket still works — `ssh -L 8080:/run/my-salmon.http host` from
 another machine, or `socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork
 UNIX-CONNECT:/run/my-salmon.http` locally — but bind it to `127.0.0.1`:
 the port inherits none of the socket's file permissions, and whoever
-reaches it has the socket. The layout is a
+reaches it has the socket — any local process, and any web page open in the
+same browser (a blind cross-origin `POST`).
+
+To show the page without handing out the controls, start the loop with
+`--http-read-only`: every HTTP listener (`--http` and `--http-tcp` alike)
+still serves the page, `/dag`, `/status`, `/history`, `/help/seed` and
+`/events`, but answers every `POST /command` with `403` whatever the line —
+before reading the body, so nothing is queued or numbered — and the page,
+reading `GET /access` (`{"access": "read-only"}`), hides its buttons, seed
+form and command line. Stdin and `--listen` are not HTTP and are not
+restricted: the operator who started the loop keeps control. The flag
+alone, with neither HTTP listener, is refused. It does not check `Host` or
+`Origin`, and there is no per-command grain (a harmless `status` is refused
+as well as `clear`). The layout is a
 small longest-path layering with barycentre ordering written in
 `salmon-ops/ui/ui.js` itself — no bundler, no framework, no vendored
 library — so the three files are readable as they are served.

@@ -1075,6 +1075,25 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
   pinning exactly that certificate. Not done: client certificates, a read-only token.
+  **`--http-read-only` (spectate-only)** is `Http.Access` (`ReadWrite`, the default and every
+  version before it, | `ReadOnly`), a field of the one `Server`, chosen through
+  `withHttpServerAccess` (`withHttpServerOn` is it with `ReadWrite`, so existing callers are
+  untouched). Under `ReadOnly`, `POST /command` answers `403 {"error": ...}` whatever the line,
+  sync or `?async`, text or JSON, on the unix and the TCP listener alike, **before the body is
+  read**: no line is parsed, no origin minted, no `enqueued` event numbered, so a refused request
+  leaves no trace on the loop. It is a check inside `application`, not a middleware, because it
+  applies to both listeners. `GET /access` (`{"access": "read-write"|"read-only"}`, answered in
+  both modes) is how the page knows: `ui.js`'s `checkAccess` adds `body.spectate`, the CSS hides
+  every `.write` control (header world actions, the seed form, the panel's mailbox buttons,
+  history's `down`, the command line) and `post` refuses locally; failing to ask leaves them shown,
+  which the server still refuses. Stdin and `--listen` are untouched (the operator keeps control);
+  the flag with neither `--http` nor `--http-tcp` exits 1. *Run:* `ServeHttpSpec`'s
+  `readOnlyRefusesCommands` (six lines sync and async, a JSON body, the reads, stdin still
+  declaring, `/access` both ways, schemas checked), and by hand against
+  `salmon-ops-serve-fixture run serve --http P --http-read-only` with `curl`. *Not run:* the page
+  in a browser under the flag (the CSS/JS path was syntax-checked only), and over `--http-tcp`
+  (same `application`, not separately tested). Not done: `Host`/`Origin` checks in read-write
+  mode, and a finer grain that would let a harmless `status` through.
   **`GET /openapi.json`** answers `salmon-ops/openapi/serve-api.openapi.json`, an OpenAPI 3.1 description of
   every route above, embedded at build time (`Http.openApiDocument`, so a server describes itself with the
   file its build was checked against). It is **hand-written, with a drift test rather than a generator**

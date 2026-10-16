@@ -31,6 +31,9 @@ Milestone 3 of @specs\/generic-server.md@. Four reads and one write:
     replay what the ring still holds after @N@ and go on live, and
     @?stream=@\/@?origin=@ to narrow it. "Salmon.Actions.Serve.Events" is
     the record behind it; this module only writes it to a connection.
+  * @GET \/access@ — whether this server takes commands at all
+    (@{"access": "read-write"}@, or @"read-only"@ under
+    @--http-read-only@, see 'Access'), so the page can hide its buttons.
   * @GET \/@ and @GET \/ui\/*@ — the web UI (milestone 7), a handful of
     static files under @salmon-ops\/ui\/@ compiled into the binary with
     "Data.FileEmbed", so a binary is one file whatever it serves. The
@@ -146,6 +149,10 @@ module Salmon.Actions.Serve.Http (
     serverBoundTcp,
     withHttpServer,
     withHttpServerWith,
+
+    -- * Spectate-only
+    Access (..),
+    withHttpServerAccess,
 
     -- * Over the network
     Bind (..),
@@ -275,7 +282,26 @@ data Server = Server
     , serverStopped :: TVar Bool
     -- ^ set on the way out, so a request waiting on a loop that has ended
     -- answers with what it has rather than never
+    , serverAccess :: Access
+    -- ^ whether @POST \/command@ is taken at all ('ReadOnly': never)
     }
+
+{- | What the HTTP surface lets a client do. 'ReadWrite' is every version of
+@--http@ before the choice existed; 'ReadOnly' (@run serve --http-read-only@)
+answers every @POST \/command@ with @403@ whatever the line, before the body
+is read or anything is queued, on every listener of the server alike, so no
+HTTP request can change what the loop converges towards, its supervision,
+or end it. The reads, @\/events@ and the page are unchanged, and the page
+asks @GET \/access@ to hide its buttons. The loop's other inputs (stdin,
+@--listen@'s socket) are not this server's to restrict: the operator who
+started the loop keeps control of it.
+-}
+data Access = ReadWrite | ReadOnly
+    deriving (Eq, Show)
+
+accessName :: Access -> Text
+accessName ReadWrite = "read-write"
+accessName ReadOnly = "read-only"
 
 -- | The reports a synchronous command has been answered with so far.
 data Collector = Collector
@@ -341,8 +367,12 @@ this call rather than a listener thread dying quietly behind a running loop.
 Binds are taken in order and released in reverse; the action runs once
 every one of them is listening.
 -}
-withHttpServerOn :: forall a. Events.Config -> [Bind] -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
-withHttpServerOn cfg binds seedHelp mode act = do
+withHttpServerOn :: Events.Config -> [Bind] -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
+withHttpServerOn cfg = withHttpServerAccess cfg ReadWrite
+
+-- | 'withHttpServerOn' with the 'Access' chosen ('ReadOnly' for @--http-read-only@).
+withHttpServerAccess :: forall a. Events.Config -> Access -> [Bind] -> Text -> IO Serve.Mode -> (Server -> IO a) -> IO a
+withHttpServerAccess cfg access binds seedHelp mode act = do
     server <-
         Server name
             <$> newTVarIO []
@@ -354,6 +384,7 @@ withHttpServerOn cfg binds seedHelp mode act = do
             <*> Events.newEvents cfg
             <*> pure mode
             <*> newTVarIO False
+            <*> pure access
     listenOn server binds
   where
     name :: String
@@ -1013,6 +1044,7 @@ application server req respond =
                         ]
                     )
         ("POST", ["command"]) -> command >>= respond
+        ("GET", ["access"]) -> respond (json HTTP.status200 (object ["access" .= accessName (serverAccess server)]))
         ("GET", ["events"]) -> events
         ("GET", []) -> respond (static "index.html")
         ("GET", ["openapi.json"]) -> respond (Wai.responseLBS HTTP.status200 [(HTTP.hContentType, "application/json")] (LByteString.fromStrict openApiDocument))
@@ -1028,6 +1060,7 @@ application server req respond =
         (_, ["history"]) -> respond (methodNotAllowed ["GET"])
         (_, ["help", "seed"]) -> respond (methodNotAllowed ["GET"])
         (_, ["command"]) -> respond (methodNotAllowed ["POST"])
+        (_, ["access"]) -> respond (methodNotAllowed ["GET"])
         (_, []) -> respond (methodNotAllowed ["GET"])
         (_, "ui" : _) -> respond (methodNotAllowed ["GET"])
         _ -> respond (failure HTTP.status404 "no such resource")
@@ -1066,7 +1099,15 @@ application server req respond =
     withElided n v = object ["report" .= v, "elided" .= n]
 
     command :: IO Response
-    command = do
+    command
+        | serverAccess server == ReadOnly =
+            -- refused before the body is read: no line is parsed, numbered
+            -- or queued, so a refused request leaves no trace on the loop
+            pure (failure HTTP.status403 "this server is read-only (run serve --http-read-only): it takes no command over HTTP")
+        | otherwise = command'
+
+    command' :: IO Response
+    command' = do
         body <- Wai.strictRequestBody req
         case commandLine req body of
             Left err -> pure (failure HTTP.status400 err)
