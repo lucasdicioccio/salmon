@@ -25,6 +25,7 @@ module SreBox.Gcp.CloudRunAlerts (
     defaultAlertThresholds,
     CloudRunAlertsConfig (..),
     standardAlerts,
+    standardAlertsAfter,
     standardPolicies,
     Report (..),
 ) where
@@ -87,8 +88,19 @@ data CloudRunAlertsConfig = CloudRunAlertsConfig
 
 -- | The channel and the policies, under one node.
 standardAlerts :: Reporter Report -> Track' (Binary "gcloud") -> CloudRunAlertsConfig -> Op
-standardAlerts r gcloudTrack cfg =
-    op "gcp-cloudrun-alerts" (deps (map (Monitoring.alertPolicy rMon gcloudTrack) (standardPolicies cfg))) $ \actions ->
+standardAlerts = standardAlertsAfter []
+
+{- | 'standardAlerts', with nodes every policy and the channel wait for
+(@monitoring.googleapis.com@ enabled, typically).
+
+The node returned (@gcp-cloudrun-alerts@) has no effect of its own: a node
+@inject@ed onto it is a sibling of the policies and the channel, not
+something they wait for. These go under each of them instead. With @[]@ the
+graph is 'standardAlerts''s, unchanged.
+-}
+standardAlertsAfter :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> CloudRunAlertsConfig -> Op
+standardAlertsAfter prerequisites r gcloudTrack cfg =
+    op "gcp-cloudrun-alerts" (deps (map (Monitoring.alertPolicyAfter prerequisites rMon gcloudTrack) (standardPolicies cfg))) $ \actions ->
         actions
             { help = Text.unwords ["the standard alerts for Cloud Run service", cfg.cra_service, "to", cfg.cra_email]
             , ref = mkRef "gcp-cloudrun-alerts" (cfg.cra_project.projectId, cfg.cra_region.regionName, cfg.cra_service)

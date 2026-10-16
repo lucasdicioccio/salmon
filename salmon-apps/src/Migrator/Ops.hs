@@ -67,13 +67,22 @@ migrate arg =
   where
     initPg = Track (\connstring -> initdb connstring `inject` passfile connstring)
 
+    -- The owner's password file is 'FS.Generated' by the same node as
+    -- 'passfile', so the owner's role (created inside 'PGInit.setupPG', and
+    -- reading that file) waits for it. Injected onto the 'initdb' node alone,
+    -- it was a sibling of that role and nothing ordered the two: 'initdb'
+    -- only groups the nodes doing the work. The injection is kept, it
+    -- leaves that node's edges as they were.
     initdb :: Postgres.ConnString FilePath -> Op
     initdb ownerConnstring =
-        PGInit.setupMultiUserPG
+        PGInit.setupPG
             reportPrint
-            ownerConnstring
-            [(u, p, [], []) | (u, p) <- users]
-            []
+            ( PGInit.InitSetup
+                ownerConnstring.connstring_db
+                (ownerConnstring.connstring_user, FS.Generated extrapassfile ownerConnstring.connstring_user_pass)
+                [(u, p, [], []) | (u, p) <- users]
+                []
+            )
 
     users :: [(Postgres.User, FS.File "passfile")]
     users = [(u, FS.Generated extrapassfile p) | (u, p) <- arg.setup_extra_users]

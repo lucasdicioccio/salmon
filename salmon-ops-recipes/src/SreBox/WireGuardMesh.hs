@@ -496,8 +496,11 @@ hostOp r bins h =
             (Text.intercalate "," l.link_allowed_ips)
             l.link_keepalive
 
+    -- Each peer is injected the interface's key and port, not only the
+    -- grouping node: that one has no effect, and what is injected onto it
+    -- alone is a sibling of the peers, not something they wait for.
     peers :: Op
-    peers = op "wireguard-mesh-peers" (deps (peerOp <$> h.host_peers)) id `inject` serverIface
+    peers = op "wireguard-mesh-peers" (deps ((`inject` serverIface) . peerOp <$> h.host_peers)) id `inject` serverIface
 
     pinOps = [pinHostRoute ip_r bins a `inject` peers | a <- h.host_exit_pins]
 

@@ -90,6 +90,7 @@ import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepRetentionSpec as UpkeepRetentionSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
 import qualified Test.WindowSpec as WindowSpec
+import qualified Test.WrapperOrderingSpec as WrapperOrderingSpec
 
 import Test.Tasty (DependencyType (..), TestTree, defaultMain, sequentialTestGroup, testGroup)
 
@@ -219,4 +220,5 @@ main =
             , UpkeepSpec.tests
             , UpkeepRetentionSpec.tests
             , WindowSpec.tests
+            , WrapperOrderingSpec.tests
             ]

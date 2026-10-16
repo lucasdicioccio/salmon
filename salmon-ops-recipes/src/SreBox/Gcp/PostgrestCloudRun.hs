@@ -161,11 +161,19 @@ postgrestCloudRun r gcloudTrack podmanTrack cfg =
 
     (localCert, localKey, localCa) = cfg.pcr_clientMaterial
 
+    -- The entrypoint goes under the build and the secrets and grants under
+    -- the deploy, through 'CloudRunDeploy.buildPushDeployAfter':
+    -- @gcp-cloudrun-deploy@ has no effect of its own, and injected onto it
+    -- alone they were siblings of the build and the deploy, which could then
+    -- run first. The injections onto it are kept, they leave that node's
+    -- edges as they were.
     deploy :: Op
     deploy =
         foldl
             inject
-            ( CloudRunDeploy.buildPushDeploy
+            ( CloudRunDeploy.buildPushDeployAfter
+                [entrypoint]
+                secretsAndGrants
                 rDeploy
                 gcloudTrack
                 podmanTrack

@@ -94,9 +94,12 @@ serverVpn r bins spec =
     privkeyTrack :: Track' FilePath
     privkeyTrack = Track $ WG.privateKey bins.binWg
 
+    -- Each peer is injected the interface's key and port, not only the
+    -- grouping node: that one has no effect, and what is injected onto it
+    -- alone is a sibling of the peers, not something they wait for.
     wgSetup :: Op
     wgSetup =
-        op "wireguard-vpn-server-peers" (deps $ fmap addPeer spec.server_clients) id
+        op "wireguard-vpn-server-peers" (deps $ fmap ((`inject` serverIface) . addPeer) spec.server_clients) id
             `inject` serverIface
 
     serverIface :: Op

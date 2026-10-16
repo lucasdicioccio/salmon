@@ -3168,6 +3168,45 @@ load-balancer scripts, which call `gcloud` from bash, start with `CLOUDSDK_CORE_
 else in the four packages starts a process another way (no `callProcess`, no other `createProcess`).
 Not run against a real project: what each gcloud command does with its default under `--quiet`.
 
+**Inject onto the node that does the work, not onto a node grouping it.** A node built with
+`op name (deps [...]) id` (or one setting only `help`/`ref`) has no effect, and `x \`inject\` y`
+adds `y` to `x`'s predecessors only: the fold reads all of a node's predecessors as "depends on",
+unordered among themselves, so `y` is a *sibling* of the nodes `x` groups. A one-shot pass visits
+siblings in listed order (and `inject` lists `y` first), which hid it; a failed `y` did not stop
+the work, and `run serve` converges siblings concurrently. `Self` was the first case fixed (the
+call is now the node returned). The sweep (feature 492abed7) fixed, edges only:
+`PostgresInit.setupPG` (grants and the ownership after the database, a role after the groups and
+the database: injected onto `pg-user-grants`/`pg-db-ownership`/`pg-users`, they were siblings;
+a grant could run before `CREATE DATABASE`); `Migrator.Ops`' init (the owner's password file was
+injected onto `pg-setup`, a sibling of the owner role that reads it; the owner is now
+`FS.Generated` by that same secret node, which drops the owner's `pre-existing-file` placeholder
+node, the one change to the node set); `Postgrest.postgrestMigratedApi` (migration and init were
+both injected onto the effect-less `postgrest` node, siblings of the service and of each other:
+now the migration waits for the init and the service's call for the migration, through
+`PostgresMigrations.remoteMigrateOpaqueSetupAfter`); `PostgresTls.postgresClientCertAuth` (the
+material was a sibling of `ALTER SYSTEM SET ssl...` and the reload under `pg-server-tls`:
+`Postgres.serverTlsAfter`); `WireGuardMesh.hostOp` and `WireGuardVpn.serverVpn` (each peer now
+waits for `wireguard-server`; a peer on an interface with no key yet is accepted by the kernel, so
+this was intent rather than a failure); `Gcp.PostgrestCloudRun` (the entrypoint the Containerfile
+copies, and the secrets and grants the revision mounts, were siblings of the build and the
+deploy: `CloudRunDeploy.buildPushDeployAfter beforeBuild beforeDeploy`); `GcpToy` tier 1 (the Run
+API, repository and account onto `gcp-cloudrun-deploy`, the monitoring API onto
+`gcp-cloudrun-alerts`: also `CloudRunAlerts.standardAlertsAfter`/`Monitoring.alertPolicyAfter`,
+which put it under each channel too). Each `*After` with `[]` is the old function's graph; the
+old injections onto the grouping nodes are kept, so those nodes' edges are as they were. Neither
+list of `buildPushDeployAfter` may hold the recipe's own repository node (a self-edge).
+**Run (Layer 0 only):** `Test.WrapperOrderingSpec` (six recipes, every working node has the
+prerequisite below it on the folded `Dag`, no conflicts) and `Test.GcpToySpec` "tier 1"; all
+seven fail against the previous sources. The `ref`/shorthand/`help`/`notes`/`dynamics` of every
+node of the six fixtures were compared before and after: identical. Not run: any of these recipes
+against Postgres, WireGuard or GCP, and `Migrator` has no graph test (its `Spec` is not exported).
+Left as found: `KitchenSinkMultiSites` (experimental, not built here) injects `mkRemoteDir` onto
+the effect-less `uploads-ks-stanza-certs`/`-src` nodes, so the rsyncs do not wait for the
+directory; `WireGuardVpn.clientVpn`'s `128/1 \`inject\` 0/1 \`inject\` pin` leaves the `0/1` route
+and the pin unordered (not a wrapper: two injections onto one node are siblings too);
+`DNSRegistration.registerMachine` lists its cron task beside the token and key moves, unordered
+(not looked into).
+
 ## The seed → spec → ops CLI protocol
 
 Every salmon binary (see `salmon-apps/src/Migrator.hs` as the worked example) exposes two

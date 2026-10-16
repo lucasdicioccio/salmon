@@ -57,12 +57,25 @@ setupWithPreExistingPasswords setup =
   where
     (ownerUser, ownerPass) = setup.init_setup_owner
 
--- | generate a db with a given sets of users, all having some rights
+{- | generate a db with a given sets of users, all having some rights
+
+The @pg-*@ nodes grouping users, groups, grants and memberships have no
+effect of their own, and 'inject' onto one of them adds a predecessor to it,
+not to the nodes it groups: those would be siblings of what was injected,
+unordered (under @run serve@, concurrent). So each ordering is said on the
+nodes doing the work: a role after the groups and the database, the
+ownership and every grant after the database. (A membership already stands
+on its group and its role.) The injections onto the grouping nodes are
+kept: they order nothing more, and leave those nodes' edges as they were.
+-}
 setupPG :: Reporter Report -> InitSetup (FS.File "passfile") -> Op
 setupPG r setup =
     op "pg-setup" (deps [memberships, groupAcls, userAcls `inject` basics]) id
   where
     basics = op "pg-basics" (deps [users `inject` groups `inject` db, dbOwner `inject` db]) id
+
+    afterDb :: Op -> Op
+    afterDb o = o `inject` db
 
     cluster = Track $ Postgres.pgLocalCluster (contramap InitPostgres r) Debian.postgres Debian.pg_ctlcluster
 
@@ -70,12 +83,12 @@ setupPG r setup =
 
     db = Postgres.database (contramap InitPostgres r) cluster Debian.psql port setup.init_setup_database
 
-    groups = op "pg-groups" (deps $ fmap group setup.init_setup_groups) id
+    groups = op "pg-groups" (deps $ fmap (afterDb . group) setup.init_setup_groups) id
 
     group (g, _) =
         Postgres.group (contramap InitPostgres r) cluster Debian.psql port g
 
-    users = op "pg-users" (deps $ fmap user setup.init_setup_users) id
+    users = op "pg-users" (deps $ fmap (\u -> afterDb (user u) `inject` groups) setup.init_setup_users) id
 
     -- roundabout ways to generate users and owner user
     baseUser u pass =
@@ -91,7 +104,7 @@ setupPG r setup =
     trackgroupsFromAclsByCreatingAllGroups = Track $ const groups
     trackOwnerRoleForUser = Track $ const owner
 
-    dbOwner = op "pg-db-ownership" (deps [ownership]) id
+    dbOwner = op "pg-db-ownership" (deps [afterDb ownership]) id
       where
         ownership =
             Postgres.databaseOnwership
@@ -104,7 +117,7 @@ setupPG r setup =
                 trackOwnerRoleForUser
                 (Postgres.UserRole $ fst setup.init_setup_owner)
 
-    userAcls = op "pg-user-grants" (deps $ fmap acl setup.init_setup_users) id
+    userAcls = op "pg-user-grants" (deps $ fmap (afterDb . acl) setup.init_setup_users) id
       where
         acl (u, _, rights, _) =
             Postgres.grant
@@ -114,7 +127,7 @@ setupPG r setup =
                 trackuserFromAclsByCreatingAllUsers
                 (Postgres.AccessRight setup.init_setup_database (Postgres.UserRole u) rights)
 
-    groupAcls = op "pg-group-grants" (deps $ fmap acl setup.init_setup_groups) id
+    groupAcls = op "pg-group-grants" (deps $ fmap (afterDb . acl) setup.init_setup_groups) id
       where
         acl (g, rights) =
             Postgres.grant

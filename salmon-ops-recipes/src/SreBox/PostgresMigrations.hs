@@ -179,8 +179,29 @@ remoteMigrateOpaqueSetup ::
     (Either PrepareRemoteMigrationSetup MigrationSetup -> directive) ->
     RemoteMigrateConfig TrackedIO ->
     Op
-remoteMigrateOpaqueSetup uniquename r simulate selfRemote selfpath toSpec cfg =
-    op "migrate-remotely" (deps [opaquemigration `inject` uploadsecrets]) $ \actions ->
+remoteMigrateOpaqueSetup = remoteMigrateOpaqueSetupAfter []
+
+{- | 'remoteMigrateOpaqueSetup', with nodes the migration itself waits for
+(the database and roles it migrates, typically).
+
+The node returned (@migrate-remotely@) has no effect of its own: a node
+@inject@ed onto it is a sibling of the migration, not something the
+migration waits for. These go under the node that migrates. With @[]@ the
+graph is 'remoteMigrateOpaqueSetup''s, unchanged.
+-}
+remoteMigrateOpaqueSetupAfter ::
+    (FromJSON directive, ToJSON directive) =>
+    [Op] ->
+    Text ->
+    Reporter Report ->
+    Track' directive ->
+    Self.Remote ->
+    Self.SelfPath ->
+    (Either PrepareRemoteMigrationSetup MigrationSetup -> directive) ->
+    RemoteMigrateConfig TrackedIO ->
+    Op
+remoteMigrateOpaqueSetupAfter prerequisites uniquename r simulate selfRemote selfpath toSpec cfg =
+    op "migrate-remotely" (deps [Prelude.foldl inject opaquemigration prerequisites `inject` uploadsecrets]) $ \actions ->
         actions
             { help = Text.unwords ["remotely apply the (opaque) migration", uniquename]
             , ref = mkRef "remote-migrate" uniquename
