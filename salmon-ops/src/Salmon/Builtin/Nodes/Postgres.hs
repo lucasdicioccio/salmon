@@ -1238,20 +1238,35 @@ connection. (That also means a __broken__ certificate is not noticed until
 something tries to connect, since the reload itself succeeds.)
 -}
 serverTls :: Reporter Report -> Track' (Binary "psql") -> Port -> ServerTls -> Op
-serverTls r psql port tls =
+serverTls = serverTlsAfter []
+
+{- | 'serverTls', with nodes every setting and the reload wait for: the
+certificate, key and CA in place with the ownership postgres demands,
+typically.
+
+The node returned (@pg-server-tls@) has no effect of its own: a node
+@inject@ed onto it is a sibling of the settings and the reload, which may
+then run first and point the cluster at a key not yet there. These go under
+each of them instead. With @[]@ the graph is 'serverTls''s, unchanged.
+-}
+serverTlsAfter :: [Op] -> Reporter Report -> Track' (Binary "psql") -> Port -> ServerTls -> Op
+serverTlsAfter prerequisites r psql port tls =
     op "pg-server-tls" (deps [reload]) $ \actions ->
         actions
             { ref = mkRef "pg-server-tls" (port, tls.tls_certFile)
             , help = Text.unwords ["serves TLS on port", Text.pack (show port)]
             }
   where
-    reload = foldl inject (reloadConf r psql port) settings
+    after o = foldl inject o prerequisites
+    reload = foldl inject (after (reloadConf r psql port)) settings
     settings =
-        [ alterSystemSet r psql port "ssl" "on"
-        , alterSystemSet r psql port "ssl_cert_file" (Text.pack tls.tls_certFile)
-        , alterSystemSet r psql port "ssl_key_file" (Text.pack tls.tls_keyFile)
-        , alterSystemSet r psql port "ssl_ca_file" (Text.pack tls.tls_caFile)
-        ]
+        map
+            after
+            [ alterSystemSet r psql port "ssl" "on"
+            , alterSystemSet r psql port "ssl_cert_file" (Text.pack tls.tls_certFile)
+            , alterSystemSet r psql port "ssl_key_file" (Text.pack tls.tls_keyFile)
+            , alterSystemSet r psql port "ssl_ca_file" (Text.pack tls.tls_caFile)
+            ]
 
 allowReplicationFrom :: Reporter Report -> Track' (Binary "pg_ctlcluster") -> ClusterName -> RoleName -> AllowedCidr -> Op
 allowReplicationFrom r pgctl name replRole cidr =

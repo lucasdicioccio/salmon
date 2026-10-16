@@ -792,7 +792,15 @@ dnsZoneNode spec zone =
 
 tier1 :: Spec -> [Op]
 tier1 spec =
-    [ CloudRunDeploy.buildPushDeploy
+    -- The API, the repository and the account go under the deploy (through
+    -- 'CloudRunDeploy.buildPushDeployAfter'), and the API under every policy
+    -- and channel (through 'CloudRunAlerts.standardAlertsAfter'): the nodes
+    -- these return have no effect of their own, and injected onto them alone
+    -- those were siblings of the deploy and of the policies. The injections
+    -- onto them are kept, they leave those nodes' edges as they were.
+    [ CloudRunDeploy.buildPushDeployAfter
+        []
+        [api spec "run.googleapis.com", repository spec, serviceAccount spec]
         reportPrint
         Core.gcloud
         ignoreTrack
@@ -814,7 +822,8 @@ tier1 spec =
         `inject` repository spec
         `inject` serviceAccount spec
     ]
-        <> [ CloudRunAlerts.standardAlerts
+        <> [ CloudRunAlerts.standardAlertsAfter
+            [api spec Monitoring.monitoringApi]
             reportPrint
             Core.gcloud
             CloudRunAlerts.CloudRunAlertsConfig

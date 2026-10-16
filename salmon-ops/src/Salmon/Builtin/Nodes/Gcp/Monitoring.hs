@@ -52,6 +52,7 @@ module Salmon.Builtin.Nodes.Gcp.Monitoring (
     CloudRunCondition (..),
     AlertPolicy (..),
     alertPolicy,
+    alertPolicyAfter,
     renderCondition,
     renderPolicy,
     policyFingerprint,
@@ -90,6 +91,7 @@ import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), untrackedExec, withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject)
+import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref
 import Salmon.Op.Track
 import Salmon.Reporter
@@ -279,8 +281,18 @@ data AlertPolicy = AlertPolicy
 the fingerprint label; @down@ deletes what the lookup finds.
 -}
 alertPolicy :: Reporter Report -> Track' (Binary "gcloud") -> AlertPolicy -> Op
-alertPolicy r gcloudTrack policy =
-    withBinary gcloudTrack monitoringCommand (PoliciesList policy) $ \_list ->
+alertPolicy = alertPolicyAfter []
+
+{- | 'alertPolicy', with nodes the policy and each of its channels wait for
+(@monitoring.googleapis.com@ enabled, typically).
+
+A node @inject@ed onto the policy waits before the policy only: its channels
+are its dependencies, and siblings of what was injected. These go under the
+channels as well. With @[]@ the graph is 'alertPolicy''s, unchanged.
+-}
+alertPolicyAfter :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> AlertPolicy -> Op
+alertPolicyAfter prerequisites r gcloudTrack policy =
+    after $ withBinary gcloudTrack monitoringCommand (PoliciesList policy) $ \_list ->
         op "gcp-monitoring-policy" (deps channelNodes) $ \actions ->
             actions
                 { help = Text.unwords ["alert policy", policy.apDisplayName, "on Cloud Run service", policy.apTarget.crtService]
@@ -294,7 +306,8 @@ alertPolicy r gcloudTrack policy =
                 , check = checkPolicy
                 }
   where
-    channelNodes = map (notificationChannel r gcloudTrack) policy.apChannels
+    after o = foldl inject o prerequisites
+    channelNodes = map (after . notificationChannel r gcloudTrack) policy.apChannels
 
     run :: MonitoringCommand -> IO ()
     run cmd = untrackedExec monitoringCommand cmd "" (contramap (RunMonitoringCommand cmd) r)

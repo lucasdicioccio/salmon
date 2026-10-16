@@ -335,8 +335,15 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
                 ]
             )
 
+    -- 'prest', the @migrate-remotely@ node and 'initDB' only group the
+    -- nodes doing the work, and what is injected onto one of them is a
+    -- sibling of that work: the order is said under the working nodes
+    -- instead (the migration waits for the database and roles, the service
+    -- for the migration). The injections onto the grouping nodes are kept;
+    -- they leave those nodes' edges as they were.
     migrateDBWithUser =
-        PGMigrate.remoteMigrateOpaqueSetup
+        PGMigrate.remoteMigrateOpaqueSetupAfter
+            [initDB]
             cfg.pma_serviceName
             (contramap Migration r)
             simulate
@@ -352,7 +359,7 @@ postgrestMigratedApi r simulate toSpec0 toSpec1 toSpec2 selfpath remoteSelf mkJw
                 []
             )
 
-    prest = op "postgrest" (deps [setupPrest]) $ \actions ->
+    prest = op "postgrest" (deps [setupPrest `inject` migrateDBWithUser]) $ \actions ->
         actions
             { ref = mkRef "prest-service" cfg.pma_serviceName
             }

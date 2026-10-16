@@ -46,6 +46,7 @@ tests =
         , testCase "the peer keeps the default account and scopes" peerUnchanged
         , testCase "tiers 1 and 3 log in to the registry through one node" oneLogin
         , testCase "no declaration collides with another" noConflicts
+        , testCase "tier 1: the deploy waits for its API and account, every policy and channel for theirs" tierOneOrder
         ]
 
 -------------------------------------------------------------------------------
@@ -220,6 +221,28 @@ noConflicts =
         , ("control, tier 2", specAt 2)
         , ("on the VM, tier 3", onTheVm (specAt 3))
         ]
+
+{- | 'CloudRunDeploy.buildPushDeploy' and 'CloudRunAlerts.standardAlerts'
+return a node with no effect of its own, so what tier 1 used to inject onto
+them was a sibling of the deploy and of the policies, not something they
+waited for.
+-}
+tierOneOrder :: IO ()
+tierOneOrder = do
+    let s = (specAt 1){alertEmail = Just "ops@example.com"}
+        dag = dagOf s
+    service <- theOne "deploys CloudRun service salmon-toy-hello" dag
+    runApi <- theOne "enables the run.googleapis.com API" dag
+    account <- theOne "creates service account salmon-toy-sa" dag
+    monitoring <- theOne "enables the monitoring.googleapis.com API" dag
+    assertBool "the deploy waits for the Cloud Run API" (runApi `Set.member` below dag service)
+    assertBool "the deploy waits for the account it runs as" (account `Set.member` below dag service)
+    let policies = named "alert policy" dag
+        channels = named "notification channel" dag
+    assertBool "there are policies" (not (null policies))
+    assertBool "there is a channel" (not (null channels))
+    mapM_ (\rf -> assertBool ("waits for the monitoring API: " <> show rf) (monitoring `Set.member` below dag rf)) (policies <> channels)
+    assertEqual "no declaration collides with another" 0 (length (Dag.dagConflicts dag))
 
 _unused :: ()
 _unused = const () (dynamics, notes, ref)

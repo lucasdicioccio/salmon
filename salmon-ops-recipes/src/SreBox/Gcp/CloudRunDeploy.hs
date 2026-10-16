@@ -22,6 +22,7 @@ impossible rather than merely unlikely -- see 'Podman.AuthFile'’s own note.
 module SreBox.Gcp.CloudRunDeploy (
     CloudRunDeployConfig (..),
     buildPushDeploy,
+    buildPushDeployAfter,
     Report (..),
 ) where
 
@@ -88,7 +89,30 @@ buildPushDeploy ::
     Track' (Binary "podman") ->
     CloudRunDeployConfig ->
     Op
-buildPushDeploy r gcloudTrack podmanTrack cfg =
+buildPushDeploy = buildPushDeployAfter [] []
+
+{- | 'buildPushDeploy', with nodes the build waits for (a file the
+Containerfile copies, say), and nodes the deploy waits for (the Cloud Run
+API, the service account, the secrets the revision mounts and their grants).
+
+The node returned (@gcp-cloudrun-deploy@) has no effect of its own: a node
+@inject@ed onto it is a sibling of the build, the push and the deploy, not
+something they wait for. These go under the build and under the deploy
+instead. Neither list may hold a node of this recipe's own (the repository,
+say): that would be a node waiting for itself. With @[] []@ the graph is
+'buildPushDeploy''s, unchanged.
+-}
+buildPushDeployAfter ::
+    -- | under the build (so under the push and the deploy too)
+    [Op] ->
+    -- | under the deploy
+    [Op] ->
+    Reporter Report ->
+    Track' (Binary "gcloud") ->
+    Track' (Binary "podman") ->
+    CloudRunDeployConfig ->
+    Op
+buildPushDeployAfter beforeBuild beforeDeploy r gcloudTrack podmanTrack cfg =
     op "gcp-cloudrun-deploy" (deps [deployed]) $ \actions ->
         actions
             { help = Text.unwords ["builds, pushes and deploys", cfg.crd_image, "as CloudRun service", cfg.crd_service]
@@ -116,7 +140,7 @@ buildPushDeploy r gcloudTrack podmanTrack cfg =
             `inject` repo
 
     built :: Op
-    built = Podman.buildImage rPodman podmanTrack cfg.crd_containerfile cfg.crd_image
+    built = foldl inject (Podman.buildImage rPodman podmanTrack cfg.crd_containerfile cfg.crd_image) beforeBuild
 
     pushed :: Op
     pushed =
@@ -127,7 +151,10 @@ buildPushDeploy r gcloudTrack podmanTrack cfg =
             `inject` loggedIn
 
     deployed :: Op
-    deployed =
+    deployed = foldl inject service beforeDeploy
+
+    service :: Op
+    service =
         CloudRun.cloudRunService
             rCloudRun
             gcloudTrack

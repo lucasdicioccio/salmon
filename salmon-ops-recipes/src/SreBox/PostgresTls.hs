@@ -157,9 +157,14 @@ postgresClientCertAuth r psql pgctl materialTrack cfg =
             client.ca_cidr
             `inject` tls
 
+    -- The material goes under the settings and the reload themselves:
+    -- @pg-server-tls@ has no effect of its own, and injected onto it alone
+    -- the material was their sibling, so @ssl = on@ and a reload could come
+    -- before the key was in place. The injection onto it is kept, it
+    -- leaves that node's edges as they were.
     tls :: Op
     tls =
-        Postgres.serverTls rPg psql cfg.pgcc_port cfg.pgcc_tls
+        Postgres.serverTlsAfter [ownedMaterial] rPg psql cfg.pgcc_port cfg.pgcc_tls
             `inject` ownedMaterial
 
     -- Postgres refuses to start with a group- or world-readable key, and
