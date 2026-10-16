@@ -352,8 +352,9 @@ every shape at 20 000 nodes. The million-node case is opt-in
 `-rtsopts` for that): it was run once, every shape walked per node and `Chain` and `Tree 2`
 expanded and folded, in about two minutes and 1.1 GiB. *Not run by that spec:* any driver or
 measurement (the profiles below do both). `Fan` is left out of the large fold on purpose:
-`Dag.record` keeps a node's edges as a list it searches on each insert, so one node over a
-million others is quadratic there (since measured: 1.3 s at 10 000, see the profiles).
+`Dag.record` kept a node's edges as a list it searched on each insert, so one node over a
+million others was quadratic there (measured: 1.3 s at 10 000, see the profiles; fixed since,
+see "Edge lists" under `Op/Dag.hs`; the spec was not changed to add it back).
 `dagOf :: Op -> Dag Extension` builds what `foldDag . evalDeps` builds by visiting each node
 once (same nodes, edges and `dagOrder`; first declaration of a colliding `Ref` wins and no
 conflict is recorded). It predates the per-node `foldDag` and is kept because it shares no code
@@ -376,8 +377,9 @@ slower. Operations that read the expansion are sized by occurrences, the others 
 `foldDag` was per path (58-node diamond chain: 3.8 s, doubling per diamond, and a `serve`
 declaration with it; **fixed since**, see `Op/Dag.hs` below: 100 000 nodes of diamond chain fold
 in about 2 s); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
-`startUpkeep` (chain of 3 000: 2 s); a node with many edges is quadratic in `record`,
-`fromMagma`, `transposeOf` and `Query.outline`; listed paths cost depth per node in time and
+`startUpkeep` (chain of 3 000: 2 s); a node with many edges was quadratic in `record`,
+`fromMagma`, `transposeOf` and `Query.outline` (**fixed since**, see "Edge lists" under
+`Op/Dag.hs`; rows `edge-lists-{before,after}.tsv`); listed paths cost depth per node in time and
 memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes did
 not fit in 4 GB. The `foldDag`, `Client.Model.step` and supervisor ones are fixed (see
 `Op/Dag.hs`, `Client/Model.hs` and `Actions/Upkeep.hs` below; their before and after rows are
@@ -826,8 +828,41 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   dependencies x their dependencies per node (never more than the old fold paid: every
   occurrence looked at was visited before). The expansion must be lazy for any of this to help:
   `evalDeps` and `expandDag` over `Identity` are; an `expand` in a strict monad has paid per path
-  before the fold is called. `Dag.record`'s edge lists are still searched and appended on every
-  insert, so one node over many others is still quadratic (the profile's finding 3, not touched).
+  before the fold is called. One node over many others was quadratic in `Dag.record`'s edge
+  lists (the profile's finding 3): fixed since, see "Edge lists" just below.
+  **Edge lists (finding 3).** `dagDependencies`/`dagDependants` are still `Map Ref [Ref]` in
+  first-seen order without repeats (every consumer reads them as lists, and the order is what
+  `dagOrder`-driven reports and the fold's tie-breaks see), but nothing builds them by "`elem`
+  then `<> [x]`" any more. `record`, `mergeDag`, `foldDag` and `fromMagma` go through an internal
+  `Building`: the `Dag` plus, per *touched* key, an `Edges` (a `Set Ref` beside the list
+  reversed), so an insert is a `Set.member` and a cons; `built` reverses the touched lists back
+  once and `Map.union`s them over the untouched entries. So a run of records costs what it
+  touches, not the `Dag` it starts from (merging a small graph into a big one stays small), and a
+  single `record` call is now one `Building` round trip (it pays `log k` per edge plus turning the
+  touched lists into sets once, where it used to pay `k` per edge). `fromMagma`'s incoming lists
+  and `transposeOf` cons and reverse once instead of `fromListWith (flip (<>))`, which appended on
+  the right. `Query.outline` keeps a `Set` of children per entry and of roots beside the lists it
+  already had, for `linked`; the lists, and so every order, are what they were. `transposeOf` is
+  now exported (for the tests), and `Query` exports `outlineRoots`/`outlineChildren` (read-only).
+  *What was run:* `Test.EdgeListSpec` (Layer 0) against `Test.EdgeListReference`, which keeps
+  the appending `record`, `fromMagma`, `transposeOf`, `mergeDag` and `outline` verbatim: unit
+  cases (a fan, a node forty others depend on recorded in a shuffled order, repeated edges and a
+  self-edge, one node declared twice in either order, records onto a built `Dag`, `fromMagma` and
+  `transposeOf` on both fans, the outline of a fan; each pins the order and compares with the
+  reference), properties against the reference (2 000 runs of random records, from empty and
+  onto a reference-built `Dag`, comparing nodes, both edge maps, order and conflicts; 1 000 each
+  for `mergeDag`, `fromMagma` with edges outside the magma, `transposeOf` with repeats; 500
+  fixture graphs of every shape and edge form, the fold against the per-occurrence fold run on the
+  appending `record`, and the outline field by field), two laws (1 000 each: `transposeOf` twice
+  is the identity on a closed map without repeats, up to order and exactly when lists are in key
+  order; `fromMagma` is unchanged by re-inserting a present edge and inverts `dagEdges`), and a
+  guard at 100 000 nodes (a fan through the fold, `fromMagma`, `mergeDag` and the outline, and
+  every node over one through `fromMagma` and `transposeOf`, a minute each). The `graph-profiles`
+  rows for these operations were re-run before and after (`resources/graph-profiles.md`, "After
+  the edge lists"). *Not covered:* random record runs are at most 12 sites and 5 dependencies a
+  step (the fixtures and the guard cover size); fixture properties have no colliding `Ref`s (the
+  conflicts are covered by the random record runs); `addEdge` and `collapseInto` were not
+  rewritten beyond `transposeOf` (`addEdge` still transposes the whole map per edge).
   *What was run:* `Test.DagPerNodeSpec` (Layer 0), with the old fold kept verbatim as
   `Test.DagReference.foldDagPerOccurrence` and the precondition as `Test.DagReference.coherent`:
   unit cases (every fixture shape at sizes up to 20, a colliding `Ref`, the conflict count, last
@@ -1075,6 +1110,25 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   certificate with `Certificates.certificateAuthority` (v3; `selfSign`/`caSign` write X.509 v1,
   which crypton's validation rejects as `LeafNotV3`) and drives it with `http-client-tls`
   pinning exactly that certificate. Not done: client certificates, a read-only token.
+  **`--http-read-only` (spectate-only)** is `Http.Access` (`ReadWrite`, the default and every
+  version before it, | `ReadOnly`), a field of the one `Server`, chosen through
+  `withHttpServerAccess` (`withHttpServerOn` is it with `ReadWrite`, so existing callers are
+  untouched). Under `ReadOnly`, `POST /command` answers `403 {"error": ...}` whatever the line,
+  sync or `?async`, text or JSON, on the unix and the TCP listener alike, **before the body is
+  read**: no line is parsed, no origin minted, no `enqueued` event numbered, so a refused request
+  leaves no trace on the loop. It is a check inside `application`, not a middleware, because it
+  applies to both listeners. `GET /access` (`{"access": "read-write"|"read-only"}`, answered in
+  both modes) is how the page knows: `ui.js`'s `checkAccess` adds `body.spectate`, the CSS hides
+  every `.write` control (header world actions, the seed form, the panel's mailbox buttons,
+  history's `down`, the command line) and `post` refuses locally; failing to ask leaves them shown,
+  which the server still refuses. Stdin and `--listen` are untouched (the operator keeps control);
+  the flag with neither `--http` nor `--http-tcp` exits 1. *Run:* `ServeHttpSpec`'s
+  `readOnlyRefusesCommands` (six lines sync and async, a JSON body, the reads, stdin still
+  declaring, `/access` both ways, schemas checked), and by hand against
+  `salmon-ops-serve-fixture run serve --http P --http-read-only` with `curl`. *Not run:* the page
+  in a browser under the flag (the CSS/JS path was syntax-checked only), and over `--http-tcp`
+  (same `application`, not separately tested). Not done: `Host`/`Origin` checks in read-write
+  mode, and a finer grain that would let a harmless `status` through.
   **`GET /openapi.json`** answers `salmon-ops/openapi/serve-api.openapi.json`, an OpenAPI 3.1 description of
   every route above, embedded at build time (`Http.openApiDocument`, so a server describes itself with the
   file its build was checked against). It is **hand-written, with a drift test rather than a generator**
@@ -1212,7 +1266,23 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   touches the inbox, so no write ever stands a machine down, and a host gone quiet is one whose
   `written` is old, not one whose file says all is well. A write that fails is `Serve.SinkFailed`
   — once per run of failures, re-armed by the next success, emitted from the sink's thread and
-  attributed to nobody — and the loop keeps serving. The fetcher's `Applied` gained `appliedAt`
+  attributed to nobody — and the loop keeps serving. **Load-bearing: `writeNow` re-throws an
+  asynchronous exception** instead of reporting it. `withSink` ends the writer with `withAsync`'s
+  cancel, which waits uninterruptibly for the writer to be gone; when `writeNow` caught that cancel
+  as one more failed write (`SinkFailed ... AsyncCancelled`), the writer kept looping and the wait
+  never returned, so `quit` never returned either under `--status-sink`. The test could not be
+  interrupted either (in the hung runs SIGINT did nothing, and SIGTERM worked once and was
+  ignored twice). This was a product defect, not only a test
+  one. It was the Layer 0 hang (`StatusSinkSpec`'s two-host case, roughly 1 run in 100, more under
+  load, whenever the cancel landed mid-write). `Test/StatusSinkSpec.hs` pins it by making the
+  status read block, so the cancel always lands inside the write; `withHost` there runs the loop
+  on its own thread and fails after 20s instead of hanging. The two `ServeSpec` ticker shells that
+  were seen alive in hung runs were a consequence, not the cause: `quit` leaves a managed process
+  running, so every run kept them until the process exited, and one that lost the race with
+  its temp dir's removal outlived the suite. Those cases now let go of the ticker before
+  leaving (`releaseManaged`: `autoconverge on`, `clear`, then wait for `Released`), and
+  `withTickers` kills any recorded group that is still there. The shells spawn with `close_fds`,
+  and `withSession` uses `privatePipe` and still ends its loop when the body throws. The fetcher's `Applied` gained `appliedAt`
   and its cell is made by the caller (`Follow.newApplied`, beside `newMode`) so `Followed` can
   carry `followedApplied :: IO [AppliedDocument]`; the spec's "the sink is an op in the host's
   graph" was not done, because a node runs *in* a pass and the sink must write *after* it. The
@@ -1685,7 +1755,22 @@ node's `notes`; `Nothing`, the default, is the node as it was, pinned in `Quadle
 unchanged, so a later pass sampling a crash-looping unit while `active` still skips it; nothing is rolled back (the old
 container is gone by then); `Notify=healthy`/`HealthCmd` (podman 5) is not rendered; refused on a job. `awaitReady`
 runs in tests against a scripted unit and clock only: the real `systemctl` sampling, both probes and the node's `up`
-with readiness have not been run against a container.
+with readiness have not been run against a container. `Probe`, `describeProbe` and `runProbe` now live in
+`Nodes/Readiness.hs` (re-exported here unchanged; the described text is pinned in `ReadinessSpec`).
+
+`Nodes/Readiness.hs` (`waitUntil`) is the stand-alone wait for a service started by someone else (`podman run -d`, a
+detached process, a unit): a node whose `check` asks a probe once and whose `up` asks every `waitEvery` ms (250 by
+default) until yes or `waitDeadline` seconds, then throws `NotReadyInTime`, so its dependants are `Blocked`. The
+question is a `Probe` (`untilProbe`; `pgIsReady HOST PORT` is the host's `pg_isready --quiet`, `podmanExec NAME CMD
+ARGS` asks inside a container) or any `IO Bool` (`untilIO`, e.g. an HTTP health check the caller writes). A "no" from
+`check` is `Unknown`, not `Failure`: the node cannot make the service answer, so under `serve` it restarts nothing (the
+node running the service is the one whose check should notice it gone); under `run up` it means "wait". `down` does
+nothing. The `Ref` is `wait-until` + the author's key alone; the probe's text is in `help`/`notes`, so it must carry no
+secret on its argv. Each attempt is cut at 5s or the time left (at least 100ms), and a throw is "no"; command probes
+run with a closed stdin pipe. It is new, so no existing declaration renders differently. Run: Layer 0 only
+(`ReadinessSpec`: in-process `IO Bool` probes through `upTree` — turns true after 2s is `Done`, never true with a 1s
+deadline is `Failed` + dependant `Blocked`, already true is `Skip` — the poll loop on a fake clock, and `true`/`false`
+as command probes). Not run: `pg_isready`, `podman exec` or a TCP probe against a real service.
 `containerBinds` (`Bind`, `bind HOST GUEST` to start from) is a bind mount that says what `containerVolumes` cannot:
 `:U`/`:z`/`:Z` after the access mode (`renderBind`, one more `Volume=` line after the plain ones), and a host
 directory created ahead of the quadlet file by `hostDirNode` (`podman-quadlet-bind-dir`, keyed on the path), with an

@@ -17,7 +17,7 @@ one.
 module Test.StatusSinkSpec (tests) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Concurrent.STM (TChan, atomically, newTChanIO, readTChan, writeTChan)
 import Control.Exception (SomeException, throwIO, try)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
@@ -53,7 +53,7 @@ import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (mkRef)
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (Reporter, contramap, reportBoth, silent)
+import Salmon.Reporter (Reporter, contramap, reportBoth, runReporter, silent)
 import qualified Salmon.Reporter.Tagged as Tagged
 
 import Test.Harness (capture, replaceFile, withTempDir)
@@ -64,6 +64,7 @@ tests =
         "Salmon.Actions.Serve.StatusSink and Salmon.Actions.Fleet"
         [ testCase "two loops, one registry, one sink directory: each document names its own host, label, id and mode; rewritten after a typed convergence and after an injection; the fold shows both" twoHostsOneDirectory
         , testCase "an unwritable sink path is reported once and the loop keeps serving" unwritableSink
+        , testCase "the sink stops when its body returns even with the writer mid-write, and the cancel is no failed write" cancelledMidWrite
         , testCase "the fold: both hosts, the label filter, the stale flag, the node counts" pureFold
         , testCase "a URL sink POSTs the same document to a server, after each trigger and on the interval" postedSink
         , testCase "a URL sink that is refused is reported once, the loop keeps serving, and a later answer of 2xx resumes it" refusedPostSink
@@ -88,7 +89,7 @@ sinkHostFlag = do
   where
     parsed args =
         case Opt.execParserPure Opt.defaultPrefs (Opt.info CommandLine.runCommandParser mempty) args of
-            Opt.Success (CommandLine.RunServe _ _ _ _ _ _ _ _ _ sink _) -> pure sink
+            Opt.Success (CommandLine.RunServe _ _ _ _ _ _ _ _ _ sink _ _) -> pure sink
             Opt.Success other -> assertFailure ("not a serve command: " <> show other)
             Opt.Failure f -> assertFailure ("parse failed: " <> fst (Opt.renderFailure f "salmon"))
             Opt.CompletionInvoked _ -> assertFailure "completion"
@@ -176,11 +177,14 @@ withHost root host sinkPath labels body = do
                 , followReports = readFollow
                 }
     resultVar <- newTChanIO
+    loopVar <- newEmptyMVar
     _ <- forkIO $ do
         outcome <- try (body driver)
         atomically (writeTChan stdinChan Nothing)
         atomically (writeTChan resultVar outcome)
-    w <- StatusSink.withSink cfg (Just followed) own $ \sink -> do
+    -- the loop and its sink on a thread of their own, so that one that does
+    -- not stop is a failure that says so rather than a suite that never ends
+    _ <- forkIO $ (putMVar loopVar =<<) . try $ StatusSink.withSink cfg (Just followed) own $ \sink -> do
         let tagged = reportBoth own (StatusSink.sinkReporter sink)
             producers =
                 [ Follow.follower (Tagged.followStream tagged) pk modeVar appliedVar follow (putMVar gate ())
@@ -199,6 +203,11 @@ withHost root host sinkPath labels body = do
             (Just followed)
             producers
     outcome <- atomically (readTChan resultVar)
+    ended <- timeout (20 * 1000000) (takeMVar loopVar)
+    w <- case ended of
+        Nothing -> assertFailure ("host " <> Text.unpack host <> ": the loop and its sink did not stop within 20s of the end of input")
+        Just (Left (ex :: SomeException)) -> throwIO ex
+        Just (Right w) -> pure w
     case outcome of
         Left (ex :: SomeException) -> throwIO ex
         Right a -> (,,,) w <$> readServe <*> readFollow <*> pure a
@@ -329,6 +338,41 @@ twoHostsOneDirectory =
         pure $ case eitherDecode bytes of
             Right (Object o) -> KeyMap.lookup key o
             _ -> Nothing
+
+{- | What hung the Layer 0 suite about one run in a hundred: the writer
+caught the cancel 'StatusSink.withSink' ends it with as one more failed
+write ("SinkFailed ... AsyncCancelled"), went on looping, and 'withAsync''s
+uninterruptible wait for it never returned, so neither did the loop's
+@quit@ — and nothing could interrupt the test either. Here the status read
+is made to block, so the cancel lands inside the write every time rather
+than once in a hundred. 'withSink' runs on its own thread so that a
+regression is a failure with a message, not a hang.
+-}
+cancelledMidWrite :: IO ()
+cancelledMidWrite =
+    withTempDir $ \root -> do
+        (own, readOwn) <- capture :: IO (Reporter Tagged.Tagged, IO [Tagged.Tagged])
+        entered <- newEmptyMVar
+        finished <- newEmptyMVar
+        let cfg = StatusSink.Config{StatusSink.configPath = root </> "zeta.json", StatusSink.configInterval = 1000000, StatusSink.configHost = "zeta"}
+            slowWorld = do
+                _ <- tryPutMVar entered ()
+                threadDelay (30 * 1000000)
+                pure (Serve.emptyWorld :: World Spec Spec)
+        _ <- forkIO $ do
+            outcome <- try $ StatusSink.withSink cfg Nothing own $ \sink -> do
+                StatusSink.sinkObserver sink slowWorld
+                -- a pass ending wakes the writer at once
+                runReporter (StatusSink.sinkReporter sink) (Tagged.FromServe (Serve.ConvergeStop True 0))
+                takeMVar entered
+            putMVar finished (outcome :: Either SomeException ())
+        ended <- timeout (10 * 1000000) (takeMVar finished)
+        case ended of
+            Nothing -> assertFailure "withSink did not return: the writer swallowed its cancel"
+            Just (Left ex) -> assertFailure ("withSink threw: " <> show ex)
+            Just (Right ()) -> pure ()
+        reports <- readOwn
+        assertEqual "the cancel is not reported as a failed write" [] [() | Tagged.FromServe Serve.SinkFailed{} <- reports]
 
 {- | The sink's directory is a regular file, so neither the temp file nor
 the rename can succeed. One report, then silence; the loop still answers. -}

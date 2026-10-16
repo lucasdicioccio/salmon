@@ -12,6 +12,7 @@ small.
 -}
 module Test.DagReference (
     foldDagPerOccurrence,
+    foldDagPerOccurrenceWith,
     coherent,
     occurrences,
 ) where
@@ -41,7 +42,20 @@ foldDagPerOccurrence ::
     (Act ext -> Act ext -> Bool) ->
     Cofree Graph (OpGraph m (Actions ext)) ->
     Dag ext
-foldDagPerOccurrence same = go emptyDag
+foldDagPerOccurrence = foldDagPerOccurrenceWith record
+
+{- | 'foldDagPerOccurrence' with the 'record' to use given: the tests of
+"Test.EdgeListSpec" pass the appending one of "Test.EdgeListReference", to
+compare the fold with what it was before edge lists stopped appending.
+-}
+foldDagPerOccurrenceWith ::
+    forall m ext.
+    (HasField "ref" ext Ref) =>
+    ((Act ext -> Act ext -> Bool) -> Ref -> Act ext -> [Ref] -> Dag ext -> Dag ext) ->
+    (Act ext -> Act ext -> Bool) ->
+    Cofree Graph (OpGraph m (Actions ext)) ->
+    Dag ext
+foldDagPerOccurrenceWith record' same = go emptyDag
   where
     go ::
         Dag ext ->
@@ -54,7 +68,7 @@ foldDagPerOccurrence same = go emptyDag
                 let aref = getField @"ref" act.extension
                     preds = effPreds g
                     predRefs = nubOrd [pr | p <- preds, Just pr <- [refOf p]]
-                 in foldl' go (record same aref act predRefs dag) preds
+                 in foldl' go (record' same aref act predRefs dag) preds
 
 -- | The nearest 'Ref'-carrying subtrees below a node, through any glue.
 effPreds ::

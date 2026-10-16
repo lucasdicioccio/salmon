@@ -87,7 +87,7 @@ module Salmon.Actions.Serve.StatusSink (
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM (atomically, newTVarIO, readTVar, registerDelay, retry, writeTVar)
 import Control.Concurrent.STM.TVar (TVar)
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import Control.Monad (forever, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LByteString
@@ -207,7 +207,10 @@ data Sink = Sink
 
 {- | Run a sink for the body's lifetime. The writer thread is cancelled
 when the body returns, mid-write or not — the temporary file is the only
-casualty, never the document.
+casualty, never the document. 'withAsync' waits for the writer to be gone
+before returning, uninterruptibly, so the writer must let the cancel
+through: 'writeNow' re-throws an asynchronous exception rather than report
+it as a failed write.
 -}
 withSink :: Config -> Maybe Followed -> Reporter Tagged -> (Sink -> IO a) -> IO a
 withSink cfg followed own body = do
@@ -296,6 +299,12 @@ writeNow sink = do
                     Nothing -> writeAtomically sink.sinkConfig.configPath (encode doc)
             case attempt of
                 Right () -> writeIORef sink.sinkComplained False
+                -- the cancel 'withSink' ends the writer with: caught here,
+                -- the writer would carry on and 'withAsync''s
+                -- uninterruptible wait for it would never return, which
+                -- is the whole loop never returning from @quit@.
+                Left (ex :: SomeException)
+                    | Just (_ :: SomeAsyncException) <- fromException ex -> throwIO ex
                 Left (ex :: SomeException) -> do
                     complained <- readIORef sink.sinkComplained
                     unless complained $ do

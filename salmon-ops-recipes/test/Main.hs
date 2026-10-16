@@ -10,6 +10,7 @@ import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagPerNodeSpec as DagPerNodeSpec
+import qualified Test.EdgeListSpec as EdgeListSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.GraphFixtureSpec as GraphFixtureSpec
 import qualified Test.GraphScaleSpec as GraphScaleSpec
@@ -67,6 +68,7 @@ import qualified Test.QemuResolveKernelSpec as QemuResolveKernelSpec
 import qualified Test.QemuShutdownSpec as QemuShutdownSpec
 import qualified Test.QemuSmokeSpec as QemuSmokeSpec
 import qualified Test.QuerySpec as QuerySpec
+import qualified Test.ReadinessSpec as ReadinessSpec
 import qualified Test.RemoteOutputSpec as RemoteOutputSpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
@@ -145,6 +147,7 @@ main =
             , RemoteOutputSpec.tests
             , DagSpec.tests
             , DagPerNodeSpec.tests
+            , EdgeListSpec.tests
             , GraphFixtureSpec.tests
             , GraphScaleSpec.tests
             , AptRepositorySpec.tests
@@ -193,6 +196,7 @@ main =
             , QemuResolveKernelSpec.tests
             , QemuShutdownSpec.tests
             , QuerySpec.tests
+            , ReadinessSpec.tests
             , ReportJsonSpec.tests
             , RewriteSpec.tests
             , ServeEventsSpec.tests
