@@ -80,8 +80,13 @@ module Salmon.Op.Dag (
 ) where
 
 import Control.Comonad.Cofree (Cofree (..))
+import Control.Monad (foldM)
+import Data.Array (Array, accumArray)
+import Data.Array.ST (newListArray, readArray, runSTUArray, writeArray)
+import Data.Array.Unboxed (UArray, (!))
 import Data.Dynamic (Dynamic, fromDynamic)
 import Data.Foldable (toList)
+import qualified Data.IntSet as IntSet
 import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -194,7 +199,17 @@ everything behind one.
 
 @waitsOn@ is what a node waits for in the direction of interest —
 'dependenciesOf' going up, 'dependantsOf' coming down. Kahn's algorithm, and
-what is left over when it runs out of ready nodes is the answer.
+what is left over when it runs out of ready nodes is the answer. Only the
+nodes of the 'Dag' count: a 'Ref' @waitsOn@ names that the 'Dag' does not
+hold is never waited for.
+
+One pass: each node keeps a count of the waits still outstanding, and a node
+that becomes ready decrements its waiters once, so the cost is
+O((nodes + edges) log nodes) for numbering the 'Ref's each wait names, and
+linear after that. It used to recompute the ready set over all the
+remaining nodes once per round, which is one round per level of depth and so
+quadratic on a chain (2 s on a 3 000-node chain, @resources\/graph-profiles.md@).
+"Test.DagStuckSpec" checks the two agree.
 
 Worth having because a 'Dag' assembled from a flat edge set /can/ describe a
 cycle, unlike one folded from an expanded 'Control.Comonad.Cofree.Cofree':
@@ -203,16 +218,51 @@ neighbours would wait forever on such a node, so it needs to know up front
 which nodes those are rather than discovering it by hanging.
 -}
 stuck :: (Dag ext -> Ref -> [Ref]) -> Dag ext -> Set Ref
-stuck waitsOn dag = go (Set.fromList (dagOrder dag))
+stuck waitsOn dag =
+    Set.fromDistinctAscList [r | (i, r) <- numbered, outstanding ! i > 0]
   where
-    go remaining =
-        let ready =
-                Set.filter
-                    (\r -> all (`Set.notMember` remaining) (waitsOn dag r))
-                    remaining
-         in if Set.null ready
-                then remaining
-                else go (remaining `Set.difference` ready)
+    -- every node numbered by its position among the keys of 'dagNodes'
+    -- (which are the nodes of 'dagOrder', by the invariant), so that the
+    -- walk below indexes arrays rather than comparing 'Ref's, and numbering
+    -- costs no map of its own.
+    numbered :: [(Int, Ref)]
+    numbered = zip [0 ..] (Map.keys (dagNodes dag))
+
+    bounds' :: (Int, Int)
+    bounds' = (0, Map.size (dagNodes dag) - 1)
+
+    -- what each node waits on, restricted to the nodes of the 'Dag' (a 'Ref'
+    -- it has never seen is never waited for) and deduplicated (a repeat is
+    -- one wait, as with 'all').
+    waits :: [(Int, [Int])]
+    waits =
+        [ (i, IntSet.toList (IntSet.fromList [j | w <- waitsOn dag r, Just j <- [Map.lookupIndex w (dagNodes dag)]]))
+        | (i, r) <- numbered
+        ]
+
+    -- the transpose of 'waits': who is released, one wait at a time, when a
+    -- node becomes ready. A self-wait lands here too and is never released,
+    -- since a node that waits on itself never becomes ready.
+    releases :: Array Int [Int]
+    releases = accumArray (flip (:)) [] bounds' [(j, i) | (i, ws) <- waits, j <- ws]
+
+    -- Kahn's algorithm with a count of outstanding waits per node: each node
+    -- becomes ready at most once and releases its waiters then, so each wait
+    -- is looked at once instead of once per round. What is left above zero
+    -- is the answer.
+    outstanding :: UArray Int Int
+    outstanding = runSTUArray $ do
+        counts <- newListArray bounds' [length ws | (_, ws) <- waits]
+        let drain [] = pure ()
+            drain (i : queue) = do
+                freed <- foldM (release counts) [] (releases ! i)
+                drain (freed <> queue)
+            release counts' freed waiter = do
+                k <- readArray counts' waiter
+                writeArray counts' waiter (k - 1)
+                pure (if k == 1 then waiter : freed else freed)
+        drain [i | (i, ws) <- waits, null ws]
+        pure counts
 
 -------------------------------------------------------------------------------
 

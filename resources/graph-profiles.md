@@ -113,7 +113,7 @@ not itself profiled.
    nodes) and by `query plan` (4.5 s). The outline and the selectors do **not** hit it: they are
    per node on the same shapes (100 000-node chain of diamonds outlined in 0.7 s).
 2. **`Dag.stuck` is quadratic in depth, and every concurrent pass and every `startUpkeep` calls
-   it.** Chain: 2.0 s at 3 000 nodes (`n^2.2`). Diamonds: 13.6 s at 10 000. The
+   it.** (Fixed since: see "After `stuck` in one pass".) Chain: 2.0 s at 3 000 nodes (`n^2.2`). Diamonds: 13.6 s at 10 000. The
    concurrent walk on a chain costs what `stuck` costs (1.9 s at 3 000), so does `startUpkeep`
    (1.5 s), and so does a `serve` pass (1.9 s up, 1.8 s down, at 3 000). The sequential walk over
    the same chain is 1.0 s at 100 000. On a shallow shape the concurrent walk is fine: tree2 is
@@ -158,14 +158,14 @@ not itself profiled.
 
 ### Candidate follow-ups
 
-One per finding worth fixing, in the order the numbers suggest. The first and the fifth are done.
+One per finding worth fixing, in the order the numbers suggest. The first, second, third, fifth and sixth are done.
 
 1. `foldDag` per node instead of per occurrence (finding 1): it bounds `run up`/`down`/`tree`/
    `dag`, `query plan` and every `serve` declaration at a few dozen nodes of diamond chain.
    **Done since, under a precondition and with two accepted behaviour changes: see "After the
    per-node fold".**
 2. `Dag.stuck` in one pass (finding 2): it bounds every concurrent pass and every tending start
-   on a deep graph at a few thousand nodes.
+   on a deep graph at a few thousand nodes. **Done**: see "After `stuck` in one pass".
 3. Edge lists that do not search or append on the right, in `Dag.record`, `fromMagma`,
    `transposeOf` and `Query.outline` (finding 3). **Done**: see "After the edge lists". The
    wake-up cost of a node waiting on many neighbours is a separate question, not touched.
@@ -386,6 +386,72 @@ What the numbers say, and what they do not:
   `Test.DagReference` does).
 - **Not measured:** the 1 000 000-node run; the concurrent walk over a fan (the wake-ups,
   outside this change); a quiet machine.
+
+## After `stuck` in one pass
+
+`Dag.stuck` keeps a count of outstanding waits per node in an unboxed array and releases a
+node's waiters once, when it becomes ready, instead of re-filtering every remaining node once per
+level of depth. Same answer (`Test.DagStuckSpec` compares it with the rounds, kept as
+`Test.DagReference.stuckRounds`; see `resources/module-notes.md` under `Op/Dag.hs`, "`stuck` in
+one pass").
+
+**What was run.** One run, 2026-10-16, same machine as above, the rounds and the one pass in the
+same run (the benchmark has a `stuckRounds` series for this), budget 10 s, cap 100 000 nodes,
+load average 2.6 to 4 from other work; then the concurrent walks and `startUpkeep` on two deep
+shapes, budget 6 s, load average 7 to 11 (something else ran meanwhile, so those times are
+pessimistic):
+
+```sh
+cabal bench salmon-ops-recipes:graph-profiles --benchmark-options='--max-size 100000 --budget 10 \
+  --only stuck --out rows.tsv'
+cabal bench salmon-ops-recipes:graph-profiles --benchmark-options='--max-size 100000 --budget 6 \
+  --only DagConcurrent --only "tend nodes already up" --shape chain --shape diamonds2 --out rows.tsv'
+```
+
+The rows are `resources/graph-profiles/stuck-one-pass.tsv`. **Indicative**: one run on a shared
+machine.
+
+| operation | chain | fan | tree2 | diamonds2 | layered8x2 | random8x3 | dense32 |
+|---|---|---|---|---|---|---|---|
+| stuck, rounds (before) | n^2.3, 3.0k: 2.1 s (timeout at 10.0k) | n^1.2, 100.0k: 154 ms | n^1.3, 100.0k: 464 ms | n^2.3, 10.0k: 20.7 s | n^2.2, 10.0k: 4.5 s | n^2.2, 10.0k: 4.6 s | n^2.1, 30.0k: 20.9 s |
+| stuck, one pass, up | n^1.3, 100.0k: 183 ms, 59 MB | n^1.2, 100.0k: 153 ms, 100 MB | n^1.3, 100.0k: 169 ms, 61 MB | n^1.3, 100.0k: 213 ms, 69 MB | n^1.3, 100.0k: 278 ms, 87 MB | n^1.3, 100.0k: 497 ms, 119 MB | n^1.4, 100.0k: 7.5 s, 1.3 GB |
+| stuck, one pass, down | n^1.3, 100.0k: 176 ms, 59 MB | n^1.1, 100.0k: 72 ms, 59 MB | n^1.3, 100.0k: 164 ms, 59 MB | n^1.3, 100.0k: 222 ms, 69 MB | n^1.3, 100.0k: 265 ms, 87 MB | n^1.4, 100.0k: 506 ms, 120 MB | n^1.3, 100.0k: 6.0 s, 1.3 GB |
+
+By depth, waiting on dependencies (seconds):
+
+| nodes | chain, rounds | chain, one pass | diamonds2, rounds | diamonds2, one pass | dense32, rounds | dense32, one pass |
+|---|---|---|---|---|---|---|
+| 1 000 | 0.167 | 0.0005 | 0.112 | 0.0006 | 0.014 | 0.013 |
+| 3 000 | 2.08 | 0.0020 | 1.37 | 0.0023 | 0.117 | 0.057 |
+| 10 000 | (timeout) | 0.0086 | 20.7 | 0.011 | 1.60 | 0.21 |
+| 30 000 | | 0.038 | | 0.053 | 20.9 | 0.81 |
+| 100 000 | | 0.18 | | 0.21 | | 7.5 |
+
+What the drivers gained (before: the "Up to 100 000 nodes" tables):
+
+| operation | chain, before | chain, after | diamonds2, before | diamonds2, after |
+|---|---|---|---|---|
+| upDagConcurrent | 3.0k: 1.9 s (timeout at 10.0k) | 3.0k: 82 ms; 100.0k: 8.8 s | 10.0k: 13.5 s | 10.0k: 0.55 s; 30.0k: 2.7 s |
+| downDagConcurrent | 3.0k: 1.8 s (timeout at 10.0k) | 3.0k: 73 ms; 30.0k: 2.2 s | 10.0k: 12.4 s | 10.0k: 0.75 s; 100.0k: 9.6 s |
+| startUpkeep (settled) | 3.0k: 1.5 s | 3.0k: 0.38 s; 30.0k: 4.2 s | | 10.0k: 1.2 s; 30.0k: 3.2 s |
+
+What the numbers say, and what they do not:
+
+- **Depth no longer matters.** The one pass is `n^1.1` to `n^1.4` on every shape (the exponent
+  above 1 is the `log n` of numbering the `Ref`s and the collector, as for every other per-node
+  series here), and the chain and the chain of diamonds, which stopped at 3 000 and 10 000, reach
+  the cap in about 0.2 s. dense32 has 32 edges per node, so its 100 000 nodes are 3.2 million
+  waits: 7.5 s is about 2 µs per wait.
+- **Where the rounds were already cheap, no worse.** On a fan (one round) the two are equal going
+  up and the one pass is three times faster coming down; tree2 (seventeen rounds) is three times
+  faster.
+- **The concurrent walks and `startUpkeep` are now bounded by something else.** The concurrent
+  walk on a chain went from 1.9 s at 3 000 to 82 ms; it still grows faster than linearly (one
+  thread and one `TVar` per node, finding 3's wake-ups on a node with many neighbours), and its
+  series end on the budget between 30 000 and 100 000. Those times were taken at a high load
+  average.
+- **Not measured:** the `serve` passes (they go through the concurrent walk and were not re-run);
+  the 1 000 000-node run; a quiet machine.
 
 ## Not measured
 

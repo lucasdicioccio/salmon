@@ -138,6 +138,7 @@ library
                    , Salmon.Reporter
                    , Salmon.Reporter.Tagged
     build-depends:    base >=4.16.3.0 && <4.22
+                    , array
                     , async
                     , aeson
                     , base64-bytestring

@@ -15,6 +15,7 @@ module Test.DagReference (
     foldDagPerOccurrenceWith,
     coherent,
     occurrences,
+    stuckRounds,
 ) where
 
 import Control.Comonad.Cofree (Cofree (..))
@@ -25,7 +26,7 @@ import qualified Data.Set as Set
 import GHC.Records (HasField (..))
 
 import Salmon.Op.Actions
-import Salmon.Op.Dag (Dag, emptyDag, record)
+import Salmon.Op.Dag (Dag, dagOrder, emptyDag, record)
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
 import Salmon.Op.Ref
@@ -171,6 +172,26 @@ coherent same root = all agree (Map.elems groups)
         a.occRef == b.occRef
             && a.occPredRefs == b.occPredRefs
             && same a.occAct b.occAct
+
+{- | 'Salmon.Op.Dag.stuck' as it was before it went one pass, kept as the
+reference the one-pass version is tested against ("Test.DagStuckSpec") and
+compared with in the @graph-profiles@ benchmark.
+
+Kahn's algorithm by rounds: each round recomputes the ready set over every
+node still remaining, so a graph @d@ levels deep costs @d@ rounds of up to
+every node each, quadratic on a chain.
+-}
+stuckRounds :: (Dag ext -> Ref -> [Ref]) -> Dag ext -> Set.Set Ref
+stuckRounds waitsOn dag = go (Set.fromList (dagOrder dag))
+  where
+    go remaining =
+        let ready =
+                Set.filter
+                    (\r -> all (`Set.notMember` remaining) (waitsOn dag r))
+                    remaining
+         in if Set.null ready
+                then remaining
+                else go (remaining `Set.difference` ready)
 
 -- | order-preserving dedup.
 nubOrd :: (Ord b) => [b] -> [b]

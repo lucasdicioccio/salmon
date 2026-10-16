@@ -1,0 +1,226 @@
+dag	stuck (waiting on dependencies)		nodes	chain	100	100	99	100	0.000038	64096	ok
+dag	stuck (waiting on dependencies)		nodes	chain	300	300	299	300	0.000133	178792	ok
+dag	stuck (waiting on dependencies)		nodes	chain	1000	1000	999	1000	0.000508	593192	ok
+dag	stuck (waiting on dependencies)		nodes	chain	3000	3000	2999	3000	0.002004	1777208	ok
+dag	stuck (waiting on dependencies)		nodes	chain	10000	10000	9999	10000	0.008615	5921264	ok
+dag	stuck (waiting on dependencies)		nodes	chain	30000	30000	29999	30000	0.037543	17761424	ok
+dag	stuck (waiting on dependencies)		nodes	chain	100000	100000	99999	100000	0.182549	59201968	ok
+dag	stuck (waiting on dependencies)		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuck (waiting on dependants)		nodes	chain	100	100	99	100	0.000040	60392	ok
+dag	stuck (waiting on dependants)		nodes	chain	300	300	299	300	0.000135	178792	ok
+dag	stuck (waiting on dependants)		nodes	chain	1000	1000	999	1000	0.000503	593192	ok
+dag	stuck (waiting on dependants)		nodes	chain	3000	3000	2999	3000	0.002007	1777208	ok
+dag	stuck (waiting on dependants)		nodes	chain	10000	10000	9999	10000	0.008704	5921264	ok
+dag	stuck (waiting on dependants)		nodes	chain	30000	30000	29999	30000	0.036275	17761424	ok
+dag	stuck (waiting on dependants)		nodes	chain	100000	100000	99999	100000	0.176170	59201968	ok
+dag	stuck (waiting on dependants)		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	chain	100	100	99	100	0.000986	90232	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	chain	300	300	299	300	0.010295	349392	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	chain	1000	1000	999	1000	0.166785	1436752	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	chain	3000	3000	2999	3000	2.076256	5079992	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	chain	10000	10000	9999	10000	0.000000	0	stop:timeout
+dag	stuck (waiting on dependencies)		nodes	fan	100	100	99	100	0.000060	61160	ok
+dag	stuck (waiting on dependencies)		nodes	fan	300	300	299	300	0.000157	201496	ok
+dag	stuck (waiting on dependencies)		nodes	fan	1000	1000	999	1000	0.000576	720048	ok
+dag	stuck (waiting on dependencies)		nodes	fan	3000	3000	2999	3000	0.001988	2362864	ok
+dag	stuck (waiting on dependencies)		nodes	fan	10000	10000	9999	10000	0.009245	8647872	ok
+dag	stuck (waiting on dependencies)		nodes	fan	30000	30000	29999	30000	0.036974	27510336	ok
+dag	stuck (waiting on dependencies)		nodes	fan	100000	100000	99999	100000	0.153409	99647048	ok
+dag	stuck (waiting on dependencies)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuck (waiting on dependants)		nodes	fan	100	100	99	100	0.000055	60392	ok
+dag	stuck (waiting on dependants)		nodes	fan	300	300	299	300	0.000108	178792	ok
+dag	stuck (waiting on dependants)		nodes	fan	1000	1000	999	1000	0.000400	593192	ok
+dag	stuck (waiting on dependants)		nodes	fan	3000	3000	2999	3000	0.001303	1777208	ok
+dag	stuck (waiting on dependants)		nodes	fan	10000	10000	9999	10000	0.005315	5921264	ok
+dag	stuck (waiting on dependants)		nodes	fan	30000	30000	29999	30000	0.018791	17761424	ok
+dag	stuck (waiting on dependants)		nodes	fan	100000	100000	99999	100000	0.072427	59201968	ok
+dag	stuck (waiting on dependants)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	100	100	99	100	0.000065	32696	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	300	300	299	300	0.000148	114416	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	1000	1000	999	1000	0.000631	449416	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	3000	3000	2999	3000	0.002042	1532584	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	10000	10000	9999	10000	0.008336	5814136	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	30000	30000	29999	30000	0.032638	19409616	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	100000	100000	99999	100000	0.153994	71995496	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	fan	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuck (waiting on dependencies)		nodes	tree2	100	100	99	100	0.000045	60360	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	300	300	299	300	0.000152	181128	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	1000	1000	999	1000	0.000553	607304	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	3000	3000	2999	3000	0.002007	1823448	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	10000	10000	9999	10000	0.008860	6079184	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	30000	30000	29999	30000	0.035096	18239216	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	100000	100000	99999	100000	0.169239	60799568	ok
+dag	stuck (waiting on dependencies)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuck (waiting on dependants)		nodes	tree2	100	100	99	100	0.000060	60392	ok
+dag	stuck (waiting on dependants)		nodes	tree2	300	300	299	300	0.000129	178792	ok
+dag	stuck (waiting on dependants)		nodes	tree2	1000	1000	999	1000	0.000498	593192	ok
+dag	stuck (waiting on dependants)		nodes	tree2	3000	3000	2999	3000	0.001875	1781296	ok
+dag	stuck (waiting on dependants)		nodes	tree2	10000	10000	9999	10000	0.008439	5921264	ok
+dag	stuck (waiting on dependants)		nodes	tree2	30000	30000	29999	30000	0.034950	17761424	ok
+dag	stuck (waiting on dependants)		nodes	tree2	100000	100000	99999	100000	0.164303	59201968	ok
+dag	stuck (waiting on dependants)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	100	100	99	100	0.000150	51896	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	300	300	299	300	0.000536	182480	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	1000	1000	999	1000	0.001242	659912	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	3000	3000	2999	3000	0.004578	2222144	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	10000	10000	9999	10000	0.019608	8104240	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	30000	30000	29999	30000	0.079064	26218312	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	100000	100000	99999	100000	0.463673	95358096	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	tree2	100000	100000	99999	100000	0.000000	0	stop:cap
+dag	stuck (waiting on dependencies)		nodes	diamonds2	100	100	132	34359738365	0.000046	68544	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	300	298	396	1e30	0.000160	204240	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	1000	1000	1332	1e100	0.000628	685216	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	3000	2998	3996	1e301	0.002349	2058552	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	10000	10000	13332	1e1003	0.010507	6853224	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	30000	29998	39996	1e3010	0.052610	20559128	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	100000	100000	133332	1e10034	0.212530	68533928	ok
+dag	stuck (waiting on dependencies)		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+dag	stuck (waiting on dependants)		nodes	diamonds2	100	100	132	34359738365	0.000050	68544	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	300	298	396	1e30	0.000162	204240	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	1000	1000	1332	1e100	0.000623	685216	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	3000	2998	3996	1e301	0.002338	2058552	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	10000	10000	13332	1e1003	0.010405	6853224	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	30000	29998	39996	1e3010	0.045010	20559128	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	100000	100000	133332	1e10034	0.222029	68533928	ok
+dag	stuck (waiting on dependants)		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:cap
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	diamonds2	100	100	132	34359738365	0.000746	86936	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	diamonds2	300	298	396	1e30	0.007118	334632	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	diamonds2	1000	1000	1332	1e100	0.112011	1403416	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	diamonds2	3000	2998	3996	1e301	1.365103	4983592	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	diamonds2	10000	10000	13332	1e1003	20.743102	19482896	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	diamonds2	10000	10000	13332	1e1003	0.000000	0	stop:budget
+dag	stuck (waiting on dependencies)		nodes	layered8x2	100	97	184	32761	0.000087	80096	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	300	297	584	1099511627769	0.000222	253848	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	1000	993	1976	1e38	0.000806	861760	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	3000	2993	5976	1e113	0.003102	2605624	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	10000	9993	19976	1e376	0.014607	8709344	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	30000	29993	59976	1e1129	0.058968	26149272	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	100000	99993	199976	1e3763	0.277917	87189840	ok
+dag	stuck (waiting on dependencies)		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:cap
+dag	stuck (waiting on dependants)		nodes	layered8x2	100	97	184	32761	0.000091	80312	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	300	297	584	1099511627769	0.000231	253496	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	1000	993	1976	1e38	0.000783	861176	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	3000	2993	5976	1e113	0.002979	2605064	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	10000	9993	19976	1e376	0.014159	8708672	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	30000	29993	59976	1e1129	0.055281	26148640	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	100000	99993	199976	1e3763	0.265086	87189248	ok
+dag	stuck (waiting on dependants)		nodes	layered8x2	100000	99993	199976	1e3763	0.000000	0	stop:cap
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	layered8x2	100	97	184	32761	0.000360	67696	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	layered8x2	300	297	584	1099511627769	0.001810	279536	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	layered8x2	1000	993	1976	1e38	0.022937	1226864	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	layered8x2	3000	2993	5976	1e113	0.268956	4516064	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	layered8x2	10000	9993	19976	1e376	4.466366	17906784	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	layered8x2	10000	9993	19976	1e376	0.000000	0	stop:budget
+dag	stuck (waiting on dependencies)		nodes	random8x3	100	97	272	2125761	0.000081	101776	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	300	297	872	1e18	0.000286	335192	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	1000	993	2960	1e59	0.001151	1162064	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	3000	2993	8960	1e179	0.004298	3533952	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	10000	9993	29960	1e596	0.019748	11839424	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	30000	29993	89960	1e1789	0.082660	35570136	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	100000	99993	299960	1e5964	0.497461	118643496	ok
+dag	stuck (waiting on dependencies)		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:cap
+dag	stuck (waiting on dependants)		nodes	random8x3	100	97	272	2125761	0.000091	102552	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	300	297	872	1e18	0.000270	336088	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	1000	993	2960	1e59	0.001123	1171944	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	3000	2993	8960	1e179	0.004212	3577616	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	10000	9993	29960	1e596	0.024385	11988624	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	30000	29993	89960	1e1789	0.106329	36006968	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	100000	99993	299960	1e5964	0.506223	120098240	ok
+dag	stuck (waiting on dependants)		nodes	random8x3	100000	99993	299960	1e5964	0.000000	0	stop:cap
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	random8x3	100	97	272	2125761	0.000222	66776	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	random8x3	300	297	872	1e18	0.002040	278016	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	random8x3	1000	993	2960	1e59	0.024827	1232144	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	random8x3	3000	2993	8960	1e179	0.278104	4515344	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	random8x3	10000	9993	29960	1e596	4.635774	17909064	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	random8x3	10000	9993	29960	1e596	0.000000	0	stop:budget
+dag	stuck (waiting on dependencies)		nodes	dense32	100	97	2080	33825	0.000321	563888	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	300	289	8224	36319351833633	0.001999	2630576	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	1000	993	30752	1e46	0.012562	11236152	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	3000	2977	94240	1e139	0.056733	37569464	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	10000	9985	318496	1e469	0.206373	133241856	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	30000	29985	958496	1e1410	0.811395	396889072	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	100000	99969	3197984	1e4702	7.547382	1338657864	ok
+dag	stuck (waiting on dependencies)		nodes	dense32	100000	99969	3197984	1e4702	0.000000	0	stop:budget
+dag	stuck (waiting on dependants)		nodes	dense32	100	97	2080	33825	0.000274	567936	ok
+dag	stuck (waiting on dependants)		nodes	dense32	300	289	8224	36319351833633	0.001315	2634488	ok
+dag	stuck (waiting on dependants)		nodes	dense32	1000	993	30752	1e46	0.013086	11253496	ok
+dag	stuck (waiting on dependants)		nodes	dense32	3000	2977	94240	1e139	0.057861	37590024	ok
+dag	stuck (waiting on dependants)		nodes	dense32	10000	9985	318496	1e469	0.356098	133207872	ok
+dag	stuck (waiting on dependants)		nodes	dense32	30000	29985	958496	1e1410	1.597555	397089560	ok
+dag	stuck (waiting on dependants)		nodes	dense32	100000	99969	3197984	1e4702	6.006370	1338361912	ok
+dag	stuck (waiting on dependants)		nodes	dense32	100000	99969	3197984	1e4702	0.000000	0	stop:budget
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	100	97	2080	33825	0.000349	49288	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	300	289	8224	36319351833633	0.001973	207888	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	1000	993	30752	1e46	0.014013	1014208	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	3000	2977	94240	1e139	0.117078	3874736	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	10000	9985	318496	1e469	1.599363	15880408	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	30000	29985	958496	1e1410	20.894062	55586088	ok
+dag	stuckRounds (stuck before it went one pass, waiting on dependencies)		nodes	dense32	30000	29985	958496	1e1410	0.000000	0	stop:budget
+walk	upDagConcurrent		nodes	chain	100	100	99	100	0.000702	657664	ok
+walk	upDagConcurrent		nodes	chain	300	300	299	300	0.002609	2027216	ok
+walk	upDagConcurrent		nodes	chain	1000	1000	999	1000	0.011974	6765376	ok
+walk	upDagConcurrent		nodes	chain	3000	3000	2999	3000	0.082042	20520880	ok
+walk	upDagConcurrent		nodes	chain	10000	10000	9999	10000	0.435074	69239760	ok
+walk	upDagConcurrent		nodes	chain	30000	30000	29999	30000	1.883495	209980728	ok
+walk	upDagConcurrent		nodes	chain	100000	100000	99999	100000	8.805676	708760496	ok
+walk	upDagConcurrent		nodes	chain	100000	100000	99999	100000	0.000000	0	stop:budget
+walk	downDagConcurrent		nodes	chain	100	100	99	100	0.000983	572208	ok
+walk	downDagConcurrent		nodes	chain	300	300	299	300	0.002999	1769528	ok
+walk	downDagConcurrent		nodes	chain	1000	1000	999	1000	0.012792	5904984	ok
+walk	downDagConcurrent		nodes	chain	3000	3000	2999	3000	0.072930	17921856	ok
+walk	downDagConcurrent		nodes	chain	10000	10000	9999	10000	0.331445	65070080	ok
+walk	downDagConcurrent		nodes	chain	30000	30000	29999	30000	2.215277	197528184	ok
+walk	downDagConcurrent		nodes	chain	30000	30000	29999	30000	0.000000	0	stop:budget
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	chain	100	100	99	100	0.005592	1041896	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	chain	100	100	99	100	0.000267	46080	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	chain	100	100	99	100	0.000460	44136	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	chain	300	300	299	300	0.018631	3293192	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	chain	300	300	299	300	0.001503	64920	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	chain	300	300	299	300	0.001259	126256	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	chain	1000	1000	999	1000	0.074381	11058984	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	chain	1000	1000	999	1000	0.000889	222064	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	chain	1000	1000	999	1000	0.003026	576632	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	chain	3000	3000	2999	3000	0.383592	31250880	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	chain	3000	3000	2999	3000	0.014964	1177856	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	chain	3000	3000	2999	3000	0.026236	4714168	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	chain	10000	10000	9999	10000	1.545164	119042072	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	chain	10000	10000	9999	10000	0.012923	2088848	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	chain	10000	10000	9999	10000	0.069016	18677144	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	chain	30000	30000	29999	30000	4.196152	319757816	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	chain	30000	30000	29999	30000	0.051446	7048648	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	chain	30000	30000	29999	30000	0.500272	141937536	ok
+upkeep	tend nodes already up (settled)		nodes	chain	30000	30000	29999	30000	0.000000	0	stop:budget
+walk	upDagConcurrent		nodes	diamonds2	100	100	132	34359738365	0.001638	665224	ok
+walk	upDagConcurrent		nodes	diamonds2	300	298	396	1e30	0.004111	2041304	ok
+walk	upDagConcurrent		nodes	diamonds2	1000	1000	1332	1e100	0.015443	6862024	ok
+walk	upDagConcurrent		nodes	diamonds2	3000	2998	3996	1e301	0.120790	20806472	ok
+walk	upDagConcurrent		nodes	diamonds2	10000	10000	13332	1e1003	0.549940	70196272	ok
+walk	upDagConcurrent		nodes	diamonds2	30000	29998	39996	1e3010	2.739884	212927640	ok
+walk	upDagConcurrent		nodes	diamonds2	30000	29998	39996	1e3010	0.000000	0	stop:budget
+walk	downDagConcurrent		nodes	diamonds2	100	100	132	34359738365	0.001603	662640	ok
+walk	downDagConcurrent		nodes	diamonds2	300	298	396	1e30	0.010157	2035688	ok
+walk	downDagConcurrent		nodes	diamonds2	1000	1000	1332	1e100	0.024177	6846288	ok
+walk	downDagConcurrent		nodes	diamonds2	3000	2998	3996	1e301	0.123128	20761240	ok
+walk	downDagConcurrent		nodes	diamonds2	10000	10000	13332	1e1003	0.751680	70045544	ok
+walk	downDagConcurrent		nodes	diamonds2	30000	29998	39996	1e3010	1.911135	212478896	ok
+walk	downDagConcurrent		nodes	diamonds2	100000	100000	133332	1e10034	9.614662	717059176	ok
+walk	downDagConcurrent		nodes	diamonds2	100000	100000	133332	1e10034	0.000000	0	stop:budget
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	diamonds2	100	100	132	34359738365	0.004425	1036976	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	diamonds2	100	100	132	34359738365	0.000038	22504	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	diamonds2	100	100	132	34359738365	0.000564	67136	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	diamonds2	300	298	396	1e30	0.009729	2670416	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	diamonds2	300	298	396	1e30	0.000106	63688	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	diamonds2	300	298	396	1e30	0.001303	589416	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	diamonds2	1000	1000	1332	1e100	0.056687	10613544	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	diamonds2	1000	1000	1332	1e100	0.000937	231272	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	diamonds2	1000	1000	1332	1e100	0.004274	786032	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	diamonds2	3000	2998	3996	1e301	0.239115	30183456	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	diamonds2	3000	2998	3996	1e301	0.005712	640904	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	diamonds2	3000	2998	3996	1e301	0.017680	6131504	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	diamonds2	10000	10000	13332	1e1003	1.208616	104747624	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	diamonds2	10000	10000	13332	1e1003	0.018321	2147376	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	diamonds2	10000	10000	13332	1e1003	0.099568	26685744	ok
+upkeep	tend nodes already up (settled)	startUpkeep	nodes	diamonds2	30000	29998	39996	1e3010	3.178776	321963312	ok
+upkeep	tend nodes already up (settled)	until every machine is stable	nodes	diamonds2	30000	29998	39996	1e3010	0.047543	6262704	ok
+upkeep	tend nodes already up (settled)	stopUpkeep	nodes	diamonds2	30000	29998	39996	1e3010	0.391781	142889392	ok
+upkeep	tend nodes already up (settled)		nodes	diamonds2	30000	29998	39996	1e3010	0.000000	0	stop:budget
