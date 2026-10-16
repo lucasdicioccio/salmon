@@ -52,8 +52,9 @@ shared :: [Shape]
 shared = [Diamonds 2, Layered 8 2, RandomLayered 8 3]
 
 {- | Two hundred diamonds: six hundred nodes and @2^200@ paths. Enough
-that anything following paths cannot finish, small enough that the one
-quadratic step in these walks ('Dag.stuck', see the profile) stays cheap.
+that anything following paths cannot finish. (The size was also kept small
+for 'Dag.stuck', which was quadratic in depth until it went one pass; see
+"Test.DagStuckSpec".)
 -}
 size :: Int
 size = 601

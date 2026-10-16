@@ -109,7 +109,7 @@ import Salmon.Op.Track (Track (..))
 import Salmon.Reporter (ReporterM (..), silent)
 import Salmon.Reporter.Tagged (Tagged (..))
 
-import Test.DagReference (foldDagPerOccurrence)
+import Test.DagReference (foldDagPerOccurrence, stuckRounds)
 import Test.GraphFixture
 
 -------------------------------------------------------------------------------
@@ -557,6 +557,10 @@ dagBenches =
         pure (evaluate (Set.size (Dag.stuck Dag.dependenciesOf dag)))
     , overDag "dag" "stuck (waiting on dependants)" $ \dag ->
         pure (evaluate (Set.size (Dag.stuck Dag.dependantsOf dag)))
+    , -- what 'Dag.stuck' was before it went one pass, for the comparison:
+      -- "Test.DagReference", which the tests use as their reference.
+      overDag "dag" "stuckRounds (stuck before it went one pass, waiting on dependencies)" $ \dag ->
+        pure (evaluate (Set.size (stuckRounds Dag.dependenciesOf dag)))
     ]
 
 walkBenches :: [Bench]

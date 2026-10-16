@@ -10,6 +10,7 @@ import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
 import qualified Test.DagPerNodeSpec as DagPerNodeSpec
+import qualified Test.DagStuckSpec as DagStuckSpec
 import qualified Test.EdgeListSpec as EdgeListSpec
 import qualified Test.DagSpec as DagSpec
 import qualified Test.GraphFixtureSpec as GraphFixtureSpec
@@ -147,6 +148,7 @@ main =
             , RemoteOutputSpec.tests
             , DagSpec.tests
             , DagPerNodeSpec.tests
+            , DagStuckSpec.tests
             , EdgeListSpec.tests
             , GraphFixtureSpec.tests
             , GraphScaleSpec.tests

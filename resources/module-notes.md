@@ -376,8 +376,9 @@ slower. Operations that read the expansion are sized by occurrences, the others 
 `resources/graph-profiles/`. The findings (all measured on one shared machine, indicative):
 `foldDag` was per path (58-node diamond chain: 3.8 s, doubling per diamond, and a `serve`
 declaration with it; **fixed since**, see `Op/Dag.hs` below: 100 000 nodes of diamond chain fold
-in about 2 s); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
-`startUpkeep` (chain of 3 000: 2 s); a node with many edges was quadratic in `record`,
+in about 2 s); `Dag.stuck` was quadratic in depth and bounded every concurrent pass and
+`startUpkeep` (chain of 3 000: 2 s; **fixed since**, see "`stuck` in one pass" under `Op/Dag.hs`;
+rows `stuck-one-pass.tsv`: 2 ms at 3 000, 0.18 s at 100 000); a node with many edges was quadratic in `record`,
 `fromMagma`, `transposeOf` and `Query.outline` (**fixed since**, see "Edge lists" under
 `Op/Dag.hs`; rows `edge-lists-{before,after}.tsv`); listed paths cost depth per node in time and
 memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes did
@@ -930,6 +931,32 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   reference is per path; no property generates `notes` or `dynamics` differences (only `help`);
   a conflict test that is not an equivalence; a strict-monad expansion; no real recipe was
   audited for coherence beyond the existing suites passing.
+  **`stuck` in one pass (finding 2).** `Dag.stuck` was Kahn's algorithm by rounds: each round
+  filtered every remaining node for "nothing I wait on remains", so a graph `d` levels deep cost
+  `d` rounds over up to every node (chain of 3 000: 2 s; it bounded every concurrent pass and
+  every `startUpkeep`). It now numbers the nodes by their position among `dagNodes`' keys
+  (`Map.lookupIndex`, no map of its own; it relies on the invariant that those keys are
+  `dagOrder`'s nodes), keeps each node's count of distinct outstanding waits in an unboxed
+  `STUArray`, and releases a node's waiters once when it becomes ready; what is left above zero
+  is the answer. Same semantics as before, including the two edge cases a `waitsOn` can hit: a
+  `Ref` the `Dag` does not hold is never waited for, and a repeated wait counts once (`all` did
+  not care). This added `array` (a GHC boot package) to `salmon-ops`' dependencies: an `IntMap`
+  of counts was tried first and was about three times slower and allocated about four times more.
+  The old definition is kept verbatim as `Test.DagReference.stuckRounds`, for the tests and the
+  benchmark. *What was run:* `Test.DagStuckSpec` (Layer 0): unit cases (acyclic and empty `Dag`s,
+  a self-loop, a two-node cycle, a cycle with a tail above and below it in both directions, a
+  wait on an unknown `Ref` and a repeated one, and a 30 001-node chain and chain of diamonds
+  with and without a back edge at the bottom, a minute each) and six QuickCheck properties
+  against `stuckRounds` in both directions: fixture shapes up to 200 requested nodes (also
+  empty); the same with 1 to 4 random extra edges (cycles, self-loops); random digraphs of up to
+  40 nodes; `foldDag` of fixtures with colliding `Ref`s (up to 60 nodes, so with conflicts); a
+  random `waitsOn` table naming unknown `Ref`s and repeats; and, against plain reachability
+  rather than either version, "stuck exactly when it reaches a cycle" (digraphs up to 30 nodes).
+  Run locally at 2 000 cases each (the default run is QuickCheck's 100). The `graph-profiles`
+  `stuck` series and the concurrent walks and `startUpkeep` on chain and diamonds2 were re-run
+  (`resources/graph-profiles.md`, "After `stuck` in one pass"). *Not covered:* the properties stop
+  at 200 nodes (the guard and the profiles cover size); `waitsOn` functions that are not a fixed
+  table (every caller passes `dependenciesOf`, `dependantsOf` or a lookup in `dagDependencies`).
 - **`Op/Ledger.hs`** is the other half: who still *wants* which nodes. One `Contribution` per
   declaration — a `Set Ref` and a `Set (Ref, Ref)` of precedence edges, plus a `contribLive`
   flag — keyed by whatever identifies the declaration. `desired` is the union of the live ones'
