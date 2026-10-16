@@ -759,6 +759,25 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   a node with no `check` would otherwise have that work done again immediately.
   `Recheck`/`Pause`/`Resume` finally mean something here. See milestone 7 and
   `Test/UpkeepSpec.hs`.
+  **Writing an `UpkeepSpec` case (two load-only flakes, fixed 2026-10-16).** `Eval` is said
+  *before* `up` runs and `Done` after, so a case that reads something `up` writes (a counter,
+  a flag) must `await` `donesOf`, never `evals`/`evalsOf`: seven cases (pause/resume, failing
+  dependency, vanished effect, `Always` on `Completed`, dependant waits, demoted dependant,
+  `supReapply` re-runs) awaited the `Eval` and read the counter before the `up` had bumped it,
+  which only loses under load. And a case whose `up` blocks on a gate must open the gate on
+  the way out (`finally (tryPutMVar gate ())`): `stopUpkeep` waits out an `up` in flight, so a
+  failed assertion with the gate shut becomes a 10s "timed out" that hides it. "A sibling in
+  the middle of its own up" had both: its operation's precondition was met from the start,
+  so under load the operation could claim the replica before the replica's machine began,
+  pause it in `WaitUp`, run, and release it into the blocking `up` (assertion fails, teardown
+  hangs). The precondition is now unmet until the replica's `Eval` is seen, then met plus a
+  `Recheck`. Its 300ms sleep is kept: it waits for a non-event, so it can only let a bug
+  through, never flake. *Run:* `UpkeepSpec` + `ServeEventsSpec` alone (test `Main` cut to the
+  two, restored), 20-core host, 20x under 40 `yes` hogs before (6 failing runs: pause/resume
+  2, sibling 2 as timeouts, failing dependency 1, vanished effect 1, demoted dependant 1, one
+  run with two) and 20x under 40 plus 30x under 60 hogs after (0). `ServeEventsSpec` (ring
+  gap, the flaky-check case) failed in none of the 70 runs; its ring fix is in the
+  "Startup window" note below. The full Layer 0 suite was not re-run under load for this change.
   A node with a `managed` action runs the same three states with one difference: `Up`
   additionally races the *action itself*, so the `ExitCode` it eventually yields is what the
   restart policy reads instead of a `CheckResult` (`Always`/`OnFailure`/`Never` mapped the
@@ -1384,7 +1403,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   declaration survives a failed down" (an extra attempt) / "`converge --select` restricted to
   nothing", and `ServeTlsSpec`'s real 2s session expiry. Other flakes seen in the
   same runs and *not* addressed: `EdgeListSpec` 100k fan over a minute, `UpkeepSpec`
-  pause/resume, supReapply and "a sibling in the middle of its own up" (10s timeouts), `ServeSpec` "retired declaration survives a failed
+  pause/resume, supReapply and "a sibling in the middle of its own up" (10s timeouts; since fixed, see `Actions/Upkeep.hs`), `ServeSpec` "retired declaration survives a failed
   down" (teardown attempted twice), `PostgresPairPrereqsSpec` "Text file busy" on shimmed
   scripts (ETXTBSY; likely, not confirmed: a shim exec'd while a child forked by another thread still
   holds the shim's write fd),
