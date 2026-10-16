@@ -180,6 +180,7 @@ module Salmon.Actions.Serve.Http (
     -- * Plugging into the loop
     serverObserver,
     serverProducer,
+    awaitLoop,
     serverReporters,
     serverFollowReporter,
     serverNodeLogReporter,
@@ -825,6 +826,26 @@ serverProducer :: Server -> Producer
 serverProducer server = Producer $ \inbox -> do
     atomically (writeTVar (serverInbox server) (Just inbox))
     atomically retry `finally` atomically (writeTVar (serverInbox server) Nothing)
+
+{- | Block until the loop has installed its read accessor
+('serverObserver') and published its inbox ('serverProducer'): from then
+on a read answers from the world and a command is queued, where before
+either answers @503@ (\"the loop has not started\" / \"the loop is not
+taking commands\"). The socket is bound before the loop runs, and the
+producer that publishes the inbox is a thread the loop forks, so a client
+that connects the moment the server is up can arrive first: that @503@ is
+the right answer for that moment, and a caller that must not see it (a
+spec driving the loop it just forked) waits here rather than retrying.
+Retries in STM, so it costs nothing while it waits; it never returns if
+the loop never starts, so bound it with a timeout.
+-}
+awaitLoop :: Server -> IO ()
+awaitLoop server = atomically $ do
+    view <- readTVar (serverView server)
+    inbox <- readTVar (serverInbox server)
+    case (view, inbox) of
+        (Just _, Just _) -> pure ()
+        _ -> retry
 
 {- | Wrap the loop's reporters: every report goes on unchanged, then onto
 the event stream ('Events.eventsReporter', numbered there), and one stamped

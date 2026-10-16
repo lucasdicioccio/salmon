@@ -347,6 +347,10 @@ withRunningWith cfg act =
                         Nothing
                         [Serve.stdinProducer stdinR, Http.serverProducer server]
                 putMVar worldVar w
+            -- the loop publishes its inbox from a thread it forks: wait for
+            -- it, or the first request can beat it and be answered 503
+            timeout (10 * 1000000) (Http.awaitLoop server)
+                >>= maybe (assertFailure "the loop did not start within 10s") pure
             manager <- unixManager path
             r <- act (Running stdinW worldVar server manager upsRef)
             _ <- try (hClose stdinW) :: IO (Either IOError ())
@@ -647,7 +651,12 @@ ringOverflowGap =
         _ <- sync running "supervise off"
         _ <- sync running "up n1 n2"
         _ <- sync running "up n3"
-        (_, marker) <- async running "history"
+        (queuedAt, marker) <- async running "history"
+        -- the last number is read once the loop has handled the marker (its
+        -- hang-up is on the stream), not as soon as it is queued: read
+        -- earlier, the history's own events land after it under load and
+        -- the ring's window moves past what is asserted below
+        _ <- withEvents running ("?since=" <> show queuedAt) (readUntil (hungUpFrom marker))
         lastSeq <- Events.lastSequence (Http.serverEvents (runningServer running))
         assertBool "more happened than the ring holds" (lastSeq > 8)
         es <- withEvents running "?since=0" (readUntil (hungUpFrom marker))

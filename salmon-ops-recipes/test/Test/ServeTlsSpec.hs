@@ -272,6 +272,10 @@ withRunningWith policy act =
                         Nothing
                         [Serve.stdinProducer stdinR, Http.serverProducer server]
                 putMVar worldVar w
+            -- the loop publishes its inbox from a thread it forks: wait for
+            -- it, or the first request can beat it and be answered 503
+            timeout (10 * 1000000) (Http.awaitLoop server)
+                >>= maybe (assertFailure "the loop did not start within 10s") pure
             bound <- readTVarIO (Http.serverBoundTcp server)
             port <- case bound of
                 [Socket.SockAddrInet p _] -> pure (fromIntegral p)
