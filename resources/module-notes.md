@@ -352,8 +352,9 @@ every shape at 20 000 nodes. The million-node case is opt-in
 `-rtsopts` for that): it was run once, every shape walked per node and `Chain` and `Tree 2`
 expanded and folded, in about two minutes and 1.1 GiB. *Not run by that spec:* any driver or
 measurement (the profiles below do both). `Fan` is left out of the large fold on purpose:
-`Dag.record` keeps a node's edges as a list it searches on each insert, so one node over a
-million others is quadratic there (since measured: 1.3 s at 10 000, see the profiles).
+`Dag.record` kept a node's edges as a list it searched on each insert, so one node over a
+million others was quadratic there (measured: 1.3 s at 10 000, see the profiles; fixed since,
+see "Edge lists" under `Op/Dag.hs`; the spec was not changed to add it back).
 `dagOf :: Op -> Dag Extension` builds what `foldDag . evalDeps` builds by visiting each node
 once (same nodes, edges and `dagOrder`; first declaration of a colliding `Ref` wins and no
 conflict is recorded). It predates the per-node `foldDag` and is kept because it shares no code
@@ -376,8 +377,9 @@ slower. Operations that read the expansion are sized by occurrences, the others 
 `foldDag` was per path (58-node diamond chain: 3.8 s, doubling per diamond, and a `serve`
 declaration with it; **fixed since**, see `Op/Dag.hs` below: 100 000 nodes of diamond chain fold
 in about 2 s); `Dag.stuck` is quadratic in depth and bounds every concurrent pass and
-`startUpkeep` (chain of 3 000: 2 s); a node with many edges is quadratic in `record`,
-`fromMagma`, `transposeOf` and `Query.outline`; listed paths cost depth per node in time and
+`startUpkeep` (chain of 3 000: 2 s); a node with many edges was quadratic in `record`,
+`fromMagma`, `transposeOf` and `Query.outline` (**fixed since**, see "Edge lists" under
+`Op/Dag.hs`; rows `edge-lists-{before,after}.tsv`); listed paths cost depth per node in time and
 memory; `Client.Model.step` was quadratic over a teardown; a supervisor over 100 000 nodes did
 not fit in 4 GB. The `foldDag`, `Client.Model.step` and supervisor ones are fixed (see
 `Op/Dag.hs`, `Client/Model.hs` and `Actions/Upkeep.hs` below; their before and after rows are
@@ -826,8 +828,41 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   dependencies x their dependencies per node (never more than the old fold paid: every
   occurrence looked at was visited before). The expansion must be lazy for any of this to help:
   `evalDeps` and `expandDag` over `Identity` are; an `expand` in a strict monad has paid per path
-  before the fold is called. `Dag.record`'s edge lists are still searched and appended on every
-  insert, so one node over many others is still quadratic (the profile's finding 3, not touched).
+  before the fold is called. One node over many others was quadratic in `Dag.record`'s edge
+  lists (the profile's finding 3): fixed since, see "Edge lists" just below.
+  **Edge lists (finding 3).** `dagDependencies`/`dagDependants` are still `Map Ref [Ref]` in
+  first-seen order without repeats (every consumer reads them as lists, and the order is what
+  `dagOrder`-driven reports and the fold's tie-breaks see), but nothing builds them by "`elem`
+  then `<> [x]`" any more. `record`, `mergeDag`, `foldDag` and `fromMagma` go through an internal
+  `Building`: the `Dag` plus, per *touched* key, an `Edges` (a `Set Ref` beside the list
+  reversed), so an insert is a `Set.member` and a cons; `built` reverses the touched lists back
+  once and `Map.union`s them over the untouched entries. So a run of records costs what it
+  touches, not the `Dag` it starts from (merging a small graph into a big one stays small), and a
+  single `record` call is now one `Building` round trip (it pays `log k` per edge plus turning the
+  touched lists into sets once, where it used to pay `k` per edge). `fromMagma`'s incoming lists
+  and `transposeOf` cons and reverse once instead of `fromListWith (flip (<>))`, which appended on
+  the right. `Query.outline` keeps a `Set` of children per entry and of roots beside the lists it
+  already had, for `linked`; the lists, and so every order, are what they were. `transposeOf` is
+  now exported (for the tests), and `Query` exports `outlineRoots`/`outlineChildren` (read-only).
+  *What was run:* `Test.EdgeListSpec` (Layer 0) against `Test.EdgeListReference`, which keeps
+  the appending `record`, `fromMagma`, `transposeOf`, `mergeDag` and `outline` verbatim: unit
+  cases (a fan, a node forty others depend on recorded in a shuffled order, repeated edges and a
+  self-edge, one node declared twice in either order, records onto a built `Dag`, `fromMagma` and
+  `transposeOf` on both fans, the outline of a fan; each pins the order and compares with the
+  reference), properties against the reference (2 000 runs of random records, from empty and
+  onto a reference-built `Dag`, comparing nodes, both edge maps, order and conflicts; 1 000 each
+  for `mergeDag`, `fromMagma` with edges outside the magma, `transposeOf` with repeats; 500
+  fixture graphs of every shape and edge form, the fold against the per-occurrence fold run on the
+  appending `record`, and the outline field by field), two laws (1 000 each: `transposeOf` twice
+  is the identity on a closed map without repeats, up to order and exactly when lists are in key
+  order; `fromMagma` is unchanged by re-inserting a present edge and inverts `dagEdges`), and a
+  guard at 100 000 nodes (a fan through the fold, `fromMagma`, `mergeDag` and the outline, and
+  every node over one through `fromMagma` and `transposeOf`, a minute each). The `graph-profiles`
+  rows for these operations were re-run before and after (`resources/graph-profiles.md`, "After
+  the edge lists"). *Not covered:* random record runs are at most 12 sites and 5 dependencies a
+  step (the fixtures and the guard cover size); fixture properties have no colliding `Ref`s (the
+  conflicts are covered by the random record runs); `addEdge` and `collapseInto` were not
+  rewritten beyond `transposeOf` (`addEdge` still transposes the whole map per edge).
   *What was run:* `Test.DagPerNodeSpec` (Layer 0), with the old fold kept verbatim as
   `Test.DagReference.foldDagPerOccurrence` and the precondition as `Test.DagReference.coherent`:
   unit cases (every fixture shape at sizes up to 20, a colliding `Ref`, the conflict count, last

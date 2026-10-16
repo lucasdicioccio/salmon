@@ -6,11 +6,12 @@ by the `graph-profiles` benchmark in `salmon-ops-recipes` over the synthetic gra
 other work was using. Read the growth and the order of magnitude, not the third digit.
 
 This document reports. The super-linear findings are listed with what was measured and,
-separately, what reading the code suggests is the cause. Three have been fixed since: finding 5
+separately, what reading the code suggests is the cause. Four have been fixed since: finding 5
 (the client model's teardown) and finding 6 (what a tended node retains), both under "Since
-fixed" below, and finding 1 (`foldDag` per path: see
+fixed" below, finding 1 (`foldDag` per path: see
 "After the per-node fold", which gives the fold, `query plan` and the `serve` loop before and
-after, and what else changed). The others stand as measured, and the findings and the two big
+after, and what else changed), and finding 3 except the concurrent walk's wake-ups (edge lists:
+see "After the edge lists"). The others stand as measured, and the findings and the two big
 tables below are the 2026-10-10 run, left as measured.
 
 ## Running it
@@ -119,7 +120,9 @@ not itself profiled.
    3.3 s at 100 000 and 123 s at 1 000 000 (one thread and one `TVar` per node does fit in 4 GB
    there). *Read from the code:* `stuck` peels one layer of ready nodes per round with a full
    filter of the remaining set, so it costs depth x nodes.
-3. **A node with many edges is quadratic in its edge count, in several places.**
+3. **A node with many edges is quadratic in its edge count, in several places.** (Fixed since
+   for `record`, the fold, `fromMagma`, `mergeDag`, `transposeOf` and the outline, see "After the
+   edge lists"; the concurrent walk over a fan is not.)
    Fan: `foldDag` 1.3 s at 10 000 and abandoned at 30 000; `fromMagma` 2.8 s and 7.1 GB allocated
    at 10 000; `mergeDag` 2.0 s at 10 000; `Query.outline` 15 s at 30 000. A rewrite collapsing a
    tenth of the nodes into one batch: `n^1.6` to `n^1.9` (fan excepted), 1.8 s and 4.5 GB allocated at 100 000 on
@@ -164,8 +167,8 @@ One per finding worth fixing, in the order the numbers suggest. The first and th
 2. `Dag.stuck` in one pass (finding 2): it bounds every concurrent pass and every tending start
    on a deep graph at a few thousand nodes.
 3. Edge lists that do not search or append on the right, in `Dag.record`, `fromMagma`,
-   `transposeOf` and `Query.outline` (finding 3). The wake-up cost of a node waiting on many
-   neighbours is a separate question.
+   `transposeOf` and `Query.outline` (finding 3). **Done**: see "After the edge lists". The
+   wake-up cost of a node waiting on many neighbours is a separate question, not touched.
 4. Listed paths that do not cost depth per node (finding 4): shared prefixes, a length cap, or
    listing on request.
 5. `Client.Model.step` removing a node without filtering the order list (finding 5). **Done.**
@@ -320,6 +323,69 @@ What the numbers say, and what they do not:
 - **Not measured:** the 1 000 000-node run was not repeated; `optCollisions` (the backward walk
   that settles contested `Ref`s only runs when there are some, and no benchmark series has
   any); the full benchmark (only the three operations above); a quiet machine.
+
+## After the edge lists
+
+`Dag.record`, `mergeDag`, `foldDag` and `fromMagma` build edge lists through a set beside each
+touched list (an insert is a `Set.member` and a cons, the lists are reversed back once at the
+end); `fromMagma`'s incoming lists and `transposeOf` cons and reverse instead of appending on the
+right; `Query.outline` asks a set, not its child list, whether a node is already under another.
+The lists, their order, and everything rendered from them are unchanged (`Test.EdgeListSpec`
+compares each with the appending version, kept as `Test.EdgeListReference`; see
+`resources/module-notes.md` under `Op/Dag.hs`, "Edge lists").
+
+**What was run.** The operations finding 3 names, before (master `0c9cecf`) and after, on the
+same machine as above, 2026-10-16, one run each, budget 6 s, cap 100 000 nodes, load average 2 to
+4 from other work in both runs (no build of this change ran alongside either):
+
+```sh
+cabal bench salmon-ops-recipes:graph-profiles --benchmark-options='--max-size 100000 --budget 6 \
+  --heap 4g --only "expand + foldDag" --only "fromMagma" --only "mergeDag into an empty Dag" \
+  --only "mergeDag onto itself" --only "one batch of a tenth" --only "outline" --out rows.tsv'
+```
+
+The rows are `resources/graph-profiles/edge-lists-before.tsv` and `edge-lists-after.tsv` (the
+`--only` texts are substrings, so they also hold `foldDagPerOccurrence` and "paths per node"
+rows). **Indicative**, as everything here: one run each on a shared machine.
+
+| operation | | chain | fan | tree2 | random8x3 | dense32 |
+|---|---|---|---|---|---|---|
+| expand + foldDag | before | n^1.3, 100.0k: 993 ms, 1.0 GB | n^2.1, 30.0k: 12.6 s, 25.5 GB | n^1.3, 100.0k: 1.6 s, 1.0 GB | n^1.1, 100.0k: 5.0 s, 5.0 GB | n^1.4, 3.0k: 6.8 s, 12.5 GB |
+| | after | n^1.3, 100.0k: 1.1 s, 920 MB | n^1.3, 100.0k: 1.4 s, 1.1 GB | n^1.3, 100.0k: 1.3 s, 926 MB | n^1.2, 100.0k: 3.6 s, 4.6 GB | n^1.3, 3.0k: 5.3 s, 12.3 GB |
+| fromMagma | before | n^1.3, 100.0k: 693 ms, 690 MB | n^2.0, 10.0k: 2.1 s, 7.1 GB | n^1.3, 100.0k: 1.5 s, 688 MB | n^1.3, 100.0k: 3.3 s, 1.4 GB | n^1.3, 30.0k: 6.6 s, 5.4 GB |
+| | after | n^1.3, 100.0k: 740 ms, 552 MB | n^1.2, 100.0k: 424 ms, 602 MB | n^1.3, 100.0k: 790 ms, 546 MB | n^1.3, 100.0k: 2.2 s, 983 MB | n^1.3, 30.0k: 4.9 s, 2.3 GB |
+| mergeDag into an empty Dag | before | n^1.3, 100.0k: 684 ms, 516 MB | n^2.0, 10.0k: 1.4 s, 2.8 GB (timeout at 30.0k) | n^1.4, 100.0k: 1.4 s, 521 MB | n^1.3, 100.0k: 1.9 s, 1.0 GB | n^1.0, 30.0k: 1.8 s, 3.8 GB (timeout at 100.0k) |
+| | after | n^1.4, 100.0k: 814 ms, 399 MB | n^1.3, 100.0k: 1.0 s, 464 MB | n^1.3, 100.0k: 950 ms, 402 MB | n^1.3, 100.0k: 1.4 s, 634 MB | n^1.1, 100.0k: 6.5 s, 4.7 GB |
+| mergeDag onto itself | before | n^1.3, 100.0k: 669 ms, 549 MB | n^1.8, 10.0k: 2.1 s, 45 MB | n^1.3, 100.0k: 1.1 s, 551 MB | n^1.3, 100.0k: 1.9 s, 1.0 GB | n^1.2, 30.0k: 1.6 s, 2.1 GB (timeout at 100.0k) |
+| | after | n^1.4, 100.0k: 953 ms, 387 MB | n^1.4, 100.0k: 1.2 s, 444 MB | n^1.4, 100.0k: 1.1 s, 390 MB | n^1.3, 100.0k: 1.6 s, 612 MB | n^1.2, 30.0k: 1.7 s, 1.3 GB (timeout at 100.0k) |
+| rewrite: one batch of a tenth | before | n^1.6, 100.0k: 1.1 s, 4.5 GB | n^1.4, 100.0k: 1.1 s, 275 MB | n^1.6, 100.0k: 2.4 s, 4.5 GB | n^1.9, 30.0k: 2.4 s, 3.1 GB | n^1.6, 30.0k: 8.7 s, 33.7 GB |
+| | after | n^1.4, 100.0k: 396 ms, 230 MB | n^1.3, 100.0k: 437 ms, 281 MB | n^1.3, 100.0k: 435 ms, 231 MB | n^1.4, 100.0k: 955 ms, 475 MB | n^1.3, 30.0k: 1.6 s, 1.2 GB (timeout at 100.0k) |
+| outline | before | n^1.2, 100.0k: 352 ms, 626 MB | n^2.0, 30.0k: 15.0 s, 164 MB | n^1.3, 100.0k: 967 ms, 634 MB | n^1.1, 100.0k: 3.0 s, 3.9 GB | n^1.4, 3.0k: 3.0 s, 11.1 GB |
+| | after | n^1.2, 100.0k: 370 ms, 637 MB | n^1.3, 100.0k: 531 ms, 633 MB | n^1.2, 100.0k: 485 ms, 647 MB | n^1.1, 100.0k: 2.1 s, 4.0 GB | n^1.4, 3.0k: 2.7 s, 11.1 GB |
+
+What the numbers say, and what they do not:
+
+- **The fan is per node in every operation finding 3 named.** The fold went from 30 000 nodes in
+  12.6 s (`n^2.1`) to the cap in 1.4 s, `fromMagma` from 10 000 in 2.1 s and 7.1 GB to the cap
+  in 0.4 s, `mergeDag` from a timeout at 30 000 to the cap in about 1 s, the outline from 30 000
+  in 15 s to the cap in 0.5 s. The paths per node over a fan, which build an outline first, went
+  from 30 000 in 8.0 s to the cap in 1.3 s; on the other shapes that series is still finding 4
+  (the listed paths), untouched.
+- **The rewrite gained the most elsewhere.** A collapse transposes the whole dependency map once
+  (`transposeOf`), which appended on the right: chain at 100 000 from 1.1 s and 4.5 GB to 0.4 s
+  and 230 MB; random8x3 from 30 000 (`n^1.9`) to the cap in under a second; dense32 at 30 000 from
+  8.7 s and 33.7 GB to 1.6 s and 1.2 GB. Sixteen batches still cost sixteen collapses (not
+  re-measured).
+- **dense32's `mergeDag` into an empty `Dag` now reaches 100 000** (6.5 s, 4.7 GB) where it timed
+  out; onto itself it still times out there.
+- **Where nothing was quadratic, within the noise.** Chain and tree2 differ by -40 % to +40 %
+  between the two runs, both ways, with allocation the same or lower (`fromMagma` and `mergeDag`
+  allocate 20 to 25 % less). A single `record` call (not a series here) now goes through the
+  set-backed form and back, so one call on a node with many edges pays a `Set.fromList` of its
+  list where it used to pay one `elem`: no driver calls it in a loop any more (only
+  `Test.DagReference` does).
+- **Not measured:** the 1 000 000-node run; the concurrent walk over a fan (the wake-ups,
+  outside this change); a quiet machine.
 
 ## Not measured
 

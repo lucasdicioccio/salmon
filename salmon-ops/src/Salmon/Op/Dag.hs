@@ -70,6 +70,7 @@ module Salmon.Op.Dag (
     record,
     collapseInto,
     addEdge,
+    transposeOf,
 
     -- * Colliding representatives
     Conflict (..),
@@ -305,21 +306,24 @@ foldDag ::
     Cofree Graph (OpGraph m (Actions ext)) ->
     Dag ext
 foldDag same root
-    | Map.null contested = walkDag walked
+    | Map.null contested = folded
     | otherwise =
-        (walkDag walked)
-            { dagNodes = Map.foldlWithKey' (\nodes r (winner, _) -> Map.insert r winner nodes) (dagNodes (walkDag walked)) verdicts
+        folded
+            { dagNodes = Map.foldlWithKey' (\nodes r (winner, _) -> Map.insert r winner nodes) (dagNodes folded) verdicts
             , dagConflicts =
                 reverse
                     [ Conflict r winner loser
-                    | r <- dagOrder (walkDag walked)
+                    | r <- dagOrder folded
                     , Just (winner, losers) <- [Map.lookup r verdicts]
                     , loser <- losers
                     ]
             }
   where
     walked :: Walk ext
-    walked = forward (Walk emptyDag Map.empty) root
+    walked = forward (Walk (building emptyDag) Map.empty) root
+
+    folded :: Dag ext
+    folded = built (walkDag walked)
 
     variants :: Map Ref [Act ext]
     variants = Map.map (fmap fst) (walkMet walked)
@@ -359,13 +363,13 @@ foldDag same root
                                     { -- only for the edges and the order: the
                                       -- representative and the conflicts of
                                       -- a contested ref are settled at the end.
-                                      walkDag = record (\_ _ -> True) aref act predRefs (walkDag w)
+                                      walkDag = recordInto (\_ _ -> True) aref act predRefs (walkDag w)
                                     , walkMet = Map.insert aref met (walkMet w)
                                     }
                                 preds
 
 data Walk ext = Walk
-    { walkDag :: !(Dag ext)
+    { walkDag :: !(Building ext)
     , walkMet :: !(Map Ref [(Act ext, [[Ref]])])
     -- ^ The tops walked, by 'Ref': the declarations of it the conflict test
     -- tells apart, in first-met order, each with the predecessor lists it
@@ -471,6 +475,13 @@ refOf (x :< _) =
 
 Idempotent in the edges (they are a set) but not in the representative, which
 is the point: this is where a re-declaration takes over a node.
+
+One call costs the edge lists it touches (the node's own and each
+dependency's dependants), once each. The functions here that record many
+nodes in a row ('foldDag', 'mergeDag', 'fromMagma') do not go through this
+one: they keep a 'Building' across the whole run, so a node gaining many
+edges over many calls pays for each edge once rather than for its whole list
+every time.
 -}
 record ::
     (Act ext -> Act ext -> Bool) ->
@@ -479,15 +490,101 @@ record ::
     [Ref] ->
     Dag ext ->
     Dag ext
-record same aref act predRefs dag =
-    Dag
-        { dagNodes = Map.insert aref act (dagNodes dag)
-        , dagDependencies = foldl' addDependency deps0 predRefs
-        , dagDependants = foldl' addDependant dependants0 predRefs
-        , dagOrderRev = order'
-        , dagConflicts = conflicts'
+record same aref act predRefs dag = built (recordInto same aref act predRefs (building dag))
+
+{- | A 'Dag' being built by a run of 'record's.
+
+'dagDependencies' and 'dagDependants' are lists in first-seen order without
+repeats. Adding an edge to such a list means asking whether it is there and
+putting it at the end, both a walk of the list, so a node gaining @k@ edges
+one at a time costs @k^2@ (the profiles' finding 3: a fan of 10 000 took
+1.3 s to fold). While building, an edge list that has been touched is kept
+as an 'Edges' instead, which answers both in @log k@; lists nobody touched
+stay where they are in the 'Dag', so building on a large 'Dag' costs what is
+touched, not the 'Dag'. 'built' turns the touched ones back into lists,
+which are the same lists, in the same order, that appending one at a time
+gives.
+
+Invariant: a key of either overlay is a key of the matching map of the
+finished 'Dag' (it takes precedence over the 'Dag''s own entry, if any).
+-}
+data Building ext = Building
+    { buildingDag :: !(Dag ext)
+    -- ^ nodes, order and conflicts are current; of the two edge maps, only
+    -- the entries absent from the overlays below are.
+    , buildingDependencies :: !(Map Ref Edges)
+    , buildingDependants :: !(Map Ref Edges)
+    }
+
+-- | One edge list while building: its members, and the list itself reversed.
+data Edges = Edges !(Set Ref) ![Ref]
+
+noEdges :: Edges
+noEdges = Edges Set.empty []
+
+edgesFromList :: [Ref] -> Edges
+edgesFromList xs = Edges (Set.fromList xs) (reverse xs)
+
+edgesToList :: Edges -> [Ref]
+edgesToList (Edges _ rev) = reverse rev
+
+-- | Add at the end unless already present: what @old <> [new]@ after an
+-- @elem@ test did.
+snocEdge :: Ref -> Edges -> Edges
+snocEdge r e@(Edges members rev)
+    | Set.member r members = e
+    | otherwise = Edges (Set.insert r members) (r : rev)
+
+building :: Dag ext -> Building ext
+building dag = Building dag Map.empty Map.empty
+
+built :: Building ext -> Dag ext
+built b =
+    (buildingDag b)
+        { dagDependencies = settle (buildingDependencies b) (dagDependencies (buildingDag b))
+        , dagDependants = settle (buildingDependants b) (dagDependants (buildingDag b))
         }
   where
+    settle overlay base
+        | Map.null overlay = base
+        | otherwise = Map.union (Map.map edgesToList overlay) base
+
+-- | The edge list at a key, as an 'Edges', from the overlay or the 'Dag'.
+edgesAt :: Map Ref Edges -> Map Ref [Ref] -> Ref -> Edges
+edgesAt overlay base r =
+    case Map.lookup r overlay of
+        Just e -> e
+        Nothing -> maybe noEdges edgesFromList (Map.lookup r base)
+
+-- | Make @r@ a key, with no edges unless it has some.
+ensureKey :: Map Ref [Ref] -> Ref -> Map Ref Edges -> Map Ref Edges
+ensureKey base r overlay
+    | Map.member r overlay || Map.member r base = overlay
+    | otherwise = Map.insert r noEdges overlay
+
+-- | 'record', on a 'Building'.
+recordInto ::
+    (Act ext -> Act ext -> Bool) ->
+    Ref ->
+    Act ext ->
+    [Ref] ->
+    Building ext ->
+    Building ext
+recordInto same aref act predRefs (Building dag depsOverlay dependantsOverlay) =
+    Building
+        { buildingDag =
+            dag
+                { dagNodes = Map.insert aref act (dagNodes dag)
+                , dagOrderRev = order'
+                , dagConflicts = conflicts'
+                }
+        , buildingDependencies = deps'
+        , buildingDependants = dependants'
+        }
+  where
+    baseDeps = dagDependencies dag
+    baseDependants = dagDependants dag
+
     previous = Map.lookup aref (dagNodes dag)
 
     conflicts'
@@ -499,18 +596,20 @@ record same aref act predRefs dag =
         | Map.member aref (dagNodes dag) = dagOrderRev dag
         | otherwise = aref : dagOrderRev dag
 
-    -- every node is a key of both maps, even with no edges either way.
-    deps0 = Map.insertWith (\_ old -> old) aref [] (dagDependencies dag)
-    dependants0 = Map.insertWith (\_ old -> old) aref [] (dagDependants dag)
+    -- every node is a key of both maps, even with no edges either way, and
+    -- so is every dependency, before it is recorded itself. The node's own
+    -- list is read once and extended in order; a dependency equal to the
+    -- node (a self-edge) lands in that same list, as it did.
+    deps' =
+        let withKeys = foldl' (flip (ensureKey baseDeps)) depsOverlay predRefs
+            own = foldl' (flip snocEdge) (edgesAt withKeys baseDeps aref) predRefs
+         in Map.insert aref own withKeys
 
-    addDependency m d = Map.insertWith snoc aref [d] (Map.insertWith (\_ old -> old) d [] m)
-    addDependant m d = Map.insertWith snoc d [aref] m
-
-    -- append-if-absent, keeping first-seen order.
-    snoc [new] old
-        | new `elem` old = old
-        | otherwise = old <> [new]
-    snoc new old = old <> filter (`notElem` old) new
+    dependants' =
+        foldl'
+            (\m d -> Map.insert d (snocEdge aref (edgesAt m baseDependants d)) m)
+            (ensureKey baseDependants aref dependantsOverlay)
+            predRefs
 
 {- | Rebuild a 'Dag' from a magma and a flat edge set — the inverse of
 'dagEdges', and how a driver that keeps nodes and precedence separately (as
@@ -523,20 +622,22 @@ the magma's key order, which is arbitrary but stable — the walk this feeds is
 order-independent apart from tie-breaks.
 -}
 fromMagma :: Map Ref (Act ext) -> Set (Ref, Ref) -> Dag ext
-fromMagma magma edges = foldl' add emptyDag (Map.keys magma)
+fromMagma magma edges = built (Map.foldlWithKey' add (building emptyDag) magma)
   where
     -- \_ _ -> True: these representatives are already the survivors of
     -- whatever fold produced the magma, so there is no collision left to
     -- report here.
-    add dag r = record (\_ _ -> True) r (magma Map.! r) (deps r) dag
+    add b r act = recordInto (\_ _ -> True) r act (deps r) b
 
     deps :: Ref -> [Ref]
     deps r = Map.findWithDefault [] r incoming
 
+    -- each list in edge-set order: built by consing (what 'Map.fromListWith'
+    -- does with '(<>)' on singletons) and reversed once, rather than by
+    -- appending on the right, which costs a node's whole list per edge.
     incoming :: Map Ref [Ref]
     incoming =
-        Map.fromListWith
-            (flip (<>))
+        Map.map reverse . Map.fromListWith (<>) $
             [ (dependant, [dependency])
             | (dependency, dependant) <- Set.toList edges
             , Map.member dependency magma
@@ -563,8 +664,8 @@ collapseInto into act members dag
     | otherwise =
         Dag
             { dagNodes = Map.insert into act survivors
-            , dagDependencies = Map.map (nubOrd . fmap rename) keptDeps
-            , dagDependants = transposeOf (Map.map (nubOrd . fmap rename) keptDeps)
+            , dagDependencies = renamedDeps
+            , dagDependants = transposeOf renamedDeps
             , dagOrderRev = reverse order'
             , dagConflicts = dagConflicts dag
             }
@@ -573,6 +674,8 @@ collapseInto into act members dag
     survivors = Map.withoutKeys (dagNodes dag) present
 
     rename r = if Set.member r present then into else r
+
+    renamedDeps = Map.map (nubOrd . fmap rename) keptDeps
 
     -- every surviving node's dependencies, with members renamed and the
     -- resulting self-edges dropped; the replacement inherits the union of its
@@ -614,10 +717,14 @@ addEdge (dependency, dependant) dag
 -- | Invert a dependency map into a dependant map. Left-biased 'Map.union' so
 -- the computed entry wins; the right-hand map only supplies the empty list
 -- for nodes nothing depends on, which have to stay keys.
+--
+-- Each dependant list is in key order of the dependants (with a repeat for a
+-- dependency listed twice): consed and reversed once, not appended on the
+-- right, which cost a node's whole list per edge.
 transposeOf :: Map Ref [Ref] -> Map Ref [Ref]
 transposeOf deps =
     Map.union
-        (Map.fromListWith (flip (<>)) [(d, [r]) | (r, ds) <- Map.toList deps, d <- ds])
+        (Map.map reverse (Map.fromListWith (<>) [(d, [r]) | (r, ds) <- Map.toList deps, d <- ds]))
         (Map.map (const []) deps)
 
 {- | Fold the right 'Dag' into the left one: representatives from the right
@@ -625,12 +732,12 @@ win, edges and order accumulate. This is how a second declaration joins a
 running world.
 -}
 mergeDag :: (Act ext -> Act ext -> Bool) -> Dag ext -> Dag ext -> Dag ext
-mergeDag same into from = foldl' step into (dagOrder from)
+mergeDag same into from = built (foldl' step (building into) (dagOrder from))
   where
-    step dag r =
+    step b r =
         case representativeOf from r of
-            Nothing -> dag
-            Just act -> record same r act (dependenciesOf from r) dag
+            Nothing -> b
+            Just act -> recordInto same r act (dependenciesOf from r) b
 
 -------------------------------------------------------------------------------
 

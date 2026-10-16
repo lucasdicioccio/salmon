@@ -27,6 +27,8 @@ module Salmon.Actions.Query (
     Outline,
     outline,
     outlineRefs,
+    outlineRoots,
+    outlineChildren,
     outlineFirstPaths,
     matchOutline,
     pathLimit,
@@ -130,6 +132,9 @@ data Outline = Outline
     { outlineEntries :: !(Map Ref Entry)
     , outlineRootsRev :: ![Ref]
     -- ^ the nodes with no 'Ref'-carrying node above them, last met first
+    , outlineRootSet :: !(Set Ref)
+    -- ^ the same, as a set: what asking whether a node is a root reads, so
+    -- that a graph with many roots is not searched once per root.
     , outlineOrderRev :: ![Ref]
     -- ^ every node, last met first
     }
@@ -139,11 +144,15 @@ data Entry = Entry
     , entryHelp :: !Text
     , entryFirstPath :: ![Text]
     , entryChildrenRev :: ![Ref]
+    , entryChildSet :: !(Set Ref)
+    -- ^ the same, as a set: what asking whether a node is already under
+    -- this one reads, so that a node with many children (a fan) is not
+    -- searched once per child.
     }
 
 -- | See 'Outline'.
 outline :: Cofree Graph Op -> Outline
-outline = go Nothing [] (Outline Map.empty [] [])
+outline = go Nothing [] (Outline Map.empty [] Set.empty [])
   where
     -- the node above (if any), the path to it, and what has been seen so far.
     go :: Maybe Ref -> [Text] -> Outline -> Cofree Graph Op -> Outline
@@ -158,7 +167,7 @@ outline = go Nothing [] (Outline Map.empty [] [])
                                 entered =
                                     acc
                                         { outlineEntries =
-                                            Map.insert ref (Entry (shorthand act) act.extension.help path []) acc.outlineEntries
+                                            Map.insert ref (Entry (shorthand act) act.extension.help path [] Set.empty) acc.outlineEntries
                                         , outlineOrderRev = ref : acc.outlineOrderRev
                                         }
                              in List.foldl' (go (Just ref) path) (link parent ref entered) (toList g)
@@ -175,21 +184,30 @@ outline = go Nothing [] (Outline Map.empty [] [])
                 | otherwise -> go (Just ref) path acc c
 
     linked :: Maybe Ref -> Ref -> Outline -> Bool
-    linked Nothing ref acc = ref `elem` acc.outlineRootsRev
+    linked Nothing ref acc = ref `Set.member` acc.outlineRootSet
     linked (Just parent) ref acc =
-        maybe False (elem ref . (.entryChildrenRev)) (Map.lookup parent acc.outlineEntries)
+        maybe False (Set.member ref . (.entryChildSet)) (Map.lookup parent acc.outlineEntries)
 
     link :: Maybe Ref -> Ref -> Outline -> Outline
     link parent ref acc
         | linked parent ref acc = acc
         | otherwise = case parent of
-            Nothing -> acc{outlineRootsRev = ref : acc.outlineRootsRev}
+            Nothing -> acc{outlineRootsRev = ref : acc.outlineRootsRev, outlineRootSet = Set.insert ref acc.outlineRootSet}
             Just p ->
-                acc{outlineEntries = Map.adjust (\e -> e{entryChildrenRev = ref : e.entryChildrenRev}) p acc.outlineEntries}
+                acc{outlineEntries = Map.adjust (\e -> e{entryChildrenRev = ref : e.entryChildrenRev, entryChildSet = Set.insert ref e.entryChildSet}) p acc.outlineEntries}
 
 -- | Every node of the graph.
 outlineRefs :: Outline -> Set Ref
 outlineRefs = Map.keysSet . (.outlineEntries)
+
+-- | The nodes with no node above them, in the order they were first met.
+outlineRoots :: Outline -> [Ref]
+outlineRoots o = reverse o.outlineRootsRev
+
+-- | The nodes directly under a node, in the order they were first met under
+-- it; nothing for a 'Ref' the outline does not hold.
+outlineChildren :: Outline -> Ref -> [Ref]
+outlineChildren o ref = maybe [] (reverse . (.entryChildrenRev)) (Map.lookup ref o.outlineEntries)
 
 {- | Each node once, in the order and at the path a walk of the whole tree
 first meets it, with its help text: 'pathedNodes' keeping the first entry
