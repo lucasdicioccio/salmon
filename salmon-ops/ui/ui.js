@@ -42,7 +42,9 @@ const state = {
   unclaimed: [], // events with an origin no request has claimed yet
   history: null, // last /history: {seeds: [...], elided}
   seedHelpLoaded: false,
-  tails: new Map(), // full ref -> {lines, paused, held, pre} for each pinned live tail
+  tails: new Map(), // full ref -> {lines, paused, held, pre, ...} for each pinned live tail
+  templating: null, // the promise of {tt, tramaj} once a tail has a template (lazy: tail-template.js + vendored tramaj-js)
+  templatingLib: null, // what that promise resolved to
   zoom: { scale: 1, tx: 0, ty: 0 }, // the #viewport transform; world units are the raw layout() pixels
   zoomInit: false, // true once the first fit-to-view has run
   worldSize: null, // the current layout()'s {width, height}, for fitView
@@ -61,6 +63,9 @@ const MAX_ZOOM = 4;
 const TAIL_MAX_WINDOWS = 4;
 const TAIL_MAX_LINES = 500;
 const TAIL_STORE = "salmon-tails";
+// ref -> a tail window's Tramaj template source, kept across unpinning
+const TAIL_TEMPLATE_STORE = "salmon-tail-templates";
+const TAIL_TEMPLATE_KEEP = 64;
 
 // How long a node stays marked as touched once the command that touched it
 // has been handled.
@@ -215,7 +220,7 @@ function storePins() {
 function reconcileTails() {
   for (const ref of storedPins()) {
     if (state.nodes.has(ref) && !state.tails.has(ref) && state.tails.size < TAIL_MAX_WINDOWS) {
-      state.tails.set(ref, newTail());
+      state.tails.set(ref, newTail(ref));
     }
   }
   for (const ref of [...state.tails.keys()]) {
@@ -230,24 +235,28 @@ function reconcileTails() {
   renderDock();
 }
 
-// `seq` is the number of the newest event the window shows
-function newTail() {
-  return { lines: [], paused: false, held: [], pre: null, seq: 0 };
+// `seq` is the number of the newest event the window shows. `lines` and
+// `held` are entries ({line, text, stream, kind, channel, seq}, see
+// `tailEntryOf`); `line` is what the window shows without a template.
+function newTail(ref) {
+  const t = { lines: [], paused: false, held: [], pre: null, seq: 0, ref };
+  resetTemplate(t, storedTemplate(ref));
+  return t;
 }
 
 function seedTail(t, n) {
   if (Array.isArray(n.tail)) {
     for (const e of n.tail) {
       if (typeof e.seq !== "number" || e.seq <= t.seq) continue;
-      const line = tailLineOf(e);
-      if (line === null) continue;
-      t.lines.push(line);
+      const entry = tailEntryOf(e);
+      if (entry === null) continue;
+      t.lines.push(entry);
       t.seq = e.seq;
     }
     if (t.lines.length > TAIL_MAX_LINES) t.lines.splice(0, t.lines.length - TAIL_MAX_LINES);
   } else if (t.lines.length === 0 && n.status && Array.isArray(n.status.output)) {
     // a server from before /dag carried `tail`: the held action's ring
-    t.lines = n.status.output.slice(-TAIL_MAX_LINES);
+    t.lines = n.status.output.slice(-TAIL_MAX_LINES).map((line) => plainEntry(String(line)));
   }
 }
 
@@ -257,7 +266,7 @@ function toggleTail(ref) {
   } else {
     // the oldest pin makes room
     if (state.tails.size >= TAIL_MAX_WINDOWS) state.tails.delete(state.tails.keys().next().value);
-    const t = newTail();
+    const t = newTail(ref);
     const n = state.nodes.get(ref);
     if (n) seedTail(t, n);
     state.tails.set(ref, t);
@@ -268,27 +277,48 @@ function toggleTail(ref) {
 }
 
 // What a window shows for one event about its node, live or from a `tail`:
-// the same text either way. null for an event a window does not show.
-function tailLineOf(e) {
+// the same entry either way. Its `line` is the text shown without a
+// template; the rest is what a tail template reads besides: the line without
+// its mark, and the event's stream, kind, channel and number. null for an
+// event a window does not show.
+function tailEntryOf(e) {
   switch (e.stream) {
     case "output":
-      return outputLine(e);
+      return outputEntry(e);
     case "updown":
-      return `[updown] ${formatUpDownLine(e)}`;
+      return markedEntry("updown", e.kind, "[updown] ", formatUpDownLine(e), e.seq);
     case "upkeep":
-      return e.kind === "acted" && e.report ? `[updown] ${formatUpDownLine(e.report)}` : `[upkeep] ${formatUpkeepLine(e)}`;
+      return e.kind === "acted" && e.report
+        ? markedEntry("updown", e.report.kind, "[updown] ", formatUpDownLine(e.report), e.seq)
+        : markedEntry("upkeep", e.kind, "[upkeep] ", formatUpkeepLine(e), e.seq);
     default:
       return null;
   }
 }
 
+function markedEntry(stream, kind, mark, text, seq) {
+  return { line: mark + text, text, stream, kind: kind ?? null, channel: null, seq: typeof seq === "number" ? seq : null };
+}
+
+// a line from a server too old for `tail`: the held action's ring
+function plainEntry(line) {
+  return { line, text: line, stream: "output", kind: "output", channel: null, seq: null };
+}
+
 // The `output` stream carries two kinds: `output`, a line a held (`managed`)
 // action wrote, and `log`, a line any node said while its `up` was running:
 // a streamed command's stdout or stderr, or a progress message of its own.
-function outputLine(e) {
+function outputEntry(e) {
   if (typeof e.line !== "string") return null;
   const mark = e.kind === "log" && e.channel === "stderr" ? "err| " : e.kind === "log" && e.channel === "message" ? "msg| " : "";
-  return mark + e.line;
+  return {
+    line: mark + e.line,
+    text: e.line,
+    stream: "output",
+    kind: e.kind ?? null,
+    channel: e.kind === "log" ? (e.channel ?? null) : null,
+    seq: typeof e.seq === "number" ? e.seq : null,
+  };
 }
 
 function applyOutput(e) {
@@ -300,14 +330,14 @@ function applyOutput(e) {
       paintRow(n);
     }
   }
-  const line = outputLine(e);
-  if (line !== null) pushTailLine(e.ref.full, line, e.seq);
+  const entry = outputEntry(e);
+  if (entry !== null) pushTailLine(e.ref.full, entry, e.seq);
 }
 
 // Shared by a managed action's raw output and by the formatted updown/upkeep
 // report lines below; a no-op if that ref has no open tail window, or if the
 // window already shows the event (seeded from a `tail` that had it).
-function pushTailLine(ref, line, seq) {
+function pushTailLine(ref, entry, seq) {
   const t = state.tails.get(ref);
   if (!t) return;
   if (typeof seq === "number") {
@@ -316,7 +346,7 @@ function pushTailLine(ref, line, seq) {
   }
   // paused holds the view still; what arrives meanwhile is kept for resume
   const into = t.paused ? t.held : t.lines;
-  into.push(line);
+  into.push(entry);
   if (into.length > TAIL_MAX_LINES) into.splice(0, into.length - TAIL_MAX_LINES);
   if (!t.paused) paintTail(t);
 }
@@ -360,8 +390,184 @@ function formatUpkeepLine(e) {
 function paintTail(t) {
   if (!t.pre) return;
   const stick = t.pre.scrollTop + t.pre.clientHeight >= t.pre.scrollHeight - 4;
-  t.pre.textContent = t.lines.join("\n");
+  fillTailBody(t);
   if (stick) t.pre.scrollTop = t.pre.scrollHeight;
+}
+
+// Without a template (or until it is parsed), the lines as text, as before.
+// With one, each line through it: drawn once per template and kept on the
+// entry, so a new line does not re-evaluate the other 499.
+function fillTailBody(t) {
+  if (!t.program || !state.templatingLib) {
+    t.pre.textContent = t.lines.map((l) => l.line).join("\n");
+    paintTemplateError(t);
+    return;
+  }
+  const { tt, tramaj } = state.templatingLib;
+  const node = state.nodes.get(t.ref);
+  const rows = [];
+  for (const entry of t.lines) {
+    if (entry.drawnFor !== t.program) {
+      entry.drawnFor = t.program;
+      const r = tt.foldLine(tramaj, t.program, tt.tailContext(entry, node));
+      if (r.error && !t.templateError) t.templateError = `${r.error}; such a line is shown raw (first: ${entry.line.slice(0, 120)})`;
+      entry.drawn = r.drop ? null : lineElement(r.error ? entry.line : r.spec, Boolean(r.error));
+    }
+    if (entry.drawn) rows.push(entry.drawn);
+  }
+  t.pre.replaceChildren(...rows);
+  paintTemplateError(t);
+}
+
+function lineElement(spec, raw) {
+  const row = document.createElement("span");
+  row.className = raw ? "tail-line tail-raw" : "tail-line";
+  row.appendChild(specElement(spec));
+  return row;
+}
+
+// A spec from tail-template.js's `specOf`: only allowlisted tags, `class`
+// and `title`, text as text. Never innerHTML.
+function specElement(spec) {
+  if (typeof spec === "string") return document.createTextNode(spec);
+  const el = spec.tag === null ? document.createDocumentFragment() : document.createElement(spec.tag);
+  if (spec.tag !== null) {
+    if (spec.cls) el.className = spec.cls;
+    if (spec.title) el.title = spec.title;
+  }
+  for (const c of spec.children) el.appendChild(specElement(c));
+  return el;
+}
+
+function paintTemplateError(t) {
+  if (!t.errorLine) return;
+  t.errorLine.hidden = !t.templateError;
+  t.errorLine.textContent = t.templateError ? `template: ${t.templateError}` : "";
+}
+
+// ---------------------------------------------------------------------------
+// tail templates (opt-in): a window may carry a Tramaj template that shapes
+// how each of its lines renders. The contract is in tail-template.js; this
+// half keeps the sources, loads the evaluator on first use, and draws.
+
+function storedTemplates() {
+  try {
+    const v = JSON.parse(localStorage.getItem(TAIL_TEMPLATE_STORE) || "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+function storedTemplate(ref) {
+  const v = storedTemplates()[ref];
+  return typeof v === "string" && v.trim() !== "" ? v : null;
+}
+
+function storeTemplate(ref, source) {
+  try {
+    const all = storedTemplates();
+    delete all[ref];
+    if (source !== null) all[ref] = source;
+    // newest last; the oldest go past the cap
+    const keys = Object.keys(all);
+    for (const k of keys.slice(0, Math.max(0, keys.length - TAIL_TEMPLATE_KEEP))) delete all[k];
+    localStorage.setItem(TAIL_TEMPLATE_STORE, JSON.stringify(all));
+  } catch {
+    // page storage may be unavailable; the template lasts as long as the page
+  }
+}
+
+// Set a window's template source (null for none) and parse it, loading the
+// evaluator first if this is the first template on the page.
+function resetTemplate(t, source) {
+  t.template = source;
+  t.program = null;
+  t.templateError = null;
+  if (t.draft === undefined) t.draft = source ?? "";
+  if (source === null) return;
+  if (state.templatingLib) {
+    parseTemplate(t);
+    return;
+  }
+  loadTemplating().then(
+    () => {
+      if (t.template !== source) return;
+      parseTemplate(t);
+      paintTail(t);
+    },
+    (e) => {
+      t.templateError = `the template evaluator did not load: ${e && e.message ? e.message : e}`;
+      paintTail(t);
+    },
+  );
+}
+
+function parseTemplate(t) {
+  const { tt, tramaj } = state.templatingLib;
+  try {
+    t.program = tramaj.parseProgram(t.template);
+  } catch (e) {
+    t.program = null;
+    t.templateError = `does not parse, lines shown as text: ${tt.messageOf(e)}`;
+  }
+}
+
+// Same-origin, embedded in the binary: no third-party fetch.
+function loadTemplating() {
+  if (!state.templating) {
+    state.templating = Promise.all([import("./tail-template.js"), import("./vendor/tramaj-js/index.js")]).then(([tt, tramaj]) => {
+      state.templatingLib = { tt, tramaj };
+      return state.templatingLib;
+    });
+    state.templating.catch(() => {
+      state.templating = null; // a later template tries again
+    });
+  }
+  return state.templating;
+}
+
+const TEMPLATE_HINT =
+  "A Tramaj template per line. $ctx: line, text, stream, kind, channel, seq, words, fields, node {ref, short, shorthand, convergence}. " +
+  "null drops the line; tags: span b strong i em u s code mark small sub sup br; attributes: class, title " +
+  "(classes t-err t-warn t-ok t-muted t-hl are styled). " +
+  'e.g. branch(.span($ctx.line), eq($ctx.channel, "stderr"), .span(class: "t-err", $ctx.line))';
+
+function templateEditor(t) {
+  const box = document.createElement("div");
+  box.className = "tail-template";
+  const area = document.createElement("textarea");
+  area.rows = 4;
+  area.spellcheck = false;
+  area.placeholder = TEMPLATE_HINT;
+  area.title = TEMPLATE_HINT;
+  area.value = t.draft ?? "";
+  area.addEventListener("input", () => {
+    t.draft = area.value;
+  });
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.textContent = "apply";
+  apply.title = "render this window's lines through the template (kept in this browser)";
+  apply.addEventListener("click", () => {
+    const source = area.value.trim() === "" ? null : area.value;
+    storeTemplate(t.ref, source);
+    resetTemplate(t, source);
+    renderDock();
+  });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "remove";
+  remove.title = "show the lines as plain text again";
+  remove.addEventListener("click", () => {
+    t.draft = "";
+    storeTemplate(t.ref, null);
+    resetTemplate(t, null);
+    t.editing = false;
+    renderDock();
+  });
+  box.append(area, apply, remove);
+  return box;
 }
 
 function renderDock() {
@@ -405,14 +611,24 @@ function renderDock() {
         t.held = [];
         paintTail(t);
       }),
+      button(t.template ? "template*" : "template", "shape how this window renders its lines with a Tramaj template", () => {
+        t.editing = !t.editing;
+        renderDock();
+      }),
       button("unpin", "close this window", () => toggleTail(ref)),
     );
     const pre = document.createElement("pre");
     pre.className = "tail-body";
     t.pre = pre;
-    win.append(bar, pre);
+    const err = document.createElement("div");
+    err.className = "tail-template-error";
+    err.hidden = true;
+    t.errorLine = err;
+    win.append(bar);
+    if (t.editing) win.append(templateEditor(t));
+    win.append(err, pre);
     dock.appendChild(win);
-    pre.textContent = t.lines.join("\n");
+    fillTailBody(t);
     pre.scrollTop = pre.scrollHeight;
   }
 }
@@ -444,7 +660,7 @@ function nodeOf(e) {
 }
 
 function applyUpDown(e) {
-  if (e.ref) pushTailLine(e.ref.full, `[updown] ${formatUpDownLine(e)}`, e.seq);
+  if (e.ref) pushTailLine(e.ref.full, markedEntry("updown", e.kind, "[updown] ", formatUpDownLine(e), e.seq), e.seq);
   const n = nodeOf(e);
   if (!n) return;
   n.last = e.kind;
@@ -487,7 +703,7 @@ function applyUpkeep(e) {
     applyUpDown({ ...e.report, stream: "updown", seq: e.seq });
     return;
   }
-  if (e.ref) pushTailLine(e.ref.full, `[upkeep] ${formatUpkeepLine(e)}`, e.seq);
+  if (e.ref) pushTailLine(e.ref.full, markedEntry("upkeep", e.kind, "[upkeep] ", formatUpkeepLine(e), e.seq), e.seq);
   const n = nodeOf(e);
   if (!n) return;
   n.last = e.kind;

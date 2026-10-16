@@ -19,6 +19,10 @@ extra-source-files:
                     ui/ui.js
                     ui/ui.css
                     ui/auth.html
+                    ui/tail-template.js
+                    ui/vendor/tramaj-js/*.js
+                    ui/vendor/tramaj-js/LICENSE
+                    ui-test/tail-template.test.mjs
                     openapi/serve-api.openapi.json
 
 source-repository head

@@ -1304,7 +1304,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   one-shot `up` (`Concurrent`) has no ring that outlives the walk. Putting the lines in the machine
   ring (the note's first idea, an edit in `Upkeep`'s one-shot attempt) would have covered only
   re-applies under tending, not the `up` an operator types. The web UI's dock (`ui.js`: `toggleTail`,
-  `seedTail`, `tailLineOf`, `pushTailLine`) pins up to four windows, remembers the pinned refs in
+  `seedTail`, `tailEntryOf`, `pushTailLine`) pins up to four windows, remembers the pinned refs in
   `localStorage`, closes one whose node is gone from the next `/dag`, and keeps per window the
   number of the newest event it shows: after every `/dag` each window takes the `tail` events above
   that number and a live event at or below it is dropped, so a reload refills a window with exactly
@@ -1323,6 +1323,39 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   build's 11 events with `status: null`; the real `ui.js` run under node against that `/dag`, a pin
   remembered, refilled the window with the 11 lines and took none of the replayed events twice;
   master's `ui.js` showed it empty). Not looked at in a browser.
+  **Tail templates** (feature 7fee51f2, opt-in, first slice): a dock window's `template` button opens
+  a textarea; an applied Tramaj template renders each of that window's lines (kept per ref in
+  `localStorage`, `salmon-tail-templates`, newest 64; a window with none renders text exactly as
+  before, and the default page loads nothing new). The contract is `ui/tail-template.js` (pure, no
+  DOM, the evaluator passed in): `$ctx` is `{line, text, stream, kind, channel, seq, words, fields,
+  node: {ref, short, shorthand, convergence}}`, every key always present (Tramaj refuses a missing
+  path); Tramaj has no string builtins, so `words` (whitespace split, ≤ 64) and `fields` (the text
+  as a JSON object, else its `key=value` words) are how a template matches content. `null` drops the
+  line; a scalar is text; a document is drawn with phrasing tags only (`span b strong i em u s code
+  mark small sub sup br`) and only `class`/`title`, built with `createElement`/text nodes, never
+  HTML; another tag is an error, another attribute or an action is ignored; ≤ 512 nodes, depth ≤ 32
+  per line. A failing line is shown raw and the window shows the first error once; a template that
+  does not parse leaves all lines as text. Each line is evaluated once per template (cached on the
+  entry, `drawnFor`), with the node as it was then. `ui.css` styles `t-err t-warn t-ok t-muted
+  t-hl`. To carry what a template reads, window lines are now entries (`tailEntryOf`,
+  `outputEntry`, `markedEntry`, `plainEntry`) whose `line` is the old text. **tramaj-js is
+  vendored** under `ui/vendor/tramaj-js/` (MIT, `LICENSE` beside it): the eight ES modules compiled
+  with the package's own `tsc` (`tsconfig.build.json`, no declarations or source maps) from
+  `lucasdicioccio/tramaj` at `9822b47da2304b3d18f44309add72b2173aab907` (`tramaj-js` 0.2.0 in
+  `package.json`, which postdates its local `dist/`), ~180 KB, embedded by `embedDir` like the rest
+  of `ui/` and served same-origin at `/ui/vendor/...`; `ui.js` reaches it and `tail-template.js`
+  with a dynamic `import()` on the first template only. No runtime fetch of third-party JS. No
+  server, `/openapi.json` or report change (`/ui/{file}` already took nested paths); the Rust
+  client and `salmon-tui` have no tail templates. Run: `salmon-ops/ui-test/tail-template.test.mjs`
+  under node 20 (unit cases plus seeded properties: the identity template keeps every line, a
+  first-word filter equals a JS filter, `words` is the whitespace split, random Node trees draw iff
+  every tag is allowed with only class/title and their text kept; 12 seeds; a mutant allowing `div`
+  and keeping the first class fails two cases), run by `Test/UiTailTemplateSpec.hs` (skipped loudly
+  without `node`), and `Test/ServeHttpSpec.hs` (the vendored files and `tail-template.js` are served
+  as JavaScript, the page names neither, `ui.js` has no static import). **Not run**: the editor, the
+  lazy import and the drawing in a browser (no browser check was done), and a template against a
+  real serve's stream. Open for the owner: vendoring vs a pinned npm build step, an upgrade recipe,
+  a CSP (`script-src 'self'` would fit), tables/block layout, and sharing one template across nodes.
   **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
   opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
   in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and

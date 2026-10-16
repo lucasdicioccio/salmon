@@ -581,6 +581,20 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
   background: var(--bg);
   color: var(--fg);
 }
+/* a tail template (opt-in, tail-template.js): one block per line, and a few
+   classes a template can name for colour without bringing its own CSS */
+.tail-line { display: block; }
+.tail-raw { opacity: 0.75; }
+.tail-template { display: flex; gap: 4px; align-items: flex-start; padding: 3px 6px; border-bottom: 1px solid var(--line); }
+.tail-template textarea { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8em; background: var(--bg); color: var(--fg); }
+.tail-template button { font-size: 0.8em; }
+.tail-template-error { padding: 2px 6px; font-size: 0.75em; color: var(--errored-fg); background: var(--errored); }
+.tail-template-error[hidden] { display: none; }
+.tail-body .t-err { color: var(--errored-fg); background: var(--errored); }
+.tail-body .t-warn { color: var(--stale-fg); background: var(--stale); }
+.tail-body .t-ok { color: var(--converged-fg); }
+.tail-body .t-muted { color: var(--muted); }
+.tail-body .t-hl { font-weight: 600; color: var(--accent); }
 
 /* a Conflicting pair, side by side ---------------------------------- */
 #panel .conflict { display: grid; grid-template-columns: auto 1fr 1fr; gap: 4px 6px; align-items: start; }

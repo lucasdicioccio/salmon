@@ -30,7 +30,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy.Char8 as LChar8
 import Data.Foldable (toList)
-import Data.List (isInfixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -778,6 +778,15 @@ theWebUi =
         (ccode, ctype', _) <- getRaw running "/ui/ui.css"
         assertEqual "the stylesheet's status" 200 ccode
         assertEqual "the stylesheet's content type" (Just "text/css; charset=utf-8") ctype'
+        -- tail templates are opt-in: the page names neither file, the script
+        -- imports them only on demand, and both are embedded (no third-party fetch)
+        assertBool "the page loads no template code" (not ("tail-template" `isInfixOf` LChar8.unpack body) && not ("vendor/" `isInfixOf` LChar8.unpack body))
+        assertBool "the script imports the evaluator lazily" ("import(\"./vendor/tramaj-js/index.js\")" `isInfixOf` LChar8.unpack js)
+        assertBool "the script has no static import" (not (any ("import " `isPrefixOf`) (lines (LChar8.unpack js))))
+        forM_ ["/ui/tail-template.js", "/ui/vendor/tramaj-js/index.js", "/ui/vendor/tramaj-js/eval.js"] $ \path -> do
+            (vcode, vtype, _) <- getRaw running path
+            assertEqual (path <> "'s status") 200 vcode
+            assertEqual (path <> "'s content type") (Just "text/javascript; charset=utf-8") vtype
         (missing, _) <- get running "/ui/missing"
         assertEqual "a file outside the embedded set" 404 missing
         (mna, _) <- post running "/" "status"

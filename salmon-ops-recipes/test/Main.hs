@@ -84,6 +84,7 @@ import qualified Test.QuadletSpec as QuadletSpec
 import qualified Test.QuadletUserSpec as QuadletUserSpec
 import qualified Test.SystemdJobSpec as SystemdJobSpec
 import qualified Test.SystemdSpec as SystemdSpec
+import qualified Test.UiTailTemplateSpec as UiTailTemplateSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepRetentionSpec as UpkeepRetentionSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
@@ -157,6 +158,7 @@ main =
             , ClipCppSpec.tests
             , LlamaServerSpec.tests
             , ServeApiSpec.tests
+            , UiTailTemplateSpec.tests
             , PgVectorSpec.tests
             , PgTextSearchSpec.tests
             , PlakarSpec.tests
