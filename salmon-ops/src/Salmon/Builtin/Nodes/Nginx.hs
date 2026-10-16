@@ -62,7 +62,7 @@ configFiles :: NginxConfig -> Op
 configFiles cfg =
     op "nginx-config" (deps $ fmap vhostFile cfg.nginx_vhosts) id
   where
-    vhostFile v = FS.filecontents $ FS.FileContents (cfg.nginx_sites_dir </> vhostFileName v) (renderVHost v)
+    vhostFile v = FS.filecontentsInSharedDir $ FS.FileContents (cfg.nginx_sites_dir </> vhostFileName v) (renderVHost v)
 
 renderVHost :: VHost -> Text
 renderVHost v =

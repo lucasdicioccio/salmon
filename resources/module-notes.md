@@ -493,6 +493,33 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   Netfilter, CronTask, Rsync, etc). Look at `Filesystem.hs` as the canonical small example of the
   `op` pattern (a value type like `Directory`/`FileContents`, a smart constructor returning `Op`
   that fills in `help`/`notes`/`ref`/`up`/`down`).
+  **Shared system directories** (`Filesystem.sharedDir`, ref kind `shared-directory`): created if
+  missing, never removed by `down`, for a directory salmon does not own alone (a package's
+  `/etc/haproxy`, `/etc/sudoers.d`, `/etc/pgbouncer`, an nginx `conf.d`, or a config directory that
+  also holds a pre-provisioned secret). `filecontentsInSharedDir` is `filecontents` with its
+  predecessor swapped from `dir` to `sharedDir`; the file node's `ref`/`help`/`notes`/contents are
+  unchanged (property-tested). Before, `run down` removed the file and then `dir`'s `down` reported
+  the directory `Failed` (and blocked what stood under it), the same defect as the systemd unit
+  directory (`Systemd.unitDirectory`, which, like the quadlet `unitDirNode`, keeps its own ref).
+  Switched: `Haproxy.configFiles` (`haproxy_config_dir`), `PgBouncer.configFiles` (ini + userlist;
+  `/etc/pgbouncer` also holds the pair's `routing.ini` and console passfile, never removed),
+  `Nginx.configFiles` (`nginx_sites_dir`), `SreBox.Initialize` (`/etc/sudoers.d/salmon`),
+  `Patroni.patroniMember`'s `patroni.yml` (`pat_config_dir` also holds the pre-provisioned
+  `pat_secrets_file`), `PgBackRest.configuration`'s config file (its directory also holds the
+  `conf.d` include path). What changes for an existing declaration is one predecessor node
+  (`directory:<path>` becomes `shared-directory:<path>`), not any rendered file, so nothing restarts;
+  under `serve` the old `directory` node is retracted once and its `down` refuses, the same red line
+  one last time. Surveyed and **not** changed (data or salmon-owned directories, or keys with no
+  `down`, where `dir` refusing is the right signal or the path is the caller's): `Etcd`'s data dir
+  and config file, Patroni's `pgConfigDir` (`dir` + `ownedFile`; holds Postgres' config, Patroni's),
+  PgBackRest's repo/log dirs, `WireGuard`/`Keys`/`Secrets`/`Podman` auth-file enclosing dirs,
+  `PostgresBackup`'s `/opt/salmon/postgres`, `Tar`/`Git`/`Cabal`/`Spago`. Run: Layer 0 only,
+  `Test/SharedDirSpec.hs` (a real `upTree`/`downTree` in a temp directory holding a stranger file:
+  clean down, directory and stranger left, second down clean; the old `filecontents` shape reports
+  `directory` `Failed` in the same setup; QuickCheck: the file node renders as `filecontents` and
+  stands on exactly one `shared-directory`; graph shape for haproxy, pgbouncer, nginx, Initialize)
+  plus one graph-shape case each in `Test/PatroniSpec.hs` and `Test/PgBackRestSpec.hs`. Not run:
+  any of these builtins against a real `/etc`, a package, or under `serve`.
   `Filesystem` has three directory nodes with three `down`s: `dir` removes an *empty* directory
   and throws on any other (a signal that something in it was not declared or did not go down),
   `retainedDir` renames to a timestamped suffix, and **`scratchDir`** (opt-in, ref kind
@@ -1967,9 +1994,8 @@ existing declaration is the predecessor, so under `serve` the old `"directory"` 
 and its `down` refuses, the same red line one last time (nothing restarts). Run for this: `Test/SystemdSpec.hs`
 "the unit directory" (a real `upTree`/`downTree` of the unit file in a temp directory holding another unit, the old
 shape reported `Failed` in the same setup, graph shape, QuickCheck properties). Not run: the service node's own
-`down` (`systemctl stop`) in that teardown. Other builtins with the same shape, found by a grep for literal `/etc` paths (not a full survey) and **not** changed:
-`Haproxy`'s config file (`Filesystem.dir` of `/etc/haproxy`, which the package also fills) and
-`SreBox.Initialize`'s `/etc/sudoers.d/salmon` (`Filesystem.dir` of `/etc/sudoers.d`); `CronTask` and
+`down` (`systemctl stop`) in that teardown. The other builtins with the same shape now use
+`Filesystem.filecontentsInSharedDir` (see "Shared system directories" under `Filesystem`); `CronTask` and
 `AptRepository` write their files without a directory node and are not affected.
 
 `Nodes/Systemd/Job.hs` is jobs under systemd, which `systemdService` cannot declare: its check wants `ActiveState=active`

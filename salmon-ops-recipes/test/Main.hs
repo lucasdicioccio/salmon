@@ -82,6 +82,7 @@ import qualified Test.ServeTlsSpec as ServeTlsSpec
 import qualified Test.StatusSinkSpec as StatusSinkSpec
 import qualified Test.QuadletSpec as QuadletSpec
 import qualified Test.QuadletUserSpec as QuadletUserSpec
+import qualified Test.SharedDirSpec as SharedDirSpec
 import qualified Test.SystemdJobSpec as SystemdJobSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
@@ -209,6 +210,7 @@ main =
             , ServeTlsSpec.tests
             , StatusSinkSpec.tests
             , QuadletSpec.tests
+            , SharedDirSpec.tests
             , SystemdJobSpec.tests
             , SystemdSpec.tests
             , UpTreeSpec.tests
