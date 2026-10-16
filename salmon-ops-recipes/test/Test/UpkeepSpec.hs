@@ -23,8 +23,8 @@ it stands for, and one whose going away takes its dependants with it.
 module Test.UpkeepSpec (tests) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (ErrorCall (..), bracket, fromException, throwIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Exception (ErrorCall (..), bracket, finally, fromException, throwIO)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, retry)
 import Control.Monad (unless, void)
 import Data.Dynamic (toDyn)
@@ -423,7 +423,7 @@ vanishedComesBack = within 10 $ do
         -- the effect disappears behind salmon's back
         writeIORef there False
         void (Upkeep.instruct sup (refOf "svc") Recheck)
-        await trace (\rs -> length (evals rs) >= 2)
+        await trace (\rs -> donesOf "svc" rs >= 2)
         assertEqual "and was put back" 2 =<< readIORef ran
 
 neverLeavesItAlone :: IO ()
@@ -466,7 +466,7 @@ alwaysActsOnCompleted = within 10 $ do
         await trace (\rs -> not (null (reached Up rs)))
         assertEqual "a Completed check skipped it on the way in" ["job"] . skips =<< seen trace
         void (Upkeep.instruct sup (refOf "job") Recheck)
-        await trace (\rs -> not (null (evals rs)))
+        await trace (\rs -> donesOf "job" rs >= 1)
         assertEqual "but Always ran it anyway" 1 =<< readIORef ran
 
 dependantWaits :: IO ()
@@ -479,7 +479,7 @@ dependantWaits = within 10 $ do
         await trace (\rs -> "dep" `elem` evals rs)
         assertEqual "the dependant has not run" 0 =<< readIORef ran
         putMVar gate ()
-        await trace (\rs -> "top" `elem` evals rs)
+        await trace (\rs -> donesOf "top" rs >= 1)
         assertEqual "and now it has" 1 =<< readIORef ran
 
 {- | The sharpest difference from the one-shot drivers. There, a node whose
@@ -506,7 +506,7 @@ failureIsWaitedOut = within 20 $ do
         assertEqual "and is not reported Blocked" [] (blockeds rs)
         -- skip the backoff rather than sleeping through it
         void (Upkeep.instruct sup (refOf "flaky") Recheck)
-        await trace (\rs -> "onflaky" `elem` evals rs)
+        await trace (\rs -> donesOf "onflaky" rs >= 1)
         assertEqual "it proceeds once the dependency recovers" 1 =<< readIORef ran
 
 {- | A node nobody is tending will never move, so waiting for it to move
@@ -584,7 +584,7 @@ pauseAndResume = within 10 $ do
         await trace (\rs -> "gate" `elem` [act.shorthand | Acted (UpDown.Done act) <- rs])
         assertEqual "the paused node stayed put" 0 =<< readIORef ran
         void (Upkeep.instruct sup (refOf "held") Resume)
-        await trace (\rs -> "held" `elem` evals rs)
+        await trace (\rs -> donesOf "held" rs >= 1)
         assertEqual "and moved once resumed" 1 =<< readIORef ran
 
 {- | The watchdog is a node author saying what their node's silence would
@@ -1077,7 +1077,7 @@ demotedWaitsForItsDependency = within 20 $ do
         await trace (\rs -> reachedBy "svc" WaitUp rs >= 2)
         assertEqual "waiting, not acting" 1 =<< readIORef svcRan
         putMVar gate ()
-        await trace (\rs -> evalsOf "svc" rs >= 2)
+        await trace (\rs -> donesOf "svc" rs >= 2)
         assertEqual "and only once the dependency was back" 2 =<< readIORef svcRan
 
 {- | A demoted node is itself no longer up, which is all a dependant of /it/
@@ -1260,7 +1260,7 @@ reapplyRunsAgain = within 10 $ do
         rs0 <- seen trace
         assertEqual "never parked, since it opted out of that" 0 (length [() | Parked{} <- rs0])
         void (Upkeep.instruct sup (refOf "cheap-dir") Recheck)
-        await trace (\rs -> evalsOf "cheap-dir" rs >= 2)
+        await trace (\rs -> donesOf "cheap-dir" rs >= 2)
         assertEqual "reapplied rather than merely looked at" 2 =<< readIORef ran
 
 {- | A successful reapply is not a restart: it must not go back through
@@ -1638,7 +1638,10 @@ waits for it.
 -}
 guardedWaitsForSiblingInFlight :: IO ()
 guardedWaitsForSiblingInFlight = within 10 $ do
-    pre <- newIORef Met
+    -- unmet until the sibling is known to be inside its up: met from the
+    -- start, the operation could claim the sibling before its machine had
+    -- begun, pause it in 'WaitUp', run, and release it into the blocking up
+    pre <- newIORef (Unmet "not yet")
     done <- newIORef False
     gate <- newEmptyMVar
     (ran, bump) <- counter
@@ -1651,8 +1654,14 @@ guardedWaitsForSiblingInFlight = within 10 $ do
     let replica = siblingNode "replica" slowOnce
         upgrade = riskyNode "upgrade" defaultGuarding{guardingHolds = [refOf "replica"]} pre done bump
         top = nodeOn "top" [replica, upgrade] id
-    supervising (dagOf top) allUp $ \_ trace -> do
-        await trace (\rs -> any (isEvalOf "replica") rs && reachedBy "upgrade" Upping rs >= 1)
+    -- the gate is opened on the way out whatever happens: a failing
+    -- assertion must not leave the sibling's up blocked, or the teardown
+    -- waits on it and the failure is reported as a timeout instead
+    supervising (dagOf top) allUp $ \sup trace -> flip finally (tryPutMVar gate ()) $ do
+        await trace (any (isEvalOf "replica"))
+        writeIORef pre Met
+        void (Upkeep.instruct sup (refOf "upgrade") Recheck)
+        await trace (\rs -> reachedBy "upgrade" Upping rs >= 1)
         -- nothing to await for a non-event: time it could have used to start
         threadDelay 300000
         assertEqual "not started while the sibling is mid-up" 0 =<< readIORef ran
