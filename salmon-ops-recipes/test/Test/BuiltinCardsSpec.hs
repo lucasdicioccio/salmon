@@ -1,6 +1,7 @@
 {- | Layer 0 coverage for the builtin card templates ("Salmon.Builtin.Cards",
 feature 91138a85; "Salmon.Builtin.Cards.Gcp" and "Salmon.Builtin.Cards.Postgres",
-feature d8a79380).
+feature d8a79380; "Salmon.Builtin.Cards.Keys" and "Salmon.Builtin.Cards.Patroni",
+feature e593a79b).
 
 * Attaching a card to a builtin changes nothing it renders: the same
   representative, @ref@, @help@ and @notes@, and its dependencies untouched.
@@ -11,6 +12,8 @@ feature d8a79380).
 * 'Cards.tramajString' round-trips arbitrary text through tramaj-js.
 * A card never carries what the builtin keeps out of its public fields: a
   password, a file's contents, an instance's metadata.
+* A key or certificate card shows paths, never a key, a fingerprint or a
+  digest; a pgBackRest card names an S3 archive by its kind only.
 * A card's links are https console URLs built from the declaration's public
   names only, percent-encoded ('Cards.percentEncode').
 * Every card links to its builtin's page on the docs site
@@ -42,18 +45,30 @@ import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Salmon.Builtin.Cards as Cards
 import qualified Salmon.Builtin.Cards.Gcp as GcpCards
+import qualified Salmon.Builtin.Cards.Keys as KeyCards
+import qualified Salmon.Builtin.Cards.Patroni as HaCards
 import qualified Salmon.Builtin.Cards.Postgres as PgCards
 import Salmon.Builtin.Extension (Extension (..), Op, evalDeps, ignoreTrack)
+import qualified Salmon.Builtin.Nodes.Certificates as Certs
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as Dns
 import qualified Salmon.Builtin.Nodes.Gcp.Compute as Compute
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
 import qualified Salmon.Builtin.Nodes.Gcp.LoadBalancing as Lb
 import qualified Salmon.Builtin.Nodes.Gcp.SecretManager as Secrets
+import qualified Salmon.Builtin.Nodes.Gcp.SshAccess as SshAccess
 import qualified Salmon.Builtin.Nodes.Gcp.Storage as Storage
+import qualified Salmon.Builtin.Nodes.Haproxy as Haproxy
+import qualified Salmon.Builtin.Nodes.Keys as Keys
+import qualified Salmon.Builtin.Nodes.Patroni as Patroni
+import Salmon.Builtin.Nodes.Patroni.PreferredLeader (PreferredLeader (..))
+import qualified Salmon.Builtin.Nodes.Patroni.PreferredLeader as PreferredLeader
+import qualified Salmon.Builtin.Nodes.PgBackRest as PgBackRest
+import qualified Salmon.Builtin.Nodes.Ssh as Ssh
 import Salmon.Builtin.Nodes.SecretDelivery (Placement (..))
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
 import qualified Salmon.Builtin.Nodes.Systemd as Systemd
+import qualified Salmon.Builtin.Nodes.WireGuard as WireGuard
 import Salmon.Op.Actions (Act (..), Actions (..))
 import Salmon.Op.CardTemplate (cardTemplateOf)
 import qualified Salmon.Op.Dag as Dag
@@ -78,12 +93,14 @@ cases =
     ]
         <> gcpCases
         <> pgCases
+        <> keyCases
+        <> haCases
   where
     filePath = "/etc/demo/app.conf"
 
 -- | What no card may show: the declarations below carry these, in places the builtins keep out of their public fields.
 secretWords :: [Text]
-secretWords = [pgPassword, "metadata-value-not-on-card", "/tmp/w/startup-script.sh"]
+secretWords = [pgPassword, "metadata-value-not-on-card", "/tmp/w/startup-script.sh", "s3-bucket-not-on-card", "s3-endpoint-not-on-card"]
 
 pgPassword :: Text
 pgPassword = "pg-password-not-on-card"
@@ -155,6 +172,95 @@ pgCases =
     repl = Postgres.User "replicator"
     hba = "hostssl all app 10.0.0.0/24 scram-sha-256"
     tls = Postgres.ServerTls "/etc/demo/tls/server.crt" "/etc/demo/tls/server.key" "/etc/demo/tls/ca.crt"
+
+keyCases :: [Case]
+keyCases =
+    [ Case "ssh-key" (Keys.sshKey silent ignoreTrack sshPair) (KeyCards.sshKeyCard sshPair)
+    , Case "ssh-ca-sign" (Keys.signKey silent ignoreTrack sshCa kid principals sshPair) (KeyCards.sshCaSignCard sshCa kid principals sshPair)
+    , Case "ssh-available" (SshAccess.sshAvailable silent endpoint) (KeyCards.sshAvailableCard endpoint)
+    , Case "gcp-metadata-ssh-ca" (SshAccess.installMetadataCaKey silent ignoreTrack metaCa) (KeyCards.metadataSshCaCard metaCa)
+    , Case "tls-key" (Certs.tlsKey silent ignoreTrack tlsK) (KeyCards.tlsKeyCard tlsK)
+    , Case "tls-csr" (Certs.signingRequest silent ignoreTrack csr) (KeyCards.signingRequestCard csr)
+    , Case "tls-self-signed" (Certs.selfSign silent ignoreTrack selfS) (KeyCards.selfSignedCard selfS)
+    , Case "tls-ca" (Certs.certificateAuthority silent ignoreTrack ca) (KeyCards.certificateAuthorityCard ca)
+    , Case "tls-ca-signed" (Certs.caSign silent ignoreTrack ignoreTrack caS) (KeyCards.caSignedCard caS)
+    , Case "jwk-key" (Keys.jwkKey jwk) (KeyCards.jwkKeyCard jwk)
+    , Case "wg-private-key" (WireGuard.privateKey ignoreTrack "/etc/wireguard/wg0.key") (KeyCards.wgPrivateKeyCard "/etc/wireguard/wg0.key")
+    , Case "wg-public-key" (WireGuard.publicKey ignoreTrack ignoreTrack "/etc/wireguard/wg0.key" "/etc/wireguard/wg0.pub") (KeyCards.wgPublicKeyCard "/etc/wireguard/wg0.key" "/etc/wireguard/wg0.pub")
+    ]
+  where
+    sshPair = Keys.SSHKeyPair Keys.ED25519 "/home/demo/.ssh" "id_demo"
+    sshCa = Keys.SSHCertificateAuthority (Keys.SSHKeyPair Keys.ED25519 "/etc/demo/ssh-ca" "ca")
+    kid = Keys.KeyIdentifier "demo-login"
+    principals = [Keys.Principal "root", Keys.Principal "demo"]
+    endpoint = SshAccess.SshEndpoint (Just "root") "203.0.113.7" 22 Ssh.noClientOpts
+    metaCa = SshAccess.MetadataSshCa project "/etc/demo/ssh-ca/ca.pub"
+    tlsK = Certs.Key Certs.RSA2048 "/etc/demo/tls" "server.key"
+    csr = Certs.SigningRequest (Certs.Domain "db.example.org") tlsK "/etc/demo/tls" "server.csr"
+    selfS = Certs.SelfSigned "/etc/demo/tls/server.pem" csr
+    ca = Certs.CertificateAuthority (Certs.Key Certs.RSA4096 "/etc/demo/ca" "ca.key") "/etc/demo/ca/ca.crt" (Certs.Domain "demo CA") 3650
+    caS = Certs.CaSigned "/etc/demo/tls/app.crt" (Certs.SigningRequest (Certs.Domain "app") tlsK "/etc/demo/tls" "app.csr") ca 365
+    jwk = Keys.JWKKeyPair Keys.ED25519 "/etc/demo/jwk" "signing.jwk"
+
+haCases :: [Case]
+haCases =
+    [ Case "patroni-member" (Patroni.patroniMember silent ignoreTrack ignoreTrack patroniCfg) (HaCards.patroniMemberCard patroniCfg)
+    , Case "patroni-preferred-leader" (PreferredLeader.preferredLeader preferred) (HaCards.preferredLeaderCard preferred)
+    , Case "pgbackrest-config" (PgBackRest.configuration ignoreTrack pbrS3) (HaCards.pgBackRestConfigurationCard pbrS3)
+    , Case "pgbackrest-config-posix" (PgBackRest.configuration ignoreTrack pbr) (HaCards.pgBackRestConfigurationCard pbr)
+    , Case "pgbackrest-stanza" (PgBackRest.stanza silent ignoreTrack pbrS3) (HaCards.pgBackRestStanzaCard pbrS3)
+    , Case "pgbackrest-first-backup" (PgBackRest.firstBackup silent ignoreTrack pbrS3) (HaCards.pgBackRestFirstBackupCard pbrS3)
+    , Case "pgbackrest-restore" (PgBackRest.restoredCluster silent ignoreTrack pbr PgBackRest.Latest) (HaCards.pgBackRestRestoreCard pbr PgBackRest.Latest)
+    , Case "haproxy" (Haproxy.setup silent ignoreTrack ignoreTrack router) (HaCards.haproxyCard router)
+    ]
+  where
+    preferred = PreferredLeader "demo" "n1" "10.0.0.1:8008" (Just "/etc/patroni/rest.creds") 60
+    pbr =
+        PgBackRest.PgBackRestConfig
+            { PgBackRest.pbr_stanza = "demo"
+            , PgBackRest.pbr_pg_path = "/var/lib/postgresql/16/main"
+            , PgBackRest.pbr_pg_port = 5432
+            , PgBackRest.pbr_repo = PgBackRest.PosixRepo "/srv/archive"
+            , PgBackRest.pbr_retention_full = 2
+            , PgBackRest.pbr_global = []
+            , PgBackRest.pbr_stanza_options = []
+            , PgBackRest.pbr_config_file = "/etc/pgbackrest/pgbackrest.conf"
+            , PgBackRest.pbr_secrets_file = Nothing
+            , PgBackRest.pbr_log_path = "/var/log/pgbackrest"
+            , PgBackRest.pbr_user = "postgres"
+            , PgBackRest.pbr_run_as = Nothing
+            , PgBackRest.pbr_binary = "/usr/bin/pgbackrest"
+            }
+    pbrS3 =
+        pbr
+            { PgBackRest.pbr_repo = PgBackRest.S3Repo "s3-bucket-not-on-card" "s3-endpoint-not-on-card" "eu" "/pgbackrest" True
+            , PgBackRest.pbr_secrets_file = Just "/etc/pgbackrest/conf.d/secrets.conf"
+            }
+    router = Haproxy.patroniRouter [Haproxy.Member "n1" "10.0.0.1" 5432 8008, Haproxy.Member "n2" "10.0.0.2" 5432 8008]
+
+patroniCfg :: Patroni.PatroniConfig
+patroniCfg =
+    Patroni.PatroniConfig
+        { Patroni.pat_scope = "demo"
+        , Patroni.pat_namespace = "/service/"
+        , Patroni.pat_name = "n2"
+        , Patroni.pat_etcd_hosts = ["10.0.0.1:2379", "10.0.0.2:2379"]
+        , Patroni.pat_etcd_tls = Nothing
+        , Patroni.pat_rest_listen = "0.0.0.0:8008"
+        , Patroni.pat_rest_connect_address = "10.0.0.2:8008"
+        , Patroni.pat_pg_version = "16"
+        , Patroni.pat_pg_cluster = "main"
+        , Patroni.pat_pg_listen = "0.0.0.0:5432"
+        , Patroni.pat_pg_connect_address = "10.0.0.2:5432"
+        , Patroni.pat_pg_hba = []
+        , Patroni.pat_bootstrap_parameters = []
+        , Patroni.pat_config_dir = "/etc/patroni"
+        , Patroni.pat_secrets_file = "/etc/patroni/secrets.yml"
+        , Patroni.pat_user = "postgres"
+        , Patroni.pat_binary = "/usr/bin/patroni"
+        , Patroni.pat_ready_timeout_seconds = 60
+        , Patroni.pat_archive = Nothing
+        }
 
 unitCfg :: Systemd.Config
 unitCfg = Systemd.Config Systemd.System "/etc/systemd/system" "demo.service" unit svc install

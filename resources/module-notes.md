@@ -1551,8 +1551,7 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `javascript:`, `data:`, `http:`, relative, credentials; `safeHref` property; an `href` on
   another tag ignored; a tail still refuses `a`). Mutation-checked: dropping the `https:`
   test in `safeHref` fails two tests. **Not run**: any of these cards in a browser (node-only),
-  against real GCP or Postgres. Left for later PRs: SSH, key/certificate builtins
-  (keygen, TLS, JWK, WireGuard keys), Patroni/pgBackRest/HAProxy, Postgres templates/clones.
+  against real GCP or Postgres.
   **Docs pages per builtin** (feature 42358f5a): a `Card` has `cardDocs :: Maybe Text` (a page
   slug), and `renderCard` draws `allLinks` = `cardLinks` then `docsLink slug` (label `docs`,
   `docsBaseUrl <> "/builtin-<slug>.html"`, `docsBaseUrl` a constant: the GitHub Pages site,
@@ -1569,6 +1568,28 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `docs/` was **not** regenerated, so the published links 404 until the owner runs
   `build-site.sh`/`salmon-docs-sync`. A pages-only drift (a card sentence changed, its page
   not) is not tested. Open for the owner: overriding the base (for a fork) from `serve`.
+  **SSH, key/certificate, Patroni/pgBackRest/HAProxy cards** (feature e593a79b, still
+  **opt-in**): `Salmon.Builtin.Cards.Keys` (`sshKey`, `sshCaSign` for `Keys.signKey`,
+  `sshAvailable` and `metadataSshCa` from `Gcp.SshAccess`, `tlsKey`, `signingRequest`,
+  `selfSigned`, `certificateAuthority`, `caSigned`, `jwkKey`, `wgPrivateKey`, `wgPublicKey`)
+  and `Salmon.Builtin.Cards.Patroni` (`patroniMember`, `preferredLeader`,
+  `pgBackRestConfiguration`/`Stanza`/`FirstBackup`/`Restore`, `haproxy` for `Haproxy.setup`'s
+  service). A key or certificate card takes the declaration only (type, paths, CN, principals,
+  validity) and never reads a file, so it cannot show a key, a fingerprint or a digest;
+  present/missing is the node's own check, drawn as the verdict. A pgBackRest card names an S3
+  archive by its kind only (no bucket, endpoint or path); a credentials file (Patroni's, the
+  REST API's, pgBackRest's fragment) is shown by path. No card says who leads. One link only,
+  `metadataSshCa`'s project metadata page (`consoleUrl ["compute","metadata"]`); Patroni's
+  REST API is http and so not linked. A card's verdict sentences must not contain one another
+  (`builtin-cards.test.mjs` checks each verdict draws only its own), which the first draft of
+  three cards broke. Tests: the new cases in `BuiltinCardsSpec` (presentation-only, no S3
+  bucket/endpoint on any card, drawn under tramaj-js). **Not run**: any of these cards in a
+  browser, against real keys, Patroni, pgBackRest or HAProxy; the metadata console URL never
+  followed. Left for later: Postgres templates and clones (`SreBox.PostgresTemplate`, in
+  `salmon-ops-recipes`, so their cards belong there). Each new card has its page under
+  `resources/builtins/` (`ssh-*`, `tls-*`, `jwk-key`, `wireguard-*`, `gcp-ssh-*`, `patroni-*`,
+  `pgbackrest-*`, `haproxy-service`), hand-written from the card's sentences and the builtin's
+  code; `docs/` not regenerated.
   **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
   opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
   in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and
