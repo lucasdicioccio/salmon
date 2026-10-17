@@ -2842,10 +2842,46 @@ declaration already holds; `userPassFile` still reads the file at `up` time. Run
 argv, reports and `CommandFailed` text are checked for the password) and Layer 2 there against
 PostgreSQL 15 in podman (the existing lifecycle, plus a password with a quote and a backslash, a
 failing statement failing `up`, and the replication role's attributes and password). Not run: Layer
-3. Still in argv elsewhere: `psqlUserRun` (`pg-script`, `userScript`/`userScriptInMemoryPass`)
-passes a `postgresql://user:password@…` connstring to `psql`. The server may still log the
-plaintext `ALTER ROLE … PASSWORD` under `log_statement = ddl|all`; sending a client-computed SCRAM
-verifier instead (what psql's `\password` does) would avoid that and is not done.
+3.
+
+**The role SQL carries a verifier, not the password** (feature b02ecc0b). With `log_statement =
+ddl|all` the server logged `ALTER ROLE … PASSWORD '<plaintext>'`. For a pure-ASCII password
+`psqlAdminStdin` now computes the verifier client-side, as psql's `\password` does: the script reads
+`password_encryption` with `\gset` and `\if`s between an MD5 verifier (`md5` or `on`) and a
+SCRAM-SHA-256 one (4096 iterations, a 16-byte salt from `crypton`'s `getRandomBytes`, drawn at every
+`up`), so the scheme stored is the one the server would have chosen. That randomness is why
+`user`/`replicationUser` use `Binary.withBinaryStdinAtUp` (same dependency on the binary as
+`withBinaryStdin`, stdin made at `up`); `psqlAdminStdinSalted` is the pure form. The verifiers are
+the same `scramVerifier`/`md5Verifier` the drift check (`checkUserPassword`) recomputes, so it reads
+what `up` stores. What is still logged under `log_statement`: the verifier (an MD5 one is enough to
+log in with the `md5` method; a SCRAM one is not, but can be attacked offline). **Still plaintext**:
+a password with a non-ASCII character (PostgreSQL SASLpreps it before deriving the SCRAM keys, not
+reimplemented here), so a server logging DDL logs it. Needs psql 10+ (`\if`); a 9.x psql fails `up`.
+`ref`/`help`/`notes` unchanged. Run: Layer 0 (stdin by property never holds an ASCII password and
+holds both verifiers; the exact script; fresh salt per call; the run through a recording stand-in)
+and Layer 2 against PostgreSQL 15 in podman (a client logs in over TCP with the verifier salmon
+computed; with `log_statement = all` the log holds `PASSWORD 'SCRAM-SHA-256$4096:…` and not the
+password; under `password_encryption = md5` the stored verifier is the MD5 one and the check reads
+it). Not run: Layer 3, a PostgreSQL < 14 server, a PostgreSQL 16+ `scram_iterations` other than 4096
+(salmon always sends 4096).
+
+**`pg-script` no longer puts the password in argv** (`psqlUserRun`, used by `userScript` and
+`userScriptInMemoryPass`). It used to run `psql postgresql://user:password@host:port/db -f
+SCRIPT`. It now runs `bash -c "IFS= read -r -d '' PGPASSWORD || true; export PGPASSWORD; exec psql
+\"$@\" </dev/null" psql postgresql://user@host:port/db -f SCRIPT` with the password's bytes on
+bash's stdin (`passwordStdin`): the password is in psql's environment only (readable by the same
+user and root), and in no argv and no `CreateProcess` (whose `env` a `CommandStart` report shows,
+which is why `PGPASSWORD` is not set there). Not a PGPASSFILE: `.pgpass` is line-based and strips a
+trailing newline, and the passwords `pgPassword` makes (`openssl rand -hex`) end with one, which
+the role's password (set by `userPassFile` from the same file) keeps; `read -d ''` keeps it, as the
+URL did. Behaviour otherwise unchanged (libpq takes `PGPASSWORD` exactly as it took the URL's
+password; psql's stdin was an empty pipe and is now `/dev/null`); needs `bash` on the target. The
+URL's other parts are still not percent-encoded. `ref`/`help`/`notes` unchanged. Run: Layer 0
+(argv by property, the exact argv, no `env`, a run through a stand-in `psql` on a per-process `PATH`
+that sees `PGPASSWORD` byte for byte including a trailing newline, with reports and `CommandFailed`
+free of it) and Layer 2 (the host's `psql` through the container's published port: a `userScript`
+whose password file ends with a newline runs its script; a wrong password fails `up`; no password
+in the server log).
 
 Streaming replication (`primaryReplicationSetup`/`standbyReplicationSetup`, and the switchover
 recipe sketched in `specs/pg-switchover.md` on top of them). **`standbyReplicationSetup` is the

@@ -6,6 +6,7 @@ module Salmon.Builtin.Nodes.Binary (
     Command (..),
     withBinary,
     withBinaryStdin,
+    withBinaryStdinAtUp,
     untrackedExec,
     untrackedExecOutput,
 
@@ -173,6 +174,22 @@ withBinaryStdinTapped routing tap t cmd arg stdin consumeIO =
                 g r = f (nodeLogTap tap (opAct ret) (contramap (Requested (opAct ret)) r))
              in
                 consumeIO g
+        ret = tracking t mk arg fconsume
+     in ret
+
+{- | 'withBinaryStdin' for a command whose stdin can only be made at @up@
+time: the enclosed 'Op' is handed a runner taking the bytes, and the
+dependency on the binary is the same as 'withBinaryStdin''s. For bytes that
+need fresh randomness on each application (a salted verifier, see
+"Salmon.Builtin.Nodes.Postgres"), which a value fixed at graph build cannot
+carry. Output is 'captured'.
+-}
+withBinaryStdinAtUp :: Track' (Binary x) -> Command x arg -> arg -> ((ByteString -> Reporter Report -> IO ()) -> Op) -> Op
+withBinaryStdinAtUp t cmd arg consumeIO =
+    let mk a = (\stdin -> untrackedExecWith captured cmd a stdin, Binary)
+        fconsume :: (ByteString -> Reporter Report -> IO ()) -> Op
+        fconsume f =
+            consumeIO (\stdin r -> f stdin (nodeLogTap plainLines (opAct ret) (contramap (Requested (opAct ret)) r)))
         ret = tracking t mk arg fconsume
      in ret
 
