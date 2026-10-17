@@ -11,6 +11,7 @@ import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
+import qualified Test.DetachedSpec as DetachedSpec
 import qualified Test.DagPerNodeSpec as DagPerNodeSpec
 import qualified Test.DagStuckSpec as DagStuckSpec
 import qualified Test.EdgeListSpec as EdgeListSpec
@@ -152,6 +153,7 @@ main =
             , ConcurrentSpec.tests
             , BinarySpec.tests
             , DaemonSpec.tests
+            , DetachedSpec.tests
             , BinaryOutputSpec.tests
             , RemoteOutputSpec.tests
             , DagSpec.tests
