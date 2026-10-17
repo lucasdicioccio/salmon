@@ -34,6 +34,9 @@ Behaviour:
 * `Dag.foldDag` visits each node once instead of each occurrence.
 * `Query`/`serve`: paths are matched, never listed; a retraction redescribes nothing.
 * Web UI: compact DAG layout, `/history` timeline, `Conflicting` pairs side by side.
+* Web UI: an optional Tramaj card template per node (`withCardTemplate`), served on `/dag` as
+  `template` and drawn in place of the default card; presentation only, not part of the
+  representative.
 
 ## 0.1.0.0 -- 2026-10-01
 

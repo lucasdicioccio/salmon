@@ -248,6 +248,7 @@ import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Builtin.Extension (Extension (..))
 import qualified Salmon.Builtin.NodeLog as NodeLog
 import Salmon.Op.Actions (Act (..))
+import Salmon.Op.CardTemplate (cardTemplateOf)
 import Salmon.Op.Dag (Dag)
 import qualified Salmon.Op.Dag as Dag
 import Salmon.Op.Ref (Ref)
@@ -991,6 +992,9 @@ dagValueWith tails mode v =
                    | Just col <- [Map.lookup r (viewConflicts v)]
                    , let c = col.collisionConflict
                    ]
+                -- only on a node that carries one, so every other node's
+                -- object is what it was ("Salmon.Op.CardTemplate")
+                ++ ["template" .= t | Just t <- [cardTemplateOf act.extension.dynamics]]
       where
         rep = Dag.representative act
 

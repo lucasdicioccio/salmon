@@ -1441,6 +1441,39 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   lazy import and the drawing in a browser (no browser check was done), and a template against a
   real serve's stream. Open for the owner: vendoring vs a pinned npm build step, an upgrade recipe,
   a CSP (`script-src 'self'` would fit), tables/block layout, and sharing one template across nodes.
+  **Card templates** (feature 458c16c8, opt-in): a node may carry a Tramaj template for its card,
+  `withCardTemplate :: Text -> Extension -> Extension` (on a builtin, `amendNode (withCardTemplate
+  src) o`). It is a `CardTemplate` in `dynamics` (`Salmon.Op.CardTemplate`); `Dag.representative`
+  **filters it out**, so a template is presentation only: adding, changing or dropping one is no
+  `Conflicting`, no `Stale`, no restart, and the node's `ref`/`help`/`notes`/rendered `dynamics` (and
+  every report and golden) are unchanged. Under `serve` the newest declaration's template is what
+  `/dag` serves (the magma is replaced by the new `Act`); within one fold, two look-alikes differing
+  only by template keep the one walked first (the look-alike skip). `/dag` carries `template`
+  (string) **only** on a node that has one (optional in `/openapi.json`'s `DagNode`). In the page,
+  `ui/card-template.js` is the contract (pure, evaluator passed in): `$ctx` is `{ref: {full, short},
+  shorthand, help, notes, dynamics, direction, convergence, machine, paths, dependencies,
+  dependants (short refs), check: {verdict, reason} (an object even when never checked, since
+  `branch` evaluates both arms), last, lastReason, output, conflict}`, every key present, all of it
+  already public on `/dag` (the template does not see its own source). `null` means "draw the
+  default card"; tags are the tail's plus `div p pre ul ol li dl dt dd table thead tbody tr th td
+  h4 h5 hr details summary`, `class`/`title` only (`tail-template.js`'s `specOf`/`foldLine` take an
+  allowlist now, the tail's unchanged by default). The card replaces the panel's help, notes,
+  dynamics, last check, last event and output; title, badges, command buttons, paths,
+  dependencies, dependants, full ref and seeds stay; a `default card` button switches back (per
+  page). A template that does not parse, fails or whose evaluator does not load shows the error
+  and the default card (no retry loop). Loaded through the same lazy `loadTemplating()` as tail
+  templates (now three modules), only when a selected node has a template. The tui and the Rust
+  client ignore `template`. `salmon-ops-serve-fixture ... --card` gives the bundle node an example.
+  Tests: `Test/CardTemplateSpec.hs` (QuickCheck: a template changes neither representative nor
+  ref/help/notes; other dynamics still compared; a mutant not filtering it fails both properties
+  and the HTTP case), `ui-test/card-template.test.mjs` (unit + seeded properties, 12 seeds; run by
+  `Test/UiTailTemplateSpec.hs`), `Test/ServeHttpSpec.hs` (`/dag` carries it on that node only,
+  schema-valid; another template is no collision and the node stays converged). **Run by hand in
+  Chrome** (the fixture under `serve --http` behind a loopback `socat`): the card drew from the
+  template, the switch went to the default card and back, a plain node's panel was unchanged and
+  a fresh page selecting it fetched no template module. **Not run**: a failing template in a
+  browser, the tui/Rust clients against a `template`. Open for the owner: named template
+  libraries vs inline sources, templating the graph box itself, and a CSP.
   **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
   opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
   in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and

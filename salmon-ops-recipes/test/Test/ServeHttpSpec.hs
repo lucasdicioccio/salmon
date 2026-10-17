@@ -31,6 +31,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy.Char8 as LChar8
 import Data.Foldable (toList)
 import Data.List (isInfixOf, isPrefixOf, sort)
+import qualified Data.List as List
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -59,7 +60,7 @@ import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve.Events as Events
 import qualified Salmon.Actions.Serve.Http as Http
 import qualified Salmon.Actions.Serve.StatusSink as StatusSink
-import Salmon.Builtin.Extension (Op, Track', deps, down, help, nodeps, op, ref, up)
+import Salmon.Builtin.Extension (Op, Track', amendNode, deps, down, help, nodeps, op, ref, up, withCardTemplate)
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (Ref, mkRef)
 import Salmon.Op.Track (Track (..))
@@ -85,6 +86,7 @@ tests =
         , testCase "/dag carries the mode the loop's accessor answers at the moment of the read" dagCarriesMode
         , testCase "GET / is the web UI's page, /ui/* its files, and a missing one is 404" theWebUi
         , testCase "two seeds colliding on one ref: /dag carries the kept and replaced pair while both are wanted" conflictingPairOnDag
+        , testCase "a node's card template is on /dag, only on that node, and a new one is not a conflict" cardTemplateOnDag
         , testCase "a chain of diamonds: /dag, /status, status, a --select and a status-sink write all answer" diamondChainAnswers
         , testCase "--http-read-only: every POST /command is 403, reads and stdin still work; read-write by default" readOnlyRefusesCommands
         ]
@@ -119,6 +121,13 @@ spyProgram slow upsRef downsRef = Track $ \spec ->
         actions{ref = mkRef "http-root" spec.specNames, help = "the root of " <> Text.pack (unwords spec.specNames)}
   where
     nodeOp name | name == diamondsName = diamondChain diamondCount
+    -- @card=SRC@ is one node (ref keyed on @card@, help fixed) carrying the
+    -- card template @SRC@: two seeds differing only by their template
+    nodeOp name
+        | Just src <- List.stripPrefix "card=" name =
+            amendNode (withCardTemplate (Text.pack src)) $
+                op "http-node" nodeps $ \actions ->
+                    actions{ref = mkRef "http-node" ("card" :: String), help = "node card", up = bump upsRef "card", down = bump downsRef "card"}
     -- @NAME:VARIANT@ is the same node (ref keyed on @NAME@) described
     -- differently (help carries the whole word): two seeds colliding on
     -- one ref, for the /dag conflict case
@@ -456,6 +465,34 @@ conflictingPairOnDag =
         nodes'' <- dagNodes v''
         forM_ nodes'' $ \n -> assertEqual ("no conflict left on " <> show (textAt ["help"] n)) Nothing (field "conflict" n)
 
+{- | A node carrying a card template ("Salmon.Op.CardTemplate") has it on
+@\/dag@ as @template@ (and the answer is valid against the document); no
+other node has the key. Re-declaring it with another template is not a
+collision, does not demote the node, and @\/dag@ then carries the new one.
+-}
+cardTemplateOnDag :: IO ()
+cardTemplateOnDag =
+    withRunning $ \running -> do
+        _ <- sync running "supervise off"
+        _ <- sync running "autoconverge off"
+        _ <- sync running "up card=.p($ctx.help) n2"
+        _ <- sync running "converge"
+        let cardOf nodes = [n | n <- nodes, textAt ["help"] n == Just "node card"]
+        (_, v) <- get running "/dag"
+        nodes <- dagNodes v
+        assertEqual "the template" [Just ".p($ctx.help)"] (fmap (textAt ["template"]) (cardOf nodes))
+        assertEqual "converged" [Just "converged"] (fmap (textAt ["convergence"]) (cardOf nodes))
+        forM_ [n | n <- nodes, textAt ["help"] n /= Just "node card"] $ \n ->
+            assertEqual ("no template on " <> show (textAt ["help"] n)) Nothing (field "template" n)
+        assertBool "not among the rendered dynamics" (all (\n -> field "dynamics" n == Just (Array mempty)) (cardOf nodes))
+        again <- sync running "up card=.div($ctx.shorthand)"
+        assertBool ("another template is not a collision: " <> show again) ("conflicting" `notElem` again)
+        (_, v') <- get running "/dag"
+        nodes' <- dagNodes v'
+        assertEqual "the new template" [Just ".div($ctx.shorthand)"] (fmap (textAt ["template"]) (cardOf nodes'))
+        assertEqual "still converged" [Just "converged"] (fmap (textAt ["convergence"]) (cardOf nodes'))
+        assertEqual "no conflict on it" [Nothing] (fmap (field "conflict") (cardOf nodes'))
+
 {- | A graph whose paths are not to be listed: 'diamondCount' diamonds, 65536
 paths to the last node and a quarter of a million in all. Everything that
 shows a node's paths or resolves a pattern against them answers within
@@ -780,10 +817,10 @@ theWebUi =
         assertEqual "the stylesheet's content type" (Just "text/css; charset=utf-8") ctype'
         -- tail templates are opt-in: the page names neither file, the script
         -- imports them only on demand, and both are embedded (no third-party fetch)
-        assertBool "the page loads no template code" (not ("tail-template" `isInfixOf` LChar8.unpack body) && not ("vendor/" `isInfixOf` LChar8.unpack body))
+        assertBool "the page loads no template code" (not ("tail-template" `isInfixOf` LChar8.unpack body) && not ("card-template" `isInfixOf` LChar8.unpack body) && not ("vendor/" `isInfixOf` LChar8.unpack body))
         assertBool "the script imports the evaluator lazily" ("import(\"./vendor/tramaj-js/index.js\")" `isInfixOf` LChar8.unpack js)
         assertBool "the script has no static import" (not (any ("import " `isPrefixOf`) (lines (LChar8.unpack js))))
-        forM_ ["/ui/tail-template.js", "/ui/vendor/tramaj-js/index.js", "/ui/vendor/tramaj-js/eval.js"] $ \path -> do
+        forM_ ["/ui/tail-template.js", "/ui/card-template.js", "/ui/vendor/tramaj-js/index.js", "/ui/vendor/tramaj-js/eval.js"] $ \path -> do
             (vcode, vtype, _) <- getRaw running path
             assertEqual (path <> "'s status") 200 vcode
             assertEqual (path <> "'s content type") (Just "text/javascript; charset=utf-8") vtype

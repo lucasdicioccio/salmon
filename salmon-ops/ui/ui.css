@@ -596,6 +596,20 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
 .tail-body .t-muted { color: var(--muted); }
 .tail-body .t-hl { font-weight: 600; color: var(--accent); }
 
+/* a node's card drawn from its own template (card-template.js); the same
+   five classes as a tail, plus the panel's own sizes for tables */
+#panel .card-switch button { font-size: 11px; }
+#panel .template-error { font-size: 12px; padding: 2px 6px; color: var(--errored-fg); background: var(--errored); }
+#panel .card-template { margin-top: 8px; font-size: 13px; }
+#panel .card-template table { border-collapse: collapse; font-size: 12px; }
+#panel .card-template th, #panel .card-template td { text-align: left; padding: 1px 6px 1px 0; vertical-align: top; }
+#panel .card-template h4, #panel .card-template h5 { margin: 10px 0 4px; font-size: 12px; }
+#panel .card-template .t-err { color: var(--errored-fg); background: var(--errored); }
+#panel .card-template .t-warn { color: var(--stale-fg); background: var(--stale); }
+#panel .card-template .t-ok { color: var(--converged-fg); }
+#panel .card-template .t-muted { color: var(--muted); }
+#panel .card-template .t-hl { font-weight: 600; color: var(--accent); }
+
 /* a Conflicting pair, side by side ---------------------------------- */
 #panel .conflict { display: grid; grid-template-columns: auto 1fr 1fr; gap: 4px 6px; align-items: start; }
 #panel .conflict .chead, #panel .conflict .clabel { font-size: 10px; text-transform: uppercase; color: var(--muted); }

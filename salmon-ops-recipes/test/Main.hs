@@ -2,6 +2,7 @@ module Main (main) where
 
 import qualified Test.AptRepositorySpec as AptRepositorySpec
 import qualified Test.AmendNodeSpec as AmendNodeSpec
+import qualified Test.CardTemplateSpec as CardTemplateSpec
 import qualified Test.CheckSpec as CheckSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ClientModelStepSpec as ClientModelStepSpec
@@ -143,6 +144,7 @@ main =
                 ]
             , CheckSpec.tests
             , AmendNodeSpec.tests
+            , CardTemplateSpec.tests
             , ClientModelSpec.tests
             , ClientModelStepSpec.tests
             , ConcurrentSpec.tests
