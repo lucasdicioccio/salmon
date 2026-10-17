@@ -319,7 +319,7 @@ role, not a node that re-applies blindly every pass.
 -}
 user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
 user r server psql port user pwd =
-    withBinary psql (psqlAdminRun_Sudo port) (CreateUser user.userRole pwd) $ \up ->
+    withBinaryStdin psql (psqlAdminRun_Sudo port) createUser (psqlAdminStdin createUser) $ \up ->
         op "pg-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-user" user.userRole
@@ -329,6 +329,7 @@ user r server psql port user pwd =
                 }
   where
     r' = contramap (PGCreateUser user) r
+    createUser = CreateUser user.userRole pwd
 
 {- | A login role whose password is the content of a file, read at @check@
 and @up@ time (never at graph build). Its check is 'checkUserPassword': the
@@ -350,7 +351,7 @@ userPassFile r server psql port genpass user =
   where
     r' = contramap (PGSetUserPass user) r
     runningServer = run server localServer
-    up pass = untrackedExec (psqlAdminRun_Sudo port) (CreateUser user.userRole pass) "" r'
+    up pass = let cmd = CreateUser user.userRole pass in untrackedExec (psqlAdminRun_Sudo port) cmd (psqlAdminStdin cmd) r'
 
 {- | The check of a @pg-user@ node: does the role exist, may it log in, and
 is its password the declared one.
@@ -666,60 +667,17 @@ psqlAdminRun_Sudo port = Command go
                 , "'"
                 ]
             ]
-    -- CREATE ROLE has no IF NOT EXISTS form, but (unlike CREATE DATABASE) it's
-    -- fine inside a DO block, so we guard it with an explicit existence check.
-    -- The password is set unconditionally afterward, the same way
-    -- CreateReplicationUser does below: guarding the ALTER behind the IF NOT
-    -- EXISTS, as this used to, means a rotated password never reaches the
-    -- cluster and the failure arrives later as "password authentication
-    -- failed" somewhere that looks unrelated.
-    go (CreateUser name pass) =
-        proc
-            "sudo"
-            ( ["-u", "postgres", "psql"]
-                <> portArgs
-                <> [ "-c"
-                   , mconcat
-                        [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
-                        , Text.unpack name
-                        , "') THEN CREATE ROLE "
-                        , Text.unpack name
-                        , " WITH LOGIN; END IF; END $$; ALTER ROLE "
-                        , Text.unpack name
-                        , " WITH LOGIN PASSWORD "
-                        , quotePass pass
-                        , ";"
-                        ]
-                   ]
-            )
-    go (CreateReplicationUser name pass) =
-        proc
-            "sudo"
-            ( ["-u", "postgres", "psql"]
-                <> portArgs
-                <> [ "-c"
-                   , mconcat
-                        -- created if missing, and its password set either
-                        -- way: the password is part of what this node
-                        -- declares, so a role that exists with some other
-                        -- one has drifted from the declaration rather than
-                        -- been left alone deliberately. Guarding the ALTER
-                        -- behind the IF NOT EXISTS, as this used to, means a
-                        -- rotated password never reaches the cluster and the
-                        -- failure arrives later as "password authentication
-                        -- failed" somewhere that looks unrelated.
-                        [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
-                        , Text.unpack name
-                        , "') THEN CREATE ROLE "
-                        , Text.unpack name
-                        , " WITH REPLICATION LOGIN; END IF; END $$; ALTER ROLE "
-                        , Text.unpack name
-                        , " WITH REPLICATION LOGIN PASSWORD "
-                        , quotePass pass
-                        , ";"
-                        ]
-                   ]
-            )
+    -- The two role commands carry a password, so their SQL is not in argv
+    -- (which every local user reads in /proc while psql runs, and which
+    -- 'Binary.CommandStart' reports): psql reads it on stdin, from
+    -- 'psqlAdminStdin'. @-X@ so no @.psqlrc@ turns on @ECHO@, which would
+    -- copy the statement into the captured output and from there into a
+    -- 'Binary.CommandFailed'; @VERBOSITY=terse@ so an error does not quote
+    -- the line it failed on (the default verbosity prints a @LINE 1:@ excerpt
+    -- of the statement); @ON_ERROR_STOP@ because a script read from stdin
+    -- otherwise exits 0 after an error.
+    go (CreateUser _ _) = psqlFromStdin
+    go (CreateReplicationUser _ _) = psqlFromStdin
     go (AlterSystemSet param val) =
         proc
             "sudo"
@@ -804,8 +762,14 @@ psqlAdminRun_Sudo port = Command go
                    ]
             )
 
-    quotePass :: Password -> String
-    quotePass pwd = "'" <> Text.unpack pwd.revealPassword <> "'"
+    psqlFromStdin :: CreateProcess
+    psqlFromStdin =
+        proc
+            "sudo"
+            ( ["-u", "postgres", "psql"]
+                <> portArgs
+                <> ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=terse", "-f", "-"]
+            )
 
     renderRight :: PGRight -> Text
     renderRight CREATE = "CREATE"
@@ -813,6 +777,45 @@ psqlAdminRun_Sudo port = Command go
 
     commaList :: [Text] -> Text
     commaList = Text.intercalate ","
+
+{- | What 'psqlAdminRun_Sudo' sends on psql's stdin: the role commands' SQL,
+which holds the password, and nothing for every other command (they keep
+their SQL in @-c@, having no secret in it).
+
+A role is created if missing and its password set either way: the password
+is part of what the node declares, so a role that exists with some other one
+has drifted from the declaration rather than been left alone deliberately.
+Guarding the @ALTER@ behind the @IF NOT EXISTS@, as this used to, means a
+rotated password never reaches the cluster and the failure arrives later as
+"password authentication failed" somewhere that looks unrelated. CREATE ROLE
+has no IF NOT EXISTS form, but (unlike CREATE DATABASE) it is fine inside a
+@DO@ block, hence the explicit existence check.
+
+The password is a 'quoteLiteral', so a quote in it cannot end the literal
+(and so cannot put the rest of it in a syntax error's text).
+-}
+psqlAdminStdin :: PsqlAdmin -> ByteString.ByteString
+psqlAdminStdin (CreateUser name pass) = Text.encodeUtf8 (roleWithPasswordSql "LOGIN" name pass)
+psqlAdminStdin (CreateReplicationUser name pass) = Text.encodeUtf8 (roleWithPasswordSql "REPLICATION LOGIN" name pass)
+psqlAdminStdin _ = ""
+
+roleWithPasswordSql :: Text -> RoleName -> Password -> Text
+roleWithPasswordSql attrs name pass =
+    mconcat
+        [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
+        , name
+        , "') THEN CREATE ROLE "
+        , name
+        , " WITH "
+        , attrs
+        , "; END IF; END $$;\nALTER ROLE "
+        , name
+        , " WITH "
+        , attrs
+        , " PASSWORD "
+        , quoteLiteral pass.revealPassword
+        , ";\n"
+        ]
 
 -------------------------------------------------------------------------------
 
@@ -1115,7 +1118,7 @@ data StandbySetup
 -- | A login role carrying the @REPLICATION@ attribute, for a standby's @pg_basebackup@\/streaming connection.
 replicationUser :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
 replicationUser r server psql port u pwd =
-    withBinary psql (psqlAdminRun_Sudo port) (CreateReplicationUser u.userRole pwd) $ \up ->
+    withBinaryStdin psql (psqlAdminRun_Sudo port) createUser (psqlAdminStdin createUser) $ \up ->
         op "pg-replication-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-replication-user" u.userRole
@@ -1124,6 +1127,7 @@ replicationUser r server psql port u pwd =
                 }
   where
     r' = contramap (PGCreateReplicationUser u) r
+    createUser = CreateReplicationUser u.userRole pwd
 
 alterSystemSet :: Reporter Report -> Track' (Binary "psql") -> Port -> Text -> Text -> Op
 alterSystemSet r psql port param val =

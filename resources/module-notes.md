@@ -2803,8 +2803,28 @@ container. The role is matched by exact name as `CreateUser`'s own existence gua
 upper case (which `CreateUser` leaves unquoted and PostgreSQL folds) is never found and `up` runs
 every pass, as before. `ref`, `help` and `notes` are unchanged. Not done: a `Supervision` policy
 (e.g. `RestForOne` so a migration or bouncer is bounced when a password is corrected) now that
-there is a check to drive it; `CreateReplicationUser`'s node has no such check yet; `up` still puts
-the password in `psql`'s argv (`-c … PASSWORD '…'`), which predates this.
+there is a check to drive it; `CreateReplicationUser`'s node has no such check yet.
+
+**The password is not in argv.** `pg-user` and `pg-replication-user` used to run `psql -c "… ALTER
+ROLE … PASSWORD '…'"`, i.e. the password in argv (readable by every local user in `/proc` while
+psql runs, and printed by `Binary.CommandStart`). Their SQL now goes on psql's stdin
+(`psqlAdminStdin`; argv is `sudo -u postgres psql -p PORT -X -q -v ON_ERROR_STOP=1 -v
+VERBOSITY=terse -f -`): `-X` so a `.psqlrc` cannot turn on `ECHO` and copy the statement into the
+captured output (and so into `CommandFailed`), `VERBOSITY=terse` so an error does not quote the
+`LINE 1:` it failed on, `ON_ERROR_STOP` because a script read from stdin otherwise exits 0 after an
+error. The password is now a `quoteLiteral` (it was spliced between bare quotes, so a `'` in it broke
+the statement and put the rest of the password in the syntax error). The check never had it in argv
+(it sends the role name only). The SQL is otherwise the same and `ref`/`help`/`notes` are unchanged.
+For `Postgres.user`/`replicationUser` the stdin bytes are built from the in-memory `Password` the
+declaration already holds; `userPassFile` still reads the file at `up` time. Run: Layer 0 in
+`Test.PostgresUserSpec` (argv by property, stdin, and a run through a recording stand-in whose
+argv, reports and `CommandFailed` text are checked for the password) and Layer 2 there against
+PostgreSQL 15 in podman (the existing lifecycle, plus a password with a quote and a backslash, a
+failing statement failing `up`, and the replication role's attributes and password). Not run: Layer
+3. Still in argv elsewhere: `psqlUserRun` (`pg-script`, `userScript`/`userScriptInMemoryPass`)
+passes a `postgresql://user:password@…` connstring to `psql`. The server may still log the
+plaintext `ALTER ROLE … PASSWORD` under `log_statement = ddl|all`; sending a client-computed SCRAM
+verifier instead (what psql's `\password` does) would avoid that and is not done.
 
 Streaming replication (`primaryReplicationSetup`/`standbyReplicationSetup`, and the switchover
 recipe sketched in `specs/pg-switchover.md` on top of them). **`standbyReplicationSetup` is the

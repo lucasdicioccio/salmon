@@ -10,20 +10,24 @@ server that writes them.
 -}
 module Test.PostgresUserSpec (tests, sandboxTests) where
 
+import Control.Exception (try)
 import qualified Data.ByteString as ByteString
 import Data.Char (chr)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Process.ListLike (CmdSpec (..), CreateProcess (..))
 import Test.QuickCheck (Gen, chooseInt, counterexample, elements, forAll, listOf, vectorOf, (.&&.), (===), (==>))
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (DependencyType (..), TestTree, sequentialTestGroup, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
 import Test.Tasty.QuickCheck (testProperty)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
+import Salmon.Builtin.Nodes.Binary (Command (..), CommandFailed, untrackedExec)
 import Salmon.Builtin.Nodes.Filesystem (File (..))
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import qualified Salmon.Builtin.Nodes.Postgres as Postgres
@@ -41,13 +45,19 @@ tests =
         [ testGroup "verdicts" verdicts
         , testGroup "properties" properties
         , testGroup "the declaration" declaration
+        , testGroup "the password is not in argv" argv
         ]
 
 sandboxTests :: TestTree
 sandboxTests =
-    testGroup
+    -- sequential: both shim PATH, which is process-global, and 'heavy' in
+    -- Main serializes its direct children only
+    sequentialTestGroup
         "Salmon.Builtin.Nodes.Postgres pg-user check (Layer 2, podman sandbox)"
-        [testCase "create, satisfied, drift, rotation, md5" userLifecycle]
+        AllFinish
+        [ testCase "create, satisfied, drift, rotation, md5" userLifecycle
+        , testCase "SQL on stdin: quotes, a failing up, the replication role" stdinLifecycle
+        ]
 
 pw :: Text -> Postgres.Password
 pw = Postgres.Password
@@ -186,9 +196,12 @@ properties =
 -------------------------------------------------------------------------------
 
 pgUserAct :: Op -> Act Extension
-pgUserAct o =
-    maybe (error "no pg-user node") id $
-        Map.lookup (mkRef "pg-user" ("app" :: Text)) (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o)))
+pgUserAct = actAt "pg-user" "app"
+
+actAt :: Text -> Text -> Op -> Act Extension
+actAt kind key o =
+    maybe (error ("no " <> Text.unpack kind <> " node")) id $
+        Map.lookup (mkRef kind key) (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o)))
 
 {- | What the node renders is what it rendered before it had a check: a
 changed representative is a restart of what stands on it.
@@ -203,10 +216,115 @@ declaration =
         let act = pgUserAct (Postgres.userPassFile silent ignoreTrack ignoreTrack 5432 (PreExisting "/run/secrets/app.pass") (Postgres.User "app"))
         assertEqual "help" "set user password for app from file at /run/secrets/app.pass" act.extension.help
         assertEqual "notes" [] act.extension.notes
+    , testCase "replicationUser: same ref and help, no notes" $ do
+        let act = actAt "pg-replication-user" "repl" (Postgres.replicationUser silent ignoreTrack ignoreTrack 5432 (Postgres.User "repl") (pw "pencil"))
+        assertEqual "help" "create replication user repl" act.extension.help
+        assertEqual "notes" [] act.extension.notes
     , testProperty "user: nothing public holds the password" $
         forAll genMarkedPassword $ \p ->
             let act = pgUserAct (Postgres.user silent ignoreTrack ignoreTrack 5432 (Postgres.User "app") (pw p))
              in not (any (p `Text.isInfixOf`) (act.extension.help : act.extension.notes))
+    ]
+
+-------------------------------------------------------------------------------
+
+-- | The two commands that carry a password, as the nodes build them.
+roleCommands :: Text -> [Postgres.PsqlAdmin]
+roleCommands p = [Postgres.CreateUser "app" (pw p), Postgres.CreateReplicationUser "repl" (pw p)]
+
+argvOf :: Postgres.PsqlAdmin -> [String]
+argvOf c = case cmdspec (prepare (Postgres.psqlAdminRun_Sudo 5432) c) of
+    RawCommand exe args -> exe : args
+    ShellCommand line -> [line]
+
+{- | 'Postgres.psqlAdminRun_Sudo' with the executable swapped for a stand-in
+that records what it was given, its arguments untouched. The swap is in the
+'CreateProcess', not on @PATH@: the suite runs groups in parallel in one
+process, and @PATH@ is the process's.
+-}
+recordingCommand :: FilePath -> Command "psql" Postgres.PsqlAdmin
+recordingCommand standIn = Command $ \c ->
+    let p = prepare (Postgres.psqlAdminRun_Sudo 5432) c
+     in case cmdspec p of
+            RawCommand _ args -> p{cmdspec = RawCommand standIn args}
+            ShellCommand _ -> p
+
+isInfixOfS :: String -> String -> Bool
+isInfixOfS needle hay = Text.pack needle `Text.isInfixOf` Text.pack hay
+
+{- | @pg-user@ and @pg-replication-user@ used to put @ALTER ROLE ... PASSWORD
+'...'@ in @psql -c@, so in argv, which every local user reads in @/proc@
+while psql runs and which 'Binary.CommandStart' reports. The SQL now goes on
+stdin; argv, every report and the failure text are free of it.
+-}
+argv :: [TestTree]
+argv =
+    [ testProperty "the role commands' argv never holds the password" $
+        forAll genMarkedPassword $ \p ->
+            let argvs = fmap argvOf (roleCommands p)
+             in counterexample (show argvs) $
+                    not (any (any ("SECRET~" `isInfixOfS`)) argvs)
+    , testProperty "their stdin holds the password, as one quoted literal" $
+        forAll genMarkedPassword $ \p ->
+            let quoted = "'" <> Text.replace "'" "''" p <> "'"
+             in and
+                    [ (" PASSWORD " <> quoted <> ";\n") `Text.isInfixOf` Text.decodeUtf8 (Postgres.psqlAdminStdin c)
+                    | c <- roleCommands p
+                    ]
+    , testCase "psql reads the script on stdin: no psqlrc, terse errors, stops on the first one" $
+        mapM_
+            ( assertEqual
+                "argv"
+                ["sudo", "-u", "postgres", "psql", "-p", "5432", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=terse", "-f", "-"]
+                . argvOf
+            )
+            (roleCommands "pencil")
+    , testCase "a quote in the password cannot end the literal" $
+        assertBool "" ("PASSWORD 'it''s';" `Text.isInfixOf` Text.decodeUtf8 (Postgres.psqlAdminStdin (Postgres.CreateUser "app" (pw "it's"))))
+    , testCase "the role attributes are what they were" $ do
+        let sqlOf = Text.decodeUtf8 . Postgres.psqlAdminStdin
+            u = Postgres.CreateUser "app" (pw "pencil")
+            repl = Postgres.CreateReplicationUser "repl" (pw "pencil")
+        assertBool "user" ("ALTER ROLE app WITH LOGIN PASSWORD 'pencil';" `Text.isInfixOf` sqlOf u)
+        assertBool "user, created" ("THEN CREATE ROLE app WITH LOGIN; END IF" `Text.isInfixOf` sqlOf u)
+        assertBool "repl" ("ALTER ROLE repl WITH REPLICATION LOGIN PASSWORD 'pencil';" `Text.isInfixOf` sqlOf repl)
+        assertBool "repl, created" ("THEN CREATE ROLE repl WITH REPLICATION LOGIN; END IF" `Text.isInfixOf` sqlOf repl)
+    , testCase "no other command sends anything on stdin" $
+        assertEqual "" "" (Postgres.psqlAdminStdin Postgres.ReloadConf)
+    , testCase "run for real: argv, every report and the failure text are free of the password" $
+        withTempDir $ \tmp -> do
+            let secret = "SECRET~run-for-real" :: Text
+                ok = tmp </> "ok"
+                failing = tmp </> "failing"
+            writeExecutable ok $
+                unlines
+                    [ "#!/bin/bash"
+                    , "printf '%s\\n' \"$@\" > " <> show (tmp </> "argv")
+                    , "cat > " <> show (tmp </> "stdin")
+                    ]
+            writeExecutable failing $
+                unlines ["#!/bin/bash", "cat > /dev/null", "echo 'psql:<stdin>:2: ERROR:  boom' >&2", "exit 3"]
+            mapM_
+                ( \c -> do
+                    (r, readBack) <- capture
+                    untrackedExec (recordingCommand ok) c (Postgres.psqlAdminStdin c) r
+                    recorded <- readFile (tmp </> "argv")
+                    stdin <- ByteString.readFile (tmp </> "stdin")
+                    reports <- readBack
+                    assertBool recorded ("-f\n-\n" `isInfixOfS` recorded)
+                    assertBool "argv as executed" (not (Text.unpack secret `isInfixOfS` recorded))
+                    assertBool "the password went on stdin" (secret `Text.isInfixOf` Text.decodeUtf8 stdin)
+                    assertBool "reports" (not (any ((Text.unpack secret `isInfixOfS`) . show) reports))
+
+                    (r', readBack') <- capture
+                    failed <- try (untrackedExec (recordingCommand failing) c (Postgres.psqlAdminStdin c) r') :: IO (Either CommandFailed ())
+                    reports' <- readBack'
+                    case failed of
+                        Right () -> assertBool "a failing psql fails up" False
+                        Left e -> assertBool (show e) (not (Text.unpack secret `isInfixOfS` show e))
+                    assertBool "reports of the failure" (not (any ((Text.unpack secret `isInfixOfS`) . show) reports'))
+                )
+                (roleCommands secret)
     ]
 
 -------------------------------------------------------------------------------
@@ -258,3 +376,33 @@ userLifecycle = requireExecutable "podman" $
                 checkNow >>= assertEqual "an MD5 verifier of the declared password" Success
                 asPostgres "SET password_encryption = 'md5'; ALTER ROLE app PASSWORD 'other'"
                 checkNow >>= assertBool "an MD5 verifier of another" . isFailure
+
+{- | The role SQL as psql reads it on stdin, against PostgreSQL 15: a password
+with a quote and a backslash is set as it is (the check, which reads the
+verifier, is satisfied by it), a failing statement fails @up@ (a script read
+from stdin exits 0 after an error unless @ON_ERROR_STOP@ is set), and the
+replication role is created with its attribute and password.
+-}
+stdinLifecycle :: IO ()
+stdinLifecycle = requireExecutable "podman" $
+    withContainer (Podman.Image "debian:bookworm") (Podman.PortMapping "15443" "5432" Podman.TCPPort) $ \cid -> do
+        podmanExec_ cid ["apt-get", "update", "-qq"]
+        podmanExec_ cid ["bash", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo postgresql"]
+        podmanExec_ cid ["bash", "-c", "v=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1); pg_ctlcluster \"$v\" main status >/dev/null || pg_ctlcluster \"$v\" main start"]
+        withTempDir $ \tmp -> do
+            let passfile = tmp </> "app.pass"
+                node = Postgres.userPassFile silent ignoreTrack ignoreTrack 5432 (PreExisting passfile) (Postgres.User "app")
+            writeFile passfile "it's a \\ back\\slash"
+            withShimmedPath cid ["sudo"] $ do
+                runUp node >>= assertBool "up with a quote and a backslash"
+                (pgUserAct node).extension.check >>= assertEqual "the password is the file's, as it is" Success
+
+                let reserved = Postgres.userPassFile silent ignoreTrack ignoreTrack 5432 (PreExisting passfile) (Postgres.User "pg_app")
+                runUp reserved >>= assertBool "a reserved role name fails up" . not
+
+                let repl = Postgres.replicationUser silent ignoreTrack ignoreTrack 5432 (Postgres.User "repl") (pw "repl-password")
+                runUp repl >>= assertBool "up creates the replication role"
+                (code, out, err) <- podmanExecCapture cid ["sudo", "-u", "postgres", "psql", "-tAX", "-c", "SELECT rolreplication, rolcanlogin FROM pg_roles WHERE rolname = 'repl'"]
+                assertEqual err ExitSuccess code
+                assertEqual "attributes" "t|t" (filter (/= '\n') out)
+                Postgres.checkUserPassword 5432 "repl" (pure (pw "repl-password")) >>= assertEqual "its password" Success
