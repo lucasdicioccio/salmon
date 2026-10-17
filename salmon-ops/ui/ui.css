@@ -603,6 +603,7 @@ input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1p
 #panel .card-template { margin-top: 8px; font-size: 13px; }
 #panel .card-template table { border-collapse: collapse; font-size: 12px; }
 #panel .card-template th, #panel .card-template td { text-align: left; padding: 1px 6px 1px 0; vertical-align: top; }
+#panel .card-template td code { overflow-wrap: anywhere; }
 #panel .card-template h4, #panel .card-template h5 { margin: 10px 0 4px; font-size: 12px; }
 #panel .card-template .t-err { color: var(--errored-fg); background: var(--errored); }
 #panel .card-template .t-warn { color: var(--stale-fg); background: var(--stale); }

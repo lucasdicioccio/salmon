@@ -118,7 +118,8 @@ reload too:
 The bundle node carries a card template ('withCardTemplate'): selecting it in
 the web UI draws its card from the template instead of the default sections,
 with a button back to the default card. Nothing else about the node changes
-(same @ref@, @help@, representative):
+(same @ref@, @help@, representative). Each file node carries the builtin
+file card ('Salmon.Builtin.Cards.fileContents') the same way:
 
 > up --dir /tmp/play --name web --file index.html --card
 -}
@@ -144,6 +145,7 @@ import Salmon.Builtin.Extension (Op, Track', check, deps, down, dynamics, help, 
 import qualified Salmon.Builtin.NodeLog as NodeLog
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Daemon as Daemon
+import qualified Salmon.Builtin.Cards as Cards
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import Salmon.Op.Configure (Configure (..))
 import Salmon.Op.Ref (mkRef)
@@ -244,13 +246,16 @@ configure = Configure $ \seed ->
 
 program :: Track' Spec
 program = Track $ \spec ->
-    op "serve-fixture-bundle" (deps (fmap fileOp spec.specFiles <> foldMap (pure . daemonOp) spec.specDaemon <> foldMap (pure . buildOp spec.specRoot) spec.specBuild)) $ \actions ->
+    op "serve-fixture-bundle" (deps (fmap (fileOp spec.specCard) spec.specFiles <> foldMap (pure . daemonOp) spec.specDaemon <> foldMap (pure . buildOp spec.specRoot) spec.specBuild)) $ \actions ->
         maybe id withCardTemplate spec.specCard $
             actions{ref = mkRef "serve-fixture-bundle" (spec.specRoot, spec.specFiles, fmap daemonConf spec.specDaemon)}
   where
-    fileOp :: FilePath -> Op
-    fileOp path =
-        FS.filecontents (FS.FileContents path (Text.pack ("managed by salmon-ops-serve-fixture: " <> path <> "\n")))
+    fileOp :: Maybe Text -> FilePath -> Op
+    fileOp card path =
+        -- with --card, each file node carries the builtin file card too
+        -- ("Salmon.Builtin.Cards"); without it, the node is as it was
+        maybe id (const (Cards.withCard (Cards.fileContents path))) card $
+            FS.filecontents (FS.FileContents path (Text.pack ("managed by salmon-ops-serve-fixture: " <> path <> "\n")))
 
 {- | The @--card@ half: a card template for the bundle node (contract in
 @salmon-ops\/ui\/card-template.js@). Tramaj's @branch(else, cond, then)@

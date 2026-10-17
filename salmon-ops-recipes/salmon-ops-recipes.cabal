@@ -93,6 +93,7 @@ test-suite salmon-ops-recipes-test
                     , Test.CheckSpec
                     , Test.AmendNodeSpec
                     , Test.CardTemplateSpec
+                    , Test.BuiltinCardsSpec
                     , Test.ClientModelReference
                     , Test.ClientModelSpec
                     , Test.ClientModelStepSpec
