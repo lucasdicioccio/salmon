@@ -25,6 +25,7 @@ import qualified Test.LlamaServerSpec as LlamaServerSpec
 import qualified Test.ServeApiSpec as ServeApiSpec
 import qualified Test.PgTextSearchSpec as PgTextSearchSpec
 import qualified Test.PgVectorSpec as PgVectorSpec
+import qualified Test.PgVectorDemoSpec as PgVectorDemoSpec
 import qualified Test.PlakarSpec as PlakarSpec
 import qualified Test.WireGuardMeshSpec as WireGuardMeshSpec
 import qualified Test.WireGuardSpec as WireGuardSpec
@@ -130,6 +131,7 @@ main =
                 , MigratorTemplateSpec.tests
                 , PgBackRestSpec.sandboxTests
                 , PgTextSearchSpec.sandboxTests
+                , PgVectorDemoSpec.sandboxTests
                 , -- the rest of the VM specs: they share one bridge and a
                   -- handful of fixed addresses, so two at once is two guests
                   -- claiming one address.
@@ -170,6 +172,7 @@ main =
             , ServeApiSpec.tests
             , UiTailTemplateSpec.tests
             , PgVectorSpec.tests
+            , PgVectorDemoSpec.tests
             , PgTextSearchSpec.tests
             , PlakarSpec.tests
             , WireGuardSpec.tests

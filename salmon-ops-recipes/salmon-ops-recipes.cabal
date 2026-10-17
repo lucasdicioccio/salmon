@@ -34,6 +34,7 @@ library
                    , SreBox.PostgresTemplate
                    , SreBox.PostgresPair
                    , SreBox.PostgresPairPrereqs
+                   , SreBox.PgVectorDemo
                    , SreBox.JWTSigning
                    , SreBox.WireGuardVpn
                    , SreBox.WireGuardMesh
@@ -104,6 +105,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ServeApi
                     , Test.ServeApiSpec
                     , Test.PgVectorSpec
+                    , Test.PgVectorDemoSpec
                     , Test.PgTextSearchSpec
                     , Test.PlakarSpec
                     , Test.WireGuardSpec

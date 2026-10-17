@@ -6,6 +6,7 @@ Breaking: exported functions of `GcpToy`, `PgPair` and `QemuPgHaToy` changed. Re
 `salmon-ops ^>=0.2.0.0` and `salmon-ops-recipes ^>=0.2.0.0`.
 
 * New `salmon-cloudrun`: a Cloud Run turnup from one declarative file.
+* New `salmon-pgvector-demo`: `SreBox.PgVectorDemo` as a binary, with a read-only `search`.
 * New `salmon-report`: read-only capability probes (DNS setup, STUN mapping type, hairpin NAT,
   inbound reachability from a second vantage point, nmap on declared targets).
 * New `salmon-docs-sync`: detect `docs/` drift, regenerate, commit and push.

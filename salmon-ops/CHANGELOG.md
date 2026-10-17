@@ -14,6 +14,7 @@ New builtins:
 * Postgres high availability: `Patroni`, `PgBackRest` (archive, PITR, replica method),
   `Haproxy` routing to the leader by health check, `Etcd` join phase.
 * `PgTextSearch`, `ClipCpp` (embeddings for pgvector), `Plakar` integrations and GCS store.
+* `LlamaServer.llamaEmbed`: one text's vector from a running llama-server, for a loader.
 * `SecretDelivery` (a pre-provisioned secret onto a machine), `Deferred` (a sub-graph built at
   `up` from a value read then), `Netbird` peer enrolment, `PortMapping` (UPnP-IGD via `upnpc`),
   `Rsync.receiveDir`.
