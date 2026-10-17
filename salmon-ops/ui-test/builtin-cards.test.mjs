@@ -3,7 +3,8 @@
 // The templates are rendered by Haskell, so this script takes them from a
 // JSON file the Haskell test writes (Test/BuiltinCardsSpec.hs):
 //   node salmon-ops/ui-test/builtin-cards.test.mjs CARDS.json
-// with CARDS.json = {cards: [{name, source, facts, verdicts}], quotes: [{text, source}]}.
+// with CARDS.json = {cards: [{name, source, facts, verdicts, links}], quotes: [{text, source}]}
+// (links: [[label, url]], the card's links out of the page).
 // SALMON_UI_TEST_SEED fixes the random contexts' seed; it is printed either way.
 
 import { test } from "node:test";
@@ -74,12 +75,16 @@ function sentenceFor(verdicts, v) {
   }
 }
 
-function draw(program, node) {
+function drawSpec(program, node) {
   const r = ct.foldCard(tramaj, program, ct.cardContext(node));
   assert.equal(r.error, undefined, `error: ${r.error}`);
   assert.equal(r.fallback, undefined, "a builtin card never falls back to the default card");
-  return tt.specText(r.spec);
+  return r.spec;
 }
+const draw = (program, node) => tt.specText(drawSpec(program, node));
+
+// every `a` of a spec, as [text, href]
+const anchors = (s) => (typeof s === "string" ? [] : [...(s.tag === "a" ? [[tt.specText(s), s.href]] : []), ...s.children.flatMap(anchors)]);
 
 assert.ok(input.cards.length > 0, "no cards given");
 
@@ -115,6 +120,14 @@ for (const card of input.cards) {
         assert.equal(text.includes("disagree"), conflict, "the conflict warning, only on a conflict");
       }
     }
+  });
+
+  test(`${card.name}: its links, each drawn as an https link, and no other`, () => {
+    const program = tramaj.parseProgram(card.source);
+    const want = card.links ?? [];
+    for (const [, url] of want) assert.equal(ct.safeHref(url), url, `a card's link is a plain https URL: ${url}`);
+    assert.deepEqual(anchors(drawSpec(program, {})), want);
+    assert.deepEqual(anchors(drawSpec(program, randomNode())), want, "whatever the node");
   });
 
   test(`${card.name}: any node draws without error (seeded)`, () => {

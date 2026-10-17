@@ -34,14 +34,19 @@ module Salmon.Builtin.Cards (
     -- * The skeleton
     Card (..),
     Verdicts (..),
+    Link (..),
     renderCard,
     tramajString,
+    percentEncode,
 ) where
 
-import Data.Char (isControl, ord)
+import qualified Data.ByteString as ByteString
+import Data.Char (isAsciiLower, isAsciiUpper, isControl, isDigit, ord)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import Numeric (showHex)
+import Text.Printf (printf)
 import System.FilePath (takeDirectory)
 
 import Salmon.Builtin.Extension (Op, amendNode, withCardTemplate)
@@ -64,6 +69,21 @@ data Card = Card
     -- ^ what @up@ does
     , cardDown :: Text
     -- ^ what @down@ does
+    , cardLinks :: [Link]
+    -- ^ external links (a cloud console page, say), drawn under the facts;
+    -- none draws nothing
+    }
+    deriving (Eq, Show)
+
+{- | A link out of the page, to the managed system. Built only from public
+node data (a project, a zone, a name: what the node's @ref@ and @help@
+already publish), never from a secret. The page draws only an @https@ URL
+without credentials, opens it in a new tab with no referrer, and draws
+anything else as plain text (@ui\/card-template.js@).
+-}
+data Link = Link
+    { linkLabel :: Text
+    , linkUrl :: Text
     }
     deriving (Eq, Show)
 
@@ -107,14 +127,15 @@ dynamics and tending output folded away.
 -}
 renderCard :: Card -> Text
 renderCard c =
-    Text.intercalate
-        "\n"
+    Text.intercalate "\n" $
         [ "@v = $ctx.check.verdict"
         , "@ok = or(eq($v, \"success\"), or(eq($v, \"completed\"), eq($v, \"skipped\")))"
         , ".div("
         , "  .p(class: \"t-muted\", $ctx.help),"
         , "  .table(.tbody(" <> Text.intercalate ", " (fmap fact c.cardFacts) <> ")),"
-        , "  .p(class: branch(\"t-muted\", $ok, \"t-ok\", eq($v, \"failure\"), \"t-warn\", eq($v, \"unknown\"), \"t-warn\"),"
+        ]
+            <> links
+            <> [ "  .p(class: branch(\"t-muted\", $ok, \"t-ok\", eq($v, \"failure\"), \"t-warn\", eq($v, \"unknown\"), \"t-warn\"),"
         , "     branch(" <> s v.verdictUnchecked <> ", $ok, " <> s v.verdictInPlace <> ", eq($v, \"failure\"), " <> s v.verdictToApply <> ", eq($v, \"unknown\"), " <> s v.verdictUnsure <> ", eq($v, \"immaterial\"), " <> s v.verdictNoCheck <> ")),"
         , "  branch(.p(class: \"t-muted\", $ctx.check.reason), eq($ctx.check.reason, null), \"\"),"
         , "  branch(\"\", $ctx.conflict, .p(class: \"t-err\", \"two live declarations disagree about this node\")),"
@@ -129,6 +150,22 @@ renderCard c =
     s = tramajString
     v = c.cardVerdicts
     fact (k, x) = ".tr(.th(" <> s k <> "), .td(.code(" <> s x <> ")))"
+    -- nothing at all without links, so a card without any renders as before
+    links = case c.cardLinks of
+        [] -> []
+        ls -> ["  .p(class: \"card-links\", " <> Text.intercalate ", \" · \", " (fmap link ls) <> "),"]
+    link :: Link -> Text
+    link l = ".a(href: " <> s l.linkUrl <> ", " <> s l.linkLabel <> ")"
+
+{- | Percent-encodes everything but RFC 3986's unreserved characters, as
+UTF-8: for a name put in a URL's path segment or query value.
+-}
+percentEncode :: Text -> Text
+percentEncode = Text.concatMap enc
+  where
+    enc c
+        | isAsciiLower c || isAsciiUpper c || isDigit c || c `elem` ("-._~" :: String) = Text.singleton c
+        | otherwise = Text.pack (concatMap (printf "%%%02X") (ByteString.unpack (Text.encodeUtf8 (Text.singleton c))))
 
 {- | For 'Salmon.Builtin.Nodes.Filesystem.filecontents' at this path. The
 contents are not on the card, nor any digest of them (the builtin's own
@@ -152,6 +189,7 @@ fileContentsCard path =
                     }
             , cardUp = "writes the whole file (no merge with what is there)"
             , cardDown = "removes the file (already absent is fine); the directory stays"
+            , cardLinks = []
             }
 
 -- | For 'Salmon.Builtin.Nodes.Filesystem.dir' at this path.
@@ -173,6 +211,7 @@ directoryCard path =
                     }
             , cardUp = "creates the directory and its parents; never touches what is inside"
             , cardDown = "removes the directory only when it is empty (a non-empty one fails, on purpose)"
+            , cardLinks = []
             }
 
 {- | For 'Salmon.Builtin.Nodes.Systemd.systemdService' (and its watching
@@ -201,6 +240,7 @@ systemdServiceCard cfg =
                     }
             , cardUp = "systemctl daemon-reload, enable, then restart"
             , cardDown = "systemctl stop; the unit file is its own node"
+            , cardLinks = []
             }
   where
     scope Systemd.System = "system"
@@ -227,4 +267,5 @@ pgDatabaseCard port db =
                     }
             , cardUp = "CREATE DATABASE as the postgres user, on the local server at this port, unless pg_database already has it"
             , cardDown = "nothing: a database is never dropped by this node"
+            , cardLinks = []
             }

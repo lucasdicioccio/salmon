@@ -430,13 +430,21 @@ function lineElement(spec, raw) {
 }
 
 // A spec from tail-template.js's `specOf`: only allowlisted tags, `class`
-// and `title`, text as text. Never innerHTML.
+// and `title` (and a vetted `href` on a card's `a`), text as text. Never
+// innerHTML.
 function specElement(spec) {
   if (typeof spec === "string") return document.createTextNode(spec);
   const el = spec.tag === null ? document.createDocumentFragment() : document.createElement(spec.tag);
   if (spec.tag !== null) {
     if (spec.cls) el.className = spec.cls;
     if (spec.title) el.title = spec.title;
+    // a card's link out (card-template.js vetted it: https, no credentials)
+    if (spec.tag === "a" && spec.href) {
+      el.href = spec.href;
+      el.target = "_blank";
+      el.rel = "noopener noreferrer";
+      el.referrerPolicy = "no-referrer";
+    }
   }
   for (const c of spec.children) el.appendChild(specElement(c));
   return el;

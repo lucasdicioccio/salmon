@@ -1526,6 +1526,33 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   fixture's `/dag`, with paths wrapping (`td code { overflow-wrap: anywhere }`). **Not run**:
   the directory, systemd and Postgres cards in a browser (node-only), and any card against a
   real systemd or Postgres.
+  **GCP and Postgres cards, and links out** (feature d8a79380, still **opt-in**):
+  `Salmon.Builtin.Cards.Gcp` (instance, address, firewall rule, subnet, DNS zone, record set
+  (`recordSet True` for a resolved one), bucket, secret, secret file, application LB root) and
+  `Salmon.Builtin.Cards.Postgres` (user, userPassFile, replication user, replication slot,
+  hba line, alter-system, server TLS), each taking the builtin's own declaration value. A
+  `Card` now has `cardLinks :: [Link]` (label, url), drawn under the facts; an empty list
+  renders exactly the template it did before. Every GCP card links to its Cloud console page,
+  `consoleUrl segments project` (each segment and the project percent-encoded,
+  `Cards.percentEncode`), built from the declaration's public names only; where a resource has
+  no stable page (address, record set, regional ALB) the link is to the list or the zone.
+  **The console URLs were never followed against a real project.** What a card never takes: a
+  password (the pg cards take only the role), an instance's metadata (a startup script),
+  a secret's bytes or any digest; for a password file, a secret file or a TLS key, the path
+  only, and present/missing comes from the node's own check. The page side: `a` is a card tag
+  (still not a tail tag), and its `href` is kept only when `safeHref` accepts it (an absolute
+  `https:` URL with no user/password); `ui.js` sets `target=_blank`,
+  `rel="noopener noreferrer"`, `referrerPolicy=no-referrer`. A spec carries an `href` key
+  only on an `a`, so other specs are unchanged. Tests: `BuiltinCardsSpec` (all cases
+  presentation-only; no card contains the fixture's password, metadata or contents; every GCP
+  link is https console for its own project; one URL by hand, one encoded; `percentEncode`
+  property: only unreserved + `%XX`, decodes back), `builtin-cards.test.mjs` (each card's
+  links drawn as `a`s with exactly those hrefs), `card-template.test.mjs` (bad hrefs:
+  `javascript:`, `data:`, `http:`, relative, credentials; `safeHref` property; an `href` on
+  another tag ignored; a tail still refuses `a`). Mutation-checked: dropping the `https:`
+  test in `safeHref` fails two tests. **Not run**: any of these cards in a browser (node-only),
+  against real GCP or Postgres. Left for later PRs: SSH, key/certificate builtins
+  (keygen, TLS, JWK, WireGuard keys), Patroni/pgBackRest/HAProxy, Postgres templates/clones.
   **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
   opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
   in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and
