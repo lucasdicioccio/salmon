@@ -45,6 +45,9 @@ export const TEMPLATE_MAX_WORDS = 64;
 export const TEMPLATE_MAX_NODES = 512;
 export const TEMPLATE_MAX_DEPTH = 32;
 
+// What a tail draws; `card-template.js` passes its own (a wider set of tags).
+export const TAIL_ALLOW = { tags: TEMPLATE_TAGS, attrs: TEMPLATE_ATTRS, where: "a tail" };
+
 export class TemplateError extends Error {
   name = "TemplateError";
 }
@@ -100,7 +103,7 @@ export function fieldsOf(text) {
 
 // One line through a parsed template: {drop: true}, {spec}, or {error}.
 // `tramaj` is the tramaj-js module (runProgram, stringify).
-export function foldLine(tramaj, program, ctx) {
+export function foldLine(tramaj, program, ctx, allow = TAIL_ALLOW) {
   let out;
   try {
     out = tramaj.runProgram("concrete", new Map(), ctx, program);
@@ -109,7 +112,7 @@ export function foldLine(tramaj, program, ctx) {
   }
   if (out === null) return { drop: true };
   try {
-    return { spec: specOf(tramaj, out) };
+    return { spec: specOf(tramaj, out, allow) };
   } catch (e) {
     return { error: messageOf(e) };
   }
@@ -118,12 +121,12 @@ export function foldLine(tramaj, program, ctx) {
 // A template's result (Tramaj's normative Node JSON, or a scalar) as the
 // tree `ui.js` draws: a string, or {tag, cls, title, children} where a null
 // tag is a fragment. Throws TemplateError for what is not drawn.
-export function specOf(tramaj, out) {
+export function specOf(tramaj, out, allow = TAIL_ALLOW) {
   const budget = { nodes: 0 };
-  return specAt(tramaj, out, 0, budget);
+  return specAt(tramaj, out, 0, budget, allow);
 }
 
-function specAt(tramaj, v, depth, budget) {
+function specAt(tramaj, v, depth, budget, allow) {
   if (++budget.nodes > TEMPLATE_MAX_NODES) throw new TemplateError(`more than ${TEMPLATE_MAX_NODES} nodes in one line`);
   if (depth > TEMPLATE_MAX_DEPTH) throw new TemplateError(`nested deeper than ${TEMPLATE_MAX_DEPTH}`);
   if (v === null || typeof v !== "object" || typeof v.type !== "string") return scalarText(tramaj, v);
@@ -131,25 +134,25 @@ function specAt(tramaj, v, depth, budget) {
     case "text":
       return scalarText(tramaj, v.value);
     case "fragment":
-      return { tag: null, cls: null, title: null, children: childrenOf(tramaj, v, depth, budget) };
+      return { tag: null, cls: null, title: null, children: childrenOf(tramaj, v, depth, budget, allow) };
     case "element": {
-      if (!TEMPLATE_TAGS.has(v.tag)) throw new TemplateError(`tag "${v.tag}" is not drawn in a tail (allowed: ${[...TEMPLATE_TAGS].join(" ")})`);
+      if (!allow.tags.has(v.tag)) throw new TemplateError(`tag "${v.tag}" is not drawn in ${allow.where} (allowed: ${[...allow.tags].join(" ")})`);
       let cls = null;
       let title = null;
       for (const a of Array.isArray(v.attributes) ? v.attributes : []) {
-        if (a.kind !== "attribute" || !TEMPLATE_ATTRS.has(a.name) || typeof a.value !== "string") continue;
+        if (a.kind !== "attribute" || !allow.attrs.has(a.name) || typeof a.value !== "string") continue;
         if (a.name === "class") cls = a.value;
         else title = a.value;
       }
-      return { tag: v.tag, cls, title, children: childrenOf(tramaj, v, depth, budget) };
+      return { tag: v.tag, cls, title, children: childrenOf(tramaj, v, depth, budget, allow) };
     }
     default:
       return scalarText(tramaj, v);
   }
 }
 
-function childrenOf(tramaj, v, depth, budget) {
-  return (Array.isArray(v.children) ? v.children : []).map((c) => specAt(tramaj, c, depth + 1, budget));
+function childrenOf(tramaj, v, depth, budget, allow) {
+  return (Array.isArray(v.children) ? v.children : []).map((c) => specAt(tramaj, c, depth + 1, budget, allow));
 }
 
 // A text leaf keeps its Tramaj value; a string is itself, null nothing, and

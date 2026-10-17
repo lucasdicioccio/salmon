@@ -20,9 +20,11 @@ extra-source-files:
                     ui/ui.css
                     ui/auth.html
                     ui/tail-template.js
+                    ui/card-template.js
                     ui/vendor/tramaj-js/*.js
                     ui/vendor/tramaj-js/LICENSE
                     ui-test/tail-template.test.mjs
+                    ui-test/card-template.test.mjs
                     openapi/serve-api.openapi.json
 
 source-repository head
@@ -128,6 +130,7 @@ library
                    , Salmon.Builtin.Nodes.Upx
                    , Salmon.Builtin.Nodes.Web
                    , Salmon.Builtin.Nodes.WireGuard
+                   , Salmon.Op.CardTemplate
                    , Salmon.Op.Concurrency
                    , Salmon.Op.Dag
                    , Salmon.Op.Guard

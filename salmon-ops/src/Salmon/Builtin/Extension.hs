@@ -17,6 +17,7 @@ import System.Exit (ExitCode)
 import Salmon.Actions.Dot (PlaceHolder (..))
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Op.Actions
+import Salmon.Op.CardTemplate (setCardTemplate)
 import Salmon.Op.Configure
 import Salmon.Op.Eval
 import Salmon.Op.Graph
@@ -186,6 +187,18 @@ An 'Actionless' node has no 'Extension' and is returned unchanged.
 -}
 amendNode :: (Extension -> Extension) -> Op -> Op
 amendNode f o = o{node = fmap f o.node}
+
+{- | Give this node a Tramaj template for its card in the web UI, replacing
+any it had. Nothing else about the node changes: the template is left out
+of its representative ("Salmon.Op.CardTemplate"), so a running @serve@
+does not see it as a changed node. On a builtin, use it through
+'amendNode': @amendNode (withCardTemplate src) builtinOp@.
+
+The source is public (served on @\/dag@); the contract is
+@salmon-ops\/ui\/card-template.js@.
+-}
+withCardTemplate :: Text -> Extension -> Extension
+withCardTemplate src ext = ext{dynamics = setCardTemplate src ext.dynamics}
 
 placeholder :: ShortHand -> Text -> Op
 placeholder short t = op short nodeps $ \actions ->

@@ -45,6 +45,9 @@ const state = {
   tails: new Map(), // full ref -> {lines, paused, held, pre, ...} for each pinned live tail
   templating: null, // the promise of {tt, tramaj} once a tail has a template (lazy: tail-template.js + vendored tramaj-js)
   templatingLib: null, // what that promise resolved to
+  cardPrograms: new Map(), // a node's card template source -> {program} or {error}, parsed once
+  defaultCards: new Set(), // full refs whose card the operator switched back to the default one
+  cardLoadError: null, // why the evaluator did not load for a card, so the panel does not retry in a loop
   zoom: { scale: 1, tx: 0, ty: 0 }, // the #viewport transform; world units are the raw layout() pixels
   zoomInit: false, // true once the first fit-to-view has run
   worldSize: null, // the current layout()'s {width, height}, for fitView
@@ -516,8 +519,8 @@ function parseTemplate(t) {
 // Same-origin, embedded in the binary: no third-party fetch.
 function loadTemplating() {
   if (!state.templating) {
-    state.templating = Promise.all([import("./tail-template.js"), import("./vendor/tramaj-js/index.js")]).then(([tt, tramaj]) => {
-      state.templatingLib = { tt, tramaj };
+    state.templating = Promise.all([import("./tail-template.js"), import("./vendor/tramaj-js/index.js"), import("./card-template.js")]).then(([tt, tramaj, ct]) => {
+      state.templatingLib = { tt, tramaj, ct };
       return state.templatingLib;
     });
     state.templating.catch(() => {
@@ -1581,13 +1584,31 @@ function renderPanel() {
   body.appendChild(actions);
 
   if (n.conflict) conflictView(body, n.conflict);
-  section(body, "help", n.help);
-  section(body, "notes", n.notes);
-  if (n.dynamics && n.dynamics.length) list(body, "dynamics", n.dynamics.map(String));
+  // a card template replaces the descriptive sections, both halves; the
+  // default card keeps today's order, with paths and refs in between
+  const templated = cardFromTemplate(body, n);
+  if (!templated) describeNode(body, n);
   if (n.paths && n.paths.length) list(body, "paths", n.paths, "mono");
   refList(body, "dependencies", n.dependencies);
   refList(body, "dependants", n.dependants);
+  if (!templated) nodeActivity(body, n);
 
+  body.appendChild(sectionTitle("full ref"));
+  const full = document.createElement("pre");
+  full.textContent = n.ref.full;
+  body.appendChild(full);
+  seedList(body);
+}
+
+// The default card's two halves: what the node is, and what it last did.
+// A node's card template replaces both.
+function describeNode(body, n) {
+  section(body, "help", n.help);
+  section(body, "notes", n.notes);
+  if (n.dynamics && n.dynamics.length) list(body, "dynamics", n.dynamics.map(String));
+}
+
+function nodeActivity(body, n) {
   const check = n.status && n.status.check;
   const h3 = document.createElement("h3");
   h3.textContent = "last check";
@@ -1607,11 +1628,74 @@ function renderPanel() {
     pre.textContent = n.status.output.join("\n");
     body.appendChild(pre);
   }
-  body.appendChild(sectionTitle("full ref"));
-  const full = document.createElement("pre");
-  full.textContent = n.ref.full;
-  body.appendChild(full);
+}
 
+// A node that carries a card template (/dag's `template`, see
+// card-template.js) has its card drawn from it, with a switch to the default
+// one. Answers false when the default card is to be drawn instead: no
+// template, the operator's choice, the template answered null, or the
+// evaluator is still loading. A template that does not parse or fails says
+// so, and the default card follows.
+function cardFromTemplate(body, n) {
+  if (typeof n.template !== "string") return false;
+  const ref = n.ref.full;
+  const showDefault = state.defaultCards.has(ref);
+  const bar = document.createElement("p");
+  bar.className = "card-switch muted";
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = showDefault ? "templated card" : "default card";
+  b.title = "this node carries a card template; switch between it and the default card";
+  b.addEventListener("click", () => {
+    if (state.defaultCards.has(ref)) state.defaultCards.delete(ref);
+    else state.defaultCards.add(ref);
+    renderPanel();
+  });
+  bar.appendChild(b);
+  body.appendChild(bar);
+  if (showDefault) return false;
+  if (!state.templatingLib) {
+    if (state.cardLoadError) {
+      // said once; a reload of the page tries again
+      body.appendChild(para("template-error", `card template: ${state.cardLoadError}; the default card follows`));
+      return false;
+    }
+    bar.appendChild(document.createTextNode(" loading the template…"));
+    loadTemplating().then(
+      () => {
+        if (state.selected === ref) renderPanel();
+      },
+      (e) => {
+        state.cardLoadError = `the template evaluator did not load: ${e && e.message ? e.message : e}`;
+        if (state.selected === ref) renderPanel();
+      },
+    );
+    return false;
+  }
+  const { ct, tt, tramaj } = state.templatingLib;
+  let parsed = state.cardPrograms.get(n.template);
+  if (!parsed) {
+    try {
+      parsed = { program: tramaj.parseProgram(n.template) };
+    } catch (e) {
+      parsed = { error: `does not parse: ${tt.messageOf(e)}` };
+    }
+    state.cardPrograms.set(n.template, parsed);
+  }
+  const r = parsed.error ? { error: parsed.error } : ct.foldCard(tramaj, parsed.program, ct.cardContext(n));
+  if (r.error) {
+    body.appendChild(para("template-error", `card template: ${r.error}; the default card follows`));
+    return false;
+  }
+  if (r.fallback) return false;
+  const card = document.createElement("div");
+  card.className = "card-template";
+  card.appendChild(specElement(r.spec));
+  body.appendChild(card);
+  return true;
+}
+
+function seedList(body) {
   // A node does not know which seed declared it, and /history does not say
   // which nodes an epoch declared, so the choice is the operator's: every
   // live declaration, each with its `down`.

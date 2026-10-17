@@ -112,6 +112,15 @@ window of that node live, and, from @\/dag@'s per-node @tail@, after a page
 reload too:
 
 > up --dir /tmp/play --name web --file index.html --build 5
+
+= The @--card@ half
+
+The bundle node carries a card template ('withCardTemplate'): selecting it in
+the web UI draws its card from the template instead of the default sections,
+with a button back to the default card. Nothing else about the node changes
+(same @ref@, @help@, representative):
+
+> up --dir /tmp/play --name web --file index.html --card
 -}
 module Main (main) where
 
@@ -131,7 +140,7 @@ import System.Process (proc)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Builtin.CommandLine as CLI
-import Salmon.Builtin.Extension (Op, Track', check, deps, down, dynamics, help, ignoreTrack, managed, nodeps, notes, op, ref, up)
+import Salmon.Builtin.Extension (Op, Track', check, deps, down, dynamics, help, ignoreTrack, managed, nodeps, notes, op, ref, up, withCardTemplate)
 import qualified Salmon.Builtin.NodeLog as NodeLog
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Daemon as Daemon
@@ -153,6 +162,7 @@ data Seed = Seed
     , seedGreeting :: Text
     , seedStaleCheck :: Bool
     , seedBuild :: Int
+    , seedCard :: Bool
     }
     deriving (Generic, Show)
 
@@ -174,6 +184,7 @@ instance ParseRecord Seed where
                     <> Opt.help "give the daemon a plausible-but-stale check (\"my log exists\"), which a bounce then ignores. See (I1)."
                 )
             <*> option auto (long "build" <> metavar "N" <> value 0 <> Opt.help "also run a pretend build printing N steps, streamed, so a tail has lines (0: none)")
+            <*> switch (long "card" <> Opt.help "give the bundle node a card template, which the web UI draws in place of its default card")
 
 -- | The hermetic directive: same shape as the seed here, but that's a
 -- coincidence of how trivial this fixture is — the point of the type is that
@@ -184,6 +195,9 @@ data Spec = Spec
     , specDaemon :: Maybe DaemonSpec
     , specBuild :: Maybe Int
     -- ^ the @--build N@ half, absent when not asked for
+    , specCard :: Maybe Text
+    -- ^ the @--card@ half: the bundle node's card template, absent when not
+    -- asked for (and in a directive written before it existed)
     }
     deriving (Eq, Show, Generic)
 
@@ -226,15 +240,33 @@ configure = Configure $ \seed ->
                                 }
                 )
                 (if seed.seedBuild > 0 then Just seed.seedBuild else Nothing)
+                (if seed.seedCard then Just bundleCard else Nothing)
 
 program :: Track' Spec
 program = Track $ \spec ->
     op "serve-fixture-bundle" (deps (fmap fileOp spec.specFiles <> foldMap (pure . daemonOp) spec.specDaemon <> foldMap (pure . buildOp spec.specRoot) spec.specBuild)) $ \actions ->
-        actions{ref = mkRef "serve-fixture-bundle" (spec.specRoot, spec.specFiles, fmap daemonConf spec.specDaemon)}
+        maybe id withCardTemplate spec.specCard $
+            actions{ref = mkRef "serve-fixture-bundle" (spec.specRoot, spec.specFiles, fmap daemonConf spec.specDaemon)}
   where
     fileOp :: FilePath -> Op
     fileOp path =
         FS.filecontents (FS.FileContents path (Text.pack ("managed by salmon-ops-serve-fixture: " <> path <> "\n")))
+
+{- | The @--card@ half: a card template for the bundle node (contract in
+@salmon-ops\/ui\/card-template.js@). Tramaj's @branch(else, cond, then)@
+evaluates both arms, which is why @$ctx.check@ is always an object.
+-}
+bundleCard :: Text
+bundleCard =
+    Text.unlines
+        [ ".div("
+        , "  .p(class: branch(\"t-muted\", eq($ctx.convergence, \"converged\"), \"t-ok\"), \"a bundle of \", str(count($ctx.dependencies)), \" nodes, \", $ctx.convergence),"
+        , "  .h4(\"paths\"),"
+        , "  .ul(map($ctx.paths, (p) => .li(.code($p)))),"
+        , "  .h4(\"last check\"),"
+        , "  .p(branch($ctx.check.verdict, eq($ctx.check.verdict, null), \"never checked\"))"
+        , ")"
+        ]
 
 -------------------------------------------------------------------------------
 -- the --daemon half: a process salmon owns, and the config it stands on
