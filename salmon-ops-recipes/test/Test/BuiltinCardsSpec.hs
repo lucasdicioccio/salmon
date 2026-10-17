@@ -18,7 +18,9 @@ feature e593a79b).
   names only, percent-encoded ('Cards.percentEncode').
 * Every card links to its builtin's page on the docs site
   ('Cards.docsLink'), and that page has a source under
-  @resources\/builtins\/@ (feature 42358f5a).
+  @resources\/builtins\/@ (feature 42358f5a), and the link's base is the
+  kitchen-sink site's published URL from @website\/src\/kitchen-sink.json@
+  (feature 6b166715).
 -}
 module Test.BuiltinCardsSpec (tests) where
 
@@ -28,6 +30,7 @@ import Data.Char (chr, isAsciiLower, isAsciiUpper, isDigit, isHexDigit)
 import qualified Data.Map as Map
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Foldable (toList)
 import Data.Text (Text)
@@ -297,6 +300,7 @@ tests =
         , testCase "every card links to its builtin's docs page, last, and the page has a source" docsPages
         , testCase "a docs link, by hand" $
             assertEqual "url" (Cards.Link "docs" "https://lucasdicioccio.github.io/salmon/builtin-filesystem-file-contents.html") (Cards.docsLink "filesystem-file-contents")
+        , testCase "the docs link base is the kitchen-sink site's published URL" docsSite
         , testCase "every card draws under tramaj-js; tramajString round-trips (node)" runNode
         ]
 
@@ -317,6 +321,28 @@ docsPages = do
                     assertBool (Text.unpack c.caseName <> ": no page source " <> dir </> Text.unpack slug <> ".md") page
   where
     lastMaybe xs = if null xs then Nothing else Just (last xs)
+
+{- | The pages under @resources\/builtins\/@ are a kitchen-sink input
+(@website\/scripts\/sync-repo-docs.sh@ mirrors each to
+@website\/src\/builtin-<slug>.cmark@, so they are on the site's search index
+and navigation), and 'Cards.docsLink' must point at where that site is
+published: @publishURL@ and @basePath@ of @website\/src\/kitchen-sink.json@.
+A move of the site breaks this test instead of every card's link.
+-}
+docsSite :: IO ()
+docsSite = do
+    let cfg = "../website/src/kitchen-sink.json"
+    there <- doesFileExist cfg
+    if not there
+        then putStrLn "SKIPPED: website/src/kitchen-sink.json is not next to the test suite; the site check needs the source tree"
+        else do
+            bytes <- LByteString.readFile cfg
+            case Aeson.decode bytes of
+                Just (Aeson.Object o)
+                    | Just (Aeson.String publishUrl) <- KeyMap.lookup "publishURL" o
+                    , Just (Aeson.String basePath) <- KeyMap.lookup "basePath" o ->
+                        assertEqual "docsBaseUrl" (Text.dropWhileEnd (== '/') publishUrl <> basePath) Cards.docsBaseUrl
+                _ -> assertFailure (cfg <> ": no publishURL/basePath strings")
 
 percentDecode :: Text -> Maybe Text
 percentDecode t = either (const Nothing) Just . Text.decodeUtf8' . ByteString.pack =<< go (Text.unpack t)

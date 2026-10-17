@@ -1568,6 +1568,17 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `docs/` was **not** regenerated, so the published links 404 until the owner runs
   `build-site.sh`/`salmon-docs-sync`. A pages-only drift (a card sentence changed, its page
   not) is not tested. Open for the owner: overriding the base (for a fork) from `serve`.
+  **On the kitchen-sink site** (feature 6b166715): the pages already are a kitchen-sink input
+  (the mirror above writes `website/src/builtin-*.cmark`, a `documentation`-layout page each),
+  so a produce puts them in `json/doc-search.json` and every documentation page's sidebar, and
+  `docsLink` already points at those produced pages. What was missing is only the published
+  copy: `docs/` predates them, so the live search and links lack them until `build-site.sh`
+  (or `salmon-docs-sync up`) is run. `BuiltinCardsSpec` now also pins `docsBaseUrl` to
+  `publishURL` + `basePath` of `website/src/kitchen-sink.json` (skipped loudly without the
+  source tree), so moving the site breaks a test rather than every card's link. **Run**: a
+  `build-site.sh` into a scratch directory: 76 pages, 41 `builtin-*.html` (40 cards + index),
+  each with entries in `doc-search.json` and linked from `docs.html`'s sidebar. `docs/` not
+  regenerated (no publish from the PR).
   **SSH, key/certificate, Patroni/pgBackRest/HAProxy cards** (feature e593a79b, still
   **opt-in**): `Salmon.Builtin.Cards.Keys` (`sshKey`, `sshCaSign` for `Keys.signKey`,
   `sshAvailable` and `metadataSshCa` from `Gcp.SshAccess`, `tlsKey`, `signingRequest`,
