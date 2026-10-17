@@ -460,7 +460,10 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
 - **`Nodes/Detached.hs`** (`detached`) is the one-shot counterpart of `Daemon`: a process that
   outlives the `run up` that started it, stopped later by a `run down` in another process (a
   developer's rig, a bench, a machine with no unit manager). Asked for by a customer who had
-  written it themselves. `up` starts the command in a **new session**, stdin `/dev/null`
+  written it themselves. **Needed only in rare situations: the preferred way to keep a process
+  running is `run serve` with a `managed` node (`Daemon`), else a systemd unit.** The owner
+  accepted the node on that condition, so the module header, the `detached` Haddock and the
+  first `notes` line all say it. `up` starts the command in a **new session**, stdin `/dev/null`
   (`Binary.detachedStdin`), stdout+stderr appended to a log file, `close_fds`, optional cwd and
   env overlay, and writes a pid file; it does not wait. Under `serve` the child stays salmon's,
   and a forked `waitForProcess` reaps it. **It reopens the pidfile non-goal of

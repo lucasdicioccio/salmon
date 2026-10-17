@@ -3,6 +3,14 @@
 
 {- | A process that outlives the @run up@ that started it.
 
+__You rarely need this node.__ The preferred way to keep a process running
+is @run serve@ with a @managed@ node ("Salmon.Builtin.Nodes.Daemon"): salmon
+then owns the process, notices when it exits, and restarts it under its
+supervision policy. Failing that, a unit manager ("Salmon.Builtin.Nodes.Systemd")
+does the same job. Reach for 'detached' only in the rare situation where
+neither is available and a one-shot @run up@ must leave a process behind;
+nothing watches it once that @run up@ has exited.
+
 "Salmon.Builtin.Nodes.Daemon" owns its process from a thread that never
 returns, so only @run serve@ can hold one, and its @up@ throws
 'Salmon.Builtin.Nodes.Daemon.NeedsSupervisor' on purpose.
@@ -373,13 +381,19 @@ isOurs rec = do
 
 -------------------------------------------------------------------------------
 
+{- | A detached process, for the rare case with no @run serve@ and no unit
+manager. Prefer a @managed@ node under @run serve@
+("Salmon.Builtin.Nodes.Daemon") to keep a process running; see the module
+header.
+-}
 detached :: Reporter Report -> Detached -> Op
 detached r d =
     op "detached" nodeps $ \actions ->
         actions
             { help = "keeps " <> d.detached_name <> " running, detached"
             , notes =
-                [ "argv: " <> Text.pack (show (argvOf d))
+                [ "rarely needed: prefer `run serve` with a managed node (Daemon) to keep a process running"
+                , "argv: " <> Text.pack (show (argvOf d))
                 , "cwd: " <> maybe "(inherited)" Text.pack d.detached_cwd
                 , "env names: " <> Text.pack (show (map fst d.detached_env))
                 , "pid file: " <> Text.pack d.detached_pidFile
