@@ -13,6 +13,9 @@ feature d8a79380).
   password, a file's contents, an instance's metadata.
 * A card's links are https console URLs built from the declaration's public
   names only, percent-encoded ('Cards.percentEncode').
+* Every card links to its builtin's page on the docs site
+  ('Cards.docsLink'), and that page has a source under
+  @resources\/builtins\/@ (feature 42358f5a).
 -}
 module Test.BuiltinCardsSpec (tests) where
 
@@ -185,8 +188,29 @@ tests =
             forAll genText $ \t ->
                 let e = Cards.percentEncode t
                  in (Text.all (\ch -> isAsciiLower ch || isAsciiUpper ch || isDigit ch || ch `elem` ("-._~%" :: String)) e, percentDecode e) === (True, Just t)
+        , testCase "every card links to its builtin's docs page, last, and the page has a source" docsPages
+        , testCase "a docs link, by hand" $
+            assertEqual "url" (Cards.Link "docs" "https://lucasdicioccio.github.io/salmon/builtin-filesystem-file-contents.html") (Cards.docsLink "filesystem-file-contents")
         , testCase "every card draws under tramaj-js; tramajString round-trips (node)" runNode
         ]
+
+docsPages :: IO ()
+docsPages = do
+    let dir = "../resources/builtins"
+    there <- doesFileExist (dir </> "README.md")
+    forM_ cases $ \c -> case c.caseCard.cardDocs of
+        Nothing -> assertFailure (Text.unpack c.caseName <> ": no docs page")
+        Just slug -> do
+            assertBool (show slug <> ": a slug is lowercase letters, digits and dashes") (not (Text.null slug) && Text.all (\ch -> isAsciiLower ch || isDigit ch || ch == '-') slug)
+            assertEqual (Text.unpack c.caseName <> ": the docs link comes last") (Just (Cards.docsLink slug)) (lastMaybe (Cards.allLinks c.caseCard))
+            assertBool (Text.unpack c.caseName <> ": the docs link is drawn") (Cards.tramajString (Cards.docsLink slug).linkUrl `Text.isInfixOf` Cards.renderCard c.caseCard)
+            if not there
+                then putStrLn "SKIPPED: resources/builtins is not next to the test suite; the page-source check needs the source tree"
+                else do
+                    page <- doesFileExist (dir </> Text.unpack slug <> ".md")
+                    assertBool (Text.unpack c.caseName <> ": no page source " <> dir </> Text.unpack slug <> ".md") page
+  where
+    lastMaybe xs = if null xs then Nothing else Just (last xs)
 
 percentDecode :: Text -> Maybe Text
 percentDecode t = either (const Nothing) Just . Text.decodeUtf8' . ByteString.pack =<< go (Text.unpack t)
@@ -251,7 +275,7 @@ runNode = do
                         , "source" .= Cards.renderCard c.caseCard
                         , "facts" .= c.caseCard.cardFacts
                         , "verdicts" .= sentences c.caseCard.cardVerdicts
-                        , "links" .= [(l.linkLabel, l.linkUrl) | l <- c.caseCard.cardLinks]
+                        , "links" .= [(l.linkLabel, l.linkUrl) | l <- Cards.allLinks c.caseCard]
                         ]
             LByteString.writeFile input (Aeson.encode (object ["cards" .= fmap card cases, "quotes" .= fmap quote ("" : texts :: [Text])]))
             (code, out, err) <- readCreateProcessWithExitCode (proc "node" [script, input]) ""

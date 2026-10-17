@@ -57,6 +57,7 @@ userCard p u =
         , cardUp = "creates the login role if missing, then sets its password (either way)"
         , cardDown = "nothing: a role is never dropped by this node"
         , cardLinks = []
+        , cardDocs = Just "postgres-user"
         }
 
 userVerdicts :: Text -> Verdicts
@@ -84,6 +85,7 @@ userPassFileCard p path u =
         , cardUp = "creates the login role if missing, then sets its password from the file, read at that moment"
         , cardDown = "nothing: a role is never dropped by this node"
         , cardLinks = []
+        , cardDocs = Just "postgres-user-passfile"
         }
 
 -- | For 'Postgres.replicationUser' on this port: the role, never the password.
@@ -99,6 +101,7 @@ replicationUserCard p u =
         , cardUp = "creates the role with REPLICATION LOGIN if missing, then sets its password (either way)"
         , cardDown = "nothing: a role is never dropped by this node"
         , cardLinks = []
+        , cardDocs = Just "postgres-replication-user"
         }
 
 noCheckVerdicts :: Text -> Text -> Verdicts
@@ -124,6 +127,7 @@ replicationSlotCard p slot =
         , cardUp = "creates the physical replication slot unless pg_replication_slots has it"
         , cardDown = "nothing: the slot is left (a slot nobody reads from holds WAL back, so drop it by hand when its standby is gone)"
         , cardLinks = []
+        , cardDocs = Just "postgres-replication-slot"
         }
 
 -- | For 'Postgres.hbaLine' on this cluster.
@@ -139,6 +143,7 @@ hbaLineCard cluster line =
         , cardUp = "appends the line to pg_hba.conf unless it is there verbatim, then reloads the cluster"
         , cardDown = "nothing: the line stays (and a changed declaration leaves the old line in place)"
         , cardLinks = []
+        , cardDocs = Just "postgres-hba-line"
         }
 
 -- | For 'Postgres.alterSystemSet' on this port.
@@ -154,6 +159,7 @@ alterSystemCard p param val =
         , cardUp = "ALTER SYSTEM SET, written to postgresql.auto.conf; it takes effect on a reload or, for some settings, a restart"
         , cardDown = "nothing: the setting stays"
         , cardLinks = []
+        , cardDocs = Just "postgres-alter-system"
         }
 
 {- | For 'Postgres.serverTls' (and 'Postgres.serverTlsAfter') on this port:
@@ -183,4 +189,5 @@ serverTlsCard p tls =
         , cardUp = "nothing of its own: under it, ssl and the three file settings are set, then the configuration is reloaded"
         , cardDown = "nothing: TLS stays configured"
         , cardLinks = []
+        , cardDocs = Just "postgres-server-tls"
         }

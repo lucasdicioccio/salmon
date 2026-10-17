@@ -8,6 +8,7 @@ Two things Kitchen-Sink's cmark renderer needs done for it: pipe tables are
 not CommonMark, so they become raw <table> blocks (md_tables_to_html.py), and
 the repository's relative links are rewritten to where the mirrored pages
 live — `resources/x.md` and `../specs/x.md` become `/docs-x.html`/`/specs-x.html`,
+`resources/builtins/x.md` becomes `/builtin-x.html` (its README `/builtin-index.html`),
 and any other repository-relative link becomes a GitHub blob URL, so nothing
 on the site points at a path that only exists in a checkout.
 """
@@ -31,8 +32,14 @@ def rewrite_links(text, base_dir):
         path, _, anchor = target.partition("#")
         norm = os.path.normpath(os.path.join(base_dir, path)) if base_dir else os.path.normpath(path)
         anchor = ("#" + anchor) if anchor else ""
+        bi = re.fullmatch(r"resources/builtins/README\.md", norm)
+        bm = re.fullmatch(r"resources/builtins/([^/]+)\.md", norm)
         dm = re.fullmatch(r"resources/([^/]+)\.md", norm)
         sm = re.fullmatch(r"specs/([^/]+)\.md", norm)
+        if bi:
+            return f"[{label}](/builtin-index.html{anchor})"
+        if bm:
+            return f"[{label}](/builtin-{bm.group(1)}.html{anchor})"
         if dm:
             return f"[{label}](/docs-{dm.group(1)}.html{anchor})"
         if sm:

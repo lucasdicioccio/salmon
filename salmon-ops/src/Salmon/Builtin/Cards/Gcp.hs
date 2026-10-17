@@ -103,6 +103,7 @@ instanceCard i =
         , cardUp = "creates the instance if absent, then starts, resumes or stops it to the declared power; a different machine type is changed only when the declaration permits a stop"
         , cardDown = "deletes the instance if it is there, whatever its state"
         , cardLinks = console "instance in the Cloud console" ["compute", "instancesDetail", "zones", i.instanceZone.zoneName, "instances", i.instanceName] i.instanceProject
+        , cardDocs = Just "gcp-compute-instance"
         }
   where
     power Compute.PoweredOn = "on"
@@ -133,6 +134,7 @@ addressCard a =
         , cardUp = "reserves the address (retrying while a freshly enabled API settles)"
         , cardDown = "releases the address if it is reserved"
         , cardLinks = console "IP addresses in the Cloud console" ["networking", "addresses", "list"] a.addressProject
+        , cardDocs = Just "gcp-compute-address"
         }
   where
     kind Compute.ExternalAddress = [("kind", "external")]
@@ -165,6 +167,7 @@ firewallRuleCard fw =
         , cardUp = "creates the ingress rule (an existing rule of that name is not compared or changed)"
         , cardDown = "deletes the rule if it is there"
         , cardLinks = console "rule in the Cloud console" ["networking", "firewalls", "details", fw.firewallName] fw.firewallProject
+        , cardDocs = Just "gcp-compute-firewall-rule"
         }
 
 -- | For 'Compute.subnet'.
@@ -194,6 +197,7 @@ subnetCard n =
         , cardUp = "creates the subnetwork (the range is not compared with an existing one)"
         , cardDown = "deletes the subnetwork if it is there"
         , cardLinks = console "subnet in the Cloud console" ["networking", "subnetworks", "details", n.subnetRegion.regionName, n.subnetName] n.subnetProject
+        , cardDocs = Just "gcp-compute-subnet"
         }
 
 -- | For 'Dns.managedZone'.
@@ -220,6 +224,7 @@ managedZoneCard z =
         , cardUp = "creates the public managed zone"
         , cardDown = "deletes the zone if it is there and serves the declared domain; Cloud DNS refuses while records other than the apex NS and SOA remain"
         , cardLinks = zoneLink z
+        , cardDocs = Just "gcp-dns-managed-zone"
         }
 
 zoneLink :: Dns.ManagedZone -> [Link]
@@ -255,6 +260,7 @@ recordSetCard resolved rs =
         , cardUp = "creates the record set, or updates it in place: the name and type are the effect site, so one made by hand is taken over"
         , cardDown = "deletes the record set at that name and type if there is one, whatever it holds"
         , cardLinks = zoneLink rs.recordZone
+        , cardDocs = Just "gcp-dns-record-set"
         }
 
 -- | For 'Storage.bucket'.
@@ -282,6 +288,7 @@ bucketCard b =
         , cardUp = "creates the bucket"
         , cardDown = "deletes the bucket if it is there"
         , cardLinks = console "bucket in the Cloud console" ["storage", "browser", b.bucketName] b.bucketProject
+        , cardDocs = Just "gcp-storage-bucket"
         }
 
 -- | For 'Secrets.secret': the secret's name, never a version's value.
@@ -308,6 +315,7 @@ secretCard sec =
         , cardUp = "creates the secret, with no version"
         , cardDown = "deletes the secret if it is there, and with it every version"
         , cardLinks = console "secret in the Cloud console" ["security", "secret-manager", "secret", sec.secretName, "versions"] sec.secretProject
+        , cardDocs = Just "gcp-secret"
         }
 
 {- | For 'Secrets.secretFile': where the secret is written and from which
@@ -339,6 +347,7 @@ secretFileCard f =
         , cardUp = "reads the secret version as this machine's identity and writes it to the path, atomically; the bytes are never reported"
         , cardDown = "removes the file"
         , cardLinks = console "secret in the Cloud console" ["security", "secret-manager", "secret", f.fileSecretName, "versions"] f.fileProject
+        , cardDocs = Just "gcp-secret-file"
         }
   where
     place = f.filePlacement
@@ -368,6 +377,7 @@ applicationLoadBalancerCard alb =
         , cardUp = "nothing of its own: its parts (address, health check, services, URL map, certificates, proxies, forwarding rules) are its dependencies"
         , cardDown = "nothing of its own: each part's node deletes its resource"
         , cardLinks = console "load balancers in the Cloud console" ["net-services", "loadbalancing", "list", "loadBalancers"] alb.albProject
+        , cardDocs = Just "gcp-application-load-balancer"
         }
 
 commas :: [Text] -> Text
