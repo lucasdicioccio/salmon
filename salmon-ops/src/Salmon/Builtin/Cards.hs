@@ -173,8 +173,11 @@ renderCard c =
 allLinks :: Card -> [Link]
 allLinks c = c.cardLinks <> maybe [] (\slug -> [docsLink slug]) c.cardDocs
 
-{- | Where the salmon documentation site is published (GitHub Pages, from
-@docs\/@ on @master@; @website\/README.md@). A constant, not a setting:
+{- | Where the salmon documentation site is published: the kitchen-sink site
+of @website\/@, so this must equal the @publishURL@ and @basePath@ of
+@website\/src\/kitchen-sink.json@ (@BuiltinCardsSpec@ checks it). GitHub
+Pages serves it from @docs\/@ on @master@ (@website\/README.md@). A
+constant, not a setting:
 a card's template is fixed when the graph is built, and it is not part of the
 representative, so changing this restarts nothing.
 -}
@@ -182,8 +185,10 @@ docsBaseUrl :: Text
 docsBaseUrl = "https://lucasdicioccio.github.io/salmon"
 
 {- | The link to a builtin's page on the docs site: @builtin-<slug>.html@,
-generated from @resources\/builtins\/<slug>.md@ by
-@website\/scripts\/sync-repo-docs.sh@. The slug is author-chosen and
+the kitchen-sink page made from @resources\/builtins\/<slug>.md@
+(@website\/scripts\/sync-repo-docs.sh@ mirrors it to
+@website\/src\/builtin-<slug>.cmark@, so the page is in the site's search
+index and its "Builtin nodes" navigation group). The slug is author-chosen and
 fixed per builtin (never a declaration's value), so the URL needs no
 encoding beyond what the slug already is.
 -}
