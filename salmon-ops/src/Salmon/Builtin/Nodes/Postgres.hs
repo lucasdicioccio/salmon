@@ -8,6 +8,7 @@ import Control.Exception (Exception, IOException, throwIO, try)
 import Control.Monad (unless, when)
 import qualified Crypto.Hash as Hash
 import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Crypto.Random as Random
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Bits (xor)
 import qualified Data.ByteString as ByteString
@@ -28,7 +29,7 @@ import System.Process.ListLike (CreateProcess (..), proc)
 import Salmon.Actions.UpDown (CheckResult (..))
 
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall, untrackedExec, withBinary, withBinaryStdin)
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), justInstall, untrackedExec, withBinary, withBinaryStdin, withBinaryStdinAtUp)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Filesystem (File, withFile)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -316,16 +317,21 @@ newtype User = User {userRole :: RoleName}
 {- | A login role with this password. Its check is 'checkUserPassword': a
 role whose password was changed outside salmon is a 'Failure' naming the
 role, not a node that re-applies blindly every pass.
+
+The @ALTER ROLE@ sends a verifier computed here, not the password, so a
+server with @log_statement = ddl|all@ logs that verifier; a password with a
+non-ASCII character is the exception and is sent (and so may be logged) in
+plaintext. See 'psqlAdminStdinSalted'.
 -}
 user :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
 user r server psql port user pwd =
-    withBinaryStdin psql (psqlAdminRun_Sudo port) createUser (psqlAdminStdin createUser) $ \up ->
+    withBinaryStdinAtUp psql (psqlAdminRun_Sudo port) createUser $ \up ->
         op "pg-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-user" user.userRole
                 , help = Text.unwords ["create user", user.userRole]
                 , check = checkUserPassword port user.userRole (pure pwd)
-                , up = up r'
+                , up = psqlAdminStdin createUser >>= \stdin -> up stdin r'
                 }
   where
     r' = contramap (PGCreateUser user) r
@@ -335,7 +341,8 @@ user r server psql port user pwd =
 and @up@ time (never at graph build). Its check is 'checkUserPassword': the
 password the cluster holds is compared with the file, so a rotation (a new
 file) and a drift (a role altered by hand, restored from a backup) both show
-as a 'Failure' before @up@ puts the file's password back.
+as a 'Failure' before @up@ puts the file's password back. As for 'user', the
+@ALTER ROLE@ carries a verifier, not the password, unless it is non-ASCII.
 -}
 userPassFile :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> File "passfile" -> User -> Op
 userPassFile r server psql port genpass user =
@@ -351,7 +358,10 @@ userPassFile r server psql port genpass user =
   where
     r' = contramap (PGSetUserPass user) r
     runningServer = run server localServer
-    up pass = let cmd = CreateUser user.userRole pass in untrackedExec (psqlAdminRun_Sudo port) cmd (psqlAdminStdin cmd) r'
+    up pass = do
+        let cmd = CreateUser user.userRole pass
+        stdin <- psqlAdminStdin cmd
+        untrackedExec (psqlAdminRun_Sudo port) cmd stdin r'
 
 {- | The check of a @pg-user@ node: does the role exist, may it log in, and
 is its password the declared one.
@@ -779,8 +789,17 @@ psqlAdminRun_Sudo port = Command go
     commaList = Text.intercalate ","
 
 {- | What 'psqlAdminRun_Sudo' sends on psql's stdin: the role commands' SQL,
-which holds the password, and nothing for every other command (they keep
-their SQL in @-c@, having no secret in it).
+which holds the password (or a verifier of it), and nothing for every other
+command (they keep their SQL in @-c@, having no secret in it). Draws a fresh
+16-byte SCRAM salt each time, so it runs at @up@ time; 'psqlAdminStdinSalted'
+is the same with the salt given.
+-}
+psqlAdminStdin :: PsqlAdmin -> IO ByteString.ByteString
+psqlAdminStdin cmd = do
+    salt <- Random.getRandomBytes scramSaltBytes
+    pure (psqlAdminStdinSalted salt cmd)
+
+{- | 'psqlAdminStdin' with the SCRAM salt given (pure, for the tests).
 
 A role is created if missing and its password set either way: the password
 is part of what the node declares, so a role that exists with some other one
@@ -791,16 +810,41 @@ rotated password never reaches the cluster and the failure arrives later as
 has no IF NOT EXISTS form, but (unlike CREATE DATABASE) it is fine inside a
 @DO@ block, hence the explicit existence check.
 
-The password is a 'quoteLiteral', so a quote in it cannot end the literal
-(and so cannot put the rest of it in a syntax error's text).
--}
-psqlAdminStdin :: PsqlAdmin -> ByteString.ByteString
-psqlAdminStdin (CreateUser name pass) = Text.encodeUtf8 (roleWithPasswordSql "LOGIN" name pass)
-psqlAdminStdin (CreateReplicationUser name pass) = Text.encodeUtf8 (roleWithPasswordSql "REPLICATION LOGIN" name pass)
-psqlAdminStdin _ = ""
+__The plaintext is not sent__ for a pure-ASCII password: the @ALTER ROLE@
+carries a verifier computed here, as psql's @\\password@ does, so a server
+with @log_statement = ddl@ or @all@ (or an error, or @pg_stat_statements@)
+records a verifier rather than the password. Which verifier follows the
+server's @password_encryption@, read first with @\\gset@: MD5 (salted by the
+role name, see 'md5Verifier') when it says @md5@ (or @on@), SCRAM-SHA-256
+with 4096 iterations and a random salt otherwise (see 'scramVerifier'); a
+verifier is stored as it is whatever that setting says, so this keeps the
+scheme the server would have chosen. 'checkUserPassword' reads either. Note
+that an MD5 verifier, in a log as in @pg_authid@, is enough to log in with
+the @md5@ method: only a SCRAM one is safe to see.
 
-roleWithPasswordSql :: Text -> RoleName -> Password -> Text
-roleWithPasswordSql attrs name pass =
+A password with a non-ASCII character is still sent in plaintext, because
+PostgreSQL normalizes such a password with SASLprep before deriving the
+SCRAM keys and that is not reimplemented here; a server logging DDL logs it.
+
+Needs psql 10 or later (@\\if@). The password or verifier is a
+'quoteLiteral', so a quote in it cannot end the literal (and so cannot put
+the rest of it in a syntax error's text).
+-}
+psqlAdminStdinSalted :: ByteString.ByteString -> PsqlAdmin -> ByteString.ByteString
+psqlAdminStdinSalted salt (CreateUser name pass) = Text.encodeUtf8 (roleWithPasswordSql salt "LOGIN" name pass)
+psqlAdminStdinSalted salt (CreateReplicationUser name pass) = Text.encodeUtf8 (roleWithPasswordSql salt "REPLICATION LOGIN" name pass)
+psqlAdminStdinSalted _ _ = ""
+
+-- | PostgreSQL's own default salt length (@SCRAM_DEFAULT_SALT_LEN@).
+scramSaltBytes :: Int
+scramSaltBytes = 16
+
+-- | PostgreSQL's own default (@scram_iterations@, @SCRAM_SHA_256_DEFAULT_ITERATIONS@).
+scramIterations :: Int
+scramIterations = 4096
+
+roleWithPasswordSql :: ByteString.ByteString -> Text -> RoleName -> Password -> Text
+roleWithPasswordSql salt attrs name pass =
     mconcat
         [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '"
         , name
@@ -808,14 +852,22 @@ roleWithPasswordSql attrs name pass =
         , name
         , " WITH "
         , attrs
-        , "; END IF; END $$;\nALTER ROLE "
-        , name
-        , " WITH "
-        , attrs
-        , " PASSWORD "
-        , quoteLiteral pass.revealPassword
-        , ";\n"
+        , "; END IF; END $$;\n"
+        , setPassword
         ]
+  where
+    alterWith secret = "ALTER ROLE " <> name <> " WITH " <> attrs <> " PASSWORD " <> quoteLiteral secret <> ";\n"
+    setPassword
+        | Text.all isAscii pass.revealPassword =
+            mconcat
+                [ "SELECT current_setting('password_encryption') IN ('md5', 'on') AS salmon_md5 \\gset\n"
+                , "\\if :salmon_md5\n"
+                , alterWith (md5Verifier name pass)
+                , "\\else\n"
+                , alterWith (scramVerifier scramIterations salt pass)
+                , "\\endif\n"
+                ]
+        | otherwise = alterWith pass.revealPassword
 
 -------------------------------------------------------------------------------
 
@@ -858,7 +910,7 @@ userScriptInMemoryPass ::
     Op
 userScriptInMemoryPass r psql mksetup c@(ConnString server user pass db) file =
     withFile file $ \path ->
-        withBinary psql (psqlUserRun c) (UserScript path) $ \up ->
+        withBinaryStdin psql (psqlUserRun c) (UserScript path) (passwordStdin pass) $ \up ->
             op "pg-script" (deps [run mksetup c]) $ \actions ->
                 actions
                     { ref = mkRef "pg-script" path
@@ -886,21 +938,53 @@ userScript r psql mksetup c@(ConnString server user passFile db) file =
                 }
   where
     r' path = contramap (PGScript path) r
-    up path pass = untrackedExec (psqlUserRun $ c `withPassword` pass) (UserScript path) "" (r' path)
+    up path pass = untrackedExec (psqlUserRun c) (UserScript path) (passwordStdin pass) (r' path)
 
 data PsqlUser
     = UserScript FilePath
 
-psqlUserRun :: ConnString Password -> Command "psql" PsqlUser
+{- | Runs a script as the connection's user. __The password is not in argv__
+(which every local user reads in @/proc@ while psql runs, and which
+'Binary.CommandStart' reports), nor in the 'CreateProcess' at all (its
+environment is reported too): a @bash@ reads it from its stdin (see
+'passwordStdin') into @PGPASSWORD@ and @exec@s psql with a connection URL
+that has no password, so it lives only in psql's own environment, which only
+the same user and root can read. Newlines in it are kept (@read -d ''@), as
+they were in the URL this used to build: a password file written by
+@openssl rand -hex@ ends with one, and so does the role's password set from
+it. psql's stdin is @\/dev\/null@.
+-}
+psqlUserRun :: ConnString a -> Command "psql" PsqlUser
 psqlUserRun c = Command go
   where
     go (UserScript path) =
         proc
-            "psql"
-            [ Text.unpack $ connstring c
+            "bash"
+            [ "-c"
+            , "IFS= read -r -d '' PGPASSWORD || true; export PGPASSWORD; exec psql \"$@\" </dev/null"
+            , "psql"
+            , Text.unpack $ connstringWithoutPassword c
             , "-f"
             , path
             ]
+
+-- | What 'psqlUserRun' reads on stdin: the password's bytes, nothing else.
+passwordStdin :: Password -> ByteString.ByteString
+passwordStdin pass = Text.encodeUtf8 pass.revealPassword
+
+-- | 'connstring' without the @:password@, which libpq then takes from @PGPASSWORD@.
+connstringWithoutPassword :: ConnString a -> Text
+connstringWithoutPassword (ConnString server user _ db) =
+    mconcat
+        [ "postgresql://"
+        , user.userRole
+        , "@"
+        , server.serverHost
+        , ":"
+        , Text.pack $ show server.serverPort
+        , "/"
+        , db.getDatabase
+        ]
 
 -------------------------------------------------------------------------------
 -- Cluster lifecycle (named, non-"main" clusters)
@@ -1115,15 +1199,19 @@ data StandbySetup
     }
     deriving (Show)
 
--- | A login role carrying the @REPLICATION@ attribute, for a standby's @pg_basebackup@\/streaming connection.
+{- | A login role carrying the @REPLICATION@ attribute, for a standby's
+@pg_basebackup@\/streaming connection. Its password goes as 'user''s does:
+a verifier (what @log_statement = ddl|all@ may log), except for a non-ASCII
+password, sent in plaintext; see 'psqlAdminStdinSalted'.
+-}
 replicationUser :: Reporter Report -> Track' Server -> Track' (Binary "psql") -> Port -> User -> Password -> Op
 replicationUser r server psql port u pwd =
-    withBinaryStdin psql (psqlAdminRun_Sudo port) createUser (psqlAdminStdin createUser) $ \up ->
+    withBinaryStdinAtUp psql (psqlAdminRun_Sudo port) createUser $ \up ->
         op "pg-replication-user" (deps [run server localServer]) $ \actions ->
             actions
                 { ref = mkRef "pg-replication-user" u.userRole
                 , help = Text.unwords ["create replication user", u.userRole]
-                , up = up r'
+                , up = psqlAdminStdin createUser >>= \stdin -> up stdin r'
                 }
   where
     r' = contramap (PGCreateReplicationUser u) r

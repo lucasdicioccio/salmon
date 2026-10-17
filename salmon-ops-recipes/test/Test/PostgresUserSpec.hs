@@ -18,6 +18,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import System.Exit (ExitCode (..))
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.Process.ListLike (CmdSpec (..), CreateProcess (..))
 import Test.QuickCheck (Gen, chooseInt, counterexample, elements, forAll, listOf, vectorOf, (.&&.), (===), (==>))
@@ -46,6 +47,7 @@ tests =
         , testGroup "properties" properties
         , testGroup "the declaration" declaration
         , testGroup "the password is not in argv" argv
+        , testGroup "pg-script: the password is not in argv" pgScript
         ]
 
 sandboxTests :: TestTree
@@ -264,13 +266,45 @@ argv =
             let argvs = fmap argvOf (roleCommands p)
              in counterexample (show argvs) $
                     not (any (any ("SECRET~" `isInfixOfS`)) argvs)
-    , testProperty "their stdin holds the password, as one quoted literal" $
-        forAll genMarkedPassword $ \p ->
-            let quoted = "'" <> Text.replace "'" "''" p <> "'"
-             in and
-                    [ (" PASSWORD " <> quoted <> ";\n") `Text.isInfixOf` Text.decodeUtf8 (Postgres.psqlAdminStdin c)
-                    | c <- roleCommands p
-                    ]
+    , testProperty "their stdin holds verifiers of an ASCII password, never the password" $
+        forAll genMarkedPassword $ \p -> forAll genSalt $ \salt ->
+            and
+                [ not (p `Text.isInfixOf` sql)
+                    && (" PASSWORD " <> quoted (Postgres.scramVerifier 4096 salt (pw p)) <> ";\n") `Text.isInfixOf` sql
+                    && (" PASSWORD " <> quoted (Postgres.md5Verifier role (pw p)) <> ";\n") `Text.isInfixOf` sql
+                | (role, c) <- zip ["app", "repl"] (roleCommands p)
+                , let sql = Text.decodeUtf8 (Postgres.psqlAdminStdinSalted salt c)
+                ]
+    , testProperty "the verifiers it sends are ones the check accepts" $
+        forAll genRole $ \role -> forAll genAsciiPassword $ \p -> forAll genSalt $ \salt ->
+            (verdict role p ("t|" <> Postgres.scramVerifier 4096 salt (pw p)) === Success)
+                .&&. (verdict role p ("t|" <> Postgres.md5Verifier role (pw p)) === Success)
+    , testCase "the scheme follows password_encryption, read with \\gset" $ do
+        let sql = Text.decodeUtf8 (Postgres.psqlAdminStdinSalted "0123456789abcdef" (Postgres.CreateUser "app" (pw "pencil")))
+        assertEqual
+            "script"
+            ( Text.unlines
+                [ "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app') THEN CREATE ROLE app WITH LOGIN; END IF; END $$;"
+                , "SELECT current_setting('password_encryption') IN ('md5', 'on') AS salmon_md5 \\gset"
+                , "\\if :salmon_md5"
+                , "ALTER ROLE app WITH LOGIN PASSWORD " <> quoted (Postgres.md5Verifier "app" (pw "pencil")) <> ";"
+                , "\\else"
+                , "ALTER ROLE app WITH LOGIN PASSWORD " <> quoted (Postgres.scramVerifier 4096 "0123456789abcdef" (pw "pencil")) <> ";"
+                , "\\endif"
+                ]
+            )
+            sql
+    , testCase "each up draws a fresh 16-byte salt" $ do
+        let c = Postgres.CreateUser "app" (pw "pencil")
+            saltOf dat =
+                [ Text.takeWhile (/= '$') rest
+                | l <- Text.lines (Text.decodeUtf8 dat)
+                , Just rest <- [Text.stripPrefix "ALTER ROLE app WITH LOGIN PASSWORD 'SCRAM-SHA-256$4096:" l]
+                ]
+        a <- Postgres.psqlAdminStdin c
+        b <- Postgres.psqlAdminStdin c
+        assertBool "two runs, two salts" (saltOf a /= saltOf b)
+        assertEqual "a 16-byte salt is 24 base64 characters" [24] (fmap Text.length (saltOf a))
     , testCase "psql reads the script on stdin: no psqlrc, terse errors, stops on the first one" $
         mapM_
             ( assertEqual
@@ -279,19 +313,21 @@ argv =
                 . argvOf
             )
             (roleCommands "pencil")
-    , testCase "a quote in the password cannot end the literal" $
-        assertBool "" ("PASSWORD 'it''s';" `Text.isInfixOf` Text.decodeUtf8 (Postgres.psqlAdminStdin (Postgres.CreateUser "app" (pw "it's"))))
+    , testCase "a password above ASCII is still sent as it is, one quoted literal" $ do
+        let sql = Text.decodeUtf8 (Postgres.psqlAdminStdinSalted "salt" (Postgres.CreateUser "app" (pw "it's \233t\233")))
+        assertBool (Text.unpack sql) ("ALTER ROLE app WITH LOGIN PASSWORD 'it''s \233t\233';\n" `Text.isSuffixOf` sql)
+        assertBool "no \\if" (not ("\\if" `Text.isInfixOf` sql))
     , testCase "the role attributes are what they were" $ do
-        let sqlOf = Text.decodeUtf8 . Postgres.psqlAdminStdin
+        let sqlOf = Text.decodeUtf8 . Postgres.psqlAdminStdinSalted "salt"
             u = Postgres.CreateUser "app" (pw "pencil")
             repl = Postgres.CreateReplicationUser "repl" (pw "pencil")
-        assertBool "user" ("ALTER ROLE app WITH LOGIN PASSWORD 'pencil';" `Text.isInfixOf` sqlOf u)
+        assertBool "user" ("ALTER ROLE app WITH LOGIN PASSWORD 'SCRAM-SHA-256$" `Text.isInfixOf` sqlOf u)
         assertBool "user, created" ("THEN CREATE ROLE app WITH LOGIN; END IF" `Text.isInfixOf` sqlOf u)
-        assertBool "repl" ("ALTER ROLE repl WITH REPLICATION LOGIN PASSWORD 'pencil';" `Text.isInfixOf` sqlOf repl)
+        assertBool "repl" ("ALTER ROLE repl WITH REPLICATION LOGIN PASSWORD 'md5" `Text.isInfixOf` sqlOf repl)
         assertBool "repl, created" ("THEN CREATE ROLE repl WITH REPLICATION LOGIN; END IF" `Text.isInfixOf` sqlOf repl)
     , testCase "no other command sends anything on stdin" $
-        assertEqual "" "" (Postgres.psqlAdminStdin Postgres.ReloadConf)
-    , testCase "run for real: argv, every report and the failure text are free of the password" $
+        Postgres.psqlAdminStdin Postgres.ReloadConf >>= assertEqual "" ""
+    , testCase "run for real: argv, stdin, every report and the failure text are free of the password" $
         withTempDir $ \tmp -> do
             let secret = "SECRET~run-for-real" :: Text
                 ok = tmp </> "ok"
@@ -307,17 +343,19 @@ argv =
             mapM_
                 ( \c -> do
                     (r, readBack) <- capture
-                    untrackedExec (recordingCommand ok) c (Postgres.psqlAdminStdin c) r
+                    dat <- Postgres.psqlAdminStdin c
+                    untrackedExec (recordingCommand ok) c dat r
                     recorded <- readFile (tmp </> "argv")
                     stdin <- ByteString.readFile (tmp </> "stdin")
                     reports <- readBack
                     assertBool recorded ("-f\n-\n" `isInfixOfS` recorded)
                     assertBool "argv as executed" (not (Text.unpack secret `isInfixOfS` recorded))
-                    assertBool "the password went on stdin" (secret `Text.isInfixOf` Text.decodeUtf8 stdin)
+                    assertBool "a verifier went on stdin" ("PASSWORD 'SCRAM-SHA-256$4096:" `Text.isInfixOf` Text.decodeUtf8 stdin)
+                    assertBool "the password did not" (not (secret `Text.isInfixOf` Text.decodeUtf8 stdin))
                     assertBool "reports" (not (any ((Text.unpack secret `isInfixOfS`) . show) reports))
 
                     (r', readBack') <- capture
-                    failed <- try (untrackedExec (recordingCommand failing) c (Postgres.psqlAdminStdin c) r') :: IO (Either CommandFailed ())
+                    failed <- try (untrackedExec (recordingCommand failing) c dat r') :: IO (Either CommandFailed ())
                     reports' <- readBack'
                     case failed of
                         Right () -> assertBool "a failing psql fails up" False
@@ -325,6 +363,91 @@ argv =
                     assertBool "reports of the failure" (not (any ((Text.unpack secret `isInfixOfS`) . show) reports'))
                 )
                 (roleCommands secret)
+    ]
+
+quoted :: Text -> Text
+quoted t = "'" <> Text.replace "'" "''" t <> "'"
+
+-------------------------------------------------------------------------------
+
+scriptConn :: Text -> Postgres.ConnString Postgres.Password
+scriptConn p = Postgres.ConnString (Postgres.Server "localhost" 5432) (Postgres.User "app") (pw p) (Postgres.Database "appdb")
+
+scriptArgv :: Postgres.ConnString a -> [String]
+scriptArgv c = case cmdspec (prepare (Postgres.psqlUserRun c) (Postgres.UserScript "/srv/migrations/001.sql")) of
+    RawCommand exe args -> exe : args
+    ShellCommand line -> [line]
+
+{- | @pg-script@ ('Postgres.userScript', 'Postgres.userScriptInMemoryPass')
+used to give psql a @postgresql://user:password\@…@ URL in argv. The password
+now goes on a bash's stdin, which puts it in @PGPASSWORD@ and @exec@s psql: it
+is in no argv, no 'CreateProcess' (whose environment is reported too) and no
+failure text.
+-}
+pgScript :: [TestTree]
+pgScript =
+    [ testProperty "argv never holds the password" $
+        forAll genMarkedPassword $ \p ->
+            let a = scriptArgv (scriptConn p)
+             in counterexample (show a) (not (any ("SECRET~" `isInfixOfS`) a))
+    , testCase "argv: a bash reading the password, then psql with a URL without one" $ do
+        assertEqual
+            "argv"
+            [ "bash"
+            , "-c"
+            , "IFS= read -r -d '' PGPASSWORD || true; export PGPASSWORD; exec psql \"$@\" </dev/null"
+            , "psql"
+            , "postgresql://app@localhost:5432/appdb"
+            , "-f"
+            , "/srv/migrations/001.sql"
+            ]
+            (scriptArgv (scriptConn "pencil"))
+        assertBool "no environment of its own" (null (env (prepare (Postgres.psqlUserRun (scriptConn "pencil")) (Postgres.UserScript "/x.sql"))))
+    , testCase "stdin is the password's bytes, nothing else" $
+        assertEqual "" (Text.encodeUtf8 "pencil\n") (Postgres.passwordStdin (pw "pencil\n"))
+    , testCase "same ref and help, no notes" $ do
+        let o = Postgres.userScriptInMemoryPass silent ignoreTrack ignoreTrack (scriptConn "SECRET~") (PreExisting "/srv/migrations/001.sql")
+            -- keyed by the script's path, a FilePath
+            act =
+                maybe (error "no pg-script node") id $
+                    Map.lookup (mkRef "pg-script" ("/srv/migrations/001.sql" :: FilePath)) (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o)))
+        assertEqual "help" "runs pg script /srv/migrations/001.sql" act.extension.help
+        assertEqual "notes" [] act.extension.notes
+    , testCase "run for real: psql gets the password in PGPASSWORD only, newlines kept; reports and failure text are free of it" $
+        withTempDir $ \tmp -> do
+            let secret = "SECRET~it's a \\ back:slash\n" :: Text
+                c = scriptConn secret
+                bin = tmp </> "bin"
+                withPath p = Command $ \u -> (prepare (Postgres.psqlUserRun c) u){env = Just [("PATH", p <> ":/usr/bin:/bin")]}
+            createDirectoryIfMissing True (bin </> "ok")
+            createDirectoryIfMissing True (bin </> "failing")
+            writeExecutable (bin </> "ok" </> "psql") $
+                unlines
+                    [ "#!/bin/bash"
+                    , "printf '%s\\n' \"$@\" > " <> show (tmp </> "argv")
+                    , "printf '%s' \"$PGPASSWORD\" > " <> show (tmp </> "pgpassword")
+                    , "cat > " <> show (tmp </> "stdin")
+                    ]
+            writeExecutable (bin </> "failing" </> "psql") $
+                unlines ["#!/bin/bash", "echo 'psql:/srv/migrations/001.sql:2: ERROR:  boom' >&2", "exit 3"]
+            (r, readBack) <- capture
+            untrackedExec (withPath (bin </> "ok")) (Postgres.UserScript "/srv/migrations/001.sql") (Postgres.passwordStdin (pw secret)) r
+            recorded <- readFile (tmp </> "argv")
+            passed <- ByteString.readFile (tmp </> "pgpassword")
+            stdin <- ByteString.readFile (tmp </> "stdin")
+            reports <- readBack
+            assertEqual "argv as executed" "postgresql://app@localhost:5432/appdb\n-f\n/srv/migrations/001.sql\n" recorded
+            assertEqual "PGPASSWORD is the password, byte for byte" (Text.encodeUtf8 secret) passed
+            assertEqual "psql's stdin is empty" "" stdin
+            assertBool "reports" (not (any (("SECRET~" `isInfixOfS`) . show) reports))
+
+            (r', readBack') <- capture
+            failed <- try (untrackedExec (withPath (bin </> "failing")) (Postgres.UserScript "/srv/migrations/001.sql") (Postgres.passwordStdin (pw secret)) r') :: IO (Either CommandFailed ())
+            reports' <- readBack'
+            case failed of
+                Right () -> assertBool "a failing psql fails up" False
+                Left e -> assertBool (show e) (not ("SECRET~" `isInfixOfS` show e))
+            assertBool "reports of the failure" (not (any (("SECRET~" `isInfixOfS`) . show) reports'))
     ]
 
 -------------------------------------------------------------------------------
@@ -406,3 +529,54 @@ stdinLifecycle = requireExecutable "podman" $
                 assertEqual err ExitSuccess code
                 assertEqual "attributes" "t|t" (filter (/= '\n') out)
                 Postgres.checkUserPassword 5432 "repl" (pure (pw "repl-password")) >>= assertEqual "its password" Success
+
+                -- the verifier salmon computed is one the server logs a client in with
+                (code', out', err') <- podmanExecCapture cid ["env", "PGPASSWORD=repl-password", "psql", "-X", "-tA", "-h", "127.0.0.1", "-U", "repl", "-d", "postgres", "-c", "SELECT 1"]
+                assertEqual (out' <> err') ExitSuccess code'
+
+                -- with every statement logged, the log holds a verifier, not the password
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "ALTER SYSTEM SET log_statement = 'all'"]
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "SELECT pg_reload_conf()"]
+                let logged = Postgres.replicationUser silent ignoreTrack ignoreTrack 5432 (Postgres.User "logged") (pw "never-in-the-log")
+                runUp logged >>= assertBool "up with log_statement = all"
+                Postgres.checkUserPassword 5432 "logged" (pure (pw "never-in-the-log")) >>= assertEqual "its password" Success
+                (_, logs, _) <- podmanExecCapture cid ["bash", "-c", "cat /var/log/postgresql/*.log"]
+                assertBool "the ALTER ROLE was logged" ("ALTER ROLE logged WITH REPLICATION LOGIN PASSWORD 'SCRAM-SHA-256$4096:" `isInfixOfS` logs)
+                assertBool "the password was not" (not ("never-in-the-log" `isInfixOfS` logs))
+
+                -- password_encryption = md5: an MD5 verifier is sent, and the check reads it
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "ALTER SYSTEM SET password_encryption = 'md5'"]
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "SELECT pg_reload_conf()"]
+                let md5 = Postgres.replicationUser silent ignoreTrack ignoreTrack 5432 (Postgres.User "md5role") (pw "md5-password")
+                runUp md5 >>= assertBool "up under md5"
+                (code'', out'', err'') <- podmanExecCapture cid ["sudo", "-u", "postgres", "psql", "-tAX", "-c", "SELECT rolpassword FROM pg_authid WHERE rolname = 'md5role'"]
+                assertEqual err'' ExitSuccess code''
+                assertEqual "an MD5 verifier" (Text.unpack (Postgres.md5Verifier "md5role" (pw "md5-password"))) (filter (/= '\n') out'')
+                Postgres.checkUserPassword 5432 "md5role" (pure (pw "md5-password")) >>= assertEqual "its password" Success
+
+                -- a role whose password file ends with a newline, as openssl rand -hex writes it
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "ALTER SYSTEM RESET password_encryption"]
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "SELECT pg_reload_conf()"]
+                let scriptedPass = tmp </> "scripted.pass"
+                writeFile scriptedPass "scripted-password\n"
+                runUp (Postgres.userPassFile silent ignoreTrack ignoreTrack 5432 (PreExisting scriptedPass) (Postgres.User "scripted"))
+                    >>= assertBool "up creates the scripted role"
+
+            -- pg-script: the host's psql (bash, PGPASSWORD) against the container's published port
+            requireExecutable "psql" $ do
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "ALTER SYSTEM SET listen_addresses = '*'"]
+                podmanExec_ cid ["bash", "-c", "echo 'host all all 0.0.0.0/0 md5' >> \"$(sudo -u postgres psql -tAX -c 'SHOW hba_file')\""]
+                podmanExec_ cid ["bash", "-c", "v=$(pg_lsclusters --no-header | awk '{print $1}' | sort -n | tail -n1); pg_ctlcluster \"$v\" main restart"]
+                podmanExec_ cid ["sudo", "-u", "postgres", "psql", "-X", "-c", "GRANT CREATE ON SCHEMA public TO scripted"]
+                let script = tmp </> "001.sql"
+                    conn = Postgres.ConnString (Postgres.Server "127.0.0.1" 15443) (Postgres.User "scripted") (tmp </> "scripted.pass") (Postgres.Database "postgres")
+                writeFile script "CREATE TABLE scripted_was_here (x int);\n"
+                runUp (Postgres.userScript silent ignoreTrack ignoreTrack conn (PreExisting script)) >>= assertBool "pg-script logs in with the file's password, newline and all"
+                (code, out, err) <- podmanExecCapture cid ["sudo", "-u", "postgres", "psql", "-tAX", "-c", "SELECT count(*) FROM pg_tables WHERE tablename = 'scripted_was_here'"]
+                assertEqual err ExitSuccess code
+                assertEqual "the script ran" "1" (filter (/= '\n') out)
+                writeFile (tmp </> "wrong.pass") "not-the-password\n"
+                runUp (Postgres.userScript silent ignoreTrack ignoreTrack conn{Postgres.connstring_user_pass = tmp </> "wrong.pass"} (PreExisting script))
+                    >>= assertBool "a wrong password fails up" . not
+                (_, logs, _) <- podmanExecCapture cid ["bash", "-c", "cat /var/log/postgresql/*.log"]
+                assertBool "no password in the log" (not ("scripted-password" `isInfixOfS` logs))
