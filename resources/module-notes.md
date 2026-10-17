@@ -1553,6 +1553,22 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   test in `safeHref` fails two tests. **Not run**: any of these cards in a browser (node-only),
   against real GCP or Postgres. Left for later PRs: SSH, key/certificate builtins
   (keygen, TLS, JWK, WireGuard keys), Patroni/pgBackRest/HAProxy, Postgres templates/clones.
+  **Docs pages per builtin** (feature 42358f5a): a `Card` has `cardDocs :: Maybe Text` (a page
+  slug), and `renderCard` draws `allLinks` = `cardLinks` then `docsLink slug` (label `docs`,
+  `docsBaseUrl <> "/builtin-<slug>.html"`, `docsBaseUrl` a constant: the GitHub Pages site,
+  `https://lucasdicioccio.github.io/salmon`). Every existing card names a page. The pages are
+  **hand-written** markdown, `resources/builtins/<slug>.md` (README = the index), mirrored by
+  `sync-repo-docs.sh` to `builtin-<slug>.html` in the "Builtin nodes" sidebar group, so
+  `salmon-docs-sync` already counts them as inputs. The link is in the template only (out of
+  the representative): nothing restarts, and nodes without a card are unchanged. Tests:
+  `BuiltinCardsSpec` (every card names a lowercase-dash slug, the docs link is its last link
+  and is drawn, `resources/builtins/<slug>.md` exists; one URL by hand), `builtin-cards.test.mjs`
+  (now fed `allLinks`, so the docs `a` is checked like a console one). **Run**: those specs,
+  `sync-repo-docs.sh` and a `kitchen-sink produce` into a scratch directory (22 pages, the
+  index's links resolve under `/salmon/`). **Not run**: a card's docs link in a browser, and
+  `docs/` was **not** regenerated, so the published links 404 until the owner runs
+  `build-site.sh`/`salmon-docs-sync`. A pages-only drift (a card sentence changed, its page
+  not) is not tested. Open for the owner: overriding the base (for a fork) from `serve`.
   **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
   opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
   in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and

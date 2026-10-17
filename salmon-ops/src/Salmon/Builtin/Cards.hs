@@ -16,6 +16,10 @@ the ones the builtin already makes public in its @ref@ and @help@ (a path, a
 unit name, a port, a database name), and the rest is read from the node's
 own public @\/dag@ fields at drawing time. A card never takes, and so never
 shows, a file's contents, a password or any digest of either.
+
+Every card links to its builtin's page on the salmon docs site ('cardDocs',
+'docsLink'; the pages are @resources\/builtins\/<slug>.md@). The link is in the
+template only, so like the rest of the card it restarts nothing.
 -}
 module Salmon.Builtin.Cards (
     -- * Attaching
@@ -36,6 +40,11 @@ module Salmon.Builtin.Cards (
     Verdicts (..),
     Link (..),
     renderCard,
+    allLinks,
+
+    -- * The builtin's page on the docs site
+    docsBaseUrl,
+    docsLink,
     tramajString,
     percentEncode,
 ) where
@@ -72,6 +81,9 @@ data Card = Card
     , cardLinks :: [Link]
     -- ^ external links (a cloud console page, say), drawn under the facts;
     -- none draws nothing
+    , cardDocs :: Maybe Text
+    -- ^ the builtin's page on the salmon docs site, by slug ('docsLink'),
+    -- drawn after 'cardLinks'; 'Nothing' draws nothing
     }
     deriving (Eq, Show)
 
@@ -151,11 +163,32 @@ renderCard c =
     v = c.cardVerdicts
     fact (k, x) = ".tr(.th(" <> s k <> "), .td(.code(" <> s x <> ")))"
     -- nothing at all without links, so a card without any renders as before
-    links = case c.cardLinks of
+    links = case allLinks c of
         [] -> []
         ls -> ["  .p(class: \"card-links\", " <> Text.intercalate ", \" · \", " (fmap link ls) <> "),"]
     link :: Link -> Text
     link l = ".a(href: " <> s l.linkUrl <> ", " <> s l.linkLabel <> ")"
+
+-- | What a card links to, in drawing order: its 'cardLinks', then its docs page.
+allLinks :: Card -> [Link]
+allLinks c = c.cardLinks <> maybe [] (\slug -> [docsLink slug]) c.cardDocs
+
+{- | Where the salmon documentation site is published (GitHub Pages, from
+@docs\/@ on @master@; @website\/README.md@). A constant, not a setting:
+a card's template is fixed when the graph is built, and it is not part of the
+representative, so changing this restarts nothing.
+-}
+docsBaseUrl :: Text
+docsBaseUrl = "https://lucasdicioccio.github.io/salmon"
+
+{- | The link to a builtin's page on the docs site: @builtin-<slug>.html@,
+generated from @resources\/builtins\/<slug>.md@ by
+@website\/scripts\/sync-repo-docs.sh@. The slug is author-chosen and
+fixed per builtin (never a declaration's value), so the URL needs no
+encoding beyond what the slug already is.
+-}
+docsLink :: Text -> Link
+docsLink slug = Link "docs" (docsBaseUrl <> "/builtin-" <> slug <> ".html")
 
 {- | Percent-encodes everything but RFC 3986's unreserved characters, as
 UTF-8: for a name put in a URL's path segment or query value.
@@ -190,6 +223,7 @@ fileContentsCard path =
             , cardUp = "writes the whole file (no merge with what is there)"
             , cardDown = "removes the file (already absent is fine); the directory stays"
             , cardLinks = []
+            , cardDocs = Just "filesystem-file-contents"
             }
 
 -- | For 'Salmon.Builtin.Nodes.Filesystem.dir' at this path.
@@ -212,6 +246,7 @@ directoryCard path =
             , cardUp = "creates the directory and its parents; never touches what is inside"
             , cardDown = "removes the directory only when it is empty (a non-empty one fails, on purpose)"
             , cardLinks = []
+            , cardDocs = Just "filesystem-directory"
             }
 
 {- | For 'Salmon.Builtin.Nodes.Systemd.systemdService' (and its watching
@@ -241,6 +276,7 @@ systemdServiceCard cfg =
             , cardUp = "systemctl daemon-reload, enable, then restart"
             , cardDown = "systemctl stop; the unit file is its own node"
             , cardLinks = []
+            , cardDocs = Just "systemd-service"
             }
   where
     scope Systemd.System = "system"
@@ -268,4 +304,5 @@ pgDatabaseCard port db =
             , cardUp = "CREATE DATABASE as the postgres user, on the local server at this port, unless pg_database already has it"
             , cardDown = "nothing: a database is never dropped by this node"
             , cardLinks = []
+            , cardDocs = Just "postgres-database"
             }

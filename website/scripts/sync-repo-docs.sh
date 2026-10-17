@@ -2,6 +2,7 @@
 # Regenerates the mirrored pages of website/src from the repository:
 #
 #   resources/<name>.md -> website/src/docs-<name>.cmark
+#   resources/builtins/<slug>.md -> website/src/builtin-<slug>.cmark (README.md -> builtin-index.cmark)
 #   specs/<name>.md     -> website/src/specs-<name>.cmark
 #   README.md's tables  -> website/src/builtins.cmark   (Builtin nodes / Recipes / Binaries)
 #   the specs' Status:  -> website/src/specs.cmark      (one line per spec)
@@ -47,6 +48,21 @@ for src in resources/*.md; do
   $MIRROR --kind docs --source "$src" --title "$(title_of "$src")" --topic docs \
     --keywords "guide, documentation" --group "Guides" --order "$(guide_order "$name")" --summary "$(summary_of "$src")" \
     --github "$GITHUB/$src" --date "$DATE" > "$OUT/docs-$name.cmark"
+done
+
+# resources/builtins/: one page per builtin node, each linked from its web UI
+# card (Salmon.Builtin.Cards.docsLink). The README is the group's index.
+rm -f "$OUT"/builtin-*.cmark
+for src in resources/builtins/*.md; do
+  name="$(basename "$src" .md)"
+  if [ "$name" = README ]; then
+    page=index order=300
+  else
+    page="$name" order=310
+  fi
+  $MIRROR --kind docs --source "$src" --title "$(title_of "$src")" --topic reference \
+    --keywords "builtins, nodes" --group "Builtin nodes" --order "$order" --summary "$(summary_of "$src")" \
+    --github "$GITHUB/$src" --date "$DATE" > "$OUT/builtin-$page.cmark"
 done
 
 # specs/: the design sketches, each headed by a Status: line
@@ -129,4 +145,4 @@ EOF
 EOF
 } > "$OUT/specs.cmark"
 
-echo "synced $(ls $OUT/docs-*.cmark | wc -l) docs, $(ls $OUT/specs-*.cmark | wc -l) specs, builtins.cmark, specs.cmark"
+echo "synced $(ls $OUT/docs-*.cmark | wc -l) docs, $(ls $OUT/builtin-*.cmark | wc -l) builtin pages, $(ls $OUT/specs-*.cmark | wc -l) specs, builtins.cmark, specs.cmark"
