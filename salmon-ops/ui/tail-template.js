@@ -139,12 +139,18 @@ function specAt(tramaj, v, depth, budget, allow) {
       if (!allow.tags.has(v.tag)) throw new TemplateError(`tag "${v.tag}" is not drawn in ${allow.where} (allowed: ${[...allow.tags].join(" ")})`);
       let cls = null;
       let title = null;
+      let href = null;
       for (const a of Array.isArray(v.attributes) ? v.attributes : []) {
-        if (a.kind !== "attribute" || !allow.attrs.has(a.name) || typeof a.value !== "string") continue;
+        if (a.kind !== "attribute" || typeof a.value !== "string") continue;
+        // `href` only on an `a`, and only where the allowlist vets it (a card)
+        if (a.name === "href" && v.tag === "a" && allow.href) href = allow.href(a.value);
+        if (!allow.attrs.has(a.name)) continue;
         if (a.name === "class") cls = a.value;
         else title = a.value;
       }
-      return { tag: v.tag, cls, title, children: childrenOf(tramaj, v, depth, budget, allow) };
+      const spec = { tag: v.tag, cls, title, children: childrenOf(tramaj, v, depth, budget, allow) };
+      // only an `a` has the key, so every other spec is as it was
+      return v.tag === "a" ? { ...spec, href } : spec;
     }
     default:
       return scalarText(tramaj, v);

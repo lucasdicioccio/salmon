@@ -41,9 +41,15 @@
 //   template can opt out per state); a string or other scalar is text; a
 //   document is drawn as elements.
 // - Only the tags in CARD_TAGS are drawn (the tail's phrasing tags plus a
-//   few block ones), and of attributes only `class` and `title`. A tag
-//   outside the list is an error; another attribute, and every action, is
-//   ignored. Nothing is ever parsed as HTML. At most TEMPLATE_MAX_NODES
+//   few block ones, and `a`), and of attributes only `class` and `title`,
+//   plus `href` on an `a`. A tag outside the list is an error; another
+//   attribute, and every action, is ignored. Nothing is ever parsed as HTML.
+// - An `a` is a link out of the page (a cloud console page, say). Its `href`
+//   is kept only when it is an absolute `https:` URL with no user name or
+//   password in it (`safeHref`); anything else (`javascript:`, `data:`, a
+//   relative path, plain `http:`) leaves the `a` without an href, drawn as
+//   its text. `ui.js` opens a kept link in a new tab, with
+//   `rel="noopener noreferrer"` and no referrer. At most TEMPLATE_MAX_NODES
 //   nodes and TEMPLATE_MAX_DEPTH deep, as in a tail.
 // - A template that does not parse, or a card whose evaluation fails, is
 //   drawn as the default card with the error above it.
@@ -76,9 +82,24 @@ export const CARD_TAGS = new Set([
   "hr",
   "details",
   "summary",
+  "a",
 ]);
 
-export const CARD_ALLOW = { tags: CARD_TAGS, attrs: TEMPLATE_ATTRS, where: "a card" };
+// An `a`'s href as drawn, or null: only an absolute https URL without
+// credentials, normalized by the URL parser.
+export function safeHref(v) {
+  if (typeof v !== "string") return null;
+  let u;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.username !== "" || u.password !== "" || u.hostname === "") return null;
+  return u.href;
+}
+
+export const CARD_ALLOW = { tags: CARD_TAGS, attrs: TEMPLATE_ATTRS, href: safeHref, where: "a card" };
 
 const strings = (v) => (Array.isArray(v) ? v.map((x) => String(x)) : []);
 const orNull = (v) => (v === undefined ? null : v);

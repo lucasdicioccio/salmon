@@ -143,10 +143,46 @@ test("null asks for the default card; a scalar is text", () => {
 });
 
 test("what is not drawn in a card is an error, never markup", () => {
-  for (const tag of ["script", "a", "img", "iframe", "style", "form", "input", "object"]) {
+  for (const tag of ["script", "img", "iframe", "style", "form", "input", "object"]) {
     assert.match(run(`.${tag}("x")`, node).error, /is not drawn in a card/, tag);
   }
   assert.match(run("$ctx.nope", node).error, /PathNotFound/);
+});
+
+test("a card's link keeps only an https href without credentials", () => {
+  const link = (href) => run(`.a(href: ${JSON.stringify(href)}, class: "c", "label")`, node).spec;
+  assert.deepEqual(link("https://console.cloud.google.com/storage/browser/b?project=p"), {
+    tag: "a",
+    cls: "c",
+    title: null,
+    href: "https://console.cloud.google.com/storage/browser/b?project=p",
+    children: ["label"],
+  });
+  for (const bad of ["javascript:alert(1)", "JAVASCRIPT:alert(1)", " javascript:alert(1)", "data:text/html,<b>x</b>", "http://example.org/", "//example.org/x", "/dag", "x", "https://user:pw@example.org/", "https://user@example.org/", "vbscript:x", "file:///etc/passwd", ""]) {
+    const s = link(bad);
+    assert.equal(s.href, null, bad);
+    assert.equal(tt.specText(s), "label", bad);
+  }
+  // an href on any other tag is ignored, and only an `a` carries the key
+  assert.equal("href" in run('.span(href: "https://example.org/", "x")', node).spec, false);
+  assert.equal(run('.a("no href")', node).spec.href, null);
+  // a tail still draws no `a`
+  const ctx = tt.tailContext({ line: "x", text: "x" }, undefined);
+  assert.match(tt.foldLine(tramaj, tramaj.parseProgram('.a(href: "https://example.org/", "x")'), ctx).error, /is not drawn in a tail/);
+});
+
+test("property: safeHref keeps only https URLs, and keeps them as parsed", () => {
+  const SCHEMES = ["https://", "http://", "javascript:", "data:", "", "//", "HTTPS://", "ftp://"];
+  for (let i = 0; i < CASES * 2; i++) {
+    const v = pick(SCHEMES) + pick(["", "u:p@", "u@"]) + randomText(12);
+    const h = ct.safeHref(v);
+    if (h !== null) {
+      const u = new URL(h);
+      assert.equal(u.protocol, "https:", v);
+      assert.equal(u.username + u.password, "", v);
+      assert.equal(ct.safeHref(h), h, "idempotent");
+    }
+  }
 });
 
 test("the tail's allowlist is unchanged by the card's", () => {
@@ -182,7 +218,7 @@ test("property: the help template shows the help unchanged, the notes in order",
 });
 
 // random normative Node JSON, allowed in a card and not
-const TAGS = [...ct.CARD_TAGS, "script", "a", "img", "iframe"];
+const TAGS = [...ct.CARD_TAGS, "script", "img", "iframe", "object"];
 function randomDoc(depth) {
   const r = int(depth > 3 ? 2 : 4);
   if (r === 0) return { type: "text", value: pick([randomText(8), 3, true, null]), annotations: {} };
