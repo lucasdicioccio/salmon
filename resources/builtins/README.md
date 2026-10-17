@@ -43,3 +43,28 @@ representative, so adding one restarts nothing.
 - [Secret Manager secret](gcp-secret.md)
 - [Secret delivered to a file](gcp-secret-file.md)
 - [Application load balancer](gcp-application-load-balancer.md)
+
+## SSH, keys and certificates
+
+- [SSH key pair](ssh-key.md)
+- [SSH certificate from a CA](ssh-ca-sign.md)
+- [SSH reachable](gcp-ssh-available.md)
+- [SSH CA key in project metadata](gcp-metadata-ssh-ca.md)
+- [TLS private key](tls-key.md)
+- [Certificate signing request](tls-signing-request.md)
+- [Self-signed certificate](tls-self-signed.md)
+- [Certificate authority](tls-certificate-authority.md)
+- [Certificate signed by a CA](tls-ca-signed.md)
+- [JWK key](jwk-key.md)
+- [WireGuard private key](wireguard-private-key.md)
+- [WireGuard public key](wireguard-public-key.md)
+
+## Patroni, pgBackRest and HAProxy
+
+- [Patroni member](patroni-member.md)
+- [Patroni preferred leader](patroni-preferred-leader.md)
+- [pgBackRest configuration](pgbackrest-configuration.md)
+- [pgBackRest stanza](pgbackrest-stanza.md)
+- [pgBackRest first backup](pgbackrest-first-backup.md)
+- [pgBackRest restore](pgbackrest-restore.md)
+- [HAProxy router](haproxy-service.md)

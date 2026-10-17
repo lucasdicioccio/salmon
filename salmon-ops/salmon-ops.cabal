@@ -57,6 +57,8 @@ library
                    , Salmon.Builtin.Extension
                    , Salmon.Builtin.Cards
                    , Salmon.Builtin.Cards.Gcp
+                   , Salmon.Builtin.Cards.Keys
+                   , Salmon.Builtin.Cards.Patroni
                    , Salmon.Builtin.Cards.Postgres
                    , Salmon.Builtin.Guarded
                    , Salmon.Builtin.CommandLine
