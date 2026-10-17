@@ -1474,6 +1474,29 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   a fresh page selecting it fetched no template module. **Not run**: a failing template in a
   browser, the tui/Rust clients against a `template`. Open for the owner: named template
   libraries vs inline sources, templating the graph box itself, and a CSP.
+  **Builtin cards** (feature 91138a85, `Salmon.Builtin.Cards`, **opt-in**): card templates for
+  four builtins, `fileContents path`, `directory path`, `systemdService cfg`, `pgDatabase port
+  db` (each also as a `…Card` value), attached per node with `withCard src op` (=
+  `amendNode . withCardTemplate`, root only). No builtin attaches its card itself, so no
+  existing `/dag` changes; making them default is an owner decision (a one-line change per
+  builtin plus `/dag` goldens). One skeleton (`renderCard`): help, identity facts (a table),
+  the last check in the node's words (sentences per verdict, `Verdicts`), its reason, a
+  conflict warning, what `up`/`down` do, then notes/dynamics/output folded. The baked-in
+  values are only what `ref`/`help` already publish (paths, unit, scope, unit dir, database,
+  port), quoted by `tramajString` (escapes `"` `\` `` ` `` and every control character); a file's
+  contents, a password or a digest of either are never taken. The page's `check` comes from
+  `/dag` only (live events do not update it), so a page loaded before the first check says
+  "no check result on this page yet" until reloaded (seen in Chrome).
+  Tests: `Test/BuiltinCardsSpec.hs` (a card leaves the builtin's representative, ref, help,
+  notes and dependencies unchanged; renders each card and 300 random strings to JSON for
+  `ui-test/builtin-cards.test.mjs`, which draws every card per verdict and conflict, checks
+  the right sentence and only it, the facts and the reason, 200 seeded random contexts, and
+  that every quoted string reads back as itself). Mutation-checked: dropping the backtick
+  escape, and swapping the failure/unknown arms, each fail. `salmon-ops-serve-fixture … --card`
+  also cards the fixture's file nodes. **Run by hand in Chrome**: the file card drew from the
+  fixture's `/dag`, with paths wrapping (`td code { overflow-wrap: anywhere }`). **Not run**:
+  the directory, systemd and Postgres cards in a browser (node-only), and any card against a
+  real systemd or Postgres.
   **The rows view** (`ui.js`: `setView`, `renderRows`, `topoOrder`, `shownDeps`, `gutterLayout`) is an
   opt-in second view next to the graph, behind the header's `rows` button (the choice is remembered
   in `localStorage`, `salmon-view`; with nothing stored the page opens on the graph as before, and

@@ -37,6 +37,8 @@ Behaviour:
 * Web UI: an optional Tramaj card template per node (`withCardTemplate`), served on `/dag` as
   `template` and drawn in place of the default card; presentation only, not part of the
   representative.
+* `Builtin.Cards`: opt-in card templates for `filecontents`, `dir`, `systemdService` and
+  Postgres `database` (`withCard (Cards.fileContents path) op`); no builtin attaches one itself.
 
 ## 0.1.0.0 -- 2026-10-01
 
