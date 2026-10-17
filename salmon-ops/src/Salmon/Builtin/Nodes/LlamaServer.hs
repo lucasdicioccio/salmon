@@ -62,10 +62,13 @@ module Salmon.Builtin.Nodes.LlamaServer (
     llamaServerSystemd,
     llamaReady,
     llamaCheck,
+    llamaEmbed,
 
     -- * Pieces, exposed for tests
     interpretHealth,
     interpretEmbedding,
+    embeddingRequest,
+    parseEmbedding,
     dimensionNote,
     curlConfig,
     curlBase,
@@ -375,6 +378,45 @@ llamaCheck s = do
   where
     readKey f = Text.strip . Text.takeWhile (/= '\n') . decode <$> ByteString.readFile f
     curl cfg = readCreateProcessWithExitCode (proc "curl" curlBase) (Text.encodeUtf8 cfg)
+
+{- | The vector of one text, from a running server, or why there is none: what
+a loader calls (the counterpart of "Salmon.Builtin.Nodes.ClipCpp"'s @embed@).
+The text is in the request body, which goes to @curl@ on stdin with the key,
+so neither is on a command line. A vector of another width than
+'lsDimension' is refused here rather than at the insert.
+-}
+llamaEmbed :: LlamaServer -> Text -> IO (Either Text [Double])
+llamaEmbed s text = do
+    key <- traverse readKey s.lsApiKeyFile
+    (code, out, err) <- readCreateProcessWithExitCode (proc "curl" curlBase) (Text.encodeUtf8 (curlConfig s.lsListen "/v1/embeddings" (Just (embeddingRequest text)) key))
+    pure $ case code of
+        ExitFailure n -> Left ("curl exited with " <> tshow n <> ": " <> Text.take 300 (Text.strip (decode err)))
+        ExitSuccess -> case splitStatus (decode out) of
+            (body, 200) -> parseEmbedding s.lsDimension body
+            (_, status) -> Left ("llama-server answered " <> tshow status)
+  where
+    readKey f = Text.strip . Text.takeWhile (/= '\n') . decode <$> ByteString.readFile f
+
+-- | The JSON body of @POST \/v1\/embeddings@ for one input.
+embeddingRequest :: Text -> Text
+embeddingRequest text = Text.decodeUtf8 (LByteString.toStrict (Aeson.encode (Aeson.object ["input" Aeson..= text])))
+
+-- | @data[0].embedding@, which must have the declared width.
+parseEmbedding :: Int -> Text -> Either Text [Double]
+parseEmbedding dim body =
+    case Aeson.decodeStrict (Text.encodeUtf8 body) of
+        Just (Aeson.Object o)
+            | Just (Aeson.Array ds) <- KeyMap.lookup "data" o
+            , (Aeson.Object d : _) <- foldr (:) [] ds
+            , Just (Aeson.Array v) <- KeyMap.lookup "embedding" d
+            , Just xs <- traverse number (foldr (:) [] v) ->
+                if length xs == dim
+                    then Right xs
+                    else Left ("the model produces " <> tshow (length xs) <> " dimensions, " <> tshow dim <> " declared")
+        _ -> Left "not an embeddings answer"
+  where
+    number (Aeson.Number n) = Just (realToFrac n)
+    number _ = Nothing
 
 -- | @curl@'s own arguments: everything else, the key included, is on stdin.
 curlBase :: [String]

@@ -2939,6 +2939,45 @@ the `git` and `cmake` steps, any real `extract` (so its flags, its file names an
 format as this module reads them), any model, the 512 dimensions of ViT-B/32, `debianTools` on
 a real machine, `down`. No Layer 2 test exists.
 
+`SreBox.PgVectorDemo` (in `salmon-ops-recipes`; binary `salmon-pgvector-demo` in `salmon-apps`)
+is the demo on top of `PgVector` and the two embedders: walk a directory, embed each file,
+upsert the vectors, search by cosine distance. Graph: `pgvector` (and the caller's database and
+package source) ← `schema` ← `indexDirectory` → the embedder's node. Load-bearing:
+- **The width is typed once**: `schema` takes the embedder's `embDimension`, and its `up` refuses
+  (a `DO` block, before any `CREATE`) a table whose `embedding` has another width; the remedy is
+  another `--table`, not an `ALTER`. Above 2000 dimensions there is no `hnsw` index. It is a node
+  with a `check` rather than a `SreBox.PostgresMigrations` file because the file-based migration
+  reader has nowhere to take the width from.
+- **Rows record their embedder** (`embName`: tool, model sha256 prefix, clip commit). A row from
+  another embedder is pending, and `search` reads only this embedder's rows: vectors of two
+  models are not comparable. A changed `embName` re-embeds everything.
+- **Idempotent by `(path, content_hash, embedder)`**; `path` (relative to the directory) is the
+  primary key and the write is an upsert. `check` walks and hashes every file, so it is O(size
+  of the directory) per pass.
+- **Nothing is deleted**: rows of removed files are counted (`StaleRows`), and neither `down`
+  drops a row or the table.
+- **The walk** (`classify`/`walk`): recursive, sorted, hidden names and symlinks skipped (not
+  followed), kind by extension, whole files under a cap (64 KiB text, 10 MiB images), no
+  chunking; every skip is reported with its reason.
+- SQL goes to `sudo -u postgres psql` on **stdin** (a vector literal is too long for `-c`); paths
+  and the embedder name are public, contents are not, except that `clipEmbedder` puts a text
+  file on `extract`'s argv (that module's own caveat).
+- `hashEmbedder` is a sha256 stand-in with no meaning, so the whole path runs with no model.
+  `llamaEmbedder` uses the new `LlamaServer.llamaEmbed` (body and key to `curl` on stdin,
+  width checked); the binary runs the server as `llamaServerSystemd`.
+
+Run: Layer 0 (`Test/PgVectorDemoSpec.hs`: classify, walk on a temp directory, the SQL, the
+verdicts, pending/stale, hit parsing, the stand-in) and `llamaEmbed` against
+`LlamaServerSpec`'s fake server over real `curl`. Layer 2, **run once on 2026-10-17**
+(`sandboxTests`, in the `heavy` group): `debian:trixie` with PostgreSQL 17 and Debian's
+`postgresql-17-pgvector`, `sudo` shimmed, the stand-in embedder: extension, schema, three files
+indexed, a second `up` embeds nothing, a changed file alone is re-embedded, another width is
+seen by the schema check, a file's own content and an image find themselves first, `down`
+leaves the rows. That test builds the graph from `Postgres.extension` rather than `pgVectorDemo`,
+so the package node and the binary's database/cluster wiring were **not** run. **Never run**:
+`llamaEmbedder`/`clipEmbedder` with any real model, the `salmon-pgvector-demo` binary beyond
+`config` and `run tree`, `search` from the binary, the PGDG source, anything under `serve`.
+
 `SreBox.PostgresPair` is the pair above that cluster pair: two machines, one declared primary,
 and `pairRole` — a node that *states where the primary is* rather than an action that moves it.
 Its `check` asks both machines and every bouncer; its `up` takes steps until the declaration

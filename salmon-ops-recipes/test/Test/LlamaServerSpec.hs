@@ -76,6 +76,11 @@ tests =
                 assertBool "halfvec" (maybe False ("halfvec" `Text.isInfixOf`) (dimensionNote 3072))
                 assertBool "truncate" (maybe False ("truncate" `Text.isInfixOf`) (dimensionNote 8192))
             ]
+        , testCase "the embedding request is JSON-encoded, and the answer is read with its width" $ do
+            assertEqual "" "{\"input\":\"a \\\"b\\\"\\nc\"}" (embeddingRequest "a \"b\"\nc")
+            assertEqual "" (Right [0.1, 0.2, 0.3]) (parseEmbedding 3 embedding3)
+            assertEqual "" (Left "the model produces 3 dimensions, 4 declared") (parseEmbedding 4 embedding3)
+            assertEqual "" (Left "not an embeddings answer") (parseEmbedding 3 "{}")
         , testCase "the key is in curl's stdin configuration and never its argv" $ do
             let cfg = curlConfig (Loopback 8080) "/v1/embeddings" (Just "{\"input\":\"x\"}") (Just "s3cret\"key")
             assertBool "in the config, quoted" ("header = \"Authorization: Bearer s3cret\\\"key\"" `Text.isInfixOf` cfg)
@@ -119,7 +124,10 @@ fakeServer = requireExecutable "curl" $ withTempDir $ \tmp -> do
             "a model of another width"
             (Failure "the model produces 384 dimensions, 768 declared")
             =<< llamaCheck s{lsDimension = 768}
+        assertEqual "a loader's embedding, through the same curl" (Right (replicate 384 0.25)) =<< llamaEmbed s "a text with \"quotes\" and\na newline"
+        assertEqual "of another width, refused" (Left "the model produces 384 dimensions, 768 declared") =<< llamaEmbed s{lsDimension = 768} "x"
         writeFile keyFile "another-key\n"
+        assertEqual "a refused key is no vector" (Left "llama-server answered 401") =<< llamaEmbed s "x"
         assertEqual "the file's key is not the server's" (Failure "the api key was refused") =<< llamaCheck s
         writeFile keyFile "top-secret\n"
         writeIORef healthy False
