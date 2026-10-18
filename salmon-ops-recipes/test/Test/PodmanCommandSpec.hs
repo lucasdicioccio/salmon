@@ -15,6 +15,11 @@ import System.FilePath (takeDirectory, (</>))
 import System.Process (CmdSpec (..), cmdspec, cwd)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
+import Test.Tasty.QuickCheck (Gen, elements, forAll, oneof, testProperty, (===))
+import qualified Test.Tasty.QuickCheck as QC
+
+import Salmon.Op.Ref (mkRef)
+import System.Exit (ExitCode (..))
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
@@ -38,6 +43,7 @@ tests =
         , testCase "build with a context passes it as the positional argument and leaves the working directory alone" buildContextOnly
         , testCase "build with a context and a target" buildContextAndTarget
         , testGroup "login renewal" loginTests
+        , testGroup "runContainer's check" runCheckTests
         ]
 
 {- | 'Podman.loginExpiring' and 'Podman.pushLoggingIn', as far as they go
@@ -229,3 +235,77 @@ rmiIgnoresMissing =
         ""
         (RawCommand "podman" ["rmi", "--ignore", "us-docker.pkg.dev/p/r/img:1"])
         (cmdspec (prepare Podman.podmanCommand (Podman.RmiTag "us-docker.pkg.dev/p/r/img:1")))
+
+{- | 'Podman.runContainer''s check and its leftover removal, without podman:
+the two commands' argv, what their answers read as, and the verdict on each
+state. Running them is "Test.PodmanSpec" (Layer 2).
+-}
+runCheckTests :: [TestTree]
+runCheckTests =
+    [ testCase "the probes are `podman container exists` and an inspect of .State.Status" $ do
+        assertEqual "" ["container", "exists", "web"] (Podman.containerExistsArgs cname)
+        assertEqual "" ["container", "inspect", "--format", "{{.State.Status}}", "web"] (Podman.containerStatusArgs cname)
+    , testCase "a leftover is removed with `podman rm` and no -f; down keeps -f" $ do
+        assertEqual "" (RawCommand "podman" ["rm", "web"]) (cmdspec (prepare Podman.podmanCommand (Podman.RmStopped cname)))
+        assertEqual "" (RawCommand "podman" ["rm", "-f", "web"]) (cmdspec (prepare Podman.podmanCommand (Podman.Rm cname)))
+    , testCase "the node's ref, help and notes are what they were" $ do
+        let o = Podman.runContainer silent ignoreTrack Podman.dockerRegistry Podman.ubuntuLatest cname Podman.noRunOptions
+        assertEqual "" (Just (mkRef "podman-run" ("web" :: Text))) (fmap (\act -> act.extension.ref) (opAct o))
+        assertEqual "" (Just "runs a podman container") (fmap (\act -> act.extension.help) (opAct o))
+        assertEqual "" (Just []) (fmap (\act -> act.extension.notes) (opAct o))
+    , testCase "reading the answers" $ do
+        assertEqual "exists says no" Podman.ContainerAbsent (Podman.containerStateFrom (ExitFailure 1) Nothing)
+        assertEqual "exists cannot tell" Podman.ContainerUnanswered (Podman.containerStateFrom (ExitFailure 125) Nothing)
+        assertEqual "running" (Podman.ContainerStatus "running") (Podman.containerStateFrom ExitSuccess (Just (ExitSuccess, "running\n")))
+        assertEqual "inspect failed (removed in between)" Podman.ContainerUnanswered (Podman.containerStateFrom ExitSuccess (Just (ExitFailure 125, "")))
+        assertEqual "empty output" Podman.ContainerUnanswered (Podman.containerStateFrom ExitSuccess (Just (ExitSuccess, "  \n")))
+    , testCase "verdicts" $ do
+        assertEqual "running is in place" Success (verdict (Podman.ContainerStatus "running"))
+        assertBool "absent is to apply" (isFailure (verdict Podman.ContainerAbsent))
+        assertBool "exited is to apply" (isFailure (verdict (Podman.ContainerStatus "exited")))
+        assertBool "created (a failed start) is to apply" (isFailure (verdict (Podman.ContainerStatus "created")))
+        assertEqual "paused is not decided here" Unknown (verdict (Podman.ContainerStatus "paused"))
+        assertEqual "stopping is transitional" Unknown (verdict (Podman.ContainerStatus "stopping"))
+        assertEqual "no answer" Unknown (verdict Podman.ContainerUnanswered)
+    , testCase "only a container that is there and not running is removed" $ do
+        assertBool "" (Podman.isRemovableLeftover (Podman.ContainerStatus "exited"))
+        assertBool "" (not (Podman.isRemovableLeftover (Podman.ContainerStatus "running")))
+        assertBool "" (not (Podman.isRemovableLeftover (Podman.ContainerStatus "paused")))
+        assertBool "" (not (Podman.isRemovableLeftover Podman.ContainerAbsent))
+        assertBool "" (not (Podman.isRemovableLeftover Podman.ContainerUnanswered))
+    , testProperty "a leftover up removes is never one the check calls in place" $
+        forAll genState $ \st ->
+            QC.classify (Podman.isRemovableLeftover st) "leftover" $
+                not (Podman.isRemovableLeftover st) || isFailure (verdict st)
+    , testProperty "the check calls a container in place exactly when it is running" $
+        forAll genState $ \st -> (verdict st == Success) === (st == Podman.ContainerStatus "running")
+    , testProperty "a podman that cannot answer `exists` is never read as absent or present" $
+        forAll (elements [2, 125, 126, 127 :: Int]) $ \code ->
+            forAll genAnswer $ \answer ->
+                verdict (Podman.containerStateFrom (ExitFailure code) answer) === Unknown
+    , testProperty "the status is read whatever its case and surrounding space" $
+        forAll (elements statuses) $ \s ->
+            forAll (QC.chooseInt (0, 3)) $ \pad ->
+                Podman.containerStateFrom ExitSuccess (Just (ExitSuccess, Text.replicate pad " " <> Text.toUpper s <> "\n"))
+                    === Podman.ContainerStatus s
+    , testProperty "an exists that says no is absent, whatever inspect would have said" $
+        forAll genAnswer $ \answer -> Podman.containerStateFrom (ExitFailure 1) answer === Podman.ContainerAbsent
+    ]
+  where
+    cname = Podman.ContainerName "web"
+    verdict = Podman.interpretContainerState cname
+    isFailure (Failure _) = True
+    isFailure _ = False
+
+    -- podman's own status words, plus ones it does not use
+    statuses :: [Text]
+    statuses = ["configured", "created", "initialized", "running", "paused", "stopping", "stopped", "exited", "removing", "unknown", "frobnicated"]
+
+    genState :: Gen Podman.ContainerState
+    genState = oneof [pure Podman.ContainerAbsent, pure Podman.ContainerUnanswered, Podman.ContainerStatus <$> elements statuses]
+
+    genExit :: Gen ExitCode
+    genExit = oneof [pure ExitSuccess, ExitFailure <$> elements [1, 2, 125]]
+
+    genAnswer :: Gen (Maybe (ExitCode, Text))
+    genAnswer = oneof [pure Nothing, (\c s -> Just (c, s)) <$> genExit <*> elements ("" : statuses)]

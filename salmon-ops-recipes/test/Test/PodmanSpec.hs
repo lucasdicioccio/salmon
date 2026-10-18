@@ -17,6 +17,7 @@ import Data.Char (toLower)
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Podman as Podman
 import System.Directory (createDirectory)
 import System.Exit (ExitCode (..))
@@ -31,6 +32,7 @@ tests =
     testGroup
         "Salmon.Builtin.Nodes.Podman (Layer 2, dogfooded)"
         [ testCase "pullImage + runContainer bring up a real, reachable container" pullAndRun
+        , testCase "runContainer: a second run up skips a running container, and a stopped one is replaced" runTwiceThenStopped
         , testCase "buildImageWith builds one stage of a multi-stage file against a context that is not the file's directory" buildContextAndTarget
         ]
 
@@ -80,3 +82,55 @@ pullAndRun = requireExecutable "podman" $ do
     withContainer (Podman.Image "alpine:latest") (Podman.PortMapping hostPort "80" Podman.TCPPort) $ \cid -> do
         (code, out, _) <- readProcessWithExitCode "podman" ["inspect", "--format", "{{.State.Running}}", cid] ""
         assertBool "podman reports the container as Running" (code == ExitSuccess && "true" `isInfixOf` out)
+
+{- | The acceptance the customer stated: @run up@ twice, the second pass
+skips @podman run@ and succeeds; then @podman stop@, and @run up@ brings the
+container back (the stopped leftover is removed and run again).
+-}
+runTwiceThenStopped :: IO ()
+runTwiceThenStopped = requireExecutable "podman" $ do
+    cname <- freshContainerName
+    (reporter, readBack) <- capture
+    let reg = Podman.dockerRegistry
+        img = Podman.Image "alpine:latest"
+        name = Text.unpack (Podman.getContainerName cname)
+        pullOp = Podman.pullImage reporter podmanTrack reg img
+        runOp = Podman.runContainer reporter podmanTrack reg img cname Podman.noRunOptions
+        runs = length . filter isRunStopped <$> readBack
+        removals = length . filter isRemoveStopped <$> readBack
+        running = do
+            (code, out, _) <- readProcessWithExitCode "podman" ["container", "inspect", "--format", "{{.State.Status}}", name] ""
+            pure (code == ExitSuccess && "running" `isInfixOf` out)
+    ( do
+        pulled <- runUp pullOp
+        assertBool "the image is pulled" pulled
+        first <- runUp runOp
+        assertBool "the first run up succeeds" first
+        assertEqual "the first run up ran podman run" 1 =<< runs
+        assertBool "the container runs" =<< running
+        second <- runUp runOp
+        assertBool "the second run up succeeds" second
+        assertEqual "the second run up did not run podman run" 1 =<< runs
+        (stopCode, _, _) <- readProcessWithExitCode "podman" ["stop", "-t", "0", name] ""
+        assertEqual "podman stop" ExitSuccess stopCode
+        assertBool "the container is stopped" . not =<< running
+        third <- runUp runOp
+        assertBool "run up after a stop succeeds" third
+        assertEqual "the stopped leftover was removed" 1 =<< removals
+        assertEqual "and podman run ran again" 2 =<< runs
+        assertBool "the container runs again" =<< running
+        )
+        `finally` void (runDown runOp)
+    (code, _, _) <- readProcessWithExitCode "podman" ["container", "exists", name] ""
+    assertBool "down removed the container" (code /= ExitSuccess)
+  where
+    isRunStopped r = case r of
+        Podman.RunContainer _ _ _ _ b -> stopped b
+        _ -> False
+    isRemoveStopped r = case r of
+        Podman.RemoveContainer _ b -> stopped b
+        _ -> False
+    stopped b = case b of
+        Binary.CommandStopped{} -> True
+        Binary.Requested _ inner -> stopped inner
+        _ -> False

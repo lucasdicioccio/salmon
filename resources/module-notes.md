@@ -2092,6 +2092,22 @@ and the working directory is left alone, so a relative path is relative to the s
 stays the tag alone, the options go in `notes` only when they are not the default, so a plain `buildImage` node is
 described as before. `Test/PodmanCommandSpec.hs` holds the argv, `Test/PodmanSpec.hs` a real multi-stage build.
 
+`Podman.runContainer` has a `check` (before, it had none, so it was `Immaterial` and a second `run up` failed at
+`podman run` on the name). The name is the effect site, as for its `down` (`podman rm -f NAME`). The check runs
+`podman container exists NAME`, then `podman container inspect --format {{.State.Status}} NAME`
+(`probeContainer`/`containerStateFrom`); `interpretContainerState` reads `running` as in place, no container or a
+leftover that is not running (`configured`, `created`, `initialized`, `exited`, `stopped`) as `Failure`, and
+anything else (`paused`, `stopping`, `removing`, an unknown word, a podman that cannot answer) as `Unknown`. `up`
+probes again and removes such a leftover with `podman rm NAME` (no `-f`: one that started meanwhile is refused, not
+killed), then runs as before; a running or paused container under the name still makes the run fail. Decided
+conservatively, without the owner: only the name is compared (a running container from another image or with other
+options reads as in place, which is what the customer who reported it asked for), and a stopped leftover is
+removed and run again rather than `podman start`ed (its old options would otherwise stay). `ref`, `help` and `notes`
+are unchanged. What changed for callers: `run up` skips a running container, and under `serve` the node is now
+watched, so a container that stops is run again on the next tending. Run: Layer 0 (`Test/PodmanCommandSpec.hs`
+"runContainer's check", with QuickCheck properties) and Layer 2 (`Test/PodmanSpec.hs`: `run up` twice, the second
+does not run `podman run`; `podman stop`, `run up` removes and re-runs it). Not run: anything under `serve`.
+
 `Podman.login` has no `check`: it logs in once per pass and, being `Immaterial`, once per `serve` session, so an
 hour-long registry token is not renewed by it. Two nodes cover the two ways that bites. `Podman.loginExpiring` takes a
 `Credential` (secret and lifetime), writes the expiry to `AUTHFILE.expires` after a login that worked, and its `check`

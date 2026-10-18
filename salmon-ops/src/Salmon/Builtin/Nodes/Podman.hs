@@ -481,8 +481,24 @@ not attempted with whatever the auth file held before.
 loggingInThen :: IO () -> IO () -> IO ()
 loggingInThen authenticate act = authenticate >> act
 
--- | Runs a detached container under a caller-chosen 'ContainerName' (so
--- 'down' has a stable target to remove), with the given ports/env/volumes/network.
+{- | Runs a detached container under a caller-chosen 'ContainerName' (so
+'down' has a stable target to remove), with the given ports/env/volumes/network.
+
+The name is the effect site, as for 'down' (which removes whatever runs under
+it). The @check@ asks podman for the container's state under that name
+('probeContainer', 'interpretContainerState'): @running@ is in place and
+skipped, no container (or a leftover that is not running) is to apply, and a
+state podman is moving through (@paused@, @stopping@, @removing@) or a podman
+that cannot answer is 'Unknown'. Only the name is compared: a running
+container started from another image or with other options under the same
+name reads as in place.
+
+@up@ clears a leftover first: a container under the name that is not running
+(@created@ by a run that failed at start, @exited@, @stopped@) is removed with
+@podman rm@ (no @-f@, so one that started meanwhile is refused, not killed),
+then @podman run@ as before. A running or paused container is left alone and
+the run fails on the name, as it always did.
+-}
 runContainer :: Reporter Report -> Track' (Binary "podman") -> Registry -> Image -> ContainerName -> RunOptions -> Op
 runContainer r podman reg img cname opts =
     withBinary podman podmanCommand (Run reg img cname opts) $ \run ->
@@ -490,12 +506,77 @@ runContainer r podman reg img cname opts =
             actions
                 { help = "runs a podman container"
                 , ref = mkRef "podman-run" (getContainerName cname)
-                , up = run r'
+                , check = interpretContainerState cname <$> probeContainer cname
+                , up = do
+                    st <- probeContainer cname
+                    when (isRemovableLeftover st) $
+                        Binary.untrackedExec podmanCommand (RmStopped cname) "" r''
+                    run r'
                 , down = Binary.untrackedExec podmanCommand (Rm cname) "" r''
                 }
   where
     r' = contramap (RunContainer reg img cname opts) r
     r'' = contramap (RemoveContainer cname) r
+
+-- | What podman says is under a container name.
+data ContainerState
+    = -- | @podman container exists@ said no (exit 1).
+      ContainerAbsent
+    | -- | @.State.Status@ as @podman container inspect@ printed it, stripped.
+      ContainerStatus !Text
+    | -- | podman did not answer either question (an exit other than 0\/1, a broken store).
+      ContainerUnanswered
+    deriving (Eq, Show)
+
+{- | @podman container exists NAME@, then, if it does,
+@podman container inspect --format {{.State.Status}} NAME@.
+-}
+probeContainer :: ContainerName -> IO ContainerState
+probeContainer cname = do
+    (existsCode, _, _) <- readCreateProcessWithExitCode (proc "podman" (containerExistsArgs cname)) ""
+    case existsCode of
+        ExitSuccess -> do
+            (code, out, _) <- readCreateProcessWithExitCode (proc "podman" (containerStatusArgs cname)) ""
+            pure (containerStateFrom existsCode (Just (code, Text.pack (ByteString.unpack out))))
+        _ -> pure (containerStateFrom existsCode Nothing)
+
+containerExistsArgs :: ContainerName -> [String]
+containerExistsArgs cname = ["container", "exists", Text.unpack (getContainerName cname)]
+
+containerStatusArgs :: ContainerName -> [String]
+containerStatusArgs cname = ["container", "inspect", "--format", "{{.State.Status}}", Text.unpack (getContainerName cname)]
+
+{- | The state from the two commands' answers: @exists@'s exit code, and
+@inspect@'s exit code and output when it was asked (only after @exists@ said 0).
+-}
+containerStateFrom :: ExitCode -> Maybe (ExitCode, Text) -> ContainerState
+containerStateFrom (ExitFailure 1) _ = ContainerAbsent
+containerStateFrom ExitSuccess (Just (ExitSuccess, out))
+    | Text.null status = ContainerUnanswered
+    | otherwise = ContainerStatus status
+  where
+    status = Text.toLower (Text.strip out)
+containerStateFrom _ _ = ContainerUnanswered
+
+-- | States of a container that is not running and is not going anywhere: what a failed or ended run leaves behind.
+leftoverStatuses :: [Text]
+leftoverStatuses = ["configured", "created", "initialized", "exited", "stopped"]
+
+-- | A container 'runContainer''s @up@ removes before running: there, and not running.
+isRemovableLeftover :: ContainerState -> Bool
+isRemovableLeftover (ContainerStatus s) = s `elem` leftoverStatuses
+isRemovableLeftover _ = False
+
+interpretContainerState :: ContainerName -> ContainerState -> CheckResult
+interpretContainerState cname st = case st of
+    ContainerAbsent -> Failure ("no podman container named " <> n)
+    ContainerStatus "running" -> Success
+    ContainerStatus s
+        | s `elem` leftoverStatuses -> Failure ("the podman container " <> n <> " is " <> s <> ", not running")
+        | otherwise -> Unknown
+    ContainerUnanswered -> Unknown
+  where
+    n = getContainerName cname
 
 -- | Creates a user-defined podman network under a caller-chosen 'NetworkName'
 -- (idempotent: skipped via 'check' if @podman network exists@ already says yes,
@@ -535,6 +616,8 @@ data PodmanCommand
     | Rmi !Registry !Image
     | RmiTag !TagName
     | Rm !ContainerName
+    | -- | @podman rm@ without @-f@: refused for a running container.
+      RmStopped !ContainerName
     | RemoveNetworkCmd !NetworkName
 
 podmanCommand :: Command "podman" PodmanCommand
@@ -606,6 +689,8 @@ podmanCommand = Command $ \cmd -> case cmd of
         proc "podman" ["rmi", "--ignore", Text.unpack tagname]
     (Rm cname) ->
         proc "podman" ["rm", "-f", Text.unpack (getContainerName cname)]
+    (RmStopped cname) ->
+        proc "podman" ["rm", Text.unpack (getContainerName cname)]
     (RemoveNetworkCmd name) ->
         proc "podman" ["network", "rm", Text.unpack (getNetworkName name)]
 
