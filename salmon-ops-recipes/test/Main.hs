@@ -91,6 +91,7 @@ import qualified Test.SharedDirSpec as SharedDirSpec
 import qualified Test.SystemdJobSpec as SystemdJobSpec
 import qualified Test.SystemdSpec as SystemdSpec
 import qualified Test.UiTailTemplateSpec as UiTailTemplateSpec
+import qualified Test.UpDownTextSpec as UpDownTextSpec
 import qualified Test.UpTreeSpec as UpTreeSpec
 import qualified Test.UpkeepRetentionSpec as UpkeepRetentionSpec
 import qualified Test.UpkeepSpec as UpkeepSpec
@@ -227,6 +228,7 @@ main =
             , SharedDirSpec.tests
             , SystemdJobSpec.tests
             , SystemdSpec.tests
+            , UpDownTextSpec.tests
             , UpTreeSpec.tests
             , UpkeepSpec.tests
             , UpkeepRetentionSpec.tests

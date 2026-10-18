@@ -573,7 +573,7 @@ complete example):
 main :: IO ()
 main = do
     cmd <- execParser (info parseRecord ...)
-    CLI.execCommandOrSeed reportPrint configure program cmd
+    CLI.execCommandOrSeed UpDownText.reportText configure program cmd
 
 program :: Track' Spec
 program = Track $ \spec -> op "program" (deps [...]) id
@@ -581,6 +581,14 @@ program = Track $ \spec -> op "program" (deps [...]) id
 configure :: Configure IO Seed Spec
 configure = Configure $ \seed -> ... build a Spec from seed ...
 ```
+
+`UpDownText.reportText` (`import qualified Salmon.Reporter.UpDownText as
+UpDownText`) prints one line per node event of `run up`/`run down`, e.g.
+`done    #MTA4NDYx file: write /etc/motd` (the kind, the node's `#` short ref
+as a `--select` takes it, its shorthand and help). `reportPrint` works there
+too and prints each report's derived `Show`, which is long and is what the
+binaries in `salmon-apps` still pass; `--json` replaces either with one JSON
+object per line.
 
 `Migrator.hs` itself calls `CLI.execCommandOrSeedWithRewrites`, which is the
 same plus a reporter for `run serve`'s own reports and a list of `Rewrite`
