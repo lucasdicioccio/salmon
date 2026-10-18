@@ -36,6 +36,7 @@ module Test.Harness (
     podmanTrack,
     withContainer,
     freeTcpPort,
+    freshContainerName,
     podmanFailures,
     podmanExec_,
     podmanExecCapture,
