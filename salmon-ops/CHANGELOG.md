@@ -6,6 +6,12 @@ Breaking: several exported records gained or changed fields (e.g. `Gcp.Compute`'
 `Client.Model`'s model) and some exported functions changed signature. Requires
 `salmon-core ^>=0.1.0.0` (unchanged).
 
+Packaging: a manual `http-server` flag (default on). `constraints: salmon-ops -http-server`
+builds the library without `Salmon.Actions.Serve.Http` and without warp, warp-tls and wai, for a
+binary that never serves HTTP; `run serve` then refuses `--http`/`--http-tcp`. The listener
+configuration (`Bind`, `TlsBind`, `SessionPolicy`, `readTokenFile`) is now defined in
+`Salmon.Actions.Serve.HttpBind` and still re-exported by `Salmon.Actions.Serve.Http`.
+
 New builtins:
 
 * `Podman.Quadlet`: containers as systemd services (bind volumes, `UserNS=keep-id`, readiness

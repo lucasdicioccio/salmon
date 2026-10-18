@@ -1243,6 +1243,21 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   than `Stdin`: with a socket to talk to the process must outlive whatever started it
   (`< /dev/null &`), so stdin's EOF is a hang-up like any client's and only `quit` — from
   anywhere — ends the loop. `Test/ServeSocketSpec.hs` drives it with real connections.
+  **The `http-server` cabal flag** (manual, default on) is the only thing in `salmon-ops` that
+  can leave a module out. Off (`constraints: salmon-ops -http-server`), `Serve.Http` is not
+  built and warp, warp-tls and wai (19 packages of the library's closure: 132 → 113 non-boot
+  units in the plan at `312bebb`) leave the plan; `CommandLine` imports the hidden
+  `src-no-http-server/…/NoHttp.hs` under the name `Http` instead (one `CPP` import, an empty
+  `Server`), and `run serve` refuses `--http`/`--http-tcp` before binding anything
+  (`httpServerAvailable`). `Bind`/`TlsBind`/`SessionPolicy`/`readTokenFile` moved to
+  `Serve/HttpBind.hs` so the options still parse; `Serve.Http` re-exports them, so its export
+  list is unchanged. Everything else stays in both builds: serve over stdin and `--listen`,
+  pull mode, the status sink, `Client.Http` (http-client-tls already brings `tls`, so cutting
+  the TLS *client* too would cost https pull and is a separate decision). Nothing in the repo
+  builds it off, and there is no CI: `SALMON_TEST_NO_HTTP_SERVER_BUILD=1` makes
+  `Test/HttpServerFlagSpec.hs` build the library off into a temp `--builddir` and check its plan
+  (run once, passing, when the flag was added); otherwise it skips loudly. The flag-off
+  refusal path itself was not run as a binary.
   **`Actions/Serve/Http.hs`** is milestone 3: `run serve --http PATH` serves HTTP (warp) on a
   *second* unix socket, bound through the same `withUnixListener` (owner-only, live path
   refused) — its own path rather than protocol detection on `--listen`'s, because the line

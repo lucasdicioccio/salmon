@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 
@@ -44,7 +45,12 @@ import Salmon.Actions.Help as Help
 import qualified Salmon.Actions.Query as Query
 import qualified Salmon.Actions.Serve as Serve
 import qualified Salmon.Actions.Serve.Events as Events
+#ifdef SALMON_HTTP_SERVER
 import qualified Salmon.Actions.Serve.Http as Http
+#else
+-- built with -http-server: the same names, refusing (see 'httpServerAvailable')
+import qualified Salmon.Actions.Serve.NoHttp as Http
+#endif
 import qualified Salmon.Actions.Serve.Socket as Socket
 import qualified Salmon.Actions.Serve.StatusSink as StatusSink
 -- 'CheckResult' constructors are hidden: 'Success'/'Failure' collide with
@@ -147,6 +153,22 @@ data TcpOptions = TcpOptions
 
 instance FromJSON TcpOptions
 instance ToJSON TcpOptions
+
+{- | Whether this @salmon-ops@ was built with its @http-server@ flag (the
+default), i.e. whether @run serve --http@\/@--http-tcp@ can do anything.
+Without it the library has no warp, warp-tls or wai in its plan, and the
+loop runs over standard input and @--listen@ only.
+-}
+httpServerAvailable :: Bool
+#ifdef SALMON_HTTP_SERVER
+httpServerAvailable = True
+#else
+httpServerAvailable = False
+#endif
+
+-- | What @run serve@ says when given an HTTP flag it was built without.
+httpServerUnavailable :: String
+httpServerUnavailable = "this binary was built with salmon-ops -http-server: --http and --http-tcp are not available (rebuild with the flag on, its default)"
 
 -- | No network listener at all: the default.
 noTcp :: TcpOptions
@@ -811,6 +833,11 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             reportByLine
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let own = taggedFor fmt
+            -- a build without the HTTP server says so before anything is
+            -- bound or read, rather than after the socket listener is up
+            when (not httpServerAvailable && (isJust http || isJust tcpOptions.tcpBind)) $ do
+                hPutStrLn stderr httpServerUnavailable
+                exitFailure
             -- the network listener is refused before anything is bound or
             -- read: the flags as a whole, then the token file itself
             tcp <- case validateTcpOptions tcpOptions of

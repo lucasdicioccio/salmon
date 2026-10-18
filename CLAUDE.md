@@ -17,7 +17,8 @@ Dependency direction is strictly `salmon-core` ← `salmon-ops` ← `salmon-ops-
 
 - `salmon-core`: the `Graph`/`OpGraph` DAG representation and evaluation. Minimal deps on purpose.
 - `salmon-ops`: IO-heavy builtins (`Salmon/Builtin/Nodes/`), the drivers (`Salmon/Actions/`), the
-  shared CLI (`Salmon.Builtin.CommandLine`), the `serve` loop and its HTTP/UI/client.
+  shared CLI (`Salmon.Builtin.CommandLine`), the `serve` loop and its HTTP/UI/client. Its manual
+  `http-server` flag (default on) leaves warp/wai and `Serve.Http` out of an up/down-only binary.
 - `salmon-ops-recipes`: opinionated recipes built from builtins (`SreBox.*`). No heavy deps.
 - `salmon-ops-recipes-experimental`: recipes needing heavy/unstable deps (`kitchen-sink`,
   `acme-not-a-joke`). **Not** in `cabal.project`; built only via `cabal.perso.project`.

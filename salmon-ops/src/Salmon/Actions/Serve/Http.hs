@@ -237,7 +237,7 @@ import Network.Wai (Application, Request, Response)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wai.Handler.WarpTLS as WarpTLS
-import System.Posix.Files (fileMode, getFileStatus)
+import Salmon.Actions.Serve.HttpBind (Bind (..), SessionPolicy (..), TlsBind (..), TokenError (..), defaultSessionPolicy, readTokenFile)
 
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Attributed (..), Declaration, EpochId, Line (..), NodeState (..), Origin (..), Producer (..), World (..))
@@ -311,33 +311,6 @@ data Collector = Collector
     -- ^ newest first
     , collectorDone :: TVar Bool
     }
-
-{- | Where a server listens. A unix socket needs nothing but its path; TCP
-needs everything in 'TlsBind', and there is deliberately no constructor for
-TCP without it.
--}
-data Bind
-    = BindUnix FilePath
-    | BindTls TlsBind
-    deriving (Show)
-
-{- | A TCP listener: the address to bind, the certificate and key warp-tls
-serves, and the token every request on it must present. The token is the
-file's content already read and trimmed ('readTokenFile'), so that a
-server is refused before it binds rather than after.
--}
-data TlsBind = TlsBind
-    { tlsHost :: String
-    -- ^ an address to bind, never a wildcard by omission: the caller spells it
-    , tlsPort :: Int
-    -- ^ @0@ for any free port; 'serverBoundTcp' says which
-    , tlsCertFile :: FilePath
-    , tlsKeyFile :: FilePath
-    , tlsToken :: ByteString.ByteString
-    , tlsSessions :: SessionPolicy
-    -- ^ how long a browser's sign-in lasts ('defaultSessionPolicy' unless told)
-    }
-    deriving (Show)
 
 {- | Bind the socket at the path (owner-only, see 'Socket.withUnixListener'),
 serve HTTP on it for as long as the action runs, and take it down after.
@@ -627,33 +600,6 @@ loginPage status note =
         WrongToken -> "<p class=\"refused\">That is not the token.</p>"
         SessionEnded -> "<p class=\"ended\">Your session ended; sign in again.</p>"
 
-{- | How long a session lasts. Two limits, each 'Nothing' for none, because
-they guard against different things. The __lifetime__ counts from sign-in
-and ends a session however busy it is — it bounds how long a stolen
-cookie or a tab left open over a weekend stays good, and it cuts an event
-stream the session has open. The __idle__ limit counts from the session's
-last use, and an open @\/events@ stream is use: the page makes almost no
-requests while it is being watched, and a dashboard left open should not
-expire for being looked at. So "idle" means nobody is looking, and the
-lifetime is what ends a session somebody is.
-
-What bounds the listener's memory is that an ended session is dropped at
-every sign-in ('newSession'), and at the next request that presents it —
-at most the sessions signed in within one lifetime are held. With both
-limits off nothing ends a session but signing out or a restart.
--}
-data SessionPolicy = SessionPolicy
-    { sessionLifetime :: Maybe Double
-    -- ^ seconds from sign-in
-    , sessionIdle :: Maybe Double
-    -- ^ seconds since last use, not counting while a stream is open
-    }
-    deriving (Show, Eq)
-
--- | Twelve hours from sign-in, one hour of nobody looking.
-defaultSessionPolicy :: SessionPolicy
-defaultSessionPolicy = SessionPolicy (Just (12 * 3600)) (Just 3600)
-
 {- | Where sessions get their time: now, and a wait for a moment to come,
 both in seconds on one monotonic scale. 'systemSessionClock' is the real
 one; a test's moves when it says so.
@@ -784,32 +730,6 @@ sameSecret a b = (lengthBit .|. foldl' (.|.) 0 (ByteString.zipWith xor a b)) == 
   where
     lengthBit :: Word8
     lengthBit = if ByteString.length a == ByteString.length b then 0 else 1
-
--- | Why a token file was not accepted.
-data TokenError
-    = -- | others can read it, so it is not a secret: the file's mode
-      TokenFileReadable FilePath
-    | -- | nothing but whitespace in it
-      TokenFileEmpty FilePath
-    deriving (Show, Eq)
-
-instance Exception TokenError
-
-{- | The token in a file: its content with surrounding whitespace removed
-(so a trailing newline from @echo@ is not part of it). Refused when the
-file is readable by others — a token anyone on the box can read is not one —
-and when it is empty, which would make every request with an empty
-@Bearer@ valid. A file that cannot be read at all throws as any read does.
--}
-readTokenFile :: FilePath -> IO (Either TokenError ByteString.ByteString)
-readTokenFile path = do
-    st <- getFileStatus path
-    if fileMode st .&. 0o004 /= 0
-        then pure (Left (TokenFileReadable path))
-        else do
-            raw <- ByteString.readFile path
-            let token = Char8.dropWhileEnd isSpace (Char8.dropWhile isSpace raw)
-            pure (if ByteString.null token then Left (TokenFileEmpty path) else Right token)
 
 {- | What to hand 'Serve.serveObserved': installs the read accessor. Reads
 answer @503@ until it has been.
