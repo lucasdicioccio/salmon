@@ -190,6 +190,7 @@ test-suite salmon-ops-recipes-test
                     , Test.SystemdJobSpec
                     , Test.SystemdSpec
                     , Test.UiTailTemplateSpec
+                    , Test.UpDownTextSpec
                     , Test.UpTreeSpec
                     , Test.UpkeepSpec
                     , Test.UpkeepRetentionSpec

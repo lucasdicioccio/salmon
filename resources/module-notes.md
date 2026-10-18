@@ -3588,6 +3588,19 @@ Not covered: a node's own `Binary.Report`s (handed a `reportPrint` by the recipe
 text regardless; the lines of a *streamed* command are the exception, they are `FromNode`), and sequence numbers
 (a later milestone).
 
+**`Salmon.Reporter.UpDownText`** is the readable text reporter for `run up`/`run down`
+(`Reporter (UpDown.Report Extension)`), opt-in: a binary passes `UpDownText.reportText` where it
+passed `reportPrint`, whose output (the derived `Show` of the report and its `Act`) is unchanged,
+so nothing that parses it breaks, and every binary in `salmon-apps` still passes `reportPrint`.
+One line per report: the kind (the JSON `kind`, padded to 7), `#` + `shortRef` (what a `#`
+selector matches), `shorthand: help`, and after ` -- ` the exception's `show` (as the JSON
+`error`), the instruction, or the dropped count. Every control character but a tab in those is
+escaped (`showLitChar`), so one report is exactly one line; it is for people, not to parse
+(`--json` is the machine form). `Test/UpDownTextSpec.hs`: a golden line per constructor,
+QuickCheck properties (one line, kind agrees with the JSON `kind`, `#shortRef` second, clean help
+verbatim), and a real `upTree` over three nodes printing six lines. Layer 0 only; no binary was
+switched to it, so no `run up` of a shipped binary was run with it.
+
 `run serve` is the odd one out: it reads *seeds* (not a directive) as command lines, one
 declaration per line, and keeps converging a `Salmon.Actions.Serve.World` across all of them —
 see `Actions/Serve.hs` above for the state it maintains. Its input language is:
