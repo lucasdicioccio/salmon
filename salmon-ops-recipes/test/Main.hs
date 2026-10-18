@@ -5,6 +5,7 @@ import qualified Test.AmendNodeSpec as AmendNodeSpec
 import qualified Test.BuiltinCardsSpec as BuiltinCardsSpec
 import qualified Test.CardTemplateSpec as CardTemplateSpec
 import qualified Test.CheckSpec as CheckSpec
+import qualified Test.HttpServerFlagSpec as HttpServerFlagSpec
 import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ClientModelStepSpec as ClientModelStepSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
@@ -151,6 +152,7 @@ main =
             , AmendNodeSpec.tests
             , CardTemplateSpec.tests
             , BuiltinCardsSpec.tests
+            , HttpServerFlagSpec.tests
             , ClientModelSpec.tests
             , ClientModelStepSpec.tests
             , ConcurrentSpec.tests

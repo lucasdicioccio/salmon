@@ -32,6 +32,16 @@ source-repository head
     location: https://github.com/lucasdicioccio/salmon
     subdir:   salmon-ops
 
+flag http-server
+    description: Build @run serve@'s HTTP surface (@--http@, @--http-tcp@,
+                 the web UI, "Salmon.Actions.Serve.Http"), and with it warp,
+                 warp-tls and wai. Turn it off (@constraints: salmon-ops
+                 -http-server@) for a binary that never serves HTTP; @serve@
+                 over standard input and @--listen@, pull mode and the
+                 status sink stay.
+    default:     True
+    manual:      True
+
 library
     exposed-modules: Salmon.Actions.Concurrent
                    , Salmon.Actions.Follow
@@ -44,7 +54,7 @@ library
                    , Salmon.Actions.Help
                    , Salmon.Actions.Serve
                    , Salmon.Actions.Serve.Events
-                   , Salmon.Actions.Serve.Http
+                   , Salmon.Actions.Serve.HttpBind
                    , Salmon.Actions.Serve.Socket
                    , Salmon.Actions.Serve.StatusSink
                    , Salmon.Actions.Fleet
@@ -183,11 +193,17 @@ library
                     , text
                     , time
                     , unix
-                    , wai
-                    , warp
                     , tls
-                    , warp-tls
     hs-source-dirs:   src
+    if flag(http-server)
+        exposed-modules: Salmon.Actions.Serve.Http
+        build-depends:   wai
+                       , warp
+                       , warp-tls
+        cpp-options:     -DSALMON_HTTP_SERVER
+    else
+        other-modules:   Salmon.Actions.Serve.NoHttp
+        hs-source-dirs:  src-no-http-server
     default-language: Haskell2010
     default-extensions: KindSignatures
                       , DataKinds
