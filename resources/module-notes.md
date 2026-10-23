@@ -2738,6 +2738,24 @@ client ever echoes a key, which release introduced `--setup-key-file`/`daemonSta
 address, deregistering a peer, and **an enrolment against a real management server, still owed** (the control-plane
 recipe below exists but has never been started).
 
+`SreBox.GeneratedSite.autoPublishSite` (in `salmon-ops-recipes-experimental`, used by no app) is the
+"watch a generated site and publish it" pipeline as **one node**, because a freshness trigger has to be a
+`check` and `generateSite`'s chain of clone/build/add/commit/tag/push nodes has none: under `serve` every one
+of them parks after its first pass, and its commit fails on a second pass with nothing to commit. The node's
+`check` compares the source remote's branch head (`git ls-remote`) with a stamp file under
+`autoPublishStateDir` (in neither repository) holding the source revision it last published: equal is
+`Success`, moved or no stamp is `Failure`, an unreachable remote is `Unknown` (restarts nothing). So under
+`serve` the trigger is upkeep's own delay ladder (60s cap) and no watcher or timer was added. `up` pulls both
+clones `--ff-only`, runs the producer (source clone → output clone), `git add -A`, commits only when
+`status --porcelain` is non-empty (message gains a `Salmon-Source-Revision:` trailer), and pushes only when the
+local head differs from the output remote's; the branch push is not forced, only the declared tag is. The
+stamp is written last, so a failed push is retried. `notes` carry the clone dirs, never the remote URLs (a URL
+may hold a token). `generateSite`/`generateKitchenSinkSite` are untouched and render what they did.
+`autoPublishKitchenSinkSite` wires kitchen-sink's build and `produce --srcDir SRC/site-src`. Run:
+`Test/GeneratedSiteSpec.hs`, pure decisions plus one `upTree` against real `git` on local bare repositories
+with `cp` as producer (publish, fresh skip, forced `up` with nothing to commit, source moves, republish).
+Not run: kitchen-sink's `produce` through this node, a remote over the network, or `run serve` itself.
+
 `SreBox.NetbirdControlPlane` (in `salmon-ops-recipes-experimental`, used by no app) is a self-hosted NetBird control
 plane over two quadlets, what a `Netbird.peer` enrols against (`managementUrl`). **It is not the "management, signal,
 relay, coturn" of its filing**: read in `netbirdio/netbird` at tag `v0.80.0` (`infrastructure_files/getting-started.sh`,

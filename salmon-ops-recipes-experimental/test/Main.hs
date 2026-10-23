@@ -3,6 +3,7 @@ module Main (main) where
 import System.Environment (lookupEnv, setEnv)
 import Test.Tasty (defaultMain, testGroup)
 
+import qualified Test.GeneratedSiteSpec as GeneratedSiteSpec
 import qualified Test.NetbirdControlPlaneSpec as NetbirdControlPlaneSpec
 import qualified Test.PgTurretSpec as PgTurretSpec
 
@@ -27,4 +28,4 @@ main = do
     case threads of
         Nothing -> setEnv "TASTY_NUM_THREADS" "1"
         Just _ -> pure ()
-    defaultMain (testGroup "salmon-ops-recipes-experimental" [PgTurretSpec.tests, NetbirdControlPlaneSpec.tests])
+    defaultMain (testGroup "salmon-ops-recipes-experimental" [PgTurretSpec.tests, NetbirdControlPlaneSpec.tests, GeneratedSiteSpec.tests])
