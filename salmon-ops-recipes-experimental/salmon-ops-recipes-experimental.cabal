@@ -68,6 +68,7 @@ test-suite salmon-ops-recipes-experimental-test
     main-is:          Main.hs
     hs-source-dirs:   test
     other-modules:    Test.PgTurretSpec
+                    , Test.GeneratedSiteSpec
                     , Test.NetbirdControlPlaneSpec
     build-depends:    base
                     , QuickCheck
@@ -77,6 +78,8 @@ test-suite salmon-ops-recipes-experimental-test
                     , cryptohash-sha256
                     , directory
                     , filepath
+                    , process
+                    , temporary
                     , salmon-core
                     , salmon-ops
                     , salmon-ops-recipes-experimental
