@@ -148,6 +148,8 @@ module Salmon.Actions.Serve (
     originName,
     handleProducer,
     stdinProducer,
+    linesProducer,
+    quoteArg,
 
     -- * Attributing reports
     Attributed (..),
@@ -1549,6 +1551,34 @@ thing to the loop.
 -}
 stdinProducer :: Handle -> Producer
 stdinProducer = handleProducer Stdin
+
+{- | A fixed list of lines, pushed in order, then @primed@ — what @run serve
+--no-supervise@ and @--up-directive FILE@ are: the commands an operator would
+otherwise type first, under their own 'Origin'. A caller that wants them run
+before anything else gates its other producers on @primed@ (the way the
+fetcher's first round gates standard input, see
+'Salmon.Actions.Follow.gated'): the inbox is one
+queue, so lines pushed before the gate opens are read first.
+
+It pushes no 'Eof': nobody waits on this origin's hang-up (no connection
+belongs to it), and an 'Eof' from it would only add a 'HungUp' report.
+-}
+linesProducer :: Origin -> [String] -> IO () -> Producer
+linesProducer origin ls primed = Producer $ \inbox -> do
+    atomically (mapM_ (writeTChan inbox . Line origin) ls)
+    primed
+
+{- | One argument spelled so that the line protocol's 'tokenize' reads it
+back as exactly that one word, spaces, quotes and backslashes included: it
+is single-quoted, and a single quote inside it closes the quote, is escaped,
+and reopens it. For building a line out of a value the caller holds, such as
+a file name given on the command line.
+-}
+quoteArg :: String -> String
+quoteArg a = "'" <> concatMap esc a <> "'"
+  where
+    esc '\'' = "'\\''"
+    esc c = [c]
 
 {- | 'serveWith', fed by any number of 'Producer's rather than one handle.
 Each runs on its own thread so that the loop is never itself blocked in a
