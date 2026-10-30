@@ -22,7 +22,8 @@ import Options.Applicative
 import qualified Options.Applicative
 import Options.Generic
 import System.Exit (exitFailure)
-import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, stderr, stdin, stdout)
+import Control.Exception (IOException, try)
+import System.IO (BufferMode (..), Handle, IOMode (AppendMode), hPutStrLn, hSetBuffering, openFile, stderr, stdin, stdout)
 
 import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Concurrency as Concurrency
@@ -340,11 +341,17 @@ stdout, in the encoding "Salmon.Reporter.Tagged" defines, in place of the
 binary's own text reporters — so @run up --json | jq@ works, and a client
 of the server @specs\/generic-server.md@ sketches reads the same objects.
 Absent, 'ReportText' hands every report to the reporters the binary
-passed in, untouched.
+passed in, untouched. @run serve --json-log FILE@ selects
+'ReportTextJsonLog': the text reports on the terminal exactly as
+'ReportText' prints them, and the very objects @--json@ would print
+appended to FILE, one per line, flushed per report (so @tail -f FILE | jq@
+follows a loop whose operator reads text). It excludes @--json@; @run
+up@\/@run down@ do not take it.
 -}
 data ReportFormat
     = ReportText
     | ReportJson
+    | ReportTextJsonLog !FilePath
     deriving (Eq, Ord, Generic, Show)
 
 instance FromJSON ReportFormat
@@ -418,7 +425,7 @@ runCommandParser =
                     <> Options.Applicative.help
                         "Start with `autoconverge off`: declarations are recorded but not converged until an explicit `converge`."
                 )
-            <*> reportFormatP
+            <*> (jsonLogP <|> reportFormatP)
             <*> optional
                 ( strOption
                     ( long "follow"
@@ -672,6 +679,13 @@ runCommandParser =
             ( long "override-window"
                 <> Options.Applicative.help "Run disruptive nodes whatever the maintenance windows say."
             )
+    jsonLogP =
+        ReportTextJsonLog
+            <$> strOption
+                ( long "json-log"
+                    <> Options.Applicative.metavar "FILE"
+                    <> Options.Applicative.help "Keep the text report on the terminal and also append every report, as the one-JSON-object-per-line --json prints, to FILE (created if missing, flushed per report). Not with --json."
+                )
     reportFormatP =
         Options.Applicative.flag
             ReportText
@@ -832,7 +846,8 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
         (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly wins overrideWins)) -> do
             reportByLine
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
-            let own = taggedFor fmt
+            jsonLog <- traverse openJsonLog (jsonLogPath fmt)
+            let own = maybe id (\h t -> reportBoth t (Tagged.reportJSONLines h)) jsonLog (taggedFor fmt)
             -- a build without the HTTP server says so before anything is
             -- bound or read, rather than after the socket listener is up
             when (not httpServerAvailable && (isJust http || isJust tcpOptions.tcpBind)) $ do
@@ -1043,6 +1058,26 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     taggedFor fmt = case fmt of
         ReportText -> Tagged.reportTexts serveR r silent Follow.reportText (Tagged.reportNodeLogText stdout)
         ReportJson -> Tagged.reportJSONLines stdout
+        -- the JSON half needs a file opened, which @serve@ adds beside this
+        ReportTextJsonLog _ -> taggedFor ReportText
+
+    jsonLogPath :: ReportFormat -> Maybe FilePath
+    jsonLogPath (ReportTextJsonLog path) = Just path
+    jsonLogPath _ = Nothing
+
+    {- | @--json-log FILE@, opened for appending before anything is bound or
+    read, so a path that cannot be written stops the loop before it starts.
+    The handle stays open for the life of the process: every report is
+    flushed as it is written ('Tagged.reportJSONLines'), so nothing is lost
+    to its not being closed. -}
+    openJsonLog :: FilePath -> IO Handle
+    openJsonLog path = do
+        opened <- try (openFile path AppendMode)
+        case opened of
+            Left err -> do
+                hPutStrLn stderr ("--json-log " <> path <> ": " <> show (err :: IOException))
+                exitFailure
+            Right h -> pure h
 
     -- | The tagged reporter split contravariantly into the two the drivers take.
     reportersOver :: Reporter Tagged.Tagged -> (Reporter Serve.Report, Reporter (UpDown.Report Extension))

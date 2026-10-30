@@ -180,6 +180,7 @@ test-suite salmon-ops-recipes-test
                     , Test.RewriteSpec
                     , Test.ServeEventsSpec
                     , Test.ServeHttpSpec
+                    , Test.ServeJsonLogSpec
                     , Test.ServeModelSpec
                     , Test.ServeSocketSpec
                     , Test.ServeSpec

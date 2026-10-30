@@ -3621,6 +3621,18 @@ Not covered: a node's own `Binary.Report`s (handed a `reportPrint` by the recipe
 text regardless; the lines of a *streamed* command are the exception, they are `FromNode`), and sequence numbers
 (a later milestone).
 
+`run serve --json-log FILE` (`ReportTextJsonLog`) is both: the text reporters on stdout as without
+a flag, and `reportJSONLines` on FILE (opened for appending before anything is bound; an unopenable
+path exits 1) composed beside them with `reportBoth` into the loop's one `Reporter Tagged`, so the
+file holds exactly the objects `--json` would print — node output, follow stream and status sink
+triggers included. It excludes `--json` (an optparse `<|>`, so giving both is a parse error), and
+`run up`/`run down` do not take it; `taggedFor` maps it to the text reporter and `serve` adds the
+file. The handle is never closed (each report is flushed; the process ends with the loop). It is a
+`ReportFormat` constructor rather than a new `RunServe` field so the positional constructor did not
+grow. Run: the parse cases (`Test/ServeJsonLogSpec.hs`) and one `salmon-ops-serve-fixture run serve
+--json-log` by hand (text on stdout, 11 parseable lines in the file, `serve`/`updown` streams).
+Not run: with `--listen`/`--http`, follow or a status sink attached.
+
 **`Salmon.Reporter.UpDownText`** is the readable text reporter for `run up`/`run down`
 (`Reporter (UpDown.Report Extension)`), opt-in: a binary passes `UpDownText.reportText` where it
 passed `reportPrint`, whose output (the derived `Show` of the report and its `Act`) is unchanged,

@@ -81,6 +81,7 @@ import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
 import qualified Test.ServeEventsSpec as ServeEventsSpec
 import qualified Test.ServeHttpSpec as ServeHttpSpec
+import qualified Test.ServeJsonLogSpec as ServeJsonLogSpec
 import qualified Test.ServeModelSpec as ServeModelSpec
 import qualified Test.ServeSocketSpec as ServeSocketSpec
 import qualified Test.ServeSpec as ServeSpec
@@ -221,6 +222,7 @@ main =
             , RewriteSpec.tests
             , ServeEventsSpec.tests
             , ServeHttpSpec.tests
+            , ServeJsonLogSpec.tests
             , ServeModelSpec.tests
             , ServeSocketSpec.tests
             , ServeSpec.tests
