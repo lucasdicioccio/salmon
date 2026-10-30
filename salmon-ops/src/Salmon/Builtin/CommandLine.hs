@@ -4,7 +4,9 @@
 
 module Salmon.Builtin.CommandLine where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Control.Applicative ((<|>))
 import Control.Monad (forM, forM_, void, when)
 import Data.Foldable (traverse_)
@@ -127,7 +129,11 @@ data RunCommand
       -- default, is every version before the flag; see 'Http.Access').
       -- Then the maintenance windows and @--override-window@, as for
       -- 'RunUp' (see 'Serve.serveObservedWith' for what @serve@ does with them).
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool ![Text] !Bool
+      -- Finally @--once@ ('Serve.AfterFirstPass': end after the first
+      -- convergence pass and exit with its verdict) and @--linger SECONDS@
+      -- (keep the listeners answering reads that long before exiting; only
+      -- with @--once@).
+      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool ![Text] !Bool !Bool !(Maybe Int)
     deriving (Eq, Ord, Generic, Show)
 
 {- | The four flags that put the HTTP surface on a network, as typed. What
@@ -467,6 +473,20 @@ runCommandParser =
                 )
             <*> maintenanceWindowsP "Nodes marked disruptive are brought up only inside these windows (repeatable): outside them a pass skips them without counting them converged, `status` shows until when they are held, and a tended node waits for the next opening (a `force` still goes through). Teardowns are not held. DAY is Mon..Sun; a start later than the end crosses midnight; the zone is a fixed offset, UTC by default."
             <*> overrideWindowP
+            <*> switch
+                ( long "once"
+                    <> Options.Applicative.help
+                        "End after the first convergence pass (a declaration's, an explicit `converge`'s or a fetched document's) and exit with its verdict: 0 when it converged (nothing failed, nothing left), 1 when a node failed, was blocked or remains, or when the session ended before any pass ran. Input queued behind the command that ran the pass is not read. Starts with supervision off."
+                )
+            <*> optional
+                ( Options.Applicative.option
+                    Options.Applicative.auto
+                    ( long "linger"
+                        <> Options.Applicative.metavar "SECONDS"
+                        <> Options.Applicative.help
+                            "With --once: after the pass, keep --listen, --http and --http-tcp up this long (reads answer from the final state, commands are refused) before exiting, so a client such as salmon-tui can show the end state."
+                    )
+                )
     tcpOptionsP =
         TcpOptions
             <$> optional
@@ -829,8 +849,23 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly wins overrideWins)) -> do
+        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly wins overrideWins once linger)) -> do
             reportByLine
+            -- like --http-read-only without a listener: a flag that would do
+            -- nothing is refused rather than ignored
+            forM_ linger $ \secs -> do
+                when (not once) $ do
+                    hPutStrLn stderr "--linger needs --once: it is how long a one-pass session stays up after its pass"
+                    exitFailure
+                when (secs < 0) $ do
+                    hPutStrLn stderr "--linger takes a number of seconds, 0 or more"
+                    exitFailure
+            -- the first pass's 'Serve.ConvergeStop', which is what --once
+            -- exits on; later ones (there are none under --once) are ignored
+            verdict <- newIORef Nothing
+            let verdictR = ReporterM $ \rep -> case Serve.attributed rep of
+                    Serve.ConvergeStop ok remaining -> modifyIORef' verdict (<|> Just (ok, remaining))
+                    _ -> pure ()
             limit <- traverse Concurrency.newConcurrencyLimit maxConcurrency
             let own = taggedFor fmt
             -- a build without the HTTP server says so before anything is
@@ -982,14 +1017,15 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         nodeLogR = maybe id (\srv nr -> reportBoth nr (Http.serverNodeLogReporter srv)) mserver (Tagged.nodeLogStream tagged)
                         saidR = maybe id (\listener sr -> reportBoth sr (Socket.listenerNodeLogReporter listener)) mlistener (contramap Serve.attributed nodeLogR)
                     void $
-                        Serve.serveSayingWith
+                        Serve.serveSayingEnding
+                            (if once then Serve.AfterFirstPass else Serve.UntilQuit)
                             (if overrideWins then Window.noWindows else Window.windowsAt (rights (map Window.parseWindow wins)))
                             saidR
                             observe
                             rewrites
                             limit
                             (not noAutoConverge)
-                            serveR'
+                            (if once then reportBoth serveR' verdictR else serveR')
                             r'
                             parseSeedArgs
                             genBase
@@ -997,6 +1033,22 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                             onFetch
                             -- the fetcher's reports also go to /events, as its own stream
                             (producersWith (maybe id (\srv r -> reportBoth r (Http.serverFollowReporter srv)) mserver (Tagged.followStream tagged)) more)
+                    -- the loop is over and its producers are gone, so the
+                    -- listeners answer reads from the final world and
+                    -- refuse commands; they close when these brackets end
+                    forM_ linger $ \secs -> when (once && secs > 0) $ do
+                        hPutStrLn stderr ("serve: lingering " <> show secs <> "s before exiting")
+                        threadDelay (secs * 1000000)
+            when once $ do
+                outcome <- readIORef verdict
+                case outcome of
+                    Just (True, 0) -> hPutStrLn stderr "serve: --once: converged"
+                    Just (ok, remaining) -> do
+                        hPutStrLn stderr ("serve: --once: did not converge (" <> show remaining <> " node(s) left" <> (if ok then ")" else ", including a failure)"))
+                        exitFailure
+                    Nothing -> do
+                        hPutStrLn stderr "serve: --once: the session ended before any convergence pass ran"
+                        exitFailure
         (Query (QueryShow (QuerySelection sel exc) dedupe showDescriptions)) -> do
             void $ withGraph $ \op -> do
                 let cograph = runIdentity (expand op)

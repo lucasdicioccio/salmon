@@ -89,7 +89,7 @@ sinkHostFlag = do
   where
     parsed args =
         case Opt.execParserPure Opt.defaultPrefs (Opt.info CommandLine.runCommandParser mempty) args of
-            Opt.Success (CommandLine.RunServe _ _ _ _ _ _ _ _ _ sink _ _ _ _) -> pure sink
+            Opt.Success (CommandLine.RunServe _ _ _ _ _ _ _ _ _ sink _ _ _ _ _ _) -> pure sink
             Opt.Success other -> assertFailure ("not a serve command: " <> show other)
             Opt.Failure f -> assertFailure ("parse failed: " <> fst (Opt.renderFailure f "salmon"))
             Opt.CompletionInvoked _ -> assertFailure "completion"
