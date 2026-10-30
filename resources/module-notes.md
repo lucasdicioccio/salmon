@@ -2833,6 +2833,38 @@ collects what HAProxy would refuse (duplicate names/ports, names or hosts that s
 `configFiles` throws them rather than write the file. `patroniRouter` is the usual 5000/5001 pair. No `check` beyond
 the unit's, no TLS, no recipe or binary wiring it to `patroniMember` yet; see `Test/HaproxySpec.hs` (Layer 0 only).
 
+`Nodes/ClickHouse.hs` is a ClickHouse server and what lives in it. The server is the official image as a system-scope
+quadlet (`serverOp`/`serverContainer`): a data directory bound at `/var/lib/clickhouse` (created if missing, never
+removed, the entrypoint chowns it), and two drop-ins salmon writes in `serverConfigDir` and binds read-only, which are
+`containerWatched` (a changed one is a restart): `salmon-server.xml` in `config.d` (`renderServerConfig`: listen
+hosts, ports, scalar settings, values XML-escaped, element names refused by `configProblems` at `up`) and
+`salmon-admin.xml` in `users.d` (`renderAdminAccess`). Load-bearing: **the admin drop-in confines `default` to
+loopback** (`<networks replace="replace">` with `::1`/`127.0.0.1`) while giving it `access_management`; the packaged
+`users.xml` lets `default` in from anywhere with an empty password, so a published port without it is an open server.
+Every SQL node runs `clickhouse-client` as that `default`, with no password, through a `Client`: the host's
+(`LocalClient`) or the container's own via `podman exec -i` (`InContainer`, what `serverClient` gives); statements go
+on stdin, `--multiquery`. A remote or password-protected administrator is not covered. `database` is `CREATE
+DATABASE IF NOT EXISTS`, checked on `system.databases`. `userPassFile` reads a pre-provisioned file at `up`/`check`
+(verbatim, trailing newline included, as `Postgres.userPassFile`) and sends `CREATE USER IF NOT EXISTS` then `ALTER
+USER ... IDENTIFIED WITH sha256_hash BY H SALT S` (fresh 16-byte salt each `up`; ClickHouse masks it in
+`system.query_log`), so a rotated file reaches the server; it runs through `setUser`, not `untrackedExec`, because a
+syntax error quotes the statement: the hash and salt are redacted from the reported and thrown output. Its check
+cannot compare hashes (`system.users` shows the scheme only), so it **logs in** as the user with the password in
+`CLICKHOUSE_PASSWORD` (`podman exec -e CLICKHOUSE_PASSWORD`, the value never on an argv): `AUTHENTICATION_FAILED` is
+`Failure`, any other error `Unknown`. `grant` is `GRANT privs ON db.* TO user` (it needs the user and database: `inject` them, as the spec does), checked on `system.grants` rows at
+database level; **a compound privilege (`ALL`, `CREATE`) is stored expanded**, so declare the names `SHOW GRANTS`
+lists or the check never reads satisfied (seen on 25.8: `GRANT ALL ON db.*` stored as some forty rows). Nothing here
+drops or revokes: `down` of database, user and grant is nothing, the server's `down` stops the container. Refs are
+keyed on `clientKey` (container or `localhost:PORT`) plus the name, so two servers on one box do not collide. Run:
+Layer 0 (`Test/ClickHouseSpec.hs`: rendering, quoting, the hash against `sha256sum`, the statements, the verdicts,
+the quadlet's lines) and Layer 2 against `docker.io/clickhouse/clickhouse-server:25.8` under rootless podman (`podman
+run` with both drop-ins mounted, not the quadlet): the three nodes up, all three checks `Success`, a second pass
+applying nothing, a rotated password file read `Failure` then put back by `up`, `default`'s allowed hosts read back as
+`localhost` only, the hash absent from `query_log`. ClickHouse counts every address of its machine as local, so a
+client inside the container on its own address is let in; a refused remote `default` was not tried. Not run: `serverOp` as a system quadlet (its readiness probe
+included), `LocalClient` against a packaged install, a non-default TCP port. For PeerDB (`3c21e832`): the target user
+is `userPassFile` + `grant` on the target database; PeerDB itself reads the same password file.
+
 `Debian.Package.deb`/`debs` depend on an `aptIndex` node (same module), which is what makes them work on a
 machine whose index was never refreshed (a fresh cloud image: `apt-get install` fails with "no installation
 candidate" for some packages and not others). Its `check` is `Success` when the packages are already

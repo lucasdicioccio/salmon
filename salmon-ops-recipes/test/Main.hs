@@ -55,6 +55,7 @@ import qualified Test.PostgresBackupSpec as PostgresBackupSpec
 import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
+import qualified Test.ClickHouseSpec as ClickHouseSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
 import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
@@ -199,6 +200,7 @@ main =
             , PodmanSpec.tests
             , PostgresBackupSpec.tests
             , PostgresClusterSpec.tests
+            , ClickHouseSpec.tests
             , PgBouncerSpec.tests
             , HaproxySpec.tests
             , EtcdSpec.tests
