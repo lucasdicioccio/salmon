@@ -47,26 +47,26 @@ library
                     Migrator.Spec
 
     build-depends:    base >=4.16.3.0 && <4.22
-                    , aeson
-                    , async
-                    , brick
-                    , bytestring
-                    , http-client
-                    , containers
-                    , directory
-                    , filepath
-                    , layoutz-hs
-                    , network
-                    , optparse-applicative
-                    , optparse-generic
-                    , process
+                    , aeson ^>=2.3.2.0
+                    , async ^>=2.2.6
+                    , brick ^>=3.0
+                    , bytestring ^>=0.12.2.0
+                    , http-client ^>=0.7.19
+                    , containers ^>=0.7
+                    , directory ^>=1.3.8.5
+                    , filepath ^>=1.5.4.0
+                    , layoutz-hs ^>=0.1.0.0
+                    , network ^>=3.2.9.0
+                    , optparse-applicative ^>=0.19.0.0
+                    , optparse-generic ^>=1.5.3
+                    , process ^>=1.6.26.1
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops ^>=0.2.0.0
                     , salmon-ops-recipes ^>=0.2.0.0
-                    , text
-                    , time
-                    , vty
-                    , unix
+                    , text ^>=2.1.3
+                    , time ^>=1.12.2
+                    , vty ^>=6.6
+                    , unix ^>=2.8.7.0
     ghc-options:   -Wall
     hs-source-dirs:   src
     default-language: Haskell2010
@@ -198,24 +198,24 @@ test-suite salmon-apps-test
                     , Test.ReportInboundSpec
                     , Test.ReportSpec
     build-depends:    base >=4.16.3.0 && <4.22
-                    , QuickCheck
-                    , aeson
-                    , bytestring
-                    , directory
-                    , filepath
-                    , containers
-                    , process
-                    , network
+                    , QuickCheck ^>=2.19.0.0
+                    , aeson ^>=2.3.2.0
+                    , bytestring ^>=0.12.2.0
+                    , directory ^>=1.3.8.5
+                    , filepath ^>=1.5.4.0
+                    , containers ^>=0.7
+                    , process ^>=1.6.26.1
+                    , network ^>=3.2.9.0
                     , salmon-apps
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops-recipes ^>=0.2.0.0
                     , salmon-ops ^>=0.2.0.0
-                    , tasty
-                    , tasty-hunit
-                    , tasty-quickcheck
-                    , temporary
-                    , text
-                    , time
+                    , tasty ^>=1.5.5
+                    , tasty-hunit ^>=0.10.2
+                    , tasty-quickcheck ^>=0.11.1
+                    , temporary ^>=1.3
+                    , text ^>=2.1.3
+                    , time ^>=1.12.2
     ghc-options:      -Wall
     default-language: Haskell2010
     default-extensions: OverloadedStrings

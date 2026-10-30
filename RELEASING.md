@@ -16,10 +16,12 @@ at 0.1.0.0). It is still sdisted and built from its tarball, since the others bu
 2. Run `scripts/release-hackage.sh --set-bounds`. It rewrites every internal dependency to
    `^>=` that package's own version (e.g. `salmon-core ^>=0.1.0.0`, `salmon-ops ^>=0.2.0.0`);
    review and commit.
-3. Commit everything. The script refuses to run if tracked files are modified.
-4. Make sure `cabal check` is clean of errors in each package (Hackage rejects a package with
+3. Check the external bounds (see below) still admit what `cabal build all` resolves, and
+   widen any that a dependency's new major version has outgrown once the build passes with it.
+4. Commit everything. The script refuses to run if tracked files are modified.
+5. Make sure `cabal check` is clean of errors in each package (Hackage rejects a package with
    no `license`, `synopsis`/`description`, or an upper bound on `base`).
-5. Credentials: either rely on cabal's own configured credentials (nothing to do if
+6. Credentials: either rely on cabal's own configured credentials (nothing to do if
    `cabal upload` already works for you), or create a Hackage API token (hackage.haskell.org,
    account page) and keep it in the environment as `HACKAGE_TOKEN`, or in a file passed with
    `--token-file FILE`. A token, when given, wins over cabal's credentials. The confirmation
@@ -84,6 +86,24 @@ scripts/release-hackage.sh --docs-only             # same, then publishes the do
 `--docs-only` publishes the docs (they replace any existing ones), each package at its own version;
 `--packages` narrows it; `--dry-run` is the way to look first.
 
+## External bounds
+
+Every external `build-depends` of the four released packages, in every component (library,
+executables, test suites, benchmark), carries a PVP major-version bound: `^>=` the version
+`cabal build all` resolved on GHC 9.10.3 when the bound was last set, so the lower bound is
+what was built and the upper bound is that version's next major (`aeson ^>=2.3.2.0` is
+`>=2.3.2.0 && <2.4`). `base` keeps its explicit range. Internal dependencies are `--set-bounds`'s
+business, above. `salmon-ops-recipes-experimental` is not released and has no bounds.
+
+When a dependency's next major is out: build with it (`--allow-newer=PKG`), and if that passes,
+widen the bound to an explicit range (`>=OLD && <NEXT`) or move the `^>=` to the new version.
+`cabal check` warns of any external dependency left without an upper bound.
+
+These bounds reach Hackage only with a new version (or a Hackage metadata revision); the
+versions already published there were uploaded without them.
+
 ## Known gaps
 
 - There is no changelog check; write `CHANGELOG.md` entries before running.
+- Nothing checks that external bounds still admit the newest Hackage majors; a bound that
+  has fallen behind shows only as a solver failure for someone on a newer index.
