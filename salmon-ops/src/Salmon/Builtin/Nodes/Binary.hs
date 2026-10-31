@@ -7,6 +7,7 @@ module Salmon.Builtin.Nodes.Binary (
     withBinary,
     withBinaryStdin,
     withBinaryStdinAtUp,
+    withBinaryArgAtUp,
     untrackedExec,
     untrackedExecOutput,
 
@@ -191,6 +192,21 @@ withBinaryStdinAtUp t cmd arg consumeIO =
         fconsume f =
             consumeIO (\stdin r -> f stdin (nodeLogTap plainLines (opAct ret) (contramap (Requested (opAct ret)) r)))
         ret = tracking t mk arg fconsume
+     in ret
+
+{- | 'withBinary' for a command whose argument can only be made at @up@
+time: the enclosed 'Op' is handed a runner taking the argument, and the
+dependency on the binary is the same as 'withBinary''s. For a path chosen
+when the node is applied (a fresh temporary file the command writes into,
+see "Salmon.Builtin.Nodes.Podman".@pushImageId@), which a value fixed at
+graph build cannot carry. Output is 'captured', stdin is empty.
+-}
+withBinaryArgAtUp :: Track' (Binary x) -> Command x arg -> ((arg -> Reporter Report -> IO ()) -> Op) -> Op
+withBinaryArgAtUp t cmd consumeIO =
+    let mk () = (\a -> untrackedExecWith captured cmd a "", Binary)
+        fconsume f =
+            consumeIO (\a r -> f a (nodeLogTap plainLines (opAct ret) (contramap (Requested (opAct ret)) r)))
+        ret = tracking t mk () fconsume
      in ret
 
 {- | Sends the lines of a streamed command to "Salmon.Builtin.NodeLog" under

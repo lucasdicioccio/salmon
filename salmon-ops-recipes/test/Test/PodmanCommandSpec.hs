@@ -45,6 +45,7 @@ tests =
         , testGroup "login renewal" loginTests
         , testGroup "runContainer's check" runCheckTests
         , testGroup "imageHasId" imageIdTests
+        , testGroup "pushImageId" pushImageIdTests
         ]
 
 {- | 'Podman.loginExpiring' and 'Podman.pushLoggingIn', as far as they go
@@ -391,3 +392,91 @@ imageIdTests =
 
     genAnswer :: Gen (Maybe (ExitCode, Text))
     genAnswer = oneof [pure Nothing, (\c s -> Just (c, s)) <$> elements [ExitSuccess, ExitFailure 1, ExitFailure 125] <*> elements ["", hexA, "junk"]]
+
+{- | 'Podman.pushImageId', as far as it goes without a registry: the argv
+(the source is the id, the digest file is passed only when chosen at @up@),
+the node's 'Ref' (that of 'Podman.push') and notes, and the reading of the
+digest file after a push. The push itself is in @Test.PodmanSpec@.
+-}
+pushImageIdTests :: [TestTree]
+pushImageIdTests =
+    [ testCase "with the default options: `podman push ID DEST`, nothing else" $
+        assertEqual
+            ""
+            (RawCommand "podman" ["push", Text.unpack hexA, Text.unpack dest])
+            (argv Podman.defaultPushOptions Nothing)
+    , testCase "an auth file, no TLS verification and a digest file go before the two references" $
+        assertEqual
+            ""
+            ( RawCommand
+                "podman"
+                ["push", "--authfile", "/etc/app/auth.json", "--tls-verify=false", "--digestfile", "/tmp/d", Text.unpack hexA, Text.unpack dest]
+            )
+            (argv Podman.defaultPushOptions{Podman.pushAuthFile = Just authfile, Podman.pushTlsVerify = False} (Just "/tmp/d"))
+    , testCase "the expected digest is not on the command line: it is compared after" $
+        assertEqual
+            ""
+            (argv Podman.defaultPushOptions (Just "/tmp/d"))
+            (argv Podman.defaultPushOptions{Podman.pushExpectedDigest = Just digestA} (Just "/tmp/d"))
+    , testCase "the same effect site as a push of the destination, on the same auth file" $ do
+        let byTag = Podman.push silent ignoreTrack (Just authfile) dest
+            byId = Podman.pushImageId silent ignoreTrack Podman.defaultPushOptions{Podman.pushAuthFile = Just authfile} imageA dest
+        assertEqual "" (refOf byTag) (refOf byId)
+        assertBool "" (notesOf byTag /= notesOf byId)
+    , testCase "the notes carry the id, then the expected digest and an unverified registry when there are" $ do
+        assertEqual "" (Just ["image id: " <> hexA]) (notesOf (pushA Podman.defaultPushOptions))
+        assertEqual
+            ""
+            (Just ["image id: " <> hexA, "expected digest: " <> Podman.getManifestDigest digestA, "registry TLS not verified"])
+            (notesOf (pushA Podman.defaultPushOptions{Podman.pushExpectedDigest = Just digestA, Podman.pushTlsVerify = False}))
+    , testCase "two images pushed to one destination are one effect site, described differently" $ do
+        let other = either (error . Text.unpack) id (Podman.mkImageId (Text.replicate 8 "ffff0000"))
+            a = pushA Podman.defaultPushOptions
+            b = Podman.pushImageId silent ignoreTrack Podman.defaultPushOptions other dest
+        assertEqual "" (refOf a) (refOf b)
+        assertBool "" (notesOf a /= notesOf b)
+    , testCase "a digest reads with sha256:, in any case, with space around; a bare or short one is refused" $ do
+        assertEqual "padded" (Right digestA) (Podman.mkManifestDigest ("  sha256:" <> hexB <> "\n"))
+        assertEqual "upper case" (Right digestA) (Podman.mkManifestDigest ("SHA256:" <> Text.toUpper hexB))
+        assertBool "bare hex, an image id's shape" (isLeft (Podman.mkManifestDigest hexB))
+        assertBool "short" (isLeft (Podman.mkManifestDigest ("sha256:" <> Text.take 12 hexB)))
+        assertBool "another algorithm" (isLeft (Podman.mkManifestDigest ("sha512:" <> hexB)))
+        assertBool "empty" (isLeft (Podman.mkManifestDigest ""))
+    , testCase "after the push: no expectation is the digest pushed" $
+        assertEqual "" (Right digestA) (Podman.verifyPushedDigest dest Nothing ("sha256:" <> hexB))
+    , testCase "after the push: the expected digest is the digest pushed" $
+        assertEqual "" (Right digestA) (Podman.verifyPushedDigest dest (Just digestA) ("sha256:" <> hexB))
+    , testCase "after the push: another digest names the destination, the one expected and the one pushed" $
+        assertEqual
+            ""
+            (Left (Podman.PushedDigestMismatch dest digestB digestA))
+            (Podman.verifyPushedDigest dest (Just digestB) ("sha256:" <> hexB))
+    , testCase "after the push: an empty or unreadable digest file fails the node, expectation or not" $ do
+        assertEqual "" (Left (Podman.PushDigestUnreadable dest "")) (Podman.verifyPushedDigest dest Nothing "")
+        assertEqual "" (Left (Podman.PushDigestUnreadable dest "junk")) (Podman.verifyPushedDigest dest (Just digestA) "junk")
+    , testProperty "a push is accepted exactly when no digest is expected or the expected one was pushed" $
+        forAll (oneof [pure Nothing, Just <$> genDigest]) $ \mExpected ->
+            forAll genDigest $ \pushed ->
+                let accepted = either (const False) (const True) (Podman.verifyPushedDigest dest mExpected (Podman.getManifestDigest pushed))
+                 in accepted === maybe True (== pushed) mExpected
+    , testProperty "any digest podman writes reads back as itself" $
+        forAll genDigest $ \d -> Podman.mkManifestDigest (Podman.getManifestDigest d) === Right d
+    ]
+  where
+    dest = "localhost:5000/app:1"
+    authfile = Podman.AuthFile "/etc/app/auth.json"
+    hexA = Text.replicate 8 "0123abcd"
+    hexB = Text.replicate 8 "89ef4567"
+    imageA = either (error . Text.unpack) id (Podman.mkImageId hexA)
+    digestA = either (error . Text.unpack) id (Podman.mkManifestDigest ("sha256:" <> hexB))
+    digestB = either (error . Text.unpack) id (Podman.mkManifestDigest ("sha256:" <> Text.replicate 8 "aaaa5555"))
+    pushA opts = Podman.pushImageId silent ignoreTrack opts imageA dest
+    argv opts mDigestFile = cmdspec (prepare Podman.podmanCommand (Podman.pushImageIdCommand opts imageA dest mDigestFile))
+    refOf o = fmap (\act -> act.extension.ref) (opAct o)
+    notesOf o = fmap (\act -> act.extension.notes) (opAct o)
+    isLeft = either (const True) (const False)
+
+    genDigest :: Gen Podman.ManifestDigest
+    genDigest =
+        either (error . Text.unpack) id . Podman.mkManifestDigest . ("sha256:" <>) . Text.pack
+            <$> QC.vectorOf 64 (elements "0123456789abcdef")
