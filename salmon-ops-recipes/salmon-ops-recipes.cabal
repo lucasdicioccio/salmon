@@ -155,6 +155,7 @@ test-suite salmon-ops-recipes-test
                     , Test.ClickHouseSpec
                     , Test.PeerDBSpec
                     , Test.PgBouncerSpec
+                    , Test.ClickHouseMigrationsSpec
                     , Test.HaproxySpec
                     , Test.EtcdSpec
                     , Test.PatroniSpec
