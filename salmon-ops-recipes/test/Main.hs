@@ -58,6 +58,7 @@ import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.ClickHouseSpec as ClickHouseSpec
 import qualified Test.PeerDBSpec as PeerDBSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
+import qualified Test.ClickHouseMigrationsSpec as ClickHouseMigrationsSpec
 import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
 import qualified Test.PatroniSpec as PatroniSpec
@@ -207,6 +208,7 @@ main =
             , ClickHouseSpec.tests
             , PeerDBSpec.tests
             , PgBouncerSpec.tests
+            , ClickHouseMigrationsSpec.tests
             , HaproxySpec.tests
             , EtcdSpec.tests
             , PatroniSpec.tests

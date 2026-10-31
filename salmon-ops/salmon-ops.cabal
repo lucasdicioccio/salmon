@@ -127,6 +127,7 @@ library
                    , Salmon.Builtin.Nodes.PeerDB
                    , Salmon.Builtin.Nodes.ClickHouse
                    , Salmon.Builtin.Nodes.ClipCpp
+                   , Salmon.Builtin.Nodes.ClickHouse.Migrations
                    , Salmon.Builtin.Nodes.LlamaServer
                    , Salmon.Builtin.Nodes.PgVector
                    , Salmon.Builtin.Nodes.PgTextSearch

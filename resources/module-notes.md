@@ -2993,6 +2993,33 @@ rotated peer password, a peer with TLS, a mirror that PeerDB itself fails while 
 table and `CREATE` on the database (PeerDB's `_peerdb_internal` schema) are granted by hand there: no node declares
 them yet.
 
+`Nodes/ClickHouse/Migrations.hs` applies ClickHouse schema migrations: a directory's `.sql` files, ordered by file
+name, each applied once and recorded in a ledger table `salmon_migrations` (`name`, `checksum`, `applied_at`;
+`MergeTree ORDER BY name`) in a database the caller names (`default` always exists; another is a prerequisite the
+caller passes in, e.g. `ClickHouse.database`). Planning is in the seed stage (`loadMigrationsDir`, pure
+`planMigrations`): the SHA-256 of each file is computed there and carried in the `Migration` and in the node's
+`notes`, so an edited file is a changed representative. One node per file, each `inject`ing the previous one, the
+first the ledger node. **A recorded migration is never re-applied**: recorded with the planned checksum it is done
+(check `Success`, `up` nothing); recorded with another checksum the check is a `Failure` naming both and **`up`
+throws `MigrationChecksumMismatch` and sends nothing**; unrecorded, `up` re-hashes the file (an edit after `config`
+throws `MigrationFileChanged`), sends it on `clickhouse-client --multiquery`'s stdin (`adminRun`), then inserts the
+row. Two client calls, no transaction (ClickHouse has none for DDL): a file that fails part-way, or whose row was not
+written, runs again in full next pass, so migrations must tolerate a rerun (`IF NOT EXISTS`). A missing ledger or
+database reads as nothing applied (`UNKNOWN_TABLE`/`UNKNOWN_DATABASE`), any other error `Unknown`. Rows for files
+not in the plan are ignored. This is stricter than the Postgres migrator (`SreBox.PostgresMigrations`), which records
+nothing and re-runs every script each pass (no `check`). Cluster hook: `migrationsOnCluster` is a clause supplied by
+the caller (``Just " ON CLUSTER `main`"``, what the cluster module's `onClusterClause` renders), added to the
+ledger's `CREATE TABLE` and substituted for the token `{{on_cluster}}` in files (removed when `Nothing`); the
+checksum is of the file as written. With a cluster the ledger is a local table on every member and rows are written
+only on the server salmon talks to. Nothing renders differently for existing declarations (a new module). Run:
+Layer 0 (`Test/ClickHouseMigrationsSpec.hs`: ordering and filtering, refused names, checksums against `sha256sum`,
+the SQL with and without the clause, the ledger's readings, the graph's edges) and Layer 2 against
+`clickhouse-server:25.8` under rootless podman (14s, image cached): the ledger in a missing database read as
+pending, two files applied in order (one opening with a comment line, one statement with no trailing `;`), every
+check `Success`, a second pass applying nothing, a third file applied alone, an applied file edited read `Failure`
+and refused by `up` with nothing run. Not run: the cluster clause against a cluster (Layer 0 only), a migration
+failing part-way, a `LocalClient`, a `run up` through a binary (no app wires it yet).
+
 `Debian.Package.deb`/`debs` depend on an `aptIndex` node (same module), which is what makes them work on a
 machine whose index was never refreshed (a fresh cloud image: `apt-get install` fails with "no installation
 candidate" for some packages and not others). Its `check` is `Success` when the packages are already
