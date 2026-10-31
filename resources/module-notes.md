@@ -2876,6 +2876,44 @@ is `userPassFile` + `grant` on the target database; PeerDB itself reads the same
 `access_object = S3`) was added for PeerDB, which refuses a ClickHouse peer whose user may not read S3 (it stages
 rows there).
 
+`Nodes/ClickHouse/Backup.hs` is backups as files with ClickHouse's own `BACKUP`/`RESTORE`, on a schedule, shipped
+to GCS. It is its own module and edits nothing in `Nodes/ClickHouse.hs`: a server that takes backups is declared
+with `backupServerOp` instead of `serverOp`, which is the same quadlet plus a third drop-in (`salmon-backups.xml`,
+fixed text: a local disk `backups` at `/var/lib/clickhouse-backups/`, the only `allowed_disk`/`allowed_path`),
+bound read-only and watched, and the host backup directory bound read-write. That directory is `backupDirectory`
+(`FS.sharedDir`: created, never removed); its bind does not create it. The image's entrypoint chowns every disk
+path of the configuration to `clickhouse` at start, so the files are that user's, mode `0640` (seen on 25.8).
+A backup is a run of a rendered `/bin/sh` script (`renderBackupScript`) by a system-scope `Systemd.Job`
+(`backupJob`: stamp next to the script, run as root, who can read and prune the container user's files):
+`BACKUP DATABASE ... TO Disk('backups', 'NAME-YYYYMMDDTHHMMSSZ.zip')` through the server's client, the statement
+on its stdin; then, with a `GcsTarget`, `gcloud storage rsync` of this plan's files only (an `--exclude` of
+everything not matching `backupFileRegex`), argv rendered by `Storage.storageCommand`, **never deleting in the
+bucket** (retention there is `Storage.bucketLifecycle`'s); then, with `planKeepLocal`, the oldest local files of
+this plan removed. `set -eu` stops a failed backup from shipping or pruning. `scheduledBackup` is the timer
+(`Job.scheduledJob`) under `Job.completedRun` on that job, whose completion also counts the script as written: the
+node that says how the last run went, and the pass that schedules the first backup takes it. GCS credentials are
+gcloud's own or a pre-provisioned file whose **path** is exported as `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`;
+salmon never reads it. `restore` puts one database of one file back (optionally `AS` another name), from the
+directory or fetched first with `gcloud storage cp` (`Storage.ObjectCopy`, added for it) to `FILE.download` and
+renamed. **It is guarded by identity**: a restored database carries the comment `salmon-restore: FILE database
+DB` (`ALTER DATABASE ... MODIFY COMMENT`, accepted by 25.8); the check is `Success` only for that comment; `up`
+restores into an absent database, drops then restores an empty one (no table), does nothing for its own restore,
+and **refuses a database holding tables that is not this restore** unless the declaration sets
+`restoreMayDiscard` (the operator's flag, as `pair_may_discard`). A `RESTORE` over an existing database fails in
+ClickHouse anyway (`CANNOT_RESTORE_DATABASE`, a different definition), which is why the flag's path is a `DROP
+DATABASE ... SYNC` first. Run: Layer 0 (`Test/ClickHouseBackupSpec.hs`: the drop-in, the quadlet, the script with
+and without GCS, the pattern through `grep -E`, the job, the restore SQL, the readings and decisions, the
+`gcloud storage cp` argv) and Layer 2 against `clickhouse-server:25.8` under rootless podman (`podman run` with
+the three drop-ins and the directory, not the quadlet): the rendered script run three times as root of podman's
+user namespace (`podman unshare sh SCRIPT`, standing for the job's root), two files kept; the database dropped,
+`restore` up, row counts equal, check `Success`, a second pass applying nothing; another file over data written
+since refused (count unchanged), then replaced with the flag; restores `AS` an absent and into an empty
+database. Not run: the job and timer under systemd (`Systemd.Job` has its own Layer 2), `backupServerOp` as a
+system quadlet, anything against GCS (shipping and fetching are Layer 0 only: no bucket reachable from the test
+host), a restore fetched from GCS, `LocalClient`. Not covered: incremental backups (`base_backup`), and **`ON
+CLUSTER`** (left for after the cluster nodes land: a cluster backup to a local disk writes on each host's own
+disk, which wants its own design), a remote or password-protected administrator.
+
 CDC from PostgreSQL into ClickHouse through PeerDB is two modules. `Nodes/Postgres/Logical.hs` is the source's
 side, as the `postgres` OS user like the rest of `Nodes/Postgres.hs`: `logicalWalLevel` (`ALTER SYSTEM SET wal_level
 = logical` + reload, checked on what the files say, falling back to the running value; the restart is

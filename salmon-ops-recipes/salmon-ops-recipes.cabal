@@ -153,6 +153,7 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresReplicationSpec
                     , Test.PostgresClusterSpec
                     , Test.ClickHouseSpec
+                    , Test.ClickHouseBackupSpec
                     , Test.PeerDBSpec
                     , Test.PgBouncerSpec
                     , Test.HaproxySpec
