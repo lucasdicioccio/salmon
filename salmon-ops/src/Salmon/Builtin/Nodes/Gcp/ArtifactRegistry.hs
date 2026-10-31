@@ -12,6 +12,7 @@ module Salmon.Builtin.Nodes.Gcp.ArtifactRegistry (
 
     -- * Pulling from a GCE instance
     dockerRegistry,
+    dockerImageReference,
     instanceLogin,
     instanceLoginWith,
     InstanceToken (..),
@@ -132,6 +133,32 @@ configureDockerAuth r gcloudTrack project region =
 -- | The docker-format registry of a region, as a podman 'Podman.Registry'.
 dockerRegistry :: Region -> Podman.Registry
 dockerRegistry region = Podman.Registry (region.regionName <> "-docker.pkg.dev")
+
+{- | The reference of an image in a docker-format repository,
+@LOCATION-docker.pkg.dev\/PROJECT\/REPO\/IMAGE:TAG@: what to tag a build
+with for 'Podman.push', or the destination of 'Podman.pushImageId', which
+pushes a local image by its id (so the tag cannot move between a check and
+the push) and can compare the manifest digest it wrote with an expected one.
+Log in first with 'dockerRegistry' as the registry ('Podman.login' with
+@oauth2accesstoken@, or 'instanceLogin' on an instance).
+
+A repository of another format has no docker reference and is refused.
+-}
+dockerImageReference :: ArtifactRepo -> Text -> Text -> Either Text Podman.TagName
+dockerImageReference repo image tag
+    | repo.repoFormat /= Docker =
+        Left ("not a docker repository: " <> repo.repoName <> " is " <> renderRepoFormat repo.repoFormat)
+    | Text.null image || Text.null tag =
+        Left "an image reference needs an image name and a tag"
+    | otherwise =
+        Right $
+            Text.intercalate
+                "/"
+                [ Podman.getRegistry (dockerRegistry repo.repoLocation)
+                , repo.repoProject.projectId
+                , repo.repoName
+                , image <> ":" <> tag
+                ]
 
 {- | A GCE instance logging podman in to its region's registry /as the
 instance's own service account/.

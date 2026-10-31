@@ -13,6 +13,7 @@ import Salmon.Reporter
 
 import Control.Monad (void, when)
 import qualified Data.ByteString.Char8 as ByteString
+import Data.Char (isHexDigit)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -21,10 +22,11 @@ import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import System.IO.Error (catchIOError)
 import Text.Read (readMaybe)
 
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception, bracket, throwIO)
 import GHC.IO.Exception (ExitCode (..))
 import GHC.IO.Handle (Handle, hClose)
-import System.Directory (doesFileExist, removeFile)
+import System.IO (openTempFile)
+import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Process (ProcessHandle, StdStream (CreatePipe), waitForProcess)
 import System.Process.ByteString (readCreateProcessWithExitCode)
@@ -35,6 +37,9 @@ data Report
     = PullImage !Registry !Image !Binary.Report
     | BuildImage !FilePath !TagName !Binary.Report
     | PushImage !(Maybe AuthFile) !TagName !Binary.Report
+    | PushImageById !(Maybe AuthFile) !ImageId !TagName !Binary.Report
+    | -- | The manifest digest a 'pushImageId' push wrote at the destination.
+      PushedImageDigest !TagName !ManifestDigest
     | LoginRegistry !AuthFile !Registry !Username
     | LogoutRegistry !AuthFile !Registry !Binary.Report
     | RunContainer !Registry !Image !ContainerName !RunOptions !Binary.Report
@@ -217,6 +222,117 @@ buildNotes :: BuildOptions -> [Text]
 buildNotes opts =
     maybe [] (\c -> ["build context: " <> Text.pack c]) opts.buildContext
         <> maybe [] (\t -> ["target stage: " <> t]) opts.buildTarget
+
+{- | The id of an image in the local store, as @podman image inspect
+--format {{.Id}}@ prints it: 64 lowercase hex digits, no @sha256:@ prefix.
+
+'mkImageId' is the only way to make one from text, so a declared id is
+always in the form podman prints and the comparison is plain equality.
+-}
+newtype ImageId = ImageId {getImageId :: Text}
+    deriving (Eq, Ord, Show)
+
+{- | Reads an image id as podman, @podman images --no-trunc@ or a build log
+may print it: surrounding space and a @sha256:@ prefix are dropped, case is
+ignored. Anything that is not then 64 hex digits is refused, a short id
+among them: it would never equal the full id the check reads, and a check
+that can never succeed is better refused where it is declared.
+-}
+mkImageId :: Text -> Either Text ImageId
+mkImageId raw
+    | Text.length hex == 64 && Text.all isHexDigit hex = Right (ImageId hex)
+    | otherwise = Left ("not a full image id (64 hex digits): " <> raw)
+  where
+    stripped = Text.toLower (Text.strip raw)
+    hex = maybe stripped id (Text.stripPrefix "sha256:" stripped)
+
+-- | What the local store says about a tag.
+data ImageState
+    = -- | @podman image exists@ said no (exit 1).
+      ImageAbsent
+    | -- | The id @podman image inspect@ printed.
+      ImagePresent !ImageId
+    | -- | podman did not answer (an exit other than 0\/1, an inspect that failed, an id that does not read as one).
+      ImageUnanswered
+    deriving (Eq, Show)
+
+{- | @podman image exists TAG@, then, if it does,
+@podman image inspect --format {{.Id}} TAG@. Asks the local store only:
+nothing reaches a registry. Also what a dry run reads to record the ids it
+will later declare with 'imageHasId'.
+-}
+probeImageId :: TagName -> IO ImageState
+probeImageId tagname = do
+    (existsCode, _, _) <- readCreateProcessWithExitCode (proc "podman" (imageExistsArgs tagname)) ""
+    case existsCode of
+        ExitSuccess -> do
+            (code, out, _) <- readCreateProcessWithExitCode (proc "podman" (imageIdArgs tagname)) ""
+            pure (imageStateFrom existsCode (Just (code, Text.pack (ByteString.unpack out))))
+        _ -> pure (imageStateFrom existsCode Nothing)
+
+imageExistsArgs :: TagName -> [String]
+imageExistsArgs tagname = ["image", "exists", Text.unpack tagname]
+
+imageIdArgs :: TagName -> [String]
+imageIdArgs tagname = ["image", "inspect", "--format", "{{.Id}}", Text.unpack tagname]
+
+{- | The state from the two commands' answers: @exists@'s exit code, and
+@inspect@'s exit code and output when it was asked (only after @exists@ said 0).
+-}
+imageStateFrom :: ExitCode -> Maybe (ExitCode, Text) -> ImageState
+imageStateFrom (ExitFailure 1) _ = ImageAbsent
+imageStateFrom ExitSuccess (Just (ExitSuccess, out)) =
+    either (const ImageUnanswered) ImagePresent (mkImageId out)
+imageStateFrom _ _ = ImageUnanswered
+
+{- | The verdict on a tag against the id it is declared to have: that id is
+in place; another id, or no image, is a 'Failure' naming both; a podman
+that cannot answer is 'Unknown'.
+-}
+interpretImageId :: TagName -> ImageId -> ImageState -> CheckResult
+interpretImageId tagname expected st = case st of
+    ImagePresent actual
+        | actual == expected -> Success
+        | otherwise -> Failure (tagname <> " is image " <> getImageId actual <> ", not " <> getImageId expected)
+    ImageAbsent -> Failure ("no local image tagged " <> tagname <> " (expected " <> getImageId expected <> ")")
+    ImageUnanswered -> Unknown
+
+-- | 'imageHasId''s @up@ found the tag is not the declared image (or podman could not say).
+data ImageIdMismatch = ImageIdMismatch !TagName !ImageId !ImageState
+    deriving (Show)
+
+instance Exception ImageIdMismatch
+
+{- | Asserts that the local image tagged 'TagName' has the given 'ImageId'.
+It changes nothing: it is a gate. A @push@ (or anything else) that must
+only ever ship the image a dry run looked at depends on it, and is
+@Blocked@ when the tag has moved since.
+
+The @check@ is 'probeImageId' read by 'interpretImageId'. The @up@ probes
+again and throws 'ImageIdMismatch' unless the id is the declared one, so a
+tag with another id, no image, or a podman that cannot answer all fail the
+node and block its dependants; it never builds, pulls or retags. @down@ is
+nothing.
+
+The 'ref' is the tag alone (@podman-image-id@): a tag has one id at a time,
+so two declarations asserting different ids for one tag are a collision,
+and the id is in 'notes' so the two are seen to differ. Declared beside a
+'buildImage' of the same tag, it must depend on the build to be meaningful:
+the order is build, then this, then the push.
+-}
+imageHasId :: TagName -> ImageId -> Op
+imageHasId tagname expected =
+    op "podman-image-id" nodeps $ \actions ->
+        actions
+            { help = "checks that " <> tagname <> " is the expected local image"
+            , notes = ["image id: " <> getImageId expected]
+            , ref = mkRef "podman-image-id" tagname
+            , check = interpretImageId tagname expected <$> probeImageId tagname
+            , up = do
+                st <- probeImageId tagname
+                when (st /= ImagePresent expected) $
+                    throwIO (ImageIdMismatch tagname expected st)
+            }
 
 {- | Logs in to a registry, writing credentials to an explicit 'AuthFile'
 rather than the ambient default (see 'AuthFile'’s own note on why that
@@ -481,6 +597,135 @@ not attempted with whatever the auth file held before.
 loggingInThen :: IO () -> IO () -> IO ()
 loggingInThen authenticate act = authenticate >> act
 
+{- | A manifest digest as a registry names it and as @podman push
+--digestfile@ writes it: @sha256:@ and 64 lowercase hex digits.
+
+It is /not/ an 'ImageId': the id is the digest of the image's config, the
+manifest digest that of the manifest the push wrote, which also depends on
+the layers' compression and the manifest format. Only 'mkManifestDigest'
+makes one from text.
+-}
+newtype ManifestDigest = ManifestDigest {getManifestDigest :: Text}
+    deriving (Eq, Ord, Show)
+
+{- | Reads a manifest digest as a registry, @skopeo@ or a digest file may
+print it: surrounding space is dropped and case ignored; @sha256:@ is
+required. Anything else is refused where it is declared (a bare 64-hex
+string is refused too: it is more likely an image id passed by mistake,
+which would never equal what a push writes).
+-}
+mkManifestDigest :: Text -> Either Text ManifestDigest
+mkManifestDigest raw =
+    case Text.stripPrefix "sha256:" stripped of
+        Just hex
+            | Text.length hex == 64 && Text.all isHexDigit hex -> Right (ManifestDigest stripped)
+        _ -> Left ("not a manifest digest (sha256: and 64 hex digits): " <> raw)
+  where
+    stripped = Text.toLower (Text.strip raw)
+
+-- | How 'pushImageId' pushes. 'defaultPushOptions' renders nothing extra.
+data PushOptions = PushOptions
+    { pushAuthFile :: !(Maybe AuthFile)
+    -- ^ as for 'push': the auth file a 'login' wrote, or the ambient default
+    , pushTlsVerify :: !Bool
+    -- ^ 'False' is @--tls-verify=false@, for a plain-HTTP or self-signed
+    -- registry (a local @registry:2@); the default is to verify
+    , pushExpectedDigest :: !(Maybe ManifestDigest)
+    -- ^ the manifest digest the push must have written; any other is a
+    -- failure of the node ('PushedDigestMismatch')
+    }
+    deriving (Eq, Show)
+
+defaultPushOptions :: PushOptions
+defaultPushOptions = PushOptions{pushAuthFile = Nothing, pushTlsVerify = True, pushExpectedDigest = Nothing}
+
+-- | What went wrong after a 'pushImageId' push itself succeeded.
+data PushDigestError
+    = -- | The digest file podman wrote did not read as a digest.
+      PushDigestUnreadable !TagName !Text
+    | -- | The destination, the declared digest, the digest podman pushed.
+      PushedDigestMismatch !TagName !ManifestDigest !ManifestDigest
+    deriving (Eq, Show)
+
+instance Exception PushDigestError
+
+{- | The verdict on what @--digestfile@ held after a push that exited 0:
+the digest pushed, or why the node must fail. Pure, for the tests.
+-}
+verifyPushedDigest :: TagName -> Maybe ManifestDigest -> Text -> Either PushDigestError ManifestDigest
+verifyPushedDigest dest mExpected raw = do
+    pushed <- either (const (Left (PushDigestUnreadable dest raw))) Right (mkManifestDigest raw)
+    case mExpected of
+        Just expected | expected /= pushed -> Left (PushedDigestMismatch dest expected pushed)
+        _ -> Right pushed
+
+{- | Pushes the local image with the given 'ImageId' to the destination
+reference, @podman push [--authfile F] [--tls-verify=false] --digestfile TMP
+ID DEST@.
+
+'push' names the image by its tag, so what it ships is whatever the tag
+points at when the push starts; a caller that checked the id first (with
+'imageHasId', or by hand) still has a window between that check and the
+push in which the tag can move. Here the source /is/ the id, which is
+content-addressed: either that image is pushed or, if it is no longer in
+the local store, the push fails. The local tag is not read at all, so the
+image need not be tagged with the destination.
+
+After a push that exited 0, the manifest digest podman wrote is read back
+from a temporary file, reported ('PushedImageDigest'), and, when
+'pushExpectedDigest' is set, compared: another digest throws
+'PushedDigestMismatch', and the node fails. That check is /after/ the
+bytes went: the destination tag then names the unexpected manifest, which
+the failure says; salmon does not retag or delete anything at the registry.
+
+Same effect site as 'push' (the destination and the auth file), so the same
+'Ref'; the id, and the expected digest if any, are in 'notes', so two
+declarations pushing different images to one tag are seen to differ. No
+@check@ (a registry's digest for the tag is not asked; like 'push', this is
+'Salmon.Actions.UpDown.Immaterial'), and @down@ is nothing.
+-}
+pushImageId :: Reporter Report -> Track' (Binary "podman") -> PushOptions -> ImageId -> TagName -> Op
+pushImageId r podman opts imageId dest =
+    Binary.withBinaryArgAtUp podman podmanCommand $ \doPush ->
+        op "podman-push" (deps []) $ \actions ->
+            actions
+                { help = "pushes image " <> Text.take 12 (getImageId imageId) <> " as " <> dest
+                , notes = pushImageIdNotes opts imageId
+                , ref = mkRef "podman-push" (dest, fmap getAuthFile opts.pushAuthFile)
+                , up = withDigestFile $ \digestfile -> do
+                    doPush (pushImageIdCommand opts imageId dest (Just digestfile)) r'
+                    raw <- Text.readFile digestfile
+                    pushed <- either throwIO pure (verifyPushedDigest dest opts.pushExpectedDigest raw)
+                    runReporter r (PushedImageDigest dest pushed)
+                }
+  where
+    r' = contramap (PushImageById opts.pushAuthFile imageId dest) r
+
+-- | The command 'pushImageId' runs, given where the digest goes.
+pushImageIdCommand :: PushOptions -> ImageId -> TagName -> Maybe FilePath -> PodmanCommand
+pushImageIdCommand opts = PushId opts.pushAuthFile opts.pushTlsVerify
+
+pushImageIdNotes :: PushOptions -> ImageId -> [Text]
+pushImageIdNotes opts imageId =
+    ["image id: " <> getImageId imageId]
+        <> maybe [] (\d -> ["expected digest: " <> getManifestDigest d]) opts.pushExpectedDigest
+        <> (if opts.pushTlsVerify then [] else ["registry TLS not verified"])
+
+{- | A fresh, empty file for podman's @--digestfile@, removed afterwards
+whatever happened.
+-}
+withDigestFile :: (FilePath -> IO a) -> IO a
+withDigestFile act =
+    bracket
+        ( do
+            tmp <- getTemporaryDirectory
+            (path, h) <- openTempFile tmp "salmon-push.digest"
+            hClose h
+            pure path
+        )
+        (\path -> removeFile path `catchIOError` const (pure ()))
+        act
+
 {- | Runs a detached container under a caller-chosen 'ContainerName' (so
 'down' has a stable target to remove), with the given ports/env/volumes/network.
 
@@ -611,6 +856,8 @@ data PodmanCommand
       Build !FilePath !TagName
     | BuildWith !BuildOptions !FilePath !TagName
     | Push !(Maybe AuthFile) !TagName
+    | -- | auth file, TLS verification, source id, destination, digest file
+      PushId !(Maybe AuthFile) !Bool !ImageId !TagName !(Maybe FilePath)
     | Logout !AuthFile !Registry
     | CreateNetworkCmd !NetworkName
     | Rmi !Registry !Image
@@ -637,6 +884,13 @@ podmanCommand = Command $ \cmd -> case cmd of
             ["push"]
                 <> maybe [] (\af -> ["--authfile", getAuthFile af]) mAuthFile
                 <> [Text.unpack tagname]
+    (PushId mAuthFile tlsVerify imageId dest mDigestFile) ->
+        proc "podman" $
+            ["push"]
+                <> maybe [] (\af -> ["--authfile", getAuthFile af]) mAuthFile
+                <> (if tlsVerify then [] else ["--tls-verify=false"])
+                <> maybe [] (\f -> ["--digestfile", f]) mDigestFile
+                <> [Text.unpack (getImageId imageId), Text.unpack dest]
     (Logout authfile reg) ->
         proc "podman" ["logout", "--authfile", getAuthFile authfile, Text.unpack (getRegistry reg)]
     (Run r i cname opts) ->

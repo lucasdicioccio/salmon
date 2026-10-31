@@ -11,21 +11,25 @@
 -- accompanying teardown story yet.
 module Test.PodmanSpec (tests) where
 
-import Control.Exception (finally)
+import Control.Concurrent (threadDelay)
+import Control.Exception (finally, try)
+import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Control.Monad (void)
 import Data.Char (toLower)
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
+import Salmon.Builtin.Extension (Extension (..), Op, deps, op, opAct)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Podman as Podman
+import Salmon.Op.Actions (Act (..))
 import System.Directory (createDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeFileName, (</>))
 import System.Process (readProcessWithExitCode)
 import Test.Harness
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 tests :: TestTree
 tests =
@@ -34,6 +38,8 @@ tests =
         [ testCase "pullImage + runContainer bring up a real, reachable container" pullAndRun
         , testCase "runContainer: a second run up skips a running container, and a stopped one is replaced" runTwiceThenStopped
         , testCase "buildImageWith builds one stage of a multi-stage file against a context that is not the file's directory" buildContextAndTarget
+        , testCase "imageHasId passes the id it was given and blocks its dependant once the tag is rebuilt" imageIdGate
+        , testCase "pushImageId pushes the id it was given to a local registry, whatever the tag became, and checks the digest" pushImageIdToRegistry
         ]
 
 {- | A Containerfile in @deploy\/@ whose @COPY@ sources are relative to the
@@ -134,3 +140,132 @@ runTwiceThenStopped = requireExecutable "podman" $ do
         Binary.CommandStopped{} -> True
         Binary.Requested _ inner -> stopped inner
         _ -> False
+
+{- | The dry-run-then-release use: build a tag, read its id with
+'Podman.probeImageId', declare 'Podman.imageHasId' with it under a
+stand-in for the push. The gate passes and the dependant runs; after the tag
+is rebuilt from other content the same declaration fails and the dependant
+does not run. Nothing here reaches a registry.
+-}
+imageIdGate :: IO ()
+imageIdGate = requireExecutable "podman" $
+    withTempDir $ \root -> do
+        let tag = Text.pack ("localhost/salmon-test-imageid-" <> map toLower (takeFileName root) <> ":1")
+            containerfile = root </> "Containerfile"
+            writeBuild content =
+                writeFile containerfile $
+                    unlines ["FROM docker.io/library/alpine:latest", "RUN echo " <> content <> " > /stamp"]
+        (reporter, _) <- capture
+        let built = Podman.buildImage reporter podmanTrack (FS.PreExisting containerfile) tag
+        ( do
+            writeBuild "first"
+            assertBool "the first build succeeds" =<< runUp built
+            st <- Podman.probeImageId tag
+            recorded <- case st of
+                Podman.ImagePresent i -> pure i
+                other -> assertFailure ("no id read for the built tag: " <> show other) >> fail "unreachable"
+            ran <- newIORef (0 :: Int)
+            let gate = Podman.imageHasId tag recorded
+                released = op "test-release" (deps [gate]) $ \actions -> actions{up = modifyIORef ran (+ 1)}
+            assertBool "the gate passes on the id it was given" =<< runUp released
+            assertEqual "and its dependant ran" 1 =<< readIORef ran
+            writeBuild "second"
+            assertBool "the rebuild succeeds" =<< runUp built
+            moved <- Podman.probeImageId tag
+            assertBool "the rebuild gave the tag another id" (moved /= Podman.ImagePresent recorded)
+            ok <- runUp released
+            assertBool "the gate fails once the tag moved" (not ok)
+            assertEqual "and its dependant did not run" 1 =<< readIORef ran
+            )
+            `finally` void (runDown built)
+        gone <- Podman.probeImageId tag
+        assertEqual "down removed the image, and the probe says so" Podman.ImageAbsent gone
+
+{- | 'Podman.pushImageId' against a real registry: a @registry:2@ container
+on a loopback port, plain HTTP (so @pushTlsVerify = False@). Build a tag,
+read its id, push the id; rebuild the tag from other content and push the
+/old/ id again with the digest the first push reported as expected: the
+registry still serves the first image, which is the point (the tag moving
+does not change what an id push ships). A push expecting another digest
+fails with 'Podman.PushedDigestMismatch', and an id no longer in the local
+store is not pushed. Nothing reaches a registry other than the container.
+-}
+pushImageIdToRegistry :: IO ()
+pushImageIdToRegistry = requireExecutable "podman" $
+    withTempDir $ \root -> do
+        port <- freeTcpPort
+        recorded <- newIORef Nothing
+        let suffix = map toLower (takeFileName root)
+            tag = Text.pack ("localhost/salmon-test-pushid-" <> suffix <> ":1")
+            dest = "localhost:" <> port <> "/salmon-test/pushid-" <> Text.pack suffix <> ":1"
+            containerfile = root </> "Containerfile"
+            writeBuild content =
+                writeFile containerfile $
+                    unlines ["FROM docker.io/library/alpine:latest", "RUN echo " <> content <> " > /stamp"]
+            podman_ args = void (readProcessWithExitCode "podman" args "")
+        withContainer (Podman.Image "registry:2") (Podman.PortMapping ("127.0.0.1:" <> port) "5000" Podman.TCPPort) $ \cid -> do
+            awaitRegistry cid (40 :: Int)
+            (reporter, readBack) <- capture
+            let built = Podman.buildImage reporter podmanTrack (FS.PreExisting containerfile) tag
+                opts = Podman.defaultPushOptions{Podman.pushTlsVerify = False}
+                pushed = do
+                    reports <- readBack
+                    pure [d | Podman.PushedImageDigest _ d <- reports]
+                -- What the registry serves under the destination, as a local
+                -- id. The pulled name is taken off with `untag`, not `rmi`:
+                -- once the build tag has moved, that name is the only one the
+                -- first image has, and `rmi` would delete the image itself.
+                served = do
+                    (code, _, err) <- readProcessWithExitCode "podman" ["pull", "-q", "--tls-verify=false", Text.unpack dest] ""
+                    assertEqual ("pulling the destination back: " <> err) ExitSuccess code
+                    st <- Podman.probeImageId dest
+                    podman_ ["untag", Text.unpack dest, Text.unpack dest]
+                    pure st
+            ( do
+                writeBuild "first"
+                assertBool "the first build succeeds" =<< runUp built
+                first <- Podman.probeImageId tag
+                firstId <- case first of
+                    Podman.ImagePresent i -> writeIORef recorded (Just i) >> pure i
+                    other -> assertFailure ("no id read for the built tag: " <> show other) >> fail "unreachable"
+                ok <- runUp (Podman.pushImageId reporter podmanTrack opts firstId dest)
+                failures <- podmanFailures <$> readBack
+                assertBool ("the push by id succeeds" <> concatMap ("\n  " <>) failures) ok
+                digest <-
+                    pushed >>= \ds -> case ds of
+                        [d] -> pure d
+                        other -> assertFailure ("one digest reported, not " <> show other) >> fail "unreachable"
+                assertEqual "the registry serves the image pushed" (Podman.ImagePresent firstId) =<< served
+
+                writeBuild "second"
+                assertBool "the rebuild succeeds" =<< runUp built
+                moved <- Podman.probeImageId tag
+                assertBool "the rebuild gave the tag another id" (moved /= Podman.ImagePresent firstId)
+                again <- runUp (Podman.pushImageId reporter podmanTrack opts{Podman.pushExpectedDigest = Just digest} firstId dest)
+                assertBool "the old id, pushed again expecting the first digest, succeeds" again
+                assertEqual "the registry still serves the first image, not the tag's new one" (Podman.ImagePresent firstId) =<< served
+
+                let wrong = either (error . Text.unpack) id (Podman.mkManifestDigest ("sha256:" <> Text.replicate 64 "0"))
+                refused <- try (upOf (Podman.pushImageId reporter podmanTrack opts{Podman.pushExpectedDigest = Just wrong} firstId dest))
+                assertEqual "a push expecting another digest fails, naming both" (Left (Podman.PushedDigestMismatch dest wrong digest)) refused
+                assertEqual "only the pushes that passed reported their digest, the same one" [digest, digest] =<< pushed
+
+                podman_ ["rmi", "-f", Text.unpack (Podman.getImageId firstId)]
+                gone <- runUp (Podman.pushImageId reporter podmanTrack opts firstId dest)
+                assertBool "an id no longer in the local store is not pushed" (not gone)
+                )
+                `finally` do
+                    void (runDown built)
+                    readIORef recorded >>= mapM_ (\i -> podman_ ["rmi", "-f", "--ignore", Text.unpack (Podman.getImageId i)])
+        gone <- Podman.probeImageId tag
+        assertEqual "down removed the image" Podman.ImageAbsent gone
+  where
+    upOf :: Op -> IO ()
+    upOf o = maybe (fail "not a node") (\act -> act.extension.up) (opAct o)
+    awaitRegistry cid n = do
+        (code, _, _) <- podmanExecCapture cid ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5000/v2/"]
+        case code of
+            ExitSuccess -> pure ()
+            _
+                | n <= 0 -> assertFailure "the registry container never answered on /v2/"
+                | otherwise -> threadDelay 250000 >> awaitRegistry cid (n - 1)
