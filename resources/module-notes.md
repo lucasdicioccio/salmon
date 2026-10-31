@@ -2871,6 +2871,56 @@ applying nothing, a rotated password file read `Failure` then put back by `up`, 
 client inside the container on its own address is let in; a refused remote `default` was not tried. Not run: `serverOp` as a system quadlet (its readiness probe
 included), `LocalClient` against a packaged install, a non-default TCP port. For PeerDB (`3c21e832`): the target user
 is `userPassFile` + `grant` on the target database; PeerDB itself reads the same password file.
+`sourceReadGrant` (`GRANT READ ON S3 TO user`, checked on the `system.grants` row with `access_type = READ`,
+`access_object = S3`) was added for PeerDB, which refuses a ClickHouse peer whose user may not read S3 (it stages
+rows there).
+
+CDC from PostgreSQL into ClickHouse through PeerDB is two modules. `Nodes/Postgres/Logical.hs` is the source's
+side, as the `postgres` OS user like the rest of `Nodes/Postgres.hs`: `logicalWalLevel` (`ALTER SYSTEM SET wal_level
+= logical` + reload, checked on what the files say, falling back to the running value; the restart is
+`restartClusterIfPending`'s, `inject` it after), `replicationRole` (`ALTER ROLE ... WITH REPLICATION` on a role
+declared elsewhere, checked on `pg_roles`), `publication` (exactly the declared tables: `CREATE` through `\gexec`
+when missing, then `SET TABLE`, then a `salmon-publication:` comment, one transaction; **an existing publication
+without the comment is refused**, so salmon never takes over a hand-made one) and `logicalSlot` (`pgoutput`, in
+one database; a slot of that name of another kind is refused). Load-bearing: `logicalWalLevel`'s `Ref` is
+`alterSystemSet`'s for `wal_level` on that port, and `logicalSlot`'s is the physical `replicationSlot`'s (the slot
+name, no port, as that node had it): the same effect sites, so a declaration that also uses
+`primaryReplicationSetup` (which writes `replica`) gets a `Conflicting` rather than two nodes fighting each pass.
+**Nothing in the module has a `down`**: a publication or slot dropped under a mirror breaks it, and PostgreSQL
+will not start below `logical` while a logical slot exists. An unread slot keeps WAL: cap it with
+`max_slot_wal_keep_size` (`defaultReplicationTuning` does). `Nodes/PeerDB.hs` speaks PeerDB's flow API (the
+grpc-gateway JSON on `flow-api`'s 8113) with `http-client`, no child process: `peer` (Postgres source or
+ClickHouse target; `POST /v1/peers/create` with `allow_update`, the password read from a file at `up` and only in
+the request body; the check is `GET /v1/peers/info/NAME` compared on type/host/port/user/database/TLS switch,
+404 is `Failure`) and `mirrorOp` (`POST /v1/mirrors/status` first; none: `POST /v1/flows/cdc/create`; one with the
+declared peers and table mappings: nothing; other peers or tables, or `STATUS_FAILED`/`TERMINAT*`: **`up` throws
+and changes nothing**: changing, resyncing or recreating a mirror is the operator's. `STATUS_PAUSED` reads
+`Success`, salmon does not resume a pause; setup/snapshot states read `Unknown`). **A declared slot goes with no
+initial snapshot**: PeerDB fails a snapshot on a slot it did not create (`irrecoverable_existing_slot`, the
+mirror goes `STATUS_FAILED`, seen at `stable-v0.37.12`), so `mirrorProblems` refuses the pair before anything is
+sent; such a mirror streams from the slot's creation and copies none of the rows already there. Requests use protobuf field
+names, answers come in lowerCamelCase (seen at `stable-v0.37.12`). A peer's password is shown back as `********`,
+so **a rotated password file is not noticed by the check** and reaches PeerDB only when the node is forced; PeerDB's
+answers are cut of the password before they are thrown. Not covered: running PeerDB itself (catalog, Temporal,
+object store, `flow-api`, workers: upstream's compose file is seven services, none in salmon yet; the caller's
+`Track' Api` stands for it), a `flow-api` with a password or TLS, dropping anything. Run: Layer 0
+(`Test/PeerDBSpec.hs`: the SQL, the bodies, the readings on answers copied from `stable-v0.37.12`), and Layer 2
+opt-in with `SALMON_TEST_PEERDB=1` (`sandboxTests`): upstream's services at `stable-v0.37.12` started by
+`podman run` on one network (not the UI, not the pgwire `peerdb-server`), a `postgres:17-alpine` source (its
+`psql` reached through a `sudo` shim; the restart is `podman restart`, not `pg_ctlcluster`) and
+`clickhouse-server:25.8` (run on the author's host, 76s with images cached). It runs: `logicalWalLevel` from
+`replica` (check `Failure`, `up`, check `Success`, restart, running value `logical`); then one graph of the CDC
+role (`Postgres.userPassFile` + `replicationRole`), the publication, a declared slot, the ClickHouse database,
+user, grant and `READ ON S3`, both peers and two mirrors (one on PeerDB's own slot with a snapshot, one on the
+declared slot without); every check `Success` after one pass; the snapshot rows in ClickHouse, then an insert and
+an update through both mirrors; PeerDB active on the declared slot; a second pass applying nothing that has a
+check; another table set on a mirror read `Failure` and refused by `up`; a slot-plus-snapshot mirror refused
+without PeerDB being asked; a hand-made publication refused; `down` succeeding and leaving the mirrors running and
+both publications in place. Peers name hosts by container address (podman's resolver timed out on a fresh
+container once). Not run: `restartClusterIfPending` after `logicalWalLevel` (no `pg_ctlcluster` in the image), a
+rotated peer password, a peer with TLS, a mirror that PeerDB itself fails while running. The role's `SELECT` on the
+table and `CREATE` on the database (PeerDB's `_peerdb_internal` schema) are granted by hand there: no node declares
+them yet.
 
 `Debian.Package.deb`/`debs` depend on an `aptIndex` node (same module), which is what makes them work on a
 machine whose index was never refreshed (a fresh cloud image: `apt-get install` fails with "no installation

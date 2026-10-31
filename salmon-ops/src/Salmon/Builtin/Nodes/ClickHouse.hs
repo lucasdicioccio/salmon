@@ -59,6 +59,7 @@ data Report
     = CHCreateDatabase !DatabaseName !Binary.Report
     | CHSetUser !UserName !Binary.Report
     | CHGrant !Grant !Binary.Report
+    | CHSourceGrant !Text !UserName !Binary.Report
     deriving (Show)
 
 type DatabaseName = Text
@@ -602,6 +603,42 @@ interpretGrants g out =
         missing -> Failure (g.grantTo <> " lacks " <> Text.intercalate ", " missing <> " on " <> g.grantDatabase <> ".*")
   where
     held = fmap (Text.map toUpper . Text.strip) (filter (not . Text.null . Text.strip) (Text.lines out))
+
+{- | @GRANT READ ON SOURCE TO user@: leave to read an external source, such as
+@S3@ (what a PeerDB ClickHouse peer needs: it stages rows in S3 and has
+ClickHouse read them, and PeerDB refuses the peer without it). The source
+name is ClickHouse's (@S3@, @URL@, @FILE@, ...), upper case. Checked on the
+@system.grants@ row (@access_type = READ@, @access_object@ the source), as
+25.8 stores it. @down@ revokes nothing. Inject the user first.
+-}
+sourceReadGrant :: Reporter Report -> Track' (Binary "clickhouse-client") -> Client -> Text -> UserName -> Op
+sourceReadGrant r clientT c rawSource name =
+    withBinaryStdin clientT (adminRun c) AdminBatch (Text.encodeUtf8 (sourceReadGrantSql source name)) $ \apply ->
+        op "clickhouse-source-grant" nodeps $ \actions ->
+            actions
+                { ref = mkRef "clickhouse-source-grant" (clientKey c, name, source)
+                , help = Text.unwords ["grant READ on", source, "to", name]
+                , notes = ["server: " <> clientKey c]
+                , check = either (const Unknown) (interpretCount (name <> " may not read " <> source)) <$> adminQuery c (sourceReadGrantedSql source name)
+                , up = apply (contramap (CHSourceGrant source name) r)
+                }
+  where
+    source = sourceName rawSource
+
+-- | A source as ClickHouse names it: upper case, letters and digits only.
+sourceName :: Text -> Text
+sourceName = Text.filter isAlphaNum . Text.toUpper
+
+sourceReadGrantSql :: Text -> UserName -> Text
+sourceReadGrantSql source name = "GRANT READ ON " <> sourceName source <> " TO " <> quoteIdent name <> ";\n"
+
+sourceReadGrantedSql :: Text -> UserName -> Text
+sourceReadGrantedSql source name =
+    "SELECT count() > 0 FROM system.grants WHERE user_name = "
+        <> quoteLiteral name
+        <> " AND access_type = 'READ' AND access_object = "
+        <> quoteLiteral (sourceName source)
+        <> " AND is_partial_revoke = 0"
 
 -------------------------------------------------------------------------------
 

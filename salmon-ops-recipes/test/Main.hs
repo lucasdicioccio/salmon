@@ -56,6 +56,7 @@ import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.ClickHouseSpec as ClickHouseSpec
+import qualified Test.PeerDBSpec as PeerDBSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
 import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
@@ -136,6 +137,7 @@ main =
                 , PgBackRestSpec.sandboxTests
                 , PgTextSearchSpec.sandboxTests
                 , PgVectorDemoSpec.sandboxTests
+                , PeerDBSpec.sandboxTests
                 , -- the rest of the VM specs: they share one bridge and a
                   -- handful of fixed addresses, so two at once is two guests
                   -- claiming one address.
@@ -202,6 +204,7 @@ main =
             , PostgresBackupSpec.tests
             , PostgresClusterSpec.tests
             , ClickHouseSpec.tests
+            , PeerDBSpec.tests
             , PgBouncerSpec.tests
             , HaproxySpec.tests
             , EtcdSpec.tests
