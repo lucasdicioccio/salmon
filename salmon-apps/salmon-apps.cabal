@@ -1,6 +1,6 @@
 cabal-version:      2.4
 name:               salmon-apps
-version:            0.2.0.0
+version:            0.3.0.0
 synopsis:           A set of utilities built with Salmon at their core.
 description:        Tools useful for operating systems, and which benefit from specialized implementations configured via external files: salmon-migrator, salmon-pgpair, salmon-fleet, salmon-tui and others.
 homepage:           https://lucasdicioccio.github.io/salmon/
@@ -61,8 +61,8 @@ library
                     , optparse-generic ^>=1.5.3
                     , process ^>=1.6.26.1
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.2.0.0
-                    , salmon-ops-recipes ^>=0.2.0.0
+                    , salmon-ops ^>=0.3.0.0
+                    , salmon-ops-recipes ^>=0.3.0.0
                     , text ^>=2.1.3
                     , time ^>=1.12.2
                     , vty ^>=6.6
@@ -208,8 +208,8 @@ test-suite salmon-apps-test
                     , network ^>=3.2.9.0
                     , salmon-apps
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops-recipes ^>=0.2.0.0
-                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops-recipes ^>=0.3.0.0
+                    , salmon-ops ^>=0.3.0.0
                     , tasty ^>=1.5.5
                     , tasty-hunit ^>=0.10.2
                     , tasty-quickcheck ^>=0.11.1

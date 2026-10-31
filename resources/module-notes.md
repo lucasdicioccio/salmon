@@ -211,7 +211,8 @@ version the solver picked on GHC 9.10.3 on 2026-10-31 (`base` keeps its own rang
 major on Hackage is excluded rather than tried. The lower bounds are therefore the versions that
 were built, not the oldest that would work; nothing older was tried. Policy and how to widen a
 bound are in `RELEASING.md` ("External bounds"). The 0.1.0.0/0.2.0.0 uploads on Hackage predate
-them. The experimental package has no bounds.
+them; 0.3.0.0 is the first to carry them, and `salmon-core` 0.1.0.0 (not re-released) gets them
+only through a Hackage metadata revision. The experimental package has no bounds.
 
 ## `rs/`: experimental Rust clients of `run serve --http`
 

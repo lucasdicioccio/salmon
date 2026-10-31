@@ -1,6 +1,6 @@
 cabal-version:      2.4
 name:               salmon-ops
-version:            0.2.0.0
+version:            0.3.0.0
 synopsis:           IO builtins and command line plumbing for Salmon operations.
 description:        Builtin operations (files, systemd, debian packages, podman, postgres, wireguard, certificates, ssh, ...) built on salmon-core, plus the shared command line, the long-running serve loop with its HTTP API and web UI.
 homepage:           https://lucasdicioccio.github.io/salmon/
@@ -222,7 +222,7 @@ executable salmon-ops-dot-fixture
     build-depends:    base >=4.16.3.0 && <4.22
                     , mtl ^>=2.3.1
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops ^>=0.3.0.0
                     , text ^>=2.1.3
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
@@ -238,7 +238,7 @@ executable salmon-postgres-replication-fixture
     build-depends:    base >=4.16.3.0 && <4.22
                     , mtl ^>=2.3.1
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops ^>=0.3.0.0
                     , text ^>=2.1.3
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
@@ -256,7 +256,7 @@ executable salmon-qemu-host-setup-fixture
                     , mtl ^>=2.3.1
                     , filepath ^>=1.5.4.0
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops ^>=0.3.0.0
                     , text ^>=2.1.3
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.
@@ -274,7 +274,7 @@ executable salmon-qemu-smoke-rootfs-fixture
                     , mtl ^>=2.3.1
                     , filepath ^>=1.5.4.0
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops ^>=0.3.0.0
                     , text ^>=2.1.3
     ghc-options:      -threaded
     default-language: Haskell2010
@@ -293,7 +293,7 @@ executable salmon-ops-serve-fixture
                     , optparse-generic ^>=1.5.3
                     , process ^>=1.6.26.1
                     , salmon-core ^>=0.1.0.0
-                    , salmon-ops ^>=0.2.0.0
+                    , salmon-ops ^>=0.3.0.0
                     , text ^>=2.1.3
     -- every salmon binary can end up running the concurrent driver (`run
     -- serve` does), and a node's own thread must not block the whole runtime.

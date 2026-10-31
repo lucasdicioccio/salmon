@@ -1,6 +1,41 @@
 # Revision history for salmon-ops
 
-## 0.2.0.0 -- unreleased
+## 0.3.0.0 -- 2026-10-31
+
+Breaking: `Salmon.Builtin.CommandLine`'s `RunServe` constructor gained fields (start-up
+options, `--once`, `--linger`) and `ReportFormat` gained a constructor (`ReportTextJsonLog`).
+Requires `salmon-core ^>=0.1.0.0` (unchanged).
+
+Packaging: every external dependency now carries a PVP upper bound (`^>=` the version built on
+GHC 9.10.3; `base` keeps its range).
+
+`run serve`:
+
+* `--once` ends the loop after the first convergence pass and exits with its verdict (0 only
+  when the pass converged with nothing left); it starts with supervision off. `--linger SECONDS`
+  keeps `--listen`/`--http`/`--http-tcp` answering reads from the final world that long after.
+  In the library: `Serve.Ending` (`UntilQuit` | `AfterFirstPass`) and `serveSayingEnding`;
+  existing entry points keep `UntilQuit`.
+* `--json-log FILE`: the text reports on the terminal as before, plus the objects `--json`
+  would print appended to FILE, one per line. Excludes `--json`.
+* `--no-supervise` and `--up-directive FILE` run `supervise off` and `up-directive FILE` as
+  the loop's first commands, ahead of any other input, so a loop started by a unit file needs
+  nothing typed. `Serve.linesProducer` and `Serve.quoteArg` are exported for the same purpose.
+
+New builtins:
+
+* `ClickHouse`: the official image as a system-scope quadlet with watched `config.d`/`users.d`
+  drop-ins; `CREATE DATABASE IF NOT EXISTS`, users whose password is a pre-provisioned file,
+  database-level grants checked on `system.grants`, and `sourceReadGrant` (`GRANT READ ON S3`)
+  for PeerDB. Nothing drops or revokes.
+* `Postgres.Logical`: the prerequisites of logical replication (`wal_level = logical`, the
+  `REPLICATION` attribute, a publication of exactly the declared tables, a `pgoutput` slot),
+  each with a check and no down.
+* `PeerDB`: Postgres and ClickHouse peers and CDC mirrors through PeerDB's flow API. A mirror
+  that exists with other peers or tables, or has failed, is refused, never changed or recreated;
+  nothing is dropped.
+
+## 0.2.0.0 -- 2026-10-23
 
 Breaking: several exported records gained or changed fields (e.g. `Gcp.Compute`'s instance,
 `Client.Model`'s model) and some exported functions changed signature. Requires

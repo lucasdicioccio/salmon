@@ -6,8 +6,8 @@ does the work.
 
 The packages released together share one version (it names the tag `vVERSION`). A package
 unchanged since the last release keeps the version already on Hackage and is not uploaded again
-(0.2.0.0 released `salmon-ops`, `salmon-ops-recipes` and `salmon-apps`; `salmon-core` stayed
-at 0.1.0.0). It is still sdisted and built from its tarball, since the others build against it.
+(0.2.0.0 and 0.3.0.0 released `salmon-ops`, `salmon-ops-recipes` and `salmon-apps`; `salmon-core`
+stayed at 0.1.0.0). It is still sdisted and built from its tarball, since the others build against it.
 
 ## Before you run it
 
