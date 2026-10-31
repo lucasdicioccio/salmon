@@ -44,6 +44,7 @@ tests =
         , testCase "build with a context and a target" buildContextAndTarget
         , testGroup "login renewal" loginTests
         , testGroup "runContainer's check" runCheckTests
+        , testGroup "imageHasId" imageIdTests
         ]
 
 {- | 'Podman.loginExpiring' and 'Podman.pushLoggingIn', as far as they go
@@ -309,3 +310,84 @@ runCheckTests =
 
     genAnswer :: Gen (Maybe (ExitCode, Text))
     genAnswer = oneof [pure Nothing, (\c s -> Just (c, s)) <$> genExit <*> elements ("" : statuses)]
+
+{- | 'Podman.imageHasId', as far as it goes without podman: reading a
+declared id, the probes' argv, what their answers read as, the verdicts,
+and the node's description. Running it is "Test.PodmanSpec" (Layer 2).
+-}
+imageIdTests :: [TestTree]
+imageIdTests =
+    [ testCase "an id reads with or without sha256:, in any case, with space around" $ do
+        assertEqual "bare" (Right expected) (Podman.mkImageId hexA)
+        assertEqual "prefixed" (Right expected) (Podman.mkImageId ("sha256:" <> hexA))
+        assertEqual "upper case, padded" (Right expected) (Podman.mkImageId ("  SHA256:" <> Text.toUpper hexA <> "\n"))
+    , testCase "a short id, a non-hex id and an empty one are refused" $ do
+        assertBool "short" (isLeft (Podman.mkImageId (Text.take 12 hexA)))
+        assertBool "non-hex" (isLeft (Podman.mkImageId (Text.replicate 64 "z")))
+        assertBool "too long" (isLeft (Podman.mkImageId (hexA <> "0")))
+        assertBool "empty" (isLeft (Podman.mkImageId ""))
+    , testCase "the probes are `podman image exists` and an inspect of .Id" $ do
+        assertEqual "" ["image", "exists", "localhost/app:1"] (Podman.imageExistsArgs tag)
+        assertEqual "" ["image", "inspect", "--format", "{{.Id}}", "localhost/app:1"] (Podman.imageIdArgs tag)
+    , testCase "reading the answers" $ do
+        assertEqual "exists says no" Podman.ImageAbsent (Podman.imageStateFrom (ExitFailure 1) Nothing)
+        assertEqual "exists cannot tell" Podman.ImageUnanswered (Podman.imageStateFrom (ExitFailure 125) Nothing)
+        assertEqual "an id" (Podman.ImagePresent expected) (Podman.imageStateFrom ExitSuccess (Just (ExitSuccess, hexA <> "\n")))
+        assertEqual "inspect failed (removed in between)" Podman.ImageUnanswered (Podman.imageStateFrom ExitSuccess (Just (ExitFailure 125, "")))
+        assertEqual "not an id" Podman.ImageUnanswered (Podman.imageStateFrom ExitSuccess (Just (ExitSuccess, "<no value>\n")))
+    , testCase "verdicts" $ do
+        assertEqual "the declared id is in place" Success (verdict (Podman.ImagePresent expected))
+        assertBool "another id is to fail" (isFailure (verdict (Podman.ImagePresent other)))
+        assertBool "no image is to fail" (isFailure (verdict Podman.ImageAbsent))
+        assertEqual "no answer" Unknown (verdict Podman.ImageUnanswered)
+    , testCase "a moved tag's failure names both ids" $
+        case verdict (Podman.ImagePresent other) of
+            Failure msg -> do
+                assertBool "the id found" (Podman.getImageId other `Text.isInfixOf` msg)
+                assertBool "the id declared" (Podman.getImageId expected `Text.isInfixOf` msg)
+            r -> assertFailure ("not a failure: " <> show r)
+    , testCase "the node is keyed on the tag, and the id is in its notes" $ do
+        let o = Podman.imageHasId tag expected
+        assertEqual "" (Just (mkRef "podman-image-id" tag)) (fmap (\act -> act.extension.ref) (opAct o))
+        assertEqual "" (Just ["image id: " <> hexA]) (fmap (\act -> act.extension.notes) (opAct o))
+    , testCase "two ids declared for one tag are one effect site, described differently" $ do
+        let a = Podman.imageHasId tag expected
+            b = Podman.imageHasId tag other
+        assertEqual "" (fmap (\act -> act.extension.ref) (opAct a)) (fmap (\act -> act.extension.ref) (opAct b))
+        assertBool "" (fmap (\act -> act.extension.notes) (opAct a) /= fmap (\act -> act.extension.notes) (opAct b))
+    , testProperty "only the declared id is in place" $
+        forAll genImageState $ \st -> (verdict st == Success) === (st == Podman.ImagePresent expected)
+    , testProperty "a podman that cannot answer `exists` is never read as absent or present" $
+        forAll (elements [2, 125, 126, 127 :: Int]) $ \code ->
+            forAll genAnswer $ \answer ->
+                verdict (Podman.imageStateFrom (ExitFailure code) answer) === Unknown
+    , testProperty "an exists that says no is absent, whatever inspect would have said" $
+        forAll genAnswer $ \answer -> Podman.imageStateFrom (ExitFailure 1) answer === Podman.ImageAbsent
+    , testProperty "any id podman prints reads back as itself" $
+        forAll genHex $ \h -> fmap Podman.getImageId (Podman.mkImageId ("sha256:" <> h <> "\n")) === Right h
+    ]
+  where
+    tag = "localhost/app:1"
+    hexA = Text.replicate 8 "0123abcd"
+    expected = either (error . Text.unpack) id (Podman.mkImageId hexA)
+    other = either (error . Text.unpack) id (Podman.mkImageId (Text.replicate 8 "ffff0000"))
+    verdict = Podman.interpretImageId tag expected
+    isFailure (Failure _) = True
+    isFailure _ = False
+    isLeft = either (const True) (const False)
+
+    genHex :: Gen Text
+    genHex = Text.pack <$> QC.vectorOf 64 (elements "0123456789abcdef")
+
+    genImageState :: Gen Podman.ImageState
+    genImageState =
+        oneof
+            [ pure Podman.ImageAbsent
+            , pure Podman.ImageUnanswered
+            , pure (Podman.ImagePresent expected)
+            , pure (Podman.ImagePresent other)
+            , (\h -> either (const Podman.ImageUnanswered) Podman.ImagePresent (Podman.mkImageId h)) <$> genHex
+            ]
+
+    genAnswer :: Gen (Maybe (ExitCode, Text))
+    genAnswer = oneof [pure Nothing, (\c s -> Just (c, s)) <$> elements [ExitSuccess, ExitFailure 1, ExitFailure 125] <*> elements ["", hexA, "junk"]]

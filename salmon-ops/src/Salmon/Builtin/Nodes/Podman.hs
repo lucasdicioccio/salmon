@@ -13,6 +13,7 @@ import Salmon.Reporter
 
 import Control.Monad (void, when)
 import qualified Data.ByteString.Char8 as ByteString
+import Data.Char (isHexDigit)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -217,6 +218,117 @@ buildNotes :: BuildOptions -> [Text]
 buildNotes opts =
     maybe [] (\c -> ["build context: " <> Text.pack c]) opts.buildContext
         <> maybe [] (\t -> ["target stage: " <> t]) opts.buildTarget
+
+{- | The id of an image in the local store, as @podman image inspect
+--format {{.Id}}@ prints it: 64 lowercase hex digits, no @sha256:@ prefix.
+
+'mkImageId' is the only way to make one from text, so a declared id is
+always in the form podman prints and the comparison is plain equality.
+-}
+newtype ImageId = ImageId {getImageId :: Text}
+    deriving (Eq, Ord, Show)
+
+{- | Reads an image id as podman, @podman images --no-trunc@ or a build log
+may print it: surrounding space and a @sha256:@ prefix are dropped, case is
+ignored. Anything that is not then 64 hex digits is refused, a short id
+among them: it would never equal the full id the check reads, and a check
+that can never succeed is better refused where it is declared.
+-}
+mkImageId :: Text -> Either Text ImageId
+mkImageId raw
+    | Text.length hex == 64 && Text.all isHexDigit hex = Right (ImageId hex)
+    | otherwise = Left ("not a full image id (64 hex digits): " <> raw)
+  where
+    stripped = Text.toLower (Text.strip raw)
+    hex = maybe stripped id (Text.stripPrefix "sha256:" stripped)
+
+-- | What the local store says about a tag.
+data ImageState
+    = -- | @podman image exists@ said no (exit 1).
+      ImageAbsent
+    | -- | The id @podman image inspect@ printed.
+      ImagePresent !ImageId
+    | -- | podman did not answer (an exit other than 0\/1, an inspect that failed, an id that does not read as one).
+      ImageUnanswered
+    deriving (Eq, Show)
+
+{- | @podman image exists TAG@, then, if it does,
+@podman image inspect --format {{.Id}} TAG@. Asks the local store only:
+nothing reaches a registry. Also what a dry run reads to record the ids it
+will later declare with 'imageHasId'.
+-}
+probeImageId :: TagName -> IO ImageState
+probeImageId tagname = do
+    (existsCode, _, _) <- readCreateProcessWithExitCode (proc "podman" (imageExistsArgs tagname)) ""
+    case existsCode of
+        ExitSuccess -> do
+            (code, out, _) <- readCreateProcessWithExitCode (proc "podman" (imageIdArgs tagname)) ""
+            pure (imageStateFrom existsCode (Just (code, Text.pack (ByteString.unpack out))))
+        _ -> pure (imageStateFrom existsCode Nothing)
+
+imageExistsArgs :: TagName -> [String]
+imageExistsArgs tagname = ["image", "exists", Text.unpack tagname]
+
+imageIdArgs :: TagName -> [String]
+imageIdArgs tagname = ["image", "inspect", "--format", "{{.Id}}", Text.unpack tagname]
+
+{- | The state from the two commands' answers: @exists@'s exit code, and
+@inspect@'s exit code and output when it was asked (only after @exists@ said 0).
+-}
+imageStateFrom :: ExitCode -> Maybe (ExitCode, Text) -> ImageState
+imageStateFrom (ExitFailure 1) _ = ImageAbsent
+imageStateFrom ExitSuccess (Just (ExitSuccess, out)) =
+    either (const ImageUnanswered) ImagePresent (mkImageId out)
+imageStateFrom _ _ = ImageUnanswered
+
+{- | The verdict on a tag against the id it is declared to have: that id is
+in place; another id, or no image, is a 'Failure' naming both; a podman
+that cannot answer is 'Unknown'.
+-}
+interpretImageId :: TagName -> ImageId -> ImageState -> CheckResult
+interpretImageId tagname expected st = case st of
+    ImagePresent actual
+        | actual == expected -> Success
+        | otherwise -> Failure (tagname <> " is image " <> getImageId actual <> ", not " <> getImageId expected)
+    ImageAbsent -> Failure ("no local image tagged " <> tagname <> " (expected " <> getImageId expected <> ")")
+    ImageUnanswered -> Unknown
+
+-- | 'imageHasId''s @up@ found the tag is not the declared image (or podman could not say).
+data ImageIdMismatch = ImageIdMismatch !TagName !ImageId !ImageState
+    deriving (Show)
+
+instance Exception ImageIdMismatch
+
+{- | Asserts that the local image tagged 'TagName' has the given 'ImageId'.
+It changes nothing: it is a gate. A @push@ (or anything else) that must
+only ever ship the image a dry run looked at depends on it, and is
+@Blocked@ when the tag has moved since.
+
+The @check@ is 'probeImageId' read by 'interpretImageId'. The @up@ probes
+again and throws 'ImageIdMismatch' unless the id is the declared one, so a
+tag with another id, no image, or a podman that cannot answer all fail the
+node and block its dependants; it never builds, pulls or retags. @down@ is
+nothing.
+
+The 'ref' is the tag alone (@podman-image-id@): a tag has one id at a time,
+so two declarations asserting different ids for one tag are a collision,
+and the id is in 'notes' so the two are seen to differ. Declared beside a
+'buildImage' of the same tag, it must depend on the build to be meaningful:
+the order is build, then this, then the push.
+-}
+imageHasId :: TagName -> ImageId -> Op
+imageHasId tagname expected =
+    op "podman-image-id" nodeps $ \actions ->
+        actions
+            { help = "checks that " <> tagname <> " is the expected local image"
+            , notes = ["image id: " <> getImageId expected]
+            , ref = mkRef "podman-image-id" tagname
+            , check = interpretImageId tagname expected <$> probeImageId tagname
+            , up = do
+                st <- probeImageId tagname
+                when (st /= ImagePresent expected) $
+                    throwIO (ImageIdMismatch tagname expected st)
+            }
 
 {- | Logs in to a registry, writing credentials to an explicit 'AuthFile'
 rather than the ambient default (see 'AuthFile'’s own note on why that

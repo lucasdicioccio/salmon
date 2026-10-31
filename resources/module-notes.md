@@ -2115,6 +2115,20 @@ and the working directory is left alone, so a relative path is relative to the s
 stays the tag alone, the options go in `notes` only when they are not the default, so a plain `buildImage` node is
 described as before. `Test/PodmanCommandSpec.hs` holds the argv, `Test/PodmanSpec.hs` a real multi-stage build.
 
+`Podman.imageHasId TAG ID` is a gate, not an effect: "the local image tagged TAG has this id", for a release that
+must push only the image a dry run looked at (the dry run reads ids with `probeImageId`). Its `check` is
+`podman image exists TAG` then `podman image inspect --format {{.Id}} TAG` (`imageStateFrom`); `interpretImageId`
+reads the declared id as `Success`, another id or no image as `Failure` naming both, a podman that cannot answer as
+`Unknown`. Its `up` probes again and throws `ImageIdMismatch` unless the id is the declared one, so the dependant (the
+push) is `Blocked`; it never builds, pulls or retags, and `down` is nothing. `ImageId` is only made by `mkImageId`,
+which drops `sha256:`, space and case and refuses anything not 64 hex digits (a short id could never match, so it is
+refused where it is declared rather than failing every pass). The `ref` is the tag alone (`podman-image-id`): two ids
+asserted for one tag collide, the id is in `notes`. Beside a build of the same tag it must depend on that build. Not
+done, decided without the owner: a push that takes the id itself (the gate composes with the existing `push`), and
+comparing a digest at the registry. Run: Layer 0 (`Test/PodmanCommandSpec.hs` "imageHasId", with QuickCheck
+properties) and Layer 2 (`Test/PodmanSpec.hs`: build, read the id, the gate passes and its dependant runs; rebuild
+the tag from other content, the gate fails and the dependant does not run). Not run: anything under `serve`.
+
 `Podman.runContainer` has a `check` (before, it had none, so it was `Immaterial` and a second `run up` failed at
 `podman run` on the name). The name is the effect site, as for its `down` (`podman rm -f NAME`). The check runs
 `podman container exists NAME`, then `podman container inspect --format {{.State.Status}} NAME`

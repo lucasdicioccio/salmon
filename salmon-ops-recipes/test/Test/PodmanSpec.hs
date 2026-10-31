@@ -12,10 +12,12 @@
 module Test.PodmanSpec (tests) where
 
 import Control.Exception (finally)
+import Data.IORef (modifyIORef, newIORef, readIORef)
 import Control.Monad (void)
 import Data.Char (toLower)
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
+import Salmon.Builtin.Extension (Extension (..), deps, op)
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Podman as Podman
@@ -25,7 +27,7 @@ import System.FilePath (takeFileName, (</>))
 import System.Process (readProcessWithExitCode)
 import Test.Harness
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
 tests :: TestTree
 tests =
@@ -34,6 +36,7 @@ tests =
         [ testCase "pullImage + runContainer bring up a real, reachable container" pullAndRun
         , testCase "runContainer: a second run up skips a running container, and a stopped one is replaced" runTwiceThenStopped
         , testCase "buildImageWith builds one stage of a multi-stage file against a context that is not the file's directory" buildContextAndTarget
+        , testCase "imageHasId passes the id it was given and blocks its dependant once the tag is rebuilt" imageIdGate
         ]
 
 {- | A Containerfile in @deploy\/@ whose @COPY@ sources are relative to the
@@ -134,3 +137,43 @@ runTwiceThenStopped = requireExecutable "podman" $ do
         Binary.CommandStopped{} -> True
         Binary.Requested _ inner -> stopped inner
         _ -> False
+
+{- | The dry-run-then-release use: build a tag, read its id with
+'Podman.probeImageId', declare 'Podman.imageHasId' with it under a
+stand-in for the push. The gate passes and the dependant runs; after the tag
+is rebuilt from other content the same declaration fails and the dependant
+does not run. Nothing here reaches a registry.
+-}
+imageIdGate :: IO ()
+imageIdGate = requireExecutable "podman" $
+    withTempDir $ \root -> do
+        let tag = Text.pack ("localhost/salmon-test-imageid-" <> map toLower (takeFileName root) <> ":1")
+            containerfile = root </> "Containerfile"
+            writeBuild content =
+                writeFile containerfile $
+                    unlines ["FROM docker.io/library/alpine:latest", "RUN echo " <> content <> " > /stamp"]
+        (reporter, _) <- capture
+        let built = Podman.buildImage reporter podmanTrack (FS.PreExisting containerfile) tag
+        ( do
+            writeBuild "first"
+            assertBool "the first build succeeds" =<< runUp built
+            st <- Podman.probeImageId tag
+            recorded <- case st of
+                Podman.ImagePresent i -> pure i
+                other -> assertFailure ("no id read for the built tag: " <> show other) >> fail "unreachable"
+            ran <- newIORef (0 :: Int)
+            let gate = Podman.imageHasId tag recorded
+                released = op "test-release" (deps [gate]) $ \actions -> actions{up = modifyIORef ran (+ 1)}
+            assertBool "the gate passes on the id it was given" =<< runUp released
+            assertEqual "and its dependant ran" 1 =<< readIORef ran
+            writeBuild "second"
+            assertBool "the rebuild succeeds" =<< runUp built
+            moved <- Podman.probeImageId tag
+            assertBool "the rebuild gave the tag another id" (moved /= Podman.ImagePresent recorded)
+            ok <- runUp released
+            assertBool "the gate fails once the tag moved" (not ok)
+            assertEqual "and its dependant did not run" 1 =<< readIORef ran
+            )
+            `finally` void (runDown built)
+        gone <- Podman.probeImageId tag
+        assertEqual "down removed the image, and the probe says so" Podman.ImageAbsent gone
