@@ -335,12 +335,25 @@ whose @up@ returns once the server answers. Use it as the @Track'@ of the
 SQL nodes' client: @Track (const (serverOp r systemctl s))@.
 -}
 serverOp :: Reporter Systemd.Report -> Track' (Binary "systemctl") -> Server -> Op
-serverOp r systemctl s =
-    Quadlet.quadletContainer r systemctl (Track (const files)) (serverContainer s)
+serverOp = serverOpIn id []
+
+{- | 'serverOp' with the quadlet amended first (its scope and unit directory,
+for a user-scope rootless server as @salmon-toy-clickhouse@ declares them)
+and with further prerequisites of the drop-ins, which the quadlet file
+stands on: what must exist before the file is written and its watched
+files read (a pre-provisioned 'serverEnvFile', the podman network).
+@serverOpIn id []@ is 'serverOp'; the drop-ins are the same files either
+way.
+-}
+serverOpIn :: (Quadlet.Container -> Quadlet.Container) -> [Op] -> Reporter Systemd.Report -> Track' (Binary "systemctl") -> Server -> Op
+serverOpIn amend before r systemctl s =
+    Quadlet.quadletContainer r systemctl (Track (const files)) (amend (serverContainer s))
   where
     files =
-        op "clickhouse-config-files" (deps ([serverConfigFile (serverConfigPath s) s.serverConfig, adminAccessFile (adminAccessPath s)] <> [dropInFile (dropInPath s d) d | d <- s.serverDropIns])) $ \actions ->
-            actions{help = "ClickHouse drop-ins in " <> Text.pack s.serverConfigDir}
+        op "clickhouse-config-files" (deps ([serverConfigFile (serverConfigPath s) s.serverConfig, adminAccessFile (adminAccessPath s)] <> [dropInFile (dropInPath s d) d | d <- s.serverDropIns] <> before)) $ \actions ->
+            -- keyed on the directory: without it two servers in one graph
+            -- were one node (the shorthand's default key)
+            actions{help = "ClickHouse drop-ins in " <> Text.pack s.serverConfigDir, ref = mkRef "clickhouse-config-files" s.serverConfigDir}
 
 -------------------------------------------------------------------------------
 -- The client

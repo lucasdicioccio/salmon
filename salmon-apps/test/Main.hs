@@ -2,6 +2,7 @@ module Main (main) where
 
 import Test.Tasty (defaultMain, testGroup)
 
+import qualified Test.ClickHouseToySpec as ClickHouseToySpec
 import qualified Test.CloudrunSpec as CloudrunSpec
 import qualified Test.FleetSpec as FleetSpec
 import qualified Test.GcpToySpec as GcpToySpec
@@ -15,7 +16,8 @@ main =
     defaultMain $
         testGroup
             "salmon-apps"
-            [ CloudrunSpec.tests
+            [ ClickHouseToySpec.tests
+            , CloudrunSpec.tests
             , FleetSpec.tests
             , GcpToySpec.tests
             , QemuPgHaToySpec.tests

@@ -3098,8 +3098,67 @@ the SQL with and without the clause, the ledger's readings, the graph's edges) a
 `clickhouse-server:25.8` under rootless podman (14s, image cached): the ledger in a missing database read as
 pending, two files applied in order (one opening with a comment line, one statement with no trailing `;`), every
 check `Success`, a second pass applying nothing, a third file applied alone, an applied file edited read `Failure`
-and refused by `up` with nothing run. Not run: the cluster clause against a cluster (Layer 0 only), a migration
-failing part-way, a `LocalClient`, a `run up` through a binary (no app wires it yet).
+and refused by `up` with nothing run. Not run here: a migration failing part-way, a `LocalClient`. The cluster
+clause against a cluster and a `run up` through a binary were run by `salmon-toy-clickhouse` (below).
+
+`salmon-toy-clickhouse` (`salmon-apps/src/ClickHouseToy.hs`, feature `34f7f5aa`) is the four ClickHouse modules
+wired end to end, the counterpart of `salmon-toy-qemu-pg-ha` and `salmon-gcp-toy`. Two seeds. `up` declares a
+podman network, three servers `PREFIX-1..3` each embedding a member of one Keeper ensemble, cluster `main` of **one
+shard of three replicas** (so member 1 holds all the data and a backup of it is a backup of the cluster), the
+quorum wait, each member's Keeper session and view of the cluster, database `toy` `ON CLUSTER`, the migrations of
+a directory applied through member 1 with `migrationsOnCluster = Just (onClusterClause "main")` (two ship in
+`salmon-apps/clickhouse-toy/migrations`), and `scheduledBackup` of `toy` on member 1 (`OnCalendar hourly` by
+default; the pass that schedules it takes the first backup). `drill` is a fourth server `PREFIX-drill` on **no
+network and in no cluster of the three**: its own one-member Keeper and a one-member cluster `drill` on
+`localhost` (shard macro `01`, as `main`'s), binding the same backup directory; it `restore`s `toy` from one file
+(by default the newest of this prefix, listed by `config` through `podman unshare ls`, since the directory is the
+containers' user's), so a drill reads a backup without touching what it is a backup of, and the replicated tables
+it recreates register in the drill's own Keeper. **Podman, not qemu**, and rootless: every container is a
+**user-scope quadlet** (the modules' own quadlets, scope and unit directory amended, no `WantedBy`), the backup job
+and timer are user-scope units. qemu guests on the shared host are slow, need the capabilities the pg toy asks
+for and leak when a run is killed; three servers here start in seconds and leave nothing a `run down` and a
+`podman unshare rm -rf ROOT` do not remove. Consequences of rootless: the data and backup directories belong to a
+subordinate uid, so the plan keeps every local file (`planKeepLocal = Nothing`: pruning would be the user's `rm`
+of files not theirs), and a stopped server's unit may be left `failed` (clear it with `systemctl --user
+reset-failed`). Secrets: the cluster secret and interserver password are in `ROOT/secrets/cluster.env`, written
+once by the toy's `inventSecrets` (random, mode `0600` before anything is in it, never rewritten: a new value is a
+restart of every member), read only by podman; nothing in `help`, `notes`, argv or a rendered file holds them.
+GCS shipping is off unless `--gcs-bucket`/`--gcs-project` are given (credentials gcloud's own or `--gcs-credentials
+FILE`, the path only). To carry this, three changes in `salmon-ops`, none rendering differently: `serverOpIn` and
+`backupServerOpIn` are `serverOp`/`backupServerOp` with the quadlet amended and further prerequisites of the
+drop-ins (the env file and the network must exist before the quadlet file is written and its watched files read;
+an `inject` on the result would have been beside the file, not before it); **`backupServerOp` did not write the
+server's `serverDropIns`** (a backup-taking cluster member's quadlet bound a Keeper and a cluster drop-in nobody
+wrote, and the container failed at start on the missing bind source: a defect, fixed); and the drop-ins node of
+both was keyed by its shorthand alone, so **two servers in one graph were one node** and `Conflicting`: it is now
+keyed `clickhouse-config-files` + the configuration directory (a changed `Ref` for an effect-free aggregate node, no
+file or quadlet changes).
+
+Demo (`t=$(cabal list-bin salmon-toy-clickhouse)`, run from the repository root):
+
+```sh
+$t config up --root $HOME/chtoy --migrations salmon-apps/clickhouse-toy/migrations | $t run up
+podman exec -i chtoy-1 clickhouse-client --query "INSERT INTO toy.events (at, kind, value) SELECT now(), 'demo', number FROM numbers(1000)"
+podman exec chtoy-3 clickhouse-client --query "SELECT count() FROM toy.events"   # 1000: replicated
+systemctl --user start clickhouse-backup-chtoy.service                           # a backup now, as the timer would
+$t config drill --root $HOME/chtoy | $t run up                                   # the newest backup, restored on chtoy-drill
+podman exec chtoy-drill clickhouse-client --query "SELECT count() FROM toy.events"
+$t config drill --root $HOME/chtoy | $t run down
+$t config up --root $HOME/chtoy --migrations salmon-apps/clickhouse-toy/migrations | $t run down
+podman unshare rm -rf $HOME/chtoy
+```
+
+Run: Layer 0 (`salmon-apps` `Test/ClickHouseToySpec.hs`: the directive's JSON, both graphs folded with no
+conflict and the expected nodes, the members' drop-ins and secrets by reference, the clause, the shipped
+migrations, the job's scope, the script with and without a bucket, the drill's isolation and guard, the newest
+backup); and Layer 2 opt-in with `SALMON_TEST_CLICKHOUSE_TOY=1` (47s here, image cached), the same binary's graphs
+in process on a prefix of its own against podman 4.9.3 and this user's systemd: `up`, a second pass restarting no
+member (container start times equal), 1000 rows inserted on member 1 read on member 3, the ledger's two rows, the
+job started by hand writing a second file, the drill restoring it (count and sum equal, the marker), a second drill
+pass, both `down`s, no container left; whatever happens, a cleanup removes containers, network, unit files, failed
+records and the root. The same steps were also run by hand through the binary. Not run: GCS shipping or a drill
+from GCS (Layer 0 only), the timer firing on its own, a drill with `--may-discard` over a different `toy`, a member
+stopped mid-way, a qemu variant (none written).
 
 `Debian.Package.deb`/`debs` depend on an `aptIndex` node (same module), which is what makes them work on a
 machine whose index was never refreshed (a fresh cloud image: `apt-get install` fails with "no installation

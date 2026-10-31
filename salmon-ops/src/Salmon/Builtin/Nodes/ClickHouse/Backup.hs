@@ -52,6 +52,7 @@ module Salmon.Builtin.Nodes.ClickHouse.Backup (
     backupDirectory,
     backupServerContainer,
     backupServerOp,
+    backupServerOpIn,
 
     -- * Scheduled backups
     GcsTarget (..),
@@ -208,20 +209,37 @@ directory ('backupDirectory'), then the quadlet ('backupServerContainer').
 A server declared with 'ClickHouse.serverOp' is unchanged by this module.
 -}
 backupServerOp :: Reporter Systemd.Report -> Track' (Binary "systemctl") -> FilePath -> Server -> Op
-backupServerOp r systemctl hostDir s =
-    Quadlet.quadletContainer r systemctl (Track (const files)) (backupServerContainer hostDir s)
+backupServerOp = backupServerOpIn id []
+
+{- | 'backupServerOp' with the quadlet amended first (scope, unit directory)
+and further prerequisites of the drop-ins, as 'ClickHouse.serverOpIn'.
+@backupServerOpIn id []@ is 'backupServerOp'.
+-}
+backupServerOpIn :: (Quadlet.Container -> Quadlet.Container) -> [Op] -> Reporter Systemd.Report -> Track' (Binary "systemctl") -> FilePath -> Server -> Op
+backupServerOpIn amend before r systemctl hostDir s =
+    Quadlet.quadletContainer r systemctl (Track (const files)) (amend (backupServerContainer hostDir s))
   where
     files =
         op
             "clickhouse-config-files"
             ( deps
-                [ ClickHouse.serverConfigFile (ClickHouse.serverConfigPath s) s.serverConfig
-                , ClickHouse.adminAccessFile (ClickHouse.adminAccessPath s)
-                , FS.filecontentsInSharedDir (FS.FileContents (backupConfigPath s) renderBackupConfig)
-                , backupDirectory hostDir
-                ]
+                ( [ ClickHouse.serverConfigFile (ClickHouse.serverConfigPath s) s.serverConfig
+                  , ClickHouse.adminAccessFile (ClickHouse.adminAccessPath s)
+                  , FS.filecontentsInSharedDir (FS.FileContents (backupConfigPath s) renderBackupConfig)
+                  , backupDirectory hostDir
+                  ]
+                    -- the server's further drop-ins (a Keeper member, a
+                    -- cluster), as 'ClickHouse.serverOp' writes them: the
+                    -- quadlet binds them whichever op declares it
+                    <> [ClickHouse.dropInFile (ClickHouse.dropInPath s d) d | d <- s.serverDropIns]
+                    <> before
+                )
             )
-            $ \actions -> actions{help = "ClickHouse drop-ins in " <> Text.pack s.serverConfigDir <> " and backups in " <> Text.pack hostDir}
+            $ \actions ->
+                actions
+                    { help = "ClickHouse drop-ins in " <> Text.pack s.serverConfigDir <> " and backups in " <> Text.pack hostDir
+                    , ref = mkRef "clickhouse-config-files" s.serverConfigDir
+                    }
 
 -------------------------------------------------------------------------------
 -- Scheduled backups
