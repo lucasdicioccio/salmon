@@ -206,6 +206,13 @@ and the build is on GHC 9.10.3. Caveat: Hackage's `acme-not-a-joke-0.1.0.0` boun
 gitignored, alongside its `.perso.project.local`) carries an extra `salmon-personal-apps` package
 used only by the author's personal, non-public binaries.
 
+Every external `build-depends` of the four released packages (every component) is `^>=` the
+version the solver picked on GHC 9.10.3 on 2026-10-31 (`base` keeps its own range), so a new
+major on Hackage is excluded rather than tried. The lower bounds are therefore the versions that
+were built, not the oldest that would work; nothing older was tried. Policy and how to widen a
+bound are in `RELEASING.md` ("External bounds"). The 0.1.0.0/0.2.0.0 uploads on Hackage predate
+them. The experimental package has no bounds.
+
 ## `rs/`: experimental Rust clients of `run serve --http`
 
 A cargo workspace at the top of the tree, **outside `cabal.project`**: no cabal build needs a

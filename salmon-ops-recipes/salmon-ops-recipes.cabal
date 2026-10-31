@@ -45,37 +45,37 @@ library
                    , SreBox.Gcp.PreviewEnvironment
                    , SreBox.Gcp.PlakarGcsBackup
     build-depends:    base >=4.16.3.0 && <4.22
-                    , aeson
-                    , base16-bytestring
-                    , base64-bytestring
-                    , bytestring
-                    , case-insensitive
-                    , comonad
-                    , containers
-                    , contravariant
-                    , cryptohash-sha256
-                    , crypton-connection
-                    , crypton-x509
-                    , crypton-x509-store
-                    , crypton-x509-validation
-                    , directory
-                    , filepath
-                    , free
-                    , hashable
-                    , http-client
-                    , http-client-tls
-                    , jose
-                    , jose-jwt
-                    , mtl
-                    , optparse-applicative
-                    , optparse-generic
-                    , process
-                    , process-extras
+                    , aeson ^>=2.3.2.0
+                    , base16-bytestring ^>=1.0.2.0
+                    , base64-bytestring ^>=1.2.1.0
+                    , bytestring ^>=0.12.2.0
+                    , case-insensitive ^>=1.2.1.0
+                    , comonad ^>=5.0.10
+                    , containers ^>=0.7
+                    , contravariant ^>=1.5.6
+                    , cryptohash-sha256 ^>=0.11.102.1
+                    , crypton-connection ^>=0.4.6
+                    , crypton-x509 ^>=1.10.0
+                    , crypton-x509-store ^>=1.10.0
+                    , crypton-x509-validation ^>=1.10.0
+                    , directory ^>=1.3.8.5
+                    , filepath ^>=1.5.4.0
+                    , free ^>=5.2
+                    , hashable ^>=1.5.1.0
+                    , http-client ^>=0.7.19
+                    , http-client-tls ^>=0.4.0
+                    , jose ^>=0.13
+                    , jose-jwt ^>=0.11.0
+                    , mtl ^>=2.3.1
+                    , optparse-applicative ^>=0.19.0.0
+                    , optparse-generic ^>=1.5.3
+                    , process ^>=1.6.26.1
+                    , process-extras ^>=0.7.4
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops ^>=0.2.0.0
-                    , text
-                    , time
-                    , tls
+                    , text ^>=2.1.3
+                    , time ^>=1.12.2
+                    , tls ^>=2.4.12
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions: KindSignatures
@@ -199,41 +199,41 @@ test-suite salmon-ops-recipes-test
                     , Test.UpkeepRetentionSpec
                     , Test.WindowSpec
                     , Test.WrapperOrderingSpec
-    build-depends:    QuickCheck
+    build-depends:    QuickCheck ^>=2.19.0.0
                     , base >=4.16.3.0 && <4.22
-                    , aeson
-                    , bytestring
-                    , comonad
-                    , containers
-                    , contravariant
-                    , crypton-connection
-                    , crypton-x509-store
-                    , directory
-                    , filepath
-                    , free
-                    , ghc-heap
-                    , http-client
-                    , http-client-tls
-                    , http-types
-                    , mtl
-                    , network
-                    , optparse-applicative
-                    , process
-                    , process-extras
-                    , stm
+                    , aeson ^>=2.3.2.0
+                    , bytestring ^>=0.12.2.0
+                    , comonad ^>=5.0.10
+                    , containers ^>=0.7
+                    , contravariant ^>=1.5.6
+                    , crypton-connection ^>=0.4.6
+                    , crypton-x509-store ^>=1.10.0
+                    , directory ^>=1.3.8.5
+                    , filepath ^>=1.5.4.0
+                    , free ^>=5.2
+                    , ghc-heap ^>=9.10.3
+                    , http-client ^>=0.7.19
+                    , http-client-tls ^>=0.4.0
+                    , http-types ^>=0.12.6
+                    , mtl ^>=2.3.1
+                    , network ^>=3.2.9.0
+                    , optparse-applicative ^>=0.19.0.0
+                    , process ^>=1.6.26.1
+                    , process-extras ^>=0.7.4
+                    , stm ^>=2.5.3.1
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops ^>=0.2.0.0
                     , salmon-ops-recipes ^>=0.2.0.0
-                    , tasty
-                    , tasty-hunit
-                    , tasty-quickcheck
-                    , temporary
-                    , text
-                    , time
-                    , tls
-                    , unix
-                    , wai
-                    , warp
+                    , tasty ^>=1.5.5
+                    , tasty-hunit ^>=0.10.2
+                    , tasty-quickcheck ^>=0.11.1
+                    , temporary ^>=1.3
+                    , text ^>=2.1.3
+                    , time ^>=1.12.2
+                    , tls ^>=2.4.12
+                    , unix ^>=2.8.7.0
+                    , wai ^>=3.2.5
+                    , warp ^>=3.4.16
     -- Salmon.Actions.Serve reads its input handle on a forked thread, so a
     -- test driving the loop wants a runtime where a blocking read does not
     -- stall every other Haskell thread. -rtsopts so that a large-graph run
@@ -259,20 +259,20 @@ benchmark graph-profiles
                     , Test.DagReference
                     , Test.PathListReference
     build-depends:    base >=4.16.3.0 && <4.22
-                    , aeson
-                    , bytestring
-                    , comonad
-                    , containers
-                    , free
-                    , mtl
-                    , optparse-applicative
-                    , process
-                    , stm
-                    , unix
+                    , aeson ^>=2.3.2.0
+                    , bytestring ^>=0.12.2.0
+                    , comonad ^>=5.0.10
+                    , containers ^>=0.7
+                    , free ^>=5.2
+                    , mtl ^>=2.3.1
+                    , optparse-applicative ^>=0.19.0.0
+                    , process ^>=1.6.26.1
+                    , stm ^>=2.5.3.1
+                    , unix ^>=2.8.7.0
                     , salmon-core ^>=0.1.0.0
                     , salmon-ops ^>=0.2.0.0
-                    , text
-                    , time
+                    , text ^>=2.1.3
+                    , time ^>=1.12.2
     -- one capability, as the binaries in salmon-apps are built; -T for the
     -- allocation counter; -rtsopts so a run can be given a heap bound.
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-T"
