@@ -127,7 +127,9 @@ library
                    , Salmon.Builtin.Nodes.PeerDB
                    , Salmon.Builtin.Nodes.ClickHouse
                    , Salmon.Builtin.Nodes.ClickHouse.Cluster
+                   , Salmon.Builtin.Nodes.ClickHouse.Backup
                    , Salmon.Builtin.Nodes.ClipCpp
+                   , Salmon.Builtin.Nodes.ClickHouse.Migrations
                    , Salmon.Builtin.Nodes.LlamaServer
                    , Salmon.Builtin.Nodes.PgVector
                    , Salmon.Builtin.Nodes.PgTextSearch
@@ -151,6 +153,8 @@ library
                    , Salmon.Builtin.Nodes.Web
                    , Salmon.Builtin.Nodes.WireGuard
                    , Salmon.Op.CardTemplate
+                   , Salmon.Op.PassPhase
+                   , Salmon.Op.PassPhase.Tag
                    , Salmon.Op.Concurrency
                    , Salmon.Op.Dag
                    , Salmon.Op.Guard

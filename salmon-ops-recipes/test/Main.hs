@@ -57,8 +57,10 @@ import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.ClickHouseSpec as ClickHouseSpec
 import qualified Test.ClickHouseClusterSpec as ClickHouseClusterSpec
+import qualified Test.ClickHouseBackupSpec as ClickHouseBackupSpec
 import qualified Test.PeerDBSpec as PeerDBSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
+import qualified Test.ClickHouseMigrationsSpec as ClickHouseMigrationsSpec
 import qualified Test.HaproxySpec as HaproxySpec
 import qualified Test.EtcdSpec as EtcdSpec
 import qualified Test.PatroniSpec as PatroniSpec
@@ -82,6 +84,7 @@ import qualified Test.ReadinessSpec as ReadinessSpec
 import qualified Test.RemoteOutputSpec as RemoteOutputSpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
+import qualified Test.PassPhaseSpec as PassPhaseSpec
 import qualified Test.ServeEventsSpec as ServeEventsSpec
 import qualified Test.ServeHttpSpec as ServeHttpSpec
 import qualified Test.ServeJsonLogSpec as ServeJsonLogSpec
@@ -206,8 +209,10 @@ main =
             , PostgresClusterSpec.tests
             , ClickHouseSpec.tests
             , ClickHouseClusterSpec.tests
+            , ClickHouseBackupSpec.tests
             , PeerDBSpec.tests
             , PgBouncerSpec.tests
+            , ClickHouseMigrationsSpec.tests
             , HaproxySpec.tests
             , EtcdSpec.tests
             , PatroniSpec.tests
@@ -227,6 +232,7 @@ main =
             , ReadinessSpec.tests
             , ReportJsonSpec.tests
             , RewriteSpec.tests
+            , PassPhaseSpec.tests
             , ServeEventsSpec.tests
             , ServeHttpSpec.tests
             , ServeJsonLogSpec.tests

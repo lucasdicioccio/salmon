@@ -32,6 +32,8 @@ import Salmon.Op.Actions (Act (..))
 import qualified Salmon.Op.Concurrency as Concurrency
 import Salmon.Op.Configure
 import qualified Salmon.Op.Dag as Dag
+import Salmon.Op.PassPhase (PassPhase (..))
+import qualified Salmon.Op.PassPhase as PassPhase
 import Salmon.Op.Ref (Ref)
 import Salmon.Op.Rewrite (Phase (..), Rewrite, Rewritten)
 import qualified Salmon.Op.Rewrite as Rewrite
@@ -100,7 +102,9 @@ data RunCommand
     = -- | @run up@, optionally honoring a @query plan@-emitted 'Query.Plan' file.
       -- The windows (@--maintenance-window@) outside which 'Window.disruptive'
       -- nodes are held, and whether to ignore them (@--override-window@).
-      RunUp !(Maybe FilePath) !Bool !ReportFormat ![Text] !Bool
+      -- Last, @--phase build@: run only the build phase of a two-phase pass
+      -- ("Salmon.Op.PassPhase"); 'Nothing', the default, runs everything.
+      RunUp !(Maybe FilePath) !Bool !ReportFormat ![Text] !Bool !(Maybe PassPhase)
     | RunDown !ReportFormat
     | RunTree
     | RunDAG
@@ -741,6 +745,20 @@ runCommandParser =
             <*> reportFormatP
             <*> maintenanceWindowsP "Nodes marked disruptive run only inside these windows (repeatable); outside them they are skipped and reported on stderr. DAY is Mon..Sun; a start later than the end crosses midnight; the zone is a fixed offset, UTC by default."
             <*> overrideWindowP
+            <*> optional
+                ( option
+                    (eitherReader passPhaseOnly)
+                    ( long "phase"
+                        <> Options.Applicative.metavar "build"
+                        <> Options.Applicative.help "Run only the build phase: the nodes marked build (inBuildPhase) and what they depend on; every other node is skipped. Refuses, running nothing, when no node is marked build or when a build node depends on a node marked deploy. Omitted = everything."
+                    )
+                )
+    -- only the build phase runs alone: a deploy phase without its builds is
+    -- what the barrier exists to prevent.
+    passPhaseOnly t = case PassPhase.parsePassPhase (Text.pack t) of
+        Right BuildPhase -> Right BuildPhase
+        Right DeployPhase -> Left "only --phase build is supported: the deploy phase does not run without its builds"
+        Left err -> Left (Text.unpack err)
     maintenanceWindowsP helpText =
         many
             ( option
@@ -873,12 +891,12 @@ execCommandOrSeedWithRewrites ::
     Track' directive ->
     Command seed ->
     IO ()
-execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
+execCommandOrSeedWithRewrites serveR r rewrites0 genBase traceBase cmd = do
     case cmd of
-        (Run (RunUp Nothing _ fmt wins override)) -> do
-            result <- listening fmt $ withGraph (runUp (updownFor fmt) (windowsFor wins override) Set.empty)
+        (Run (RunUp Nothing _ fmt wins override phase)) -> do
+            result <- listening fmt $ withGraph (runUp (updownFor fmt) (windowsFor wins override) phase Set.empty)
             when (result == Just False) exitFailure
-        (Run (RunUp (Just planPath) forceStale fmt wins override)) -> do
+        (Run (RunUp (Just planPath) forceStale fmt wins override phase)) -> do
             result <- listening fmt $ withGraphAndBytes $ \dirBytes op -> do
                 planBytes <- LBysteString.readFile planPath
                 case eitherDecode planBytes of
@@ -889,7 +907,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                         let actual = Query.digestBytes dirBytes
                         let expected = Query.planDirectiveDigest plan
                         if actual == expected
-                            then runUp (updownFor fmt) (windowsFor wins override) (Set.fromList (Query.planExcludedRefs plan)) op
+                            then runUp (updownFor fmt) (windowsFor wins override) phase (Set.fromList (Query.planExcludedRefs plan)) op
                             else
                                 if forceStale
                                     then do
@@ -899,7 +917,7 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                                                 <> ", this directive hashes to "
                                                 <> Text.unpack actual
                                                 <> "); proceeding due to --force-stale-plan"
-                                        runUp (updownFor fmt) (windowsFor wins override) (Set.fromList (Query.planExcludedRefs plan)) op
+                                        runUp (updownFor fmt) (windowsFor wins override) phase (Set.fromList (Query.planExcludedRefs plan)) op
                                     else do
                                         putStrLn $
                                             "refusing to run stale plan: plan expects digest "
@@ -1232,11 +1250,33 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
     composes with collections — a batch is worth running iff some member of
     it is, which is the same 'Rewrite.membersOf' translation @serve@'s gate
     does. The report stream is identical either way: both produce a 'Skip'. -}
-    runUp :: Reporter (UpDown.Report Extension) -> UpDown.Gate Extension -> Set Ref -> Op -> IO Bool
-    runUp r' windowGate excluded op = do
+    runUp :: Reporter (UpDown.Report Extension) -> UpDown.Gate Extension -> Maybe PassPhase -> Set Ref -> Op -> IO Bool
+    runUp r' windowGate phase excluded op = do
         dag <- UpDown.expandDag r' nat op
         let computed = Rewrite.rewrite rewrites (Phase (Set.fromList (Dag.dagOrder dag)) excluded) dag
-        UpDown.upDag (bothGates windowGate (excluding computed excluded)) r' (Rewrite.computedDag computed)
+        let gate = bothGates windowGate (excluding computed excluded)
+        case phase of
+            Nothing -> UpDown.upDag gate r' (Rewrite.computedDag computed)
+            -- only --phase build parses ('passPhaseOnly')
+            Just _ -> case buildPhaseGate (Rewrite.computedDag computed) of
+                Left err -> do
+                    hPutStrLn stderr ("refusing --phase build: " <> err)
+                    pure False
+                Right (selected, phaseGate) -> do
+                    hPutStrLn stderr $
+                        "--phase build: running "
+                            <> show (Set.size selected)
+                            <> " of "
+                            <> show (length (Dag.dagOrder (Rewrite.computedDag computed)))
+                            <> " nodes, skipping the rest"
+                    UpDown.upDag (bothGates phaseGate gate) r' (Rewrite.computedDag computed)
+
+    {- | The registered rewrites, then the two-phase barrier
+    ("Salmon.Op.PassPhase"), last so that it reads the tags of the nodes
+    the other rewrites left in place. The identity on a graph with no
+    node marked build or deploy. -}
+    rewrites :: [Rewrite Extension]
+    rewrites = rewrites0 <> [PassPhase.barrier]
 
     {- | @run down@: nothing is wanted up, which is what makes a
     direction-aware rewrite emit a teardown batch here and an install batch
@@ -1307,6 +1347,32 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                 pure Nothing
             Right a -> do
                 Just <$> cont jsonbody (run traceBase a)
+
+{- | What @run up --phase build@ runs ("Salmon.Op.PassPhase"): the build
+nodes and their dependencies, and a 'UpDown.Gate' skipping every other node.
+A skipped node releases its dependants, so nothing outside the selection
+blocks the build phase; the barrier keeps every deploy node behind the build
+nodes anyway. 'Left' (the message, naming nodes by shorthand) when no node is
+marked build or a deploy node is among the build nodes' dependencies, in
+which case nothing should run.
+-}
+buildPhaseGate :: Dag.Dag Extension -> Either String (Set Ref, UpDown.Gate Extension)
+buildPhaseGate dag =
+    case PassPhase.buildSelection dag of
+        Left PassPhase.NoBuildNode -> Left "no node is marked build (inBuildPhase)"
+        Left (PassPhase.DeployUnderBuild refs) ->
+            Left $
+                "these nodes are marked deploy but a build node depends on them: "
+                    <> Text.unpack (Text.intercalate ", " (fmap nameOf refs))
+        Right selected -> Right (selected, gateFor selected)
+  where
+    nameOf aref = maybe (Text.pack (show aref)) (\act -> act.shorthand) (Dag.representativeOf dag aref)
+    gateFor :: Set Ref -> UpDown.Gate Extension
+    gateFor selected act =
+        pure $
+            if Set.member act.extension.ref selected
+                then UpDown.Required
+                else UpDown.Skippable
 
 -- | Bracket over an optional resource: the continuation gets 'Nothing'
 -- when there was nothing to acquire.

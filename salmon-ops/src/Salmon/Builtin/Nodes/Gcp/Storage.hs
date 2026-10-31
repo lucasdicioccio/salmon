@@ -961,6 +961,10 @@ data StorageCommand
     | BucketsSetWebsite BucketWebsite
     | -- | @gcloud storage rsync@, a local directory to a bucket.
       BucketsRsync Rsync
+    | {- | @gcloud storage cp SOURCE DESTINATION@ for one object, either way
+      (a @gs:\/\/@ URL or a local path on each side).
+      -}
+      ObjectCopy Project Text Text
     deriving (Show)
 
 storageCommand :: Command "gcloud" StorageCommand
@@ -1018,6 +1022,8 @@ storageCommand = Command $ \cmd -> case cmd of
                     <> ["--cache-control=" <> Text.unpack v | Just v <- [rs.rsyncCacheControl]]
                     <> ["--exclude=" <> Text.unpack re | Just re <- [rs.rsyncExclude]]
                     <> ["--dry-run" | rs.rsyncDryRun]
+    ObjectCopy project source destination ->
+        gcloudProc $ withProject project ["storage", "cp", Text.unpack source, Text.unpack destination]
   where
     url :: Bucket -> String
     url b = "gs://" <> Text.unpack b.bucketName

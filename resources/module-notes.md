@@ -1979,6 +1979,39 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   allocation than the day before; it keys the refs once for both maps), was timed after
   the change only. The web UI's fold (`salmon-ops/ui/ui.js`) was not changed because it never
   had the cost: it removes no node on an event, and its order is rebuilt only by a `/dag` read.
+- **`Op/PassPhase.hs`** (feature 53211a0a, opt-in): a two-phase pass. A node is tagged
+  `BuildPhase` (builds, checks: `amendNode inBuildPhase o`) or `DeployPhase` (pushes, deploys:
+  `amendNode inDeployPhase o`); the tag (`Op/PassPhase/Tag.hs`, a `PassPhase` in `dynamics`) is
+  scheduling only, so `Dag.representative` **filters it out** like a card template: tagging a node
+  under a running `serve` is no restart, and two declarations disagreeing only on a node's phase do
+  not conflict (newest wins). `PassPhase.barrier` is a `Rewrite`: among the nodes in
+  `phaseDesired`, every deploy node gets every build node as a dependency (`builds x deploys`
+  edges, added with one transpose; no synthetic barrier node, which would need a `Ref` and an
+  action). A failed build then blocks every deploy through the drivers' ordinary containment: no
+  new report constructor, no driver change, no `/openapi.json` change. Restricting to
+  `phaseDesired` keeps the conservative partition: under `serve` a build being retracted is not
+  made a dependency of a deploy that stays, and `run down` (nothing desired) is left as declared.
+  `CommandLine.execCommandOrSeedWithRewrites` appends the barrier **last** to the registered
+  rewrites, so it applies to `run up`/`run down`/`run serve`/`run tree`/`run dag` of every binary;
+  with no tagged node it is the identity. A node a rewrite batches loses its tag (the batch node's
+  dynamics are its own), so do not tag a node a rewrite collects. A build node that depends on a
+  deploy node closes a cycle with the barrier: both are reported `Blocked` and the pass fails.
+  `run up --phase build` (`RunUp`'s last field; only `build` parses, a deploy phase without its
+  builds is what the barrier forbids) runs `PassPhase.buildSelection`: the build nodes and the
+  closure of their dependencies; every other node gets a `Skip` from a gate
+  (`CommandLine.buildPhaseGate`), and the exit code is the pass's verdict. It refuses, running
+  nothing and exiting 1, when no node is tagged build (a dry run that tests nothing must not pass)
+  or when a deploy node is among the build nodes' dependencies (it would deploy); a line on stderr
+  says how many nodes run. Composes with `--plan` and the maintenance windows (all gates).
+  Tests: `Test/PassPhaseSpec.hs` (Layer 0: the barrier's edges, builds-before-deploys order and
+  containment under `upDag`, `phaseDesired` restriction, the cycle, the representative, the
+  selection and its refusals, the gate, the flag parser). **Run**: those, on fake nodes recording
+  their `up`. **Not run**: the concurrent driver and `serve` with tagged nodes (they only see edges,
+  so nothing phase-specific is there to run, but no test exercises it), and a real build/push
+  release. **Not done** (left open): `--phase build` for `run serve` (so `salmon-tui` can follow a
+  dry run: a `--once` pass with the same gate), showing the phase on `/dag`/`run tree`, and tagging
+  builtins: `Podman.imageHasId` (PR 219) is meant to be tagged build and `Podman.pushImageId`
+  (PR 223) deploy by the recipe that declares them; no builtin tags itself.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
@@ -2114,6 +2147,43 @@ and the working directory is left alone, so a relative path is relative to the s
 `buildTarget` (`--target`, one stage of a multi-stage file; several images from one file are several nodes). The `ref`
 stays the tag alone, the options go in `notes` only when they are not the default, so a plain `buildImage` node is
 described as before. `Test/PodmanCommandSpec.hs` holds the argv, `Test/PodmanSpec.hs` a real multi-stage build.
+
+`Podman.imageHasId TAG ID` is a gate, not an effect: "the local image tagged TAG has this id", for a release that
+must push only the image a dry run looked at (the dry run reads ids with `probeImageId`). Its `check` is
+`podman image exists TAG` then `podman image inspect --format {{.Id}} TAG` (`imageStateFrom`); `interpretImageId`
+reads the declared id as `Success`, another id or no image as `Failure` naming both, a podman that cannot answer as
+`Unknown`. Its `up` probes again and throws `ImageIdMismatch` unless the id is the declared one, so the dependant (the
+push) is `Blocked`; it never builds, pulls or retags, and `down` is nothing. `ImageId` is only made by `mkImageId`,
+which drops `sha256:`, space and case and refuses anything not 64 hex digits (a short id could never match, so it is
+refused where it is declared rather than failing every pass). The `ref` is the tag alone (`podman-image-id`): two ids
+asserted for one tag collide, the id is in `notes`. Beside a build of the same tag it must depend on that build. A
+gate before a `push` by tag still leaves a window between the check and the push; `pushImageId` (below) closes it.
+Run: Layer 0 (`Test/PodmanCommandSpec.hs` "imageHasId", with QuickCheck
+properties) and Layer 2 (`Test/PodmanSpec.hs`: build, read the id, the gate passes and its dependant runs; rebuild
+the tag from other content, the gate fails and the dependant does not run). Not run: anything under `serve`.
+
+`Podman.pushImageId OPTS ID DEST` pushes by id: `podman push [--authfile F] [--tls-verify=false] --digestfile TMP ID
+DEST`. The source is the content-addressed id, so the local tag is never read and cannot move between a check and the
+push (an id no longer in the store fails the push). After a push that exited 0, the manifest digest podman wrote to a
+fresh temporary file (`withDigestFile`, removed whatever happens; the path is chosen at `up`, hence
+`Binary.withBinaryArgAtUp`, a `withBinary` whose argument is given at `up`) is read back (`verifyPushedDigest`),
+reported as `PushedImageDigest`, and compared with `pushExpectedDigest` when set: another digest throws
+`PushedDigestMismatch DEST EXPECTED PUSHED`. That comparison is *after* the bytes went, so the destination tag then
+names the unexpected manifest; nothing is retagged or deleted at the registry. An unreadable digest file fails the node
+too. `ManifestDigest` is only made by `mkManifestDigest`, which requires `sha256:` (a bare 64-hex string is refused: it
+is an image id's shape, and an id is the config's digest, never the manifest's). The `ref` is `push`'s
+(`podman-push`, destination and auth file): both write the same remote tag. The id, the expected digest and an
+unverified registry go in `notes`; `help` names the id's first 12 digits and the destination. No `check` (asking the
+registry for the tag's digest is not done; `Immaterial`, like `push`), `down` is nothing, and there is no
+log-in-again variant like `pushLoggingIn` yet. `push` and every existing declaration render as before.
+`Gcp.ArtifactRegistry.dockerImageReference REPO IMAGE TAG` spells `LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE:TAG` for
+a docker-format repository (another format, or an empty image or tag, is a `Left`), the destination to give
+`pushImageId`. Run: Layer 0 (`Test/PodmanCommandSpec.hs` "pushImageId", argv, refs, notes and the digest verdict with
+QuickCheck properties; `Test/GcpSpec.hs` for the reference) and Layer 2 (`Test/PodmanSpec.hs`, podman 4.9.3 rootless,
+a `registry:2` container on a loopback port over plain HTTP: push the id, pull it back and read the same id; rebuild
+the tag, push the old id expecting the first digest, the registry still serves the old image and the second push wrote
+the same digest; a wrong expected digest throws `PushedDigestMismatch`; after `rmi` of the id the push fails). **Not
+run: a push to Artifact Registry**, TLS or an `--authfile` against a real registry, anything under `serve`.
 
 `Podman.runContainer` has a `check` (before, it had none, so it was `Immaterial` and a second `run up` failed at
 `podman run` on the name). The name is the effect site, as for its `down` (`podman rm -f NAME`). The check runs
@@ -2919,6 +2989,44 @@ a lone member answers no `ruok` for 15s, then with the other two `keeperQuorum` 
 Keeper root (`clusterKeeperRoot`), a non-default port, TLS between members, a member stopped during `ON CLUSTER`,
 a changed topology on running members, `WrongEngine` against a real server.
 
+`Nodes/ClickHouse/Backup.hs` is backups as files with ClickHouse's own `BACKUP`/`RESTORE`, on a schedule, shipped
+to GCS. It is its own module and edits nothing in `Nodes/ClickHouse.hs`: a server that takes backups is declared
+with `backupServerOp` instead of `serverOp`, which is the same quadlet plus a third drop-in (`salmon-backups.xml`,
+fixed text: a local disk `backups` at `/var/lib/clickhouse-backups/`, the only `allowed_disk`/`allowed_path`),
+bound read-only and watched, and the host backup directory bound read-write. That directory is `backupDirectory`
+(`FS.sharedDir`: created, never removed); its bind does not create it. The image's entrypoint chowns every disk
+path of the configuration to `clickhouse` at start, so the files are that user's, mode `0640` (seen on 25.8).
+A backup is a run of a rendered `/bin/sh` script (`renderBackupScript`) by a system-scope `Systemd.Job`
+(`backupJob`: stamp next to the script, run as root, who can read and prune the container user's files):
+`BACKUP DATABASE ... TO Disk('backups', 'NAME-YYYYMMDDTHHMMSSZ.zip')` through the server's client, the statement
+on its stdin; then, with a `GcsTarget`, `gcloud storage rsync` of this plan's files only (an `--exclude` of
+everything not matching `backupFileRegex`), argv rendered by `Storage.storageCommand`, **never deleting in the
+bucket** (retention there is `Storage.bucketLifecycle`'s); then, with `planKeepLocal`, the oldest local files of
+this plan removed. `set -eu` stops a failed backup from shipping or pruning. `scheduledBackup` is the timer
+(`Job.scheduledJob`) under `Job.completedRun` on that job, whose completion also counts the script as written: the
+node that says how the last run went, and the pass that schedules the first backup takes it. GCS credentials are
+gcloud's own or a pre-provisioned file whose **path** is exported as `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`;
+salmon never reads it. `restore` puts one database of one file back (optionally `AS` another name), from the
+directory or fetched first with `gcloud storage cp` (`Storage.ObjectCopy`, added for it) to `FILE.download` and
+renamed. **It is guarded by identity**: a restored database carries the comment `salmon-restore: FILE database
+DB` (`ALTER DATABASE ... MODIFY COMMENT`, accepted by 25.8); the check is `Success` only for that comment; `up`
+restores into an absent database, drops then restores an empty one (no table), does nothing for its own restore,
+and **refuses a database holding tables that is not this restore** unless the declaration sets
+`restoreMayDiscard` (the operator's flag, as `pair_may_discard`). A `RESTORE` over an existing database fails in
+ClickHouse anyway (`CANNOT_RESTORE_DATABASE`, a different definition), which is why the flag's path is a `DROP
+DATABASE ... SYNC` first. Run: Layer 0 (`Test/ClickHouseBackupSpec.hs`: the drop-in, the quadlet, the script with
+and without GCS, the pattern through `grep -E`, the job, the restore SQL, the readings and decisions, the
+`gcloud storage cp` argv) and Layer 2 against `clickhouse-server:25.8` under rootless podman (`podman run` with
+the three drop-ins and the directory, not the quadlet): the rendered script run three times as root of podman's
+user namespace (`podman unshare sh SCRIPT`, standing for the job's root), two files kept; the database dropped,
+`restore` up, row counts equal, check `Success`, a second pass applying nothing; another file over data written
+since refused (count unchanged), then replaced with the flag; restores `AS` an absent and into an empty
+database. Not run: the job and timer under systemd (`Systemd.Job` has its own Layer 2), `backupServerOp` as a
+system quadlet, anything against GCS (shipping and fetching are Layer 0 only: no bucket reachable from the test
+host), a restore fetched from GCS, `LocalClient`. Not covered: incremental backups (`base_backup`), and **`ON
+CLUSTER`** (left for after the cluster nodes land: a cluster backup to a local disk writes on each host's own
+disk, which wants its own design), a remote or password-protected administrator.
+
 CDC from PostgreSQL into ClickHouse through PeerDB is two modules. `Nodes/Postgres/Logical.hs` is the source's
 side, as the `postgres` OS user like the rest of `Nodes/Postgres.hs`: `logicalWalLevel` (`ALTER SYSTEM SET wal_level
 = logical` + reload, checked on what the files say, falling back to the running value; the restart is
@@ -2965,6 +3073,33 @@ container once). Not run: `restartClusterIfPending` after `logicalWalLevel` (no 
 rotated peer password, a peer with TLS, a mirror that PeerDB itself fails while running. The role's `SELECT` on the
 table and `CREATE` on the database (PeerDB's `_peerdb_internal` schema) are granted by hand there: no node declares
 them yet.
+
+`Nodes/ClickHouse/Migrations.hs` applies ClickHouse schema migrations: a directory's `.sql` files, ordered by file
+name, each applied once and recorded in a ledger table `salmon_migrations` (`name`, `checksum`, `applied_at`;
+`MergeTree ORDER BY name`) in a database the caller names (`default` always exists; another is a prerequisite the
+caller passes in, e.g. `ClickHouse.database`). Planning is in the seed stage (`loadMigrationsDir`, pure
+`planMigrations`): the SHA-256 of each file is computed there and carried in the `Migration` and in the node's
+`notes`, so an edited file is a changed representative. One node per file, each `inject`ing the previous one, the
+first the ledger node. **A recorded migration is never re-applied**: recorded with the planned checksum it is done
+(check `Success`, `up` nothing); recorded with another checksum the check is a `Failure` naming both and **`up`
+throws `MigrationChecksumMismatch` and sends nothing**; unrecorded, `up` re-hashes the file (an edit after `config`
+throws `MigrationFileChanged`), sends it on `clickhouse-client --multiquery`'s stdin (`adminRun`), then inserts the
+row. Two client calls, no transaction (ClickHouse has none for DDL): a file that fails part-way, or whose row was not
+written, runs again in full next pass, so migrations must tolerate a rerun (`IF NOT EXISTS`). A missing ledger or
+database reads as nothing applied (`UNKNOWN_TABLE`/`UNKNOWN_DATABASE`), any other error `Unknown`. Rows for files
+not in the plan are ignored. This is stricter than the Postgres migrator (`SreBox.PostgresMigrations`), which records
+nothing and re-runs every script each pass (no `check`). Cluster hook: `migrationsOnCluster` is a clause supplied by
+the caller (``Just " ON CLUSTER `main`"``, what the cluster module's `onClusterClause` renders), added to the
+ledger's `CREATE TABLE` and substituted for the token `{{on_cluster}}` in files (removed when `Nothing`); the
+checksum is of the file as written. With a cluster the ledger is a local table on every member and rows are written
+only on the server salmon talks to. Nothing renders differently for existing declarations (a new module). Run:
+Layer 0 (`Test/ClickHouseMigrationsSpec.hs`: ordering and filtering, refused names, checksums against `sha256sum`,
+the SQL with and without the clause, the ledger's readings, the graph's edges) and Layer 2 against
+`clickhouse-server:25.8` under rootless podman (14s, image cached): the ledger in a missing database read as
+pending, two files applied in order (one opening with a comment line, one statement with no trailing `;`), every
+check `Success`, a second pass applying nothing, a third file applied alone, an applied file edited read `Failure`
+and refused by `up` with nothing run. Not run: the cluster clause against a cluster (Layer 0 only), a migration
+failing part-way, a `LocalClient`, a `run up` through a binary (no app wires it yet).
 
 `Debian.Package.deb`/`debs` depend on an `aptIndex` node (same module), which is what makes them work on a
 machine whose index was never refreshed (a fresh cloud image: `apt-get install` fails with "no installation
@@ -3691,6 +3826,7 @@ subcommands via `Salmon.Builtin.CommandLine.execCommandOrSeed`:
 ```sh
 my-salmon config <seed-args...>          # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
 my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
+my-salmon run up --phase build           # only the nodes marked build (inBuildPhase) and their dependencies; see Op/PassPhase.hs
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
 my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--follow-debounce S] ...
                                          # the same loop, also fetching documents from DIR (pull mode)

@@ -154,8 +154,10 @@ test-suite salmon-ops-recipes-test
                     , Test.PostgresClusterSpec
                     , Test.ClickHouseSpec
                     , Test.ClickHouseClusterSpec
+                    , Test.ClickHouseBackupSpec
                     , Test.PeerDBSpec
                     , Test.PgBouncerSpec
+                    , Test.ClickHouseMigrationsSpec
                     , Test.HaproxySpec
                     , Test.EtcdSpec
                     , Test.PatroniSpec
@@ -181,6 +183,7 @@ test-suite salmon-ops-recipes-test
                     , Test.RemoteOutputSpec
                     , Test.ReportJsonSpec
                     , Test.RewriteSpec
+                    , Test.PassPhaseSpec
                     , Test.ServeEventsSpec
                     , Test.ServeHttpSpec
                     , Test.ServeJsonLogSpec
