@@ -292,6 +292,8 @@ podmanFailures = mapMaybe (failed . binaryReport)
         Podman.PullImage _ _ b -> Just b
         Podman.BuildImage _ _ b -> Just b
         Podman.PushImage _ _ b -> Just b
+        Podman.PushImageById _ _ _ b -> Just b
+        Podman.PushedImageDigest{} -> Nothing
         Podman.LoginRegistry{} -> Nothing
         Podman.LogoutRegistry _ _ b -> Just b
         Podman.RunContainer _ _ _ _ b -> Just b

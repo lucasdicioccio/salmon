@@ -2123,11 +2123,34 @@ reads the declared id as `Success`, another id or no image as `Failure` naming b
 push) is `Blocked`; it never builds, pulls or retags, and `down` is nothing. `ImageId` is only made by `mkImageId`,
 which drops `sha256:`, space and case and refuses anything not 64 hex digits (a short id could never match, so it is
 refused where it is declared rather than failing every pass). The `ref` is the tag alone (`podman-image-id`): two ids
-asserted for one tag collide, the id is in `notes`. Beside a build of the same tag it must depend on that build. Not
-done, decided without the owner: a push that takes the id itself (the gate composes with the existing `push`), and
-comparing a digest at the registry. Run: Layer 0 (`Test/PodmanCommandSpec.hs` "imageHasId", with QuickCheck
+asserted for one tag collide, the id is in `notes`. Beside a build of the same tag it must depend on that build. A
+gate before a `push` by tag still leaves a window between the check and the push; `pushImageId` (below) closes it.
+Run: Layer 0 (`Test/PodmanCommandSpec.hs` "imageHasId", with QuickCheck
 properties) and Layer 2 (`Test/PodmanSpec.hs`: build, read the id, the gate passes and its dependant runs; rebuild
 the tag from other content, the gate fails and the dependant does not run). Not run: anything under `serve`.
+
+`Podman.pushImageId OPTS ID DEST` pushes by id: `podman push [--authfile F] [--tls-verify=false] --digestfile TMP ID
+DEST`. The source is the content-addressed id, so the local tag is never read and cannot move between a check and the
+push (an id no longer in the store fails the push). After a push that exited 0, the manifest digest podman wrote to a
+fresh temporary file (`withDigestFile`, removed whatever happens; the path is chosen at `up`, hence
+`Binary.withBinaryArgAtUp`, a `withBinary` whose argument is given at `up`) is read back (`verifyPushedDigest`),
+reported as `PushedImageDigest`, and compared with `pushExpectedDigest` when set: another digest throws
+`PushedDigestMismatch DEST EXPECTED PUSHED`. That comparison is *after* the bytes went, so the destination tag then
+names the unexpected manifest; nothing is retagged or deleted at the registry. An unreadable digest file fails the node
+too. `ManifestDigest` is only made by `mkManifestDigest`, which requires `sha256:` (a bare 64-hex string is refused: it
+is an image id's shape, and an id is the config's digest, never the manifest's). The `ref` is `push`'s
+(`podman-push`, destination and auth file): both write the same remote tag. The id, the expected digest and an
+unverified registry go in `notes`; `help` names the id's first 12 digits and the destination. No `check` (asking the
+registry for the tag's digest is not done; `Immaterial`, like `push`), `down` is nothing, and there is no
+log-in-again variant like `pushLoggingIn` yet. `push` and every existing declaration render as before.
+`Gcp.ArtifactRegistry.dockerImageReference REPO IMAGE TAG` spells `LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE:TAG` for
+a docker-format repository (another format, or an empty image or tag, is a `Left`), the destination to give
+`pushImageId`. Run: Layer 0 (`Test/PodmanCommandSpec.hs` "pushImageId", argv, refs, notes and the digest verdict with
+QuickCheck properties; `Test/GcpSpec.hs` for the reference) and Layer 2 (`Test/PodmanSpec.hs`, podman 4.9.3 rootless,
+a `registry:2` container on a loopback port over plain HTTP: push the id, pull it back and read the same id; rebuild
+the tag, push the old id expecting the first digest, the registry still serves the old image and the second push wrote
+the same digest; a wrong expected digest throws `PushedDigestMismatch`; after `rmi` of the id the push fails). **Not
+run: a push to Artifact Registry**, TLS or an `--authfile` against a real registry, anything under `serve`.
 
 `Podman.runContainer` has a `check` (before, it had none, so it was `Immaterial` and a second `run up` failed at
 `podman run` on the name). The name is the effect site, as for its `down` (`podman rm -f NAME`). The check runs

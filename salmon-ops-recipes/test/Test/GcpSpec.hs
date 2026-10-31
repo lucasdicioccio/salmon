@@ -1668,7 +1668,18 @@ repoTests =
         assertEqual "" Success (ArtifactRegistry.interpretRepoDescribe "my-repo" ExitSuccess)
     , testCase "describe failing means the repo is absent" $
         assertBool "" (isFailure (ArtifactRegistry.interpretRepoDescribe "my-repo" (ExitFailure 1)))
+    , testCase "an image in a docker repository is LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE:TAG" $
+        assertEqual
+            ""
+            (Right "us-west1-docker.pkg.dev/p/my-repo/api:1.2")
+            (ArtifactRegistry.dockerImageReference (repoOf ArtifactRegistry.Docker) "api" "1.2")
+    , testCase "a repository of another format, or an empty image or tag, has no image reference" $ do
+        assertBool "npm" (either (const True) (const False) (ArtifactRegistry.dockerImageReference (repoOf ArtifactRegistry.Npm) "api" "1.2"))
+        assertBool "no image" (either (const True) (const False) (ArtifactRegistry.dockerImageReference (repoOf ArtifactRegistry.Docker) "" "1.2"))
+        assertBool "no tag" (either (const True) (const False) (ArtifactRegistry.dockerImageReference (repoOf ArtifactRegistry.Docker) "api" ""))
     ]
+  where
+    repoOf = ArtifactRegistry.ArtifactRepo "my-repo" (Core.Project "p") (Core.Region "us-west1")
 
 -------------------------------------------------------------------------------
 
