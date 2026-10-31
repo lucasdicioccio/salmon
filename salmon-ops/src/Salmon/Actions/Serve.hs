@@ -132,6 +132,8 @@ module Salmon.Actions.Serve (
     serveObservedWith,
     serveSaying,
     serveSayingWith,
+    serveSayingEnding,
+    Ending (..),
     Followed (..),
     AppliedDocument (..),
     Mode (..),
@@ -432,6 +434,9 @@ data Tending = Tending
     -- started and adopted), then clears the queue. "Force this node next
     -- time you look at it" rather than keeping every one-shot machine alive
     -- just so it has a mailbox to post into.
+    , tendingPassed :: !(IORef Bool)
+    -- ^ set when a convergence pass has reported its 'ConvergeStop': what
+    -- 'AfterFirstPass' ends the loop on
     }
 
 {- | A representative that lost to the magma's current one, kept for as
@@ -1740,7 +1745,7 @@ serveObservedWith ::
     IO (World seed directive)
 serveObservedWith windows observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
-    serveLoop windows observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+    serveLoop UntilQuit windows observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
@@ -1791,10 +1796,54 @@ serveSayingWith ::
     Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
-serveSayingWith windows said observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
+serveSayingWith = serveSayingEnding UntilQuit
+
+{- | When the loop ends of its own accord, besides @quit@ (and 'Eof' from
+'Stdin'), which always end it.
+
+'UntilQuit' is every version of 'serve' before the choice existed.
+'AfterFirstPass' (@run serve --once@) ends it once the first convergence
+pass has run and the command that started it is done — a declaration's
+auto-converge, an explicit @converge@, or a fetched 'Batch' alike. Anything
+still in the inbox behind that command is left unread, and so are the lines
+of a @load@ed file after the one whose pass it was, so exactly one pass runs
+however much input was already queued. It also starts with
+supervision off (as if @supervise off@ were the first line): a one-pass
+session has no "between passes" for a machine to tend in, and a node tended
+while declarations wait for an explicit @converge@ would be acted on outside
+the pass whose verdict is reported. A @supervise on@ is still obeyed.
+
+The verdict is the first pass's 'ConvergeStop', which the loop reports as it
+always does; a caller wanting an exit code reads it off the report stream
+(see @run serve --once@ in "Salmon.Builtin.CommandLine"). The loop reports
+nothing else on the way out: no 'Stopped', since input did not close.
+-}
+data Ending = UntilQuit | AfterFirstPass
+    deriving (Show, Eq)
+
+-- | 'serveSayingWith', choosing when the loop ends; see 'Ending'.
+serveSayingEnding ::
+    forall seed directive.
+    (ToJSON directive, FromJSON directive) =>
+    Ending ->
+    Window.Windows ->
+    Reporter (Attributed NodeLog.Line) ->
+    (IO (World seed directive) -> IO ()) ->
+    [Rewrite Extension] ->
+    Maybe ConcurrencyLimit ->
+    Bool ->
+    Reporter (Attributed Report) ->
+    Reporter (Attributed (UpDown.Report Extension)) ->
+    ([String] -> Either Text seed) ->
+    Configure IO seed directive ->
+    Track' directive ->
+    Maybe Followed ->
+    [Producer] ->
+    IO (World seed directive)
+serveSayingEnding ending windows said observe rewrites limit autoConverge0 rAttributed nodeReporterAttributed parseSeed configure program onFetch producers = do
     handling <- newIORef Nothing
     NodeLog.withSink (stamp handling said) $
-        serveLoop windows observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
+        serveLoop ending windows observe rewrites limit autoConverge0 handling (stamp handling rAttributed) (stamp handling nodeReporterAttributed) parseSeed configure program onFetch producers
   where
     stamp :: IORef (Maybe Origin) -> Reporter (Attributed a) -> Reporter a
     stamp handling = pulls (\rep -> (`Attributed` rep) <$> readIORef handling)
@@ -1804,6 +1853,7 @@ serveSayingWith windows said observe rewrites limit autoConverge0 rAttributed no
 serveLoop ::
     forall seed directive.
     (ToJSON directive, FromJSON directive) =>
+    Ending ->
     Window.Windows ->
     (IO (World seed directive) -> IO ()) ->
     [Rewrite Extension] ->
@@ -1818,10 +1868,10 @@ serveLoop ::
     Maybe Followed ->
     [Producer] ->
     IO (World seed directive)
-serveLoop windows observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
+serveLoop ending windows observe rewrites limit autoConverge0 handling r nodeReporter parseSeed configure program onFetch producers = do
     world <- newIORef emptyWorld
     observe (readIORef world)
-    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef True <*> newIORef autoConverge0 <*> newIORef Map.empty
+    tending <- Tending <$> newIORef Nothing <*> newIORef Upkeep.noKept <*> newIORef (ending == UntilQuit) <*> newIORef autoConverge0 <*> newIORef Map.empty <*> newIORef False
     inbox <- newTChanIO
     readers <- traverse (\p -> forkIO (produceInto p inbox)) producers
     runReporter r Started
@@ -1876,10 +1926,21 @@ serveLoop windows observe rewrites limit autoConverge0 handling r nodeReporter p
                         writeIORef handling (Just origin)
                         keepGoing <- step tending 0 world origin l
                         writeIORef handling Nothing
-                        when keepGoing (loop tending world inbox)
+                        continue keepGoing
                     Batch cmds -> do
                         keepGoing <- batch tending world cmds
-                        when keepGoing (loop tending world inbox)
+                        continue keepGoing
+      where
+        continue keepGoing = do
+            done <- ended tending
+            when (keepGoing && not done) (loop tending world inbox)
+
+    -- | Whether 'AfterFirstPass' says the loop is over: checked between
+    -- commands, and between the lines of a @load@ed file.
+    ended :: Tending -> IO Bool
+    ended tending
+        | ending == AfterFirstPass = readIORef (tendingPassed tending)
+        | otherwise = pure False
 
     {- | Run a 'Batch': every command with @autoconverge@ held off, the
     setting put back afterwards (a @finally@, so a command that stops the
@@ -2295,7 +2356,10 @@ serveLoop windows observe rewrites limit autoConverge0 handling r nodeReporter p
             pure True
         go n (ln : rest) = do
             keepGoing <- step tending depth world (Loaded path) ln
-            if keepGoing then go (n + 1) rest else pure False
+            -- 'AfterFirstPass' stops a file at the line whose pass it was,
+            -- unread lines and all (the loop then ends, see 'continue')
+            done <- ended tending
+            if keepGoing && not done then go (n + 1) rest else pure keepGoing
 
     -- | A 'Configure' that throws is reported as a bad seed and the loop
     -- reads on, same as a seed that fails to parse. It used to take the whole
@@ -2448,6 +2512,7 @@ serveLoop windows observe rewrites limit autoConverge0 handling r nodeReporter p
         w' <- readIORef world
         let (rup, rdown) = pendingCounts w'
         runReporter r (ConvergeStop (okDown && okUp) (rup + rdown))
+        writeIORef (tendingPassed tending) True
 
     {- | Only touch what this pass is for: a node wanted the other way (it
     belongs to some other seed), already converged, or excluded by this

@@ -21,6 +21,7 @@ import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Dynamic (toDyn)
+import Data.Functor.Contravariant (contramap)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import qualified Data.List
 import qualified Data.Set as Set
@@ -56,7 +57,8 @@ import qualified Salmon.Op.Status as MachineStatus
 import Salmon.Op.Supervision (Strategy (..), Supervision (..), defaultSupervision, supervised)
 import qualified Salmon.Op.Rewrite as Rewrite
 import Salmon.Op.Track (Track (..))
-import Salmon.Reporter (Reporter, ReporterM (..))
+import qualified Salmon.Op.Window as Window
+import Salmon.Reporter (Reporter, ReporterM (..), silent)
 
 import Test.Harness (capture, privatePipe, withTempDir)
 
@@ -105,6 +107,11 @@ tests =
         , testCase "`status` prints each node's path, and it round-trips as a `--select` pattern" statusPathsRoundTripAsSelectors
         , testCase "two nodes sharing one shorthand-derived path are told apart by `#ref` instead" ambiguousPathsAreDisambiguatedByRef
         , testCase "`force` still reaches a node deferred by `autoconverge off`, without converging anything else" autoConvergeOffForceStillReachesANamedNode
+        , testCase "--once: the loop ends after the first pass, leaving queued input unread" onceEndsAfterFirstPass
+        , testCase "--once: a failed first pass is the verdict, and nothing retries it" onceReportsAFailedPass
+        , testCase "--once: commands before the pass run, the explicit `converge` is the pass" onceWaitsForTheFirstPass
+        , testCase "--once: a loaded file stops at the line whose pass it was" onceStopsALoadedFile
+        , testCase "--once: input that ends before any pass ends the loop with no verdict" onceWithoutAPass
         ]
 
 -------------------------------------------------------------------------------
@@ -563,6 +570,34 @@ runServeWith rewrites prog root script = do
     w <-
         withScript script $
             Serve.serveWith rewrites Nothing True serveReporter nodeReporter (parseSpec root) (Configure pure) prog
+    (,,) w <$> readServeReports <*> readNodeReports
+
+-- | 'runServe' under 'Serve.AfterFirstPass', the loop @run serve --once@ runs.
+runServeOnce ::
+    Track' Spec ->
+    FilePath ->
+    [String] ->
+    IO (World Spec Spec, [Serve.Report], [UpDown.Report Extension])
+runServeOnce prog root script = do
+    (serveReporter, readServeReports) <- capture
+    (nodeReporter, readNodeReports) <- capture
+    w <-
+        withScript script $ \h ->
+            Serve.serveSayingEnding
+                Serve.AfterFirstPass
+                Window.noWindows
+                silent
+                (const (pure ()))
+                []
+                Nothing
+                True
+                (contramap Serve.attributed serveReporter)
+                (contramap Serve.attributed nodeReporter)
+                (parseSpec root)
+                (Configure pure)
+                prog
+                Nothing
+                [Serve.stdinProducer h]
     (,,) w <$> readServeReports <*> readNodeReports
 
 withScript :: [String] -> (Handle -> IO a) -> IO a
@@ -1424,3 +1459,65 @@ reDeclareWithChangedContentIsAppliedByThePass =
             [(0, 2), (0, 1)]
             (convergeStarts reports)
         assertAllConverged TurnUp w
+
+-------------------------------------------------------------------------------
+-- --once ('Serve.AfterFirstPass')
+
+{- | Every line of a piped script is in the inbox before the first pass ends,
+so this is the case that tells "end after the pass" from "quit once input is
+done": the second declaration must not be read, let alone converged. -}
+onceEndsAfterFirstPass :: IO ()
+onceEndsAfterFirstPass =
+    withTempDir $ \root -> do
+        (w, reports, _) <- runServeOnce program root ["up a", "up b", "status"]
+        assertFileExists root "a" True
+        assertFileExists root "b" False
+        assertAllConverged TurnUp w
+        assertEqual "exactly one pass, and it converged" [(True, 0)] (convergeStops reports)
+        assertEqual "one declaration read" 1 (length w.worldLog)
+        assertEqual "the queued `status` was not read" [] [() | Serve.StatusReport{} <- reports]
+        assertEqual "input did not close, so no `Stopped`" [] [() | Serve.Stopped <- reports]
+
+onceReportsAFailedPass :: IO ()
+onceReportsAFailedPass =
+    withTempDir $ \root -> do
+        attempts <- newIORef (0 :: Int)
+        (_, reports, _) <- runServeOnce (flaky attempts) root ["up a", "converge"]
+        assertEqual "attempted once: the second pass never ran" 1 =<< readIORef attempts
+        assertEqual "the verdict is the failed pass's" [(False, 1)] (convergeStops reports)
+
+{- | The pass, not the first command, is what ends the loop: settings and
+declarations recorded under @autoconverge off@ run, and the explicit
+@converge@ is the one pass. -}
+onceWaitsForTheFirstPass :: IO ()
+onceWaitsForTheFirstPass =
+    withTempDir $ \root -> do
+        (_, reports, _) <- runServeOnce program root ["supervise off", "autoconverge off", "up a", "up b", "converge", "up c"]
+        assertFileExists root "a" True
+        assertFileExists root "b" True
+        assertFileExists root "c" False
+        assertEqual "one pass" [(True, 0)] (convergeStops reports)
+
+onceStopsALoadedFile :: IO ()
+onceStopsALoadedFile =
+    withTempDir $ \root -> do
+        let scriptPath = root </> "commands.txt"
+        writeFile scriptPath (unlines ["up a", "up b"])
+        (_, reports, _) <- runServeOnce program root ["load " <> scriptPath, "up c"]
+        assertFileExists root "a" True
+        assertFileExists root "b" False
+        assertFileExists root "c" False
+        assertEqual "one pass" [(True, 0)] (convergeStops reports)
+        assertEqual "the file was not run to its end" [] [() | Serve.LoadDone{} <- reports]
+
+onceWithoutAPass :: IO ()
+onceWithoutAPass =
+    withTempDir $ \root -> do
+        (w, reports, _) <- runServeOnce program root ["autoconverge off", "up a"]
+        assertFileExists root "a" False
+        assertEqual "no pass ran" [] (convergeStops reports)
+        assertEqual "the declaration was recorded" 1 (length w.worldLog)
+        assertEqual "the loop ended on end of input" [()] [() | Serve.Stopped <- reports]
+
+convergeStops :: [Serve.Report] -> [(Bool, Int)]
+convergeStops reports = [(ok, n) | Serve.ConvergeStop ok n <- reports]

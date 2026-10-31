@@ -3665,7 +3665,28 @@ the same world over HTTP on a second socket — `curl --unix-socket PATH http://
 it over the network".
 `--status-sink PATH` writes the host's status document there after every pass and injection and
 on a timer — see `Actions/Serve/StatusSink.hs` above and §12's "Status flows back" — and
-`salmon-fleet status DIR` folds a directory of them. `salmon-tui PATH` is a terminal client of
+`salmon-fleet status DIR` folds a directory of them.
+`--once` (`Serve.Ending`: `UntilQuit`, every version before it, | `AfterFirstPass`, through
+`serveSayingEnding`) is a one-pass session for a release script: the loop ends once the command
+that ran the first convergence pass is done (a declaration's auto-converge, an explicit
+`converge`, a fetched batch), leaving whatever is queued behind it unread — a piped script's
+later lines and the rest of a `load`ed file included, so exactly one pass runs — and the process
+exits 0 only when that pass's `ConvergeStop` was `ok` with 0 left; 1 when it was not, or when
+input ended / `quit` came before any pass. The verdict is read off the loop's own report stream
+in `CommandLine` (no new `Report` constructor, so the JSON stream, openapi and goldens are
+unchanged; the loop emits no `Stopped` on this exit). It starts with supervision off: there is
+no "between passes" in a one-pass session, and a node tended while declarations wait under
+`autoconverge off` would be acted on outside the pass being judged. `--linger SECONDS` (only
+with `--once`; refused otherwise) keeps the brackets of `--listen`/`--http`/`--http-tcp`/the sink
+open that long after the loop returns: reads answer from the final `World` (the accessor
+outlives the loop), `POST /command` answers 503 (the HTTP producer is gone), nothing is tended.
+*Run:* `ServeSpec`'s five `--once` cases (queued input unread, a failed pass, `autoconverge off`
+then `converge`, a `load`ed file stopped mid-way, no pass at all), and by hand with
+`salmon-ops-serve-fixture run serve --once [--http P --linger N]` (exit codes, a `curl` read
+during linger). *Not run:* `--once` with `--follow` (the first fetched batch is the pass; an
+unreachable registry with no cache means no pass, so the loop waits for stdin/`quit`), and
+`salmon-tui` against a lingering socket.
+`salmon-tui PATH` is a terminal client of
 `--http PATH` (and `salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]` of
 `--http-tcp`) — see `Client/Http.hs`/`Client/Model.hs` above and §14's last paragraph.
 
