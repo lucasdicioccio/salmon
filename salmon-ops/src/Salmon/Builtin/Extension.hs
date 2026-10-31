@@ -19,6 +19,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Op.Actions
 import Salmon.Op.CardTemplate (setCardTemplate)
 import Salmon.Op.Configure
+import Salmon.Op.PassPhase.Tag (PassPhase (..), setPassPhase)
 import Salmon.Op.Eval
 import Salmon.Op.Graph
 import Salmon.Op.OpGraph
@@ -199,6 +200,24 @@ The source is public (served on @\/dag@); the contract is
 -}
 withCardTemplate :: Text -> Extension -> Extension
 withCardTemplate src ext = ext{dynamics = setCardTemplate src ext.dynamics}
+
+{- | Put this node in the build phase of a two-phase pass
+("Salmon.Op.PassPhase"): every build node succeeds before any deploy node
+starts, and @run up --phase build@ runs the build nodes (and what they
+depend on) alone. Scheduling only: the tag is left out of the node's
+representative, so a running @serve@ does not see a changed node. On a
+builtin, through 'amendNode': @amendNode inBuildPhase builtinOp@.
+-}
+inBuildPhase :: Extension -> Extension
+inBuildPhase = inPassPhase BuildPhase
+
+-- | Put this node in the deploy phase: it starts only once every build node
+-- of the pass succeeded. See 'inBuildPhase'.
+inDeployPhase :: Extension -> Extension
+inDeployPhase = inPassPhase DeployPhase
+
+inPassPhase :: PassPhase -> Extension -> Extension
+inPassPhase p ext = ext{dynamics = setPassPhase p ext.dynamics}
 
 placeholder :: ShortHand -> Text -> Op
 placeholder short t = op short nodeps $ \actions ->

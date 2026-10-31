@@ -98,6 +98,7 @@ import GHC.Records (HasField (..))
 
 import Salmon.Op.Actions
 import Salmon.Op.CardTemplate (isCardTemplate)
+import Salmon.Op.PassPhase.Tag (isPassPhase)
 import Salmon.Op.Graph
 import Salmon.Op.Guard (Guard)
 import Salmon.Op.OpGraph
@@ -840,9 +841,10 @@ representative act =
         { repShorthand = act.shorthand
         , repHelp = getField @"help" act.extension
         , repNotes = getField @"notes" act.extension
-        , -- a node's card template is presentation only, and left out: see
-          -- "Salmon.Op.CardTemplate"
-          repDynamics = fmap showDynamic (filter (not . isCardTemplate) (getField @"dynamics" act.extension))
+        , -- a node's card template is presentation only, and its pass
+          -- phase is scheduling only; both are left out: see
+          -- "Salmon.Op.CardTemplate" and "Salmon.Op.PassPhase"
+          repDynamics = fmap showDynamic (filter (\d -> not (isCardTemplate d || isPassPhase d)) (getField @"dynamics" act.extension))
         }
 
 -- | The default conflict test for 'foldDag': equality on 'Representative'.

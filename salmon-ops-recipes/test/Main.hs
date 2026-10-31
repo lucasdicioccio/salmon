@@ -81,6 +81,7 @@ import qualified Test.ReadinessSpec as ReadinessSpec
 import qualified Test.RemoteOutputSpec as RemoteOutputSpec
 import qualified Test.ReportJsonSpec as ReportJsonSpec
 import qualified Test.RewriteSpec as RewriteSpec
+import qualified Test.PassPhaseSpec as PassPhaseSpec
 import qualified Test.ServeEventsSpec as ServeEventsSpec
 import qualified Test.ServeHttpSpec as ServeHttpSpec
 import qualified Test.ServeJsonLogSpec as ServeJsonLogSpec
@@ -225,6 +226,7 @@ main =
             , ReadinessSpec.tests
             , ReportJsonSpec.tests
             , RewriteSpec.tests
+            , PassPhaseSpec.tests
             , ServeEventsSpec.tests
             , ServeHttpSpec.tests
             , ServeJsonLogSpec.tests
