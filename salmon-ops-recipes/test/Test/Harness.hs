@@ -43,6 +43,7 @@ module Test.Harness (
 
     -- * redirecting a recipe's system binaries into a container via PATH shims
     withShimmedPath,
+    withPrependedPath,
 
     -- * qemu-backed sandboxes (Layer 3)
     testBridge,

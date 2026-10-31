@@ -168,6 +168,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Graph fixture and scaling profiles | `Test.GraphFixture`, `salmon-ops-recipes/bench/GraphProfiles.hs` | `resources/graph-profiles.md` |
 | Processes, output routing, node logs, daemons | `Builtin/Nodes/{Binary,Daemon,Detached}.hs`, `Builtin/NodeLog.hs` | `specs/salmon-as-init.md` |
 | Postgres, replication, templates | `Nodes/Postgres.hs`, `SreBox.PostgresTemplate` | |
+| CDC: logical decoding prerequisites, PeerDB peers and mirrors into ClickHouse | `Nodes/Postgres/Logical.hs`, `Nodes/PeerDB.hs`, `Nodes/ClickHouse.hs` | |
 | Postgres pair / switchover | `SreBox.PostgresPair`, `SreBox.PostgresPairPrereqs` | `specs/pg-switchover.md`, `resources/postgres-pair.md` |
 | Patroni, preferred leader, rolling maintenance, pgBackRest, HAProxy | `Nodes/{Patroni,Patroni/PreferredLeader,Patroni/RollingMaintenance,PgBackRest,Haproxy}.hs` | `specs/pg-patroni.md` |
 | systemd services, jobs, timers | `Nodes/Systemd.hs`, `Nodes/Systemd/Job.hs` | |

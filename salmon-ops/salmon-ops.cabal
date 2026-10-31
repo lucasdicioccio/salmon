@@ -123,6 +123,8 @@ library
                    , Salmon.Builtin.Nodes.Patroni.RollingMaintenance
                    , Salmon.Builtin.Nodes.PgBackRest
                    , Salmon.Builtin.Nodes.Postgres
+                   , Salmon.Builtin.Nodes.Postgres.Logical
+                   , Salmon.Builtin.Nodes.PeerDB
                    , Salmon.Builtin.Nodes.ClickHouse
                    , Salmon.Builtin.Nodes.ClipCpp
                    , Salmon.Builtin.Nodes.LlamaServer
