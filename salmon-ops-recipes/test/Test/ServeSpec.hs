@@ -38,12 +38,15 @@ import System.Process (CreateProcess (..), Pid, proc)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
+import qualified Options.Applicative as Opt
 
 import qualified Salmon.Actions.Serve as Serve
 import Salmon.Actions.Serve (Convergence (..), Direction (..), NodeState (..), World (..))
 import qualified Salmon.Actions.UpDown as UpDown
 import Salmon.Actions.UpDown (CheckResult (..))
 import qualified Salmon.Actions.Upkeep as Upkeep
+import qualified Salmon.Actions.Follow as Follow
+import qualified Salmon.Builtin.CommandLine as CommandLine
 import Salmon.Builtin.Extension (Extension, Op, Track', check, deps, down, dynamics, managed, nodeps, notes, op, opAct, ref, up)
 import qualified Salmon.Builtin.Nodes.Daemon as Daemon
 import qualified Salmon.Builtin.Nodes.Filesystem as FS
@@ -80,6 +83,9 @@ tests =
         , testCase "unparseable input does not disturb the world" badInputIsInert
         , testCase "`load` runs a file of declarations as if typed" loadRunsAScript
         , testCase "`up-directive` declares straight from a directive file" upDirectiveDeclares
+        , testCase "quoteArg spells any file name as one line-protocol word" quoteArgRoundTrips
+        , testCase "--no-supervise and --up-directive parse into the start-up lines, and default to none" startupFlagsParse
+        , testCase "start-up lines run before stdin is read, and declare under their own origin" startupLinesRunFirst
         , testCase "`status --exclude **` hides every node" statusExcludeAllHidesEverything
         , testCase "`history --exclude **` hides every epoch" historyExcludeAllHidesEverything
         , testCase "`converge --select` restricted to nothing leaves a failed node untouched" convergeSelectRestricts
@@ -112,6 +118,7 @@ tests =
         , testCase "--once: commands before the pass run, the explicit `converge` is the pass" onceWaitsForTheFirstPass
         , testCase "--once: a loaded file stops at the line whose pass it was" onceStopsALoadedFile
         , testCase "--once: input that ends before any pass ends the loop with no verdict" onceWithoutAPass
+        , testCase "--once --up-directive: the directive's pass is the one pass, stdin and a second directive are not read" onceWithUpDirective
         ]
 
 -------------------------------------------------------------------------------
@@ -446,6 +453,82 @@ upDirectiveDeclares =
             "history records the file, not seed args"
             [["<directive-file>", directivePath]]
             (fmap Serve.logTokens w.worldLog)
+
+quoteArgRoundTrips :: IO ()
+quoteArgRoundTrips =
+    mapM_
+        ( \name ->
+            assertEqual
+                ("round trip of " <> show name)
+                (Right ["up-directive", name])
+                (Serve.tokenize ("up-directive " <> Serve.quoteArg name))
+        )
+        ["plain.json", "with space.json", "it's.json", "back\\slash \"dq\".json", "", "''"]
+
+startupFlagsParse :: IO ()
+startupFlagsParse = do
+    none <- parsed ["serve"]
+    assertEqual "no flag, nothing run first" CommandLine.noStartup none
+    assertEqual "no flag, no line" [] (CommandLine.startupLines none)
+    both <- parsed ["serve", "--up-directive", "b c.json", "--no-supervise", "--up-directive", "a.json"]
+    assertEqual "parsed" (CommandLine.StartupOptions False ["b c.json", "a.json"]) both
+    assertEqual
+        "supervise off first, then each directive in order"
+        ["supervise off", "up-directive 'b c.json'", "up-directive 'a.json'"]
+        (CommandLine.startupLines both)
+  where
+    parsed args =
+        case Opt.execParserPure Opt.defaultPrefs (Opt.info CommandLine.runCommandParser mempty) args of
+            Opt.Success (CommandLine.RunServe _ startup _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) -> pure startup
+            Opt.Success other -> assertFailure ("not a serve command: " <> show other)
+            Opt.Failure f -> assertFailure ("parse failed: " <> fst (Opt.renderFailure f "salmon"))
+            Opt.CompletionInvoked _ -> assertFailure "completion"
+
+{- | What @run serve --no-supervise --up-directive FILE@ wires up: the
+start-up producer, and stdin gated on it. Stdin's own lines are already
+there to read when the loop starts, so the order is the gate's doing. -}
+startupLinesRunFirst :: IO ()
+startupLinesRunFirst =
+    withTempDir $ \root -> do
+        let directivePath = root </> "it's a directive.json"
+        LByteString.writeFile directivePath (encode (Spec (root </> "files") ["a"]))
+        let opts = CommandLine.StartupOptions False [directivePath]
+        (serveReporter, readServeReports) <- capture
+        (nodeReporter, _) <- capture
+        gate <- newEmptyMVar
+        w <-
+            withScript ["up b"] $ \h ->
+                Serve.serveProducers
+                    []
+                    Nothing
+                    True
+                    serveReporter
+                    nodeReporter
+                    (parseSpec root)
+                    (Configure pure)
+                    program
+                    [ Serve.linesProducer (Serve.Origin "startup") (CommandLine.startupLines opts) (putMVar gate ())
+                    , Follow.gated gate (Serve.stdinProducer h)
+                    ]
+        reports <- readServeReports
+        assertFileExists root "a" True
+        assertFileExists root "b" True
+        assertAllConverged TurnUp w
+        assertEqual
+            "the directive, then stdin's line"
+            [(Serve.Origin "startup", ["<directive-file>", directivePath]), (Serve.Stdin, ["b"])]
+            (reverse [(e.logOrigin, e.logTokens) | e <- w.worldLog])
+        assertEqual "supervision was turned off, once" [False] [on | Serve.Supervised on <- reports]
+        assertBool
+            "and before the first pass"
+            (case dropWhile (not . isSupervised) reports of
+                (_ : rest) -> any isConvergeStart rest
+                [] -> False)
+  where
+    isSupervised Serve.Supervised{} = True
+    isSupervised _ = False
+    isConvergeStart Serve.ConvergeStart{} = True
+    isConvergeStart _ = False
 
 statusExcludeAllHidesEverything :: IO ()
 statusExcludeAllHidesEverything =
@@ -1518,6 +1601,50 @@ onceWithoutAPass =
         assertEqual "no pass ran" [] (convergeStops reports)
         assertEqual "the declaration was recorded" 1 (length w.worldLog)
         assertEqual "the loop ended on end of input" [()] [() | Serve.Stopped <- reports]
+
+{- | What @run serve --once --up-directive F1 --up-directive F2@ wires up:
+the start-up lines, then stdin gated on them. The first directive's
+auto-converge is the one pass, so neither the second directive nor stdin's
+line is read; @supervise off@ from the start-up lines is what @--once@
+already starts with. -}
+onceWithUpDirective :: IO ()
+onceWithUpDirective =
+    withTempDir $ \root -> do
+        let first = root </> "first.json"
+            second = root </> "second.json"
+        LByteString.writeFile first (encode (Spec (root </> "files") ["a"]))
+        LByteString.writeFile second (encode (Spec (root </> "files") ["b"]))
+        let opts = CommandLine.StartupOptions True [first, second]
+        (serveReporter, readServeReports) <- capture
+        gate <- newEmptyMVar
+        w <-
+            withScript ["up c"] $ \h ->
+                Serve.serveSayingEnding
+                    Serve.AfterFirstPass
+                    Window.noWindows
+                    silent
+                    (const (pure ()))
+                    []
+                    Nothing
+                    True
+                    (contramap Serve.attributed serveReporter)
+                    silent
+                    (parseSpec root)
+                    (Configure pure)
+                    program
+                    Nothing
+                    [ Serve.linesProducer (Serve.Origin "startup") (CommandLine.startupLines opts) (putMVar gate ())
+                    , Follow.gated gate (Serve.stdinProducer h)
+                    ]
+        reports <- readServeReports
+        assertFileExists root "a" True
+        assertFileExists root "b" False
+        assertFileExists root "c" False
+        assertEqual "one pass, and it converged" [(True, 0)] (convergeStops reports)
+        assertEqual
+            "only the first directive was read"
+            [(Serve.Origin "startup", ["<directive-file>", first])]
+            [(e.logOrigin, e.logTokens) | e <- w.worldLog]
 
 convergeStops :: [Serve.Report] -> [(Bool, Int)]
 convergeStops reports = [(ok, n) | Serve.ConvergeStop ok n <- reports]

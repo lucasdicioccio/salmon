@@ -16,6 +16,7 @@ import qualified Data.ByteString.Lazy as LBysteString
 import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import System.Directory (doesFileExist)
 import Data.Either (rights)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -106,7 +107,9 @@ data RunCommand
     | -- | @run serve@, optionally capping how many nodes converge at once
       -- per pass (R6 in @specs/per-node-state-machines-remaining.md@;
       -- 'Nothing' is unbounded, matching every version of @serve@ before
-      -- this flag existed), and optionally starting with @autoconverge@ off
+      -- this flag existed), what the loop does before reading any input
+      -- ('StartupOptions': @--no-supervise@, @--up-directive FILE@), and
+      -- optionally starting with @autoconverge@ off
       -- (@--no-autoconverge@; 'False' is the default, matching every
       -- version of @serve@ before the setting existed). Then pull mode
       -- ("Salmon.Actions.Follow"): a registry to follow (@--follow
@@ -134,7 +137,7 @@ data RunCommand
       -- convergence pass and exit with its verdict) and @--linger SECONDS@
       -- (keep the listeners answering reads that long before exiting; only
       -- with @--once@).
-      RunServe !(Maybe Int) !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool ![Text] !Bool !Bool !(Maybe Int)
+      RunServe !(Maybe Int) !StartupOptions !Bool !ReportFormat !(Maybe FilePath) ![Text] !FollowOptions !(Maybe FilePath) !(Maybe FilePath) !Int !SinkOptions !TcpOptions !Bool ![Text] !Bool !Bool !(Maybe Int)
     deriving (Eq, Ord, Generic, Show)
 
 {- | The four flags that put the HTTP surface on a network, as typed. What
@@ -284,6 +287,41 @@ data SinkOptions = SinkOptions
 instance FromJSON SinkOptions
 instance ToJSON SinkOptions
 
+{- | What @run serve@ does before it reads a line of input, so that a loop
+started by a unit file or a script needs nothing typed on standard input:
+@--no-supervise@ is @supervise off@ and each @--up-directive FILE@
+(repeatable, in order) is @up-directive FILE@, run as the loop's first
+commands under the @startup@ origin and before standard input, a socket
+client, an HTTP request or the fetcher's first round is read (see
+'Serve.linesProducer'). Neither changes what the commands mean: an
+@--up-directive@ converges at once unless @--no-autoconverge@ holds it for a
+@converge@, and a @supervise on@ typed later is obeyed. The defaults run
+nothing, which is every version before the flags.
+-}
+data StartupOptions = StartupOptions
+    { startupSupervise :: !Bool
+    -- ^ 'False' with @--no-supervise@
+    , startupDirectives :: ![FilePath]
+    -- ^ @--up-directive FILE@, in the order given
+    }
+    deriving (Eq, Ord, Generic, Show)
+
+instance FromJSON StartupOptions
+instance ToJSON StartupOptions
+
+-- | Supervision on, no directive: what @run serve@ starts with by default.
+noStartup :: StartupOptions
+noStartup = StartupOptions True []
+
+{- | The serve-command lines 'StartupOptions' stands for, in the order they
+run: @supervise off@ first, so that nothing a directive brings up is tended
+in between, then each directive.
+-}
+startupLines :: StartupOptions -> [String]
+startupLines o =
+    ["supervise off" | not o.startupSupervise]
+        <> ["up-directive " <> Serve.quoteArg path | path <- o.startupDirectives]
+
 instance FromJSON RunCommand
 instance ToJSON RunCommand
 
@@ -426,6 +464,7 @@ runCommandParser =
                         <> Options.Applicative.help "Cap how many nodes converge (check/up/down) at once per pass. Omitted = unbounded."
                     )
                 )
+            <*> startupOptionsP
             <*> switch
                 ( long "no-autoconverge"
                     <> Options.Applicative.help
@@ -492,6 +531,23 @@ runCommandParser =
                         <> Options.Applicative.metavar "SECONDS"
                         <> Options.Applicative.help
                             "With --once: after the pass, keep --listen, --http and --http-tcp up this long (reads answer from the final state, commands are refused) before exiting, so a client such as salmon-tui can show the end state."
+                    )
+                )
+    startupOptionsP =
+        StartupOptions
+            <$> ( not
+                    <$> switch
+                        ( long "no-supervise"
+                            <> Options.Applicative.help
+                                "Start with `supervise off`: nodes are left alone between passes until a `supervise on`."
+                        )
+                )
+            <*> many
+                ( strOption
+                    ( long "up-directive"
+                        <> Options.Applicative.metavar "FILE"
+                        <> Options.Applicative.help
+                            "Declare the directive JSON in FILE before reading any input, as a first `up-directive FILE` would (repeatable, in order; converged at once unless --no-autoconverge). The file must exist at start-up. With --once the first directive's pass is the one pass: later directives and stdin are not read."
                     )
                 )
     tcpOptionsP =
@@ -863,8 +919,16 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             void $ withGraph (\op -> computedTreeDag op >>= Help.printDagTree)
         (Run RunDAG) -> do
             void $ withGraph (\op -> computedTreeDag (injectRemoteSubgraphs 0 op) >>= Dot.printDagCograph)
-        (Run (RunServe maxConcurrency noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly wins overrideWins once linger)) -> do
+        (Run (RunServe maxConcurrency startup noAutoConverge fmt followDir labels followOptions listen http eventsRing sinkOptions tcpOptions httpReadOnly wins overrideWins once linger)) -> do
             reportByLine
+            -- a directive named on the command line is looked for before
+            -- anything is bound, rather than reported as a bad seed by a
+            -- loop that then waits for input nobody is going to type
+            forM_ startup.startupDirectives $ \path -> do
+                there <- doesFileExist path
+                when (not there) $ do
+                    hPutStrLn stderr ("--up-directive " <> path <> ": no such file")
+                    exitFailure
             -- like --http-read-only without a listener: a flag that would do
             -- nothing is refused rather than ignored
             forM_ linger $ \secs -> do
@@ -974,6 +1038,9 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
             -- registry says, deterministically; after that both interleave
             -- at line granularity.
             gate <- newEmptyMVar
+            -- and before that, the start-up lines: every producer waits
+            -- for them to be in the inbox (there are none by default)
+            startupGate <- newEmptyMVar
             -- what `fetch` pokes: the fetcher's clock wakes on it; and
             -- what `status` reads: the fetcher's mode
             pk <- Scheduler.newPoke
@@ -1003,9 +1070,12 @@ execCommandOrSeedWithRewrites serveR r rewrites genBase traceBase cmd = do
                       (Nothing, []) -> Serve.stdinProducer stdin
                       _ -> Serve.handleProducer (Serve.Origin "stdin") stdin
                   producersWith followR more =
-                      case follow of
+                      startupFirst $ case follow of
                           Nothing -> stdinP : more
                           Just f -> Follow.follower followR pk modeVar appliedVar f (putMVar gate ()) : Follow.gated gate stdinP : more
+                  startupFirst ps = case startupLines startup of
+                      [] -> ps
+                      ls -> Serve.linesProducer (Serve.Origin "startup") ls (putMVar startupGate ()) : map (Follow.gated startupGate) ps
               -- the listener's reporters answer each socket client on its own
               -- connection, the HTTP server's answer each request with its
               -- own reports, and both hand everything on to the loop's own,

@@ -3741,6 +3741,25 @@ unreachable registry with no cache means no pass, so the loop waits for stdin/`q
 `--http PATH` (and `salmon-tui https://HOST:PORT --token-file FILE [--cacert FILE]` of
 `--http-tcp`) — see `Client/Http.hs`/`Client/Model.hs` above and §14's last paragraph.
 
+`--no-supervise` and `--up-directive FILE` (repeatable) are `CommandLine.StartupOptions`: the lines
+`supervise off` then `up-directive 'FILE'` (each path through `Serve.quoteArg`, so any name
+survives `tokenize`), pushed by `Serve.linesProducer` under `Origin "startup"` before any other
+producer runs — every producer, stdin, sockets, HTTP and the follower alike, is `Follow.gated` on
+it, the same device that puts the fetcher's first round ahead of stdin. They are the commands as if
+typed: an `--up-directive` converges at once unless `--no-autoconverge` holds it, history says
+`[via startup]`, a later `supervise on` is obeyed, and a missing FILE exits 1 before anything is bound.
+It pushes no `Eof` (nobody waits for that origin to hang up). The flags do not change how the loop
+ends: with no `--listen`/`--http`, stdin's end still ends it after the start-up lines are handled,
+so a service keeps stdin open or gives a listener. `--once --up-directive F` is "apply this
+directive in one pass and exit with the verdict": the directive's auto-converge is the one pass,
+`--no-supervise` is redundant there (`--once` already starts with supervision off), and a second
+`--up-directive` is never read (its line is queued behind the pass), so several directives under
+`--once` must be one file. With `--no-autoconverge` the pass waits for a typed `converge`. *Run:*
+`ServeSpec`'s parse, `quoteArg` round-trip, start-up-first and `--once --up-directive` cases (the
+last two wire `linesProducer` + a gated stdin over `serveProducers`/`serveSayingEnding`, not
+`execCommandOrSeed`), and `salmon-ops-serve-fixture run serve --no-supervise --up-directive F` by
+hand. *Not run:* with `--follow`, `--listen` or `--http`.
+
 To build one of these binaries: define a `seed` type, a `directive`/`Spec` type (`FromJSON`/
 `ToJSON`), a `Configure IO seed Spec`, and a `Track' Spec` that turns a `Spec` into an `Op` by
 composing builtin nodes and/or recipes.

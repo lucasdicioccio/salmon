@@ -46,8 +46,9 @@ refused args =
         Opt.Success other -> assertFailure (unwords args <> ": accepted as " <> show other)
         Opt.CompletionInvoked _ -> assertFailure "completion"
 
-{- | The 'CommandLine.ReportFormat' of a parsed @serve@, read as the third
-of the constructor's fields through its JSON encoding rather than by a
+{- | The 'CommandLine.ReportFormat' of a parsed @serve@, read as the fourth
+of the constructor's fields (after the concurrency cap, the
+'CommandLine.StartupOptions' and @--no-autoconverge@) through its JSON encoding rather than by a
 pattern naming all of them, so a flag appended to 'CommandLine.RunServe'
 does not have to be spelled here too. -}
 serveFormat :: [String] -> IO CommandLine.ReportFormat
@@ -57,7 +58,7 @@ serveFormat args =
             case toJSON cmd of
                 Object o
                     | Just (Array fields) <- KeyMap.lookup "contents" o
-                    , (_ : _ : v : _) <- toList fields
+                    , (_ : _ : _ : v : _) <- toList fields
                     , Success fmt <- fromJSON v ->
                         pure fmt
                 other -> assertFailure ("unexpected encoding of a serve command: " <> show other)
