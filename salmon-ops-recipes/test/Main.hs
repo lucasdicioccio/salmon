@@ -56,6 +56,7 @@ import qualified Test.PostgresInitSpec as PostgresInitSpec
 import qualified Test.PostgresReplicationSpec as PostgresReplicationSpec
 import qualified Test.PostgresClusterSpec as PostgresClusterSpec
 import qualified Test.ClickHouseSpec as ClickHouseSpec
+import qualified Test.ClickHouseClusterSpec as ClickHouseClusterSpec
 import qualified Test.ClickHouseBackupSpec as ClickHouseBackupSpec
 import qualified Test.PeerDBSpec as PeerDBSpec
 import qualified Test.PgBouncerSpec as PgBouncerSpec
@@ -207,6 +208,7 @@ main =
             , PostgresBackupSpec.tests
             , PostgresClusterSpec.tests
             , ClickHouseSpec.tests
+            , ClickHouseClusterSpec.tests
             , ClickHouseBackupSpec.tests
             , PeerDBSpec.tests
             , PgBouncerSpec.tests

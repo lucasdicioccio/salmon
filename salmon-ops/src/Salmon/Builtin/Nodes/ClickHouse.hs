@@ -203,8 +203,75 @@ data Server
     -- through @podman exec@ either way)
     , serverReadyTimeout :: Int
     -- ^ seconds @up@ waits for the server to answer a query after a start
+    , serverDropIns :: [DropIn]
+    -- ^ further @config.d@ drop-ins (a Keeper member, a cluster: see
+    -- "Salmon.Builtin.Nodes.ClickHouse.Cluster"), written in
+    -- 'serverConfigDir' next to the two above, bound read-only and watched.
+    -- Empty adds no file, bind or watch: the quadlet is the one it was.
+    , serverEnvFile :: Maybe FilePath
+    -- ^ a pre-provisioned @EnvironmentFile=@ (@KEY=VALUE@ lines) podman
+    -- reads on the host at every start, and watched; where a drop-in's
+    -- @from_env@ settings (a cluster secret, interserver credentials) find
+    -- their values, so that no secret is in a file salmon renders.
+    -- 'Nothing' renders nothing.
+    , serverNetwork :: Maybe Text
+    -- ^ the podman network (@Network=@), for members that reach each other
+    -- by container name; 'Nothing' renders nothing
+    , serverWaitReady :: Bool
+    -- ^ whether @up@ waits for the server to answer (@True@, the default).
+    -- A server embedding a member of a Keeper ensemble of several answers
+    -- nothing before the ensemble has a quorum (seen on 25.8: "waiting for
+    -- quorum"), so a graph that starts the members one after another would
+    -- wait on the first for members started after it: such a member sets it
+    -- @False@ and the graph waits once, after all of them
+    -- ("Salmon.Builtin.Nodes.ClickHouse.Cluster".@keeperQuorum@). Never
+    -- rendered.
     }
     deriving (Eq, Show)
+
+{- | One more @config.d@ file: its name in 'serverConfigDir' and in the
+container's @config.d@, its rendered contents, and what makes it
+unrenderable (when not empty, @up@ refuses to write it, as
+'serverConfigFile' does). The contents are public (they are what the node
+shows to tell a change): nothing secret goes in one, a secret is a
+@from_env@ reference to 'serverEnvFile'.
+-}
+data DropIn = DropIn
+    { dropInName :: FilePath
+    , dropInContents :: Text
+    , dropInProblems :: [Text]
+    }
+    deriving (Eq, Show)
+
+dropInPath :: Server -> DropIn -> FilePath
+dropInPath s d = s.serverConfigDir </> d.dropInName
+
+-- | What makes a drop-in's name unusable: not a plain @.xml@ file name, or one of the two salmon always writes.
+dropInNameProblems :: DropIn -> [Text]
+dropInNameProblems d =
+    [ "drop-in " <> name <> " is not a plain .xml file name"
+    | Text.null base || not (Text.all (\c -> isAscii c && (isAlphaNum c || c `elem` ("-_." :: String))) name) || not (".xml" `Text.isSuffixOf` name) || "." `Text.isPrefixOf` name
+    ]
+        <> ["drop-in " <> name <> " is a file salmon already writes" | d.dropInName `elem` ["salmon-server.xml", "salmon-admin.xml"]]
+  where
+    name = Text.pack d.dropInName
+    base = maybe "" id (Text.stripSuffix ".xml" name)
+
+{- | A drop-in file, refused at @up@ (nothing written) when it has problems,
+as 'serverConfigFile' is.
+-}
+dropInFile :: FilePath -> DropIn -> Op
+dropInFile path d =
+    case dropInNameProblems d <> d.dropInProblems of
+        [] -> FS.filecontentsInSharedDir (FS.FileContents path d.dropInContents)
+        problems ->
+            op "clickhouse-config" nodeps $ \actions ->
+                actions
+                    { help = "refuses to write " <> Text.pack path
+                    , notes = problems
+                    , ref = mkRef "file-contents" path
+                    , up = throwIO (InvalidConfig path problems)
+                    }
 
 -- | No port published, the default configuration, 60 seconds to answer.
 server :: Podman.ContainerName -> Text -> FilePath -> FilePath -> Server
@@ -217,6 +284,10 @@ server name image configDir dataDir =
         , serverConfig = defaultServerConfig
         , serverPorts = []
         , serverReadyTimeout = 60
+        , serverDropIns = []
+        , serverEnvFile = Nothing
+        , serverNetwork = Nothing
+        , serverWaitReady = True
         }
 
 serverConfigPath :: Server -> FilePath
@@ -243,8 +314,11 @@ serverContainer s =
             , readOnlyFile (serverConfigPath s) "/etc/clickhouse-server/config.d/salmon-server.xml"
             , readOnlyFile (adminAccessPath s) "/etc/clickhouse-server/users.d/salmon-admin.xml"
             ]
-        , Quadlet.containerWatched = [serverConfigPath s, adminAccessPath s]
-        , Quadlet.containerReady = Just (Quadlet.readyWhen (readyProbe (serverClient s)) s.serverReadyTimeout)
+                <> [readOnlyFile (dropInPath s d) ("/etc/clickhouse-server/config.d" </> d.dropInName) | d <- s.serverDropIns]
+        , Quadlet.containerWatched = [serverConfigPath s, adminAccessPath s] <> fmap (dropInPath s) s.serverDropIns
+        , Quadlet.containerEnvFile = s.serverEnvFile
+        , Quadlet.containerNetwork = s.serverNetwork
+        , Quadlet.containerReady = if s.serverWaitReady then Just (Quadlet.readyWhen (readyProbe (serverClient s)) s.serverReadyTimeout) else Nothing
         }
   where
     readOnlyFile host guest =
@@ -265,7 +339,7 @@ serverOp r systemctl s =
     Quadlet.quadletContainer r systemctl (Track (const files)) (serverContainer s)
   where
     files =
-        op "clickhouse-config-files" (deps [serverConfigFile (serverConfigPath s) s.serverConfig, adminAccessFile (adminAccessPath s)]) $ \actions ->
+        op "clickhouse-config-files" (deps ([serverConfigFile (serverConfigPath s) s.serverConfig, adminAccessFile (adminAccessPath s)] <> [dropInFile (dropInPath s d) d | d <- s.serverDropIns])) $ \actions ->
             actions{help = "ClickHouse drop-ins in " <> Text.pack s.serverConfigDir}
 
 -------------------------------------------------------------------------------

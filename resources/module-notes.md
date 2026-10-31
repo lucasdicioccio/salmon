@@ -2946,6 +2946,49 @@ is `userPassFile` + `grant` on the target database; PeerDB itself reads the same
 `access_object = S3`) was added for PeerDB, which refuses a ClickHouse peer whose user may not read S3 (it stages
 rows there).
 
+`Nodes/ClickHouse/Cluster.hs` (feature `bb9b9cca`) is ClickHouse as a replicated and sharded cluster. To carry it,
+`ClickHouse.Server` grew three fields that default to nothing, so an existing declaration renders the same quadlet
+(pinned line by line in `Test/ClickHouseClusterSpec.hs`): `serverDropIns` (further `config.d` files: written in
+`serverConfigDir` by `dropInFile`, refused at `up` on a bad name or the drop-in's own problems, bound read-only and
+watched), `serverEnvFile` (`EnvironmentFile=`) and `serverNetwork` (`Network=`). **Secrets are never in a rendered
+file**: the cluster drop-in says `<secret from_env="VAR" />` and `<password from_env="VAR" />` and the values are in
+the pre-provisioned env file podman reads at start, which the quadlet already watches through its keyed HMAC (so a
+rotated file restarts the member and no digest is public); nothing in salmon reads it. Keeper: `renderKeeperConfig`
+(`server_id`, client port, `raft_configuration replace="replace"`, because the standalone image ships a one-member
+list a merge would add to), embedded through `keeperDropIn` or standalone through `keeperServerOp` (the official
+`clickhouse-keeper` image, whose drop-in directory is **`keeper_config.d`**, not `config.d`: seen on 25.8, a file in
+`config.d` is ignored). Load-bearing, seen on 25.8: **a member of an ensemble of several answers nothing before
+there is a quorum**: a standalone one opens no client port (not even `ruok`), a server embedding one does not answer
+`SELECT 1` ("waiting for quorum"). So no member waits for itself: `keeperContainer` has no readiness, and
+`embeddedKeeperMember` sets the new `serverWaitReady` (default `True`, never rendered) to `False`; a graph that
+starts the members one after another would otherwise wait on the first for members started after it. The graph
+waits once, after all of them, with `keeperQuorum`: a `Readiness.waitUntil` asking every listed member for a session
+(`clickhouse-keeper-client -q "ls '/'"`), preferring none; nothing reads `mntr` or names a leader.
+`keeperAliveProbe` (`ruok` over bash's `/dev/tcp`; the images have no `nc`) is there for a member already in a quorum. Cluster drop-in (`renderClusterConfig`):
+`remote_servers` (shards × replicas, `internal_replication`, optional weight), `macros` (`memberMacros`: cluster,
+shard, replica), `zookeeper` (rendered `replace`), `interserver_http_host` (the default in a container is its id,
+which the other replicas cannot resolve) and `interserver_http_credentials`; `memberConfig` is the usual shape. Checks:
+`clusterVisible` reads `system.clusters` against the declared rows (a difference is a `Failure` naming it; `up` only
+waits, since the server reloads `remote_servers` and the quadlet restarts on a changed drop-in) and `keeperConnected`
+reads `system.zookeeper` at `/` (`Unknown` when `SELECT 1` fails, `Failure` with the server's error otherwise).
+`clusterDatabase` is `Replicated(path, '{shard}', '{replica}')` declared on every member (its ref is
+`ClickHouse.database`'s, so both for one name on one server conflict; `up` reads the engine back and throws
+`WrongEngine` rather than convert or drop an existing database) or `ON CLUSTER` declared once (checked through
+`clusterAllReplicas`, so `Unknown` while a replica does not answer; a member down at `up` fails the node after
+`distributed_ddl_task_timeout` and the queued task runs when it is back). A cluster secret matters beyond
+authentication: without it a member's query to another runs as `default` with no password, which
+`renderAdminAccess` only lets in from loopback, so `clusterAllReplicas` (the `ON CLUSTER` check) needs the secret.
+`onClusterClause` is exported for later DDL (schema migrations). Run: Layer 0 (renders, refusals, quadlet lines,
+SQL, readings) and Layer 2 under rootless podman on a fresh network, containers started with the arguments their
+quadlet would give (binds without the data directory, `--env-file`, `--network` and the name as alias): three
+`clickhouse-server:25.8` each embedding a Keeper member, cluster `main` of shards (ch1, ch2) and (ch3), a secret and
+interserver credentials from the env file; quorum, sessions, `system.clusters`, a `Replicated` database on each and
+an `ON CLUSTER` one, a second pass applying nothing, a `ReplicatedMergeTree` made once reaching every member and its
+rows the other replica of shard 1 (an interserver fetch with the credentials). And three `clickhouse-keeper:25.8`:
+a lone member answers no `ruok` for 15s, then with the other two `keeperQuorum` holds and each answers `imok`. Not run: either quadlet as a system unit, a
+Keeper root (`clusterKeeperRoot`), a non-default port, TLS between members, a member stopped during `ON CLUSTER`,
+a changed topology on running members, `WrongEngine` against a real server.
+
 `Nodes/ClickHouse/Backup.hs` is backups as files with ClickHouse's own `BACKUP`/`RESTORE`, on a schedule, shipped
 to GCS. It is its own module and edits nothing in `Nodes/ClickHouse.hs`: a server that takes backups is declared
 with `backupServerOp` instead of `serverOp`, which is the same quadlet plus a third drop-in (`salmon-backups.xml`,
