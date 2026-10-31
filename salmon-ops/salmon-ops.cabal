@@ -126,6 +126,7 @@ library
                    , Salmon.Builtin.Nodes.Postgres.Logical
                    , Salmon.Builtin.Nodes.PeerDB
                    , Salmon.Builtin.Nodes.ClickHouse
+                   , Salmon.Builtin.Nodes.ClickHouse.Backup
                    , Salmon.Builtin.Nodes.ClipCpp
                    , Salmon.Builtin.Nodes.ClickHouse.Migrations
                    , Salmon.Builtin.Nodes.LlamaServer
