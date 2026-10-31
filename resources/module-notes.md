@@ -1979,6 +1979,39 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   allocation than the day before; it keys the refs once for both maps), was timed after
   the change only. The web UI's fold (`salmon-ops/ui/ui.js`) was not changed because it never
   had the cost: it removes no node on an event, and its order is rebuilt only by a `/dag` read.
+- **`Op/PassPhase.hs`** (feature 53211a0a, opt-in): a two-phase pass. A node is tagged
+  `BuildPhase` (builds, checks: `amendNode inBuildPhase o`) or `DeployPhase` (pushes, deploys:
+  `amendNode inDeployPhase o`); the tag (`Op/PassPhase/Tag.hs`, a `PassPhase` in `dynamics`) is
+  scheduling only, so `Dag.representative` **filters it out** like a card template: tagging a node
+  under a running `serve` is no restart, and two declarations disagreeing only on a node's phase do
+  not conflict (newest wins). `PassPhase.barrier` is a `Rewrite`: among the nodes in
+  `phaseDesired`, every deploy node gets every build node as a dependency (`builds x deploys`
+  edges, added with one transpose; no synthetic barrier node, which would need a `Ref` and an
+  action). A failed build then blocks every deploy through the drivers' ordinary containment: no
+  new report constructor, no driver change, no `/openapi.json` change. Restricting to
+  `phaseDesired` keeps the conservative partition: under `serve` a build being retracted is not
+  made a dependency of a deploy that stays, and `run down` (nothing desired) is left as declared.
+  `CommandLine.execCommandOrSeedWithRewrites` appends the barrier **last** to the registered
+  rewrites, so it applies to `run up`/`run down`/`run serve`/`run tree`/`run dag` of every binary;
+  with no tagged node it is the identity. A node a rewrite batches loses its tag (the batch node's
+  dynamics are its own), so do not tag a node a rewrite collects. A build node that depends on a
+  deploy node closes a cycle with the barrier: both are reported `Blocked` and the pass fails.
+  `run up --phase build` (`RunUp`'s last field; only `build` parses, a deploy phase without its
+  builds is what the barrier forbids) runs `PassPhase.buildSelection`: the build nodes and the
+  closure of their dependencies; every other node gets a `Skip` from a gate
+  (`CommandLine.buildPhaseGate`), and the exit code is the pass's verdict. It refuses, running
+  nothing and exiting 1, when no node is tagged build (a dry run that tests nothing must not pass)
+  or when a deploy node is among the build nodes' dependencies (it would deploy); a line on stderr
+  says how many nodes run. Composes with `--plan` and the maintenance windows (all gates).
+  Tests: `Test/PassPhaseSpec.hs` (Layer 0: the barrier's edges, builds-before-deploys order and
+  containment under `upDag`, `phaseDesired` restriction, the cycle, the representative, the
+  selection and its refusals, the gate, the flag parser). **Run**: those, on fake nodes recording
+  their `up`. **Not run**: the concurrent driver and `serve` with tagged nodes (they only see edges,
+  so nothing phase-specific is there to run, but no test exercises it), and a real build/push
+  release. **Not done** (left open): `--phase build` for `run serve` (so `salmon-tui` can follow a
+  dry run: a `--once` pass with the same gate), showing the phase on `/dag`/`run tree`, and tagging
+  builtins: `Podman.imageHasId` (PR 219) is meant to be tagged build and `Podman.pushImageId`
+  (PR 223) deploy by the recipe that declares them; no builtin tags itself.
 - **`Builtin/CommandLine.hs`** wires all of the above into the CLI every salmon binary shares:
   `execCommandOrSeed` implements the two-phase protocol described below.
 - **`Op/Configure.hs`**: `Configure m seed a = Configure { gen :: seed -> m a }` — deliberately
@@ -3648,6 +3681,7 @@ subcommands via `Salmon.Builtin.CommandLine.execCommandOrSeed`:
 ```sh
 my-salmon config <seed-args...>          # seed (human/CLI-friendly) -> JSON-encoded directive on stdout
 my-salmon run up|down|tree|dag           # reads a JSON directive on stdin, expands it into an Op graph, executes/prints it
+my-salmon run up --phase build           # only the nodes marked build (inBuildPhase) and their dependencies; see Op/PassPhase.hs
 my-salmon run serve                      # reads a stream of seed declarations on stdin, converges after each
 my-salmon run serve --follow DIR --label L [--label L]... [--follow-base S] [--follow-debounce S] ...
                                          # the same loop, also fetching documents from DIR (pull mode)
