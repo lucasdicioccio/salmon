@@ -1,6 +1,14 @@
 # Revision history for salmon-ops-recipes
 
-## 0.2.0.0 -- unreleased
+## 0.3.0.0 -- 2026-10-31
+
+No change to the library's own code. Requires `salmon-ops ^>=0.3.0.0`, whose exports changed.
+
+* Every external dependency now carries a PVP upper bound.
+* Tests for the ClickHouse, PeerDB and `run serve` start-up/`--once`/`--json-log` additions of
+  `salmon-ops` (Layer 0; Layer 2 under podman, PeerDB opt-in with `SALMON_TEST_PEERDB=1`).
+
+## 0.2.0.0 -- 2026-10-23
 
 Breaking: `SreBox.PostgresPair`'s records and some exported functions changed. Requires
 `salmon-ops ^>=0.2.0.0`.
