@@ -3177,6 +3177,17 @@ a repository depends on both nodes in no order. And
 batch inherits as a dependency; on the way down they are left as declared, their `down` being nothing. A
 harness that shims `apt-get`/`dpkg-query` into a sandbox must shim `apt-cache` too.
 
+`Debian.AptRepository`: the suite is `FixedSuite`, `CodenameSuffixed suffix` or `CodenameInfixed prefix suffix`
+(Google's `google-cloud-ops-agent-<codename>-2`), the codename read from `/etc/os-release` when the sources node
+runs. The key is `repoKey :: SigningKey` (was `repoKeyFile`/`repoKeyFingerprint`, a breaking rename for anyone
+building the record by hand; `pgdg`/`netbirdRepository` keep their signatures): `KeyFile path fingerprint`, as
+before and rendering the same help/notes/paths (pinned in `AptRepositorySpec`), or `KeyBytes bytes (Maybe
+fingerprint)`, written by the key node itself, installed as `.asc` when it starts with an armor header and `.gpg`
+otherwise. The bytes are a *public* key, so their sha256 is in the key and index nodes' notes: a changed embedded key
+is a changed representative. A declared fingerprint is checked by feeding the bytes to `gpg --show-keys` on stdin
+(tried by hand with gpg 2.4 on an armored and a binary export; the node itself has not been run against `/etc/apt`).
+Layer 0 only: suite resolution, destination extension, the notes and the digest.
+
 Template databases: `Postgres.cloneDatabase` (a `CREATE DATABASE … TEMPLATE` node, whose
 `Retention` says whether `down` drops it — `retainedClone` for an open PR's environment,
 `disposableClone` for a test fixture or a merged PR) and

@@ -114,7 +114,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
 import Salmon.Builtin.Nodes.Binary (Binary, Command (..), CommandFailed (..), justInstall, untrackedExec)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
-import Salmon.Builtin.Nodes.Debian.AptRepository (AptRepository (..), Pinning (..), Suite (..))
+import Salmon.Builtin.Nodes.Debian.AptRepository (AptRepository (..), Pinning (..), SigningKey (..), Suite (..))
 import Salmon.Builtin.Nodes.Debian.Package (Package (..), deb)
 import Salmon.Op.OpGraph (inject)
 import Salmon.Op.Ref
@@ -388,8 +388,7 @@ netbirdRepository keyFile fingerprint =
         , repoUris = "https://pkgs.netbird.io/debian"
         , repoSuite = FixedSuite "stable"
         , repoComponents = ["main"]
-        , repoKeyFile = keyFile
-        , repoKeyFingerprint = fingerprint
+        , repoKey = KeyFile keyFile fingerprint
         , repoPin = OnlyPackages ("netbird" NEList.:| [])
         , repoAptDir = "/etc/apt"
         , repoListsDir = "/var/lib/apt/lists"
