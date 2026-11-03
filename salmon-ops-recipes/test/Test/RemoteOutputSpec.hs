@@ -7,8 +7,9 @@
 
 Three kinds of case, and what none of them is. /Declared shape/: the calls
 that existed before there was a choice declare the node they always did
-(same 'Ref', notes, @ssh@ argv), and only 'Self.RemoteReports' changes the
-remote command line. /The re-telling/, pure: 'Self.remoteReportLines' over
+(same 'Ref', notes, @ssh@ argv; but a standard input is a keyed tag in the
+'Ref' and @help@, never the bytes, see /standard input is not public/), and
+only 'Self.RemoteReports' changes the remote command line. /The re-telling/, pure: 'Self.remoteReportLines' over
 lines encoded here by the server's own "Salmon.Reporter.Tagged", so a change
 of wire shape fails here. /A real process/: a @\/bin\/sh@ standing where
 @ssh@ would be, writing those same lines and held open on a file, to show a
@@ -26,8 +27,11 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (ErrorCall (..), toException)
 import Control.Monad (void, when)
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Aeson (encode)
+import Data.Bits ((.&.))
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Char8 as C8
 import qualified Data.ByteString.Lazy as LByteString
 import Data.Functor.Identity (runIdentity)
@@ -38,7 +42,9 @@ import qualified Data.Text.Encoding as Text
 import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Posix.Files (fileMode, getFileStatus)
 import System.Process (proc)
+import Text.Printf (printf)
 import System.Process.ListLike (CmdSpec (..), cmdspec)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
@@ -69,10 +75,18 @@ tests =
             "declared shape"
             [ testCase "Ssh.call is the node it was, and a routed call is the same node" sshCallUnchanged
             , testCase "the ssh argv does not depend on the routing" sshArgv
-            , testCase "callSelf is the node it was" selfCallUnchanged
-            , testCase "callSelfAsSudoWith is the node it was" selfSudoCallUnchanged
+            , testCase "callSelf is the node it was, its directive tagged" selfCallUnchanged
+            , testCase "callSelfAsSudoWith is the node it was, its directive tagged" selfSudoCallUnchanged
             , testCase "following the remote's lines keeps the node; asking for its reports adds --json" selfCallOutputs
             , testCase "only up and down are asked for --json" selfCallJsonOnlyWhereTaken
+            ]
+        , testGroup
+            "standard input is not public"
+            [ testCase "an input is in neither help, notes nor ref, nor is its plain hash" stdinNotPublic
+            , testCase "two inputs are two nodes, the same input one" stdinTellsCallsApart
+            , testCase "a self-call's directive is not in its help" selfCallDirectiveNotPublic
+            , testCase "the tag is HMAC-SHA256 under the key, and says when the key is ephemeral" stdinTagVector
+            , testCase "the key file is made once, owner-only, and read back the same" callKeyFileMadeOnce
             ]
         , testGroup
             "re-telling a remote salmon's reports"
@@ -103,9 +117,15 @@ self :: Self.RemoteSelf
 self = Self.RemoteSelf (Self.Remote "deployer" "198.51.100.7") "/srv/salmon/self"
 
 -- | The 'Ref' an ssh call has always had: the remote program, the remote,
--- its arguments and its standard input.
+-- its arguments and its standard input. Still the 'Ref' of a call with
+-- nothing on standard input; see 'sshRunRefTagged' for the others.
 sshRunRef :: FilePath -> [Text] -> ByteString.ByteString -> Ref
 sshRunRef path args input = mkRef "ssh-run" (show (path, remote, args, input))
+
+-- | The 'Ref' of a call with something on standard input: the input's
+-- keyed tag where the input was.
+sshRunRefTagged :: FilePath -> [Text] -> ByteString.ByteString -> Ref
+sshRunRefTagged path args input = mkRef "ssh-run" (show (path, remote, args, Ssh.stdinTag Ssh.callKey input))
 
 selfCall :: Self.CallOpts -> CLI.BaseCommand -> Op
 selfCall o base = trackedGraph (Self.callSelfOpts o silent ignoreTrack self ignoreTrack base ())
@@ -119,6 +139,7 @@ sshCallUnchanged = do
     plain <- actOf (Ssh.call silent ignoreTrack ignoreTrack remote "uname" ["-a"] "")
     routed <- actOf (Ssh.callRouted Binary.streamed Ssh.noClientOpts silent ignoreTrack ignoreTrack remote "uname" ["-a"] "")
     assertEqual "the ref it always had" (sshRunRef "uname" ["-a"] "") plain.extension.ref
+    assertEqual "the help it always had" "calls uname on 198.51.100.7 with args -a and stdin " plain.extension.help
     assertEqual "notes" ["uname", "-a"] plain.extension.notes
     assertEqual "same ref when streamed" plain.extension.ref routed.extension.ref
     assertEqual "same help" plain.extension.help routed.extension.help
@@ -136,7 +157,7 @@ sshArgv =
 selfCallUnchanged :: IO ()
 selfCallUnchanged = do
     old <- actOf (trackedGraph (Self.callSelf silent ignoreTrack self ignoreTrack CLI.Up ()))
-    assertEqual "" (sshRunRef "/srv/salmon/self" ["run", "up"] unitDirective) old.extension.ref
+    assertEqual "" (sshRunRefTagged "/srv/salmon/self" ["run", "up"] unitDirective) old.extension.ref
     assertEqual "" ["/srv/salmon/self", "run", "up"] old.extension.notes
     viaOpts <- actOf (selfCall Self.defaultCallOpts CLI.Up)
     assertEqual "the default options are callSelf" old.extension.ref viaOpts.extension.ref
@@ -145,10 +166,68 @@ selfSudoCallUnchanged :: IO ()
 selfSudoCallUnchanged = do
     let client = Ssh.ClientOpts (Just "/keys/client") (Just "/keys/known_hosts")
     old <- actOf (trackedGraph (Self.callSelfAsSudoWith client silent ignoreTrack self ignoreTrack CLI.Up ()))
-    assertEqual "" (sshRunRef "sudo" ["/srv/salmon/self", "run", "up"] unitDirective) old.extension.ref
+    assertEqual "" (sshRunRefTagged "sudo" ["/srv/salmon/self", "run", "up"] unitDirective) old.extension.ref
     assertEqual "" ["sudo", "/srv/salmon/self", "run", "up"] old.extension.notes
     plain <- actOf (trackedGraph (Self.callSelfAsSudo silent ignoreTrack self ignoreTrack CLI.Down ()))
-    assertEqual "" (sshRunRef "sudo" ["/srv/salmon/self", "run", "down"] unitDirective) plain.extension.ref
+    assertEqual "" (sshRunRefTagged "sudo" ["/srv/salmon/self", "run", "down"] unitDirective) plain.extension.ref
+
+-------------------------------------------------------------------------------
+
+-- | A standard input carrying something a reader of a report must not see.
+secretInput :: ByteString.ByteString
+secretInput = "{\"password\":\"hunter2\"}"
+
+callWithInput :: ByteString.ByteString -> Op
+callWithInput = Ssh.call silent ignoreTrack ignoreTrack remote "/srv/salmon/self" ["run", "up"]
+
+stdinNotPublic :: IO ()
+stdinNotPublic = do
+    act <- actOf (callWithInput secretInput)
+    let ext = act.extension
+        public = Text.unwords (ext.help : act.shorthand : ext.notes)
+        plainHex = Text.pack (concatMap (printf "%02x") (ByteString.unpack (SHA256.hash secretInput)))
+        plainB64 = Text.decodeUtf8 (Base64.encode (SHA256.hash secretInput))
+    assertBool (Text.unpack ext.help) (not ("hunter2" `Text.isInfixOf` public))
+    assertBool "no plain sha256 (hex)" (not (Text.take 16 plainHex `Text.isInfixOf` public))
+    assertBool "no plain sha256 (base64)" (not (Text.take 16 plainB64 `Text.isInfixOf` public))
+    assertBool "not the ref that hashed the input" (ext.ref /= sshRunRef "/srv/salmon/self" ["run", "up"] secretInput)
+    assertEqual "the tag in its place" (sshRunRefTagged "/srv/salmon/self" ["run", "up"] secretInput) ext.ref
+    assertEqual
+        "help"
+        ("calls /srv/salmon/self on 198.51.100.7 with args run up and stdin " <> Ssh.stdinTag Ssh.callKey secretInput)
+        ext.help
+
+stdinTellsCallsApart :: IO ()
+stdinTellsCallsApart = do
+    a <- actOf (callWithInput secretInput)
+    a' <- actOf (callWithInput secretInput)
+    b <- actOf (callWithInput "{\"password\":\"hunter3\"}")
+    assertEqual "same input, same ref" a.extension.ref a'.extension.ref
+    assertEqual "same input, same help" a.extension.help a'.extension.help
+    assertBool "another input, another ref" (a.extension.ref /= b.extension.ref)
+    assertBool "another input, another help" (a.extension.help /= b.extension.help)
+
+selfCallDirectiveNotPublic :: IO ()
+selfCallDirectiveNotPublic = do
+    act <- actOf (trackedGraph (Self.callSelf silent ignoreTrack self ignoreTrack CLI.Up ("hunter2" :: Text)))
+    assertBool (Text.unpack act.extension.help) (not ("hunter2" `Text.isInfixOf` act.extension.help))
+
+stdinTagVector :: IO ()
+stdinTagVector = do
+    let key = ByteString.replicate 32 107 -- "kkk...": python's hmac computed the vector
+    assertEqual "" "hmac-sha256:rnRTLK-HK6f1BjkvSUtycR" (Ssh.stdinTag (Ssh.CallKey Ssh.Persistent key) secretInput)
+    assertEqual "" "hmac-sha256-ephemeral:rnRTLK-HK6f1BjkvSUtycR" (Ssh.stdinTag (Ssh.CallKey Ssh.Ephemeral key) secretInput)
+
+callKeyFileMadeOnce :: IO ()
+callKeyFileMadeOnce =
+    withTempDir $ \dir -> do
+        let path = dir </> "state" </> "salmon" </> "call.key"
+        k1 <- Ssh.loadCallKeyAt path
+        k2 <- Ssh.loadCallKeyAt path
+        assertBool "a key" (not (ByteString.null k1))
+        assertEqual "the same key read back" k1 k2
+        st <- getFileStatus path
+        assertEqual "owner-only" 0o600 (fileMode st .&. 0o777)
 
 selfCallOutputs :: IO ()
 selfCallOutputs = do

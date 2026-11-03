@@ -8,13 +8,23 @@ import Salmon.Op.Ref
 import Salmon.Op.Track (Track (..), run)
 import Salmon.Reporter
 
+import Salmon.Builtin.Nodes.Systemd (ensureWatchKeyAt, readWatchKeyAt)
+
+import Control.Exception (SomeException, try)
 import Control.Monad (void)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Crypto.Random (getRandomBytes)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64.URL as Base64.URL
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
-import System.FilePath ((</>))
+import System.Directory (XdgDirectory (XdgState), createDirectoryIfMissing, getXdgDirectory)
+import System.Environment (lookupEnv)
+import System.FilePath (takeDirectory, (</>))
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
 
@@ -138,14 +148,95 @@ callTapped routing tap opts r ssh tRemote remote remotepath args stdin =
     Binary.withBinaryStdinTapped routing tap ssh sshRun cmd stdin $ \up ->
         op "ssh:call" (deps [run tRemote remote]) $ \actions ->
             actions
-                { help = "calls " <> Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> Text.decodeUtf8 stdin
+                { help = "calls " <> Text.pack remotepath <> " on " <> remote.remoteHost <> " with args " <> Text.intercalate " " args <> " and stdin " <> stdinShown
                 , notes = Text.pack remotepath : args
-                , ref = mkRef "ssh-run" (show (remotepath, remote, args, stdin))
+                , ref = callRef remotepath remote args stdin
                 , up = up r'
                 }
   where
     cmd = Call remotepath remote args opts
     r' = contramap (RunSSHCommand cmd) r
+    stdinShown
+        | ByteString.null stdin = ""
+        | otherwise = stdinTag callKey stdin
+
+{- | The 'Ref' of a call. With nothing on standard input it is the 'Ref' a
+call always had. With something, the input itself is no longer hashed into
+it (a 'Ref' is a fast unkeyed hash, so that was an offline guessing aid for
+anything low-entropy in the input, a password in a directive say); its
+'stdinTag' is, so two calls differing only by their input are still two
+nodes.
+-}
+callRef :: FilePath -> Remote -> [Text] -> ByteString -> Ref
+callRef remotepath remote args stdin
+    | ByteString.null stdin = mkRef "ssh-run" (show (remotepath, remote, args, stdin))
+    | otherwise = mkRef "ssh-run" (show (remotepath, remote, args, stdinTag callKey stdin))
+
+{- | What a call's @help@ (and 'callRef') says of its standard input: an
+HMAC-SHA256 under the 'CallKey', 128 bits of it in base64url. Enough to tell
+two inputs apart, and nothing to guess one from without the key.
+
+The input itself is never in @help@, @notes@ or the 'Ref' (all public, see
+CLAUDE.md), and neither is a plain digest of it. A tag made under a key of
+this process only ('Ephemeral') says so.
+-}
+stdinTag :: CallKey -> ByteString -> Text
+stdinTag (CallKey origin key) stdin =
+    prefix origin <> Text.take 22 (Text.decodeUtf8 (Base64.URL.encode (SHA256.hmac key stdin)))
+  where
+    prefix Persistent = "hmac-sha256:"
+    prefix Ephemeral = "hmac-sha256-ephemeral:"
+
+-- | Where a 'CallKey' came from.
+data CallKeyOrigin
+    = -- | the key file ('callKeyFile'): one key for every process of this user
+      Persistent
+    | -- | made for this process alone, the key file being unusable
+      Ephemeral
+    deriving (Eq, Show)
+
+data CallKey = CallKey !CallKeyOrigin !ByteString
+
+{- | The key file: @$SALMON_CALL_KEY_FILE@ when set and not empty, else
+@call.key@ in salmon's XDG state directory (@~\/.local\/state\/salmon@).
+-}
+callKeyFile :: IO FilePath
+callKeyFile = do
+    override <- lookupEnv "SALMON_CALL_KEY_FILE"
+    case override of
+        Just path | not (null path) -> pure path
+        _ -> (</> "call.key") <$> getXdgDirectory XdgState "salmon"
+
+{- | The key at a path, made first if there is none (32 random bytes, @0600@,
+put in place with @link(2)@ and never replaced: see
+"Salmon.Builtin.Nodes.Systemd".'ensureWatchKeyAt').
+-}
+loadCallKeyAt :: FilePath -> IO ByteString
+loadCallKeyAt path = do
+    createDirectoryIfMissing True (takeDirectory path)
+    ensureWatchKeyAt path
+    readWatchKeyAt path
+
+{- | The key 'callRef' and @help@ tag a standard input under: read (made if
+missing) once per process, when the first call with an input is rendered.
+
+Persistent on purpose: a 'Ref' is matched across processes (a plan from
+@query plan@ is applied by a later @run up --plan@), and a key of one process
+would make a node that plan excludes run in the next. When the file cannot be
+made or read (a read-only home, say) the key is made for this process alone
+and every tag says @ephemeral@.
+
+It is read at graph build, which the secrets rule forbids for /secret/ bytes:
+this key protects those, carries none of them, and an 'Op' is pure, so there
+is no later moment to read it at.
+-}
+callKey :: CallKey
+callKey = unsafePerformIO $ do
+    loaded <- try (callKeyFile >>= loadCallKeyAt) :: IO (Either SomeException ByteString)
+    case loaded of
+        Right key -> pure (CallKey Persistent key)
+        Left _ -> CallKey Ephemeral <$> getRandomBytes 32
+{-# NOINLINE callKey #-}
 
 data SSHCommand = Call FilePath Remote [Text] ClientOpts
     deriving (Show)

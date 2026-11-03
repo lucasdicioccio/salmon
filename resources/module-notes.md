@@ -2189,6 +2189,30 @@ unchanged refs, runs the re-telling over lines encoded by `Tagged` itself, and h
 stand-in `ssh` on `PATH` (a script that drops the host and runs the rest locally), in all three modes, text and
 `--json`. **Never run: a real ssh hop**, sudo on the far side, or any of it under `run serve`.
 
+**An ssh call's standard input is not public** (`Ssh.callTapped`, so every `Ssh.call*` and every `Self` call;
+feature 0d034411). It used to be in `help` verbatim and in the `ref`'s key, which for a self-call is the machine's
+whole directive; the `ref` is a fast unkeyed `hashable` hash, so even there it was an offline guessing aid for a
+low-entropy field. Now a non-empty input shows as `Ssh.stdinTag`: `hmac-sha256:` and 22 base64url characters (128
+bits) of an HMAC-SHA256 under `Ssh.callKey`, in `help` (`... and stdin hmac-sha256:...`) and in the `ref` key in the
+input's place (`callRef`), so two inputs are still two nodes and the same input one. **The key is persistent on
+purpose**: `$SALMON_CALL_KEY_FILE`, else `$XDG_STATE_HOME/salmon/call.key` (`~/.local/state/salmon/call.key`), made
+once (`Systemd.ensureWatchKeyAt`: 32 random bytes, `0600`, `link(2)`, never replaced), because a `ref` is matched
+across processes (`query plan` then `run up --plan`) and a node a plan excludes must not run in the next process. It is
+read through `unsafePerformIO` once per process, when the first call with an input is rendered: hidden IO at graph
+build, allowed because the key carries no secret bytes and an `Op` is pure. If the file cannot be made or read (a
+read-only home), the key is made for the process alone and every tag reads `hmac-sha256-ephemeral:`, which is the cue
+that refs of such calls will not match across processes. **This changes rendering**: every call with a non-empty input
+(every self-call, whose input is at least `[]`) gets a new `ref` and `help` once, and again whenever the key file is
+lost; calls with an empty input (`mkdir -p` and the like) render exactly as before. The key is per user and machine, so
+two operators (or two machines) render different refs for the same self-call. Not addressed: what the *remote* graph's
+nodes say (`run tree` expands `CLI.RemoteOp`; each remote node's own `help` is its own builtin's affair).
+`Test/RemoteOutputSpec.hs` "standard input is not public" pins: no input bytes and no plain SHA-256 (hex or base64) of
+them in `help`/`notes`/shorthand, the tagged `ref`, distinct/equal inputs, a self-call directive kept out of `help`, the
+tag against a Python `hmac` vector, and the key file made once `0600` in a temp dir. Run: that spec and
+`Test/DeferredSpec.hs` in `cabal repl` with `SALMON_CALL_KEY_FILE` pointed at a scratch file (the full suite run would
+make the real `~/.local/state/salmon/call.key`). **Not run**: any real ssh hop, the ephemeral fallback on a real
+read-only home, a plan made and applied by two processes.
+
 `Podman.buildImage` builds with the Containerfile's own directory as context (the build runs *in* that directory, no
 context argument) and no `--target`; `Podman.buildImageWith` takes a `BuildOptions` for the two cases that does not
 cover: `buildContext` (the context is passed as the positional argument, `-f` gets the Containerfile's path as given,
