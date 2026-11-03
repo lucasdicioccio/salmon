@@ -3,7 +3,7 @@
 
 module Salmon.Actions.UpDown where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import Control.Monad (forM_, when)
 import Data.Dynamic (Dynamic)
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
@@ -27,6 +27,21 @@ import Salmon.Op.Ref
 import Salmon.Reporter
 
 -------------------------------------------------------------------------------
+
+{- | 'try' for a node's own 'up', 'check' or 'down': a synchronous exception
+is the node failing and comes back as a 'Left', but an asynchronous one
+(anything under 'SomeAsyncException': 'Control.Concurrent.Async.cancel',
+'killThread', 'System.Timeout.timeout' around the whole pass) is not the
+node's doing, so it is re-thrown and ends the pass instead of being reported
+as that node's 'Failed' while the walk carries on. Every driver
+('Salmon.Actions.Concurrent', 'Salmon.Actions.Upkeep') catches through this.
+-}
+trySync :: IO a -> IO (Either SomeException a)
+trySync act = do
+    result <- try act
+    case result of
+        Left e | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+        _ -> pure result
 
 {- | 'Failed' and 'Blocked' are new relative to the early history of this
 module: 'upTree' used to run every node's 'up' unconditionally and never
@@ -295,7 +310,7 @@ upDag gate r dag =
                 pure False
             Required -> do
                 runReporter r (Eval act)
-                result <- try @SomeException act.extension.up
+                result <- trySync act.extension.up
                 case result of
                     Left e -> do
                         runReporter r (Failed act e)
@@ -451,7 +466,7 @@ runCheck ::
     Act ext ->
     IO CheckResult
 runCheck act = do
-    result <- try @SomeException act.extension.check
+    result <- trySync act.extension.check
     pure $ case result of
         Left e -> Failure (Text.pack (show e))
         Right x -> x
@@ -568,7 +583,7 @@ downDag gate r dag =
                 pure False
             Required -> do
                 runReporter r (Eval act)
-                result <- try @SomeException act.extension.down
+                result <- trySync act.extension.down
                 case result of
                     Left e -> do
                         runReporter r (Failed act e)

@@ -119,6 +119,7 @@ test-suite salmon-ops-recipes-test
                     , Test.DebootstrapSpec
                     , Test.ConcurrentSpec
                     , Test.ContainedSpec
+                    , Test.AsyncInterruptSpec
                     , Test.BinaryOutputSpec
                     , Test.BinarySpec
                     , Test.DaemonSpec
@@ -210,6 +211,7 @@ test-suite salmon-ops-recipes-test
                     , Test.WrapperOrderingSpec
     build-depends:    QuickCheck ^>=2.19.0.0
                     , base >=4.16.3.0 && <4.22
+                    , async ^>=2.2.6
                     , aeson ^>=2.3.2.0
                     , base64-bytestring ^>=1.2.1.0
                     , bytestring ^>=0.12.2.0

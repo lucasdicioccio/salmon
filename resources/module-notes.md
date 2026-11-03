@@ -722,6 +722,30 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `Skip`. `upTree`/`downTree` are those with a gate that wants everything; the only real user is
   `Actions/Serve.hs` (below), which walks the union of several seeds' nodes and must leave other
   seeds' alone.
+  **An asynchronous exception is not a node's failure.** Every place a driver runs a node's
+  `up`/`check`/`down` catches through `UpDown.trySync`, which re-throws anything under
+  `SomeAsyncException` (`cancel`'s `AsyncCancelled`, `killThread`, a `timeout` around the pass)
+  and returns only synchronous exceptions as the `Left` that becomes `Failed`/`Failure`. Was a
+  defect first: all three sites in `UpDown`, the two in `Concurrent` plus its per-node backstop,
+  and the three in `Upkeep`'s machines (`up`, re-apply, `down`) used `try @SomeException`, so a
+  cancel landing inside a node was reported as that node's `Failed` and the walk carried on
+  (budgetz's control plane did not stop on SIGTERM and re-threw from its reporters as a
+  workaround). Now the pass ends with the exception: sequentially it propagates out of
+  `upDag`/`downDag`; concurrently `forConcurrently_` cancels every other node's thread and
+  re-throws; an upkeep machine dies with it (`restarting` already let async through, so it is
+  reported `Escaped` by `stopUpkeep`, not restarted). Synchronous failures, containment and
+  `Contained` are unchanged. Consequence: an `up` that itself re-throws an async-typed exception
+  synchronously (e.g. `wait` on an `Async` someone else cancelled) now ends the pass rather than
+  failing the node, as with `UnliftIO.tryAny`. `Guarded`'s precondition `try` and `StatusSink`
+  already did this and were not touched.
+  **Run (Layer 0 only):** `Test.AsyncInterruptSpec` (cancel inside `up` for `upDag` and
+  `upDagConcurrent`, inside `down` for `downDag` and `downDagConcurrent`, inside `check`; a
+  `timeout` around `upDag`; a synchronous failure still `Failed`/`Blocked` in both drivers; an
+  upkeep machine killed inside `up` reports no `Failed` and ends `Escaped ThreadKilled`), with
+  `ContainedSpec`, `ConcurrentSpec`, `UpkeepSpec`, `UpDownTextSpec` through `cabal repl` of the
+  test suite (109 passing); the seven interruption cases were also run against the unfixed drivers
+  and all failed. **Not run:** `serve` being stopped mid-pass, a real binary on SIGTERM, budgetz's
+  reporters without `rethrowInterruption`.
 - **`Op/Contained.hs`** (with `Extension.contained`, used as `amendNode contained op`) is a node whose failure
   is reported but fails nothing beyond itself: a `Contained` marker on `dynamics`. **Going up only**, in both
   `UpDown.walk` and `Concurrent.walkConcurrent`: a marked node that failed or was `Blocked` releases its dependants
