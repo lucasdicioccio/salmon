@@ -109,6 +109,14 @@ module Salmon.Builtin.Nodes.Gcp.Monitoring (
     Report (..),
     MonitoringCommand (..),
     monitoringCommand,
+
+    -- ** Shared with the other monitoring and logging nodes
+    textField,
+    nestedTextField,
+    firstLine,
+    ownerLabelKey,
+    ownerLabelValue,
+    shortId,
 ) where
 
 import Control.Exception (handle, throwIO)
@@ -927,6 +935,22 @@ firstLine :: ByteString -> Text
 firstLine err = case Text.lines (Text.decodeUtf8 err) of
     (l : _) -> ": " <> l
     [] -> ""
+
+{- | The user label that marks a resource as salmon's own, for the nodes that
+create resources with server-assigned ids and may delete them
+("Salmon.Builtin.Nodes.Gcp.Uptime", "Salmon.Builtin.Nodes.Gcp.Dashboard"):
+one found by display name without it is neither updated nor deleted. The
+alert policies and channels above predate it and do not carry it.
+-}
+ownerLabelKey :: Text
+ownerLabelKey = "managed-by"
+
+ownerLabelValue :: Text
+ownerLabelValue = "salmon"
+
+-- | The last segment of a resource name (@projects\/P\/x\/ID@ to @ID@).
+shortId :: Text -> Text
+shortId = last . ("" :) . Text.splitOn "/"
 
 -------------------------------------------------------------------------------
 

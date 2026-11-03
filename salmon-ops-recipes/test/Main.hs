@@ -43,6 +43,7 @@ import qualified Test.FollowRegistrySpec as FollowRegistrySpec
 import qualified Test.FollowSchedulerSpec as FollowSchedulerSpec
 import qualified Test.FollowSignatureSpec as FollowSignatureSpec
 import qualified Test.FollowSpec as FollowSpec
+import qualified Test.GcpObservabilitySpec as GcpObservabilitySpec
 import qualified Test.GcpSpec as GcpSpec
 import qualified Test.RemoteFileSpec as RemoteFileSpec
 import qualified Test.SecretDeliverySpec as SecretDeliverySpec
@@ -221,6 +222,7 @@ main = do
             , FollowSchedulerSpec.tests
             , FollowSignatureSpec.tests
             , FollowSpec.tests
+            , GcpObservabilitySpec.tests
             , GcpSpec.tests
             , RemoteFileSpec.tests
             , SecretDeliverySpec.tests
