@@ -2830,10 +2830,13 @@ certificate. `Test/GcpSpec.hs` pins by checksum that a declaration using none of
 as it did before (the pins moved with the set comparison: the check scripts, the rule-less map's `up`, and the
 description on a map of services). **What a balancer made and no longer declares is removed by its last node,
 `LeftoversPart`** (`gcp-lb-leftovers`, after the URL map, the proxies and the superseded certificates; nothing else
-depends on it but the root). It deletes four kinds of resource, each under a proof of ownership and never while in
+depends on it but the root). It deletes six kinds of resource, each under a proof of ownership and never while in
 use: a backend bucket named `<name>-<n>-bucket` whose `description` is `ownershipMarker` (`salmon:lb:<name>`: the
 balancer is in the marker because `web-eu-x-bucket` has balancer `web`'s shape), once no URL map of the project names
-it; a Certificate Manager certificate carrying the marker, once no HTTPS proxy of the project serves it (so not the
+it; a backend service named `<name>-<n>-backend` carrying the marker, on the same rule (deleting it detaches its
+backends; its NEGs, and the named ports on its instance groups, are left); a health check carrying the marker, once
+no backend service and no managed instance group's autohealing of the project names it (any scope: a same-named one
+elsewhere holds it too), planned after the services so one freed in the same pass goes in it; a Certificate Manager certificate carrying the marker, once no HTTPS proxy of the project serves it (so not the
 old certificate of a pending swap); a DNS authorization carrying the marker, once no certificate of the location uses
 it; and `<name>-http-redirect-url-map` when the declaration is no longer `RedirectToHttps`, its description is one of
 the five fingerprints this module writes for that map, and no proxy is on it. Load-bearing: **the marker is written
@@ -2847,8 +2850,16 @@ references are looked for with a here-string, since `printf | grep -q` under `pi
 what is in use is `WAITING` (`Unknown`); **a failed delete or marking fails that node, and so the root** (chosen over
 an `up` that succeeds while its check keeps failing, which `Upkeep` would re-run at its delay floor), but it is the
 last node, so everything serving traffic was applied first; a listing that fails (Certificate Manager disabled on a
-plain balancer) is said and is nothing to clean. Not done: any of it at teardown; a backend service, health check,
-NEG, HTTPS proxy/rule/address no longer declared (a balancer that drops all its certificates keeps its HTTPS proxy,
+plain balancer) is said and is nothing to clean. Health checks are weaker ground than the rest: their names are the
+caller's, so only the marker says one is this balancer's, and a declared health check with no description is marked
+by this balancer even if somebody made it first (as a bucket of its name shape is) — only a `TCP` one, since `update
+tcp` is the verb this module has; any other type is a `NOTE` and stays unmarked. The node waits on every declared
+service, attachment and health check (two writers of one resource race on its fingerprint), and an undeclared
+`<name>-<n>-backend` with no description at all is said (`NOTE ... no ownership mark, so not deleted`) for a hand
+delete. Run only against the stand-in `gcloud`: whether `backend-services list`/`health-checks list` without a scope
+flag list both scopes, whether `instance-groups managed list --format='value(autoHealingPolicies[].healthCheck)'`
+prints what the grep reads, and whether GCP refuses a health check in use, have not been seen on a project. Not done:
+any of it at teardown; a NEG, HTTPS proxy/rule/address no longer declared (a balancer that drops all its certificates keeps its HTTPS proxy,
 which keeps the certificate `WAITING`); a certificate two balancers declare is marked by the first only. Also not
 done: a default (unmatched-host) redirect, a path rewrite in a rule, a dependency hook
 on a bucket's node, the bucket itself, a toy flag. `salmon-gcp-toy --tier 3 --dns-zone D --lb-https` declares all of
