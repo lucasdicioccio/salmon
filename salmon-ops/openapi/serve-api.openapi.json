@@ -1323,6 +1323,49 @@
           "dropped"
         ]
       },
+      "UpDown_contained": {
+        "type": "object",
+        "description": "After a run up or convergence pass: this node did not come up (its failed or blocked report came first), and the failure stopped at a node marked contained, so it blocked nothing above that node and does not count against the pass.",
+        "properties": {
+          "stream": {
+            "const": "updown"
+          },
+          "kind": {
+            "const": "contained"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "stream",
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
+      "UpDownUntagged_contained": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "contained"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/Ref"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeDescription"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "node"
+        ]
+      },
       "Upkeep_acted": {
         "type": "object",
         "properties": {
@@ -3284,6 +3327,9 @@
           },
           {
             "$ref": "#/components/schemas/UpDown_dropped-instructions"
+          },
+          {
+            "$ref": "#/components/schemas/UpDown_contained"
           }
         ],
         "description": "`stream` is added when the report travels tagged; nested inside `acted` it is absent."
@@ -3384,6 +3430,9 @@
           },
           {
             "$ref": "#/components/schemas/UpDownUntagged_dropped-instructions"
+          },
+          {
+            "$ref": "#/components/schemas/UpDownUntagged_contained"
           }
         ],
         "description": "An UpDown report nested inside another (no `stream`: only the outermost object is tagged)."

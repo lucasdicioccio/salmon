@@ -74,6 +74,7 @@ import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, unless)
+import Data.Dynamic (Dynamic)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -81,7 +82,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import GHC.Records (HasField)
 
-import Salmon.Actions.UpDown (CheckResult (..), Gate, Report (..), Requirement (..), requirement, runCheck)
+import Salmon.Actions.UpDown (CheckResult (..), Gate, Report (..), Requirement (..), containedIn, reportContained, requirement, runCheck)
 import Salmon.Op.Actions (Act (..))
 import Salmon.Op.Concurrency (ConcurrencyLimit, withConcurrencyLimit)
 import Salmon.Op.Dag (Dag)
@@ -106,6 +107,8 @@ upDagConcurrent ::
     ( HasField "up" ext (IO ())
     , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
+    , -- read for the "Salmon.Op.Contained" marker only
+      HasField "dynamics" ext [Dynamic]
     ) =>
     Gate ext ->
     Reporter (Report ext) ->
@@ -116,7 +119,7 @@ upDagConcurrent ::
     Dag ext ->
     IO Bool
 upDagConcurrent gate r boxes limit dag =
-    walkConcurrent TurnUp r boxes limit dag Dag.dependenciesOf apply
+    walkConcurrent TurnUp r boxes limit dag Dag.dependenciesOf Dag.dependantsOf (containedIn dag) apply
   where
     apply :: Say ext -> TVar Status -> Act ext -> [Instruction] -> IO CheckResult
     apply say status act instructions = do
@@ -172,7 +175,8 @@ downDagConcurrent ::
     Dag ext ->
     IO Bool
 downDagConcurrent gate r boxes limit dag =
-    walkConcurrent TurnDown r boxes limit dag Dag.dependantsOf apply
+    -- nothing is contained going down, as in 'UpDown.downDag'
+    walkConcurrent TurnDown r boxes limit dag Dag.dependantsOf Dag.dependenciesOf (const False) apply
   where
     apply :: Say ext -> TVar Status -> Act ext -> [Instruction] -> IO CheckResult
     apply say status act instructions = do
@@ -223,6 +227,11 @@ drivers share, parameterised by which adjacency direction a node waits on.
 vocabulary of the direction it is going: 'Success' means the node reached the
 state this pass wanted (the effect is up, or the effect is gone), 'Failure'
 that it did not, 'Skipped' that nobody asked it to try.
+
+@contained@ is 'UpDown.walk''s: a marked node that did not settle as wanted
+is not recorded where its neighbours look, so they proceed; the pass's verdict
+and the 'Contained' reports come from 'UpDown.reportContained' over every node
+that did not settle as wanted, after the walk.
 -}
 walkConcurrent ::
     forall ext.
@@ -233,9 +242,11 @@ walkConcurrent ::
     Maybe ConcurrencyLimit ->
     Dag ext ->
     (Dag ext -> Ref -> [Ref]) ->
+    (Dag ext -> Ref -> [Ref]) ->
+    (Ref -> Bool) ->
     (Say ext -> TVar Status -> Act ext -> [Instruction] -> IO CheckResult) ->
     IO Bool
-walkConcurrent dir r boxes limit dag waitsOn apply = do
+walkConcurrent dir r boxes limit dag waitsOn releases contained apply = do
     let order = Dag.dagOrder dag
     let stuckRefs = Dag.stuck waitsOn dag
 
@@ -244,6 +255,9 @@ walkConcurrent dir r boxes limit dag waitsOn apply = do
     -- neighbours once they have settled, which is why it is a TVar and not
     -- an IORef.
     failedVar <- newTVarIO (Set.empty :: Set Ref)
+    -- every node that did not settle as wanted, contained or not: what the
+    -- verdict is computed from.
+    notOkVar <- newTVarIO (Set.empty :: Set Ref)
 
     reportLock <- newMVar ()
     let say :: Say ext
@@ -254,7 +268,9 @@ walkConcurrent dir r boxes limit dag waitsOn apply = do
     -- cycle and therefore also here.
     forM_ [aref | aref <- order, Set.member aref stuckRefs] $ \aref -> do
         forM_ (Dag.representativeOf dag aref) $ \act -> say (Blocked act)
-        atomically (modifyTVar' failedVar (Set.insert aref))
+        atomically $ do
+            modifyTVar' failedVar (Set.insert aref)
+            modifyTVar' notOkVar (Set.insert aref)
 
     forConcurrently_ [aref | aref <- order, Set.notMember aref stuckRefs] $ \aref ->
         forM_ (Dag.representativeOf dag aref) $ \act -> do
@@ -288,12 +304,14 @@ walkConcurrent dir r boxes limit dag waitsOn apply = do
             -- a neighbour that saw `Stable` before the failure was recorded
             -- would proceed against a node that had in fact failed.
             atomically $ do
-                unless (succeeded outcome) $ modifyTVar' failedVar (Set.insert aref)
+                unless (succeeded outcome) $ do
+                    modifyTVar' notOkVar (Set.insert aref)
+                    unless (contained aref) $ modifyTVar' failedVar (Set.insert aref)
                 modifyTVar' status $ \st ->
                     st{statusStability = Stable, statusCheck = outcome}
 
-    failed <- readTVarIO failedVar
-    pure (Set.null failed)
+    notOk <- readTVarIO notOkVar
+    reportContained (ReporterM say) dag contained (releases dag) notOk
   where
     succeeded :: CheckResult -> Bool
     succeeded (Failure _) = False

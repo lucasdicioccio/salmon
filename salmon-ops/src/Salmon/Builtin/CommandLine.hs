@@ -894,9 +894,12 @@ execCommandOrSeedWithRewrites ::
 execCommandOrSeedWithRewrites serveR r rewrites0 genBase traceBase cmd = do
     case cmd of
         (Run (RunUp Nothing _ fmt wins override phase)) -> do
-            result <- listening fmt $ withGraph (runUp (updownFor fmt) (windowsFor wins override) phase Set.empty)
+            (upR, sayContained) <- countingContained (updownFor fmt)
+            result <- listening fmt $ withGraph (runUp upR (windowsFor wins override) phase Set.empty)
+            sayContained
             when (result == Just False) exitFailure
         (Run (RunUp (Just planPath) forceStale fmt wins override phase)) -> do
+            (upR, sayContained) <- countingContained (updownFor fmt)
             result <- listening fmt $ withGraphAndBytes $ \dirBytes op -> do
                 planBytes <- LBysteString.readFile planPath
                 case eitherDecode planBytes of
@@ -907,7 +910,7 @@ execCommandOrSeedWithRewrites serveR r rewrites0 genBase traceBase cmd = do
                         let actual = Query.digestBytes dirBytes
                         let expected = Query.planDirectiveDigest plan
                         if actual == expected
-                            then runUp (updownFor fmt) (windowsFor wins override) phase (Set.fromList (Query.planExcludedRefs plan)) op
+                            then runUp upR (windowsFor wins override) phase (Set.fromList (Query.planExcludedRefs plan)) op
                             else
                                 if forceStale
                                     then do
@@ -917,7 +920,7 @@ execCommandOrSeedWithRewrites serveR r rewrites0 genBase traceBase cmd = do
                                                 <> ", this directive hashes to "
                                                 <> Text.unpack actual
                                                 <> "); proceeding due to --force-stale-plan"
-                                        runUp (updownFor fmt) (windowsFor wins override) phase (Set.fromList (Query.planExcludedRefs plan)) op
+                                        runUp upR (windowsFor wins override) phase (Set.fromList (Query.planExcludedRefs plan)) op
                                     else do
                                         putStrLn $
                                             "refusing to run stale plan: plan expects digest "
@@ -925,6 +928,7 @@ execCommandOrSeedWithRewrites serveR r rewrites0 genBase traceBase cmd = do
                                                 <> ", but this directive hashes to "
                                                 <> Text.unpack actual
                                         exitFailure
+            sayContained
             when (result == Just False) exitFailure
         (Run (RunDown fmt)) -> do
             result <- listening fmt $ withGraph (runDown (updownFor fmt))
@@ -1240,6 +1244,26 @@ execCommandOrSeedWithRewrites serveR r rewrites0 genBase traceBase cmd = do
     listening fmt act = do
         reportByLine
         NodeLog.withSink (Tagged.nodeLogStream (taggedFor fmt)) act
+
+    {- | @run up@'s verdict on contained failures ("Salmon.Op.Contained"):
+    the reporter counts the 'UpDown.Contained' reports going through it, and
+    the action, run after the pass, says how many on standard error when
+    there were any (standard output may be @--json@'s). Says nothing, and so
+    changes nothing, for a graph with no contained node. -}
+    countingContained :: Reporter (UpDown.Report Extension) -> IO (Reporter (UpDown.Report Extension), IO ())
+    countingContained r' = do
+        n <- newIORef (0 :: Int)
+        let counter = ReporterM $ \rep -> case rep of
+                UpDown.Contained{} -> modifyIORef' n (+ 1)
+                _ -> pure ()
+        let say = do
+                k <- readIORef n
+                when (k > 0) $
+                    hPutStrLn stderr $
+                        "run up: "
+                            <> show k
+                            <> " node(s) failed or were blocked inside a contained section; not counted against this pass"
+        pure (reportBoth r' counter, say)
 
     {- | @run up@: everything in this one directive's graph is wanted up, so
     that is the rewrites' 'phaseDesired'. @excluded@ (a plan's skipped

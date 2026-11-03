@@ -2264,6 +2264,9 @@ serveLoop ending windows observe rewrites limit autoConverge0 handling r nodeRep
             UpDown.Conflicting{} -> pure ()
             UpDown.Instructed{} -> pure ()
             UpDown.DroppedInstructions{} -> pure ()
+            -- the node's own 'Failed'\/'Blocked' came first and is what it
+            -- is recorded as; this only says the failure went no further.
+            UpDown.Contained{} -> pure ()
       where
         mark :: Act Extension -> Convergence -> IO ()
         mark act c =
@@ -2641,6 +2644,9 @@ serveLoop ending windows observe rewrites limit autoConverge0 handling r nodeRep
             -- than what happened.
             UpDown.Instructed{} -> pure ()
             UpDown.DroppedInstructions{} -> pure ()
+            -- the node's own 'Failed'\/'Blocked' came first and is what it
+            -- is recorded as; this only says the failure went no further.
+            UpDown.Contained{} -> pure ()
       where
         -- what happened to a collection node happened to every declared node
         -- it stands in for — that is the whole of what makes a batch's

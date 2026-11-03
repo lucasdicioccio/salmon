@@ -147,6 +147,7 @@ taggedNode tagged = case tagged of
         UpDown.Conflicting r _ _ -> Just r
         UpDown.Instructed act _ -> about act
         UpDown.DroppedInstructions act _ -> about act
+        UpDown.Contained act -> about act
 
     upkeepNode :: Upkeep.Report Extension -> Maybe Ref
     upkeepNode rep = case rep of
@@ -382,6 +383,7 @@ instance ToJSON (UpDown.Report Extension) where
                 ]
             UpDown.Instructed act instr -> kind "instructed" : actPairs act ++ ["instruction" .= instructionValue instr]
             UpDown.DroppedInstructions act n -> kind "dropped-instructions" : actPairs act ++ ["dropped" .= n]
+            UpDown.Contained act -> kind "contained" : actPairs act
 
 -------------------------------------------------------------------------------
 

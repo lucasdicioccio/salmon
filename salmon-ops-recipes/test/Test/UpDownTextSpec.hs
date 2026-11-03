@@ -78,6 +78,7 @@ goldens =
       )
     , ("Instructed", UpDown.Instructed fixtureAct Mailbox.Force, "instructed " <> short <> " file: write /etc/motd -- force")
     , ("DroppedInstructions", UpDown.DroppedInstructions fixtureAct 3, "dropped-instructions " <> short <> " file: write /etc/motd -- 3 dropped")
+    , ("Contained", UpDown.Contained fixtureAct, "contained " <> short <> " file: write /etc/motd")
     ]
   where
     short = "#" <> shortRef fixtureRef
@@ -106,6 +107,7 @@ genReport =
         , (\a b -> UpDown.Conflicting a.extension.ref a b) <$> genAct <*> genAct
         , UpDown.Instructed <$> genAct <*> elements [Mailbox.Force, Mailbox.Satisfy, Mailbox.Recheck, Mailbox.Pause, Mailbox.Resume]
         , UpDown.DroppedInstructions <$> genAct <*> choose (0, 100)
+        , UpDown.Contained <$> genAct
         ]
 
 reportRef :: UpDown.Report Extension -> Ref
@@ -118,6 +120,7 @@ reportRef rep = case rep of
     UpDown.Conflicting r _ _ -> r
     UpDown.Instructed a _ -> a.extension.ref
     UpDown.DroppedInstructions a _ -> a.extension.ref
+    UpDown.Contained a -> a.extension.ref
 
 propOneLine :: Property
 propOneLine = forAll genReport $ \rep ->
