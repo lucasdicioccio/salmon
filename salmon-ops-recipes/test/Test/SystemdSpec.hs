@@ -29,10 +29,11 @@ import Data.List (intercalate, nub, sort)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath ((</>))
 import System.IO (readFile')
-import System.Posix.Files (fileMode, getFileStatus, setFileMode)
+import System.Posix.Files (fileMode, getFileStatus, setFileMode, statusChangeTimeHiRes)
 import Test.QuickCheck (Gen, counterexample, elements, forAll, ioProperty, listOf, listOf1, (.&&.), (===), (==>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
@@ -66,6 +67,7 @@ tests =
         , testGroup "watched config files" watchedTests
         , testGroup "the watched files' keyed digest" keyedTests
         , testGroup "the unit directory" unitDirTests
+        , testGroup "restarting a unit a package owns when a file it reads changed" restartWatchingTests
         ]
 
 {- | The unit file stands on a 'Systemd.unitDirectory', not on
@@ -438,3 +440,68 @@ orderIndependent =
         "the same three properties, whatever order systemd emits them in"
         Success
         (shown ["NeedDaemonReload=no", "UnitFileState=enabled", "ActiveState=active"])
+
+{- | 'Systemd.restartServiceWatching': the verdict on @systemctl show@ and the
+watched files' ctimes, the timestamp formats, and the node's shape. No
+systemd runs here: nothing asserts what a real @systemctl show@ prints beyond
+the lines written below (copied from systemd 255 under @TZ=UTC@), nor that a
+real restart moves @InactiveExitTimestamp@.
+-}
+restartWatchingTests :: [TestTree]
+restartWatchingTests =
+    [ testCase "a file changed before the unit started is satisfied" $
+        assertEqual "" Success (Systemd.interpretRestartWatch (active started) [(conf, 99)])
+    , testCase "a file changed in the second the unit started, or after, is a change" $ do
+        assertEqual "same second" (Failure ("changed since the unit started: " <> Text.pack conf)) (Systemd.interpretRestartWatch (active started) [(conf, 100.9)])
+        assertBool "after" (isFailure (Systemd.interpretRestartWatch (active started) [("/etc/a", 10), (conf, 250)]))
+    , testCase "no watched file that exists is no change" $
+        assertEqual "" Success (Systemd.interpretRestartWatch (active started) [])
+    , testCase "a unit that is not running needs a restart, one in transition is Unknown" $ do
+        assertEqual "inactive" (Failure "the unit is inactive") (Systemd.interpretRestartWatch ["ActiveState=inactive", "InactiveExitTimestamp="] [])
+        assertEqual "failed" (Failure "the unit is failed") (Systemd.interpretRestartWatch ["ActiveState=failed", "InactiveExitTimestamp=" <> started] [])
+        assertEqual "activating" Unknown (Systemd.interpretRestartWatch ["ActiveState=activating", "InactiveExitTimestamp=" <> started] [(conf, 500)])
+        assertBool "nothing said" (isFailure (Systemd.interpretRestartWatch [] []))
+    , testCase "an active unit whose start cannot be read is Unknown" $ do
+        assertEqual "empty" Unknown (Systemd.interpretRestartWatch ["ActiveState=active", "InactiveExitTimestamp="] [(conf, 1)])
+        assertEqual "another zone" Unknown (Systemd.interpretRestartWatch ["ActiveState=active", "InactiveExitTimestamp=Mon 2026-11-02 12:32:37 CET"] [(conf, 1)])
+    , testCase "timestamps as systemctl prints them under TZ=UTC" $ do
+        assertEqual "default" (Just 1793622757) (Systemd.parseShowTimestamp "Mon 2026-11-02 12:32:37 UTC")
+        assertEqual "microseconds" (Just 1793622757.5) (Systemd.parseShowTimestamp "Mon 2026-11-02 12:32:37.500000 UTC")
+        assertEqual "unix" (Just 1793622757) (Systemd.parseShowTimestamp "@1793622757")
+        assertEqual "zone" Nothing (Systemd.parseShowTimestamp "Mon 2026-11-02 12:32:37 CET")
+    , testCase "a missing watched file is left out, an existing one has its ctime" $ withTempDir $ \dir -> do
+        let there = dir </> "there.yaml"
+        writeFile there "a: 1\n"
+        ctime <- statusChangeTimeHiRes <$> getFileStatus there
+        got <- Systemd.watchedChangeTimes [dir </> "missing.yaml", there]
+        assertEqual "" [(there, ctime)] got
+    , testCase "up waits past the second of the newest change" $ withTempDir $ \dir -> do
+        let there = dir </> "there.yaml"
+        writeFile there "a: 1\n"
+        Systemd.waitPastChanges [there]
+        ctime <- statusChangeTimeHiRes <$> getFileStatus there
+        now <- getPOSIXTime
+        assertBool "now is in a later second than the change" ((floor now :: Integer) > floor ctime)
+    , testCase "the node: its ref is scope and unit, its notes name the files and nothing of them" $ withTempDir $ \dir -> do
+        let secretFile = dir </> "secret.yaml"
+        writeFile secretFile "password: hunter2\n"
+        let wu = Systemd.WatchedUnit Systemd.System "google-cloud-ops-agent.service" [secretFile]
+            node = Systemd.restartServiceWatching silent ignoreTrack ignoreTrack wu
+            userNode = Systemd.restartServiceWatching silent ignoreTrack ignoreTrack wu{Systemd.watched_scope = Systemd.User}
+        case (opAct node, opAct userNode) of
+            (Just act, Just userAct) -> do
+                assertEqual "shorthand" "systemd-restart-watching" act.shorthand
+                assertEqual "ref" (mkRef "systemd-restart-watching" ("system" :: Text, "google-cloud-ops-agent.service" :: Text)) act.extension.ref
+                assertBool "scopes are distinct effect sites" (act.extension.ref /= userAct.extension.ref)
+                assertEqual "notes" ["scope: System", "watches " <> Text.pack secretFile] act.extension.notes
+                assertBool "no content" (not (any ("hunter2" `Text.isInfixOf`) (act.extension.help : act.extension.notes)))
+            _ -> assertBool "the node has an action" False
+    ]
+  where
+    conf :: FilePath
+    conf = "/etc/google-cloud-ops-agent/config.yaml"
+    -- 1970-01-01 00:01:40 UTC, i.e. 100 seconds
+    started :: Text
+    started = "Thu 1970-01-01 00:01:40 UTC"
+    active :: Text -> [Text]
+    active t = ["ActiveState=active", "InactiveExitTimestamp=" <> t]

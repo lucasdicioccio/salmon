@@ -1,5 +1,6 @@
 module Salmon.Builtin.Nodes.Systemd where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, IOException, finally, throwIO, try)
 import Control.Monad (unless)
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -12,14 +13,18 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextError
+import Data.Time (defaultTimeLocale, parseTimeM)
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime, utcTimeToPOSIXSeconds)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose)
 import System.IO.Error (isAlreadyExistsError)
-import System.Posix.Files (createLink, fileMode, fileSize, getFileStatus, setFileMode)
+import System.Posix.Files (FileStatus, createLink, fileMode, fileSize, getFileStatus, setFileMode, statusChangeTimeHiRes)
 import System.Posix.IO (createFile, fdToHandle)
 import System.Posix.Types (FileMode)
+import System.Process (CreateProcess (env))
 import System.Process.ByteString (readCreateProcessWithExitCode)
 
 import Salmon.Actions.UpDown (CheckResult (..))
@@ -490,6 +495,163 @@ restartService r systemctl target =
             g callbin = f (callbin (r' cmd))
          in
             withBinary systemctl callSystemctl cmd g
+
+{- | A unit salmon did not write (one a package installs and owns), and the
+files it reads at start.
+-}
+data WatchedUnit
+    = WatchedUnit
+    { watched_scope :: Scope
+    , watched_target :: UnitTarget
+    , watched_files :: [FilePath]
+    -- ^ public: they go into the node's @notes@ and failure text, their
+    -- contents never do
+    }
+    deriving (Eq, Show)
+
+{- | Restarts a unit salmon does not author when, and only when, a file it
+reads changed after it started: 'restartService' with a check.
+
+'restartService' restarts on every pass, and 'systemdServiceWatching' writes
+the unit whose file it watches, so neither fits a unit a package owns
+(@google-cloud-ops-agent@ and its @config.yaml@, nginx and a site file).
+
+The check ('checkRestartWatching') compares the time the running unit left
+@inactive@ (@InactiveExitTimestamp@, the start of its current activation, so
+before any @ExecStartPre=@) with each watched file's /ctime/: a file whose
+inode changed in or after that second was perhaps not read, and the unit is
+restarted. Nothing is recorded, so there is no state to lose and no digest of
+the files (often secret) anywhere. ctime rather than mtime because a package
+or @cp -p@ puts an old mtime on new content, and ctime cannot be set back.
+
+Things to know:
+
+* Second precision (what @systemctl show@ prints everywhere). A write in the
+  second the unit started counts as after it, and @up@ waits for the second
+  after the newest watched change before restarting, so a change is one
+  restart, not two.
+* Anything that touches the inode counts: a @chmod@, a @touch@, a package
+  rewriting the same bytes. That is one restart more, the safe direction.
+* A watched file that is missing is not a change (nothing says when it
+  went); a file the unit writes itself must not be watched (every pass would
+  restart it).
+* A unit that is not running is a 'Failure' too: @restart@ starts it.
+  Transitional states are 'Unknown'.
+* It asks nothing about the unit file or @NeedDaemonReload@: the unit is the
+  package's, and so is reloading it. @down@ does nothing.
+* The files' contents are not in @notes@: they are read by @check@, never at
+  graph build. A changed file shows through the check, so declare the nodes
+  that write the files in the 'Track'' to have them written first.
+-}
+restartServiceWatching :: Reporter Report -> Track' (Binary "systemctl") -> Track' WatchedUnit -> WatchedUnit -> Op
+restartServiceWatching r systemctl t wu =
+    withBinary systemctl callSystemctl (Up wu.watched_scope wu.watched_target) $ \restart ->
+        op "systemd-restart-watching" (deps [run t wu]) $ \actions ->
+            actions
+                { help = "restarts " <> wu.watched_target <> " when a file it reads changed after it started"
+                , notes =
+                    ("scope: " <> Text.pack (show wu.watched_scope))
+                        : ["watches " <> Text.pack path | path <- wu.watched_files]
+                , ref = mkRef "systemd-restart-watching" (scopeKey wu.watched_scope, wu.watched_target)
+                , check = checkRestartWatching wu
+                , up = waitPastChanges wu.watched_files >> restart (contramap (CallSystemCtl (Up wu.watched_scope wu.watched_target)) r)
+                }
+  where
+    scopeKey :: Scope -> Text
+    scopeKey System = "system"
+    scopeKey User = "user"
+
+{- | One @systemctl show@ (with @TZ=UTC@, so the timestamps are read without
+knowing the machine's zone) and a @stat@ of each watched file, judged by
+'interpretRestartWatch'. @systemctl@ failing is 'Unknown'.
+-}
+checkRestartWatching :: WatchedUnit -> IO CheckResult
+checkRestartWatching wu = do
+    environment <- getEnvironment
+    let utc = ("TZ", "UTC") : ("LC_ALL", "C") : [kv | kv@(k, _) <- environment, k /= "TZ", k /= "LC_ALL"]
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            ( ( proc
+                    "systemctl"
+                    ( scopeArgs wu.watched_scope
+                        <> ["show", Text.unpack wu.watched_target, "--property=ActiveState", "--property=InactiveExitTimestamp"]
+                    )
+              )
+                { env = Just utc
+                }
+            )
+            ""
+    case code of
+        ExitFailure _ -> pure Unknown
+        ExitSuccess -> do
+            changes <- watchedChangeTimes wu.watched_files
+            pure (interpretRestartWatch (Text.lines (Text.decodeUtf8With TextError.lenientDecode out)) changes)
+
+-- | Each watched file that exists, with its ctime.
+watchedChangeTimes :: [FilePath] -> IO [(FilePath, POSIXTime)]
+watchedChangeTimes paths = concat <$> traverse one paths
+  where
+    one :: FilePath -> IO [(FilePath, POSIXTime)]
+    one path = do
+        st <- try (getFileStatus path) :: IO (Either IOException FileStatus)
+        pure $ case st of
+            Left _ -> []
+            Right s -> [(path, statusChangeTimeHiRes s)]
+
+{- | The verdict on @systemctl show@'s @ActiveState@ and
+@InactiveExitTimestamp@ and the watched files' ctimes, pure. A file changed
+in or after the second the unit's activation began is a 'Failure' naming it;
+an @active@ unit whose start cannot be read is 'Unknown'.
+-}
+interpretRestartWatch :: [Text] -> [(FilePath, POSIXTime)] -> CheckResult
+interpretRestartWatch ls changes = case property "ActiveState" of
+    Just "active" -> case parseShowTimestamp =<< property "InactiveExitTimestamp" of
+        Nothing -> Unknown
+        Just started -> case [path | (path, ctime) <- changes, wholeSeconds ctime >= wholeSeconds started] of
+            [] -> Success
+            changed -> Failure ("changed since the unit started: " <> Text.intercalate ", " (map Text.pack changed))
+    Just "activating" -> Unknown
+    Just "deactivating" -> Unknown
+    Just "reloading" -> Unknown
+    Just other -> Failure ("the unit is " <> other)
+    Nothing -> Failure "systemctl said nothing about the unit's state"
+  where
+    property :: Text -> Maybe Text
+    property name =
+        case [Text.drop 1 v | l <- ls, let (k, v) = Text.breakOn "=" l, k == name, not (Text.null v)] of
+            (x : _) | not (Text.null (Text.strip x)) -> Just (Text.strip x)
+            _ -> Nothing
+
+wholeSeconds :: POSIXTime -> Integer
+wholeSeconds = floor
+
+{- | A timestamp as @systemctl show@ prints it under @TZ=UTC@:
+@Mon 2026-11-02 12:32:37 UTC@, with or without microseconds, or
+@\@1793622757@ (@--timestamp=unix@). Another zone is 'Nothing'.
+-}
+parseShowTimestamp :: Text -> Maybe POSIXTime
+parseShowTimestamp t
+    | Just secs <- Text.stripPrefix "@" t
+    , [(n, "")] <- reads (Text.unpack secs) =
+        Just (fromInteger n)
+    | Just local <- Text.stripSuffix " UTC" t =
+        utcTimeToPOSIXSeconds <$> parseTimeM False defaultTimeLocale "%a %Y-%m-%d %H:%M:%S%Q" (Text.unpack local)
+    | otherwise = Nothing
+
+{- | Waits, at most two seconds, until the clock is past the second of the
+newest watched change, so the restart that follows begins in a later second
+than every change it picks up and the next check sees it satisfied.
+-}
+waitPastChanges :: [FilePath] -> IO ()
+waitPastChanges paths = do
+    changes <- watchedChangeTimes paths
+    now <- getPOSIXTime
+    case map (wholeSeconds . snd) changes of
+        [] -> pure ()
+        cs -> do
+            let target = fromInteger (maximum cs + 1) :: POSIXTime
+                wait = min 2 (target - now)
+            unless (wait <= 0) $ threadDelay (ceiling (wait * 1000000) + 10000)
 
 {- | A system-wide unit (@systemctl@ against @\/etc\/systemd\/system@, the
 original and still-default behavior) vs. a per-user one (@systemctl --user@

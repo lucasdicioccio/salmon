@@ -3895,6 +3895,32 @@ So `systemdServiceWatching` (and its four callers: `PgBouncer`, `Haproxy`, `Patr
 renders exactly what it did, pinned in `Test/SystemdSpec.hs`; switching a caller is an owner
 decision (one restart per service). Layer 0 only: the keyed file and key are written by a real
 `upTree` in a temp directory, no systemd has loaded one.
+**`Systemd.restartServiceWatching` is the same question for a unit salmon does not write** (one a
+package owns: `google-cloud-ops-agent` and its `config.yaml`). `restartService` has no check (it
+restarts every pass) and `systemdServiceWatching` writes the unit, so neither fits. Its `check`
+(`checkRestartWatching`, judged by the pure `interpretRestartWatch`) is one `systemctl show`
+(`ActiveState`, `InactiveExitTimestamp`, under `TZ=UTC LC_ALL=C` so the time parses without knowing
+the zone) and a `stat` of each watched file: a file whose **ctime** is in or after the second the
+current activation began is a `Failure` naming the path, and `up` is `systemctl restart`.
+Load-bearing: nothing is recorded, so no state and no digest of (often secret) files exists anywhere;
+ctime, not mtime, because dpkg and `cp -p` put an old mtime on new bytes; `InactiveExitTimestamp` is
+taken before any `ExecStartPre=`, so a change during activation counts as after; precision is the
+second (all `systemctl show` prints on every version), so `up` first waits (≤2s) until the clock is
+past the newest watched change's second, else a write-then-restart in one second restarts twice. A
+missing file is not a change; a unit not running is a `Failure` (`restart` starts it), transitional
+states and an unreadable start are `Unknown`; `NeedDaemonReload` is not asked (the unit and its
+reload are the package's); `down` does nothing. Anything touching the inode (chmod, touch, a package
+rewriting the same bytes) is one extra restart, the safe direction; a clock stepped backwards after
+the start hides a change until the next restart; a file the unit writes itself must not be watched.
+`notes` list the scope and paths only (contents are read at check time), so a changed file shows
+through the check, not the representative; callers put the file-writing nodes in its `Track'`. Ref
+is `systemd-restart-watching` + (scope, unit). It is new: `restartService` and every existing
+declaration render as before. Run: Layer 0 (`Test/SystemdSpec.hs`, "restarting a unit a package
+owns…": verdicts, timestamp formats, ctimes of a temp file, the wait, node shape and that notes hold
+no content), and once from a repl against this host's systemd 255, read-only: `systemd-journald` with
+`/etc/hostname` was `Success`, adding a just-written file was `Failure` naming it, an unknown unit
+`Failure "the unit is inactive"`. **Not run**: `up` (a real restart), user scope, a package-owned
+unit such as the ops agent, anything under `serve`.
 (I6): `EncodeFileContents` also carries `contentFingerprint :: a -> Maybe Text`, a pure,
 stable hash of the content an instance would write (`Nothing` by default — the `IO a` instance
 keeps it, since its whole point is that content isn't known until the encoder runs).
