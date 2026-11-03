@@ -2699,7 +2699,7 @@ bucket made every matcher on a backend service answer 503 (`failed_to_pick_backe
 and the bucket's host served; importing the same map minus that host rule and matcher restored the service hosts in 80
 seconds; a redirect-only matcher stayed in and is cleared. The service rules render identically with and without the
 bucket, so the difference is not in what salmon writes about them; the cause is not known, and neither is whether a
-*global* balancer (which this module does not make, and nobody here has run) mixes the two. The map's default is
+*global* balancer (`GlobalBalancer`, which refuses bucket routes by default too; nobody here has run one) mixes the two. The map's default is
 always a backend service, so any bucket route here is such a mixed map. Load-bearing: **`albBuckets` with no rule
 naming it is not refused** — the resource alone serves nothing and was not seen to harm, and keeping it declared is
 what makes "drop the rule" a one-line repair; **the repair is the declaration without the rule and one pass** (the
@@ -2746,6 +2746,31 @@ the rest. **Layer 0 only**:
 neither has `remove-backend`, the certificate swap (how a proxy lists its certificates and how `managed.domains` reads
 are assumed) or the unfolded graph (in particular concurrent gcloud calls under `serve`); `resources/gcp-toy-validation.md` ("The HTTPS run") lists the
 commands and what is unverified.
+**A global balancer** is `albScope = GlobalBalancer` (`LoadBalancerScope`; `RegionalBalancer` is the default, set by
+`httpLoadBalancer`, and renders every script as before: the checksum pins did not move). It is the same `lbParts`,
+nodes, edges, checks and `LeftoversPart`, with every resource global (`--global`; the references a resource makes to
+another say `--global-<flag>` where they said `--<flag>-region`, `referenceScope`; Certificate Manager at
+`--location=global`; URL map targets and the leftovers' greps on `/global/...`; a backend bucket created without
+`--load-balancing-scheme`, which the help says is what a global external one takes) and no proxy-only subnet. Why it
+exists: one address in front of Cloud Run replicas in several regions (asked for by a downstream stack that handed
+clients one `*.run.app` URL per replica). The new backend `CloudRunBackendIn region service` is a serverless NEG
+`<service-neg>-<region>` **in that region** (NEGs stay regional, so a plain `CloudRunBackend` on a global balancer is
+still in `albRegion`/`$REGION`, the only `$REGION` left in its scripts, pinned by a test); one backend service holds
+one per region, attached one after the other like every attachment; `globalHttpLoadBalancer name project region
+[(region, service)]` is the short form. Load-bearing: **the `ref`s of a global balancer say `global` where a regional
+one's say the region** (`locationKey`), so a global and a regional balancer of one name are distinct nodes (and
+distinct GCP resources); the root's `help` is `global application load balancer <name>`. New `albProblems`: a
+*regional* balancer naming `CloudRunBackendIn` another region; one backend service with two Cloud Run backends in one
+region (counted after the existing collapse of identical backend keys, so two plain `CloudRunBackend` on one service
+are still silently one, as before); a global balancer with `albNetwork`. Adding the record field breaks positional or
+full-record constructions (the toy and one test were updated); `httpLoadBalancer` plus record update is unaffected.
+**Layer 0 only** (`Test/GcpSpec.hs`, "LoadBalancing/a global balancer": the parts and edges, the rendered flags, the
+DAG's refs against a regional twin, the problems, `bash -n` on every script, and up/check/down against the stand-in
+`gcloud`, which ignores scope flags). **Never run against a real project**: every flag is read from `gcloud ...
+--help` (SDK 573, locally); not observed are whether a global HTTPS proxy lists a Certificate Manager certificate under
+`sslCertificates` (the swap and leftovers code reads that field, as for the regional one), `PER_PROJECT_RECORD` DNS
+authorizations at `location=global`, the `get-health` of a global service over NEGs, which region GCP routes to, and
+the downstream stack switching to it. `salmon-gcp-toy` and `salmon-cloudrun` declare no global balancer.
 
 `Gcp.Storage` has three settings nodes beside `bucket` (whose `ref`/`help`/`notes` are unchanged), each with no
 dependency of its own, so the caller injects the bucket. `bucketIamBinding` is one unconditional binding on the bucket's

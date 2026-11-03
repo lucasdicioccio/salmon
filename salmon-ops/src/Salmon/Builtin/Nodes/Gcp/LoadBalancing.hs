@@ -20,7 +20,9 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     certificateResource,
     domainSetTag,
     ApplicationLoadBalancer (..),
+    LoadBalancerScope (..),
     httpLoadBalancer,
+    globalHttpLoadBalancer,
     applicationLoadBalancer,
     applicationLoadBalancerAfter,
     applicationLoadBalancerPart,
@@ -124,10 +126,23 @@ own port -- a VM backs a balancer through one group only, however many
 services it runs. With no port at all the group is left alone and the
 service keeps GCP's default port name, @http@, which is then the caller's to
 have set.
+
+A 'CloudRunBackend' is a Cloud Run service in the balancer's own region
+('albRegion'), behind the backend service's NEG (@\<service\>-neg@). A
+'CloudRunBackendIn' names its region, and its NEG is
+@\<service\>-neg-\<region\>@: one backend service holds one serverless NEG
+per region, so the replicas of one service in several regions are several
+'CloudRunBackendIn' on one backend service. Only a 'GlobalBalancer' can send
+to a region other than its own ('albProblems').
 -}
 data Backend
     = InstanceGroupBackend Text InstanceGroupLocation [Int]
     | CloudRunBackend Text
+    | -- | a Cloud Run service of that name in that region, through a
+      -- serverless NEG of its own in that region; several of these, in
+      -- distinct regions, on one backend service of a 'GlobalBalancer' are
+      -- one address in front of replicas in several regions
+      CloudRunBackendIn Region Text
     deriving (Eq, Show)
 
 {- | One more backend service beside the balancer's default one, reachable
@@ -184,7 +199,8 @@ redirects stayed in the map and the services serve with it. The service
 rules are rendered identically with and without the bucket ('renderUrlMap'),
 so the difference is not in what this module writes about them. Why the
 platform does this is not known, and neither is whether a /global/ balancer
-(which this module does not make) does the same: nobody here has run one.
+('GlobalBalancer', which refuses them by default too) does the same: nobody
+here has run one.
 
 The URL map's default service is always a backend service, so any bucket
 route on this balancer is such a mixed map.
@@ -412,7 +428,36 @@ data ApplicationLoadBalancer = ApplicationLoadBalancer
     -- ^ 'RefuseBucketRoutes' unless the outage it names is the thing to test
     , albHttp :: HttpListener
     -- ^ 'HttpCreatedOnce' unless something else is wanted of port 80
+    , albScope :: LoadBalancerScope
+    -- ^ 'RegionalBalancer' unless the backends are in several regions
     }
+    deriving (Eq, Show)
+
+{- | Which kind of external Application Load Balancer the resources make.
+
+'RegionalBalancer' is what this module always made and is the default: a
+/regional/ external Application Load Balancer, every resource in
+'albRegion', in a network that needs a proxy-only subnet there.
+
+'GlobalBalancer' is a /global/ external Application Load Balancer: the
+health checks, backend services, backend buckets, URL maps, proxies,
+address and forwarding rules are global resources (@--global@), Certificate
+Manager's certificates and DNS authorizations are in location @global@, and
+nothing needs a proxy-only subnet. Its serverless NEGs stay regional (GCP
+has no other kind): a 'CloudRunBackend' in 'albRegion', a
+'CloudRunBackendIn' in the region it names. That is the point of it: one
+address, one URL map, one backend service whose NEGs are in several regions,
+and GCP sends each request to the closest healthy one. Its resources are
+the same nodes, with the same checks and leftovers handling, as a regional
+balancer's, and a regional and a global balancer of one name are two
+different balancers (their @ref@s say @global@ where the region was).
+
+Never run against a real project: the flags are read from @gcloud ...
+--help@ (SDK 573), see the module notes.
+-}
+data LoadBalancerScope
+    = RegionalBalancer
+    | GlobalBalancer
     deriving (Eq, Show)
 
 {- | A plain-HTTP balancer with one backend service and no rules: what this
@@ -434,6 +479,18 @@ httpLoadBalancer name project region backends hc =
         , albBuckets = []
         , albBucketRoutes = RefuseBucketRoutes
         , albHttp = HttpCreatedOnce
+        , albScope = RegionalBalancer
+        }
+
+{- | 'httpLoadBalancer' made global ('GlobalBalancer'), with Cloud Run
+replicas in several regions as its default backend service's backends: one
+'CloudRunBackendIn' per @(region, service)@. The region is the one a plain
+'CloudRunBackend' would be in, and @REGION@ in its scripts.
+-}
+globalHttpLoadBalancer :: Text -> Project -> Region -> [(Region, Text)] -> ApplicationLoadBalancer
+globalHttpLoadBalancer name project region replicas =
+    (httpLoadBalancer name project region [CloudRunBackendIn r svc | (r, svc) <- replicas] Nothing)
+        { albScope = GlobalBalancer
         }
 
 -- | The API a 'ManagedCertificate' needs enabled (the caller's dependency).
@@ -453,7 +510,10 @@ buckets under one name, a redirect that redirects to the request itself, a
 path rule that redirects and rewrites, a rewrite that is no path, an
 HTTP listener option that leaves no listener, a host in two rules, a rule with no host or no path, the two certificate kinds
 mixed, a managed certificate with no domain, a timeout that is not positive,
-one backend service sending to two different ports of one instance group.
+one backend service sending to two different ports of one instance group,
+a regional balancer sending to Cloud Run in another region, one backend
+service with two Cloud Run backends in one region, a global balancer naming
+a network.
 -}
 albProblems :: ApplicationLoadBalancer -> [Text]
 albProblems alb =
@@ -535,6 +595,26 @@ albProblems alb =
                 NoHttp -> ["no HTTP listener"]
                 _ -> []
            ]
+        <> [ "a regional load balancer cannot send to Cloud Run in another region: "
+            <> cr
+            <> " in "
+            <> r.regionName
+            <> " (albScope = GlobalBalancer can)"
+           | alb.albScope == RegionalBalancer
+           , CloudRunBackendIn r cr <- nub (concatMap svcBackends (services alb))
+           , r /= alb.albRegion
+           ]
+        -- one serverless NEG per region on a backend service
+        <> [ "backend service " <> svc.svcResource <> " has several Cloud Run backends in " <> r.regionName
+           | svc <- services alb
+           , let regions = mapMaybe (cloudRunRegion alb) (nubBy ((==) `on` backendKey svc) svc.svcBackends)
+           , r <- nub (regions \\ nub regions)
+           ]
+        -- its forwarding rules are in no VPC network
+        <> [ "a global load balancer takes no network: " <> n
+           | alb.albScope == GlobalBalancer
+           , Just n <- [alb.albNetwork]
+           ]
   where
     names = map backendServiceName alb.albServices
     buckets = map backendBucketName alb.albBuckets
@@ -571,7 +651,10 @@ bucketRouteRefusal :: ApplicationLoadBalancer -> [(Text, Text)] -> Text
 bucketRouteRefusal alb routed =
     "a rule routes to a backend bucket ("
         <> Text.intercalate ", " [what <> " to " <> bucketResource alb n | (what, n) <- routed]
-        <> "), which is refused on this regional load balancer: on a live one, a URL map with one"
+        <> ( case alb.albScope of
+                RegionalBalancer -> "), which is refused on this regional load balancer: on a live one, a URL map with one"
+                GlobalBalancer -> "), which is refused by default (a global load balancer was never tried): on a live regional one, a URL map with one"
+           )
         <> " matcher on a regional backend bucket made every host on a backend service answer 503"
         <> " (failed_to_pick_backend) while its backends were HEALTHY and the bucket's own host served."
         <> " Nothing was changed by this pass. If the live URL map already has such a rule, drop the"
@@ -633,9 +716,9 @@ applicationLoadBalancerWith :: (Part -> [Op]) -> [Op] -> Reporter Report -> Trac
 applicationLoadBalancerWith partPrereqs prereqs r gcloudTrack alb =
     op "gcp-application-lb" (deps (prereqs <> ordered)) $ \actions ->
         actions
-            { help = Text.unwords ["application load balancer", alb.albName]
+            { help = Text.unwords (["global" | alb.albScope == GlobalBalancer] <> ["application load balancer", alb.albName])
             , notes = albNotes alb
-            , ref = mkRef "gcp-application-lb" (alb.albProject.projectId, alb.albRegion.regionName, alb.albName)
+            , ref = mkRef "gcp-application-lb" (alb.albProject.projectId, locationKey alb, alb.albName)
             , up = unless (null problems) $ throwIO (InvalidLoadBalancer problems)
             , check = checkHealth
             }
@@ -757,7 +840,7 @@ ports are keyed on the balancer /and/ the group, since each balancer sets
 only its own names there.
 -}
 partRef :: ApplicationLoadBalancer -> Part -> Ref
-partRef alb part = mkRef (partKind part) (alb.albProject.projectId, alb.albRegion.regionName, key)
+partRef alb part = mkRef (partKind part) (alb.albProject.projectId, locationKey alb, key)
   where
     key :: [Text]
     key = case part of
@@ -955,7 +1038,7 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
     LbDescribe alb ->
         gcloudProc $
             withProject alb.albProject
-                ( withRegion alb.albRegion
+                ( withScope alb
                     [ "compute"
                     , "url-maps"
                     , "describe"
@@ -975,7 +1058,7 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
     LbAddressDescribe alb ->
         gcloudProc $
             withProject alb.albProject
-                ( withRegion alb.albRegion
+                ( withScope alb
                     [ "compute"
                     , "forwarding-rules"
                     , "describe"
@@ -997,13 +1080,34 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
                 , "--format"
                 , "value(dnsResourceRecord.name,dnsResourceRecord.type,dnsResourceRecord.data)"
                 , "--location"
-                , Text.unpack alb.albRegion.regionName
+                , Text.unpack (locationKey alb)
                 ]
     LbDelete alb ->
         bashScript (renderLbDeleteScript alb)
 
 serveHttps :: ApplicationLoadBalancer -> Bool
 serveHttps = not . null . albCertificates
+
+{- | Where the balancer's resources are, as its @ref@s and Certificate
+Manager's @--location@ say it: its region, or @global@.
+-}
+locationKey :: ApplicationLoadBalancer -> Text
+locationKey alb = case alb.albScope of
+    RegionalBalancer -> alb.albRegion.regionName
+    GlobalBalancer -> "global"
+
+-- | 'withRegion' for a regional balancer, @--global@ for a global one.
+withScope :: ApplicationLoadBalancer -> [String] -> [String]
+withScope alb args = case alb.albScope of
+    RegionalBalancer -> withRegion alb.albRegion args
+    GlobalBalancer -> args <> ["--global"]
+
+-- | The region a Cloud Run backend's NEG is in; 'Nothing' for an instance group.
+cloudRunRegion :: ApplicationLoadBalancer -> Backend -> Maybe Region
+cloudRunRegion alb = \case
+    InstanceGroupBackend{} -> Nothing
+    CloudRunBackend _ -> Just alb.albRegion
+    CloudRunBackendIn r _ -> Just r
 
 {- | A backend service as the scripts see it: the default one and the named
 ones, under their resource names.
@@ -1138,6 +1242,7 @@ isInstanceGroup :: Backend -> Bool
 isInstanceGroup = \case
     InstanceGroupBackend{} -> True
     CloudRunBackend _ -> False
+    CloudRunBackendIn _ _ -> False
 
 {- | The URL map as the resource @gcloud compute url-maps import@ reads.
 JSON, which is YAML: one path matcher per host rule, named by position.
@@ -1278,11 +1383,13 @@ urlMapFields alb =
     serviceUrl sref =
         "https://www.googleapis.com/compute/v1/projects/"
             <> alb.albProject.projectId
-            <> "/regions/"
-            <> alb.albRegion.regionName
+            <> scopePath
             <> collection
             <> serviceResource alb sref
       where
+        scopePath = case alb.albScope of
+            RegionalBalancer -> "/regions/" <> alb.albRegion.regionName
+            GlobalBalancer -> "/global"
         collection = case sref of
             NamedBucket _ -> "/backendBuckets/"
             _ -> "/backendServices/"
@@ -1485,6 +1592,12 @@ has a proxy-only subnet in the region. Nothing here creates one -- see
 "Salmon.Builtin.Nodes.Gcp.Compute".@subnet@ with
 'Salmon.Builtin.Nodes.Gcp.Compute.RegionalManagedProxy', which is a
 prerequisite to hand 'applicationLoadBalancerAfter'.
+
+A 'GlobalBalancer' is the same resources and the same edges, made global
+('LoadBalancerScope'), with no proxy-only subnet to need; only its
+serverless NEGs are regional, each in its backend's region, and a backend
+service attaches one per region. Its root's health check is the same
+@get-health@, global.
 -}
 lbParts :: ApplicationLoadBalancer -> [PartSpec]
 lbParts alb =
@@ -1510,6 +1623,13 @@ lbParts alb =
     -- whether a certificate here is replaced by a swap (see 'httpsProxyPart')
     domainSets = not (null [() | DomainSetCertificate _ _ <- alb.albCertificates])
     groups = groupNamedPorts alb
+    global = alb.albScope == GlobalBalancer
+
+    -- where this balancer's resources are, and its certificates
+    regional = scopeFlags alb
+    located = locationFlags alb
+    -- where a resource another names is (see 'referenceScope')
+    scopeOf = referenceScope alb
 
     resourceName :: Text -> Text
     resourceName suffix = shellQuote (alb.albName <> suffix)
@@ -1522,13 +1642,21 @@ lbParts alb =
     need what describeCmd = "need " <> shellQuote what <> " " <> describeCmd
 
     describeCompute :: Text -> Text -> Text
-    describeCompute coll name = "gcloud compute " <> coll <> " describe " <> shellQuote name <> regional
+    describeCompute = describeComputeAt regional
 
     deleteCompute :: Text -> Text -> Text
-    deleteCompute coll name =
-        "if exists " <> describeCompute coll name
+    deleteCompute = deleteComputeAt regional
+
+    -- the same, for a resource somewhere else than the balancer's
+    -- resources: a NEG of a global balancer, which is regional
+    describeComputeAt :: Text -> Text -> Text -> Text
+    describeComputeAt at coll name = "gcloud compute " <> coll <> " describe " <> shellQuote name <> at
+
+    deleteComputeAt :: Text -> Text -> Text -> Text
+    deleteComputeAt at coll name =
+        "if exists " <> describeComputeAt at coll name
             <> "; then gcloud compute " <> coll <> " delete " <> shellQuote name
-            <> regional <> " --quiet; fi"
+            <> at <> " --quiet; fi"
 
     describeLocated :: Text -> Text -> Text
     describeLocated coll name = "gcloud certificate-manager " <> coll <> " describe " <> shellQuote name <> located
@@ -1541,7 +1669,10 @@ lbParts alb =
 
     -- A resource that is created once and has nothing to set afterwards.
     simple :: Part -> [Part] -> Text -> Text -> Text -> Text -> PartSpec
-    simple part needs what coll name createFlags =
+    simple = simpleAt regional
+
+    simpleAt :: Text -> Part -> [Part] -> Text -> Text -> Text -> Text -> PartSpec
+    simpleAt at part needs what coll name createFlags =
         PartSpec
             { partId = part
             , partDeps = needs
@@ -1549,11 +1680,11 @@ lbParts alb =
             , partNotes = []
             , partUp =
                 [ ensure
-                    (describeCompute coll name)
-                    ("gcloud compute " <> coll <> " create " <> shellQuote name <> regional <> createFlags)
+                    (describeComputeAt at coll name)
+                    ("gcloud compute " <> coll <> " create " <> shellQuote name <> at <> createFlags)
                 ]
-            , partCheck = [need (coll <> " " <> name) (describeCompute coll name)]
-            , partDown = [deleteCompute coll name]
+            , partCheck = [need (coll <> " " <> name) (describeComputeAt at coll name)]
+            , partDown = [deleteComputeAt at coll name]
             }
 
     healthCheckPart :: HealthCheck -> PartSpec
@@ -1650,7 +1781,7 @@ lbParts alb =
                         <> " --protocol=HTTP"
                         <> maybe "" ((" --port-name=" <>) . shellQuote) (svcPortName svc)
                         <> " --load-balancing-scheme=EXTERNAL_MANAGED"
-                        <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> " --health-checks-region=\"$REGION\"") (instanceGroupHealthCheck svc)
+                        <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> scopeOf "health-checks") (instanceGroupHealthCheck svc)
                     )
                 ]
                     -- a set: a backend service made before it had a port
@@ -1712,25 +1843,30 @@ lbParts alb =
                 ]
                 ("instance-group " <> ig)
             )
-        CloudRunBackend cr ->
-            ( [ simple
-                    (NetworkEndpointGroupPart svc.svcNeg)
+        -- a NEG is regional whatever the balancer is: in @$REGION@ here
+        CloudRunBackend cr -> serverless svc.svcNeg regionFlags "\"$REGION\"" cr
+        CloudRunBackendIn r cr ->
+            serverless (regionalNeg svc r) (" --project=\"$PROJECT\" --region=" <> shellQuote r.regionName) (shellQuote r.regionName) cr
+      where
+        serverless neg at region cr =
+            ( [ simpleAt
+                    at
+                    (NetworkEndpointGroupPart neg)
                     []
                     "serverless network endpoint group"
                     "network-endpoint-groups"
-                    svc.svcNeg
+                    neg
                     (" --network-endpoint-type=serverless --cloud-run-service=" <> shellQuote cr)
               ]
             , attachment
-                svc.svcNeg
-                [NetworkEndpointGroupPart svc.svcNeg]
-                ("network endpoint group " <> svc.svcNeg)
-                ("/networkEndpointGroups/" <> svc.svcNeg)
-                (" --network-endpoint-group=" <> shellQuote svc.svcNeg <> " --network-endpoint-group-region=\"$REGION\"")
+                neg
+                [NetworkEndpointGroupPart neg]
+                ("network endpoint group " <> neg)
+                ("/networkEndpointGroups/" <> neg)
+                (" --network-endpoint-group=" <> shellQuote neg <> " --network-endpoint-group-region=" <> region)
                 []
-                ("neg " <> svc.svcNeg)
+                ("neg " <> neg)
             )
-      where
         attachment key needs what suffix flags checks missing =
             PartSpec
                 { partId = BackendPart svc.svcResource key
@@ -1864,7 +2000,8 @@ lbParts alb =
                     ( "gcloud compute backend-buckets create " <> shellQuote res
                         <> regional
                         <> " --gcs-bucket-name=" <> shellQuote gcs
-                        <> " --load-balancing-scheme=EXTERNAL_MANAGED"
+                        -- left blank, a backend bucket is a global external one's
+                        <> (if global then "" else " --load-balancing-scheme=EXTERNAL_MANAGED")
                     )
                 , "have=$(" <> describeCompute "backend-buckets" res <> " --format='value(bucketName)')"
                 , "[ \"$have\" = " <> shellQuote gcs <> " ] || gcloud compute backend-buckets update " <> shellQuote res
@@ -2169,6 +2306,8 @@ lbParts alb =
             }
       where
         declaredBuckets = map (bucketResource alb . backendBucketName) alb.albBuckets
+        -- how a reference to one of the balancer's resources is spelled in a URL
+        scopePath = if global then "/global" else "/regions/$REGION"
         declaredCertificates = [n | (n, _, _) <- managedCertificates alb]
         declaredAuthorizations = map snd (dnsAuthorizations alb)
         redirectMap = httpRedirectUrlMapName alb
@@ -2202,7 +2341,7 @@ lbParts alb =
             , "        case \"$n\" in " <> shellQuote (alb.albName <> "-") <> "*-bucket) ;; *) continue ;; esac"
             , "        [ \"$d\" = \"$marker\" ] || continue"
             , "        if [ -z \"$listed\" ]; then maps=$(gcloud compute url-maps list --project=\"$PROJECT\" --format=json 2>/dev/null) || { echo \"KEEP backend-buckets $n the URL maps could not be listed\"; continue; }; listed=1; fi"
-            , "        if grep -qF -- \"/regions/$REGION/backendBuckets/$n\\\"\" <<< \"$maps\"; then echo \"KEEP backend-buckets $n a URL map still names it\"; else echo \"DELETE backend-buckets $n\"; fi ;;"
+            , "        if grep -qF -- \"" <> scopePath <> "/backendBuckets/$n\\\"\" <<< \"$maps\"; then echo \"KEEP backend-buckets $n a URL map still names it\"; else echo \"DELETE backend-buckets $n\"; fi ;;"
             , "    esac"
             , "  done"
             , "}"
@@ -2250,7 +2389,7 @@ lbParts alb =
                         , "  http=$(gcloud compute target-http-proxies list --project=\"$PROJECT\" --format='value(urlMap)' 2>/dev/null) && https=$(gcloud compute target-https-proxies list --project=\"$PROJECT\" --format='value(urlMap)' 2>/dev/null) || { echo "
                             <> shellQuote ("KEEP url-maps " <> redirectMap <> " the proxies could not be listed")
                             <> "; return 0; }"
-                        , "  if grep -qE -- \"/regions/$REGION/urlMaps/\"" <> shellQuote redirectMap <> "'[[:space:]]*$' <<< \"$http\"$'\\n'\"$https\"; then echo "
+                        , "  if grep -qE -- \"" <> scopePath <> "/urlMaps/\"" <> shellQuote redirectMap <> "'[[:space:]]*$' <<< \"$http\"$'\\n'\"$https\"; then echo "
                             <> shellQuote
                                 ( -- by default the HTTP proxy is never moved, so a map it is on is not waiting for anything
                                   (if alb.albHttp == HttpCreatedOnce then "NOTE" else "KEEP")
@@ -2269,7 +2408,7 @@ lbParts alb =
     addressPart = simple AddressPart [] "reserved address" "addresses" (alb.albName <> "-ip") ""
 
     addressFlag
-        | https = " --address=" <> resourceName "-ip" <> " --address-region=\"$REGION\""
+        | https = " --address=" <> resourceName "-ip" <> scopeOf "address"
         | otherwise = ""
 
     -- Created once with its URL map, which by default is never set again:
@@ -2284,7 +2423,7 @@ lbParts alb =
         _ -> createdOnce
       where
         proxy = alb.albName <> "-proxy"
-        mapFlags urlMap = " --url-map=" <> shellQuote urlMap <> " --url-map-region=\"$REGION\""
+        mapFlags urlMap = " --url-map=" <> shellQuote urlMap <> scopeOf "url-map"
         createdOnce =
             simple
                 HttpProxyPart
@@ -2344,7 +2483,7 @@ lbParts alb =
                        , "else"
                        , "  gcloud compute target-https-proxies create " <> shellQuote httpsProxy
                             <> regional
-                            <> " --url-map=" <> resourceName "-url-map" <> " --url-map-region=\"$REGION\""
+                            <> " --url-map=" <> resourceName "-url-map" <> scopeOf "url-map"
                             <> certificateFlags
                        , "fi"
                        ]
@@ -2420,7 +2559,12 @@ lbParts alb =
                     <> ["    " <> update]
         certificateFlags = case managed of
             (_ : _) -> " --certificate-manager-certificates=" <> shellQuote (Text.intercalate "," managed)
-            [] -> " --ssl-certificates=" <> shellQuote (Text.intercalate "," compute) <> " --ssl-certificates-region=\"$REGION\""
+            [] -> " --ssl-certificates=" <> shellQuote (Text.intercalate "," compute) <> scopeOf "ssl-certificates"
+
+    -- a global balancer's rules are in no network ('albProblems' refuses one)
+    networkFlag
+        | global = ""
+        | otherwise = maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
 
     forwardingRulePart :: PartSpec
     forwardingRulePart =
@@ -2431,10 +2575,10 @@ lbParts alb =
             "forwarding-rules"
             (alb.albName <> "-fw")
             ( " --load-balancing-scheme=EXTERNAL_MANAGED"
-                <> maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
+                <> networkFlag
                 <> addressFlag
                 <> " --target-http-proxy=" <> resourceName "-proxy"
-                <> " --target-http-proxy-region=\"$REGION\""
+                <> scopeOf "target-http-proxy"
                 <> " --ports=80"
             )
 
@@ -2447,10 +2591,10 @@ lbParts alb =
             "forwarding-rules"
             (alb.albName <> "-https-fw")
             ( " --load-balancing-scheme=EXTERNAL_MANAGED"
-                <> maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
+                <> networkFlag
                 <> addressFlag
                 <> " --target-https-proxy=" <> resourceName "-https-proxy"
-                <> " --target-https-proxy-region=\"$REGION\""
+                <> scopeOf "target-https-proxy"
                 <> " --ports=443"
             )
 
@@ -2459,6 +2603,11 @@ backendKey :: Svc -> Backend -> Text
 backendKey svc = \case
     InstanceGroupBackend ig _ _ -> ig
     CloudRunBackend _ -> svc.svcNeg
+    CloudRunBackendIn r _ -> regionalNeg svc r
+
+-- | The NEG of a 'CloudRunBackendIn': the service's, suffixed with its region.
+regionalNeg :: Svc -> Region -> Text
+regionalNeg svc r = svc.svcNeg <> "-" <> r.regionName
 
 jsonText :: Aeson.Value -> Text
 jsonText = Text.decodeUtf8With TextErr.lenientDecode . LByteString.toStrict . Aeson.encode
@@ -2536,7 +2685,7 @@ renderLbHealthScript alb = Text.unlines (checkHeader alb <> healthLines alb)
 -- one state per backend instance; ';' separates a backend's instances
 healthLines :: ApplicationLoadBalancer -> [Text]
 healthLines alb =
-    [ "gcloud compute backend-services get-health " <> shellQuote svc.svcResource <> regional
+    [ "gcloud compute backend-services get-health " <> shellQuote svc.svcResource <> scopeFlags alb
         <> " --format='value(status.healthStatus[].healthState)' 2>/dev/null"
         <> " | tr ';' '\\n' | while read -r st; do [ -n \"$st\" ] && echo "
         <> shellQuote ("HEALTH " <> svc.svcLabel)
@@ -2551,14 +2700,33 @@ order reversed).
 renderLbDeleteScript :: ApplicationLoadBalancer -> Text
 renderLbDeleteScript alb = Text.unlines (mutatingHeader alb <> concatMap partDown (reverse (lbParts alb)))
 
--- | The @--project@\/@--region@ pair every regional resource in these scripts
--- is addressed by, reading the variables the script sets up front.
-regional :: Text
-regional = " --project=\"$PROJECT\" --region=\"$REGION\""
+{- | The @--project@\/@--region@ pair every resource of a regional balancer
+in these scripts is addressed by, reading the variables the script sets up
+front; @--project@\/@--global@ for a global one.
+-}
+scopeFlags :: ApplicationLoadBalancer -> Text
+scopeFlags alb = case alb.albScope of
+    RegionalBalancer -> regionFlags
+    GlobalBalancer -> " --project=\"$PROJECT\" --global"
+
+-- | A resource in the balancer's region (@$REGION@), whatever its scope: a NEG.
+regionFlags :: Text
+regionFlags = " --project=\"$PROJECT\" --region=\"$REGION\""
 
 -- | The same for Certificate Manager, which says @--location@.
-located :: Text
-located = " --project=\"$PROJECT\" --location=\"$REGION\""
+locationFlags :: ApplicationLoadBalancer -> Text
+locationFlags alb = case alb.albScope of
+    RegionalBalancer -> " --project=\"$PROJECT\" --location=\"$REGION\""
+    GlobalBalancer -> " --project=\"$PROJECT\" --location=global"
+
+{- | The flag that says where a resource another one names is, by the name
+of the flag naming it (@url-map@ gives @--url-map-region@ or
+@--global-url-map@).
+-}
+referenceScope :: ApplicationLoadBalancer -> Text -> Text
+referenceScope alb flag = case alb.albScope of
+    RegionalBalancer -> " --" <> flag <> "-region=\"$REGION\""
+    GlobalBalancer -> " --global-" <> flag
 
 -- | How to address the instance group itself.
 groupLocation :: InstanceGroupLocation -> Text

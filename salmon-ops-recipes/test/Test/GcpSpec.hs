@@ -2696,6 +2696,7 @@ lbTests =
             , part <- LoadBalancing.lbParts a
             , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
             ]
+    , testGroup "a global balancer" globalTests
     , testGroup "a node per resource" nodeTests
     , testGroup "against a stand-in gcloud" $
         -- Not GCP: a shell script that keeps "resources" as files and answers
@@ -3753,6 +3754,133 @@ lbTests =
                        , LoadBalancing.HostRule ["example.org"] (LoadBalancing.RedirectTo (LoadBalancing.redirectToHost www)) []
                        ]
             }
+    -- one address in front of a Cloud Run service replicated in three regions
+    replicated =
+        LoadBalancing.globalHttpLoadBalancer
+            "web"
+            (Core.Project "p")
+            (Core.Region "europe-west1")
+            [(Core.Region r, "api") | r <- ["europe-west1", "us-central1", "asia-east1"]]
+    -- every feature, made global: instance groups, a plain Cloud Run backend, a certificate, a bucket
+    globalFull =
+        site
+            { LoadBalancing.albScope = LoadBalancing.GlobalBalancer
+            , LoadBalancing.albNetwork = Nothing
+            , LoadBalancing.albBucketRoutes = LoadBalancing.AllowBucketRoutesKnownToHaveBrokenALiveBalancer
+            , LoadBalancing.albServices =
+                site.albServices
+                    <> [ LoadBalancing.BackendService
+                            "eu-us"
+                            [ LoadBalancing.CloudRunBackendIn (Core.Region "europe-west1") "svc-eu"
+                            , LoadBalancing.CloudRunBackendIn (Core.Region "us-east1") "svc-us"
+                            ]
+                            Nothing
+                            Nothing
+                       ]
+            , LoadBalancing.albHttp = LoadBalancing.RedirectToHttps LoadBalancing.MovedPermanently
+            }
+    globalTests =
+        [ testCase "a regional declaration is what httpLoadBalancer always made" $
+            assertEqual "" LoadBalancing.RegionalBalancer (LoadBalancing.httpLoadBalancer "web" (Core.Project "p") (Core.Region "europe-west1") [] Nothing).albScope
+        , testCase "replicas in three regions are one backend service with a NEG in each, attached one after the other" $ do
+            assertEqual "" [] (LoadBalancing.albProblems replicated)
+            let negs = ["web-neg-europe-west1", "web-neg-us-central1", "web-neg-asia-east1"]
+            assertEqual
+                ""
+                ( [LoadBalancing.BackendServicePart "web-backend"]
+                    <> concat [[LoadBalancing.NetworkEndpointGroupPart n, LoadBalancing.BackendPart "web-backend" n] | n <- negs]
+                    <> [LoadBalancing.UrlMapPart, LoadBalancing.HttpProxyPart, LoadBalancing.ForwardingRulePart, LoadBalancing.LeftoversPart]
+                )
+                (map LoadBalancing.partId (LoadBalancing.lbParts replicated))
+            assertEqual
+                "two add-backend on one service never run at once"
+                [LoadBalancing.BackendServicePart "web-backend", LoadBalancing.NetworkEndpointGroupPart "web-neg-us-central1", LoadBalancing.BackendPart "web-backend" "web-neg-europe-west1"]
+                (concat [p.partDeps | p <- LoadBalancing.lbParts replicated, p.partId == LoadBalancing.BackendPart "web-backend" "web-neg-us-central1"])
+        , testCase "the resources are global, the NEGs in their own regions" $ do
+            let sc = createScript replicated
+            mapM_
+                (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+                [ "backend-services create 'web-backend' --project=\"$PROJECT\" --global --protocol=HTTP --load-balancing-scheme=EXTERNAL_MANAGED"
+                , "network-endpoint-groups create 'web-neg-us-central1' --project=\"$PROJECT\" --region='us-central1' --network-endpoint-type=serverless --cloud-run-service='api'"
+                , "backend-services add-backend 'web-backend' --project=\"$PROJECT\" --global --network-endpoint-group='web-neg-asia-east1' --network-endpoint-group-region='asia-east1'"
+                , "url-maps create 'web-url-map' --project=\"$PROJECT\" --global --default-service='web-backend'"
+                , "target-http-proxies create 'web-proxy' --project=\"$PROJECT\" --global --url-map='web-url-map' --global-url-map"
+                , "forwarding-rules create 'web-fw' --project=\"$PROJECT\" --global --load-balancing-scheme=EXTERNAL_MANAGED --target-http-proxy='web-proxy' --global-target-http-proxy --ports=80"
+                ]
+        , testCase "with every feature, nothing but a plain Cloud Run backend's NEG is addressed in $REGION" $ do
+            assertEqual "" [] (LoadBalancing.albProblems globalFull)
+            let scripts =
+                    [ (p.partId, l)
+                    | p <- LoadBalancing.lbParts globalFull
+                    , l <- p.partUp <> p.partCheck <> p.partDown
+                    , "REGION" `Text.isInfixOf` l
+                    ]
+            assertEqual
+                (unlines (map show scripts))
+                [LoadBalancing.NetworkEndpointGroupPart "web-api-neg", LoadBalancing.BackendPart "web-api-backend" "web-api-neg"]
+                (nub (map fst scripts))
+            let sc = createScript globalFull
+            mapM_
+                (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+                [ "health-checks create tcp 'hc' --project=\"$PROJECT\" --global --port=8080"
+                , "--health-checks='hc' --global-health-checks"
+                , "addresses create 'web-ip' --project=\"$PROJECT\" --global"
+                , "--address='web-ip' --global-address"
+                , "certificates create 'web-cert' --project=\"$PROJECT\" --location=global"
+                , "dns-authorizations create 'web-cert-app-example-org' --project=\"$PROJECT\" --location=global"
+                , "target-https-proxies create 'web-https-proxy' --project=\"$PROJECT\" --global --url-map='web-url-map' --global-url-map --certificate-manager-certificates='web-cert'"
+                , "--target-https-proxy='web-https-proxy' --global-target-https-proxy --ports=443"
+                , "backend-buckets create 'web-site-bucket' --project=\"$PROJECT\" --global --gcs-bucket-name='example-site'\n"
+                , "network-endpoint-groups create 'web-api-neg' --project=\"$PROJECT\" --region=\"$REGION\""
+                , "url-maps import 'web-http-redirect-url-map' --project=\"$PROJECT\" --global"
+                ]
+            assertBool sc (not ("--network=" `isInfixOf` sc))
+            assertBool "the URL map names global backend services" ("/projects/p/global/backendServices/web-backend" `isInfixOf` sc)
+            assertBool "and global backend buckets" ("/projects/p/global/backendBuckets/web-site-bucket" `isInfixOf` sc)
+        , testCase "rendered global scripts parse as bash" $
+            mapM_
+                ( \sc -> do
+                    (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", Text.unpack sc] ""
+                    assertEqual err ExitSuccess code
+                )
+                [ render a part
+                | a <- [replicated, globalFull]
+                , part <- LoadBalancing.lbParts a
+                , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
+                ]
+        , testCase "a global balancer is another balancer than a regional one of the same name" $ do
+            let regional = replicated{LoadBalancing.albScope = LoadBalancing.RegionalBalancer, LoadBalancing.albBackends = [LoadBalancing.CloudRunBackend "api"]}
+            let refs a = Map.keysSet (Dag.dagNodes (dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack a)))
+            assertEqual "" Set.empty (Set.intersection (refs regional) (refs replicated))
+            let dag = dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack replicated)
+            assertEqual "one node per resource, and the root" (length (LoadBalancing.lbParts replicated) + 1) (Map.size (Dag.dagNodes dag))
+            assertEqual "nothing conflicting" 0 (length (Dag.dagConflicts dag))
+            assertBool "" (any (\act -> act.extension.help == "global application load balancer web") (Map.elems (Dag.dagNodes dag)))
+        , testCase "what a regional balancer cannot do, and two NEGs in one region, are problems" $ do
+            let elsewhere = replicated{LoadBalancing.albScope = LoadBalancing.RegionalBalancer}
+            let problems a = unlines (map Text.unpack (LoadBalancing.albProblems a))
+            assertBool (problems elsewhere) ("cannot send to Cloud Run in another region: api in us-central1" `isInfixOf` problems elsewhere)
+            assertBool (problems elsewhere) (not ("api in europe-west1" `isInfixOf` problems elsewhere))
+            let twice = replicated{LoadBalancing.albBackends = replicated.albBackends <> [LoadBalancing.CloudRunBackend "other"]}
+            assertBool (problems twice) ("web-backend has several Cloud Run backends in europe-west1" `isInfixOf` problems twice)
+            let networked = replicated{LoadBalancing.albNetwork = Just "default"}
+            assertBool (problems networked) ("a global load balancer takes no network" `isInfixOf` problems networked)
+            assertEqual "" [] (LoadBalancing.albProblems replicated{LoadBalancing.albScope = LoadBalancing.RegionalBalancer, LoadBalancing.albBackends = take 1 replicated.albBackends})
+        , testCase "against a stand-in gcloud: up creates every region's NEG once, the check then passes, down removes them" $
+            withFakeGcloud $ \run mutations -> do
+                first <- mutationsOf run mutations (createScript replicated)
+                mapM_
+                    (\w -> assertBool (w <> "\n" <> unlines first) (w `elem` first))
+                    ["network-endpoint-groups create web-neg-" <> r | r <- ["europe-west1", "us-central1", "asia-east1"]]
+                assertEqual (unlines first) 3 (length (filter ("add-backend" `isInfixOf`) first))
+                second <- mutationsOf run mutations (createScript replicated)
+                assertBool (unlines second) (not (any (\l -> " create " `isInfixOf` l || "add-backend" `isInfixOf` l) second))
+                (_, verdict) <- wholeVerdict run replicated
+                assertEqual "" Success verdict
+                gone <- mutationsOf run mutations (deleteScript replicated)
+                assertEqual (unlines gone) 3 (length (filter ("remove-backend" `isInfixOf`) gone))
+                assertEqual (unlines gone) 3 (length (filter ("network-endpoint-groups delete" `isInfixOf`) gone))
+        ]
     -- a declaration as somebody who means to try a bucket route would write it
     allowing a = a{LoadBalancing.albBucketRoutes = LoadBalancing.AllowBucketRoutesKnownToHaveBrokenALiveBalancer}
     -- 'site' with the one rule that routes to the bucket dropped: bucket still declared, redirects kept
@@ -3824,6 +3952,7 @@ lbTests =
             , LoadBalancing.albBuckets = []
             , LoadBalancing.albBucketRoutes = LoadBalancing.RefuseBucketRoutes
             , LoadBalancing.albHttp = LoadBalancing.HttpCreatedOnce
+            , LoadBalancing.albScope = LoadBalancing.RegionalBalancer
             }
 
 {- | A stand-in for @gcloud@: resources are files named
