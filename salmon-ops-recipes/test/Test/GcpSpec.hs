@@ -3262,11 +3262,28 @@ lbTests =
         , testCase "leftovers: the part is the last, after the map, the proxies and the superseded certificates, and writes no proxy" $ do
             let declarations = [alb, full, site, rotated, toHttps, listening LoadBalancing.ServeHttp, listening LoadBalancing.NoHttp]
             mapM_ (\a -> assertEqual "" [leftovers] (take 1 (reverse (map LoadBalancing.partId (LoadBalancing.lbParts a))))) declarations
-            assertEqual "" [LoadBalancing.UrlMapPart, LoadBalancing.HttpProxyPart] (depsOf alb leftovers)
+            -- after every write to a declared service and health check, which it marks
             assertEqual
                 ""
-                [LoadBalancing.UrlMapPart, LoadBalancing.BackendBucketPart "web-site-bucket", LoadBalancing.CertificatePart "web-cert", LoadBalancing.HttpProxyPart, LoadBalancing.HttpsProxyPart]
-                (depsOf site leftovers)
+                [ LoadBalancing.UrlMapPart
+                , LoadBalancing.HealthCheckPart "hc"
+                , LoadBalancing.BackendServicePart "web-backend"
+                , LoadBalancing.BackendPart "web-backend" "ig"
+                , LoadBalancing.NetworkEndpointGroupPart "web-neg"
+                , LoadBalancing.BackendPart "web-backend" "web-neg"
+                , LoadBalancing.HttpProxyPart
+                ]
+                (depsOf alb leftovers)
+            mapM_
+                (\d -> assertBool (show d) (d `elem` depsOf site leftovers))
+                [ LoadBalancing.UrlMapPart
+                , LoadBalancing.BackendServicePart "web-slow-backend"
+                , LoadBalancing.BackendPart "web-api-backend" "web-api-neg"
+                , LoadBalancing.BackendBucketPart "web-site-bucket"
+                , LoadBalancing.CertificatePart "web-cert"
+                , LoadBalancing.HttpProxyPart
+                , LoadBalancing.HttpsProxyPart
+                ]
             assertBool "" (LoadBalancing.SupersededCertificatesPart "web-cert" `elem` depsOf rotated leftovers)
             assertBool "" (LoadBalancing.NoHttpPart `elem` depsOf (listening LoadBalancing.NoHttp) leftovers)
             assertEqual "nothing of it at teardown" [] (concat [p.partDown | a <- declarations, p <- LoadBalancing.lbParts a, p.partId == leftovers])
@@ -3298,7 +3315,17 @@ lbTests =
                 first <- upPart run mutations live leftovers
                 assertEqual
                     ""
-                    (sort ["backend-buckets update web-site-bucket", "certificates update " <> Text.unpack certV1, "dns-authorizations update web-cert-api-example-org", "dns-authorizations update web-cert-app-example-org"])
+                    ( sort
+                        [ "backend-buckets update web-site-bucket"
+                        , "backend-services update web-api-backend"
+                        , "backend-services update web-backend"
+                        , "backend-services update web-slow-backend"
+                        , "certificates update " <> Text.unpack certV1
+                        , "dns-authorizations update web-cert-api-example-org"
+                        , "dns-authorizations update web-cert-app-example-org"
+                        , "health-checks update hc"
+                        ]
+                    )
                     (sort first)
                 after <- partVerdict run live leftovers
                 assertEqual "" [Success] after
@@ -3490,6 +3517,67 @@ lbTests =
                 untouched full
                 on <- proxyMap run
                 assertEqual "" "web-http-redirect-url-map\n" on
+        , testCase "leftovers: a backend service no longer declared goes once the map no longer names it, then its health check, and only this balancer's" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript withExtra)
+                let others =
+                        [ "gcloud compute backend-services create web-hand-backend" -- this balancer's name scheme, no mark
+                        , "gcloud compute backend-services create web-eu-x-backend --description=salmon:lb:web-eu" -- balancer web-eu's
+                        , "gcloud compute backend-services create other-backend --description=salmon:lb:web" -- the mark, not the name
+                        , "gcloud compute health-checks create tcp hc-theirs"
+                        , "gcloud compute health-checks create tcp hc-eu --description=salmon:lb:web-eu"
+                        ]
+                mapM_ run others
+                -- the declaration no longer has it, the live map still does: held, and so is its health check
+                early <- partVerdict run full leftovers
+                assertEqual "" [Unknown] early
+                held <- upPart run mutations full leftovers
+                assertEqual "" [] held
+                gone <- mutationsOf run mutations (createScript full)
+                assertEqual
+                    (unlines gone)
+                    ["url-maps import web-url-map", "backend-services delete web-extra-backend", "health-checks delete hc-extra"]
+                    (filter (\l -> "url-maps import" `isInfixOf` l || " delete " `isInfixOf` l) gone)
+                services <- listOf run "compute backend-services"
+                assertEqual "" ["other-backend", "web-api-backend", "web-backend", "web-eu-x-backend", "web-hand-backend", "web-slow-backend"] services
+                checks <- listOf run "compute health-checks"
+                assertEqual "" ["hc", "hc-eu", "hc-theirs"] checks
+                (said, v) <- wholeVerdict run full
+                assertEqual said Success v
+                -- a second pass deletes nothing, and says what it leaves of this balancer's shape
+                (code, _, err) <- run (createScript full)
+                assertEqual err ExitSuccess code
+                assertBool err ("left: backend-services web-hand-backend (no ownership mark, so not deleted)" `isInfixOf` err)
+                assertBool err (not ("web-eu-x-backend" `isInfixOf` err))
+                made <- mutations
+                assertEqual (unlines made) ["backend-services delete web-extra-backend", "health-checks delete hc-extra"] (deletes made)
+        , testCase "leftovers: a health check something else still uses is kept and said; one that is not TCP is never marked" $ do
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript withExtra)
+                -- a managed instance group heals with it
+                _ <- run "echo hc-extra > \"$FAKE_GCLOUD_STATE\"/instance-groups-managed.mig.hc; : > \"$FAKE_GCLOUD_STATE\"/instance-groups-managed.mig"
+                (code, _, err) <- run (createScript full)
+                assertEqual err ExitSuccess code
+                assertBool err ("left: health-checks hc-extra (a backend service or instance group still uses it)" `isInfixOf` err)
+                waiting <- partVerdict run full leftovers
+                assertEqual "" [Unknown] waiting
+                -- and one whose users cannot be listed is kept too
+                (code', _, err') <- run ("export FAKE_GCLOUD_FAIL='instance-groups-managed list'\n" <> createScript full)
+                assertEqual err' ExitSuccess code'
+                assertBool err' ("left: health-checks hc-extra (its users could not be listed)" `isInfixOf` err')
+                _ <- run "rm \"$FAKE_GCLOUD_STATE\"/instance-groups-managed.mig*"
+                freed <- mutationsOf run mutations (createScript full)
+                assertEqual (unlines freed) ["health-checks delete hc-extra"] (deletes freed)
+            withFakeGcloud $ \run mutations -> do
+                -- somebody's HTTP health check under the declared name: never marked, so never deleted
+                _ <- run "gcloud compute health-checks create tcp hc-extra; echo HTTP > \"$FAKE_GCLOUD_STATE\"/health-checks.hc-extra.type"
+                (code, _, err) <- run (createScript withExtra)
+                assertEqual err ExitSuccess code
+                assertBool err ("left: health-checks hc-extra (not a TCP health check, left unmarked)" `isInfixOf` err)
+                gone <- mutationsOf run mutations (createScript full)
+                assertEqual (unlines gone) ["backend-services delete web-extra-backend"] (deletes gone)
+                checks <- listOf run "compute health-checks"
+                assertEqual "" ["hc", "hc-extra"] checks
         , testCase "leftovers: a delete that fails fails the part's up; a listing that fails is said and is nothing to clean" $
             withFakeGcloud $ \run mutations -> do
                 _ <- mutationsOf run mutations (createScript site)
@@ -3944,6 +4032,19 @@ lbTests =
     -- 'site' with the one rule that routes to the bucket dropped: bucket still declared, redirects kept
     unrouted = site{LoadBalancing.albHostRules = filter ((/= ["static.example.org"]) . LoadBalancing.hostRuleHosts) site.albHostRules}
     listening how = full{LoadBalancing.albHttp = how}
+    -- the same balancer with one more service, on an instance group, under a health check of its own
+    withExtra =
+        full
+            { LoadBalancing.albServices =
+                full.albServices
+                    <> [ LoadBalancing.BackendService
+                            "extra"
+                            [LoadBalancing.InstanceGroupBackend "ig-extra" (LoadBalancing.InstanceGroupZone "europe-west1-d") [9191]]
+                            (Just (LoadBalancing.HealthCheck "hc-extra" 9191))
+                            Nothing
+                       ]
+            , LoadBalancing.albHostRules = full.albHostRules <> [LoadBalancing.HostRule ["extra.example.org"] (LoadBalancing.NamedService "extra") []]
+            }
     leftovers = LoadBalancing.LeftoversPart
     -- every resource's up but the leftovers part's, and that part's alone
     resourceLines a = unlines [Text.unpack l | p <- LoadBalancing.lbParts a, p.partId /= leftovers, l <- p.partUp]
@@ -4026,8 +4127,10 @@ fakeGcloud =
         , "set -euo pipefail"
         , "S=\"$FAKE_GCLOUD_STATE\""
         , "coll=\"$2\"; verb=\"$3\"; name=\"$4\""
-        , "if [ \"$verb\" = create ] && [ \"$name\" = tcp ]; then name=\"$5\"; fi"
-        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''; desc=''; authz=''"
+        , "if [ \"$verb\" = create ] || [ \"$verb\" = update ]; then if [ \"$name\" = tcp ]; then name=\"$5\"; fi; fi"
+        , -- a managed instance group, which only the leftovers part lists
+          "if [ \"$coll\" = instance-groups ] && [ \"$verb\" = managed ]; then coll=instance-groups-managed; verb=\"$4\"; name=\"${5:-}\"; fi"
+        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''; desc=''; authz=''; hc=''"
         , "for a in \"$@\"; do case \"$a\" in"
         , "  --format=*) format=\"${a#--format=}\";;"
         , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
@@ -4042,6 +4145,7 @@ fakeGcloud =
         , "  --url-map=*) urlmap=\"${a#--url-map=}\";;"
         , "  --description=*) desc=\"${a#--description=}\";;"
         , "  --dns-authorizations=*) authz=\"${a#--dns-authorizations=}\";;"
+        , "  --health-checks=*) hc=\"${a#--health-checks=}\";;"
         , "esac; done"
         , "f=\"$S/$coll.$name\""
         , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
@@ -4065,6 +4169,7 @@ fakeGcloud =
         , "      'value(hostRules[].hosts)') grep -o '\"hosts\":\\[[^]]*\\]' \"$f\" | sed -e 's/\"hosts\"://' -e 's/[]\\[\"]//g' | paste -sd';' || true;;"
         , "      'value(IPAddress)') echo 203.0.113.7;;"
         , "      'value(bucketName)') cat \"$f.gcs\" 2>/dev/null || true;;"
+        , "      'value(type)') cat \"$f.type\" 2>/dev/null || echo TCP;;"
         , -- a proxy names its map by URL, as (it is assumed) the real one does
           "      'value(urlMap)') echo \"https://www.googleapis.com/compute/v1/projects/p/regions/r/urlMaps/$(cat \"$f.urlmap\" 2>/dev/null)\";;"
         , "      'value(description)') if [ -e \"$f.description\" ]; then cat \"$f.description\"; exit 0; fi; grep -o '\"description\":\"[^\"]*\"' \"$f\" | sed -e 's/\"description\"://' -e 's/\"//g' || true;;"
@@ -4075,6 +4180,7 @@ fakeGcloud =
         , "    if [ -n \"$urlmap\" ]; then echo \"$urlmap\" > \"$f.urlmap\"; fi"
         , "    if [ -n \"$desc\" ]; then echo \"$desc\" > \"$f.description\"; fi"
         , "    if [ -n \"$authz\" ]; then echo \"$authz\" > \"$f.authz\"; fi"
+        , "    if [ -n \"$hc\" ]; then echo \"$hc\" > \"$f.hc\"; fi"
         , -- a new certificate is not issued at once, when the test says so
           "    if [ -n \"$domains\" ]; then echo \"$domains\" > \"$f.domains\"; echo \"${FAKE_GCLOUD_NEW_CERT_STATE:-ACTIVE}\" > \"$f.state\"; fi;;"
         , -- the listings the leftovers part reads; like the rest, a guess at gcloud's output
@@ -4085,6 +4191,7 @@ fakeGcloud =
         , "      'value(sslCertificates,certificateManagerCertificates)') tr ',' '\\n' < \"$c.certs\" 2>/dev/null | sed 's|^|//certificatemanager.googleapis.com/projects/p/locations/r/certificates/|' | paste -sd';' || true;;"
         , "      'value(urlMap)') echo \"https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/urlMaps/$(cat \"$c.urlmap\" 2>/dev/null)\";;"
         , "      'value(managed.dnsAuthorizations)') tr ',' '\\n' < \"$c.authz\" 2>/dev/null | sed 's|^|projects/p/locations/r/dnsAuthorizations/|' | paste -sd';' || true;;"
+        , "      'value(healthChecks)'|'value(autoHealingPolicies[].healthCheck)') sed 's|^|https://www.googleapis.com/compute/v1/projects/p/regions/europe-west1/healthChecks/|' \"$c.hc\" 2>/dev/null | paste -sd';' || true;;"
         , "      *) echo \"projects/p/locations/r/$coll/$n\";;"
         , "    esac; done;;"
         , "  import) mutate; cat > \"$f\";;"
@@ -4099,9 +4206,11 @@ fakeGcloud =
         , "    if [ \"$coll\" = certificates ] && served | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
         , -- what GCP refuses too: a resource something else still names
           "    if [ \"$coll\" = backend-buckets ] && grep -qsF \"/backendBuckets/$name\\\"\" \"$S\"/url-maps.*; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
+        , "    if [ \"$coll\" = backend-services ] && grep -qsF \"/backendServices/$name\\\"\" \"$S\"/url-maps.*; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
+        , "    if [ \"$coll\" = health-checks ] && cat \"$S\"/backend-services.*.hc \"$S\"/instance-groups-managed.*.hc 2>/dev/null | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
         , "    if [ \"$coll\" = dns-authorizations ] && cat \"$S\"/certificates.*.authz 2>/dev/null | tr ',' '\\n' | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
         , "    if [ \"$coll\" = url-maps ] && cat \"$S\"/target-http-proxies.*.urlmap \"$S\"/target-https-proxies.*.urlmap 2>/dev/null | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
-        , "    mutate; rm -f \"$f.description\" \"$f.authz\" \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\";;"
+        , "    mutate; rm -f \"$f.description\" \"$f.authz\" \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\" \"$f.hc\";;"
         , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
         , "esac"
         ]

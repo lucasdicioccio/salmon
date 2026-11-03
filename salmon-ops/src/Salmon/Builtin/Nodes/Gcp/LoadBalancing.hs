@@ -1303,7 +1303,8 @@ stampOf v =
     hex w = let h = showHex w "" in if length h < 2 then '0' : h else h
 
 {- | What this balancer writes in the @description@ of the backend buckets,
-Certificate Manager certificates and DNS authorizations it declares, and the
+backend services, health checks, Certificate Manager certificates and DNS
+authorizations it declares, and the
 only thing that makes one of them, once it is no longer declared, this
 balancer's to delete (see 'lbParts'). It names the balancer, because a name
 alone does not: @web-eu-assets-bucket@ is balancer @web@'s by its shape and
@@ -1545,11 +1546,21 @@ the @:80@ rule and the HTTP proxy.
 Nothing in a declaration remembers what it used to name, so what a balancer
 made and no longer declares is found on GCP, by the last node
 ('LeftoversPart'), which comes after the URL map, the proxies and the
-superseded certificates. It deletes four kinds of resource and no other, each
-under a proof that this balancer made it, and never one still in use:
+superseded certificates, and after every write to a declared backend service
+or health check. It deletes six kinds of resource and no other, each under a
+proof that this balancer made it, and never one still in use:
 
 * a backend bucket named @\<balancer\>-\<n\>-bucket@ whose @description@ is
   'ownershipMarker', once no URL map of the project names it;
+* a backend service named @\<balancer\>-\<n\>-backend@ whose @description@ is
+  the marker, on the same rule (its backends go with it; its NEGs and the
+  named ports on its instance groups are left);
+* a health check whose @description@ is the marker, once no backend service
+  and no managed instance group's autohealing of the project names it, of
+  any scope. Its name is the caller's, so the marker alone says it is this
+  balancer's; only a TCP one is ever marked (@update tcp@), any other is said
+  and left. The services go first, so a health check one of them freed goes
+  in the same pass;
 * a Certificate Manager certificate whose @description@ is the marker, once
   no HTTPS proxy of the project serves it (so not the old certificate of a
   swap still pending, nor one the proxy of a failed pass is still on);
@@ -1566,8 +1577,10 @@ exist and have no description (@update --description@), so the scripts of the
 resources themselves are what they were. A resource that is no longer
 declared and was never marked -- one dropped from the declaration before the
 marker existed -- is therefore __not__ deleted, and neither is one carrying
-somebody's description: both are left for a command by hand. A listing only
-enumerates candidates; what is deleted is what carries the marker.
+somebody's description: both are left for a command by hand (an undeclared
+@\<balancer\>-\<n\>-backend@ with no description at all is said, by @up@, so
+the hand knows). A listing only enumerates candidates; what is deleted is what
+carries the marker.
 
 What is still in use is said (@WAITING@, so 'Unknown', for the check; a line
 on stderr for @up@) and left. A delete or a marking that fails fails that
@@ -1577,9 +1590,9 @@ Certificate Manager API of a balancer that never had a certificate) is said
 and is nothing to clean.
 
 Not done: none of this runs at teardown, where a leftover is left behind (as
-is a superseded certificate of a swap that never completed); a backend
-service, a health check, a NEG, the HTTPS proxy, its rule and the address of
-a declaration that no longer names them are not removed.
+is a superseded certificate of a swap that never completed); a NEG, the HTTPS
+proxy, its rule and the address of a declaration that no longer names them
+are not removed.
 
 On the way down an attachment is /detached/ (@remove-backend@) rather than
 left to the backend service's deletion, because a NEG still attached cannot
@@ -2261,6 +2274,12 @@ lbParts alb =
             , partDeps =
                 nub $
                     [UrlMapPart]
+                        -- every write to a declared service (its own, an
+                        -- attachment's) and health check is done before
+                        -- this one marks it: two writers of one resource
+                        -- can race on its fingerprint
+                        <> [HealthCheckPart n | n <- declaredHealthChecks]
+                        <> [p.partId | svc <- services alb, p <- serviceParts svc]
                         <> [BackendBucketPart n | n <- declaredBuckets]
                         <> [CertificatePart n | n <- declaredCertificates]
                         <> [HttpProxyPart | http]
@@ -2271,11 +2290,12 @@ lbParts alb =
             , partNotes = []
             , partUp =
                 plans
-                    <> [ "mark() { case \"$1\" in backend-buckets) gcloud compute \"$1\" update \"$2\"" <> regional
+                    <> [ "mark() { case \"$1\" in backend-buckets|backend-services) gcloud compute \"$1\" update \"$2\"" <> regional
+                            <> " --description=\"$marker\" ;; health-checks) gcloud compute health-checks update tcp \"$2\"" <> regional
                             <> " --description=\"$marker\" ;; *) gcloud certificate-manager \"$1\" update \"$2\""
                             <> located
                             <> " --description=\"$marker\" ;; esac; }"
-                       , "remove() { case \"$1\" in backend-buckets|url-maps) gcloud compute \"$1\" delete \"$2\"" <> regional
+                       , "remove() { case \"$1\" in backend-buckets|backend-services|health-checks|url-maps) gcloud compute \"$1\" delete \"$2\"" <> regional
                             <> " --quiet ;; *) gcloud certificate-manager \"$1\" delete \"$2\""
                             <> located
                             <> " --quiet ;; esac; }"
@@ -2291,7 +2311,8 @@ lbParts alb =
                        , "  done <<< \"$plan\""
                        , "}"
                        ]
-                    -- certificates before the authorizations they use
+                    -- certificates before the authorizations they use,
+                    -- backend services before the health checks they use
                     <> map ("apply " <>) planNames
             , partCheck =
                 plans
@@ -2306,6 +2327,8 @@ lbParts alb =
             }
       where
         declaredBuckets = map (bucketResource alb . backendBucketName) alb.albBuckets
+        declaredServices = map svcResource (services alb)
+        declaredHealthChecks = map healthCheckName (healthChecks alb)
         -- how a reference to one of the balancer's resources is spelled in a URL
         scopePath = if global then "/global" else "/regions/$REGION"
         declaredCertificates = [n | (n, _, _) <- managedCertificates alb]
@@ -2315,17 +2338,20 @@ lbParts alb =
             RedirectToHttps _ -> True
             _ -> False
         planNames =
-            ["plan_buckets", "plan_certificates", "plan_authorizations"]
+            ["plan_buckets", "plan_services", "plan_certificates", "plan_authorizations"]
                 <> ["plan_redirect_map" | not redirecting]
+                <> ["plan_health_checks"]
         declared = shellQuote . Text.unwords
         unlisted coll = "{ echo " <> shellQuote ("NOTE " <> coll <> " - could not be listed") <> "; return 0; }"
         -- the last path segment of every name of a flattened list, one per line
         names = " | tr \";,[]' \\t\" '\\n' | sed 's|.*/||'"
         plans =
             [ "marker=" <> shellQuote (ownershipMarker alb)
-            , -- reads a 'value(name,description)' listing; $1 is the declared names
-              "classify() { awk -F'\\t' -v m=\"$marker\" -v declared=\" $1 \" "
-                <> shellQuote "{n=$1; sub(/.*\\//,\"\",n)} n==\"\"{next} index(declared,\" \" n \" \"){if($2==\"\")print \"MARK:\" n; next} $2==m{print \"OURS:\" n}"
+            , -- reads a 'value(name,description)' listing; $1 is the declared
+              -- names; given $2 and $3, an undeclared name with that prefix
+              -- and suffix and no description at all is said too (OTHER)
+              "classify() { awk -F'\\t' -v m=\"$marker\" -v declared=\" $1 \" -v pre=\"${2:-}\" -v suf=\"${3:-}\" "
+                <> shellQuote "{n=$1; sub(/.*\\//,\"\",n)} n==\"\"{next} index(declared,\" \" n \" \"){if($2==\"\")print \"MARK:\" n; next} $2==m{print \"OURS:\" n; next} pre!=\"\" && $2==\"\" && index(n,pre)==1 && length(n)>length(pre)+length(suf) && substr(n,length(n)-length(suf)+1)==suf{print \"OTHER:\" n}"
                 <> "; }"
             , "plan_buckets() {"
             , "  local all maps listed line n d"
@@ -2342,6 +2368,53 @@ lbParts alb =
             , "        [ \"$d\" = \"$marker\" ] || continue"
             , "        if [ -z \"$listed\" ]; then maps=$(gcloud compute url-maps list --project=\"$PROJECT\" --format=json 2>/dev/null) || { echo \"KEEP backend-buckets $n the URL maps could not be listed\"; continue; }; listed=1; fi"
             , "        if grep -qF -- \"" <> scopePath <> "/backendBuckets/$n\\\"\" <<< \"$maps\"; then echo \"KEEP backend-buckets $n a URL map still names it\"; else echo \"DELETE backend-buckets $n\"; fi ;;"
+            , "    esac"
+            , "  done"
+            , "}"
+            , -- a backend service: the bucket's rule, under this balancer's
+              -- name shape @<balancer>-<n>-backend@. Deleting it detaches
+              -- its backends; its NEGs are left (see 'lbParts').
+              "plan_services() {"
+            , "  local all maps listed line n d"
+            , "  all=$(gcloud compute backend-services list --project=\"$PROJECT\" --format='value(name,description)' 2>/dev/null) || " <> unlisted "backend-services"
+            , "  maps=''; listed=''"
+            , "  for line in $(printf '%s\\n' \"$all\" | classify " <> declared declaredServices <> " " <> shellQuote (alb.albName <> "-") <> " '-backend'); do"
+            , "    n=${line#*:}"
+            , "    d=$(gcloud compute backend-services describe \"$n\"" <> regional <> " --format='value(description)' 2>/dev/null) || continue"
+            , "    case \"$line\" in"
+            , "      MARK:*) [ -n \"$d\" ] || echo \"MARK backend-services $n\" ;;"
+            , "      OTHER:*) [ -n \"$d\" ] || echo \"NOTE backend-services $n no ownership mark, so not deleted\" ;;"
+            , "      OURS:*)"
+            , "        case \"$n\" in " <> shellQuote (alb.albName <> "-") <> "*-backend) ;; *) continue ;; esac"
+            , "        [ \"$d\" = \"$marker\" ] || continue"
+            , "        if [ -z \"$listed\" ]; then maps=$(gcloud compute url-maps list --project=\"$PROJECT\" --format=json 2>/dev/null) || { echo \"KEEP backend-services $n the URL maps could not be listed\"; continue; }; listed=1; fi"
+            , "        if grep -qF -- \"" <> scopePath <> "/backendServices/$n\\\"\" <<< \"$maps\"; then echo \"KEEP backend-services $n a URL map still names it\"; else echo \"DELETE backend-services $n\"; fi ;;"
+            , "    esac"
+            , "  done"
+            , "}"
+            , -- a health check: its name is the caller's, so the mark alone
+              -- says it is this balancer's. In use is named by a backend
+              -- service or a managed instance group's autohealing, of any
+              -- scope (a same-named one elsewhere holds it too).
+              "plan_health_checks() {"
+            , "  local all used listed line n d t"
+            , "  all=$(gcloud compute health-checks list --project=\"$PROJECT\" --format='value(name,description)' 2>/dev/null) || " <> unlisted "health-checks"
+            , "  used=''; listed=''"
+            , "  for line in $(printf '%s\\n' \"$all\" | classify " <> declared declaredHealthChecks <> "); do"
+            , "    n=${line#*:}"
+            , "    d=$(gcloud compute health-checks describe \"$n\"" <> regional <> " --format='value(description)' 2>/dev/null) || continue"
+            , "    case \"$line\" in"
+            , "      MARK:*)"
+            , "        [ -z \"$d\" ] || continue"
+            , -- only a TCP health check is what this module makes, and what @update tcp@ can mark
+              "        t=$(gcloud compute health-checks describe \"$n\"" <> regional <> " --format='value(type)' 2>/dev/null) || continue"
+            , "        if [ \"$t\" = TCP ]; then echo \"MARK health-checks $n\"; else echo \"NOTE health-checks $n not a TCP health check, left unmarked\"; fi ;;"
+            , "      OURS:*)"
+            , "        [ \"$d\" = \"$marker\" ] || continue"
+            , "        if [ -z \"$listed\" ]; then used=$( { gcloud compute backend-services list --project=\"$PROJECT\" --format='value(healthChecks)' && gcloud compute instance-groups managed list --project=\"$PROJECT\" --format='value(autoHealingPolicies[].healthCheck)'; } 2>/dev/null"
+                <> names
+                <> ") || { echo \"KEEP health-checks $n its users could not be listed\"; continue; }; listed=1; fi"
+            , "        if grep -qxF -- \"$n\" <<< \"$used\"; then echo \"KEEP health-checks $n a backend service or instance group still uses it\"; else echo \"DELETE health-checks $n\"; fi ;;"
             , "    esac"
             , "  done"
             , "}"
