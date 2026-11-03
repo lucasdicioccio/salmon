@@ -4156,7 +4156,7 @@ monitoringTests =
         assertBool (show args) (["--project", "p"] `isSubsequenceOf` args)
     , testCase "channels and policies are looked up by display name, as JSON" $ do
         let cargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsList channel))
-            pargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesList policy))
+            pargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesList (Monitoring.cloudRunPolicy policy)))
         assertBool (show cargs) (["--filter", "display_name=\"ops mail\"", "--format", "json"] `isSubsequenceOf` cargs)
         assertBool (show pargs) (["--filter", "display_name=\"svc: 5xx ratio\"", "--format", "json"] `isSubsequenceOf` pargs)
     , testCase "channel lookup: failed, absent, present matching, present with another address" $ do
@@ -4204,7 +4204,7 @@ monitoringTests =
         assertEqual "" (Just "projects/p/notificationChannels/1") (textAt ["notificationChannels", "0"] v)
         assertEqual "" (Just (Monitoring.policyFingerprint policy names)) (textAt ["userLabels", Monitoring.fingerprintLabel] v)
         -- and it is what --policy carries, inline
-        let args = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesCreate policy names))
+        let args = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesCreate (Monitoring.cloudRunPolicy policy) names))
         assertBool (show args) (["alpha", "monitoring", "policies", "create", "--policy"] `isSubsequenceOf` args)
         assertBool (show args) (Text.unpack (Text.decodeUtf8 (LByteString.toStrict (encode v))) `elem` args)
     , testCase "the fingerprint is label-safe, and moves with a threshold or a channel id" $ do
@@ -4216,6 +4216,11 @@ monitoringTests =
         assertBool "threshold" (fp /= Monitoring.policyFingerprint policy{Monitoring.apConditions = [Monitoring.ServerErrorRatio 0.1 300]} names)
         assertBool "channel id" (fp /= Monitoring.policyFingerprint policy ["projects/p/notificationChannels/2"])
         assertBool "documentation" (fp /= Monitoring.policyFingerprint policy{Monitoring.apDocumentation = "other"} names)
+    , testCase "a Cloud Run policy's fingerprint is pinned: running policies are not rewritten" $
+        assertEqual
+            "the rendering of an existing declaration must not move"
+            "fbe9027b7444b856"
+            (Monitoring.policyFingerprint policy ["projects/p/notificationChannels/1"])
     , testCase "policy lookup: a matching fingerprint is satisfied, anything else is not" $ do
         let names = ["projects/p/notificationChannels/1"]
             fp = Monitoring.policyFingerprint policy names
@@ -4229,15 +4234,116 @@ monitoringTests =
             (Monitoring.Present (Monitoring.FoundPolicy "projects/p/alertPolicies/9" (Just fp)))
             (Monitoring.lookupPolicy policy ExitSuccess (policyJson (Just fp)) "")
     , testCase "an update names the policy found, a delete the resource, both under the project" $ do
-        let up = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesUpdate "projects/p/alertPolicies/9" policy []))
+        let up = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesUpdate "projects/p/alertPolicies/9" (Monitoring.cloudRunPolicy policy) []))
             del = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesDelete (Core.Project "p") "projects/p/alertPolicies/9"))
             cdel = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsDelete (Core.Project "p") "projects/p/notificationChannels/1"))
         assertBool (show up) (["policies", "update", "projects/p/alertPolicies/9", "--policy"] `isSubsequenceOf` up)
         assertBool (show del) (["policies", "delete", "projects/p/alertPolicies/9", "--quiet", "--project", "p"] `isSubsequenceOf` del)
         assertBool (show cdel) (["channels", "delete", "projects/p/notificationChannels/1", "--quiet"] `isSubsequenceOf` cdel)
+    , testCase "a Cloud Run policy's node keeps its ref, help and notes" $ do
+        let ext = policyExt (Monitoring.alertPolicy silent ignoreTrack policy) "svc: 5xx ratio"
+        assertEqual "help" (Just "alert policy svc: 5xx ratio on Cloud Run service svc") ((.help) <$> ext)
+        assertEqual "notes" (Just ["conditions: 5xx ratio", "channels: ops mail"]) ((.notes) <$> ext)
+    , testCase "an uptime check condition: check_passed on the check id, failing from more than N locations" $ do
+        let v = Monitoring.renderMonitoringCondition (Monitoring.Threshold (Monitoring.uptimeCheckFailing "site down" "site-https" 1 300))
+        assertEqual "" (Just "site down") (textAt ["displayName"] v)
+        assertEqual
+            ""
+            (Just "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.labels.check_id=\"site-https\"")
+            (textAt ["conditionThreshold", "filter"] v)
+        assertEqual "" (Just "ALIGN_NEXT_OLDER") (textAt ["conditionThreshold", "aggregations", "0", "perSeriesAligner"] v)
+        assertEqual "" (Just "REDUCE_COUNT_FALSE") (textAt ["conditionThreshold", "aggregations", "0", "crossSeriesReducer"] v)
+        assertEqual "" (Just "1200s") (textAt ["conditionThreshold", "aggregations", "0", "alignmentPeriod"] v)
+        assertEqual "" (Just "COMPARISON_GT") (textAt ["conditionThreshold", "comparison"] v)
+        assertEqual "" (Just (Number 1)) (fieldAt ["conditionThreshold", "thresholdValue"] v)
+        assertEqual "" (Just "300s") (textAt ["conditionThreshold", "duration"] v)
+    , testCase "a threshold renders only the aggregation fields it was given" $ do
+        let disk =
+                Monitoring.MetricThreshold
+                    { Monitoring.mtName = "disk"
+                    , Monitoring.mtFilter = Monitoring.metricTypeFilter "agent.googleapis.com/disk/percent_used" [("resource.type", "gce_instance")]
+                    , Monitoring.mtAggregations = [Monitoring.Aggregation 300 "ALIGN_MEAN" Nothing []]
+                    , Monitoring.mtComparison = Monitoring.GreaterOrEqual
+                    , Monitoring.mtThreshold = 90
+                    , Monitoring.mtSeconds = 600
+                    }
+            v = Monitoring.renderMonitoringCondition (Monitoring.Threshold disk)
+            raw = Monitoring.renderMonitoringCondition (Monitoring.Threshold disk{Monitoring.mtAggregations = []})
+        assertEqual "" (Just "agent.googleapis.com/disk/percent_used") (Text.takeWhile (/= '"') . Text.drop 1 . Text.dropWhile (/= '"') <$> textAt ["conditionThreshold", "filter"] v)
+        assertEqual "" (Just "COMPARISON_GE") (textAt ["conditionThreshold", "comparison"] v)
+        assertEqual "" (Just "ALIGN_MEAN") (textAt ["conditionThreshold", "aggregations", "0", "perSeriesAligner"] v)
+        assertEqual "no reducer" Nothing (fieldAt ["conditionThreshold", "aggregations", "0", "crossSeriesReducer"] v)
+        assertEqual "no grouping" Nothing (fieldAt ["conditionThreshold", "aggregations", "0", "groupByFields"] v)
+        assertEqual "no aggregations at all" Nothing (fieldAt ["conditionThreshold", "aggregations"] raw)
+    , testCase "a log-based metric is a filter on its user metric type" $
+        assertEqual
+            ""
+            "metric.type=\"logging.googleapis.com/user/oom-kills\" AND resource.type=\"gce_instance\""
+            (Monitoring.logBasedMetricFilter "oom-kills" [("resource.type", "gce_instance")])
+    , testCase "absence is conditionAbsent, with its duration and no threshold" $ do
+        let v = Monitoring.renderMonitoringCondition (Monitoring.Absence (Monitoring.MetricAbsence "heartbeat gone" "metric.type=\"custom.googleapis.com/heartbeat\"" [] 600))
+        assertEqual "" (Just "metric.type=\"custom.googleapis.com/heartbeat\"") (textAt ["conditionAbsent", "filter"] v)
+        assertEqual "" (Just "600s") (textAt ["conditionAbsent", "duration"] v)
+        assertEqual "" Nothing (fieldAt ["conditionAbsent", "thresholdValue"] v)
+        assertEqual "" Nothing (fieldAt ["conditionThreshold"] v)
+    , testCase "a log match is conditionMatchedLog, with label extractors when given" $ do
+        let v = Monitoring.renderMonitoringCondition (Monitoring.MatchedLog logMatch)
+            bare = Monitoring.renderMonitoringCondition (Monitoring.MatchedLog logMatch{Monitoring.lmLabelExtractors = []})
+        assertEqual "" (Just "severity>=ERROR") (textAt ["conditionMatchedLog", "filter"] v)
+        assertEqual "" (Just "EXTRACT(jsonPayload.who)") (textAt ["conditionMatchedLog", "labelExtractors", "who"] v)
+        assertEqual "" Nothing (fieldAt ["conditionMatchedLog", "labelExtractors"] bare)
+    , testCase "an alert strategy renders when it says something, and moves the fingerprint" $ do
+        let names = ["projects/p/notificationChannels/1"]
+            base = Monitoring.cloudRunPolicy policy
+            limited = base{Monitoring.poAlertStrategy = Just (Monitoring.AlertStrategy (Just 300) (Just 1800))}
+            empty = base{Monitoring.poAlertStrategy = Just Monitoring.noAlertStrategy}
+            v = Monitoring.renderMonitoringPolicy limited names
+        assertEqual "" (Just "300s") (textAt ["alertStrategy", "notificationRateLimit", "period"] v)
+        assertEqual "" (Just "1800s") (textAt ["alertStrategy", "autoClose"] v)
+        assertEqual "" Nothing (fieldAt ["alertStrategy"] (Monitoring.renderMonitoringPolicy base names))
+        assertEqual "an empty strategy is no strategy" (Monitoring.monitoringPolicyFingerprint base names) (Monitoring.monitoringPolicyFingerprint empty names)
+        assertBool "" (Monitoring.monitoringPolicyFingerprint base names /= Monitoring.monitoringPolicyFingerprint limited names)
+    , testCase "an AlertPolicy and its cloudRunPolicy render, fingerprint and command the same" $ do
+        let names = ["projects/p/notificationChannels/1"]
+        assertEqual "" (Monitoring.renderPolicy policy names) (Monitoring.renderMonitoringPolicy (Monitoring.cloudRunPolicy policy) names)
+        assertEqual "" (Monitoring.policyFingerprint policy names) (Monitoring.monitoringPolicyFingerprint (Monitoring.cloudRunPolicy policy) names)
+    , testCase "policyProblems: a log match must be alone and rate limited; a policy needs a condition" $ do
+        let lm = (Monitoring.cloudRunPolicy policy){Monitoring.poConditions = [Monitoring.MatchedLog logMatch]}
+            limited = lm{Monitoring.poAlertStrategy = Just (Monitoring.AlertStrategy (Just 300) Nothing)}
+        assertEqual "a Cloud Run policy is fine" [] (Monitoring.policyProblems (Monitoring.cloudRunPolicy policy))
+        assertEqual "rate limited, alone" [] (Monitoring.policyProblems limited)
+        assertEqual "no rate limit" 1 (length (Monitoring.policyProblems lm))
+        assertEqual "auto-close is not a rate limit" 1 (length (Monitoring.policyProblems lm{Monitoring.poAlertStrategy = Just (Monitoring.AlertStrategy Nothing (Just 60))}))
+        assertEqual "beside another" 1 (length (Monitoring.policyProblems limited{Monitoring.poConditions = Monitoring.MatchedLog logMatch : (Monitoring.cloudRunPolicy policy).poConditions}))
+        assertEqual "no condition" 1 (length (Monitoring.policyProblems limited{Monitoring.poConditions = []}))
+    , testCase "a general policy's node: same ref scheme, its own help, the strategy in its notes" $ do
+        let p =
+                Monitoring.Policy
+                    { Monitoring.poProject = Core.Project "p"
+                    , Monitoring.poDisplayName = "errors in logs"
+                    , Monitoring.poConditions = [Monitoring.MatchedLog logMatch]
+                    , Monitoring.poChannels = [channel]
+                    , Monitoring.poDocumentation = "doc"
+                    , Monitoring.poAlertStrategy = Just (Monitoring.AlertStrategy (Just 300) Nothing)
+                    }
+            ext = policyExt (Monitoring.monitoringPolicy silent ignoreTrack p) "errors in logs"
+        assertEqual "help" (Just "alert policy errors in logs") ((.help) <$> ext)
+        assertEqual
+            "notes"
+            (Just ["conditions: error logged", "channels: ops mail", "alert strategy: at most one notification per 300s"])
+            ((.notes) <$> ext)
+        let args = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesCreate p ["projects/p/notificationChannels/1"]))
+            v = Monitoring.renderMonitoringPolicy p ["projects/p/notificationChannels/1"]
+        assertBool (show args) (Text.unpack (Text.decodeUtf8 (LByteString.toStrict (encode v))) `elem` args)
     ]
   where
     channel = Monitoring.NotificationChannel (Core.Project "p") "ops mail" (Monitoring.Email "ops@example.org")
+    logMatch = Monitoring.LogMatch "error logged" "severity>=ERROR" [("who", "EXTRACT(jsonPayload.who)")]
+    policyExt o name =
+        (.extension)
+            <$> Map.lookup
+                (mkRef "gcp-monitoring-policy" ("p" :: Text.Text, name :: Text.Text))
+                (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o)))
     target = Monitoring.CloudRunTarget (Core.Project "p") (Core.Region "europe-west1") "svc"
     policy =
         Monitoring.AlertPolicy

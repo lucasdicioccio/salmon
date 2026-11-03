@@ -1,5 +1,14 @@
 # Revision history for salmon-ops
 
+## Unreleased
+
+`Gcp.Monitoring`: alert policies on any condition. `Policy` and `monitoringPolicy` take
+`Condition`s: the Cloud Run ones, a threshold on any metric filter (`MetricThreshold`, with
+`uptimeCheckFailing`, `metricTypeFilter`, `logBasedMetricFilter`), a metric going absent
+(`MetricAbsence`) or a log match (`LogMatch`), and an optional `AlertStrategy` (notification rate
+limit, auto-close). An `AlertPolicy` renders and fingerprints as before (`cloudRunPolicy`).
+Breaking: `MonitoringCommand`'s `PoliciesList`/`PoliciesCreate`/`PoliciesUpdate` carry a `Policy`.
+
 ## 0.3.0.0 -- 2026-10-31
 
 Breaking: `Salmon.Builtin.CommandLine`'s `RunServe` constructor gained fields (start-up

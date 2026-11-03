@@ -1,8 +1,15 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Google Cloud Monitoring: notification channels and alerting policies,
-here for Cloud Run services.
+{- | Google Cloud Monitoring: notification channels and alerting policies.
+
+A policy's conditions are a 'Condition' each: one of the Cloud Run
+conditions ('CloudRunCondition', what 'AlertPolicy' and 'alertPolicy' are
+for), a threshold on any metric filter ('MetricThreshold': an uptime check,
+a VM metric, a log-based metric), a metric going absent ('MetricAbsence'), or
+a log line matching a filter ('LogMatch'). 'Policy' and 'monitoringPolicy'
+take any mix of them, plus an optional 'AlertStrategy'. An 'AlertPolicy' is
+'cloudRunPolicy' of it, and renders to the same bytes it always did.
 
 Both resources get __server-assigned ids__ (@projects\/P\/notificationChannels\/123@,
 @projects\/P\/alertPolicies\/456@), so unlike a bucket or a service account
@@ -47,12 +54,13 @@ module Salmon.Builtin.Nodes.Gcp.Monitoring (
     lookupChannel,
     interpretChannelList,
 
-    -- * Alert policies
+    -- * Alert policies on Cloud Run services
     CloudRunTarget (..),
     CloudRunCondition (..),
     AlertPolicy (..),
     alertPolicy,
     alertPolicyAfter,
+    cloudRunPolicy,
     renderCondition,
     renderPolicy,
     policyFingerprint,
@@ -60,6 +68,30 @@ module Salmon.Builtin.Nodes.Gcp.Monitoring (
     FoundPolicy (..),
     lookupPolicy,
     interpretPolicyList,
+
+    -- * Alert policies on any condition
+    Policy (..),
+    Condition (..),
+    MetricThreshold (..),
+    MetricAbsence (..),
+    LogMatch (..),
+    Aggregation (..),
+    Comparison (..),
+    AlertStrategy (..),
+    noAlertStrategy,
+    monitoringPolicy,
+    monitoringPolicyAfter,
+    policyProblems,
+    renderMonitoringCondition,
+    renderMonitoringPolicy,
+    monitoringPolicyFingerprint,
+    lookupMonitoringPolicy,
+    interpretMonitoringPolicyList,
+
+    -- ** Filters and ready-made conditions
+    metricTypeFilter,
+    logBasedMetricFilter,
+    uptimeCheckFailing,
 
     -- * Plumbing
     monitoringApi,
@@ -291,23 +323,243 @@ are its dependencies, and siblings of what was injected. These go under the
 channels as well. With @[]@ the graph is 'alertPolicy''s, unchanged.
 -}
 alertPolicyAfter :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> AlertPolicy -> Op
-alertPolicyAfter prerequisites r gcloudTrack policy =
+alertPolicyAfter prerequisites r gcloudTrack p =
+    policyNode
+        (Text.unwords ["alert policy", p.apDisplayName, "on Cloud Run service", p.apTarget.crtService])
+        prerequisites
+        r
+        gcloudTrack
+        (cloudRunPolicy p)
+
+{- | The general policy an 'AlertPolicy' is: each condition about its target,
+no alert strategy. It renders, fingerprints and is looked up exactly as the
+'AlertPolicy' always was.
+-}
+cloudRunPolicy :: AlertPolicy -> Policy
+cloudRunPolicy p =
+    Policy
+        { poProject = p.apProject
+        , poDisplayName = p.apDisplayName
+        , poConditions = map (OnCloudRun p.apTarget) p.apConditions
+        , poChannels = p.apChannels
+        , poDocumentation = p.apDocumentation
+        , poAlertStrategy = Nothing
+        }
+
+-------------------------------------------------------------------------------
+-- Alert policies on any condition
+
+{- | An alerting policy whose conditions need not be about one Cloud Run
+service. Same identity (display name) and fingerprint scheme as
+'AlertPolicy'; the conditions are combined with OR.
+-}
+data Policy = Policy
+    { poProject :: Project
+    , poDisplayName :: Text
+    -- ^ the identity, see the module header; must not contain a double quote
+    , poConditions :: [Condition]
+    -- ^ combined with OR: any one firing fires the policy
+    , poChannels :: [NotificationChannel]
+    -- ^ resolved to their ids when the policy is checked or applied; each is
+    -- also a dependency of the policy node
+    , poDocumentation :: Text
+    -- ^ markdown shown with the notification
+    , poAlertStrategy :: Maybe AlertStrategy
+    -- ^ 'Nothing' renders no @alertStrategy@ field; a 'LogMatch' condition
+    -- needs one with a notification rate limit (see 'policyProblems')
+    }
+    deriving (Eq, Show)
+
+-- | One condition of a 'Policy'.
+data Condition
+    = -- | a Cloud Run condition about that service (what 'AlertPolicy' holds)
+      OnCloudRun CloudRunTarget CloudRunCondition
+    | -- | @conditionThreshold@ on any metric filter
+      Threshold MetricThreshold
+    | -- | @conditionAbsent@: the filter's series stop arriving
+      Absence MetricAbsence
+    | -- | @conditionMatchedLog@: a log entry matches a filter. Google allows
+      -- it only as a policy's single condition, with a notification rate limit
+      MatchedLog LogMatch
+    deriving (Eq, Show)
+
+{- | A threshold on the series a monitoring filter selects, e.g. a VM's disk:
+
+> MetricThreshold
+>     { mtName = "disk above 90%"
+>     , mtFilter = metricTypeFilter "agent.googleapis.com/disk/percent_used"
+>         [("resource.type", "gce_instance"), ("metric.labels.state", "used")]
+>     , mtAggregations = [Aggregation 300 "ALIGN_MEAN" (Just "REDUCE_MAX") ["resource.labels.instance_id"]]
+>     , mtComparison = GreaterThan
+>     , mtThreshold = 90
+>     , mtSeconds = 600
+>     }
+
+or a log-based metric ('logBasedMetricFilter'), or an uptime check
+('uptimeCheckFailing').
+-}
+data MetricThreshold = MetricThreshold
+    { mtName :: Text
+    -- ^ the condition's display name, shown in the incident
+    , mtFilter :: Text
+    -- ^ a monitoring filter, with a @metric.type@
+    , mtAggregations :: [Aggregation]
+    -- ^ @[]@ renders no @aggregations@ (raw series)
+    , mtComparison :: Comparison
+    , mtThreshold :: Double
+    -- ^ in the metric's (aggregated) unit
+    , mtSeconds :: Int
+    -- ^ how long the comparison must hold before the condition fires
+    }
+    deriving (Eq, Show)
+
+-- | No data for the filter's series for 'maSeconds' (Google wants at least
+-- 120s).
+data MetricAbsence = MetricAbsence
+    { maName :: Text
+    , maFilter :: Text
+    , maAggregations :: [Aggregation]
+    , maSeconds :: Int
+    }
+    deriving (Eq, Show)
+
+-- | A log entry matching a Logging query fires the condition.
+data LogMatch = LogMatch
+    { lmName :: Text
+    , lmFilter :: Text
+    -- ^ a Cloud Logging query, e.g. @severity>=ERROR AND resource.type="gce_instance"@
+    , lmLabelExtractors :: [(Text, Text)]
+    -- ^ label name to an extractor expression (@EXTRACT(jsonPayload.x)@);
+    -- @[]@ renders none
+    }
+    deriving (Eq, Show)
+
+-- | One entry of a condition's @aggregations@.
+data Aggregation = Aggregation
+    { agAlignmentSeconds :: Int
+    , agAligner :: Text
+    -- ^ @perSeriesAligner@, e.g. @ALIGN_MEAN@
+    , agReducer :: Maybe Text
+    -- ^ @crossSeriesReducer@, e.g. @REDUCE_SUM@; 'Nothing' renders none
+    , agGroupBy :: [Text]
+    -- ^ @groupByFields@; @[]@ renders none
+    }
+    deriving (Eq, Show)
+
+data Comparison
+    = GreaterThan
+    | GreaterOrEqual
+    | LessThan
+    | LessOrEqual
+    | EqualTo
+    | NotEqualTo
+    deriving (Eq, Show, Enum, Bounded)
+
+comparisonText :: Comparison -> Text
+comparisonText c = case c of
+    GreaterThan -> "COMPARISON_GT"
+    GreaterOrEqual -> "COMPARISON_GE"
+    LessThan -> "COMPARISON_LT"
+    LessOrEqual -> "COMPARISON_LE"
+    EqualTo -> "COMPARISON_EQ"
+    NotEqualTo -> "COMPARISON_NE"
+
+-- | The policy's @alertStrategy@. Each 'Nothing' renders no field.
+data AlertStrategy = AlertStrategy
+    { asNotificationRateLimitSeconds :: Maybe Int
+    -- ^ at most one notification per this many seconds (log-match policies)
+    , asAutoCloseSeconds :: Maybe Int
+    -- ^ close an incident after this long without data
+    }
+    deriving (Eq, Show)
+
+noAlertStrategy :: AlertStrategy
+noAlertStrategy = AlertStrategy Nothing Nothing
+
+{- | What Google would refuse about a policy, checked by @up@ before any
+command runs: no condition at all, a log-match condition beside other
+conditions, or one without a notification rate limit.
+-}
+policyProblems :: Policy -> [Text]
+policyProblems p =
+    ["a policy needs at least one condition" | null p.poConditions]
+        <> ["a log-match condition must be the policy's only condition" | hasLogMatch, length p.poConditions > 1]
+        <> ["a log-match condition needs an alert strategy with a notification rate limit" | hasLogMatch, not rateLimited]
+  where
+    hasLogMatch = any isLogMatch p.poConditions
+    isLogMatch MatchedLog{} = True
+    isLogMatch _ = False
+    rateLimited = maybe False (\st -> st.asNotificationRateLimitSeconds /= Nothing) p.poAlertStrategy
+
+-- | A filter on a metric type and further @key="value"@ clauses, ANDed.
+metricTypeFilter :: Text -> [(Text, Text)] -> Text
+metricTypeFilter metric extra =
+    Text.intercalate " AND " (("metric.type=\"" <> metric <> "\"") : [k <> "=\"" <> v <> "\"" | (k, v) <- extra])
+
+-- | The filter of a user-defined log-based metric, by its name.
+logBasedMetricFilter :: Text -> [(Text, Text)] -> Text
+logBasedMetricFilter name = metricTypeFilter ("logging.googleapis.com/user/" <> name)
+
+{- | @uptimeCheckFailing name checkId locations seconds@: an uptime check
+(by its check id, the last segment of its resource name) failing from more
+than @locations@ checker locations for @seconds@. It is the shape of the
+condition the Cloud console makes for a check, over whatever resource type
+the check is on.
+-}
+uptimeCheckFailing :: Text -> Text -> Int -> Int -> MetricThreshold
+uptimeCheckFailing name checkId locations secs =
+    MetricThreshold
+        { mtName = name
+        , mtFilter =
+            metricTypeFilter
+                "monitoring.googleapis.com/uptime_check/check_passed"
+                [("metric.labels.check_id", checkId)]
+        , mtAggregations = [Aggregation 1200 "ALIGN_NEXT_OLDER" (Just "REDUCE_COUNT_FALSE") ["resource.label.*"]]
+        , mtComparison = GreaterThan
+        , mtThreshold = fromIntegral locations
+        , mtSeconds = secs
+        }
+
+{- | An alert policy on any conditions. Its channels are dependencies.
+@up@ refuses a policy with 'policyProblems', then creates or updates so the
+policy carries the rendered conditions and the fingerprint label; @down@
+deletes what the lookup finds.
+-}
+monitoringPolicy :: Reporter Report -> Track' (Binary "gcloud") -> Policy -> Op
+monitoringPolicy = monitoringPolicyAfter []
+
+-- | 'monitoringPolicy' with prerequisites, as 'alertPolicyAfter'.
+monitoringPolicyAfter :: [Op] -> Reporter Report -> Track' (Binary "gcloud") -> Policy -> Op
+monitoringPolicyAfter prerequisites r gcloudTrack p =
+    policyNode (Text.unwords ["alert policy", p.poDisplayName]) prerequisites r gcloudTrack p
+
+policyNode :: Text -> [Op] -> Reporter Report -> Track' (Binary "gcloud") -> Policy -> Op
+policyNode helpText prerequisites r gcloudTrack policy =
     after $ withBinary gcloudTrack monitoringCommand (PoliciesList policy) $ \_list ->
         op "gcp-monitoring-policy" (deps channelNodes) $ \actions ->
             actions
-                { help = Text.unwords ["alert policy", policy.apDisplayName, "on Cloud Run service", policy.apTarget.crtService]
+                { help = helpText
                 , notes =
-                    [ "conditions: " <> Text.intercalate ", " (map conditionName policy.apConditions)
-                    , "channels: " <> Text.intercalate ", " (map (.ncDisplayName) policy.apChannels)
+                    [ "conditions: " <> Text.intercalate ", " (map monitoringConditionName policy.poConditions)
+                    , "channels: " <> Text.intercalate ", " (map (.ncDisplayName) policy.poChannels)
                     ]
-                , ref = mkRef "gcp-monitoring-policy" (policy.apProject.projectId, policy.apDisplayName)
+                        <> maybe [] (\st -> ["alert strategy: " <> strategyNote st]) policy.poAlertStrategy
+                , ref = mkRef "gcp-monitoring-policy" (policy.poProject.projectId, policy.poDisplayName)
                 , up = upPolicy
                 , down = downPolicy
                 , check = checkPolicy
                 }
   where
     after o = foldl inject o prerequisites
-    channelNodes = map (after . notificationChannel r gcloudTrack) policy.apChannels
+    channelNodes = map (after . notificationChannel r gcloudTrack) policy.poChannels
+
+    strategyNote :: AlertStrategy -> Text
+    strategyNote st =
+        Text.intercalate
+            ", "
+            ( maybe [] (\n -> ["at most one notification per " <> secondsText n]) st.asNotificationRateLimitSeconds
+                <> maybe [] (\n -> ["auto-close after " <> secondsText n]) st.asAutoCloseSeconds
+            )
 
     run :: MonitoringCommand -> IO ()
     run cmd = untrackedExec monitoringCommand cmd "" (contramap (RunMonitoringCommand cmd) r)
@@ -319,7 +571,7 @@ alertPolicyAfter prerequisites r gcloudTrack policy =
     -- cannot be found is an error here, since it is a dependency that
     -- should have been brought up first
     resolveChannels :: IO [Text]
-    resolveChannels = mapM resolve policy.apChannels
+    resolveChannels = mapM resolve policy.poChannels
       where
         resolve ch = do
             (code, out, err) <- readCreateProcessWithExitCode (prepare monitoringCommand (ChannelsList ch)) ""
@@ -332,31 +584,38 @@ alertPolicyAfter prerequisites r gcloudTrack policy =
     -- against a policy that could not be rendered
     checkPolicy :: IO CheckResult
     checkPolicy = do
-        lookups <- mapM lookupOne policy.apChannels
+        lookups <- mapM lookupOne policy.poChannels
         case sequenceLookups lookups of
             LookupFailed why -> pure (Failure ("cannot list notification channels: " <> why))
             Absent -> pure (Failure "a notification channel of the policy is missing")
-            Present names -> interpretPolicyList policy names <$> listPolicy
+            Present names -> interpretMonitoringPolicyList policy names <$> listPolicy
       where
         lookupOne ch = do
             (code, out, err) <- readCreateProcessWithExitCode (prepare monitoringCommand (ChannelsList ch)) ""
             pure (fmap (.fcName) (lookupChannel ch code out err))
 
     upPolicy = do
+        case policyProblems policy of
+            [] -> pure ()
+            problems ->
+                throwIO (userError ("alert policy " <> Text.unpack policy.poDisplayName <> ": " <> Text.unpack (Text.intercalate "; " problems)))
         names <- resolveChannels
         (code, out, err) <- listPolicy
-        case lookupPolicy policy code out err of
+        case lookupMonitoringPolicy policy code out err of
             LookupFailed why -> throwIO (userError ("listing alert policies failed: " <> Text.unpack why))
             Absent -> run (PoliciesCreate policy names)
             Present found
-                | found.fpFingerprint == Just (policyFingerprint policy names) -> pure ()
+                | found.fpFingerprint == Just (monitoringPolicyFingerprint policy names) -> pure ()
                 | otherwise -> run (PoliciesUpdate found.fpName policy names)
 
     downPolicy = do
         (code, out, err) <- listPolicy
-        case lookupPolicy policy code out err of
-            Present found -> run (PoliciesDelete policy.apProject found.fpName)
+        case lookupMonitoringPolicy policy code out err of
+            Present found -> run (PoliciesDelete policy.poProject found.fpName)
             _ -> pure ()
+
+secondsText :: Int -> Text
+secondsText n = Text.pack (show n) <> "s"
 
 -- | An alert policy found by display name, and the fingerprint label it carries.
 data FoundPolicy = FoundPolicy
@@ -369,11 +628,15 @@ data FoundPolicy = FoundPolicy
 -- | Pure: what @gcloud alpha monitoring policies list --format json@ said
 -- about the declared policy.
 lookupPolicy :: AlertPolicy -> ExitCode -> ByteString -> ByteString -> Lookup FoundPolicy
-lookupPolicy policy code out err =
+lookupPolicy = lookupMonitoringPolicy . cloudRunPolicy
+
+-- | 'lookupPolicy' for a 'Policy'.
+lookupMonitoringPolicy :: Policy -> ExitCode -> ByteString -> ByteString -> Lookup FoundPolicy
+lookupMonitoringPolicy policy code out err =
     case code of
         ExitFailure n -> LookupFailed (Text.pack ("exit " <> show n) <> firstLine err)
         ExitSuccess -> case Aeson.decodeStrict' out of
-            Just (Array items) | (item : _) <- filter (named policy.apDisplayName) (toList items) ->
+            Just (Array items) | (item : _) <- filter (named policy.poDisplayName) (toList items) ->
                 Present
                     FoundPolicy
                         { fpName = maybe "" id (textField "name" item)
@@ -387,13 +650,17 @@ lookupPolicy policy code out err =
 -- | The 'CheckResult' for a policy, given its channels' resolved names:
 -- there, and carrying the fingerprint of what the declaration renders to.
 interpretPolicyList :: AlertPolicy -> [Text] -> (ExitCode, ByteString, ByteString) -> CheckResult
-interpretPolicyList policy channelNames (code, out, err) =
-    case lookupPolicy policy code out err of
+interpretPolicyList = interpretMonitoringPolicyList . cloudRunPolicy
+
+-- | 'interpretPolicyList' for a 'Policy'.
+interpretMonitoringPolicyList :: Policy -> [Text] -> (ExitCode, ByteString, ByteString) -> CheckResult
+interpretMonitoringPolicyList policy channelNames (code, out, err) =
+    case lookupMonitoringPolicy policy code out err of
         LookupFailed why -> Failure ("cannot list alert policies: " <> why)
-        Absent -> Failure ("no alert policy named " <> policy.apDisplayName)
+        Absent -> Failure ("no alert policy named " <> policy.poDisplayName)
         Present found
-            | found.fpFingerprint == Just (policyFingerprint policy channelNames) -> Success
-            | otherwise -> Failure ("alert policy " <> policy.apDisplayName <> " differs from its declaration")
+            | found.fpFingerprint == Just (monitoringPolicyFingerprint policy channelNames) -> Success
+            | otherwise -> Failure ("alert policy " <> policy.poDisplayName <> " differs from its declaration")
 
 -- | The user label the fingerprint rides on.
 fingerprintLabel :: Text
@@ -404,7 +671,11 @@ channel ids included, in the alphabet a user label value allows
 (lowercase hex, 16 characters).
 -}
 policyFingerprint :: AlertPolicy -> [Text] -> Text
-policyFingerprint policy channelNames =
+policyFingerprint = monitoringPolicyFingerprint . cloudRunPolicy
+
+-- | 'policyFingerprint' for a 'Policy'.
+monitoringPolicyFingerprint :: Policy -> [Text] -> Text
+monitoringPolicyFingerprint policy channelNames =
     Text.pack (take 16 (concatMap (printf "%02x") (ByteString.unpack digest)))
   where
     digest = SHA256.hash (LByteString.toStrict (Aeson.encode (renderPolicy' policy channelNames)))
@@ -412,23 +683,105 @@ policyFingerprint policy channelNames =
 -- | The policy JSON @gcloud alpha monitoring policies create --policy@
 -- takes, fingerprint label included.
 renderPolicy :: AlertPolicy -> [Text] -> Value
-renderPolicy policy channelNames =
+renderPolicy = renderMonitoringPolicy . cloudRunPolicy
+
+-- | 'renderPolicy' for a 'Policy'.
+renderMonitoringPolicy :: Policy -> [Text] -> Value
+renderMonitoringPolicy policy channelNames =
     withLabel (renderPolicy' policy channelNames)
   where
-    withLabel (Object o) = Object (KeyMap.insert "userLabels" (object [Key.fromText fingerprintLabel .= policyFingerprint policy channelNames]) o)
+    withLabel (Object o) = Object (KeyMap.insert "userLabels" (object [Key.fromText fingerprintLabel .= monitoringPolicyFingerprint policy channelNames]) o)
     withLabel v = v
 
--- | The policy without its fingerprint: what the fingerprint is of.
-renderPolicy' :: AlertPolicy -> [Text] -> Value
+{- | The policy without its fingerprint: what the fingerprint is of. An
+absent or empty alert strategy adds no key, so a Cloud Run policy renders as
+it did before 'Policy' existed.
+-}
+renderPolicy' :: Policy -> [Text] -> Value
 renderPolicy' policy channelNames =
     object
-        [ "displayName" .= policy.apDisplayName
-        , "combiner" .= ("OR" :: Text)
-        , "enabled" .= True
-        , "notificationChannels" .= channelNames
-        , "conditions" .= map (renderCondition policy.apTarget) policy.apConditions
-        , "documentation" .= object ["content" .= policy.apDocumentation, "mimeType" .= ("text/markdown" :: Text)]
-        ]
+        ( [ "displayName" .= policy.poDisplayName
+          , "combiner" .= ("OR" :: Text)
+          , "enabled" .= True
+          , "notificationChannels" .= channelNames
+          , "conditions" .= map renderMonitoringCondition policy.poConditions
+          , "documentation" .= object ["content" .= policy.poDocumentation, "mimeType" .= ("text/markdown" :: Text)]
+          ]
+            <> maybe [] renderStrategy policy.poAlertStrategy
+        )
+  where
+    renderStrategy :: AlertStrategy -> [(Key.Key, Value)]
+    renderStrategy st = case fields of
+        [] -> []
+        _ -> ["alertStrategy" .= object fields]
+      where
+        fields =
+            maybe [] (\n -> ["notificationRateLimit" .= object ["period" .= secondsText n]]) st.asNotificationRateLimitSeconds
+                <> maybe [] (\n -> ["autoClose" .= secondsText n]) st.asAutoCloseSeconds
+
+monitoringConditionName :: Condition -> Text
+monitoringConditionName c = case c of
+    OnCloudRun _ crc -> conditionName crc
+    Threshold t -> t.mtName
+    Absence a -> a.maName
+    MatchedLog l -> l.lmName
+
+-- | One condition as the API's condition object.
+renderMonitoringCondition :: Condition -> Value
+renderMonitoringCondition c = case c of
+    OnCloudRun target crc -> renderCondition target crc
+    Threshold t ->
+        object
+            [ "displayName" .= t.mtName
+            , "conditionThreshold"
+                .= object
+                    ( ["filter" .= t.mtFilter]
+                        <> aggregations t.mtAggregations
+                        <> [ "comparison" .= comparisonText t.mtComparison
+                           , "thresholdValue" .= t.mtThreshold
+                           , "duration" .= secondsText t.mtSeconds
+                           , "trigger" .= object ["count" .= (1 :: Int)]
+                           ]
+                    )
+            ]
+    Absence a ->
+        object
+            [ "displayName" .= a.maName
+            , "conditionAbsent"
+                .= object
+                    ( ["filter" .= a.maFilter]
+                        <> aggregations a.maAggregations
+                        <> [ "duration" .= secondsText a.maSeconds
+                           , "trigger" .= object ["count" .= (1 :: Int)]
+                           ]
+                    )
+            ]
+    MatchedLog l ->
+        object
+            [ "displayName" .= l.lmName
+            , "conditionMatchedLog"
+                .= object
+                    ( ["filter" .= l.lmFilter]
+                        <> case l.lmLabelExtractors of
+                            [] -> []
+                            kvs -> ["labelExtractors" .= object [Key.fromText k .= v | (k, v) <- kvs]]
+                    )
+            ]
+  where
+    aggregations :: [Aggregation] -> [(Key.Key, Value)]
+    aggregations [] = []
+    aggregations ags = ["aggregations" .= map renderAggregation ags]
+    renderAggregation :: Aggregation -> Value
+    renderAggregation ag =
+        object
+            ( [ "alignmentPeriod" .= secondsText ag.agAlignmentSeconds
+              , "perSeriesAligner" .= ag.agAligner
+              ]
+                <> maybe [] (\red -> ["crossSeriesReducer" .= red]) ag.agReducer
+                <> case ag.agGroupBy of
+                    [] -> []
+                    gs -> ["groupByFields" .= gs]
+            )
 
 conditionName :: CloudRunCondition -> Text
 conditionName c = case c of
@@ -523,11 +876,11 @@ data MonitoringCommand
     | -- | update the labels of the channel with this resource name
       ChannelsUpdate Text NotificationChannel
     | ChannelsDelete Project Text
-    | PoliciesList AlertPolicy
+    | PoliciesList Policy
     | -- | create with these resolved channel names
-      PoliciesCreate AlertPolicy [Text]
+      PoliciesCreate Policy [Text]
     | -- | update the policy with this resource name
-      PoliciesUpdate Text AlertPolicy [Text]
+      PoliciesUpdate Text Policy [Text]
     | PoliciesDelete Project Text
     deriving (Show)
 
@@ -538,8 +891,8 @@ displayNameFilter name = "display_name=\"" <> Text.unpack (Text.filter (/= '"') 
 renderLabels :: [(Text, Text)] -> String
 renderLabels kvs = Text.unpack (Text.intercalate "," [k <> "=" <> v | (k, v) <- kvs])
 
-policyJson :: AlertPolicy -> [Text] -> String
-policyJson policy names = Text.unpack (Text.decodeUtf8 (LByteString.toStrict (Aeson.encode (renderPolicy policy names))))
+policyJson :: Policy -> [Text] -> String
+policyJson policy names = Text.unpack (Text.decodeUtf8 (LByteString.toStrict (Aeson.encode (renderMonitoringPolicy policy names))))
 
 monitoringCommand :: Command "gcloud" MonitoringCommand
 monitoringCommand = Command $ \cmd -> case cmd of
@@ -577,15 +930,15 @@ monitoringCommand = Command $ \cmd -> case cmd of
             withProject project ["beta", "monitoring", "channels", "delete", Text.unpack name, "--quiet"]
     PoliciesList policy ->
         gcloudProc $
-            withProject policy.apProject
-                ["alpha", "monitoring", "policies", "list", "--filter", displayNameFilter policy.apDisplayName, "--format", "json"]
+            withProject policy.poProject
+                ["alpha", "monitoring", "policies", "list", "--filter", displayNameFilter policy.poDisplayName, "--format", "json"]
     PoliciesCreate policy names ->
         gcloudProc $
-            withProject policy.apProject
+            withProject policy.poProject
                 ["alpha", "monitoring", "policies", "create", "--policy", policyJson policy names]
     PoliciesUpdate name policy names ->
         gcloudProc $
-            withProject policy.apProject
+            withProject policy.poProject
                 ["alpha", "monitoring", "policies", "update", Text.unpack name, "--policy", policyJson policy names]
     PoliciesDelete project name ->
         gcloudProc $
