@@ -10,6 +10,7 @@ import qualified Test.ClientModelSpec as ClientModelSpec
 import qualified Test.ClientModelStepSpec as ClientModelStepSpec
 import qualified Test.ConcurrentSpec as ConcurrentSpec
 import qualified Test.ContainedSpec as ContainedSpec
+import qualified Test.AsyncInterruptSpec as AsyncInterruptSpec
 import qualified Test.BinaryOutputSpec as BinaryOutputSpec
 import qualified Test.BinarySpec as BinarySpec
 import qualified Test.DaemonSpec as DaemonSpec
@@ -187,6 +188,7 @@ main = do
             , ClientModelStepSpec.tests
             , ConcurrentSpec.tests
             , ContainedSpec.tests
+            , AsyncInterruptSpec.tests
             , BinarySpec.tests
             , DaemonSpec.tests
             , DetachedSpec.tests

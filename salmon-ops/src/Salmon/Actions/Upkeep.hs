@@ -1347,7 +1347,7 @@ upkeep standing ctx =
             Nothing -> do
                 say (Acted (UpDown.Eval act))
                 note status "up"
-                outcome <- try @SomeException act.extension.up
+                outcome <- UpDown.trySync act.extension.up
                 case outcome of
                     Right () -> do
                         say (Acted (UpDown.Done act))
@@ -1632,7 +1632,7 @@ upkeep standing ctx =
     reapply d tally armed = do
         say (Acted (UpDown.Eval act))
         note status "reapply"
-        outcome <- try @SomeException act.extension.up
+        outcome <- UpDown.trySync act.extension.up
         case outcome of
             Right () -> do
                 markOk ctx
@@ -1830,7 +1830,7 @@ downkeep standing ctx =
         unsettle status TurnDown
         say (Acted (UpDown.Eval act))
         note status "down"
-        outcome <- try @SomeException act.extension.down
+        outcome <- UpDown.trySync act.extension.down
         case outcome of
             Right () -> do
                 say (Acted (UpDown.Done act))

@@ -72,7 +72,6 @@ module Salmon.Actions.Concurrent (
 import Control.Concurrent.Async (forConcurrently_)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO)
-import Control.Exception (SomeException, try)
 import Control.Monad (forM_, unless)
 import Data.Dynamic (Dynamic)
 import Data.Map.Strict (Map)
@@ -82,7 +81,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import GHC.Records (HasField)
 
-import Salmon.Actions.UpDown (CheckResult (..), Gate, Report (..), Requirement (..), containedIn, reportContained, requirement, runCheck)
+import Salmon.Actions.UpDown (CheckResult (..), Gate, Report (..), Requirement (..), containedIn, reportContained, requirement, runCheck, trySync)
 import Salmon.Op.Actions (Act (..))
 import Salmon.Op.Concurrency (ConcurrencyLimit, withConcurrencyLimit)
 import Salmon.Op.Dag (Dag)
@@ -131,7 +130,7 @@ upDagConcurrent gate r boxes limit dag =
             Required -> do
                 say (Eval act)
                 note status "eval"
-                result <- try @SomeException act.extension.up
+                result <- trySync act.extension.up
                 case result of
                     Left e -> do
                         say (Failed act e)
@@ -188,7 +187,7 @@ downDagConcurrent gate r boxes limit dag =
             Required -> do
                 say (Eval act)
                 note status "eval"
-                result <- try @SomeException act.extension.down
+                result <- trySync act.extension.down
                 case result of
                     Left e -> do
                         say (Failed act e)
@@ -287,14 +286,18 @@ walkConcurrent dir r boxes limit dag waitsOn releases contained apply = do
                     else do
                         instructions <- takeInstructions say act aref
                         -- a node's own thread throwing would leave its
-                        -- neighbours waiting forever, so nothing is allowed
-                        -- to escape here even though `apply` catches already.
+                        -- neighbours waiting forever, so nothing synchronous
+                        -- is allowed to escape here even though `apply`
+                        -- catches already. An asynchronous exception (the
+                        -- pass being cancelled) does escape: `forConcurrently_`
+                        -- then cancels every other node's thread and re-throws
+                        -- it to whoever ran the pass, so nobody is left waiting.
                         -- the slot is held only around this call: every
                         -- neighbour this node waited on above has already
                         -- released its own by the time `waitStability`
                         -- returns, so this can never wait on a slot held by
                         -- something in turn waiting on this node.
-                        escaped <- try @SomeException (withConcurrencyLimit limit (apply say status act instructions))
+                        escaped <- trySync (withConcurrencyLimit limit (apply say status act instructions))
                         case escaped of
                             Right result -> pure result
                             Left e -> do
