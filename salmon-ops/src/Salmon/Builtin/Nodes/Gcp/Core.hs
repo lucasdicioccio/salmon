@@ -12,6 +12,7 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     -- * The account gcloud acts as
     Account (..),
     declaredAccount,
+    accountDigest,
     interpretAccount,
     activeAccountArgs,
     readActiveAccount,
@@ -44,12 +45,15 @@ module Salmon.Builtin.Nodes.Gcp.Core (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, throwIO, try)
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextError
 import GHC.IO.Exception (ExitCode (..))
+import Numeric (showHex)
 import System.IO.Error (userError)
 import System.Process.ByteString (readCreateProcessWithExitCode)
 import System.Process.ListLike (CreateProcess, proc)
@@ -175,6 +179,13 @@ It never /changes/ the active account: that is the operator's machine
 configuration, shared with everything else on it. Its @up@ re-reads and
 throws on anything but a match, saying what to run. Nothing is done on
 @down@.
+
+The address itself is not in the node's notes, which every pass prints
+(@run tree@, the reporters, @serve@'s @/dag@): they carry 'accountDigest'
+instead, so a changed declaration still changes the representative. The
+reference is keyed on the address, but a 'Salmon.Op.Ref.Ref' is a hash of its
+key and never shows it. The address is named only in the failure text, that
+is on a mismatch or with no active account, where the operator needs it.
 -}
 declaredAccount :: Reporter Report -> Track' (Binary "gcloud") -> Account -> Op
 declaredAccount _r gcloudTrack acct =
@@ -182,12 +193,14 @@ declaredAccount _r gcloudTrack acct =
         op "gcp-account" nodeps $ \actions ->
             actions
                 { help = "asserts the account gcloud acts as"
-                , notes = ["declared account: " <> acct.accountEmail]
+                , notes = ["declared account digest: " <> digest]
                 , ref = mkRef "gcp-account" acct.accountEmail
                 , up = refuseUnlessDeclared
                 , check = checkAccount
                 }
   where
+    digest = accountDigest acct
+
     checkAccount :: IO CheckResult
     checkAccount = uncurry (interpretAccount acct) <$> readActiveAccount
 
@@ -203,6 +216,25 @@ declaredAccount _r gcloudTrack acct =
                         <> acct.accountEmail
                         <> ", or export CLOUDSDK_CORE_ACCOUNT)"
             other -> throwIO (userError ("could not establish gcloud's active account: " <> show other))
+
+{- | What 'declaredAccount' shows of the account in its notes: @sha256:@ and
+the first 16 hex digits of the SHA-256 of the address, stripped and
+case-folded (two spellings of one address show the same digest). Changing
+the declared account still changes what 'Salmon.Op.Dag.sameRepresentative'
+compares, as the address in the note used to.
+
+It keeps the address off the page, not out of reach: an address is easy to
+guess and the digest is unkeyed, so anyone holding a candidate can confirm
+it. The address is not a secret, and no secret goes through this.
+-}
+accountDigest :: Account -> Text
+accountDigest acct =
+    "sha256:" <> Text.take 16 (Text.concat (map hex (ByteString.unpack (SHA256.hash normalised))))
+  where
+    normalised = Text.encodeUtf8 (Text.toCaseFold (Text.strip acct.accountEmail))
+    hex w =
+        let s = showHex w ""
+         in Text.pack (if length s == 1 then '0' : s else s)
 
 -- | Runs @gcloud config get-value account@: its exit code and stdout.
 readActiveAccount :: IO (ExitCode, ByteString)
