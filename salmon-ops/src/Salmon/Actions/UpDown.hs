@@ -6,7 +6,7 @@ module Salmon.Actions.UpDown where
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, when)
 import Data.Dynamic (Dynamic)
-import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -17,6 +17,7 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 
 import Salmon.FoldBranch
 import Salmon.Op.Actions
+import qualified Salmon.Op.Contained as Contained
 import Salmon.Op.Dag (Dag)
 import Salmon.Op.Mailbox (Instruction)
 import qualified Salmon.Op.Dag as Dag
@@ -60,6 +61,12 @@ data Report ext
       -- instructions. Reported because forcing a node has to be either
       -- reliable or visibly unreliable.
       DroppedInstructions !(Act ext) !Int
+    | -- | this node did not come up ('Failed' or 'Blocked', reported
+      -- already), and the failure stopped at a node marked contained, so it
+      -- blocked nothing above that node and does not count against the pass.
+      -- Emitted after the walk, once per such node, in 'Dag.dagOrder'; only
+      -- ever on the way up. See "Salmon.Op.Contained".
+      Contained !(Act ext)
     deriving (Show)
 
 -------------------------------------------------------------------------------
@@ -202,6 +209,10 @@ alwaysRequired = const (pure Required)
 something downstream of it was 'Blocked'. Callers that only care about
 side effects (the historical behaviour) can ignore the result; callers that
 want a process exit code to reflect reality (e.g. a CLI) now can.
+
+The exception is a failure that stopped at a node marked contained
+("Salmon.Op.Contained"): it is reported ('Failed' or 'Blocked', then
+'Contained'), blocks nothing above that node, and leaves the result 'True'.
 -}
 upTree ::
     forall a m ext.
@@ -260,13 +271,15 @@ upDag ::
     ( HasField "up" ext (IO ())
     , HasField "check" ext (IO CheckResult)
     , HasField "ref" ext Ref
+    , -- read for the 'Contained.Contained' marker only
+      HasField "dynamics" ext [Dynamic]
     ) =>
     Gate ext ->
     Reporter (Report ext) ->
     Dag ext ->
     IO Bool
 upDag gate r dag =
-    walk r dag Dag.dependenciesOf Dag.dependantsOf (Dag.leaves dag) apply
+    walk r dag Dag.dependenciesOf Dag.dependantsOf (Dag.leaves dag) (containedIn dag) apply
   where
     -- returns True iff this node failed, so its dependants must not be run
     -- against an unmet precondition.
@@ -302,6 +315,12 @@ node, everything it would have released is 'Blocked' instead — one failure
 contains a whole sub-DAG rather than a single branch, in whichever direction
 that sub-DAG lies.
 
+@contained@ says which nodes stop a failure (see "Salmon.Op.Contained"): such a
+node, failed or blocked, releases what it would have released as if it had
+succeeded. After the walk, every node that did not come up and whose failure
+stopped at one is reported 'Contained', and only the others make the walk
+return 'False'.
+
 The final sweep is what a walk over a 'Dag.Dag' needs and a walk over a
 'Cofree' did not: an edge set can describe a cycle, and a node on one never
 reaches a count of zero. Reporting those 'Blocked' turns "silently did
@@ -315,26 +334,30 @@ walk ::
     (Dag ext -> Ref -> [Ref]) ->
     (Dag ext -> Ref -> [Ref]) ->
     [Ref] ->
+    (Ref -> Bool) ->
     (Act ext -> IO Bool) ->
     IO Bool
-walk r dag ready release start apply = do
+walk r dag ready release start contained apply = do
     let order = Dag.dagOrder dag
     countRef <- newIORef (Map.fromList [(aref, length (ready dag aref)) | aref <- order])
     blockedRef <- newIORef (Set.empty :: Set Ref)
     doneRef <- newIORef (Set.empty :: Set Ref)
-    failRef <- newIORef False
+    -- the nodes that did not reach what this walk wanted
+    notOkRef <- newIORef (Set.empty :: Set Ref)
     let
+        -- True iff what this node would release must be blocked
         processNode :: Act ext -> IO Bool
         processNode act = do
-            blocked <- Set.member act.extension.ref <$> readIORef blockedRef
-            if blocked
-                then do
-                    runReporter r (Blocked act)
-                    writeIORef failRef True
-                    pure True
-                else apply act >>= \stop -> do
-                    when stop (writeIORef failRef True)
-                    pure stop
+            let aref = act.extension.ref
+            blocked <- Set.member aref <$> readIORef blockedRef
+            notOk <-
+                if blocked
+                    then do
+                        runReporter r (Blocked act)
+                        pure True
+                    else apply act
+            when notOk (modifyIORef' notOkRef (Set.insert aref))
+            pure (notOk && not (contained aref))
 
         processReady :: Ref -> IO ()
         processReady aref = do
@@ -352,9 +375,33 @@ walk r dag ready release start apply = do
     reached <- readIORef doneRef
     forM_ [aref | aref <- order, Set.notMember aref reached] $ \aref -> do
         forM_ (Dag.representativeOf dag aref) $ \act -> runReporter r (Blocked act)
-        writeIORef failRef True
+        modifyIORef' notOkRef (Set.insert aref)
 
-    not <$> readIORef failRef
+    notOk <- readIORef notOkRef
+    reportContained r dag contained (release dag) notOk
+
+{- | Report 'Contained' for every node of @notOk@ whose failure stopped at a
+contained node ('Contained.containment'), in 'Dag.dagOrder', and say whether
+that was all of them: the pass's verdict. Shared by both drivers.
+-}
+reportContained ::
+    Reporter (Report ext) ->
+    Dag ext ->
+    (Ref -> Bool) ->
+    (Ref -> [Ref]) ->
+    Set Ref ->
+    IO Bool
+reportContained r dag contained dependants notOk
+    | Set.null notOk = pure True
+    | otherwise = do
+        let safe = Contained.containment contained dependants notOk
+        forM_ [aref | aref <- Dag.dagOrder dag, Set.member aref safe] $ \aref ->
+            forM_ (Dag.representativeOf dag aref) $ \act -> runReporter r (Contained act)
+        pure (Set.size safe == Set.size notOk)
+
+-- | Which nodes of this 'Dag' carry the 'Contained.Contained' marker.
+containedIn :: (HasField "dynamics" ext [Dynamic]) => Dag ext -> Ref -> Bool
+containedIn dag aref = maybe False (Contained.isContained . (.extension)) (Dag.representativeOf dag aref)
 
 {- | Everything both drivers do before either of them walks anything: expand
 the effectful @predecessors@ recipes, collapse the result to a 'Dag.Dag', and
@@ -506,7 +553,9 @@ downDag ::
     Dag ext ->
     IO Bool
 downDag gate r dag =
-    walk r dag Dag.dependantsOf Dag.dependenciesOf (Dag.roots dag) apply
+    -- nothing is contained going down: a node whose @down@ failed is still
+    -- standing, marked or not.
+    walk r dag Dag.dependantsOf Dag.dependenciesOf (Dag.roots dag) (const False) apply
   where
     -- returns True iff the node is still standing, so its predecessors must
     -- not be pulled out from under it.

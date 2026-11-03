@@ -158,6 +158,7 @@ library
                    , Salmon.Op.Concurrency
                    , Salmon.Op.Dag
                    , Salmon.Op.Guard
+                   , Salmon.Op.Contained
                    , Salmon.Op.Ledger
                    , Salmon.Op.Mailbox
                    , Salmon.Op.Rewrite

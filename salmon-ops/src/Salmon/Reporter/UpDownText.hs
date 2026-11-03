@@ -65,6 +65,7 @@ renderReport rep =
             line r ["kept", node kept <> ";", "replaced", node replaced]
         UpDown.Instructed act instr -> about act [instructionText instr]
         UpDown.DroppedInstructions act n -> about act [tshow n <> " dropped"]
+        UpDown.Contained act -> about act []
   where
     about :: Act Extension -> [Text] -> Text
     about act extra =
@@ -90,6 +91,7 @@ renderKind rep =
         UpDown.Conflicting{} -> "conflicting"
         UpDown.Instructed _ _ -> "instructed"
         UpDown.DroppedInstructions _ _ -> "dropped-instructions"
+        UpDown.Contained _ -> "contained"
 
 -- | As "Salmon.Reporter.Tagged" renders a failure: the exception's 'show'.
 exceptionText :: SomeException -> Text

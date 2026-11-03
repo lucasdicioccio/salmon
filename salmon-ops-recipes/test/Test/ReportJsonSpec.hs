@@ -189,6 +189,7 @@ updownGoldens =
         )
     , ("UpDown.Instructed", Tagged.FromUpDown (UpDown.Instructed fixtureAct Mailbox.Force), "{\"kind\":\"instructed\"," <> about <> ",\"instruction\":\"force\"}")
     , ("UpDown.DroppedInstructions", Tagged.FromUpDown (UpDown.DroppedInstructions fixtureAct 3), "{\"kind\":\"dropped-instructions\"," <> about <> ",\"dropped\":3}")
+    , ("UpDown.Contained", Tagged.FromUpDown (UpDown.Contained fixtureAct), "{\"kind\":\"contained\"," <> about <> "}")
     ]
 
 upkeepGoldens :: [(String, Tagged.Tagged, Text)]
@@ -536,6 +537,7 @@ _updownCovered rep = case rep of
     UpDown.Conflicting{} -> ()
     UpDown.Instructed{} -> ()
     UpDown.DroppedInstructions{} -> ()
+    UpDown.Contained{} -> ()
 
 _upkeepCovered :: Upkeep.Report Extension -> ()
 _upkeepCovered rep = case rep of

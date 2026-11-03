@@ -19,6 +19,7 @@ import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Op.Actions
 import Salmon.Op.CardTemplate (setCardTemplate)
 import Salmon.Op.Configure
+import Salmon.Op.Contained (Contained (..), isContainedDynamic)
 import Salmon.Op.PassPhase.Tag (PassPhase (..), setPassPhase)
 import Salmon.Op.Eval
 import Salmon.Op.Graph
@@ -218,6 +219,21 @@ inDeployPhase = inPassPhase DeployPhase
 
 inPassPhase :: PassPhase -> Extension -> Extension
 inPassPhase p ext = ext{dynamics = setPassPhase p ext.dynamics}
+
+{- | Mark this node contained ("Salmon.Op.Contained"): when it fails, or is
+blocked by a failure below it, under @run up@ (or a @serve@ convergence
+pass), it is reported, then reported @contained@, and blocks none of its
+dependants; a pass in which nothing else went wrong succeeds. Mark the top
+of a section nothing above it needs. A node that does need the section
+depends on a node inside it and is blocked as usual. Teardown is unchanged.
+Pass policy only: left out of the node's representative, so it renders
+nothing different. On a builtin, through 'amendNode':
+@amendNode contained builtinOp@.
+-}
+contained :: Extension -> Extension
+contained ext
+    | any isContainedDynamic ext.dynamics = ext
+    | otherwise = ext{dynamics = toDyn Contained : ext.dynamics}
 
 placeholder :: ShortHand -> Text -> Op
 placeholder short t = op short nodeps $ \actions ->

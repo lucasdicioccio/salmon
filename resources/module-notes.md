@@ -691,6 +691,37 @@ monoidal no-op used so dependency-free ops still typecheck uniformly.
   `Skip`. `upTree`/`downTree` are those with a gate that wants everything; the only real user is
   `Actions/Serve.hs` (below), which walks the union of several seeds' nodes and must leave other
   seeds' alone.
+- **`Op/Contained.hs`** (with `Extension.contained`, used as `amendNode contained op`) is a node whose failure
+  is reported but fails nothing beyond itself: a `Contained` marker on `dynamics`. **Going up only**, in both
+  `UpDown.walk` and `Concurrent.walkConcurrent`: a marked node that failed or was `Blocked` releases its dependants
+  as if it had succeeded (the concurrent driver keeps it out of `failedVar`, which is what neighbours read). After
+  the walk, `UpDown.reportContained` takes every node that did not come up and computes `Contained.containment`:
+  the least set holding the marked ones and every other one whose dependants (at least one) are all in it. Each
+  is reported `Contained` (after its own `Failed`/`Blocked`, in `dagOrder`), and the pass returns `True` iff
+  that is all of them. Load-bearing: the *least* fixed point (a cycle never contains itself, so a cycle still
+  fails the pass); a node with a dependant that came up cleanly is not contained (only a marked node lets a
+  dependant run); a node that explicitly depends on something *inside* the section (below the mark) is blocked
+  and fails the pass as before. Teardown is untouched (`const False`): a marked node whose `down` failed is
+  still standing and blocks its predecessors. The marker is filtered out of `Dag.Representative` like a pass
+  phase (pass policy, not identity): marking renders nothing different and restarts nothing under `serve`, and
+  two declarations differing only in the mark are not `Conflicting` (last writer wins). `upDag` and
+  `upDagConcurrent` gained a `HasField "dynamics"` constraint to read the mark. New report `UpDown.Contained`
+  (`kind: "contained"`, JSON and `UpDownText`; openapi `UpDown_contained`/`UpDownUntagged_contained`; goldens
+  in `ReportJsonSpec`, `UpDownTextSpec`); serve's recorders ignore it (the node is already `Errored`/`Blocked`);
+  the web UI shows it by its kind, and `Client.Model` (and the Rust port) keep the node's convergence and record
+  `contained` as its last kind. `run up` prints `run up: N node(s) failed or were blocked inside a contained
+  section; not counted against this pass` on stderr after the pass when N > 0, and exits 0 if that was all.
+  **Not done:** `serve`'s `ConvergeStop` still counts a contained failed node as remaining (it is `Errored`),
+  so `serve --once` exits 1 and the status sink says incomplete; Upkeep's machines do not read the mark (under
+  supervision a dependant still waits for a failed contained node); no builtin or recipe uses it yet.
+  **Run (Layer 0 only):** `Test.ContainedSpec` (the pure fixed point incl. a cycle; both up drivers: a failure
+  under the mark blocks nothing and passes, the marked node failing itself, an explicit dependant inside the
+  section is blocked and fails the pass, no mark is unchanged behaviour, a clean pass says nothing; teardown
+  unchanged in both drivers; representative unchanged), plus `ConcurrentSpec`, `ReportJsonSpec`, `ServeApiSpec`,
+  `UpDownTextSpec`, `DagSpec`, `DagPerNodeSpec`, `PassPhaseSpec`, `WindowSpec`, `ServeSpec`, `ClientModelSpec`,
+  `ServeEventsSpec`, run together through `cabal repl` of the test suite (413 passing). **Not run:** the CLI's
+  stderr line and exit code on a real binary, `serve` with a contained node, the Rust client (fixtures not
+  regenerated).
 - **`Op/Window.hs`** is the maintenance-window `Gate`: a pure `Window` value (`[Day:]HH:MM-HH:MM[@+HH:MM]`,
   crossing midnight allowed, fixed UTC offset since there is no tz database) and `windowGate`, which
   `Skippable`s every node marked `disruptive` (a `Dynamic` marker, like `Supervision`) outside all windows
