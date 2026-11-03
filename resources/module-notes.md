@@ -2985,6 +2985,52 @@ address, the stdin JSON, a redacted report/failure/`show`); gcloud 573.0.0's own
 `ModifyNotificationChannel` parsed that JSON offline into the intended `NotificationChannel`, and its
 `FileContents` reads `-` as stdin (read in its source). **Not run**: any create or update against a real project.
 
+`Gcp.Uptime`, `Gcp.Dashboard`, `Gcp.Logging` and `Gcp.Billing.budget` (feature 12b7d9ca, asked for by budgetz's GCP
+stack, whose `Observability/{Resources,Alerting}.hs` hold its own versions). Five nodes, each with a `check` that
+compares declared settings and a `down`:
+- `uptimeCheck` (`"gcp-uptime-check" (project, display name)`): an `uptime-url` HTTP(S) check (host, path, port,
+  period, timeout, ≥3 `UptimeRegion`s), `gcloud monitoring uptime` (GA). Identity is the display name (server-assigned
+  id). The check compares **fields** read back from `list-configs` (host, `useSsl`, port, path, `period`/`timeout` as
+  `"60s"`, `selectedRegions` as the API's `USA_OREGON` spelling), not a fingerprint. `up` updates path/port/period/
+  timeout/regions in place (`--set-regions`); another host or protocol is refused (no update flag; delete-and-recreate
+  would change the check id an alert condition names).
+- `dashboard` (`"gcp-monitoring-dashboard" (project, display name)`): the body is the API's dashboard JSON minus
+  `displayName`/`labels`/`etag`/`name` (`dashboardProblems`). Compared by a `salmon-fingerprint` label (display name and
+  body), as alert policies are, since the read-back body carries generated fields; a console edit that keeps the label
+  is unseen. Update replaces the whole dashboard with the listed `etag`. The JSON goes on **stdin**
+  (`--config-from-file -`), for size rather than secrecy.
+- `logMetric` (`"gcp-log-metric" (project, name)`): a counter only (`--log-filter`; no distribution metrics). The name
+  is chosen, so it is the identity; `check` compares the filter and the whole description.
+- `logBucketRetention` (`"gcp-log-bucket-retention" (project, location, bucket)`, `defaultLogBucket` = `_Default` in
+  `global`): `check` reads `retentionDays` from `buckets describe --format json`, `up` is `buckets update
+  --retention-days`. **`down` does nothing**: the prior value is unknown, and shortening retention deletes logs.
+- `Billing.budget` (`"gcp-billing-budget" (account, display name)`): whole `bgUnits` in a declared `bgCurrency`
+  (`--budget-amount 100EUR`; gcloud reads `100.5` as 100 units and 5 nanos, so no fractions), `ThresholdRule`s
+  (fraction and `SpendBasis`, always passed with `basis=`), optional `bgProject`. `check` compares currency, units
+  (string or number, `nanos` 0), rules as a set (a missing `spendBasis` is `CURRENT_SPEND`) and the project filter,
+  which the API gives as `projects/NUMBER`: `check`/`up` resolve it with `Iam.readProjectNumber` (`projects/ID` also
+  accepted). Update is `--budget-amount`, `--clear-threshold-rules` then one `--add-threshold-rule` each (gcloud's hook
+  clears then appends), and `--filter-projects`; another currency, or a project filter to be cleared, is refused.
+  `--quiet` (via `gcloudProc`) is what stops the first-run prompt the stack met; `budgetsApi` must be enabled on the
+  quota project.
+Load-bearing, ownership: uptime checks and dashboards carry the user label `managed-by=salmon`
+(`Monitoring.ownerLabelKey`/`ownerLabelValue`); a log metric's description ends with the line
+`salmon:log-metric:NAME` (`metricMarker`; the API gives metrics no labels). A same-named resource **without** the
+marker is a `check` `Failure`, an `up` refusal and is left by `down`: so a dashboard or metric made by the stack's own
+nodes is not taken over until it is deleted or labelled. A budget has neither labels nor a description: `up` updates a
+same-named one, `down` deletes one only if it matches the declaration in full. The existing alert policies and
+channels do not carry the label (unchanged). `Monitoring` now also exports `textField`/`nestedTextField`/`firstLine`/
+`shortId` for these modules. Not done: the stack's "contain a budget for an account without billing rights, print the
+command and go on" (that is a recipe's choice of containment, not the node's), status-code matchers, TCP checks,
+distribution metrics, creating log buckets, budget notification channels/Pub/Sub. Known gap: an uptime alert
+condition (`uptimeCheckFailing`) needs the check id, which is server-assigned and so not known at graph build.
+**Run**: Layer 0 only, `Test/GcpObservabilitySpec.hs` (22 cases, in `cabal repl`: argv of every command, the pure
+readers on JSON written from the APIs' documented shapes, problems, node `help`/`notes`); flag names and the budget
+hooks were read from gcloud 573.0.0's `--help` and source offline. **Not run**: any command against a real project or
+billing account, so every list/describe shape (notably `period`/`timeout` spellings, `selectedRegions` for a check
+created with all regions, whether dashboard label values round-trip, int64 rendering of budget `units`), the GA
+`uptime update` id form, and the budget update mask are unverified.
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port
