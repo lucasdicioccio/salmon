@@ -29,6 +29,14 @@ module Salmon.Builtin.Nodes.Gcp.Core (
     -- * teardown
     downIfPresent,
 
+    -- * presence: present, absent, or could not be asked
+    Presence (..),
+    isNotFound,
+    describePresence,
+    presenceCheck,
+    ensurePresent,
+    downUnlessAbsent,
+
     -- * eventual consistency
     retryingIO,
     afterEnableRetries,
@@ -309,6 +317,105 @@ downIfPresent runCheck act = do
     case result of
         Success -> act
         _ -> pure ()
+
+-------------------------------------------------------------------------------
+-- Presence
+
+{- | What a @describe@ (or a listing) said about whether a resource is there.
+
+A non-zero exit of @gcloud ... describe@ is not, on its own, an answer: a
+token being renewed, a network error or a 5xx exit the same way as a
+resource that does not exist. Read as "not found", such a failure makes
+@up@ create a resource that exists (GCP answers "already exists" to every
+retry and the node fails, blocking all behind it) and makes 'downIfPresent'
+skip a delete silently. So only GCP saying the resource was not found
+('isNotFound') is 'Absent'; any other failure is 'Undetermined'.
+-}
+data Presence
+    = Present
+    | Absent
+    | -- | the question could not be asked; the text says why (public: an exit
+      -- code and gcloud's first error line, which names resources, not secrets)
+      Undetermined Text
+    deriving (Eq, Show)
+
+{- | Whether gcloud's standard error says the resource was not found: the
+API's @404@ reason (@notFound@), its gRPC-style status (@NOT_FOUND@), or the
+sentence gcloud prints for a Compute resource (@The resource '...' was not
+found@).
+-}
+isNotFound :: ByteString -> Bool
+isNotFound err = any (`ByteString.isInfixOf` err) ["was not found", "notFound", "NOT_FOUND"]
+
+-- | 'Presence' from a @describe@'s exit code and standard error.
+describePresence :: ExitCode -> ByteString -> Presence
+describePresence ExitSuccess _ = Present
+describePresence (ExitFailure n) err
+    | isNotFound err = Absent
+    | otherwise = Undetermined (Text.pack ("exit " <> show n) <> errorLine err)
+
+-- | The first non-empty line of gcloud's standard error, prefixed by @": "@.
+errorLine :: ByteString -> Text
+errorLine err =
+    case filter (not . Text.null) (map Text.strip (Text.lines (Text.decodeUtf8With TextError.lenientDecode err))) of
+        (l : _) -> ": " <> l
+        [] -> ""
+
+{- | The 'CheckResult' for a 'Presence': 'Absent' is 'Failure' with the given
+reason, 'Undetermined' is 'Unknown' (ran, could not tell), so that a check
+that could not ask is never read as "go and create it".
+-}
+presenceCheck :: Text -> Presence -> CheckResult
+presenceCheck _ Present = Success
+presenceCheck absent Absent = Failure absent
+presenceCheck _ (Undetermined _) = Unknown
+
+{- | The @up@ of a node whose effect is "this resource exists": creates only
+on 'Absent'. (The one-shot drivers run @up@ on 'Unknown' too, so the check
+being 'Unknown' is not enough: @up@ has to ask again itself.)
+
+Asks first, at most @attempts@ times @delay@ microseconds apart (the pace of
+'retryingIO'): 'Present' is done; 'Undetermined' asks again, and throws once
+the attempts are spent; 'Absent' runs @create@. A @create@ that throws is
+followed by one more ask at once, so that "already exists" (a create racing
+another, or one GCP applied while reporting an error) settles as 'Present';
+otherwise it counts as an attempt, which keeps 'retryingIO''s patience with
+a freshly enabled API. An exception from @ask@ itself is not retried.
+-}
+ensurePresent :: Int -> Int -> IO Presence -> IO () -> IO ()
+ensurePresent attempts delay ask create = go attempts
+  where
+    go n = do
+        presence <- ask
+        case presence of
+            Present -> pure ()
+            Undetermined why
+                | n <= 1 -> throwIO (userError ("could not tell whether the resource exists: " <> Text.unpack why))
+                | otherwise -> threadDelay delay >> go (n - 1)
+            Absent -> do
+                result <- try create
+                case result of
+                    Right () -> pure ()
+                    Left (e :: SomeException) -> do
+                        settled <- ask
+                        case settled of
+                            Present -> pure ()
+                            _
+                                | n <= 1 -> throwIO e
+                                | otherwise -> threadDelay delay >> go (n - 1)
+
+{- | 'downIfPresent' for a 'Presence': 'Present' runs the teardown, 'Absent'
+skips it, and 'Undetermined' throws rather than skipping silently, so that a
+@down@ that could not tell fails loudly and leaves the node standing (its
+predecessors blocked) instead of reporting a teardown that never happened.
+-}
+downUnlessAbsent :: IO Presence -> IO () -> IO ()
+downUnlessAbsent ask act = do
+    presence <- ask
+    case presence of
+        Present -> act
+        Absent -> pure ()
+        Undetermined why -> throwIO (userError ("could not tell whether the resource exists, not deleting: " <> Text.unpack why))
 
 -------------------------------------------------------------------------------
 -- Eventual consistency

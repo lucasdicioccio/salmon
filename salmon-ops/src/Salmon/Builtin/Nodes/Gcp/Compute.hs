@@ -55,6 +55,7 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     instanceGroup,
     interpretInstanceGroupDescribe,
     instanceGroupMember,
+    groupMembershipPresence,
     interpretGroupMembership,
     interpretInstanceStatus,
     interpretInstancePresence,
@@ -69,6 +70,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (throwIO)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.ByteString (ByteString)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
@@ -1204,23 +1206,29 @@ firewallRule r gcloudTrack fw =
                 actions
                     { help = Text.unwords ["allows", fw.firewallAllow, "to", Text.intercalate "," fw.firewallTargetTags]
                     , ref = mkRef "gcp-firewall-rule" (fw.firewallProject.projectId, fw.firewallName)
-                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create (rFor'' (FirewallCreate fw)))
-                    , down = Core.downIfPresent checkFirewall (delete (rFor'' (FirewallDelete fw)))
-                    , check = checkFirewall
+                    , up = Core.ensurePresent Core.afterEnableRetries Core.afterEnableDelay askFirewall (create (rFor'' (FirewallCreate fw)))
+                    , down = Core.downUnlessAbsent askFirewall (delete (rFor'' (FirewallDelete fw)))
+                    , check = uncurry (interpretFirewallDescribe fw.firewallName) <$> describeFirewall
                     }
   where
     rFor'' cmd = contramap (RunComputeCommand cmd) r
 
-    checkFirewall :: IO CheckResult
-    checkFirewall = do
-        (code, _out, _err) <-
+    describeFirewall :: IO (ExitCode, ByteString)
+    describeFirewall = do
+        (code, _out, err) <-
             readCreateProcessWithExitCode (prepare computeCommand (FirewallDescribe fw)) ""
-        pure $ interpretFirewallDescribe fw.firewallName code
+        pure (code, err)
 
--- | The verdict drawn from @gcloud compute firewall-rules describe@.
-interpretFirewallDescribe :: Text -> ExitCode -> CheckResult
-interpretFirewallDescribe _name ExitSuccess = Success
-interpretFirewallDescribe name (ExitFailure _) = Failure ("firewall rule not found: " <> name)
+    askFirewall = uncurry Core.describePresence <$> describeFirewall
+
+{- | The verdict drawn from @gcloud compute firewall-rules describe@'s exit
+code and standard error: 'Failure' only when GCP says the rule was not
+found, 'Unknown' when the describe failed for any other reason (see
+'Core.Presence').
+-}
+interpretFirewallDescribe :: Text -> ExitCode -> ByteString -> CheckResult
+interpretFirewallDescribe name code err =
+    Core.presenceCheck ("firewall rule not found: " <> name) (Core.describePresence code err)
 
 -------------------------------------------------------------------------------
 
@@ -1268,30 +1276,54 @@ subnet r gcloudTrack net =
                 actions
                     { help = Text.unwords ["creates subnet", net.subnetName, "for", renderSubnetPurpose net.subnetPurpose]
                     , ref = mkRef "gcp-subnet" (net.subnetProject.projectId, net.subnetRegion.regionName, net.subnetName)
-                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create (rSub (SubnetsCreate net)))
-                    , down = Core.downIfPresent checkSubnet (delete (rSub (SubnetsDelete net)))
-                    , check = checkSubnet
+                    , up = Core.ensurePresent Core.afterEnableRetries Core.afterEnableDelay askForUp (create (rSub (SubnetsCreate net)))
+                    , down = Core.downUnlessAbsent askForDown (delete (rSub (SubnetsDelete net)))
+                    , check = snd <$> readSubnet
                     }
   where
     rSub cmd = contramap (RunComputeCommand cmd) r
 
-    checkSubnet :: IO CheckResult
-    checkSubnet = do
-        (code, out, _err) <-
+    readSubnet :: IO (Core.Presence, CheckResult)
+    readSubnet = do
+        (code, out, err) <-
             readCreateProcessWithExitCode (prepare computeCommand (SubnetsDescribe net)) ""
-        pure $ interpretSubnetDescribe net.subnetName (renderSubnetPurpose net.subnetPurpose) code (Text.strip (Text.decodeUtf8 out))
+        pure
+            ( Core.describePresence code err
+            , interpretSubnetDescribe net.subnetName (renderSubnetPurpose net.subnetPurpose) code err (Text.strip (Text.decodeUtf8 out))
+            )
+
+    -- a subnet of that name with another purpose is not one to create over:
+    -- fail with the check's reason (as the create's "already exists" did)
+    askForUp = do
+        (presence, verdict) <- readSubnet
+        case (presence, verdict) of
+            (Core.Present, Failure why) -> throwIO (userError (Text.unpack why))
+            _ -> pure presence
+
+    -- nor one to delete: it is not the subnet that was declared (as before,
+    -- when 'Core.downIfPresent' skipped on the check's 'Failure')
+    askForDown = do
+        (presence, verdict) <- readSubnet
+        pure $ case (presence, verdict) of
+            (Core.Present, Failure _) -> Core.Absent
+            _ -> presence
 
 {- | The verdict drawn from @gcloud compute networks subnets describe
---format=value(purpose)@, split out for testability.
+--format=value(purpose)@ (exit code, standard error, output), split out for
+testability.
+
+A failed describe is 'Failure' only when GCP says the subnet was not found,
+'Unknown' otherwise (see 'Core.Presence').
 
 The purpose is compared rather than merely noting the subnet exists, because
 a subnet of the wrong purpose is the one failure mode worth catching here: a
 plain subnet answers @describe@ perfectly well and then the balancer refuses
 to use it, at a point far away from this node.
 -}
-interpretSubnetDescribe :: Text -> Text -> ExitCode -> Text -> CheckResult
-interpretSubnetDescribe name _ (ExitFailure _) _ = Failure ("subnet not found: " <> name)
-interpretSubnetDescribe name wanted ExitSuccess out
+interpretSubnetDescribe :: Text -> Text -> ExitCode -> ByteString -> Text -> CheckResult
+interpretSubnetDescribe name _ code@(ExitFailure _) err _ =
+    Core.presenceCheck ("subnet not found: " <> name) (Core.describePresence code err)
+interpretSubnetDescribe name wanted ExitSuccess _ out
     | out == wanted = Success
     -- gcloud renders an ordinary subnet's purpose as PRIVATE, but has also
     -- left it empty in the past; an empty answer is only satisfying if that
@@ -1322,23 +1354,28 @@ instanceGroup r gcloudTrack grp =
                 actions
                     { help = Text.unwords ["creates unmanaged instance group", grp.groupName]
                     , ref = mkRef "gcp-instance-group" (grp.groupProject.projectId, grp.groupZone.zoneName, grp.groupName)
-                    , up = Core.retryingIO Core.afterEnableRetries Core.afterEnableDelay (create (rGrp (InstanceGroupsCreate grp)))
-                    , down = Core.downIfPresent checkGroup (delete (rGrp (InstanceGroupsDelete grp)))
-                    , check = checkGroup
+                    , up = Core.ensurePresent Core.afterEnableRetries Core.afterEnableDelay askGroup (create (rGrp (InstanceGroupsCreate grp)))
+                    , down = Core.downUnlessAbsent askGroup (delete (rGrp (InstanceGroupsDelete grp)))
+                    , check = uncurry (interpretInstanceGroupDescribe grp.groupName) <$> describeGroup
                     }
   where
     rGrp cmd = contramap (RunComputeCommand cmd) r
 
-    checkGroup :: IO CheckResult
-    checkGroup = do
-        (code, _out, _err) <-
+    describeGroup :: IO (ExitCode, ByteString)
+    describeGroup = do
+        (code, _out, err) <-
             readCreateProcessWithExitCode (prepare computeCommand (InstanceGroupsDescribe grp)) ""
-        pure $ interpretInstanceGroupDescribe grp.groupName code
+        pure (code, err)
 
--- | The verdict drawn from @gcloud compute instance-groups unmanaged describe@.
-interpretInstanceGroupDescribe :: Text -> ExitCode -> CheckResult
-interpretInstanceGroupDescribe _name ExitSuccess = Success
-interpretInstanceGroupDescribe name (ExitFailure _) = Failure ("instance group not found: " <> name)
+    askGroup = uncurry Core.describePresence <$> describeGroup
+
+{- | The verdict drawn from @gcloud compute instance-groups unmanaged
+describe@'s exit code and standard error: 'Failure' only when GCP says the
+group was not found, 'Unknown' otherwise (see 'Core.Presence').
+-}
+interpretInstanceGroupDescribe :: Text -> ExitCode -> ByteString -> CheckResult
+interpretInstanceGroupDescribe name code err =
+    Core.presenceCheck ("instance group not found: " <> name) (Core.describePresence code err)
 
 {- | One instance's membership of an unmanaged group, as a node of its own
 rather than a field of 'InstanceGroup'.
@@ -1359,32 +1396,42 @@ instanceGroupMember r gcloudTrack grp instName =
                 actions
                     { help = Text.unwords ["adds", instName, "to instance group", grp.groupName]
                     , ref = mkRef "gcp-instance-group-member" (grp.groupProject.projectId, grp.groupZone.zoneName, grp.groupName, instName)
-                    , up = add (rMem (InstanceGroupsAddInstance grp instName))
-                    , down = Core.downIfPresent checkMember (remove (rMem (InstanceGroupsRemoveInstance grp instName)))
-                    , check = checkMember
+                    , up = Core.ensurePresent Core.afterEnableRetries Core.afterEnableDelay askMember (add (rMem (InstanceGroupsAddInstance grp instName)))
+                    , down = Core.downUnlessAbsent askMember (remove (rMem (InstanceGroupsRemoveInstance grp instName)))
+                    , check = interpretGroupMembership instName <$> listMembers
                     }
   where
     rMem cmd = contramap (RunComputeCommand cmd) r
 
-    checkMember :: IO CheckResult
-    checkMember = do
-        (code, out, _err) <-
-            readCreateProcessWithExitCode (prepare computeCommand (InstanceGroupsListInstances grp)) ""
-        pure $ interpretGroupMembership instName code (Text.decodeUtf8 out)
+    listMembers :: IO (ExitCode, ByteString, ByteString)
+    listMembers =
+        readCreateProcessWithExitCode (prepare computeCommand (InstanceGroupsListInstances grp)) ""
 
-{- | The verdict drawn from @gcloud compute instance-groups list-instances
---format=value(instance)@, whose lines are full resource URLs.
+    askMember = groupMembershipPresence instName <$> listMembers
+
+{- | Whether @gcloud compute instance-groups list-instances
+--format=value(instance)@ (exit code, output, standard error) lists the
+instance. Its lines are full resource URLs.
 
 Matching on the last path segment rather than by substring, so that an
-instance named @web@ is not read as present because @web-canary@ is.
+instance named @web@ is not read as present because @web-canary@ is. A
+listing GCP refuses because the /group/ was not found is 'Core.Absent' (no
+group, no membership); any other failed listing is 'Core.Undetermined'.
 -}
-interpretGroupMembership :: Text -> ExitCode -> Text -> CheckResult
-interpretGroupMembership name (ExitFailure _) _ = Failure ("could not list the group's instances (looking for " <> name <> ")")
-interpretGroupMembership name ExitSuccess out
-    | name `elem` map lastSegment (Text.lines out) = Success
-    | otherwise = Failure ("instance not in the group: " <> name)
+groupMembershipPresence :: Text -> (ExitCode, ByteString, ByteString) -> Core.Presence
+groupMembershipPresence name (code, out, err) =
+    case code of
+        ExitFailure _ -> Core.describePresence code err
+        ExitSuccess
+            | name `elem` map lastSegment (Text.lines (Text.decodeUtf8 out)) -> Core.Present
+            | otherwise -> Core.Absent
   where
     lastSegment = last . Text.splitOn "/" . Text.strip
+
+-- | The verdict drawn from 'groupMembershipPresence': not listed is 'Failure', could not list is 'Unknown'.
+interpretGroupMembership :: Text -> (ExitCode, ByteString, ByteString) -> CheckResult
+interpretGroupMembership name =
+    Core.presenceCheck ("instance not in the group: " <> name) . groupMembershipPresence name
 
 -------------------------------------------------------------------------------
 

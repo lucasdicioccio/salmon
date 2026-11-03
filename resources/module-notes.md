@@ -2701,6 +2701,30 @@ The IO sequencing in `gceInstance` has no test, as for the machine type. `salmon
 later nodes need the VM up), so the run that would show a machine staying off under `serve` needs a small declaration
 of its own.
 
+**A failed describe is not "not found"** (`Gcp.Core.Presence`), for `Compute.subnet`, `firewallRule`, `instanceGroup`
+and `instanceGroupMember`. These used to read *any* non-zero exit of `describe` (`list-instances` for a membership) as
+absent: a describe failing for a reason of its own (a token being renewed, a network error, a 5xx) made `up` create a
+resource that existed, GCP answered "already exists" to every retry and everything behind the node was blocked
+(budgetz's buckette, release v13: a proxy-only subnet, 36 nodes blocked), and `down` skipped the delete silently.
+Now `Core.describePresence` reads exit code and stderr three ways: `Present`; `Absent` only when stderr says GCP did not
+find it (`Core.isNotFound`: `was not found`, `notFound`, `NOT_FOUND`); `Undetermined` otherwise. The `check` is
+`Failure` for absent and `Unknown` for undetermined (`Core.presenceCheck`). Since the one-shot drivers run `up` on
+`Unknown` too, `up` asks again itself (`Core.ensurePresent`: up to `afterEnableRetries` asks, `afterEnableDelay`
+apart, creates only on `Absent`, a failed create is settled by one more ask so "already exists" ends as present, and a
+create failing while the thing stays absent is retried as `retryingIO` did). `down` is `Core.downUnlessAbsent`: deletes
+on present, skips on absent, **throws** on undetermined. Kept as before: the `ref`, `help`, commands and argv of all four;
+a subnet of that name with another purpose still fails `up` (now with the check's reason before any create, not with
+the create's "already exists") and is still left alone by `down`; a membership whose *group* was not found is absent.
+Changed for callers: the exported `interpret*` functions take stderr (`interpretGroupMembership` the whole
+`(code, out, err)`), `groupMembershipPresence` is new, and `instanceGroupMember`'s `up` now retries like the others
+(an `add-instances` that keeps failing fails ~50 s later than before). Layer 0 only (`Test/GcpSpec.hs`, "Compute (tier
+3 resources)": the verdicts on not-found and other failures, and `ensurePresent`/`downUnlessAbsent` over scripted
+answers). **Not run**: anything against GCP; the not-found stderr in the tests is written from gcloud's message format,
+not captured, and which of the three markers each command really prints was not observed. Not converted (same defect,
+left for their own change): `Compute.address`/`interpretAddressDescribe`, `interpretInstancePresence` (the instance's
+`down`), `CloudDns` zone/record, `ArtifactRegistry`, `SecretManager`, `CloudRun.interpretServicePresence`, and `Iam`'s
+describes; `Core.downIfPresent` itself is unchanged.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another
