@@ -1273,6 +1273,7 @@ albSpec spec vm lb =
           LoadBalancing.albBuckets = []
         , LoadBalancing.albBucketRoutes = LoadBalancing.RefuseBucketRoutes
         , LoadBalancing.albHttp = LoadBalancing.HttpCreatedOnce
+        , LoadBalancing.albScope = LoadBalancing.RegionalBalancer
         }
   where
     hosts = maybe [] pure (httpsHost spec lb)
