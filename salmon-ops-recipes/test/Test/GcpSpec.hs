@@ -9,7 +9,8 @@ what makes it testable without a real GCP project.
 -}
 module Test.GcpSpec (tests) where
 
-import Control.Exception (try)
+import Control.Exception (SomeException, try)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Aeson (Value (..), decodeStrict, encode, object, toJSONList, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -2066,22 +2067,74 @@ lbBackendTests =
         let args = processArgs (prepare Compute.computeCommand (Compute.SubnetsCreate proxySubnet{Compute.subnetPurpose = Compute.PrivateSubnet}))
         assertBool (show args) (not ("--role" `elem` args))
     , testCase "a subnet of the wrong purpose is not the subnet that was asked for" $ do
-        assertEqual "" Success (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" ExitSuccess "REGIONAL_MANAGED_PROXY")
-        assertBool "a plain subnet under that name" (isFailure (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" ExitSuccess "PRIVATE"))
-        assertBool "absent" (isFailure (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" (ExitFailure 1) ""))
+        assertEqual "" Success (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" ExitSuccess "" "REGIONAL_MANAGED_PROXY")
+        assertBool "a plain subnet under that name" (isFailure (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" ExitSuccess "" "PRIVATE"))
+        assertBool "absent" (isFailure (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" (ExitFailure 1) computeNotFound ""))
     , testCase "gcloud leaving an ordinary subnet's purpose empty still satisfies PRIVATE" $
-        assertEqual "" Success (Compute.interpretSubnetDescribe "s" "PRIVATE" ExitSuccess "")
+        assertEqual "" Success (Compute.interpretSubnetDescribe "s" "PRIVATE" ExitSuccess "" "")
+    , testCase "a describe that failed for a reason of its own is Unknown, not absent" $ do
+        -- buckette v13: a proxy-only subnet that existed was created again
+        assertEqual "subnet" Unknown (Compute.interpretSubnetDescribe "s" "REGIONAL_MANAGED_PROXY" (ExitFailure 1) transientError "")
+        assertEqual "firewall rule" Unknown (Compute.interpretFirewallDescribe "fw" (ExitFailure 1) transientError)
+        assertEqual "instance group" Unknown (Compute.interpretInstanceGroupDescribe "ig" (ExitFailure 1) transientError)
+        assertEqual "membership" Unknown (Compute.interpretGroupMembership "web" (ExitFailure 1, "", transientError))
+        assertEqual "no stderr at all" Unknown (Compute.interpretFirewallDescribe "fw" (ExitFailure 1) "")
+    , testCase "only GCP saying not found is absent" $ do
+        assertBool "firewall rule" (isFailure (Compute.interpretFirewallDescribe "fw" (ExitFailure 1) computeNotFound))
+        assertBool "instance group" (isFailure (Compute.interpretInstanceGroupDescribe "ig" (ExitFailure 1) computeNotFound))
+        assertBool "the NOT_FOUND status" (isFailure (Compute.interpretFirewallDescribe "fw" (ExitFailure 1) "ERROR: (gcloud) NOT_FOUND: no such thing"))
+        assertBool "the notFound reason" (isFailure (Compute.interpretFirewallDescribe "fw" (ExitFailure 1) "{\"reason\": \"notFound\"}"))
+        assertEqual "present" Success (Compute.interpretFirewallDescribe "fw" ExitSuccess "")
+        assertEqual "present" Success (Compute.interpretInstanceGroupDescribe "ig" ExitSuccess "")
+    , testCase "ensurePresent creates only on absent" $ do
+        let run answers = do
+                ref <- newIORef answers
+                created <- newIORef (0 :: Int)
+                let ask = atomicModifyIORef' ref (\xs -> case xs of (x : rest) -> (rest, x); [] -> ([], Core.Present))
+                outcome <- try (Core.ensurePresent 3 0 ask (modifyIORef' created (+ 1)))
+                n <- readIORef created
+                pure (either (\(_ :: SomeException) -> False) (const True) outcome, n)
+        r1 <- run [Core.Present]
+        assertEqual "present: nothing to do" (True, 0) r1
+        r2 <- run [Core.Absent]
+        assertEqual "absent: created once" (True, 1) r2
+        r3 <- run [Core.Undetermined "5xx", Core.Undetermined "5xx", Core.Present]
+        assertEqual "asks again, never creates over it" (True, 0) r3
+        r4 <- run (replicate 3 (Core.Undetermined "5xx"))
+        assertEqual "could never tell: fails, created nothing" (False, 0) r4
+    , testCase "ensurePresent settles a failed create by asking again" $ do
+        asks <- newIORef [Core.Absent, Core.Present]
+        creates <- newIORef (0 :: Int)
+        let ask = atomicModifyIORef' asks (\xs -> case xs of (x : rest) -> (rest, x); [] -> ([], Core.Absent))
+            create = modifyIORef' creates (+ 1) >> ioError (userError "already exists")
+        outcome <- try (Core.ensurePresent 1 0 ask create)
+        n <- readIORef creates
+        assertBool "already exists, then present: fine" (either (\(_ :: SomeException) -> False) (const True) outcome)
+        assertEqual "one create" 1 n
+        -- a create that keeps failing while the resource stays absent still fails
+        stillAbsent <- try (Core.ensurePresent 2 0 (pure Core.Absent) (ioError (userError "boom")))
+        assertBool "fails after its attempts" (either (\(_ :: SomeException) -> True) (const False) stillAbsent)
+    , testCase "downUnlessAbsent deletes when present, skips when absent, fails when it cannot tell" $ do
+        deleted <- newIORef (0 :: Int)
+        let del = modifyIORef' deleted (+ 1)
+        Core.downUnlessAbsent (pure Core.Present) del
+        Core.downUnlessAbsent (pure Core.Absent) del
+        undetermined <- try (Core.downUnlessAbsent (pure (Core.Undetermined "exit 1")) del)
+        n <- readIORef deleted
+        assertEqual "one delete" 1 n
+        assertBool "loud" (either (\(_ :: SomeException) -> True) (const False) undetermined)
     , testCase "the instance group is unmanaged and zonal" $ do
         let args = processArgs (prepare Compute.computeCommand (Compute.InstanceGroupsCreate group))
         assertBool (show args) (["instance-groups", "unmanaged", "create", "ig"] `isSubsequenceOf` args)
         assertBool (show args) (["--zone", "europe-west1-b"] `isSubsequenceOf` args)
     , testCase "membership is read off the listing's last path segment" $ do
         let listing = "https://www.googleapis.com/compute/v1/projects/p/zones/europe-west1-b/instances/web\n"
-        assertEqual "" Success (Compute.interpretGroupMembership "web" ExitSuccess listing)
+        assertEqual "" Success (Compute.interpretGroupMembership "web" (ExitSuccess, listing, ""))
         -- the whole reason not to use a substring match
-        assertBool "a longer name containing this one" (isFailure (Compute.interpretGroupMembership "web" ExitSuccess "projects/p/zones/z/instances/web-canary\n"))
-        assertBool "empty listing" (isFailure (Compute.interpretGroupMembership "web" ExitSuccess ""))
-        assertBool "listing failed" (isFailure (Compute.interpretGroupMembership "web" (ExitFailure 1) ""))
+        assertBool "a longer name containing this one" (isFailure (Compute.interpretGroupMembership "web" (ExitSuccess, "projects/p/zones/z/instances/web-canary\n", "")))
+        assertBool "empty listing" (isFailure (Compute.interpretGroupMembership "web" (ExitSuccess, "", "")))
+        assertBool "the group was not found" (isFailure (Compute.interpretGroupMembership "web" (ExitFailure 1, "", computeNotFound)))
+        assertEqual "listing failed otherwise" Unknown (Compute.interpretGroupMembership "web" (ExitFailure 1, "", ""))
     ]
   where
     proxySubnet =
@@ -2094,6 +2147,10 @@ lbBackendTests =
             , Compute.subnetPurpose = Compute.RegionalManagedProxy
             }
     group = Compute.InstanceGroup "ig" (Core.Project "p") (Core.Zone "europe-west1-b")
+    -- the shape gcloud prints for a Compute 404 (written from gcloud's
+    -- message format, not captured from a run against GCP)
+    computeNotFound = "ERROR: (gcloud.compute.firewall-rules.describe) Could not fetch resource:\n - The resource 'projects/p/global/firewalls/fw' was not found\n"
+    transientError = "ERROR: (gcloud.compute.networks.subnets.describe) There was a problem refreshing your current auth tokens: Connection reset by peer\n"
 
 -------------------------------------------------------------------------------
 
