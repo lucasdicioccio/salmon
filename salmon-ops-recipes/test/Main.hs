@@ -107,6 +107,8 @@ import qualified Test.UpkeepSpec as UpkeepSpec
 import qualified Test.WindowSpec as WindowSpec
 import qualified Test.WrapperOrderingSpec as WrapperOrderingSpec
 
+import Test.HeavyLease (LeaseConfig, leaseConfigFromEnv, withHeavyLease)
+import qualified Test.HeavyLeaseSpec as HeavyLeaseSpec
 import Test.Tasty (DependencyType (..), TestTree, defaultMain, sequentialTestGroup, testGroup)
 
 {- | The cheap tiers run concurrently, as tasty does by default; the tiers
@@ -127,12 +129,24 @@ running alongside one another all the same.
 heavy :: [TestTree] -> TestTree
 heavy = sequentialTestGroup "containers and VMs (serialized)" AllFinish
 
+{- | The qemu (Layer 3) specs. Without a lease configured
+(@BUCKETTE_HEAVY_BUCKET@ unset, see "Test.HeavyLease") they sit directly in
+'heavy', as they always have; with one, they are one serialized subgroup
+guarded by a slot on that bucket, so a heavy run of another project on the
+same machine waits for this one, and this one for it.
+-}
+qemuTier :: Maybe LeaseConfig -> [TestTree] -> [TestTree]
+qemuTier Nothing ts = ts
+qemuTier lease ts =
+    [withHeavyLease lease "qemu" (sequentialTestGroup "qemu VMs (heavy-ops lease)" AllFinish ts)]
+
 main :: IO ()
-main =
+main = do
+    lease <- leaseConfigFromEnv
     defaultMain $
         testGroup
             "salmon-ops-recipes"
-            [ heavy
+            [ heavy $
                 [ DebootstrapSpec.tests
                 , -- these two shim PATH, which is process-global
                   PostgresInitSpec.tests
@@ -143,20 +157,25 @@ main =
                 , PgTextSearchSpec.sandboxTests
                 , PgVectorDemoSpec.sandboxTests
                 , PeerDBSpec.sandboxTests
-                , -- the rest of the VM specs: they share one bridge and a
-                  -- handful of fixed addresses, so two at once is two guests
-                  -- claiming one address.
-                  QemuSmokeSpec.tests
-                , PostgresReplicationSpec.tests
-                , PostgresSwitchoverSpec.tests
-                , PgBackupSpec.tests
-                , PgPairDemoSpec.tests
-                , PatroniHarnessSpec.tests
-                , PatroniArchiveVmsSpec.vmTests
-                , -- the user's own systemd manager and podman
-                  QuadletUserSpec.tests
-                , SystemdJobSpec.userTests
                 ]
+                    -- the rest of the VM specs: they share one bridge and a
+                    -- handful of fixed addresses, so two at once is two guests
+                    -- claiming one address.
+                    <> qemuTier
+                        lease
+                        [ QemuSmokeSpec.tests
+                        , PostgresReplicationSpec.tests
+                        , PostgresSwitchoverSpec.tests
+                        , PgBackupSpec.tests
+                        , PgPairDemoSpec.tests
+                        , PatroniHarnessSpec.tests
+                        , PatroniArchiveVmsSpec.vmTests
+                        ]
+                    <> [ -- the user's own systemd manager and podman
+                         QuadletUserSpec.tests
+                       , SystemdJobSpec.userTests
+                       ]
+            , HeavyLeaseSpec.tests
             , CheckSpec.tests
             , AmendNodeSpec.tests
             , CardTemplateSpec.tests
