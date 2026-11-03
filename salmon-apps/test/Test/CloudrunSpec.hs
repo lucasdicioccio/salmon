@@ -385,7 +385,8 @@ accountUnderAll :: IO ()
 accountUnderAll = do
     let dag = dagOf fuller
     account <- theOne "asserts the account gcloud acts as" dag
-    assertEqual "" ["declared account: deployer@example.com"] (notesOf dag account)
+    -- the address (deployer@example.com) is never printed, only its digest
+    assertEqual "" ["declared account digest: sha256:7454584d6cc0ab24"] (notesOf dag account)
     gcloud <- theOne "gcloud CLI on PATH" dag
     let exposed = [(rf, said) | (rf, said) <- texts dag, rf `notElem` [account, gcloud], not (account `Set.member` below dag rf)]
     assertEqual "nodes that could run before the account is asserted" [] (map snd exposed)

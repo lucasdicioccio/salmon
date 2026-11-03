@@ -2477,6 +2477,14 @@ its `up` throws on anything but a match, so dependants are `Blocked` before anyt
 account (that is the operator's machine configuration), is keyed `"gcp-account" account`, and is opt-in: a recipe that
 does not declare one behaves as before (`salmon-gcp-toy --account EMAIL` is the one caller). The check is once per pass,
 not `--account` on every call (`Core.withAccount` exists for a caller that wants that). Never run against a real gcloud.
+The address is never in what a pass prints: the note is `declared account digest: sha256:<16 hex>`
+(`Core.accountDigest`, SHA-256 of the stripped, case-folded address; an unkeyed digest of a guessable value, so it
+hides the address from the page, not from someone holding a candidate) and the `Ref` is `mkRef`'s hash of the
+address, which never showed it. The address appears only in failure text (mismatch, no active account), where the
+operator needs it. Before this the note was `declared account: <address>`, so `run tree` and every report printed it
+(asked for by an operator who could not strip it, the reporter being built before any directive is read); the
+changed note changes the representative once, harmless for a node that only checks. Layer 0 only (`Test/GcpSpec.hs`,
+"Core.declaredAccount": the folded node's help/notes carry no address, the digest is pinned).
 
 `Gcp.CloudRun.croOwner :: Maybe OwnerLabel` makes a service's name an address rather than a proof of who made it.
 `Nothing` (the default) is the node as it was: same argv, `ref`, `help`, no `notes`, a deploy over whatever has the

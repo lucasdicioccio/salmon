@@ -152,10 +152,28 @@ accountTests =
             ""
             ["auth", "print-access-token", "--account", "deployer@example.com"]
             (Core.withAccount declared ["auth", "print-access-token"])
+    , testCase "the node never shows the address: its help and notes carry a digest" $ do
+        let exts = [act.extension | act <- Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps (Core.declaredAccount silent ignoreTrack declared))))]
+        assertEqual "one node" 1 (length exts)
+        mapM_
+            ( \e -> do
+                let shown = e.help : e.notes
+                assertBool ("no address in " <> show shown) (not (any ("example.com" `Text.isInfixOf`) shown))
+                assertEqual "" ["declared account digest: " <> Core.accountDigest declared] e.notes
+            )
+            exts
+    , testCase "the digest is pinned, ignores case and surrounding space, and tells accounts apart" $ do
+        assertEqual "" "sha256:" (Text.take 7 (Core.accountDigest declared))
+        assertEqual "16 hex digits" 23 (Text.length (Core.accountDigest declared))
+        assertEqual "" (Core.accountDigest declared) (Core.accountDigest (Core.Account " Deployer@Example.COM\n"))
+        assertBool "" (Core.accountDigest declared /= Core.accountDigest (Core.Account "someone-else@example.com"))
+        -- sha256("deployer@example.com"), so the note's text cannot drift unnoticed
+        assertEqual "" pinnedDigest (Core.accountDigest declared)
     ]
   where
     declared = Core.Account "deployer@example.com"
     verdict = Core.interpretAccount declared
+    pinnedDigest = "sha256:7454584d6cc0ab24"
 
 -------------------------------------------------------------------------------
 
