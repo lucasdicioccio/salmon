@@ -43,6 +43,7 @@ import qualified Test.FollowSchedulerSpec as FollowSchedulerSpec
 import qualified Test.FollowSignatureSpec as FollowSignatureSpec
 import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpSpec as GcpSpec
+import qualified Test.RemoteFileSpec as RemoteFileSpec
 import qualified Test.SecretDeliverySpec as SecretDeliverySpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
 import qualified Test.LedgerSpec as LedgerSpec
@@ -200,6 +201,7 @@ main =
             , FollowSignatureSpec.tests
             , FollowSpec.tests
             , GcpSpec.tests
+            , RemoteFileSpec.tests
             , SecretDeliverySpec.tests
             , JWTSigningSpec.tests
             , LedgerSpec.tests

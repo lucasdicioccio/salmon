@@ -36,6 +36,7 @@ module Salmon.Builtin.Nodes.SecretDelivery (
     -- * Where a secret goes
     Placement (..),
     validatePlacement,
+    validateFilePlacement,
 
     -- * Upload over ssh
     SecretUpload (..),
@@ -129,14 +130,25 @@ is digits. The path is quoted rather than restricted ('shellQuote'), but a
 newline or a NUL in one is refused as a mistake.
 -}
 validatePlacement :: Placement -> Either Text Placement
-validatePlacement p
+validatePlacement p = do
+    valid <- validateFilePlacement p
+    if Text.last p.placeMode /= '0'
+        then Left (Text.pack p.placePath <> ": the mode grants access to others")
+        else Right valid
+
+{- | 'validatePlacement' without its secrecy rule: the same gate on what is
+spliced into a root shell (an absolute path, plain account names, an octal
+mode, normalized), for a file whose mode may grant reading to others -- a
+unit file, a configuration file ("Salmon.Builtin.Nodes.RemoteFile").
+-}
+validateFilePlacement :: Placement -> Either Text Placement
+validateFilePlacement p
     | not (isAbsolute p.placePath) = refuse "the path must be absolute"
     | any (`elem` ['\n', '\r', '\0']) p.placePath = refuse "the path holds a control character"
     | not (accountName p.placeOwner) = refuse "the owner must be a plain account name"
     | not (accountName p.placeGroup) = refuse "the group must be a plain group name"
     | Text.length p.placeMode < 3 || Text.length p.placeMode > 4 || not (Text.all isOctDigit p.placeMode) =
         refuse "the mode must be three or four octal digits"
-    | Text.last p.placeMode /= '0' = refuse "the mode grants access to others"
     | otherwise = Right p{placeMode = normalized}
   where
     refuse why = Left (Text.pack p.placePath <> ": " <> why)

@@ -176,7 +176,7 @@ Details for each are in `resources/module-notes.md` under the same names.
 | Podman, quadlets, registry logins | `Nodes/Podman.hs`, `Nodes/Podman/Quadlet.hs` | |
 | Waiting for a service to answer (probe, deadline) | `Nodes/Readiness.hs` | |
 | GCP (compute, DNS, load balancer, storage, secrets) | `Nodes/Gcp/` | `specs/gcloud-support.md`, `resources/gcp-toy-validation.md` |
-| Secrets delivery, deferred sub-graphs | `Nodes/{SecretDelivery,Deferred}.hs` | |
+| Secrets delivery, non-secret remote files, deferred sub-graphs | `Nodes/{SecretDelivery,RemoteFile,Deferred}.hs` | |
 | pg_turret log shipping (experimental package, Layer 0 only) | `Nodes/PgTurret.hs` in `salmon-ops-recipes-experimental` | |
 | NetBird self-hosted control plane (experimental package, Layer 0 only) | `SreBox.NetbirdControlPlane` in `salmon-ops-recipes-experimental` | |
 | Debian packages / apt index | `Nodes/Debian/Package.hs` | |
