@@ -331,6 +331,37 @@ Created container removed (before, `bracket` never got the name, and each failur
 `Test.PodmanSpec` takes a kernel-chosen port (`freeTcpPort`); the Postgres/pgBackRest/pg_textsearch
 specs still use fixed ports 15432-15441, each its own, so two concurrent suites still clash there.
 
+**A heavy-ops lease around the qemu tier (`Test.HeavyLease`), off by default.** The host is
+shared between projects, and two heavy runs at once (VMs, container fleets) starve each other. With
+`BUCKETTE_HEAVY_BUCKET` set, `Main` puts the Layer 3 specs in one serialized subgroup under a
+tasty `withResource` that holds one `slots` unit of that buckette bucket (a Locking dimension
+with `raMaximum: 2`, no replenish; set up by the pacing service, not by salmon) for the whole
+subgroup. Also required then, or the run fails at start: `BUCKETTE_BASE_URL` and
+`BUCKETTE_HEAVY_KEY_FILE` (a key scoped to that bucket: reserve, refresh, release; provisioned out of
+band, read at acquire time, sent only as the `Authorization` header, never printed). With the
+gate unset `main` builds the tree it built before: same groups, same names, no lease code runs.
+Protocol: `POST /buckets/:id/reservations` (`rrvAmounts {"slots":1}`, `rrvExpiresAt` now+10min,
+`rrvMode Wait wcMaxDelaySecs 60`), asked again on each `ReserveShortfall` with the ETA
+(`POST .../eta`) printed between attempts (a lease-scoped key likely cannot read it; it then
+prints "eta unavailable (HTTP 403)"); a refresh thread (`.../reservations/:rid/refresh`,
+`rfrExpiresAt` now+10min) every 3 min; release is `DELETE .../reservations/:rid` (a cancel; a commit
+would spend the slot), run as the `withResource` finalizer on pass, failure or interrupt (tasty's
+promise; an interrupt was not exercised here, and a killed run is freed by expiry). A
+non-2xx reserve (bad key, frozen bucket) fails the lease and so every guarded test. A refresh
+answered 400/404 means the hold lapsed: it says `LOST` on stderr and stops refreshing, and the
+tier carries on unguarded. The routes, the `Wait` shape (polls every 500 ms, capped at 300 s,
+then answers `ReserveShortfall`) and `ReserveSuccess.rsReservation.rvId` were checked against
+the instance's `/docs/llm.md`, `/help/reservations` and `/openapi.json` on 2026-11-03 (readable
+without a key). One deviation from the agreed contract: the transaction id is
+`host:pid:tier:start:attempt`, not `host:pid:tier`, because buckette refuses (and holds nothing
+for) a transaction id it saw in the last seven days, which a recycled pid or a second attempt
+after a `Wait` ran out would hit. Not done: Layer 2 (podman) is not guarded; shelling out to a
+`buckette-cli reserve` (it has no such command yet). The lease is taken even when every guarded
+spec then skips for missing VM privileges. Run: `Test.HeavyLeaseSpec` only (the gate, the
+bodies and answers, and acquire/wait/refresh/cancel, a 401 and an unreachable server against an
+in-process warp fake). **Not run:** against a live bucket, and the qemu tier with or without the
+lease.
+
 **Executable stand-ins are written by a child (`Test.Harness.writeExecutable`).** A spec that
 writes a script and then execs it (or has the code under test exec it through `PATH`) failed
 now and then with `bad interpreter: Text file busy` (ETXTBSY): `PostgresPairPrereqsSpec`'s
