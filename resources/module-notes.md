@@ -2786,6 +2786,27 @@ and one of that shape was in the capture); the emptying `down`. Known gap: the d
 `Cache-Control` declared differently for bytes already published is not a difference and reaches an object only when
 its content next changes. Each check costs one listing of both sides per pass.
 
+`Gcp.Monitoring` alert policies take any condition (feature 53a0176e): `Policy` holds `[Condition]`, one of
+`OnCloudRun target CloudRunCondition` (the four Cloud Run conditions, unchanged), `Threshold MetricThreshold` (any
+monitoring filter, `Aggregation`s, a `Comparison`, a threshold and a duration: VM metrics, log-based metrics through
+`logBasedMetricFilter`, uptime checks through `uptimeCheckFailing`), `Absence MetricAbsence` (`conditionAbsent`) and
+`MatchedLog LogMatch` (`conditionMatchedLog`, optional label extractors), plus `poAlertStrategy :: Maybe AlertStrategy`
+(notification rate limit, auto-close). `monitoringPolicy`/`monitoringPolicyAfter` are the node; identity (display
+name, `ref` `"gcp-monitoring-policy" (project, display name)`) and the fingerprint label are as before. Load-bearing:
+`AlertPolicy` is now `cloudRunPolicy` of a `Policy` and `alertPolicy`/`renderPolicy`/`policyFingerprint`/`lookupPolicy`/
+`interpretPolicyList` keep their `AlertPolicy` signatures; a `Nothing` or empty strategy adds no key, so an existing
+Cloud Run policy renders to the same bytes and keeps its fingerprint (pinned by a hash in `Test/GcpSpec.hs`, taken
+from the code before the change) and its node keeps its `help`/`notes`; a strategy appends one note. Breaking for
+callers matching on it: `MonitoringCommand`'s `Policies*` constructors carry a `Policy`. `policyProblems` (no
+condition; a log match beside others or without a rate limit, both refused by Google) makes `up` throw before any
+command; `check` does not consult it. Combiner is still `OR` only; uptime checks themselves and log-based metrics
+themselves are not declared here (the conditions name them by id/name). **Layer 0 only** (`Test/GcpSpec.hs` "Monitoring":
+rendered JSON, argv, fingerprint, problems, node `help`/`notes`). No command has met a real project: that `gcloud alpha
+monitoring policies create --policy` accepts `alertStrategy`, `conditionAbsent` and `conditionMatchedLog` inline, that
+the uptime condition's shape (`ALIGN_NEXT_OLDER`/`REDUCE_COUNT_FALSE` over `resource.label.*`, 1200s) is what the API
+accepts for every check resource type, and that the API echoes nothing that would make a log-match policy differ
+from its fingerprint are all unverified.
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port
