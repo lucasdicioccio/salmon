@@ -90,6 +90,7 @@ tests =
         , testGroup "ResourceManager" projectTests
         , testGroup "Compute (tier 2 resources)" vmTests
         , testGroup "Compute (tier 3 resources)" lbBackendTests
+        , testGroup "Compute.firewallRule drift" firewallDriftTests
         , testGroup "SecretManager" secretTests
         , testGroup "CloudRun options" cloudRunOptionTests
         , testGroup "Ssh.ClientOpts" clientOptsTests
@@ -2210,6 +2211,134 @@ lbBackendTests =
     -- message format, not captured from a run against GCP)
     computeNotFound = "ERROR: (gcloud.compute.firewall-rules.describe) Could not fetch resource:\n - The resource 'projects/p/global/firewalls/fw' was not found\n"
     transientError = "ERROR: (gcloud.compute.networks.subnets.describe) There was a problem refreshing your current auth tokens: Connection reset by peer\n"
+
+-------------------------------------------------------------------------------
+
+{- | 'Compute.firewallRule' compares an existing rule with its declaration
+(feature 959a5bb2). The describe JSON here is written from the Compute API's
+@Firewall@ resource shape (@allowed[].IPProtocol@, @allowed[].ports@,
+@sourceRanges@, @targetTags@, @network@ as a URL, @direction@), not captured
+from gcloud.
+-}
+firewallDriftTests :: [TestTree]
+firewallDriftTests =
+    [ testCase "the --allow syntax is a set: order, repetition and 80-80 do not count" $ do
+        assertEqual "" (Compute.parseFirewallAllow "tcp:80,tcp:22") (Compute.parseFirewallAllow " tcp:22 , tcp:80-80,tcp:22")
+        assertEqual "" (Set.fromList [("tcp", Nothing), ("udp", Just "53"), ("icmp", Nothing)]) (Compute.parseFirewallAllow "tcp,udp:53,icmp")
+        assertEqual "" "tcp:22,tcp:8000-8100" (Compute.renderFirewallPermits (Compute.parseFirewallAllow "tcp:8000-8100,tcp:22"))
+    , testCase "a rule as declared is in place" $
+        assertEqual "" Success (check (rule [allow "tcp" ["22", "443"]] ["203.0.113.0/24"] ["web"]))
+    , testCase "ports grouped differently by GCP are the same rule" $
+        assertEqual "" Success (check (rule [allow "tcp" ["443"], allow "tcp" ["22"]] ["203.0.113.0/24"] ["web"]))
+    , testCase "a port added to the declaration is a Failure naming both, and up updates" $ do
+        let live = rule [allow "tcp" ["22"]] ["203.0.113.0/24"] ["web"]
+        assertEqual "" (Failure "firewall rule web-in allows tcp:22 where tcp:22,tcp:443 is declared") (check live)
+        assertEqual "" (Right Compute.FirewallUpdateStep) (plan live)
+    , testCase "a port removed from the declaration is noticed too" $ do
+        let live = rule [allow "tcp" ["22", "443", "8080"]] ["203.0.113.0/24"] ["web"]
+        assertBool "" (isFailure (check live))
+        assertEqual "" (Right Compute.FirewallUpdateStep) (plan live)
+    , testCase "a protocol allowed on every port is not the same as one port" $
+        assertBool "" (isFailure (check (rule [allow "tcp" []] ["203.0.113.0/24"] ["web"])))
+    , testCase "source ranges and target tags are compared as sets" $ do
+        assertEqual "order" Success (check (rule [allow "tcp" ["22", "443"]] ["203.0.113.0/24"] ["web"]))
+        assertBool "a wider range" (isFailure (check (rule [allow "tcp" ["22", "443"]] ["0.0.0.0/0"] ["web"])))
+        assertBool "another tag" (isFailure (check (rule [allow "tcp" ["22", "443"]] ["203.0.113.0/24"] ["web", "db"])))
+        assertBool "no tag at all (every instance)" (isFailure (check (ruleWithout "targetTags" [allow "tcp" ["22", "443"]] ["203.0.113.0/24"])))
+        assertEqual "update" (Right Compute.FirewallUpdateStep) (plan (rule [allow "tcp" ["22", "443"]] ["0.0.0.0/0"] ["web"]))
+    , testCase "no declared source range: ranges are not compared" $
+        assertEqual "" Success (Compute.interpretFirewallRule fw{Compute.firewallSourceRanges = []} ExitSuccess (rule [allow "tcp" ["22", "443"]] ["0.0.0.0/0"] ["web"]) "")
+    , testCase "another network, an egress rule or a deny rule is refused, never updated" $ do
+        let onOther = withField "network" (String "https://www.googleapis.com/compute/v1/projects/p/global/networks/other") (rule [allow "tcp" ["22", "443"]] ["203.0.113.0/24"] ["web"])
+            egress = withField "direction" (String "EGRESS") (rule [allow "tcp" ["22", "443"]] ["203.0.113.0/24"] ["web"])
+            deny = withField "denied" (toJSONList [allowValue "tcp" ["22"]]) (ruleWithout "allowed" [] ["203.0.113.0/24"])
+        assertEqual "network" (Failure "firewall rule web-in is on network other where default is declared") (check onOther)
+        assertBool "egress" (isFailure (check egress))
+        assertBool "deny" (isFailure (check deny))
+        mapM_ (\live -> assertBool "throws" (either (const True) (const False) (plan live))) [onOther, egress, deny]
+    , testCase "a rule as declared needs no update" $
+        assertEqual "" (Right Compute.FirewallInPlace) (plan (rule [allow "tcp" ["22", "443"]] ["203.0.113.0/24"] ["web"]))
+    , testCase "absent, undetermined and unreadable keep their meaning" $ do
+        let notFound = "ERROR: (gcloud.compute.firewall-rules.describe) Could not fetch resource:\n - The resource 'projects/p/global/firewalls/web-in' was not found\n"
+        assertBool "absent" (isFailure (Compute.interpretFirewallRule fw (ExitFailure 1) "" notFound))
+        assertEqual "a 5xx" Unknown (Compute.interpretFirewallRule fw (ExitFailure 1) "" "ERROR: (gcloud) backendError\n")
+        assertEqual "not JSON" Unknown (Compute.interpretFirewallRule fw ExitSuccess "name: web-in\n" "")
+        assertEqual "a port that is not a string" Unknown (Compute.interpretFirewallRule fw ExitSuccess "{\"allowed\":[{\"IPProtocol\":\"tcp\",\"ports\":[22]}]}" "")
+        assertBool "up throws on unreadable" (either (const True) (const False) (Compute.planFirewallUp fw ExitSuccess "[]" ""))
+        assertBool "up throws on a failed read" (either (const True) (const False) (Compute.planFirewallUp fw (ExitFailure 1) "" "ERROR: (gcloud) backendError\n"))
+    , testCase "the describe asks for JSON, the update sets every compared field" $ do
+        assertEqual
+            "describe"
+            ["compute", "firewall-rules", "describe", "web-in", "--format=json", "--project", "p", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.FirewallDescribe fw)))
+        assertEqual
+            "update"
+            ["compute", "firewall-rules", "update", "web-in", "--allow", "tcp:443,tcp:22", "--project", "p", "--source-ranges", "203.0.113.0/24", "--target-tags=web", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.FirewallUpdate fw)))
+        assertEqual
+            "no ranges, no tags: ranges untouched, tags cleared"
+            ["compute", "firewall-rules", "update", "web-in", "--allow", "tcp:443,tcp:22", "--project", "p", "--target-tags=", "--quiet"]
+            (processArgs (prepare Compute.computeCommand (Compute.FirewallUpdate fw{Compute.firewallSourceRanges = [], Compute.firewallTargetTags = []})))
+    , testCase "the node renders what it rendered before" $ do
+        let node = only (Compute.firewallRule silent ignoreTrack fw)
+        assertEqual "help" "allows tcp:443,tcp:22 to web" node.extension.help
+        assertEqual "notes" [] node.extension.notes
+        assertEqual "ref" (mkRef "gcp-firewall-rule" ("p" :: Text.Text, "web-in" :: Text.Text)) node.extension.ref
+        assertEqual "create argv unchanged" createArgv (processArgs (prepare Compute.computeCommand (Compute.FirewallCreate fw)))
+    , testProperty "a rule printed from the declaration is in place, in any order" $
+        forAll (listOf1 (elements ["22", "80", "443", "8000-8100", "53"])) $ \ports ->
+            forAll (listOf (elements ["a", "b", "c"])) $ \tags ->
+                let decl = fw{Compute.firewallAllow = Text.intercalate "," (map ("tcp:" <>) ports), Compute.firewallTargetTags = tags}
+                    live = rule [allow "tcp" (reverse (nub ports))] ["203.0.113.0/24"] (reverse (nub tags))
+                 in Compute.interpretFirewallRule decl ExitSuccess live "" === Success
+    , testProperty "one port more or less on either side is a Failure and an update" $
+        forAll (listOf (elements ["22", "80", "443"])) $ \ports ->
+            forAll (elements ["9000", "9001"]) $ \extra ->
+                let decl = fw{Compute.firewallAllow = Text.intercalate "," (map ("tcp:" <>) ("1" : ports))}
+                    live = rule [allow "tcp" ("1" : extra : ports)] ["203.0.113.0/24"] ["web"]
+                 in isFailure (Compute.interpretFirewallRule decl ExitSuccess live "")
+                        .&&. Compute.planFirewallUp decl ExitSuccess live "" === Right Compute.FirewallUpdateStep
+    ]
+  where
+    fw =
+        Compute.FirewallRule
+            { Compute.firewallName = "web-in"
+            , Compute.firewallProject = Core.Project "p"
+            , Compute.firewallNetwork = "default"
+            , Compute.firewallAllow = "tcp:443,tcp:22"
+            , Compute.firewallSourceRanges = ["203.0.113.0/24"]
+            , Compute.firewallTargetTags = ["web"]
+            }
+    createArgv =
+        [ "compute", "firewall-rules", "create", "web-in"
+        , "--network", "default", "--allow", "tcp:443,tcp:22"
+        , "--source-ranges", "203.0.113.0/24", "--project", "p"
+        , "--target-tags", "web"
+        , "--quiet"
+        ]
+    check live = Compute.interpretFirewallRule fw ExitSuccess live ""
+    plan live = Compute.planFirewallUp fw ExitSuccess live ""
+    allow proto ports = (proto, ports)
+    allowValue :: Text.Text -> [Text.Text] -> Value
+    allowValue proto ports = object (["IPProtocol" .= proto] <> ["ports" .= ports | not (null ports)])
+    ruleValue allowed ranges tags =
+        KeyMap.fromList
+            [ ("name", String "web-in")
+            , ("network", String "https://www.googleapis.com/compute/v1/projects/p/global/networks/default")
+            , ("direction", String "INGRESS")
+            , ("priority", Number 1000)
+            , ("allowed", toJSONList [allowValue p ps | (p, ps) <- allowed])
+            , ("sourceRanges", toJSONList (map String ranges))
+            , ("targetTags", toJSONList (map String tags))
+            ]
+    rule allowed ranges tags = LByteString.toStrict (encode (Object (ruleValue allowed ranges tags)))
+    ruleWithout field allowed ranges = LByteString.toStrict (encode (Object (KeyMap.delete (Key.fromText field) (ruleValue allowed ranges []))))
+    withField field v bs = case decodeStrict bs of
+        Just (Object o) -> LByteString.toStrict (encode (Object (KeyMap.insert (Key.fromText field) v o)))
+        _ -> bs
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
 
 -------------------------------------------------------------------------------
 

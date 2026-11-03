@@ -46,6 +46,17 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     FirewallRule (..),
     firewallRule,
     interpretFirewallDescribe,
+    FirewallPermit,
+    parseFirewallAllow,
+    renderFirewallPermits,
+    LiveFirewall (..),
+    parseLiveFirewall,
+    FirewallVerdict (..),
+    compareFirewall,
+    judgeFirewall,
+    interpretFirewallRule,
+    FirewallUpStep (..),
+    planFirewallUp,
     SubnetPurpose (..),
     renderSubnetPurpose,
     Subnet (..),
@@ -67,6 +78,7 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
 ) where
 
 import Control.Applicative ((<|>))
+import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -1197,38 +1209,276 @@ data FirewallRule = FirewallRule
     }
     deriving (Eq, Show)
 
--- | Idempotently creates an ingress firewall rule.
+{- | Idempotently manages an ingress firewall rule.
+
+* 'check': the rule's @describe@ (@--format=json@) compared with the
+  declaration ('judgeFirewall'): what it allows (protocols and ports, as a
+  set), its source ranges and its target tags, and the two things an update
+  cannot change, its network and its direction (a deny rule of that name is
+  refused the same way). Absent is a 'Failure'; a describe that failed for a
+  reason of its own, or printed a rule that could not be read, is 'Unknown'.
+* 'up': creates the rule when absent ('Core.ensurePresent'), then reads it
+  and, when its ports, ranges or tags differ, runs @firewall-rules update@
+  with the declared ones ('planFirewallUp'). Another network, an egress rule
+  or a deny rule throws, naming both; nothing is deleted to recreate it.
+* 'down': deletes the rule if it is there ('Core.downUnlessAbsent').
+-}
 firewallRule :: Reporter Report -> Track' (Binary "gcloud") -> FirewallRule -> Op
 firewallRule r gcloudTrack fw =
     withBinary gcloudTrack computeCommand (FirewallCreate fw) $ \create ->
-        withBinary gcloudTrack computeCommand (FirewallDelete fw) $ \delete ->
-            op "gcp-firewall-rule" nodeps $ \actions ->
-                actions
-                    { help = Text.unwords ["allows", fw.firewallAllow, "to", Text.intercalate "," fw.firewallTargetTags]
-                    , ref = mkRef "gcp-firewall-rule" (fw.firewallProject.projectId, fw.firewallName)
-                    , up = Core.ensurePresent Core.afterEnableRetries Core.afterEnableDelay askFirewall (create (rFor'' (FirewallCreate fw)))
-                    , down = Core.downUnlessAbsent askFirewall (delete (rFor'' (FirewallDelete fw)))
-                    , check = uncurry (interpretFirewallDescribe fw.firewallName) <$> describeFirewall
-                    }
+        withBinary gcloudTrack computeCommand (FirewallUpdate fw) $ \update ->
+            withBinary gcloudTrack computeCommand (FirewallDelete fw) $ \delete ->
+                op "gcp-firewall-rule" nodeps $ \actions ->
+                    actions
+                        { help = Text.unwords ["allows", fw.firewallAllow, "to", Text.intercalate "," fw.firewallTargetTags]
+                        , ref = mkRef "gcp-firewall-rule" (fw.firewallProject.projectId, fw.firewallName)
+                        , up = do
+                            Core.ensurePresent Core.afterEnableRetries Core.afterEnableDelay askFirewall (create (rFor'' (FirewallCreate fw)))
+                            step <- readPlan Core.afterEnableRetries
+                            case step of
+                                FirewallInPlace -> pure ()
+                                FirewallUpdateStep -> update (rFor'' (FirewallUpdate fw))
+                        , down = Core.downUnlessAbsent askFirewall (delete (rFor'' (FirewallDelete fw)))
+                        , check = (\(code, out, err) -> interpretFirewallRule fw code out err) <$> describeFirewall
+                        }
   where
     rFor'' cmd = contramap (RunComputeCommand cmd) r
 
-    describeFirewall :: IO (ExitCode, ByteString)
-    describeFirewall = do
-        (code, _out, err) <-
-            readCreateProcessWithExitCode (prepare computeCommand (FirewallDescribe fw)) ""
-        pure (code, err)
+    describeFirewall :: IO (ExitCode, ByteString, ByteString)
+    describeFirewall =
+        readCreateProcessWithExitCode (prepare computeCommand (FirewallDescribe fw)) ""
 
-    askFirewall = uncurry Core.describePresence <$> describeFirewall
+    askFirewall = (\(code, _, err) -> Core.describePresence code err) <$> describeFirewall
+
+    -- The rule is there ('Core.ensurePresent' returned): read it again, as
+    -- patiently as 'Core.ensurePresent' asks, and plan.
+    readPlan :: Int -> IO FirewallUpStep
+    readPlan n = do
+        (code, out, err) <- describeFirewall
+        case Core.describePresence code err of
+            Core.Undetermined _
+                | n > 1 -> threadDelay Core.afterEnableDelay >> readPlan (n - 1)
+            _ -> either (throwIO . userError . Text.unpack) pure (planFirewallUp fw code out err)
 
 {- | The verdict drawn from @gcloud compute firewall-rules describe@'s exit
-code and standard error: 'Failure' only when GCP says the rule was not
+code and standard error alone: 'Failure' only when GCP says the rule was not
 found, 'Unknown' when the describe failed for any other reason (see
-'Core.Presence').
+'Core.Presence'). Presence only: 'firewallRule''s check is
+'interpretFirewallRule', which also compares what the rule holds.
 -}
 interpretFirewallDescribe :: Text -> ExitCode -> ByteString -> CheckResult
 interpretFirewallDescribe name code err =
     Core.presenceCheck ("firewall rule not found: " <> name) (Core.describePresence code err)
+
+{- | One thing an allow rule lets through: a protocol (as written; gcloud
+says it is case-sensitive) and one port or port range, 'Nothing' being every
+port of that protocol.
+-}
+type FirewallPermit = (Text, Maybe Text)
+
+{- | gcloud's @--allow@ syntax (@tcp:22,tcp:8000-8100,udp:53,icmp@) as a set of
+'FirewallPermit's, so that order and repetition do not count. A range of one
+port (@80-80@) is read as that port.
+-}
+parseFirewallAllow :: Text -> Set FirewallPermit
+parseFirewallAllow spec =
+    Set.fromList
+        [ (Text.strip proto, normalisePort (Text.drop 1 rest))
+        | item <- map Text.strip (Text.splitOn "," spec)
+        , not (Text.null item)
+        , let (proto, rest) = Text.breakOn ":" item
+        ]
+
+normalisePort :: Text -> Maybe Text
+normalisePort raw
+    | Text.null p = Nothing
+    | otherwise = case Text.splitOn "-" p of
+        [a, b] | a == b -> Just a
+        _ -> Just p
+  where
+    p = Text.strip raw
+
+-- | 'FirewallPermit's back in @--allow@ syntax, sorted.
+renderFirewallPermits :: Set FirewallPermit -> Text
+renderFirewallPermits permits
+    | Set.null permits = "(nothing)"
+    | otherwise = Text.intercalate "," [maybe proto (\port -> proto <> ":" <> port) mport | (proto, mport) <- Set.toList permits]
+
+-- | What an existing rule's @describe --format=json@ says, as far as the node compares it.
+data LiveFirewall = LiveFirewall
+    { liveFirewallNetwork :: Maybe Text
+    -- ^ the last segment of @network@ (the API gives the network's URL)
+    , liveFirewallDirection :: Text
+    -- ^ @direction@; @INGRESS@ when the field is missing (the API's default)
+    , liveFirewallAllowed :: Set FirewallPermit
+    , liveFirewallDenies :: Bool
+    -- ^ whether the rule has a non-empty @denied@: a deny rule
+    , liveFirewallSourceRanges :: Set Text
+    , liveFirewallTargetTags :: Set Text
+    }
+    deriving (Eq, Show)
+
+{- | Reads @gcloud compute firewall-rules describe --format=json@. A missing
+list is an empty one; 'Left' names what could not be read. @sourceTags@,
+service accounts, @priority@, @disabled@ and logging are not read.
+-}
+parseLiveFirewall :: ByteString -> Either Text LiveFirewall
+parseLiveFirewall out =
+    case Aeson.decodeStrict out of
+        Just (Aeson.Object top) -> do
+            network <- case KeyMap.lookup "network" top of
+                Nothing -> Right Nothing
+                Just Aeson.Null -> Right Nothing
+                Just (Aeson.String t) -> Right (Just (lastSegment t))
+                Just v -> unreadable "network" v
+            direction <- case KeyMap.lookup "direction" top of
+                Nothing -> Right "INGRESS"
+                Just Aeson.Null -> Right "INGRESS"
+                Just (Aeson.String t) -> Right t
+                Just v -> unreadable "direction" v
+            allowed <- permits "allowed" (KeyMap.lookup "allowed" top)
+            denied <- permits "denied" (KeyMap.lookup "denied" top)
+            ranges <- texts "sourceRanges" (KeyMap.lookup "sourceRanges" top)
+            tags <- texts "targetTags" (KeyMap.lookup "targetTags" top)
+            Right
+                LiveFirewall
+                    { liveFirewallNetwork = network
+                    , liveFirewallDirection = direction
+                    , liveFirewallAllowed = allowed
+                    , liveFirewallDenies = not (Set.null denied)
+                    , liveFirewallSourceRanges = Set.fromList ranges
+                    , liveFirewallTargetTags = Set.fromList tags
+                    }
+        _ -> Left "the describe did not print a JSON object"
+  where
+    unreadable :: Text -> Aeson.Value -> Either Text a
+    unreadable field _ = Left ("could not read " <> field)
+
+    texts :: Text -> Maybe Aeson.Value -> Either Text [Text]
+    texts _ Nothing = Right []
+    texts _ (Just Aeson.Null) = Right []
+    texts field (Just v@(Aeson.Array xs)) = traverse (\x -> case x of Aeson.String t -> Right t; _ -> unreadable field v) (foldr (:) [] xs)
+    texts field (Just v) = unreadable field v
+
+    permits :: Text -> Maybe Aeson.Value -> Either Text (Set FirewallPermit)
+    permits _ Nothing = Right Set.empty
+    permits _ (Just Aeson.Null) = Right Set.empty
+    permits field (Just (Aeson.Array xs)) = Set.unions <$> traverse (entry field) (foldr (:) [] xs)
+    permits field (Just v) = unreadable field v
+
+    entry :: Text -> Aeson.Value -> Either Text (Set FirewallPermit)
+    entry field (Aeson.Object o) = do
+        proto <- case KeyMap.lookup "IPProtocol" o of
+            Just (Aeson.String t) -> Right t
+            Just v -> unreadable (field <> ".IPProtocol") v
+            Nothing -> Left ("could not read " <> field <> ".IPProtocol")
+        ports <- texts (field <> ".ports") (KeyMap.lookup "ports" o)
+        Right $
+            if null ports
+                then Set.singleton (proto, Nothing)
+                else Set.fromList [(proto, normalisePort port) | port <- ports]
+    entry field v = unreadable field v
+
+lastSegment :: Text -> Text
+lastSegment t = case filter (not . Text.null) (Text.splitOn "/" t) of
+    [] -> t
+    segs -> last segs
+
+{- | How an existing rule stands against its declaration. 'FirewallDiffers'
+is what @firewall-rules update@ fixes; 'FirewallRefused' is what it cannot
+(the network and direction are fixed at creation, and gcloud's help: "the
+action flag cannot be defined when updating a firewall rule"), which the node
+reports and never repairs. Each carries public reasons: names, ports, ranges
+and tags, all already in the declaration's argv.
+-}
+data FirewallVerdict
+    = FirewallMatches
+    | FirewallDiffers [Text]
+    | FirewallRefused [Text]
+    deriving (Eq, Show)
+
+{- | Compares an existing rule with the declaration. Allowed protocols and
+ports, source ranges and target tags are compared as sets. A declaration
+with no source range does not compare ranges (what GCP holds then was not
+observed); no declared target tag means the rule must have none.
+-}
+compareFirewall :: FirewallRule -> LiveFirewall -> FirewallVerdict
+compareFirewall fw live
+    | not (null refused) = FirewallRefused refused
+    | not (null differs) = FirewallDiffers differs
+    | otherwise = FirewallMatches
+  where
+    name = fw.firewallName
+    declaredNetwork = lastSegment fw.firewallNetwork
+    refused =
+        [ Text.unwords ["firewall rule", name, "is on network", n, "where", declaredNetwork, "is declared"]
+        | Just n <- [live.liveFirewallNetwork]
+        , n /= declaredNetwork
+        ]
+            <> [ Text.unwords ["firewall rule", name, "is an", live.liveFirewallDirection, "rule where an INGRESS rule is declared"]
+               | live.liveFirewallDirection /= "INGRESS"
+               ]
+            <> [ Text.unwords ["firewall rule", name, "is a deny rule where an allow rule is declared"]
+               | live.liveFirewallDenies
+               ]
+    declaredAllow = parseFirewallAllow fw.firewallAllow
+    declaredRanges = Set.fromList fw.firewallSourceRanges
+    declaredTags = Set.fromList fw.firewallTargetTags
+    differs =
+        [ Text.unwords ["firewall rule", name, "allows", renderFirewallPermits live.liveFirewallAllowed, "where", renderFirewallPermits declaredAllow, "is declared"]
+        | live.liveFirewallAllowed /= declaredAllow
+        ]
+            <> [ Text.unwords ["firewall rule", name, "has source ranges", renderTexts live.liveFirewallSourceRanges, "where", renderTexts declaredRanges, "is declared"]
+               | not (Set.null declaredRanges)
+               , live.liveFirewallSourceRanges /= declaredRanges
+               ]
+            <> [ Text.unwords ["firewall rule", name, "has target tags", renderTexts live.liveFirewallTargetTags, "where", renderTexts declaredTags, "is declared"]
+               | live.liveFirewallTargetTags /= declaredTags
+               ]
+    renderTexts s
+        | Set.null s = "(none)"
+        | otherwise = Text.intercalate "," (Set.toList s)
+
+{- | The rule's state from one @describe --format=json@ (exit code, standard
+output, standard error): its 'Core.Presence' when it is not 'Core.Present',
+otherwise the verdict, or 'Left' when what was printed could not be read.
+-}
+judgeFirewall :: FirewallRule -> ExitCode -> ByteString -> ByteString -> Either Core.Presence (Either Text FirewallVerdict)
+judgeFirewall fw code out err =
+    case Core.describePresence code err of
+        Core.Present -> Right (compareFirewall fw <$> parseLiveFirewall out)
+        other -> Left other
+
+-- | 'firewallRule''s check, over one @describe --format=json@.
+interpretFirewallRule :: FirewallRule -> ExitCode -> ByteString -> ByteString -> CheckResult
+interpretFirewallRule fw code out err =
+    case judgeFirewall fw code out err of
+        Left presence -> Core.presenceCheck ("firewall rule not found: " <> fw.firewallName) presence
+        Right (Left _unreadable) -> Unknown
+        Right (Right FirewallMatches) -> Success
+        Right (Right (FirewallDiffers why)) -> Failure (Text.intercalate "; " why)
+        Right (Right (FirewallRefused why)) -> Failure (Text.intercalate "; " why)
+
+-- | What @up@ does to a rule that is there.
+data FirewallUpStep
+    = FirewallInPlace
+    | FirewallUpdateStep
+    deriving (Eq, Show)
+
+{- | @up@'s plan for a rule 'Core.ensurePresent' found or made, over one
+@describe --format=json@: nothing, an update, or 'Left' (thrown) for a rule
+that is not there, could not be read, or is refused.
+-}
+planFirewallUp :: FirewallRule -> ExitCode -> ByteString -> ByteString -> Either Text FirewallUpStep
+planFirewallUp fw code out err =
+    case judgeFirewall fw code out err of
+        Left Core.Absent -> Left ("firewall rule not found after ensuring it: " <> fw.firewallName)
+        Left (Core.Undetermined why) -> Left ("could not read firewall rule " <> fw.firewallName <> ": " <> why)
+        Left Core.Present -> Left ("could not read firewall rule " <> fw.firewallName)
+        Right (Left why) -> Left ("could not read firewall rule " <> fw.firewallName <> ": " <> why)
+        Right (Right FirewallMatches) -> Right FirewallInPlace
+        Right (Right (FirewallDiffers _)) -> Right FirewallUpdateStep
+        Right (Right (FirewallRefused why)) -> Left (Text.intercalate "; " why <> " (an update cannot change that; nothing was changed)")
 
 -------------------------------------------------------------------------------
 
@@ -1453,6 +1703,7 @@ data ComputeCommand
     | AddressesDelete Address
     | FirewallCreate FirewallRule
     | FirewallDescribe FirewallRule
+    | FirewallUpdate FirewallRule
     | FirewallDelete FirewallRule
     | SubnetsCreate Subnet
     | SubnetsDescribe Subnet
@@ -1693,7 +1944,23 @@ computeCommand = Command $ \cmd -> case cmd of
                 , "firewall-rules"
                 , "describe"
                 , Text.unpack fw.firewallName
+                , "--format=json"
                 ]
+    FirewallUpdate fw ->
+        -- every field the check compares, set to the declared value (gcloud:
+        -- "setting this will override the current values"); the ranges only
+        -- when some are declared, since only then are they compared
+        gcloudProc $
+            withProject fw.firewallProject
+                [ "compute"
+                , "firewall-rules"
+                , "update"
+                , Text.unpack fw.firewallName
+                , "--allow"
+                , Text.unpack fw.firewallAllow
+                ]
+                <> (if null fw.firewallSourceRanges then [] else ["--source-ranges", Text.unpack (Text.intercalate "," fw.firewallSourceRanges)])
+                <> ["--target-tags=" <> Text.unpack (Text.intercalate "," fw.firewallTargetTags)]
     FirewallDelete fw ->
         gcloudProc $
             withProject fw.firewallProject

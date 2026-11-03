@@ -158,13 +158,13 @@ firewallRuleCard fw =
             ]
         , cardVerdicts =
             Verdicts
-                { verdictInPlace = "the rule is there"
-                , verdictToApply = "absent: up creates it"
-                , verdictUnsure = "could not tell whether the rule exists"
+                { verdictInPlace = "the rule is there, as declared"
+                , verdictToApply = "absent or differing: up creates or updates it"
+                , verdictUnsure = "could not tell whether the rule exists, or could not read it"
                 , verdictNoCheck = noCheck
                 , verdictUnchecked = unchecked
                 }
-        , cardUp = "creates the ingress rule (an existing rule of that name is not compared or changed)"
+        , cardUp = "creates the ingress rule, or updates the ports, source ranges and target tags of an existing one to the declared ones (another network or direction, or a deny rule, is refused)"
         , cardDown = "deletes the rule if it is there"
         , cardLinks = console "rule in the Cloud console" ["networking", "firewalls", "details", fw.firewallName] fw.firewallProject
         , cardDocs = Just "gcp-compute-firewall-rule"

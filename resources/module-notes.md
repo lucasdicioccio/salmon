@@ -2749,6 +2749,32 @@ left for their own change): `Compute.address`/`interpretAddressDescribe`, `inter
 `down`), `CloudDns` zone/record, `ArtifactRegistry`, `SecretManager`, `CloudRun.interpretServicePresence`, and `Iam`'s
 describes; `Core.downIfPresent` itself is unchanged.
 
+**`Compute.firewallRule` compares an existing rule with its declaration** (feature 959a5bb2, filed from a downstream
+stack that kept a separate rule per port and a manual `firewall-rules update` step because of it). The
+check used to be "a rule of that name exists": a port added to the declaration was never opened, one removed never
+closed. Now the describe asks for `--format=json` and `judgeFirewall` reads it (`parseLiveFirewall`) and compares
+(`compareFirewall`): `allowed` as a set of (protocol, port or range) pairs, so order, GCP grouping ports into entries
+and `80-80` against `80` do not count (`parseFirewallAllow` reads the declared `--allow` text the same way; a protocol
+without ports is "every port", not equal to any one port); `sourceRanges` and `targetTags` as sets. A declaration
+with **no** source range does not compare ranges (what GCP holds then was not observed) and its update does not pass
+`--source-ranges`; no declared target tag means the rule must have none, and the update clears them
+(`--target-tags=`). A difference is a `Failure` naming both sides; `up` (after `Core.ensurePresent`, which creates as
+before) describes again and runs `FirewallUpdate` (`firewall-rules update NAME --allow ... [--source-ranges ...]
+--target-tags=...`, every compared field set to the declared value: gcloud's help says each flag overrides). The
+network (last URL segment), the direction (`INGRESS`, the default when the field is missing) and the action (a
+non-empty `denied`) cannot be updated: a difference there is a `Failure` and `up` throws naming it, and nothing
+deletes a rule to recreate it. A present rule whose JSON cannot be read is `Unknown` and a throw for `up`. Not read
+or compared: `sourceTags`, service accounts, `priority`, `disabled`, logging, `destinationRanges`. Kept: `ref`,
+`help`, `notes`, the create and delete argv (pinned in `Test/GcpSpec.hs`), the node's dependencies (the update's
+`withBinary` is the same gcloud track), `interpretFirewallDescribe` (presence only, no longer the node's check).
+Changed for callers: a drifted rule is now repaired by `run up` and reported by `check`; a rule matching its
+declaration behaves as before. Layer 0 only (`Test/GcpSpec.hs`, "Compute.firewallRule drift": the parse, the
+verdicts, the plan, the argv, two QuickCheck properties; `Test/BuiltinCardsSpec.hs` for the card). **Not run**:
+anything against GCP. The describe JSON in the tests is written from the Compute API's `Firewall` resource shape, not
+captured; whether GCP spells back ports, ranges (`10.0.0.1` against `10.0.0.1/32`) or numeric protocols as declared,
+and whether gcloud accepts `--target-tags=` to clear the tags (its help shows the bare flag for `--source-ranges`),
+were not observed.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another

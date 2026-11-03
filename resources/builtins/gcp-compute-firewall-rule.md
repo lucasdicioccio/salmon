@@ -14,11 +14,11 @@ The node's `ref` is `gcp-firewall-rule`, keyed by project and rule name. Two dec
 
 ## check
 
-In place when a rule of that name exists. Absent: `up` creates it.
+In place when a rule of that name exists and holds what is declared: the protocols and ports it allows, its source ranges and its target tags, compared as sets (source ranges only when some are declared), on the declared network, as an ingress allow rule. Absent, or any of those differing: a failure naming both sides. A describe that failed for a reason of its own, or a rule that could not be read: unknown.
 
 ## up
 
-Creates the ingress rule. An existing rule of that name is neither compared nor changed.
+Creates the ingress rule when absent. An existing rule whose ports, source ranges or target tags differ is updated to the declared ones (`gcloud compute firewall-rules update`). A rule on another network, an egress rule or a deny rule cannot be updated into the declared one: `up` fails naming the difference and changes nothing.
 
 ## down
 
@@ -40,4 +40,4 @@ The card is in [`Salmon.Builtin.Cards.Gcp`](../../salmon-ops/src/Salmon/Builtin/
 
 ## Notes
 
-Every GCP card links to the resource's Cloud console page, built from the declaration's public names. Those console links have not been followed against a real project.
+Every GCP card links to the resource's Cloud console page, built from the declaration's public names. Those console links have not been followed against a real project. The comparison and the update have only been tested on a describe written from the API's resource shape, never against a real project.
