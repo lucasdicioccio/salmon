@@ -36,6 +36,14 @@ a file: nothing in one is secret, and it keeps the node free of temporary
 files. Channel kinds are a sum with one constructor today ('Email'), so that
 adding webhooks and provider-specific ones is additive.
 
+A channel's __labels__ (the email address) are not on @gcloud@'s command line:
+argv is public, and a failed command is reported with it. They go on standard
+input as the channel content (@--channel-content-from-file -@, see
+'channelContent'), the display name and type staying on the command line. A
+channel command's reports and its 'Binary.CommandFailed' have the label values
+replaced by @\<redacted\>@ in what the command printed, in case gcloud or the
+API echoes them back, and a 'ChannelKind' 'show's without its address.
+
 Everything here goes through @gcloud beta monitoring channels@ and
 @gcloud alpha monitoring policies@ (the release tracks those command groups
 live on), and needs @monitoring.googleapis.com@ enabled on the project —
@@ -48,6 +56,9 @@ module Salmon.Builtin.Nodes.Gcp.Monitoring (
     NotificationChannel (..),
     notificationChannel,
     channelLabels,
+    channelContent,
+    redactChannelReport,
+    redactChannelFailure,
     Lookup (..),
     sequenceLookups,
     FoundChannel (..),
@@ -100,7 +111,7 @@ module Salmon.Builtin.Nodes.Gcp.Monitoring (
     monitoringCommand,
 ) where
 
-import Control.Exception (throwIO)
+import Control.Exception (handle, throwIO)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -120,7 +131,7 @@ import Text.Printf (printf)
 
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), untrackedExec, withBinary)
+import Salmon.Builtin.Nodes.Binary (Binary, CommandFailed (..), Command (..), untrackedExec, withBinary)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), Region (..), gcloudProc, withProject)
 import Salmon.Op.OpGraph (inject)
@@ -147,14 +158,54 @@ of arrival is email, then webhooks, then provider-specific kinds.
 newtype ChannelKind
     = -- | an email address
       Email Text
-    deriving (Eq, Show)
+    deriving (Eq)
+
+-- | Without the address: a 'Report' carries the channel, and report text is
+-- public.
+instance Show ChannelKind where
+    showsPrec d (Email _) = showParen (d > 10) (showString "Email <redacted>")
 
 channelType :: ChannelKind -> Text
 channelType (Email _) = "email"
 
--- | The @--channel-labels@ a kind needs, as @key=value@ pairs.
+-- | The channel labels a kind needs, as @key=value@ pairs.
 channelLabels :: ChannelKind -> [(Text, Text)]
 channelLabels (Email address) = [("email_address", address)]
+
+{- | The channel content a create or an update reads on standard input
+(@--channel-content-from-file -@): a JSON object holding only the labels.
+The display name and type stay on the command line, where gcloud lets them
+override the content's.
+-}
+channelContent :: ChannelKind -> ByteString
+channelContent kind =
+    LByteString.toStrict (Aeson.encode (object ["labels" .= object [Key.fromText k .= v | (k, v) <- channelLabels kind]]))
+
+-- | Every label value of the kind replaced by @\<redacted\>@ in a command's
+-- output.
+redactBytes :: ChannelKind -> ByteString -> ByteString
+redactBytes kind bytes = foldl redactOne bytes [Text.encodeUtf8 v | (_, v) <- channelLabels kind, not (Text.null v)]
+  where
+    redactOne bs needle = case ByteString.breakSubstring needle bs of
+        (before, rest)
+            | ByteString.null rest -> before
+            | otherwise -> before <> "<redacted>" <> redactOne (ByteString.drop (ByteString.length needle) rest) needle
+
+-- | A channel command's report, with what the command printed redacted.
+redactChannelReport :: ChannelKind -> Binary.Report -> Binary.Report
+redactChannelReport kind rep = case rep of
+    Binary.CommandStart{} -> rep
+    Binary.CommandStopped p code out err -> Binary.CommandStopped p code (redactBytes kind out) (redactBytes kind err)
+    Binary.CommandOutput p channel line -> Binary.CommandOutput p channel (redactBytes kind line)
+    Binary.Requested act child -> Binary.Requested act (redactChannelReport kind child)
+
+-- | A channel command's failure, with what the command printed redacted.
+redactChannelFailure :: ChannelKind -> CommandFailed -> CommandFailed
+redactChannelFailure kind e =
+    e
+        { commandFailed_stdout = redactBytes kind e.commandFailed_stdout
+        , commandFailed_stderr = redactBytes kind e.commandFailed_stderr
+        }
 
 data NotificationChannel = NotificationChannel
     { ncProject :: Project
@@ -209,8 +260,17 @@ notificationChannel r gcloudTrack ch =
                 , check = interpretChannelList ch <$> listChannel
                 }
   where
+    -- the labels go on standard input, never on argv; what the command
+    -- prints is redacted in its reports and in the failure it throws
     run :: MonitoringCommand -> IO ()
-    run cmd = untrackedExec monitoringCommand cmd "" (contramap (RunMonitoringCommand cmd) r)
+    run cmd =
+        handle (throwIO . redactChannelFailure ch.ncKind) $
+            untrackedExec monitoringCommand cmd stdin (contramap (RunMonitoringCommand cmd . redactChannelReport ch.ncKind) r)
+      where
+        stdin = case cmd of
+            ChannelsCreate _ -> channelContent ch.ncKind
+            ChannelsUpdate _ _ -> channelContent ch.ncKind
+            _ -> ""
 
     listChannel :: IO (ExitCode, ByteString, ByteString)
     listChannel = readCreateProcessWithExitCode (prepare monitoringCommand (ChannelsList ch)) ""
@@ -872,8 +932,10 @@ firstLine err = case Text.lines (Text.decodeUtf8 err) of
 
 data MonitoringCommand
     = ChannelsList NotificationChannel
-    | ChannelsCreate NotificationChannel
-    | -- | update the labels of the channel with this resource name
+    | -- | the channel's labels are read on standard input ('channelContent')
+      ChannelsCreate NotificationChannel
+    | -- | update the labels of the channel with this resource name, read on
+      -- standard input as for a create
       ChannelsUpdate Text NotificationChannel
     | ChannelsDelete Project Text
     | PoliciesList Policy
@@ -887,9 +949,6 @@ data MonitoringCommand
 -- | gcloud's resource filter selecting one display name.
 displayNameFilter :: Text -> String
 displayNameFilter name = "display_name=\"" <> Text.unpack (Text.filter (/= '"') name) <> "\""
-
-renderLabels :: [(Text, Text)] -> String
-renderLabels kvs = Text.unpack (Text.intercalate "," [k <> "=" <> v | (k, v) <- kvs])
 
 policyJson :: Policy -> [Text] -> String
 policyJson policy names = Text.unpack (Text.decodeUtf8 (LByteString.toStrict (Aeson.encode (renderMonitoringPolicy policy names))))
@@ -911,8 +970,9 @@ monitoringCommand = Command $ \cmd -> case cmd of
                 , Text.unpack ch.ncDisplayName
                 , "--type"
                 , Text.unpack (channelType ch.ncKind)
-                , "--channel-labels"
-                , renderLabels (channelLabels ch.ncKind)
+                , -- the labels ('channelContent'), on standard input
+                  "--channel-content-from-file"
+                , "-"
                 ]
     ChannelsUpdate name ch ->
         gcloudProc $
@@ -922,8 +982,12 @@ monitoringCommand = Command $ \cmd -> case cmd of
                 , "channels"
                 , "update"
                 , Text.unpack name
-                , "--update-channel-labels"
-                , renderLabels (channelLabels ch.ncKind)
+                , -- the labels ('channelContent'), on standard input; only
+                  -- that field is written
+                  "--channel-content-from-file"
+                , "-"
+                , "--fields"
+                , "labels"
                 ]
     ChannelsDelete project name ->
         gcloudProc $

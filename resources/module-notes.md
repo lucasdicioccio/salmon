@@ -2958,6 +2958,22 @@ the uptime condition's shape (`ALIGN_NEXT_OLDER`/`REDUCE_COUNT_FALSE` over `reso
 accepts for every check resource type, and that the API echoes nothing that would make a log-match policy differ
 from its fingerprint are all unverified.
 
+`Gcp.Monitoring.notificationChannel` keeps the address off argv (feature ad64440c): a channel's labels were
+`--channel-labels`/`--update-channel-labels email_address=...`, so a failed create printed the address in salmon's
+report of the command. Now `channelContent` (`{"labels":{...}}`) goes on the command's standard input through
+`untrackedExec`'s pipe, as `--channel-content-from-file -`; create keeps `--display-name`/`--type` on argv (gcloud lets
+flags override the content), update is `--channel-content-from-file - --fields labels` (a field-masked replace of the
+labels map, where `--update-channel-labels` merged: the same for an email channel, whose only label is the address).
+Load-bearing: a channel command's `Binary.Report`s and its `CommandFailed` have every label value replaced by
+`<redacted>` in what the command printed (`redactChannelReport`/`redactChannelFailure`), in case gcloud or the API
+echoes it in an error, and `ChannelKind`'s `Show` elides the address (a `Report` carries the `MonitoringCommand`, so
+the derived one printed it). The node's `ref`, `help`, `check` and failure text are unchanged and never held it; the
+argv of create/update changed, which restarts nothing. The `list` output does hold the address and is only parsed,
+never reported. **Run**: Layer 0 (`Test/GcpSpec.hs` "Monitoring", in `cabal repl`: argv of list/create/update holds no
+address, the stdin JSON, a redacted report/failure/`show`); gcloud 573.0.0's own `MessageFromString` +
+`ModifyNotificationChannel` parsed that JSON offline into the intended `NotificationChannel`, and its
+`FileContents` reads `-` as stdin (read in its source). **Not run**: any create or update against a real project.
+
 `Nodes/PortMapping.hs` asks the LAN gateway for a UPnP-IGD port map through `upnpc` (the `Netfilter.rule`
 shape: `check` lists, `up` adds only if absent and re-lists to verify, since `upnpc`'s exit status is not
 trusted). Load-bearing: the mapping is keyed `("upnp-map", protocol, externalPort)`, a mapping on that port

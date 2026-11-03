@@ -43,6 +43,7 @@ import Test.Tasty.QuickCheck (testProperty)
 import Salmon.Actions.UpDown (CheckResult (..))
 import Salmon.Builtin.Extension (Extension (..), Op, evalDeps, ignoreTrack, nodeps, op)
 import Salmon.Builtin.Nodes.Binary (prepare)
+import qualified Salmon.Builtin.Nodes.Binary as Binary
 import qualified Salmon.Builtin.Nodes.Gcp.ArtifactRegistry as ArtifactRegistry
 import qualified Salmon.Builtin.Nodes.Gcp.Billing as Billing
 import qualified Salmon.Builtin.Nodes.Gcp.CloudDns as CloudDns
@@ -4316,13 +4317,41 @@ clientOptsTests =
 
 monitoringTests :: [TestTree]
 monitoringTests =
-    [ testCase "an email channel is created with its type and address as channel labels" $ do
+    [ testCase "an email channel is created with its type on argv and its address on standard input" $ do
         let args = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsCreate channel))
         assertBool (show args) (["beta", "monitoring", "channels", "create"] `isSubsequenceOf` args)
         assertBool (show args) (["--type", "email"] `isSubsequenceOf` args)
-        assertBool (show args) (["--channel-labels", "email_address=ops@example.org"] `isSubsequenceOf` args)
+        assertBool (show args) (["--channel-content-from-file", "-"] `isSubsequenceOf` args)
         assertBool (show args) (["--display-name", "ops mail"] `isSubsequenceOf` args)
         assertBool (show args) (["--project", "p"] `isSubsequenceOf` args)
+        assertEqual
+            "the content gcloud reads on stdin"
+            (Just (object ["labels" .= object ["email_address" .= ("ops@example.org" :: Text.Text)]]))
+            (decodeStrict (Monitoring.channelContent channel.ncKind) :: Maybe Value)
+    , testCase "no channel command puts the address on argv" $ do
+        let cmds =
+                [ Monitoring.ChannelsList channel
+                , Monitoring.ChannelsCreate channel
+                , Monitoring.ChannelsUpdate "projects/p/notificationChannels/1" channel
+                ]
+        mapM_
+            (\c -> let args = processArgs (prepare Monitoring.monitoringCommand c) in assertBool (show args) (not (any ("ops@example.org" `isInfixOf`) args)))
+            cmds
+        let up = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsUpdate "projects/p/notificationChannels/1" channel))
+        assertBool (show up) (["channels", "update", "projects/p/notificationChannels/1", "--channel-content-from-file", "-", "--fields", "labels"] `isSubsequenceOf` up)
+    , testCase "a channel command's report, failure and Show carry no address" $ do
+        let p = prepare Monitoring.monitoringCommand (Monitoring.ChannelsCreate channel)
+            out = "created ops@example.org\n"
+            err = "ERROR: invalid email_address ops@example.org (ops@example.org)\n"
+            failure = Monitoring.redactChannelFailure channel.ncKind (Binary.CommandFailed p 1 out err)
+            report = Monitoring.redactChannelReport channel.ncKind (Binary.Requested Nothing (Binary.CommandStopped p (ExitFailure 1) out err))
+            shown =
+                [ show failure
+                , show (Monitoring.RunMonitoringCommand (Monitoring.ChannelsCreate channel) report)
+                , show channel
+                ]
+        mapM_ (\t -> assertBool t (not ("ops@example.org" `isInfixOf` t))) shown
+        assertBool (show failure) ("invalid email_address <redacted> (<redacted>)" `isInfixOf` show failure)
     , testCase "channels and policies are looked up by display name, as JSON" $ do
         let cargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.ChannelsList channel))
             pargs = processArgs (prepare Monitoring.monitoringCommand (Monitoring.PoliciesList (Monitoring.cloudRunPolicy policy)))
