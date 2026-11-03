@@ -2043,6 +2043,24 @@ teardown of the machine the file is on. `salmon-gcp-toy` tier 2 uses the upload 
 `Test/SecretDeliverySpec.hs` runs the remote scripts under a local `sh`; neither transport has been run against a
 real machine.
 
+`Nodes/RemoteFile.hs` (`remoteFile`) is the same ssh transport for a file that is *not* a secret (a unit file, a
+configuration file), asked for by a downstream stack that shipped its units `0640` through `uploadSecretFile` and
+hand-wrote `ssh` for the rest. It reuses `SecretDelivery`'s `Placement`, `Elevation`, `DeliveryCommand`,
+`remoteCommand`, `removeScript` and `interpretProbe`; the placement goes through `validateFilePlacement`, which is
+`validatePlacement` minus the "nothing for others" rule (that rule is now applied on top of it; what
+`validatePlacement` accepts and the texts it refuses with are unchanged). Differences from the secret upload, all on
+purpose: the contents are a `ByteString` given at graph build, fed on a pipe; `notes` carry their full hex SHA-256,
+so a re-declared file is a changed representative under `serve`; `check` compares `sha256sum` of the remote file with
+that digest (embedded in the probe script) and then `stat` owner/mode, sending nothing; `up` writes a `0600` temp,
+refuses (exit 7, old file kept) when what arrived does not hash to the declared digest, then chown/chmod/rename; a
+missing directory is created `0755` by whoever runs the script (root under `WithSudo`); an empty file is allowed. The
+`Ref` is `("remote-file", host, path)`, a different kind from `secret-upload`, so a secret and a non-secret at one
+path are not reported as colliding. `down` tolerates ssh exit 255 like the upload. Needs `sha256sum`, `stat -c`,
+`mktemp` on the remote (GNU coreutils). Run: `Test/RemoteFileSpec.hs` (Layer 0) runs both scripts under a local
+`sh`, including through `remoteCommand`'s quoting, and checks the rendered ssh argv, `help`/`notes`/`ref`, and that
+an invalid placement fails before any connection. **Not run:** the ssh leg, `sudo -n`, a chown to another owner, or
+any real remote machine.
+
 `Nodes/Rsync.hs` has `sendFile`, `sendDir`, `receiveFile` and `receiveDir` (each with a `...With` taking
 `Ssh.ClientOpts`, passed through `--rsh` since rsync has no `-i`). `receiveDir` is `sendDir` in the other direction,
 asked for by a downstream benchmark that had to archive a results directory on the remote before it could fetch it.

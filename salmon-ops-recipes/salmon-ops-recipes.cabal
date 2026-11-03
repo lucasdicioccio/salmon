@@ -140,6 +140,7 @@ test-suite salmon-ops-recipes-test
                     , Test.FollowSignatureSpec
                     , Test.FollowSpec
                     , Test.GcpSpec
+                    , Test.RemoteFileSpec
                     , Test.SecretDeliverySpec
                     , Test.PodmanCommandSpec
                     , Test.JWTSigningSpec
