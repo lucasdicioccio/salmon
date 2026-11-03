@@ -13,15 +13,20 @@ installable already. See 'pgdg' for the first user.
 
 = What the node refuses
 
-* __A key whose fingerprint is not the declared one.__ The key is a file
-  somebody provisioned (this module does not care how it got there: rsync,
-  a secret store, the repository's own download page), and the fingerprint
-  is what the declaration was written against. It is read with
-  @gpg --show-keys --with-colons@ before the key is installed, and a
-  mismatch throws 'KeyFingerprintMismatch'. Only /primary/ keys count: a
-  subkey's fingerprint is not a statement about who published the file.
-  The fingerprint is __declared, never read from a file next to the key__,
-  because a pin that travels with the thing it pins pins nothing.
+* __A key whose fingerprint is not the declared one.__ The key is either a
+  file somebody provisioned ('KeyFile'; this module does not care how it
+  got there: rsync, a secret store, the repository's own download page) or
+  bytes the declaration carries ('KeyBytes', e.g. embedded in the binary),
+  and the fingerprint is what the declaration was written against. It is
+  read with @gpg --show-keys --with-colons@ before the key is installed,
+  and a mismatch throws 'KeyFingerprintMismatch'. Only /primary/ keys
+  count: a subkey's fingerprint is not a statement about who published the
+  file. The fingerprint is __declared, never read from a file next to the
+  key__, because a pin that travels with the thing it pins pins nothing.
+  For 'KeyBytes' the fingerprint is optional: the bytes are part of the
+  declaration already, so they are their own pin (their sha256 is in the
+  node's notes, so a changed key is a changed declaration); declaring one
+  as well still has @gpg@ check it before anything is written.
 * __Shadowing the distribution.__ A repository that carries packages the
   distribution also has (PGDG ships @postgresql-<major>@) wins by version
   under apt's default priorities. So the default 'Pinning' is
@@ -45,6 +50,7 @@ down should not uninstall a tool something else may be using.
 module Salmon.Builtin.Nodes.Debian.AptRepository (
     AptRepository (..),
     Suite (..),
+    SigningKey (..),
     Pinning (..),
     KeyFingerprintMismatch (..),
     aptRepository,
@@ -62,16 +68,21 @@ module Salmon.Builtin.Nodes.Debian.AptRepository (
     repositoryHost,
     listsPrefix,
     keyDestination,
+    keyBytesDigest,
+    isArmored,
     sourcesPath,
     preferencesPath,
 ) where
 
 import Control.Exception (Exception, throwIO)
 import Control.Monad (unless, when)
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as ByteString8
 import Data.Foldable (toList)
 import qualified Data.List.NonEmpty as NEList
 import Data.Text (Text)
+import Text.Printf (printf)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import GHC.IO.Exception (ExitCode (..))
@@ -100,8 +111,26 @@ data Suite
       -- the node runs, not when the directive is written) followed by this
       -- suffix: @CodenameSuffixed "-pgdg"@ is @bookworm-pgdg@ on bookworm.
       CodenameSuffixed Text
+    | -- | The codename between a prefix and a suffix, for a repository that
+      -- spells it in the middle: @CodenameInfixed "google-cloud-ops-agent-" "-2"@
+      -- is @google-cloud-ops-agent-noble-2@ on noble. Read when the node runs,
+      -- as for 'CodenameSuffixed'.
+      CodenameInfixed Text Text
     | -- | A suite that does not depend on the machine.
       FixedSuite Text
+    deriving (Eq, Show)
+
+-- | The repository's signing key, and what it is checked against.
+data SigningKey
+    = -- | A pre-provisioned file (armored @.asc@ or binary @.gpg@; the
+      -- extension is kept on the installed copy, since apt tells them apart
+      -- by it) and its full primary-key fingerprint, spaces and case ignored.
+      KeyFile FilePath Text
+    | -- | The key itself (armored or binary; it is installed as @.asc@ when it
+      -- starts with an armor header, @.gpg@ otherwise), which the node writes,
+      -- and optionally the primary-key fingerprint it must have. A public key
+      -- is not a secret: its sha256 is in the node's notes.
+      KeyBytes ByteString.ByteString (Maybe Text)
     deriving (Eq, Show)
 
 -- | What the repository is allowed to supply.
@@ -123,12 +152,7 @@ data AptRepository = AptRepository
     , repoUris :: Text
     , repoSuite :: Suite
     , repoComponents :: [Text]
-    , repoKeyFile :: FilePath
-    -- ^ The pre-provisioned key (armored @.asc@ or binary @.gpg@; the
-    -- extension is kept on the installed copy, since apt tells them apart
-    -- by it).
-    , repoKeyFingerprint :: Text
-    -- ^ Full primary-key fingerprint, spaces and case ignored.
+    , repoKey :: SigningKey
     , repoPin :: Pinning
     , repoAptDir :: FilePath
     -- ^ @/etc/apt@; a field so that a test can aim the node at a temporary
@@ -149,8 +173,7 @@ pgdg keyFile fingerprint =
         , repoUris = "https://apt.postgresql.org/pub/repos/apt"
         , repoSuite = CodenameSuffixed "-pgdg"
         , repoComponents = ["main"]
-        , repoKeyFile = keyFile
-        , repoKeyFingerprint = fingerprint
+        , repoKey = KeyFile keyFile fingerprint
         , repoPin = OnlyPackages ("postgresql-*-pgvector" NEList.:| [])
         , repoAptDir = "/etc/apt"
         , repoListsDir = "/var/lib/apt/lists"
@@ -196,7 +219,10 @@ aptRepository repo =
             { help = "refreshes the apt index for " <> repo.repoName
             , notes =
                 [ "repository: " <> repo.repoUris
-                , "key fingerprint pinned: " <> normalizeFingerprint repo.repoKeyFingerprint
+                , case repo.repoKey of
+                    KeyFile _ fpr -> "key fingerprint pinned: " <> normalizeFingerprint fpr
+                    KeyBytes _ (Just fpr) -> "key fingerprint pinned: " <> normalizeFingerprint fpr
+                    KeyBytes bytes Nothing -> "key given inline, sha256: " <> keyBytesDigest bytes
                 , case repo.repoPin of
                     OnlyPackages ps -> "only packages: " <> Text.unwords (toList ps)
                     WholeSuite -> "whole suite (no pin)"
@@ -216,12 +242,11 @@ keyOp repo =
     op "apt-repository-key" nodeps $ \actions ->
         actions
             { help = "installs the signing key for " <> repo.repoName
-            , notes = ["pinned fingerprint: " <> normalizeFingerprint repo.repoKeyFingerprint]
+            , notes = keyNotes
             , ref = mkRef "apt-repository-key" dest
             , check = checkKey
             , up = do
-                verifyKeyFingerprint repo.repoKeyFile repo.repoKeyFingerprint
-                key <- ByteString.readFile repo.repoKeyFile
+                key <- verifiedKey
                 createDirectoryIfMissing True (takeDirectory dest)
                 ByteString.writeFile dest key
             , down = removeFileIfPresent dest
@@ -229,13 +254,36 @@ keyOp repo =
   where
     dest = keyDestination repo
 
+    keyNotes :: [Text]
+    keyNotes = case repo.repoKey of
+        KeyFile _ fpr -> ["pinned fingerprint: " <> normalizeFingerprint fpr]
+        KeyBytes bytes mfpr ->
+            ["pinned fingerprint: " <> normalizeFingerprint fpr | Just fpr <- [mfpr]]
+                <> ["key given inline, sha256: " <> keyBytesDigest bytes]
+
+    -- The bytes to install, once their fingerprint (when declared) is checked.
+    verifiedKey :: IO ByteString.ByteString
+    verifiedKey = case repo.repoKey of
+        KeyFile file fpr -> do
+            verifyKeyFingerprint file (Left file) fpr
+            ByteString.readFile file
+        KeyBytes bytes Nothing -> pure bytes
+        KeyBytes bytes (Just fpr) -> do
+            verifyKeyFingerprint ("inline key of " <> Text.unpack repo.repoName) (Right bytes) fpr
+            pure bytes
+
+    wanted :: IO ByteString.ByteString
+    wanted = case repo.repoKey of
+        KeyFile file _ -> ByteString.readFile file
+        KeyBytes bytes _ -> pure bytes
+
     checkKey :: IO CheckResult
     checkKey = do
         installed <- doesFileExist dest
         if not installed
             then pure (Failure ("missing: " <> Text.pack dest))
             else do
-                a <- ByteString.readFile repo.repoKeyFile
+                a <- wanted
                 b <- ByteString.readFile dest
                 pure $
                     if a == b
@@ -292,9 +340,22 @@ preferencesPath repo = repo.repoAptDir </> "preferences.d" </> Text.unpack repo.
 keyDestination repo =
     repo.repoAptDir </> "keyrings" </> Text.unpack repo.repoName <> ext
   where
-    ext = case takeExtension repo.repoKeyFile of
-        "" -> ".gpg"
-        e -> e
+    ext = case repo.repoKey of
+        KeyFile file _ -> case takeExtension file of
+            "" -> ".gpg"
+            e -> e
+        KeyBytes bytes _
+            | isArmored bytes -> ".asc"
+            | otherwise -> ".gpg"
+
+-- | Does the key start (after blank space) with an OpenPGP armor header?
+isArmored :: ByteString.ByteString -> Bool
+isArmored = ByteString.isPrefixOf "-----BEGIN PGP" . ByteString8.dropWhile (`elem` [' ', '\t', '\r', '\n'])
+
+-- | sha256 of a key given inline, hex-encoded: what its notes show so that a
+-- changed key is a changed declaration. (A public key; nothing secret.)
+keyBytesDigest :: ByteString.ByteString -> Text
+keyBytesDigest = Text.pack . concatMap (printf "%02x") . ByteString.unpack . SHA256.hash
 
 -- | The deb822 stanza, for a suite already resolved.
 renderSources :: AptRepository -> Text -> Text
@@ -322,6 +383,7 @@ renderPreferences repo pats =
 resolveSuite :: Suite -> Text -> Text
 resolveSuite (FixedSuite s) _ = s
 resolveSuite (CodenameSuffixed suffix) codename = codename <> suffix
+resolveSuite (CodenameInfixed prefix suffix) codename = prefix <> codename <> suffix
 
 -- | @VERSION_CODENAME@ from an @os-release@ file's text, unquoted.
 parseOsReleaseCodename :: Text -> Maybe Text
@@ -374,14 +436,21 @@ primaryFingerprints out = go (Text.splitOn ":" <$> Text.lines out)
     -- fpr:::::::::<FINGERPRINT>:
     fprField fields = normalizeFingerprint (case drop 8 fields of (f : _) -> f; [] -> "")
 
-verifyKeyFingerprint :: FilePath -> Text -> IO ()
-verifyKeyFingerprint file wanted = do
-    (code, out, err) <- readCreateProcessWithExitCode (proc "gpg" ["--show-keys", "--with-colons", "--with-fingerprint", file]) ""
+{- | The key is a file (passed as gpg's argument) or bytes (fed on gpg's
+stdin, which @--show-keys@ reads when given no file); @label@ names it in
+errors.
+-}
+verifyKeyFingerprint :: String -> Either FilePath ByteString.ByteString -> Text -> IO ()
+verifyKeyFingerprint label key wanted = do
+    let (args, input) = case key of
+            Left file -> ([file], "")
+            Right bytes -> ([], bytes)
+    (code, out, err) <- readCreateProcessWithExitCode (proc "gpg" (["--show-keys", "--with-colons", "--with-fingerprint"] <> args)) input
     when (code /= ExitSuccess) $
-        ioError (userError ("apt repository: gpg --show-keys failed on " <> file <> ": " <> Text.unpack (Text.decodeUtf8 err)))
+        ioError (userError ("apt repository: gpg --show-keys failed on " <> label <> ": " <> Text.unpack (Text.decodeUtf8 err)))
     let fps = primaryFingerprints (Text.decodeUtf8 out)
     unless (normalizeFingerprint wanted `elem` fps) $
-        throwIO (KeyFingerprintMismatch file (normalizeFingerprint wanted) fps)
+        throwIO (KeyFingerprintMismatch label (normalizeFingerprint wanted) fps)
 
 -------------------------------------------------------------------------------
 
