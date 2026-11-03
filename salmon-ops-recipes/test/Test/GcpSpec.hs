@@ -1860,8 +1860,48 @@ iamTests =
             ""
             ["iam", "service-accounts", "keys", "create", "secrets/gh-ci/uploader.key.json", "--iam-account", "uploader@p.iam.gserviceaccount.com", "--project", "p", "--quiet"]
             (processArgs (prepare Iam.iamCommand (Iam.ServiceAccountKeysCreate key)))
+    , testCase "the project number is asked of gcloud projects describe, quietly" $
+        assertEqual
+            ""
+            ["projects", "describe", "p", "--format", "value(projectNumber)", "--quiet"]
+            (processArgs (prepare Iam.iamCommand (Iam.ProjectNumberDescribe (Core.Project "p"))))
+    , testCase "a project number is the digits gcloud printed" $
+        assertEqual "" (Right "123456789012") (Iam.interpretProjectNumber (Core.Project "p") ExitSuccess "123456789012\n")
+    , testCase "no digits, other text, or a failed describe is no project number" $ do
+        assertBool "empty" (isLeft (Iam.interpretProjectNumber (Core.Project "p") ExitSuccess "\n"))
+        assertBool "text" (isLeft (Iam.interpretProjectNumber (Core.Project "p") ExitSuccess "ERROR: denied\n"))
+        assertBool "exit" (isLeft (Iam.interpretProjectNumber (Core.Project "p") (ExitFailure 1) "123\n"))
+    , testCase "the default compute service account is named after the project number" $
+        assertEqual "" "123-compute@developer.gserviceaccount.com" (Iam.defaultComputeServiceAccountEmail "123")
+    , testCase "a run-time binding renders its label, not a member, and resolves nothing at graph build" $ do
+        let rtb =
+                Iam.RunTimeIamBinding
+                    { Iam.rtPrincipal = Iam.RunTimePrincipal "serviceAccount:<later>" (error "resolved at graph build")
+                    , Iam.rtRole = "roles/logging.logWriter"
+                    , Iam.rtResource = "projects/p"
+                    }
+            act = onlyNode (Iam.iamBindingAtRunTime silent ignoreTrack rtb)
+        assertEqual "" "grants roles/logging.logWriter to serviceAccount:<later>" act.extension.help
+        assertEqual
+            ""
+            (mkRef "gcp-iam-binding" ("serviceAccount:<later>" :: Text.Text, "roles/logging.logWriter" :: Text.Text, "projects/p" :: Text.Text))
+            act.extension.ref
+    , testCase "a run-time binding whose principal cannot be resolved fails its check" $ do
+        let rtb =
+                Iam.RunTimeIamBinding
+                    { Iam.rtPrincipal = Iam.RunTimePrincipal "serviceAccount:<later>" (ioError (userError "no number"))
+                    , Iam.rtRole = "roles/logging.logWriter"
+                    , Iam.rtResource = "projects/p"
+                    }
+            act = onlyNode (Iam.iamBindingAtRunTime silent ignoreTrack rtb)
+        res <- act.extension.check
+        assertBool "an unresolvable principal is a Failure" (isFailure res)
     ]
   where
+    isLeft = either (const True) (const False)
+    onlyNode o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
     binding =
         Iam.IamBinding
             { Iam.iamPrincipal = Iam.ServiceAccount "sa-1@p.iam.gserviceaccount.com"

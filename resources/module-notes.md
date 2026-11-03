@@ -2796,6 +2796,20 @@ Both read `describe --raw --format json` and look under the API's member name an
 resource shape, not captured): no command here has met a real project, so `--raw`, the described shapes and how the API
 spells back a rule are unverified.
 
+`Gcp.Iam.iamBindingAtRunTime` is `iamBinding` for a principal known only when the node runs (`RunTimeIamBinding`,
+`RunTimePrincipal {runTimePrincipalLabel, resolvePrincipal :: IO Principal}`). Asked for by budgetz's GCP stack, whose
+own node grants `roles/logging.logWriter`/`roles/monitoring.metricWriter` to the Compute Engine default service account
+(`NUMBER-compute@developer.gserviceaccount.com`, named after the project *number*). `defaultComputeServiceAccount
+project` resolves it with `gcloud projects describe P --format value(projectNumber) --quiet` (`ProjectNumberDescribe`,
+read by the pure `interpretProjectNumber`: only a run of digits is a number). `check`, `up` and `down` each resolve
+first (never at graph build), then run exactly `iamBinding`'s commands and policy reading on the resolved binding; an
+unresolvable principal is a `Failure` for `check` and a throw for `up`/`down`. The `ref` is `"gcp-iam-binding"
+(label, role, resource)`, so it is not the same effect site as an `iamBinding` naming the resolved member explicitly
+(two nodes for one grant, and the `down` of either removes it). `iamBinding`, `Principal` and their rendering are
+unchanged. **Layer 0 only** (`Test/GcpSpec.hs`: the describe argv, the number parser, the email, the node's
+`help`/`ref` built with a resolver that throws if forced, and `check` on an unresolvable principal): no command here
+has met a real project; that `value(projectNumber)` prints the bare number is from gcloud's documentation.
+
 `Gcp.Storage.bucketContents` publishes a local directory under a bucket (or a prefix) with `gcloud storage rsync`,
 keyed `"gcp-bucket-contents" (bucket, prefix)`, the bucket being the caller's dependency. `rsync` takes one
 `--cache-control` per invocation and narrows only by an `--exclude` regex, so a directory is published in

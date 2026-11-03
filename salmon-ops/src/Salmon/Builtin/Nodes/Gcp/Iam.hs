@@ -7,6 +7,15 @@ module Salmon.Builtin.Nodes.Gcp.Iam (
     iamBinding,
     interpretServiceAccountDescribe,
     interpretBindingPolicy,
+
+    -- * Bindings whose principal is known only at run time
+    RunTimePrincipal (..),
+    defaultComputeServiceAccount,
+    defaultComputeServiceAccountEmail,
+    readProjectNumber,
+    interpretProjectNumber,
+    RunTimeIamBinding (..),
+    iamBindingAtRunTime,
     CustomRole (..),
     customRole,
     interpretRoleDescribe,
@@ -18,7 +27,8 @@ module Salmon.Builtin.Nodes.Gcp.Iam (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (throwIO)
+import Control.Exception (SomeException, throwIO, try)
+import Data.Char (isDigit)
 import Control.Monad (when)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -30,7 +40,7 @@ import System.Process.ListLike (proc)
 
 import Salmon.Actions.UpDown (CheckResult (..), skipIfFileExists)
 import Salmon.Builtin.Extension
-import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary)
+import Salmon.Builtin.Nodes.Binary (Binary, Command (..), withBinary, withBinaryArgAtUp)
 import qualified Salmon.Builtin.Nodes.Binary as Binary
 import Salmon.Builtin.Nodes.Gcp.Core (Project (..), gcloudProc, retryingIO, withProject)
 import qualified Salmon.Builtin.Nodes.Gcp.Core as Core
@@ -162,6 +172,116 @@ interpretBindingPolicy binding ExitSuccess outText =
 
 -------------------------------------------------------------------------------
 
+{- | A principal whose name is only known when the node runs, such as the
+Compute Engine default service account, which is named after the project's
+/number/ (@NUMBER-compute\@developer.gserviceaccount.com@) and so cannot be
+written down when the graph is built from a project id alone.
+
+'runTimePrincipalLabel' is what the graph shows ('help', 'ref') in place of
+the member: public, stable, and the same on every build. 'resolvePrincipal'
+runs at @check@, @up@ and @down@ time only, never at graph build; it throws
+when it cannot say.
+-}
+data RunTimePrincipal = RunTimePrincipal
+    { runTimePrincipalLabel :: Text
+    , resolvePrincipal :: IO Principal
+    }
+
+{- | The Compute Engine default service account of a project, resolved with
+@gcloud projects describe PROJECT --format=value(projectNumber)@ each time
+the node runs.
+-}
+defaultComputeServiceAccount :: Project -> RunTimePrincipal
+defaultComputeServiceAccount project =
+    RunTimePrincipal
+        { runTimePrincipalLabel = "serviceAccount:<default compute service account of " <> project.projectId <> ">"
+        , resolvePrincipal = ServiceAccount . defaultComputeServiceAccountEmail <$> readProjectNumber project
+        }
+
+-- | The email of the Compute Engine default service account, given the
+-- project's number.
+defaultComputeServiceAccountEmail :: Text -> Text
+defaultComputeServiceAccountEmail number = number <> "-compute@developer.gserviceaccount.com"
+
+-- | Asks gcloud for the project's number; throws when it cannot be read.
+readProjectNumber :: Project -> IO Text
+readProjectNumber project = do
+    (code, out, _err) <-
+        readCreateProcessWithExitCode
+            (prepare iamCommand (ProjectNumberDescribe project))
+            ""
+    either (throwIO . userError . Text.unpack) pure $
+        interpretProjectNumber project code (Text.decodeUtf8 out)
+
+-- | The project number read off @gcloud projects describe
+-- --format=value(projectNumber)@, split out for testability: only a
+-- non-empty run of digits is a number.
+interpretProjectNumber :: Project -> ExitCode -> Text -> Either Text Text
+interpretProjectNumber project (ExitFailure n) _ =
+    Left ("could not describe project " <> project.projectId <> " (exit " <> Text.pack (show n) <> ")")
+interpretProjectNumber project ExitSuccess out
+    | not (Text.null number) && Text.all isDigit number = Right number
+    | otherwise = Left ("no project number for " <> project.projectId <> " in: " <> Text.take 80 number)
+  where
+    number = Text.strip out
+
+-- | 'IamBinding' with a 'RunTimePrincipal'.
+data RunTimeIamBinding = RunTimeIamBinding
+    { rtPrincipal :: RunTimePrincipal
+    , rtRole :: Text
+    , rtResource :: Text
+    }
+
+{- | 'iamBinding' for a principal resolved when the node runs: each of
+@check@, @up@ and @down@ first resolves the principal, then does what
+'iamBinding' does with the resulting 'IamBinding' (same commands, same
+policy reading, same retries). A principal that cannot be resolved is a
+'Failure' for @check@ and a throw for @up@ and @down@.
+
+The 'ref' is keyed on the principal's label, not on the member it resolves
+to (which the graph cannot know), so this node and an 'iamBinding' naming
+the same member explicitly are two nodes, not one effect site.
+-}
+iamBindingAtRunTime :: Reporter Report -> Track' (Binary "gcloud") -> RunTimeIamBinding -> Op
+iamBindingAtRunTime r gcloudTrack rtb =
+    withBinaryArgAtUp gcloudTrack iamCommand $ \runCmd ->
+        op "gcp-iam-binding" nodeps $ \actions ->
+            actions
+                { help = Text.unwords ["grants", rtb.rtRole, "to", label]
+                , ref = mkRef "gcp-iam-binding" (label, rtb.rtRole, rtb.rtResource)
+                , up = do
+                    binding <- resolved
+                    retryingIO 5 3000000 (reported runCmd (IamPolicyAddBinding binding))
+                , down = do
+                    binding <- resolved
+                    Core.downIfPresent (checkResolved binding) (reported runCmd (IamPolicyRemoveBinding binding))
+                , check = do
+                    eb <- try resolved
+                    case eb of
+                        Left e -> pure (Failure (Text.pack (show (e :: SomeException))))
+                        Right binding -> checkResolved binding
+                }
+  where
+    label = rtb.rtPrincipal.runTimePrincipalLabel
+
+    resolved :: IO IamBinding
+    resolved = do
+        p <- rtb.rtPrincipal.resolvePrincipal
+        pure IamBinding{iamPrincipal = p, iamRole = rtb.rtRole, iamResource = rtb.rtResource}
+
+    reported :: (IamCommand -> Reporter Binary.Report -> IO ()) -> IamCommand -> IO ()
+    reported runCmd cmd = runCmd cmd (contramap (RunIamCommand cmd) r)
+
+    checkResolved :: IamBinding -> IO CheckResult
+    checkResolved binding = do
+        (code, out, _err) <-
+            readCreateProcessWithExitCode
+                (prepare iamCommand (IamPolicyGetBinding binding))
+                ""
+        pure $ interpretBindingPolicy binding code (Text.decodeUtf8 out)
+
+-------------------------------------------------------------------------------
+
 -- | A custom IAM role, defined by a permissions file (YAML or JSON, as
 -- @gcloud iam roles create --file@ accepts).
 data CustomRole = CustomRole
@@ -270,10 +390,19 @@ data IamCommand
     | RolesDescribe CustomRole
     | RolesDelete CustomRole
     | ServiceAccountKeysCreate ServiceAccountKey
+    | ProjectNumberDescribe Project
     deriving (Show)
 
 iamCommand :: Command "gcloud" IamCommand
 iamCommand = Command $ \cmd -> case cmd of
+    ProjectNumberDescribe project ->
+        gcloudProc
+            [ "projects"
+            , "describe"
+            , Text.unpack project.projectId
+            , "--format"
+            , "value(projectNumber)"
+            ]
     ServiceAccountsCreate project accountId ->
         gcloudProc $
             withProject project
