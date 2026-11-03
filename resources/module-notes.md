@@ -2749,8 +2749,8 @@ left for their own change): `Compute.address`/`interpretAddressDescribe`, `inter
 `down`), `CloudDns` zone/record, `ArtifactRegistry`, `SecretManager`, `CloudRun.interpretServicePresence`, and `Iam`'s
 describes; `Core.downIfPresent` itself is unchanged.
 
-**`Compute.firewallRule` compares an existing rule with its declaration** (feature 959a5bb2, filed from budgetz's
-buckette, whose stack kept a separate rule per port and a manual `firewall-rules update` step because of it). The
+**`Compute.firewallRule` compares an existing rule with its declaration** (feature 959a5bb2, filed from a downstream
+stack that kept a separate rule per port and a manual `firewall-rules update` step because of it). The
 check used to be "a rule of that name exists": a port added to the declaration was never opened, one removed never
 closed. Now the describe asks for `--format=json` and `judgeFirewall` reads it (`parseLiveFirewall`) and compares
 (`compareFirewall`): `allowed` as a set of (protocol, port or range) pairs, so order, GCP grouping ports into entries
