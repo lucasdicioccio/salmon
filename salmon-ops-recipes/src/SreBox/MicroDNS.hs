@@ -155,7 +155,12 @@ dnsSecretFile r path =
 
 systemdMicroDNS :: Reporter Report -> MicroDNSSetup -> Op
 systemdMicroDNS r arg =
-    Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig config
+    -- microdns reads its cert, key and HMAC secret once, at start: watch them so
+    -- a renewed self-signed cert (30 days) restarts the service instead of the
+    -- box serving the expired one until someone restarts it by hand. Keyed,
+    -- because the key and the secret must not have a plain digest in a
+    -- world-readable unit file.
+    Systemd.systemdServiceWatchingKeyed [pemPath, keyPath, hmacSecretFile] (contramap SetupSystemd r) Debian.systemctl trackConfig config
   where
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
@@ -276,7 +281,9 @@ hmacHeader s t = ("x-microdns-hmac", hmacHashedPart s t)
 
 selfSignedCert :: Reporter Report -> MicroDNSConfig -> Track' FilePath
 selfSignedCert r cfg =
-    Track $ \p -> Certs.selfSign (contramap SelfSign r) Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
+    -- a year rather than openssl's 30-day default: this cert is only pinned
+    -- by our own clients (makeTlsManagerForSelfSigned), never a browser.
+    Track $ \p -> Certs.selfSignForDays 365 (contramap SelfSign r) Debian.openssl (Certs.SelfSigned p cfg.microdns_cfg_selfCsr)
 
 selfSigningKey :: Reporter Report -> MicroDNSConfig -> Track' FilePath
 selfSigningKey r cfg =

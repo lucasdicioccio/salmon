@@ -313,8 +313,20 @@ siteTrashDir = stanzaPath "old"
 
 systemdKitchenSink :: Reporter Report -> KitchenSinkSetup -> Op
 systemdKitchenSink r setup =
-    Systemd.systemdService (contramap SetupSystemd r) Debian.systemctl trackConfig systemdConfig
+    -- kitchen-sink loads every stanza's cert and key once, at start: watch
+    -- them so a renewed ACME cert restarts the service instead of the old one
+    -- being served until it expires. Keyed, because the keys must not have a
+    -- plain digest in a world-readable unit file.
+    Systemd.systemdServiceWatchingKeyed watchedTlsFiles (contramap SetupSystemd r) Debian.systemctl trackConfig systemdConfig
   where
+    watchedTlsFiles :: [FilePath]
+    watchedTlsFiles =
+        List.nub $
+            concat [[pemPath ss, keyPath ss] | ss <- ks_setup_stanzas setup]
+                <> case setup.ks_setup_fallback_stanza of
+                    Just ss -> [pemPath ss, keyPath ss]
+                    Nothing -> [lastResortPemPath, lastResortKeyPath]
+
     trackConfig :: Track' Systemd.Config
     trackConfig = Track $ \cfg ->
         let

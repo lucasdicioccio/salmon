@@ -167,8 +167,23 @@ signingRequest r bin req =
     dom :: Domain
     dom = req.certDomain
 
+{- | Self-signs with openssl's default validity (@openssl x509 -req@ without
+@-days@: 30 days). Kept as is because changing the argv of an existing
+declaration is not wanted silently; use 'selfSignForDays' for a longer one.
+-}
 selfSign :: Reporter Report -> Track' (Binary "openssl") -> SelfSigned -> Op
-selfSign r bin selfsigned =
+selfSign = selfSignWith Nothing
+
+{- | 'selfSign' with an explicit validity in days. The node's @ref@ and
+@help@ are those of 'selfSign', so moving a declaration to it does not
+change its representative; the existing certificate is kept until its
+check ('checkCertNotExpiringSoon') asks for a new one.
+-}
+selfSignForDays :: Int -> Reporter Report -> Track' (Binary "openssl") -> SelfSigned -> Op
+selfSignForDays days = selfSignWith (Just days)
+
+selfSignWith :: Maybe Int -> Reporter Report -> Track' (Binary "openssl") -> SelfSigned -> Op
+selfSignWith validity r bin selfsigned =
     withBinary bin openssl cmd $ \up ->
         op "certificate-self-sign" (deps [signingRequest r bin selfsigned.selfSignedRequest]) $ \actions ->
             actions
@@ -178,7 +193,7 @@ selfSign r bin selfsigned =
                 , up = up r'
                 }
   where
-    cmd = SignCSR csr key pempath
+    cmd = maybe (SignCSR csr key pempath) (SignCSRForDays csr key pempath) validity
     r' = contramap (RunOpenSSLCommand cmd) r
     key :: FilePath
     key = keyPath selfsigned.selfSignedRequest.certKey
@@ -283,6 +298,8 @@ data OpenSSLCommand
     = GenCSR FilePath FilePath Domain
     | ConvertCSR2DER FilePath FilePath
     | SignCSR FilePath FilePath FilePath
+    | -- | CSR, key, output cert, days
+      SignCSRForDays FilePath FilePath FilePath Int
     | GenTLSKey KeyType FilePath
     | -- | key, output cert, CN, days
       GenSelfSignedCa FilePath FilePath Domain Int
@@ -329,6 +346,20 @@ openssl = Command $ \cmd ->
                 , csrPath
                 , "-signkey"
                 , keyPath
+                , "-out"
+                , pemPath
+                ]
+        (SignCSRForDays csrPath keyPath pemPath days) ->
+            proc
+                "openssl"
+                [ "x509"
+                , "-req"
+                , "-in"
+                , csrPath
+                , "-signkey"
+                , keyPath
+                , "-days"
+                , show days
                 , "-out"
                 , pemPath
                 ]
