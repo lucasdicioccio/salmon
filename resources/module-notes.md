@@ -4426,3 +4426,20 @@ infra — not part of the `salmon` project itself. `git ls-files` is the source 
 actually part of this repository (the cabal packages above, the Rust workspace under `rs/`,
 and root-level `README.md`/`cabal.project*`). Don't read from or write into those directories
 unless a task explicitly concerns them.
+
+## `SreBox.MicroDNS` (self-signed cert lifetime and restarts)
+
+microdns's cert was self-signed with openssl's default 30 days, and its unit was a plain `systemdService`: a
+renewed cert was copied to `/opt/rundir/microdns/` but the running service (it reads cert, key and HMAC secret once,
+at start) was never restarted, so the box served the expired cert and the ACME DNS-01 POST failed with
+`CertificateExpired`. Now the cert is signed for 365 days (`Certificates.selfSignForDays`; plain `selfSign` keeps
+its argv, so other callers are unchanged) and the unit is `systemdServiceWatchingKeyed [cert, key, secret]`
+(keyed: the key and secret must not have a plain digest in the world-readable unit). Run: build only, and the
+openssl argv by hand (gives a 365-day cert); deployed to the box with the watching unit, which then served the
+renewed cert. The 365-day cert itself is only made once the current 30-day one nears expiry (or is moved aside).
+
+`SreBox.KitchenSinkMultiSites` had the same defect: renewed ACME certs were copied to each stanza's `cert.pem`/`cert.key`
+under `/opt/rundir/ks/services/` but the plain `systemdService` never restarted kitchen-sink, which loads them at start,
+so dicioccio.fr kept serving the old Let's Encrypt cert. Its unit now watches every stanza's cert and key plus the
+fallback (or last-resort) pair, keyed. A renewal restarts the one process serving every site (a short outage for all of
+them). Run: deployed to the box (2026-11-12); dicioccio.fr then served the renewed cert.
