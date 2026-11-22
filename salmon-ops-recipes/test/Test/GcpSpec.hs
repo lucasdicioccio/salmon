@@ -2942,6 +2942,7 @@ lbTests =
             , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
             ]
     , testGroup "a global balancer" globalTests
+    , testGroup "an internal balancer" internalTests
     , testGroup "a node per resource" nodeTests
     , testGroup "against a stand-in gcloud" $
         -- Not GCP: a shell script that keeps "resources" as files and answers
@@ -4214,6 +4215,95 @@ lbTests =
                 assertEqual (unlines gone) 3 (length (filter ("remove-backend" `isInfixOf`) gone))
                 assertEqual (unlines gone) 3 (length (filter ("network-endpoint-groups delete" `isInfixOf`) gone))
         ]
+    -- 'full' (instance groups, Cloud Run, a managed certificate) made internal
+    internalFull = full{LoadBalancing.albScheme = LoadBalancing.InternalManaged "clients"}
+    internalPlain =
+        LoadBalancing.internalHttpLoadBalancer
+            "web"
+            (Core.Project "p")
+            (Core.Region "europe-west1")
+            "default"
+            "clients"
+            [LoadBalancing.InstanceGroupBackend "ig" (LoadBalancing.InstanceGroupZone "europe-west1-b") [8080]]
+            (Just (LoadBalancing.HealthCheck "hc" 8080))
+    internalTests =
+        [ testCase "a declaration is external unless it says otherwise" $ do
+            assertEqual "" LoadBalancing.ExternalManaged (LoadBalancing.httpLoadBalancer "web" (Core.Project "p") (Core.Region "europe-west1") [] Nothing).albScheme
+            assertEqual "" LoadBalancing.ExternalManaged alb.albScheme
+        , testCase "an internal balancer is the same parts and edges as its external twin" $ do
+            assertEqual "" [] (LoadBalancing.albProblems internalFull)
+            assertEqual "" [] (LoadBalancing.albProblems internalPlain)
+            let shape a = [(p.partId, p.partDeps) | p <- LoadBalancing.lbParts a]
+            assertEqual "" (shape full) (shape internalFull)
+        , testCase "its backend services and rules say INTERNAL_MANAGED, its rules and address are in its subnet" $ do
+            let sc = createScript internalFull
+            assertBool sc (not ("EXTERNAL_MANAGED" `isInfixOf` sc))
+            mapM_
+                (\w -> assertBool (w <> "\n" <> sc) (w `isInfixOf` sc))
+                [ "backend-services create 'web-backend' --project=\"$PROJECT\" --region=\"$REGION\" --protocol=HTTP --port-name='web-backend' --load-balancing-scheme=INTERNAL_MANAGED"
+                , "backend-services create 'web-api-backend' --project=\"$PROJECT\" --region=\"$REGION\" --protocol=HTTP --load-balancing-scheme=INTERNAL_MANAGED"
+                , "addresses create 'web-ip' --project=\"$PROJECT\" --region=\"$REGION\" --subnet='clients' --purpose=SHARED_LOADBALANCER_VIP"
+                , "forwarding-rules create 'web-fw' --project=\"$PROJECT\" --region=\"$REGION\" --load-balancing-scheme=INTERNAL_MANAGED --network='default' --subnet='clients' --subnet-region=\"$REGION\" --address='web-ip' --address-region=\"$REGION\" --target-http-proxy='web-proxy'"
+                , "forwarding-rules create 'web-https-fw' --project=\"$PROJECT\" --region=\"$REGION\" --load-balancing-scheme=INTERNAL_MANAGED --network='default' --subnet='clients' --subnet-region=\"$REGION\" --address='web-ip' --address-region=\"$REGION\" --target-https-proxy='web-https-proxy'"
+                ]
+            let plain = createScript internalPlain
+            assertBool plain ("--subnet='clients' --subnet-region=\"$REGION\" --target-http-proxy='web-proxy'" `isInfixOf` plain)
+            assertBool "no address to reserve without a certificate" (not ("addresses create" `isInfixOf` plain))
+        , testCase "an external declaration's scripts carry no scheme check" $ do
+            let lines' a = concat [p.partUp <> p.partCheck | p <- LoadBalancing.lbParts a]
+            assertBool "" (not (any ("loadBalancingScheme" `Text.isInfixOf`) (lines' full)))
+            assertBool "" (any ("loadBalancingScheme" `Text.isInfixOf`) (lines' internalFull))
+        , testCase "the root says it is internal, and its notes say on which subnet" $ do
+            let dag = dagOf (LoadBalancing.applicationLoadBalancer silent ignoreTrack internalPlain)
+            let roots = [act | act <- Map.elems (Dag.dagNodes dag), act.extension.help == "internal application load balancer web"]
+            assertEqual "" 1 (length roots)
+            assertBool "" (all (\act -> "internal (INTERNAL_MANAGED) on subnet clients" `elem` act.extension.notes) roots)
+            assertEqual "nothing conflicting" 0 (length (Dag.dagConflicts dag))
+        , testCase "what an internal balancer cannot be is a problem" $ do
+            let problems a = unlines (map Text.unpack (LoadBalancing.albProblems a))
+            let global = internalPlain{LoadBalancing.albScope = LoadBalancing.GlobalBalancer, LoadBalancing.albNetwork = Nothing}
+            assertBool (problems global) ("an internal load balancer is regional here" `isInfixOf` problems global)
+            let unnetworked = internalPlain{LoadBalancing.albNetwork = Nothing}
+            assertBool (problems unnetworked) ("an internal load balancer needs albNetwork" `isInfixOf` problems unnetworked)
+            let unsubnetted = internalPlain{LoadBalancing.albScheme = LoadBalancing.InternalManaged ""}
+            assertBool (problems unsubnetted) ("an internal load balancer names no subnet" `isInfixOf` problems unsubnetted)
+            let bucketed = internalPlain{LoadBalancing.albBuckets = [LoadBalancing.BackendBucket "site" "example-site"]}
+            assertBool (problems bucketed) ("an internal load balancer takes no backend bucket" `isInfixOf` problems bucketed)
+        , testCase "rendered internal scripts parse as bash" $
+            mapM_
+                ( \sc -> do
+                    (code, _, err) <- readProcessWithExitCode "bash" ["-n", "-c", Text.unpack sc] ""
+                    assertEqual err ExitSuccess code
+                )
+                [ render a part
+                | a <- [internalFull, internalPlain]
+                , part <- LoadBalancing.lbParts a
+                , render <- [LoadBalancing.renderPartUpScript, LoadBalancing.renderPartCheckScript, LoadBalancing.renderPartDownScript]
+                ]
+        , testCase "against a stand-in gcloud: up, a second up that creates nothing, the check passes, down removes it" $
+            withFakeGcloud $ \run mutations -> do
+                first <- mutationsOf run mutations (createScript internalFull)
+                mapM_
+                    (\w -> assertBool (w <> "\n" <> unlines first) (w `elem` first))
+                    ["backend-services create web-backend", "addresses create web-ip", "forwarding-rules create web-fw", "forwarding-rules create web-https-fw"]
+                second <- mutationsOf run mutations (createScript internalFull)
+                assertBool (unlines second) (not (any (" create " `isInfixOf`) second))
+                (out, verdict) <- wholeVerdict run internalFull
+                assertEqual out Success verdict
+                gone <- mutationsOf run mutations (deleteScript internalFull)
+                assertBool (unlines gone) ("forwarding-rules delete web-https-fw" `elem` gone)
+                assertBool (unlines gone) ("backend-services delete web-backend" `elem` gone)
+        , testCase "against a stand-in gcloud: an external balancer of the same name is a problem the internal up refuses" $
+            withFakeGcloud $ \run mutations -> do
+                _ <- mutationsOf run mutations (createScript full)
+                (out, verdict) <- wholeVerdict run internalFull
+                assertBool out (isFailure verdict)
+                assertBool out ("PROBLEM backend-services web-backend has scheme EXTERNAL_MANAGED" `isInfixOf` out)
+                assertBool out ("PROBLEM forwarding-rules web-fw has scheme EXTERNAL_MANAGED" `isInfixOf` out)
+                (code, _, err) <- run (createScript internalFull)
+                assertBool err (code /= ExitSuccess)
+                assertBool err ("has scheme EXTERNAL_MANAGED, declared INTERNAL_MANAGED" `isInfixOf` err)
+        ]
     -- a declaration as somebody who means to try a bucket route would write it
     allowing a = a{LoadBalancing.albBucketRoutes = LoadBalancing.AllowBucketRoutesKnownToHaveBrokenALiveBalancer}
     -- 'site' with the one rule that routes to the bucket dropped: bucket still declared, redirects kept
@@ -4299,6 +4389,7 @@ lbTests =
             , LoadBalancing.albBucketRoutes = LoadBalancing.RefuseBucketRoutes
             , LoadBalancing.albHttp = LoadBalancing.HttpCreatedOnce
             , LoadBalancing.albScope = LoadBalancing.RegionalBalancer
+            , LoadBalancing.albScheme = LoadBalancing.ExternalManaged
             }
 
 {- | A stand-in for @gcloud@: resources are files named
@@ -4317,7 +4408,7 @@ fakeGcloud =
         , "if [ \"$verb\" = create ] || [ \"$verb\" = update ]; then if [ \"$name\" = tcp ]; then name=\"$5\"; fi; fi"
         , -- a managed instance group, which only the leftovers part lists
           "if [ \"$coll\" = instance-groups ] && [ \"$verb\" = managed ]; then coll=instance-groups-managed; verb=\"$4\"; name=\"${5:-}\"; fi"
-        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''; desc=''; authz=''; hc=''"
+        , "format=''; group=''; timeout=''; portname=''; namedports=''; domains=''; certs=''; gcs=''; urlmap=''; desc=''; authz=''; hc=''; scheme=''"
         , "for a in \"$@\"; do case \"$a\" in"
         , "  --format=*) format=\"${a#--format=}\";;"
         , "  --instance-group=*) group=\"/instanceGroups/${a#--instance-group=}\";;"
@@ -4333,6 +4424,7 @@ fakeGcloud =
         , "  --description=*) desc=\"${a#--description=}\";;"
         , "  --dns-authorizations=*) authz=\"${a#--dns-authorizations=}\";;"
         , "  --health-checks=*) hc=\"${a#--health-checks=}\";;"
+        , "  --load-balancing-scheme=*) scheme=\"${a#--load-balancing-scheme=}\";;"
         , "esac; done"
         , "f=\"$S/$coll.$name\""
         , "mutate() { echo \"$coll $verb $name\" >> \"$FAKE_GCLOUD_LOG\"; }"
@@ -4357,6 +4449,7 @@ fakeGcloud =
         , "      'value(IPAddress)') echo 203.0.113.7;;"
         , "      'value(bucketName)') cat \"$f.gcs\" 2>/dev/null || true;;"
         , "      'value(type)') cat \"$f.type\" 2>/dev/null || echo TCP;;"
+        , "      'value(loadBalancingScheme)') cat \"$f.scheme\" 2>/dev/null || true;;"
         , -- a proxy names its map by URL, as (it is assumed) the real one does
           "      'value(urlMap)') echo \"https://www.googleapis.com/compute/v1/projects/p/regions/r/urlMaps/$(cat \"$f.urlmap\" 2>/dev/null)\";;"
         , "      'value(description)') if [ -e \"$f.description\" ]; then cat \"$f.description\"; exit 0; fi; grep -o '\"description\":\"[^\"]*\"' \"$f\" | sed -e 's/\"description\"://' -e 's/\"//g' || true;;"
@@ -4368,6 +4461,7 @@ fakeGcloud =
         , "    if [ -n \"$desc\" ]; then echo \"$desc\" > \"$f.description\"; fi"
         , "    if [ -n \"$authz\" ]; then echo \"$authz\" > \"$f.authz\"; fi"
         , "    if [ -n \"$hc\" ]; then echo \"$hc\" > \"$f.hc\"; fi"
+        , "    if [ -n \"$scheme\" ]; then echo \"$scheme\" > \"$f.scheme\"; fi"
         , -- a new certificate is not issued at once, when the test says so
           "    if [ -n \"$domains\" ]; then echo \"$domains\" > \"$f.domains\"; echo \"${FAKE_GCLOUD_NEW_CERT_STATE:-ACTIVE}\" > \"$f.state\"; fi;;"
         , -- the listings the leftovers part reads; like the rest, a guess at gcloud's output
@@ -4397,7 +4491,7 @@ fakeGcloud =
         , "    if [ \"$coll\" = health-checks ] && cat \"$S\"/backend-services.*.hc \"$S\"/instance-groups-managed.*.hc 2>/dev/null | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
         , "    if [ \"$coll\" = dns-authorizations ] && cat \"$S\"/certificates.*.authz 2>/dev/null | tr ',' '\\n' | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
         , "    if [ \"$coll\" = url-maps ] && cat \"$S\"/target-http-proxies.*.urlmap \"$S\"/target-https-proxies.*.urlmap 2>/dev/null | grep -qxF \"$name\"; then echo \"IN_USE $coll $name\" >&2; exit 1; fi"
-        , "    mutate; rm -f \"$f.description\" \"$f.authz\" \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\" \"$f.hc\";;"
+        , "    mutate; rm -f \"$f.description\" \"$f.authz\" \"$f\" \"$f.backends\" \"$f.timeout\" \"$f.portname\" \"$f.certs\" \"$f.domains\" \"$f.state\" \"$f.attempts\" \"$f.expire\" \"$f.gcs\" \"$f.urlmap\" \"$f.hc\" \"$f.scheme\";;"
         , "  *) echo \"fake gcloud: unhandled $*\" >&2; exit 2;;"
         , "esac"
         ]

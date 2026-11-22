@@ -21,8 +21,11 @@ module Salmon.Builtin.Nodes.Gcp.LoadBalancing (
     domainSetTag,
     ApplicationLoadBalancer (..),
     LoadBalancerScope (..),
+    LoadBalancingScheme (..),
+    schemeText,
     httpLoadBalancer,
     globalHttpLoadBalancer,
+    internalHttpLoadBalancer,
     applicationLoadBalancer,
     applicationLoadBalancerAfter,
     applicationLoadBalancerPart,
@@ -430,8 +433,61 @@ data ApplicationLoadBalancer = ApplicationLoadBalancer
     -- ^ 'HttpCreatedOnce' unless something else is wanted of port 80
     , albScope :: LoadBalancerScope
     -- ^ 'RegionalBalancer' unless the backends are in several regions
+    , albScheme :: LoadBalancingScheme
+    -- ^ 'ExternalManaged' unless the balancer is to be reachable only from
+    -- inside 'albNetwork'
     }
     deriving (Eq, Show)
+
+{- | Who can reach the balancer: the internet ('ExternalManaged', what this
+module always made and the default), or only addresses inside the VPC
+network ('InternalManaged').
+
+'InternalManaged' is a /regional internal/ Application Load Balancer
+(@INTERNAL_MANAGED@): the same resources, nodes, edges, checks and leftovers
+handling as a regional external one, with the scheme said on its backend
+services and forwarding rules, and its forwarding rules (and, with a
+certificate, the address they share) in 'albNetwork' on the subnet named
+here, in 'albRegion'. That subnet is the caller's, an ordinary one the
+clients can reach, not the proxy-only subnet; the proxy-only subnet
+(@REGIONAL_MANAGED_PROXY@) is a prerequisite exactly as for a regional
+external balancer, and one serves both kinds in a region and network. With
+a certificate the address is reserved in that subnet with
+@--purpose=SHARED_LOADBALANCER_VIP@, so the HTTP and the HTTPS rules can
+share it.
+
+A scheme is fixed when a backend service or a forwarding rule is created,
+and every resource here is created once: so an internal declaration's checks
+also read each one's @loadBalancingScheme@, and one found with another is a
+@PROBLEM@ that its @up@ refuses rather than fixes (delete it by hand to
+change the scheme). An external declaration's scripts are what they were.
+
+Refused ('albProblems'): an internal 'GlobalBalancer' (a cross-region
+internal balancer is not done), an internal balancer with no 'albNetwork' or
+an empty subnet, and an internal balancer with 'albBuckets' (not done).
+
+What an internal balancer leaves to the caller: anything outside the
+network asking whether it answers (an uptime check cannot reach an internal
+address; the root's own check is the backends' health, as for any
+balancer), the firewall rules letting the proxy-only subnet and the health
+checkers reach the backends, and the DNS records clients resolve
+('readAddress' reads its internal address as it does an external one's).
+
+Never run against a real project: the flags are read from GCP's
+documentation and @gcloud ... --help@, see the module notes.
+-}
+data LoadBalancingScheme
+    = ExternalManaged
+    | -- | the subnet (in 'albNetwork', in 'albRegion') the forwarding rules
+      -- take their address from
+      InternalManaged Text
+    deriving (Eq, Show)
+
+-- | What @--load-balancing-scheme@ says.
+schemeText :: LoadBalancingScheme -> Text
+schemeText = \case
+    ExternalManaged -> "EXTERNAL_MANAGED"
+    InternalManaged _ -> "INTERNAL_MANAGED"
 
 {- | Which kind of external Application Load Balancer the resources make.
 
@@ -480,6 +536,7 @@ httpLoadBalancer name project region backends hc =
         , albBucketRoutes = RefuseBucketRoutes
         , albHttp = HttpCreatedOnce
         , albScope = RegionalBalancer
+        , albScheme = ExternalManaged
         }
 
 {- | 'httpLoadBalancer' made global ('GlobalBalancer'), with Cloud Run
@@ -491,6 +548,18 @@ globalHttpLoadBalancer :: Text -> Project -> Region -> [(Region, Text)] -> Appli
 globalHttpLoadBalancer name project region replicas =
     (httpLoadBalancer name project region [CloudRunBackendIn r svc | (r, svc) <- replicas] Nothing)
         { albScope = GlobalBalancer
+        }
+
+{- | 'httpLoadBalancer' made internal ('InternalManaged'): reachable only
+from inside @network@, its forwarding rule's address taken from @subnet@ (an
+ordinary subnet of that network in @region@, not the proxy-only one, which
+is still the caller's prerequisite).
+-}
+internalHttpLoadBalancer :: Text -> Project -> Region -> Text -> Text -> [Backend] -> Maybe HealthCheck -> ApplicationLoadBalancer
+internalHttpLoadBalancer name project region network subnet backends hc =
+    (httpLoadBalancer name project region backends hc)
+        { albNetwork = Just network
+        , albScheme = InternalManaged subnet
         }
 
 -- | The API a 'ManagedCertificate' needs enabled (the caller's dependency).
@@ -513,7 +582,8 @@ mixed, a managed certificate with no domain, a timeout that is not positive,
 one backend service sending to two different ports of one instance group,
 a regional balancer sending to Cloud Run in another region, one backend
 service with two Cloud Run backends in one region, a global balancer naming
-a network.
+a network, an internal balancer that is global, names no network or subnet,
+or declares a backend bucket.
 -}
 albProblems :: ApplicationLoadBalancer -> [Text]
 albProblems alb =
@@ -615,6 +685,19 @@ albProblems alb =
            | alb.albScope == GlobalBalancer
            , Just n <- [alb.albNetwork]
            ]
+        <> concat
+            [ [ "an internal load balancer is regional here: a cross-region internal one is not done"
+              | alb.albScope == GlobalBalancer
+              ]
+                <> [ "an internal load balancer needs albNetwork: its forwarding rules are in a VPC network"
+                   | alb.albNetwork == Nothing
+                   ]
+                <> ["an internal load balancer names no subnet" | Text.null subnet]
+                <> [ "an internal load balancer takes no backend bucket (not done): " <> Text.unwords buckets
+                   | not (null buckets)
+                   ]
+            | InternalManaged subnet <- [alb.albScheme]
+            ]
   where
     names = map backendServiceName alb.albServices
     buckets = map backendBucketName alb.albBuckets
@@ -716,7 +799,7 @@ applicationLoadBalancerWith :: (Part -> [Op]) -> [Op] -> Reporter Report -> Trac
 applicationLoadBalancerWith partPrereqs prereqs r gcloudTrack alb =
     op "gcp-application-lb" (deps (prereqs <> ordered)) $ \actions ->
         actions
-            { help = Text.unwords (["global" | alb.albScope == GlobalBalancer] <> ["application load balancer", alb.albName])
+            { help = Text.unwords (["global" | alb.albScope == GlobalBalancer] <> ["internal" | internal alb] <> ["application load balancer", alb.albName])
             , notes = albNotes alb
             , ref = mkRef "gcp-application-lb" (alb.albProject.projectId, locationKey alb, alb.albName)
             , up = unless (null problems) $ throwIO (InvalidLoadBalancer problems)
@@ -882,6 +965,9 @@ albNotes alb =
            ]
         <> [ "bucket routes allowed (known to have broken a live balancer)"
            | alb.albBucketRoutes == AllowBucketRoutesKnownToHaveBrokenALiveBalancer
+           ]
+        <> [ "internal (INTERNAL_MANAGED) on subnet " <> subnet
+           | InternalManaged subnet <- [alb.albScheme]
            ]
         <> case alb.albHttp of
             HttpCreatedOnce -> []
@@ -1087,6 +1173,9 @@ loadBalancingCommand = Command $ \cmd -> case cmd of
 
 serveHttps :: ApplicationLoadBalancer -> Bool
 serveHttps = not . null . albCertificates
+
+internal :: ApplicationLoadBalancer -> Bool
+internal alb = alb.albScheme /= ExternalManaged
 
 {- | Where the balancer's resources are, as its @ref@s and Certificate
 Manager's @--location@ say it: its region, or @global@.
@@ -1606,6 +1695,10 @@ has a proxy-only subnet in the region. Nothing here creates one -- see
 'Salmon.Builtin.Nodes.Gcp.Compute.RegionalManagedProxy', which is a
 prerequisite to hand 'applicationLoadBalancerAfter'.
 
+An internal balancer ('InternalManaged') is a /regional internal/ one
+(@INTERNAL_MANAGED@): the same parts and edges, needing the same proxy-only
+subnet, its forwarding rules and address in the subnet it names.
+
 A 'GlobalBalancer' is the same resources and the same edges, made global
 ('LoadBalancerScope'), with no proxy-only subnet to need; only its
 serverless NEGs are regional, each in its backend's region, and a backend
@@ -1637,6 +1730,31 @@ lbParts alb =
     domainSets = not (null [() | DomainSetCertificate _ _ <- alb.albCertificates])
     groups = groupNamedPorts alb
     global = alb.albScope == GlobalBalancer
+    scheme = schemeText alb.albScheme
+
+    -- An internal declaration's backend services and forwarding rules are
+    -- also checked for the scheme they were created with, which no @up@
+    -- can change: another is a PROBLEM for the check and a refusal for the
+    -- up. An external declaration's scripts are left as they were.
+    schemeGuarded :: Text -> Text -> PartSpec -> PartSpec
+    schemeGuarded coll name spec
+        | internal alb =
+            spec
+                { partUp =
+                    spec.partUp
+                        <> [ readScheme
+                           , "if [ \"$scheme\" != " <> scheme <> " ]; then echo " <> shellQuote (coll <> " " <> name <> " has scheme ") <> "\"${scheme:-none}\"" <> shellQuote (", declared " <> scheme <> ": " <> wrongScheme) <> " >&2; exit 1; fi"
+                           ]
+                , partCheck =
+                    spec.partCheck
+                        <> [ readScheme
+                           , "[ -z \"$scheme\" ] || [ \"$scheme\" = " <> scheme <> " ] || echo " <> shellQuote ("PROBLEM " <> coll <> " " <> name <> " has scheme") <> "\" $scheme\"" <> shellQuote (", declared " <> scheme <> ": " <> wrongScheme)
+                           ]
+                }
+        | otherwise = spec
+      where
+        readScheme = "scheme=$(" <> describeCompute coll name <> " --format='value(loadBalancingScheme)' 2>/dev/null) || scheme=''"
+        wrongScheme = "a scheme is set at creation, delete it to change it"
 
     -- where this balancer's resources are, and its certificates
     regional = scopeFlags alb
@@ -1778,6 +1896,7 @@ lbParts alb =
 
     servicePart :: Svc -> PartSpec
     servicePart svc =
+        schemeGuarded "backend-services" svc.svcResource $
         PartSpec
             { partId = BackendServicePart svc.svcResource
             , partDeps = [HealthCheckPart hc.healthCheckName | Just hc <- [instanceGroupHealthCheck svc]]
@@ -1793,7 +1912,7 @@ lbParts alb =
                         <> regional
                         <> " --protocol=HTTP"
                         <> maybe "" ((" --port-name=" <>) . shellQuote) (svcPortName svc)
-                        <> " --load-balancing-scheme=EXTERNAL_MANAGED"
+                        <> " --load-balancing-scheme=" <> scheme
                         <> maybe "" (\hc -> " --health-checks=" <> shellQuote hc.healthCheckName <> scopeOf "health-checks") (instanceGroupHealthCheck svc)
                     )
                 ]
@@ -2014,7 +2133,7 @@ lbParts alb =
                         <> regional
                         <> " --gcs-bucket-name=" <> shellQuote gcs
                         -- left blank, a backend bucket is a global external one's
-                        <> (if global then "" else " --load-balancing-scheme=EXTERNAL_MANAGED")
+                        <> (if global then "" else " --load-balancing-scheme=" <> scheme)
                     )
                 , "have=$(" <> describeCompute "backend-buckets" res <> " --format='value(bucketName)')"
                 , "[ \"$have\" = " <> shellQuote gcs <> " ] || gcloud compute backend-buckets update " <> shellQuote res
@@ -2478,7 +2597,13 @@ lbParts alb =
 
     -- Two forwarding rules can only share an address that is reserved.
     addressPart :: PartSpec
-    addressPart = simple AddressPart [] "reserved address" "addresses" (alb.albName <> "-ip") ""
+    addressPart = simple AddressPart [] "reserved address" "addresses" (alb.albName <> "-ip") addressCreateFlags
+
+    -- an internal balancer's address is in its subnet, and shared by its
+    -- two rules only when reserved for that
+    addressCreateFlags = case alb.albScheme of
+        ExternalManaged -> ""
+        InternalManaged subnet -> " --subnet=" <> shellQuote subnet <> " --purpose=SHARED_LOADBALANCER_VIP"
 
     addressFlag
         | https = " --address=" <> resourceName "-ip" <> scopeOf "address"
@@ -2637,17 +2762,22 @@ lbParts alb =
     -- a global balancer's rules are in no network ('albProblems' refuses one)
     networkFlag
         | global = ""
-        | otherwise = maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
+        | otherwise =
+            maybe "" ((" --network=" <>) . shellQuote) alb.albNetwork
+                <> case alb.albScheme of
+                    InternalManaged subnet -> " --subnet=" <> shellQuote subnet <> " --subnet-region=\"$REGION\""
+                    ExternalManaged -> ""
 
     forwardingRulePart :: PartSpec
     forwardingRulePart =
+        schemeGuarded "forwarding-rules" (alb.albName <> "-fw") $
         simple
             ForwardingRulePart
             (HttpProxyPart : [AddressPart | https])
             "forwarding rule"
             "forwarding-rules"
             (alb.albName <> "-fw")
-            ( " --load-balancing-scheme=EXTERNAL_MANAGED"
+            ( " --load-balancing-scheme=" <> scheme
                 <> networkFlag
                 <> addressFlag
                 <> " --target-http-proxy=" <> resourceName "-proxy"
@@ -2657,13 +2787,14 @@ lbParts alb =
 
     httpsForwardingRulePart :: PartSpec
     httpsForwardingRulePart =
+        schemeGuarded "forwarding-rules" (alb.albName <> "-https-fw") $
         simple
             HttpsForwardingRulePart
             [HttpsProxyPart, AddressPart]
             "HTTPS forwarding rule"
             "forwarding-rules"
             (alb.albName <> "-https-fw")
-            ( " --load-balancing-scheme=EXTERNAL_MANAGED"
+            ( " --load-balancing-scheme=" <> scheme
                 <> networkFlag
                 <> addressFlag
                 <> " --target-https-proxy=" <> resourceName "-https-proxy"

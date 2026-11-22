@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+`Gcp.LoadBalancing`: internal managed load balancers. `albScheme = InternalManaged subnet`
+(`LoadBalancingScheme`, `internalHttpLoadBalancer`) makes the balancer a regional internal one
+(`INTERNAL_MANAGED`): its forwarding rules, and with a certificate their shared address
+(`SHARED_LOADBALANCER_VIP`), are in that subnet of `albNetwork`, and its backend services and rules
+are checked for the scheme they were created with. `ExternalManaged` is the default and renders
+what it did. Breaking: `ApplicationLoadBalancer` gained the `albScheme` field (a full-record
+construction must name it; `httpLoadBalancer` plus a record update is unaffected).
+
 `Gcp.Monitoring`: alert policies on any condition. `Policy` and `monitoringPolicy` take
 `Condition`s: the Cloud Run ones, a threshold on any metric filter (`MetricThreshold`, with
 `uptimeCheckFailing`, `metricTypeFilter`, `logBasedMetricFilter`), a metric going absent
