@@ -4570,6 +4570,29 @@ clientOptsTests =
             ""
             ["-o", "UserKnownHostsFile=/w/ssh/known_hosts", "-o", "StrictHostKeyChecking=accept-new"]
             (Ssh.clientArgs Ssh.noClientOpts{Ssh.optKnownHosts = Just "/w/ssh/known_hosts"})
+    , testCase "extra options come last, one -o each, in the order given" $
+        assertEqual
+            "ssh keeps the first value of an option, so the fields above still win"
+            [ "-o"
+            , "UserKnownHostsFile=/w/ssh/known_hosts"
+            , "-o"
+            , "StrictHostKeyChecking=accept-new"
+            , "-o"
+            , "ServerAliveInterval=15"
+            , "-o"
+            , "ServerAliveCountMax=3"
+            ]
+            ( Ssh.clientArgs
+                Ssh.noClientOpts
+                    { Ssh.optKnownHosts = Just "/w/ssh/known_hosts"
+                    , Ssh.optExtra = [("ServerAliveInterval", "15"), ("ServerAliveCountMax", "3")]
+                    }
+            )
+    , testCase "rsync carries extra options through --rsh too" $
+        assertEqual
+            ""
+            ["--copy-links", "--rsh", "ssh -o BatchMode=yes", "/local/bin", "salmon@1.2.3.4:/home/salmon/bin"]
+            (processArgs (prepare Rsync.rsyncRun (Rsync.SendFile "/local/bin" (Rsync.Remote "salmon" "1.2.3.4") "/home/salmon/bin" Ssh.noClientOpts{Ssh.optExtra = [("BatchMode", "yes")]})))
     , testCase "rsync carries the same options through --rsh" $
         assertEqual
             "rsync has no -i of its own"
@@ -4606,7 +4629,7 @@ clientOptsTests =
             (not (Ssh.isHostKeyMismatch "salmon@1.2.3.4: Permission denied (publickey)."))
     ]
   where
-    opts = Ssh.ClientOpts (Just "/w/ssh/toy-client") (Just "/w/ssh/known_hosts")
+    opts = Ssh.noClientOpts{Ssh.optIdentity = Just "/w/ssh/toy-client", Ssh.optKnownHosts = Just "/w/ssh/known_hosts"}
 
 -------------------------------------------------------------------------------
 

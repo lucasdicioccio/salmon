@@ -191,7 +191,7 @@ leaving a landmine in a file the operator shares with everything else.
 -}
 clientOpts :: VmProvisionConfig directive -> Ssh.ClientOpts
 clientOpts cfg =
-    Ssh.ClientOpts
+    Ssh.noClientOpts
         { Ssh.optIdentity = Just key
         , Ssh.optKnownHosts = Just (takeDirectory key </> "known_hosts")
         }
