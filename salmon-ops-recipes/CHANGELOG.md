@@ -1,5 +1,14 @@
 # Revision history for salmon-ops-recipes
 
+## Unreleased
+
+Breaking for code that builds a `SreBox.PostgresPair.Bouncer` with record syntax (two new fields);
+a JSON directive without them reads as before.
+
+* `SreBox.PostgresPair.Bouncer`: `bouncer_default_pool_size` and `bouncer_max_client_conn`
+  (optional, defaulting to the 20 and 200 the ini always had), written to the bouncer's
+  `pgbouncer.ini` and checked by `bouncerProblems` (positive, pool not above the client limit).
+
 ## 0.3.0.0 -- 2026-10-31
 
 No change to the library's own code. Requires `salmon-ops ^>=0.3.0.0`, whose exports changed.

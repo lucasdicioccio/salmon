@@ -51,6 +51,10 @@ module SreBox.PostgresPair (
     RoutedDatabase (..),
     routedDatabases,
     bouncerProblems,
+    defaultPoolSize,
+    defaultMaxClientConn,
+    poolSize,
+    maxClientConn,
     memberOn,
     memberSshHost,
     sshLogin,
@@ -112,7 +116,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.List (nub, (\\))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -224,8 +228,32 @@ data Bouncer
     -- 'bouncer_alias'. Absent (also from a directive written before this
     -- field existed) there are none, and the bouncer routes the one database
     -- it always did. Read them all through 'routedDatabases'.
+    , bouncer_default_pool_size :: Maybe Int
+    -- ^ pgbouncer's @default_pool_size@: server connections per database and
+    -- user. Absent (also from a directive written before this field existed)
+    -- is 'defaultPoolSize', what every bouncer of a pair had before it could
+    -- be chosen. Read it through 'poolSize'.
+    , bouncer_max_client_conn :: Maybe Int
+    -- ^ pgbouncer's @max_client_conn@: client connections it accepts in all.
+    -- Absent is 'defaultMaxClientConn'. Read it through 'maxClientConn'.
     }
     deriving (Eq, Show, Generic)
+
+-- | The pool size of a bouncer that does not declare one.
+defaultPoolSize :: Int
+defaultPoolSize = 20
+
+-- | The client connection limit of a bouncer that does not declare one.
+defaultMaxClientConn :: Int
+defaultMaxClientConn = 200
+
+-- | 'bouncer_default_pool_size', or 'defaultPoolSize' when absent.
+poolSize :: Bouncer -> Int
+poolSize b = fromMaybe defaultPoolSize b.bouncer_default_pool_size
+
+-- | 'bouncer_max_client_conn', or 'defaultMaxClientConn' when absent.
+maxClientConn :: Bouncer -> Int
+maxClientConn b = fromMaybe defaultMaxClientConn b.bouncer_max_client_conn
 
 instance FromJSON Bouncer
 instance ToJSON Bouncer
@@ -264,6 +292,10 @@ word would be read as something else by the routing file, by the console's
 @PAUSE@, or by the shell carrying both -- checked only for the databases
 beyond the first, so that a directive written before there could be several
 is refused nothing it was not refused before.
+
+The pool settings are checked as they will be written, defaults included: a
+count that is not positive is not one pgbouncer can honour, and a pool larger
+than the clients allowed in could never be filled by them.
 -}
 bouncerProblems :: Pair -> [Text]
 bouncerProblems pair =
@@ -275,6 +307,18 @@ bouncerProblems pair =
                | d <- fromMaybe [] b.bouncer_more_databases
                , name <- [d.routed_alias, d.routed_dbname]
                , Text.null name || Text.any (not . plain) name
+               ]
+            <> [ "bouncer " <> b.bouncer_name <> ": default_pool_size " <> Text.pack (show (poolSize b)) <> " is not positive"
+               | poolSize b <= 0
+               ]
+            <> [ "bouncer " <> b.bouncer_name <> ": max_client_conn " <> Text.pack (show (maxClientConn b)) <> " is not positive"
+               | maxClientConn b <= 0
+               ]
+            <> [ "bouncer " <> b.bouncer_name <> ": default_pool_size " <> Text.pack (show (poolSize b))
+                    <> " is above max_client_conn " <> Text.pack (show (maxClientConn b))
+               | poolSize b > 0
+               , maxClientConn b > 0
+               , poolSize b > maxClientConn b
                ]
         | b <- pair.pair_bouncers
         , let aliases = map routed_alias (routedDatabases b)
@@ -1611,6 +1655,13 @@ bouncerSetup r pair b =
                 [ "clients reach " <> Text.intercalate ", " (map routed_alias (routedDatabases b)) <> " on port " <> Text.pack (show b.bouncer_listen_port)
                 , "routing is " <> Text.pack b.bouncer_routing_path <> ", which the role node owns"
                 ]
+                    -- only when declared, so a bouncer without them keeps the
+                    -- representative it always had; when declared, a change
+                    -- of size is a change of representative, which is what
+                    -- makes serve rewrite the ini
+                    <> [ "pool: default_pool_size " <> Text.pack (show (poolSize b)) <> ", max_client_conn " <> Text.pack (show (maxClientConn b))
+                       | isJust b.bouncer_default_pool_size || isJust b.bouncer_max_client_conn
+                       ]
             , up = do
                 (code, out, err) <- sshToTarget pair (OnBouncer b) (bouncerSetupScript pair b)
                 runReporter r (Acted b.bouncer_name code (Text.strip (out <> err)))
@@ -1658,8 +1709,8 @@ bouncerSetupScript pair b =
               -- transactions rather than for whole sessions, so a client
               -- sees a pause of its own length and not of somebody else's.
               PgBouncer.bouncer_pool_mode = PgBouncer.TransactionPooling
-            , PgBouncer.bouncer_max_client_conn = 200
-            , PgBouncer.bouncer_default_pool_size = 20
+            , PgBouncer.bouncer_max_client_conn = maxClientConn b
+            , PgBouncer.bouncer_default_pool_size = poolSize b
             , PgBouncer.bouncer_admin_users = [b.bouncer_console_user]
             , PgBouncer.bouncer_routing_file = Just b.bouncer_routing_path
             }

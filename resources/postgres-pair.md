@@ -366,6 +366,22 @@ not arrived while any alias is held or pointed elsewhere.
   prerequisites' (one `app` entry per database), as is every user in the
   bouncer's `userlist.txt`.
 
+### Sizing a bouncer's pool
+
+Each bouncer's `pgbouncer.ini` carries `default_pool_size` (server connections
+per database and user) and `max_client_conn` (client connections it accepts in
+all). In the directive they are `bouncer_default_pool_size` and
+`bouncer_max_client_conn` on the `Bouncer`; a directive without them writes 20
+and 200, what every pair's bouncer had before they could be chosen, and its
+node's notes stay what they were. Declaring either puts both values in the
+node's notes, so changing them is a change `serve` sees: `bouncerSetup`
+rewrites the ini and restarts pgbouncer, which drops the clients it holds, so
+resize at a quiet moment. `salmon-pgpair config` has no flags for them; edit
+the directive.
+
+Refused: a count that is not positive, and a pool larger than the client limit
+(checked against the default when only one of the two is declared).
+
 ## When it refuses, and why
 
 A refusal is the recipe saying it cannot prove the next step is safe:
