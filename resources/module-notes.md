@@ -4205,6 +4205,14 @@ The two paths that called a bare `createProcess` did inherit, and now go through
 load-balancer scripts, which call `gcloud` from bash, start with `CLOUDSDK_CORE_DISABLE_PROMPTS=1`.
 `Test/BinarySpec.hs` and `Test/DaemonSpec.hs` ask real children what their descriptor 0 is. Nothing
 else in the four packages starts a process another way (no `callProcess`, no other `createProcess`).
+`Test/GcpQuietSpec.hs` prepares one sample of every constructor of every `Command "gcloud"` type
+under `Nodes/Gcp/` (both load-balancer scopes, every part) and asserts `--quiet` before any `--`, or,
+for a `bash -c` script, the disable-prompts export as its first line. It is compiled with
+`-Werror=incomplete-patterns` and holds a total match per command type, so a new constructor fails
+the build there until it has a sample. Rendered scripts outside `Nodes/Gcp/` carry their own
+`--quiet`: `ClickHouse.Backup` renders `Storage.storageCommand`'s argv, and `SreBox.PostgresBackup`'s
+upload line was the one call without it (added; this changes the rendered backup script of a
+declaration that ships to GCS, a file node whose next `up` rewrites it, with no unit restarted).
 Not run against a real project: what each gcloud command does with its default under `--quiet`.
 
 **Inject onto the node that does the work, not onto a node grouping it.** A node built with
