@@ -2805,8 +2805,8 @@ rule, and the GCP toy uses both to point `lb.DNS_NAME` at its balancer (`--dns-z
 record-set command has been run against a real project, so the `describe` JSON shape, the `^DELIM^` escaping, how Cloud
 DNS spells back a `TXT`, an `AAAA` or an `MX`, and the toy's tier 3 record are unverified.
 
-`Gcp.LoadBalancing.applicationLoadBalancer` is one *declaration* for a whole *regional external* Application Load
-Balancer, unfolded into a node per resource under a root that keeps the old `ref` (`gcp-application-lb`): `lbParts` is
+`Gcp.LoadBalancing.applicationLoadBalancer` is one *declaration* for a whole *regional external* (or, see below,
+global or internal) Application Load Balancer, unfolded into a node per resource under a root that keeps the old `ref` (`gcp-application-lb`): `lbParts` is
 the pure list (a `PartSpec` per health check, per group's named ports, per backend service, per NEG, per backend
 attachment, the URL map, per DNS authorization, per certificate, the address, the proxies, the forwarding rules), each
 with its dependencies and the bash lines of its `up` (`describe`-guarded creates), its read-only check (lines
@@ -2968,6 +2968,34 @@ DAG's refs against a regional twin, the problems, `bash -n` on every script, and
 `sslCertificates` (the swap and leftovers code reads that field, as for the regional one), `PER_PROJECT_RECORD` DNS
 authorizations at `location=global`, the `get-health` of a global service over NEGs, which region GCP routes to, and
 the downstream stack switching to it. `salmon-gcp-toy` and `salmon-cloudrun` declare no global balancer.
+**An internal balancer** is `albScheme = InternalManaged subnet` (`LoadBalancingScheme`; `ExternalManaged` is the
+default, set by `httpLoadBalancer`, and renders every script as before: the checksum pins did not move;
+`internalHttpLoadBalancer name project region network subnet backends hc` is the short form). Asked for by budgetz,
+whose stack front for a core-only stack in a customer's own project should be reachable only inside that network. It
+is a *regional internal* Application Load Balancer: the same `lbParts`, nodes, edges, checks and `LeftoversPart`, with
+`--load-balancing-scheme=INTERNAL_MANAGED` on the backend services and both forwarding rules, the rules also on
+`--subnet=<subnet> --subnet-region=$REGION` (after `--network`), and, with a certificate, the shared `<name>-ip`
+reserved in that subnet with `--purpose=SHARED_LOADBALANCER_VIP` (what lets the HTTP and HTTPS rules share an internal
+address). The subnet is an ordinary one the clients reach; the proxy-only subnet (`REGIONAL_MANAGED_PROXY`) is still the
+caller's prerequisite, as for a regional external balancer, and one serves both schemes in a region and network.
+Load-bearing: **a scheme is fixed at creation and every resource here is created once**, so an internal declaration's
+backend services and forwarding rules read `loadBalancingScheme` back: another is a `PROBLEM` (a `Failure`) for the
+check and a refusal (exit 1, "a scheme is set at creation, delete it to change it") for the `up`, never a delete.
+Those lines are added to internal declarations only; an external one does not check its scheme, so an external
+declaration over an internal balancer of the same name is not seen. The `ref`s do not change with the scheme (same
+names in the same region are the same GCP resources), and the root's `help` says `internal application load balancer
+<name>`, its notes `internal (INTERNAL_MANAGED) on subnet <subnet>`. New `albProblems`: an internal `GlobalBalancer`
+(cross-region internal is not done), no `albNetwork`, an empty subnet, any `albBuckets` (not done). **Left to the
+caller**: whether it answers from somewhere (an uptime check cannot reach an internal address; the root's check is the
+backends' `get-health`, as for any balancer), the firewall rules letting the proxy-only subnet and the health checkers
+reach the backends, and the DNS clients resolve (`readAddress` reads the internal address as it does an external one).
+**Layer 0 only** (`Test/GcpSpec.hs`, "LoadBalancing/an internal balancer": parts and edges against the external twin,
+the rendered flags, the root's help and notes, the problems, `bash -n`, and up/check/down plus a scheme mismatch
+against the stand-in `gcloud`, which now records `--load-balancing-scheme`). **Never run against a real project**: the
+flags are read from GCP's documentation and `gcloud ... --help`; not observed are a Certificate Manager certificate
+(and its DNS authorization) on a regional internal HTTPS proxy, `SHARED_LOADBALANCER_VIP` on a real address,
+`get-health` of an internal service, and how `describe --format='value(loadBalancingScheme)'` spells the scheme.
+`salmon-gcp-toy` and `salmon-cloudrun` declare no internal balancer.
 
 `Gcp.Storage` has three settings nodes beside `bucket` (whose `ref`/`help`/`notes` are unchanged), each with no
 dependency of its own, so the caller injects the bucket. `bucketIamBinding` is one unconditional binding on the bucket's
