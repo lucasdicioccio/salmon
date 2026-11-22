@@ -58,18 +58,36 @@ data ClientOpts = ClientOpts
     -- @~\/.ssh\/known_hosts@ fails every later connection with
     -- @REMOTE HOST IDENTIFICATION HAS CHANGED@ (which @accept-new@ does not,
     -- and should not, override).
+    , optExtra :: [(String, String)]
+    -- ^ further @ssh_config@ options, each passed as @-o Key=Value@ in
+    -- this order, after the flags the two fields above ask for (e.g.
+    -- @[(\"BatchMode\", \"yes\"), (\"ConnectTimeout\", \"10\")]@). Empty by
+    -- default, which adds nothing to any argv.
+    --
+    -- ssh keeps the /first/ value it is given for an option, so an extra
+    -- option cannot override what 'optIdentity' or 'optKnownHosts' set, nor
+    -- what a caller puts before 'clientArgs' (the probe in
+    -- "Salmon.Builtin.Nodes.Gcp.SshAccess" fixes @ConnectTimeout@ and
+    -- @BatchMode@ that way).
+    --
+    -- Each pair is one argv element under 'sshRun' and the other direct
+    -- @ssh@ calls, so a value may hold spaces there; rsync's @--rsh@
+    -- ("Salmon.Builtin.Nodes.Rsync") joins the flags with spaces and so
+    -- does not keep such a value whole. The options are never in a node's
+    -- @ref@, @help@ or @notes@: changing them restarts nothing.
     }
     deriving (Eq, Show)
 
 -- | Authenticate however ssh would by default.
 noClientOpts :: ClientOpts
-noClientOpts = ClientOpts Nothing Nothing
+noClientOpts = ClientOpts Nothing Nothing []
 
 -- | The @ssh@ flags 'ClientOpts' asks for.
 clientArgs :: ClientOpts -> [String]
 clientArgs opts =
     maybe [] (\key -> ["-i", key, "-o", "IdentitiesOnly=yes"]) opts.optIdentity
         <> maybe [] (\hosts -> ["-o", "UserKnownHostsFile=" <> hosts, "-o", "StrictHostKeyChecking=accept-new"]) opts.optKnownHosts
+        <> concatMap (\(key, value) -> ["-o", key <> "=" <> value]) opts.optExtra
 
 {- | Calls a command on a remote over ssh, with whatever identities ssh
 would offer by default (an agent, or @~\/.ssh\/id_*@).

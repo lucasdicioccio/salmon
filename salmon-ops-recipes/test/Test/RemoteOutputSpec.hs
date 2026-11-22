@@ -75,6 +75,8 @@ tests =
             "declared shape"
             [ testCase "Ssh.call is the node it was, and a routed call is the same node" sshCallUnchanged
             , testCase "the ssh argv does not depend on the routing" sshArgv
+            , testCase "extra ssh options go on the argv, before the destination" sshArgvExtra
+            , testCase "extra ssh options leave the node as it was" sshCallExtraUnchanged
             , testCase "callSelf is the node it was, its directive tagged" selfCallUnchanged
             , testCase "callSelfAsSudoWith is the node it was, its directive tagged" selfSudoCallUnchanged
             , testCase "following the remote's lines keeps the node; asking for its reports adds --json" selfCallOutputs
@@ -154,6 +156,46 @@ sshArgv =
             assertEqual "" ["deployer@198.51.100.7", "/srv/salmon/self", "run", "up", "--json"] args
         ShellCommand s -> assertFailure ("a shell command: " <> s)
 
+sshArgvExtra :: IO ()
+sshArgvExtra =
+    case cmdspec (prepare Ssh.sshRun (Ssh.Call "/srv/salmon/self" remote ["run", "up"] extraOpts)) of
+        RawCommand _ args ->
+            assertEqual
+                "one -o per option, in order, after the identity flags; an option value is one argv element"
+                [ "-i"
+                , "/keys/client"
+                , "-o"
+                , "IdentitiesOnly=yes"
+                , "-o"
+                , "BatchMode=yes"
+                , "-o"
+                , "ConnectTimeout=10"
+                , "-o"
+                , "SetEnv=GREETING=hello world"
+                , "deployer@198.51.100.7"
+                , "/srv/salmon/self"
+                , "run"
+                , "up"
+                ]
+                args
+        ShellCommand s -> assertFailure ("a shell command: " <> s)
+
+sshCallExtraUnchanged :: IO ()
+sshCallExtraUnchanged = do
+    plain <- actOf (Ssh.callWith Ssh.noClientOpts silent ignoreTrack ignoreTrack remote "uname" ["-a"] "")
+    extra <- actOf (Ssh.callWith extraOpts silent ignoreTrack ignoreTrack remote "uname" ["-a"] "")
+    assertEqual "same ref" plain.extension.ref extra.extension.ref
+    assertEqual "same help" plain.extension.help extra.extension.help
+    assertEqual "same notes" plain.extension.notes extra.extension.notes
+    assertEqual "same shorthand" plain.shorthand extra.shorthand
+
+extraOpts :: Ssh.ClientOpts
+extraOpts =
+    Ssh.noClientOpts
+        { Ssh.optIdentity = Just "/keys/client"
+        , Ssh.optExtra = [("BatchMode", "yes"), ("ConnectTimeout", "10"), ("SetEnv", "GREETING=hello world")]
+        }
+
 selfCallUnchanged :: IO ()
 selfCallUnchanged = do
     old <- actOf (trackedGraph (Self.callSelf silent ignoreTrack self ignoreTrack CLI.Up ()))
@@ -164,7 +206,7 @@ selfCallUnchanged = do
 
 selfSudoCallUnchanged :: IO ()
 selfSudoCallUnchanged = do
-    let client = Ssh.ClientOpts (Just "/keys/client") (Just "/keys/known_hosts")
+    let client = Ssh.noClientOpts{Ssh.optIdentity = Just "/keys/client", Ssh.optKnownHosts = Just "/keys/known_hosts"}
     old <- actOf (trackedGraph (Self.callSelfAsSudoWith client silent ignoreTrack self ignoreTrack CLI.Up ()))
     assertEqual "" (sshRunRefTagged "sudo" ["/srv/salmon/self", "run", "up"] unitDirective) old.extension.ref
     assertEqual "" ["sudo", "/srv/salmon/self", "run", "up"] old.extension.notes

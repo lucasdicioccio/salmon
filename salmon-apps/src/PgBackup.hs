@@ -336,7 +336,7 @@ driven spec rs =
             }
   where
     opts =
-        Ssh.ClientOpts
+        Ssh.noClientOpts
             { Ssh.optIdentity = rs.rs_identity
             , Ssh.optKnownHosts = rs.rs_knownHosts
             }

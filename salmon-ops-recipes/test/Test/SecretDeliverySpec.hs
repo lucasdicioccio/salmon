@@ -230,7 +230,7 @@ commandTests =
     ]
   where
     place = Placement "/etc/x/secret" "root" "root" "600"
-    opts = Ssh.ClientOpts (Just "/keys/client") Nothing
+    opts = Ssh.noClientOpts{Ssh.optIdentity = Just "/keys/client"}
     argsOf elevation = do
         p <- prepareIO deliveryCommand (DeliveryCommand opts (Ssh.Remote "salmon" "203.0.113.7") elevation (uploadScript place)) stdin
         pure $ case cmdspec p of

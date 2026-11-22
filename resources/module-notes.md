@@ -2268,6 +2268,19 @@ tag against a Python `hmac` vector, and the key file made once `0600` in a temp 
 make the real `~/.local/state/salmon/call.key`). **Not run**: any real ssh hop, the ephemeral fallback on a real
 read-only home, a plan made and applied by two processes.
 
+**Extra ssh options** (`Ssh.ClientOpts.optExtra :: [(String, String)]`, feature cd6bff6c, asked for by budgetz,
+which needs `BatchMode`, `ConnectTimeout` and `ServerAliveInterval`/`ServerAliveCountMax` on every call and was
+splicing them into `sshRun`'s argv). `clientArgs` renders each pair as `-o Key=Value`, in order, *after* the
+identity and known-hosts flags, so every `clientArgs` user carries them: `sshRun`, `RemoteFile`, `SecretDelivery`,
+the `SshAccess` probe and rsync's `--rsh`. Load-bearing: ssh keeps the **first** value of an option, so an extra
+cannot override `optIdentity`/`optKnownHosts`, nor the probe's own `ConnectTimeout=5`/`BatchMode=yes` (which come
+before `clientArgs`); the default `[]` adds nothing to any argv; and the options are in no `ref`, `help` or `notes`,
+so setting them restarts nothing. Through `sshRun` a value is one argv element (spaces kept); rsync's `--rsh` joins
+the flags with spaces, so a value with whitespace does not survive there (not quoted, not rejected). Adding the field
+broke positional `ClientOpts a b` constructions: the in-tree ones now use `noClientOpts{...}`, and an out-of-tree
+caller must do the same. Run: Layer 0 only (`Test/GcpSpec.hs` "Ssh.ClientOpts", `Test/RemoteOutputSpec.hs`: argv
+order, the rsync `--rsh`, an unchanged `ref`/`help`/`notes`). **Not run**: any real ssh connection with these options.
+
 `Podman.buildImage` builds with the Containerfile's own directory as context (the build runs *in* that directory, no
 context argument) and no `--target`; `Podman.buildImageWith` takes a `BuildOptions` for the two cases that does not
 cover: `buildContext` (the context is passed as the positional argument, `-f` gets the Containerfile's path as given,

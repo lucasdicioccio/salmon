@@ -159,7 +159,7 @@ commandTests =
     ]
   where
     place = Placement "/etc/systemd/system/x.service" "root" "root" "644"
-    opts = Ssh.ClientOpts (Just "/keys/client") Nothing
+    opts = Ssh.noClientOpts{Ssh.optIdentity = Just "/keys/client"}
 
 nodeTests :: [TestTree]
 nodeTests =
