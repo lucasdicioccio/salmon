@@ -267,4 +267,6 @@ plainPair seed =
               Pair.bouncer_more_databases = case seed.seedAlsoDatabases of
                 [] -> Nothing
                 more -> Just [Pair.RoutedDatabase db db | db <- more]
+            , Pair.bouncer_default_pool_size = Nothing
+            , Pair.bouncer_max_client_conn = Nothing
             }

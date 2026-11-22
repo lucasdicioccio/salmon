@@ -4001,6 +4001,15 @@ argument. What follows is the list of things that are load-bearing; each was a d
   it with `PgBouncer.renderIni` over ssh and restarts on change — `PgBouncer.setup` is the local
   equivalent, and watches the ini the same way) and the routing file has another (the role node, which does not), and one
   file with two writers is how a switchover becomes an outage.
+- **A bouncer's pool size and client limit are the declaration's, defaulting to what they were.**
+  `bouncer_default_pool_size`/`bouncer_max_client_conn` (`Maybe Int`, read through `poolSize`/
+  `maxClientConn`, absent meaning 20/200, the literals `bouncerSetupScript` used to write) reach the
+  ini through `PgBouncer.BouncerConfig`. A bouncer declaring neither renders the same script and the
+  same `notes`; declaring either adds a `pool:` line to `bouncerSetup`'s notes, because the node has
+  no `check` and a size change must change the representative for `serve` to re-apply it (which
+  restarts pgbouncer). `bouncerProblems` refuses a non-positive count and a pool above the client
+  limit, on the effective values. Run: Layer 0 only (`Test.PostgresPairSpec`, rendered ini, notes,
+  problems, JSON); no live pgbouncer was resized.
 - **A bouncer routes a list of databases, and every alias has to agree.** `routedDatabases` is
   `bouncer_alias`/`bouncer_dbname` followed by the optional `bouncer_more_databases` (absent in a
   directive written before it, so such a directive is the one-database bouncer it was;

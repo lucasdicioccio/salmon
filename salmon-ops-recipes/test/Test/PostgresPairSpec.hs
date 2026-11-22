@@ -29,6 +29,9 @@ import qualified Data.Text as Text
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 
+import Salmon.Builtin.Extension (Extension (..), opAct)
+import Salmon.Op.Actions (Act (..))
+import Salmon.Reporter (silent)
 import qualified SreBox.PostgresPair as Pair
 
 tests :: TestTree
@@ -39,6 +42,7 @@ tests =
         , testGroup "slot names" slotNameTests
         , testGroup "what a bouncer is doing" bouncerTests
         , testGroup "one bouncer routing several databases (bouncer_more_databases)" severalDatabasesTests
+        , testGroup "a bouncer's pool size and client limit (bouncer_default_pool_size, bouncer_max_client_conn)" poolTests
         , testGroup "parseLsn" lsnTests
         , testGroup "parseObserved" observedTests
         , testGroup "the probe script" probeTests
@@ -345,6 +349,8 @@ bouncer =
         , Pair.bouncer_alias = "app"
         , Pair.bouncer_dbname = "app"
         , Pair.bouncer_more_databases = Nothing
+        , Pair.bouncer_default_pool_size = Nothing
+        , Pair.bouncer_max_client_conn = Nothing
         , Pair.bouncer_routing_path = "/etc/pgbouncer/routing.ini"
         , Pair.bouncer_config_dir = "/etc/pgbouncer"
         , Pair.bouncer_listen_port = 6432
@@ -457,6 +463,59 @@ severalDatabasesTests =
     tails' xs@(_ : rest) = xs : tails' rest
 
 -- | A standby streaming from the machine it should be streaming from.
+poolTests :: [TestTree]
+poolTests =
+    [ testCase "a bouncer that declares neither writes the ini it always did" $ do
+        let s' = Pair.bouncerSetupScript pair bouncer
+        assertBool s' ("max_client_conn = 200\ndefault_pool_size = 20\n" `isInfixOf` s')
+    , testCase "and its node's notes are the ones it always had, so serve sees no change" $
+        assertEqual
+            ""
+            [ "clients reach app on port 6432"
+            , "routing is /etc/pgbouncer/routing.ini, which the role node owns"
+            ]
+            (notesOf bouncer)
+    , testCase "a declared pool size and client limit reach the ini" $ do
+        let s' = Pair.bouncerSetupScript pair sized
+        assertBool s' ("max_client_conn = 500\ndefault_pool_size = 50\n" `isInfixOf` s')
+        assertBool s' (not ("default_pool_size = 20" `isInfixOf` s'))
+    , testCase "one declared alone keeps the other's default" $ do
+        let s' = Pair.bouncerSetupScript pair bouncer{Pair.bouncer_default_pool_size = Just 5}
+        assertBool s' ("max_client_conn = 200\ndefault_pool_size = 5\n" `isInfixOf` s')
+    , testCase "declared values show in the notes, so changing them changes the representative" $ do
+        assertBool "" ("pool: default_pool_size 50, max_client_conn 500" `elem` notesOf sized)
+        assertBool "" (notesOf sized /= notesOf sized{Pair.bouncer_default_pool_size = Just 51})
+    , testCase "sensible values are no problem" $
+        assertEqual "" [] (Pair.bouncerProblems (withBouncer sized))
+    , testCase "a count that is not positive is refused" $
+        assertEqual
+            ""
+            [ "bouncer bouncer-1: default_pool_size 0 is not positive"
+            , "bouncer bouncer-1: max_client_conn -1 is not positive"
+            ]
+            (Pair.bouncerProblems (withBouncer bouncer{Pair.bouncer_default_pool_size = Just 0, Pair.bouncer_max_client_conn = Just (-1)}))
+    , testCase "a pool larger than the clients allowed in is refused, against the default limit too" $ do
+        assertEqual
+            ""
+            ["bouncer bouncer-1: default_pool_size 300 is above max_client_conn 200"]
+            (Pair.bouncerProblems (withBouncer bouncer{Pair.bouncer_default_pool_size = Just 300}))
+        assertEqual
+            ""
+            ["bouncer bouncer-1: default_pool_size 20 is above max_client_conn 10"]
+            (Pair.bouncerProblems (withBouncer bouncer{Pair.bouncer_max_client_conn = Just 10}))
+    , testCase "a directive without the fields reads as the defaults" $ do
+        let stripped = case Aeson.toJSON bouncer of
+                Aeson.Object o -> Aeson.Object (KeyMap.delete "bouncer_default_pool_size" (KeyMap.delete "bouncer_max_client_conn" o))
+                v -> v
+        assertEqual "" (Aeson.Success bouncer) (Aeson.fromJSON stripped)
+    , testCase "a directive with them reads them" $
+        assertEqual "" (Aeson.Success sized) (Aeson.fromJSON (Aeson.toJSON sized))
+    ]
+  where
+    sized = bouncer{Pair.bouncer_default_pool_size = Just 50, Pair.bouncer_max_client_conn = Just 500}
+    withBouncer b = pair{Pair.pair_bouncers = [b]}
+    notesOf b = maybe [] (\a -> a.extension.notes) (opAct (Pair.bouncerSetup silent pair b))
+
 streamingFrom :: Text -> Text -> Pair.Observed
 streamingFrom host at = Pair.Standby "7000" 1 (Just host) (Just host) (lsn at) (lsn at)
 
