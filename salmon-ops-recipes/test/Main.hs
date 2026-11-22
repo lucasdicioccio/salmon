@@ -46,6 +46,7 @@ import qualified Test.FollowSignatureSpec as FollowSignatureSpec
 import qualified Test.FollowSpec as FollowSpec
 import qualified Test.GcpObservabilitySpec as GcpObservabilitySpec
 import qualified Test.GcpSpec as GcpSpec
+import qualified Test.SshAccessProbeSpec as SshAccessProbeSpec
 import qualified Test.RemoteFileSpec as RemoteFileSpec
 import qualified Test.SecretDeliverySpec as SecretDeliverySpec
 import qualified Test.JWTSigningSpec as JWTSigningSpec
@@ -226,6 +227,7 @@ main = do
             , FollowSpec.tests
             , GcpObservabilitySpec.tests
             , GcpSpec.tests
+            , SshAccessProbeSpec.tests
             , RemoteFileSpec.tests
             , SecretDeliverySpec.tests
             , JWTSigningSpec.tests

@@ -2788,6 +2788,20 @@ captured; whether GCP spells back ports, ranges (`10.0.0.1` against `10.0.0.1/32
 and whether gcloud accepts `--target-tags=` to clear the tags (its help shows the bare flag for `--source-ranges`),
 were not observed.
 
+**`Gcp.SshAccess` reachability is also a plain function** (feature 9c7e1575, asked by a downstream stack that waits
+for a machine to come back after a reboot and was running `sshAvailableWithin`'s `up` with a one-attempt policy to get
+a probe). `probeSsh :: SshEndpoint -> IO (Either Text ())` is one attempt (the node's `check`), `waitSshReachable ::
+ProbePolicy -> SshEndpoint -> IO (Either SshUnreachable ())` the node's waiting loop returning its failure instead of
+throwing it, `sshProbeArgs` the argv (pure), and `waitReachableWith` the loop over any one-attempt probe (for tests).
+The "timeout" is the policy: attempts × (ssh's 5 s connect timeout + the delay) bounds the wait. The node now calls
+these: its `ref`, `help`, argv, host-key-mismatch handling and the `SshUnreachable` it throws are unchanged; the one
+behaviour change is that the loop no longer sleeps `probeDelayMicros` after the *last* failed attempt before failing
+(the node's `up` fails one delay sooner). Run: `Test/SshAccessProbeSpec.hs` (7 cases: the argv pinned with and
+without client options, the loop over scripted answers including the forget-on-mismatch path, and one real
+`waitSshReachable` against a closed loopback port, which needs `ssh` on PATH and was run with OpenSSH 10.2) and the
+existing `ssh-available` card case. **Not run**: a probe against a host that answers, or across a reboot. No release
+or tag was cut: a caller pins the merge commit.
+
 `Gcp.CloudDns.managedZone` is a public Cloud DNS zone (`gcloud dns managed-zones`), keyed `"gcp-dns-zone" (project,
 zone name)`; enabling `dnsApi` is the caller's dependency, as for every `Gcp.*` node. Its `check` reads `describe
 --format json` and compares the DNS name (dot and case normalised by `fqdn`): a zone of that name serving another

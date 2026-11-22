@@ -145,6 +145,7 @@ test-suite salmon-ops-recipes-test
                     , Test.FollowSpec
                     , Test.GcpObservabilitySpec
                     , Test.GcpSpec
+                    , Test.SshAccessProbeSpec
                     , Test.RemoteFileSpec
                     , Test.SecretDeliverySpec
                     , Test.PodmanCommandSpec
