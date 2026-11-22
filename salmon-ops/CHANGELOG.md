@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+`Gcp.Compute`: an opt-in to change an existing instance's access scopes. `instanceScopeChange =
+MayStopToChangeScopes` lets `up` stop a running instance, set the declared scopes (and declared
+service account) with `gcloud compute instances set-service-account`, and start it again unless the
+declaration is `PoweredOff`; one stop serves a permitted resize too (`planExistingInstanceScoped`,
+`compareScopes`, `ScopeVerdict`, `InstancesSetScopes`, `SetScopesStep`). `RefuseScopeChange` is
+today's behaviour and renders exactly what it did. Breaking: `Instance` gained the
+`instanceScopeChange` field (a full-record construction must name it), and `interpretInstanceScopes`
+takes the `ScopeChange` first.
+
 `Gcp.LoadBalancing`: internal managed load balancers. `albScheme = InternalManaged subnet`
 (`LoadBalancingScheme`, `internalHttpLoadBalancer`) makes the balancer a regional internal one
 (`INTERNAL_MANAGED`): its forwarding rules, and with a certificate their shared address

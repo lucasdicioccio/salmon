@@ -1044,6 +1044,7 @@ peerInstance spec vm peer =
             , -- the peer pulls nothing: it stays the instance it was
               Compute.instanceServiceAccount = Nothing
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             , Compute.instanceRunLimit = Compute.NoRunLimit
             }
@@ -1104,6 +1105,7 @@ gceInstance spec vm =
           Compute.instanceTags = [sshTag spec] <> [lbTag spec | spec.tier >= 3]
         , Compute.instancePower = Compute.PoweredOn
         , Compute.instanceScopes = if spec.tier >= 3 then Compute.DeclaredScopes ["cloud-platform"] else Compute.DefaultScopes
+        , Compute.instanceScopeChange = Compute.RefuseScopeChange
         , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
         , Compute.instanceRunLimit = Compute.NoRunLimit
         }
