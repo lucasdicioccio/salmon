@@ -471,7 +471,9 @@ renderBackupScript cfg =
         Nothing -> []
         Just dest ->
             [ ""
-            , "gcloud storage cp \"$BACKUP_FILE\" " <> shellQuote (destination dest)
+            , -- --quiet: a timer's run has nobody to answer a prompt, so
+              -- gcloud must not ask one (it would read end-of-file).
+              "gcloud storage cp \"$BACKUP_FILE\" " <> shellQuote (destination dest) <> " --quiet"
             ]
 
     destination :: GcsDestination -> Text

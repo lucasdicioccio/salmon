@@ -144,6 +144,7 @@ test-suite salmon-ops-recipes-test
                     , Test.FollowSignatureSpec
                     , Test.FollowSpec
                     , Test.GcpObservabilitySpec
+                    , Test.GcpQuietSpec
                     , Test.GcpSpec
                     , Test.SshAccessProbeSpec
                     , Test.RemoteFileSpec

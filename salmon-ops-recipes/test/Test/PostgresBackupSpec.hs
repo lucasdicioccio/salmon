@@ -72,8 +72,8 @@ scriptTests =
         assertBool s ("'db'\\''; rm -rf / #'" `isInfixOf` s)
     , testCase "no bucket means no upload" $
         assertBool (script plain) (not ("gcloud storage cp" `isInfixOf` script plain))
-    , testCase "the upload names the bucket and prefix" $
-        assertBool (script shipped) ("gcloud storage cp \"$BACKUP_FILE\" 'gs://acme-backups/newco/api/'" `isInfixOf` script shipped)
+    , testCase "the upload names the bucket and prefix, and never prompts" $
+        assertBool (script shipped) ("gcloud storage cp \"$BACKUP_FILE\" 'gs://acme-backups/newco/api/' --quiet" `isInfixOf` script shipped)
     , testCase "an empty prefix does not produce a doubled slash" $ do
         let s = script plain{Backup.pgb_gcs = Just (Backup.GcsDestination "acme-backups" "")}
         assertBool s ("'gs://acme-backups/'" `isInfixOf` s)
