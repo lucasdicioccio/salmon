@@ -6,6 +6,10 @@ module Salmon.Builtin.Nodes.Gcp.SshAccess (
     defaultProbePolicy,
     sshAvailable,
     sshAvailableWithin,
+    probeSsh,
+    sshProbeArgs,
+    waitSshReachable,
+    waitReachableWith,
     SshUnreachable (..),
     MetadataSshCa (..),
     installMetadataCaKey,
@@ -16,7 +20,7 @@ module Salmon.Builtin.Nodes.Gcp.SshAccess (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, throwIO)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.IO.Exception (ExitCode (..))
@@ -102,62 +106,99 @@ sshAvailableWithin policy _r endpoint =
         actions
             { help = Text.unwords ["checks SSH is reachable on", endpoint.sshHost]
             , ref = mkRef "gcp-ssh-available" (endpoint.sshUser, endpoint.sshHost, endpoint.sshPort)
-            , check = either (Failure . ("SSH not reachable: " <>)) (const Success) <$> probe
-            , up = waitReachable policy.probeAttempts ""
+            , check = either (Failure . ("SSH not reachable: " <>)) (const Success) <$> probeSsh endpoint
+            , up = waitSshReachable policy endpoint >>= either throwIO pure
             }
+
+-------------------------------------------------------------------------------
+-- The same probe without a node.
+
+{- | One probe: @ssh -o ConnectTimeout=5 -o BatchMode=yes ... true@ against
+the endpoint. 'Right' when it ran @true@ remotely, else 'Left' with the host
+and ssh's own stderr (stripped), which is the "why not".
+
+This is exactly what 'sshAvailableWithin'\'s 'check' runs, for a caller that
+wants the answer without building an 'Op' (and without a driver to run it).
+It waits no longer than ssh's own connect timeout, plus however long an
+accepted connection takes to run @true@.
+-}
+probeSsh :: SshEndpoint -> IO (Either Text ())
+probeSsh endpoint = do
+    (code, _out, err) <- readCreateProcessWithExitCode (proc "ssh" (sshProbeArgs endpoint)) ""
+    pure $ case code of
+        ExitSuccess -> Right ()
+        ExitFailure _ -> Left (endpoint.sshHost <> ": " <> Text.strip (Text.decodeUtf8With TextError.lenientDecode err))
+
+-- | The argv 'probeSsh' passes to @ssh@ (pure, so it can be pinned).
+sshProbeArgs :: SshEndpoint -> [String]
+sshProbeArgs endpoint =
+    [ "-o"
+    , "ConnectTimeout=5"
+    , "-o"
+    , "BatchMode=yes"
+    ]
+        <> Ssh.clientArgs endpoint.sshClientOpts
+        <> [ "-p"
+           , show endpoint.sshPort
+           , Text.unpack (maybe endpoint.sshHost (\u -> u <> "@" <> endpoint.sshHost) endpoint.sshUser)
+           , "true"
+           ]
+
+{- | Probes until the endpoint answers or the 'ProbePolicy' runs out: what
+'sshAvailableWithin'\'s 'up' does, returning the failure instead of
+throwing it. 'Left' carries the host, the attempts spent and the last ssh
+error. The wait is bounded by roughly
+@probeAttempts * (5s connect timeout + probeDelayMicros)@.
+
+A host key that no longer matches is forgotten from the endpoint's
+known-hosts file (when it names one) and retried at once, as in the node.
+A policy of zero (or fewer) attempts probes nothing and is 'Left'.
+-}
+waitSshReachable :: ProbePolicy -> SshEndpoint -> IO (Either SshUnreachable ())
+waitSshReachable policy endpoint =
+    waitReachableWith policy endpoint.sshHost onMismatch (probeSsh endpoint)
   where
-    waitReachable :: Int -> Text -> IO ()
-    waitReachable remaining lastErr
+    onMismatch = case endpoint.sshClientOpts.optKnownHosts of
+        Just hosts -> Just (forgetHostKey hosts endpoint.sshHost)
+        Nothing -> Nothing
+
+{- | The retry loop behind 'waitSshReachable', over any single-attempt
+probe; exported so the loop can be tested without ssh. The second argument
+is the host named in 'SshUnreachable'; the third is what to run on a host
+key mismatch before retrying at once ('Nothing' treats a mismatch like any
+other failure). No delay follows the last attempt.
+-}
+waitReachableWith :: ProbePolicy -> Text -> Maybe (IO ()) -> IO (Either Text ()) -> IO (Either SshUnreachable ())
+waitReachableWith policy host onMismatch probe = go policy.probeAttempts ""
+  where
+    go :: Int -> Text -> IO (Either SshUnreachable ())
+    go remaining lastErr
         | remaining <= 0 =
-            throwIO (SshUnreachable endpoint.sshHost policy.probeAttempts lastErr)
+            pure (Left (SshUnreachable host policy.probeAttempts lastErr))
         | otherwise = do
             result <- probe
             case result of
-                Right () -> pure ()
+                Right () -> pure (Right ())
                 Left err
                     -- A host key that no longer matches never resolves by
                     -- waiting: this is a machine rebuilt at an address salmon
                     -- reserved, so "same address, new host" is the expected
                     -- case rather than an attack. Forget the recorded key and
                     -- retry at once; if the mismatch somehow persists, the
-                    -- ordinary budget still runs out and still throws.
+                    -- ordinary budget still runs out and still fails.
                     | Ssh.isHostKeyMismatch err
-                    , Just hosts <- endpoint.sshClientOpts.optKnownHosts -> do
-                        forgetHostKey hosts endpoint.sshHost
-                        waitReachable (remaining - 1) err
+                    , Just forget <- onMismatch -> do
+                        forget
+                        go (remaining - 1) err
                     | otherwise -> do
-                        threadDelay policy.probeDelayMicros
-                        waitReachable (remaining - 1) err
+                        when (remaining > 1) $ threadDelay policy.probeDelayMicros
+                        go (remaining - 1) err
 
-    -- ssh-keygen -R rewrites the file in place, and succeeds when there was
-    -- nothing to remove.
-    forgetHostKey :: FilePath -> Text -> IO ()
-    forgetHostKey hosts host =
-        void $ readCreateProcessWithExitCode (proc "ssh-keygen" ["-R", Text.unpack host, "-f", hosts]) ""
-
-    probe :: IO (Either Text ())
-    probe = do
-        (code, _out, err) <-
-            readCreateProcessWithExitCode
-                ( proc
-                    "ssh"
-                    ( [ "-o"
-                      , "ConnectTimeout=5"
-                      , "-o"
-                      , "BatchMode=yes"
-                      ]
-                        <> Ssh.clientArgs endpoint.sshClientOpts
-                        <> [ "-p"
-                           , show endpoint.sshPort
-                           , Text.unpack (maybe endpoint.sshHost (\u -> u <> "@" <> endpoint.sshHost) endpoint.sshUser)
-                           , "true"
-                           ]
-                    )
-                )
-                ""
-        pure $ case code of
-            ExitSuccess -> Right ()
-            ExitFailure _ -> Left (endpoint.sshHost <> ": " <> Text.strip (Text.decodeUtf8With TextError.lenientDecode err))
+-- ssh-keygen -R rewrites the file in place, and succeeds when there was
+-- nothing to remove.
+forgetHostKey :: FilePath -> Text -> IO ()
+forgetHostKey hosts host =
+    void $ readCreateProcessWithExitCode (proc "ssh-keygen" ["-R", Text.unpack host, "-f", hosts]) ""
 
 -------------------------------------------------------------------------------
 
