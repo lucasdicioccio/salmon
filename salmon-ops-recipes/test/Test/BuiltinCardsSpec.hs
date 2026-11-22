@@ -156,6 +156,7 @@ demoInstance =
         , Compute.instanceTags = ["demo-ssh"]
         , Compute.instancePower = Compute.PoweredOn
         , Compute.instanceScopes = Compute.DefaultScopes
+        , Compute.instanceScopeChange = Compute.RefuseScopeChange
         , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
         , Compute.instanceRunLimit = Compute.NoRunLimit
         }

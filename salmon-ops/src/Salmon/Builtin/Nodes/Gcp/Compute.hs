@@ -12,6 +12,7 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     InstanceStep (..),
     instanceUpSteps,
     planExistingInstance,
+    planExistingInstanceScoped,
     planAbsentInstance,
     RunLimit (..),
     LiveRunLimit (..),
@@ -35,6 +36,10 @@ module Salmon.Builtin.Nodes.Gcp.Compute (
     scopeProblems,
     declaredScopeUris,
     parseLiveScopes,
+    ScopeChange (..),
+    ScopeVerdict (..),
+    compareScopes,
+    scopesReason,
     interpretInstanceScopes,
     gceInstance,
     Address (..),
@@ -521,14 +526,15 @@ aliases ('scopeAliases': @storage-rw@, @cloud-platform@, ...) or a full
 @https://www.googleapis.com/auth/...@ URI; the empty list is no scope at all
 (@--no-scopes@).
 
-__Scopes are read at create time and never changed by this node.__ GCP only
-lets them change on a stopped instance, so on an existing instance holding
-other scopes than the declared ones the check is a 'Failure' naming both
-sets and @up@ throws the same words without starting, stopping or
-re-creating anything: stopping a machine is an operator's decision. The
+__Scopes are read at create time and, unless the declaration permits
+it ('ScopeChange'), never changed by this node.__ GCP only lets them change
+on a stopped instance, so on an existing instance holding other scopes than
+the declared ones the check is a 'Failure' naming both sets and, under
+'RefuseScopeChange', @up@ throws the same words without starting, stopping
+or re-creating anything: stopping a machine is an operator's decision. The
 remedy is theirs too -- stop it, @gcloud compute instances
-set-service-account NAME --scopes ...@, start it; or take the node down and
-up again, which deletes the instance.
+set-service-account NAME --scopes ...@, start it; take the node down and up
+again, which deletes the instance; or declare 'MayStopToChangeScopes'.
 -}
 data AccessScopes
     = -- | say nothing: gcloud's defaults for the service account
@@ -627,31 +633,85 @@ parseLiveScopes =
 
 {- | The verdict on an existing instance's scopes against the declared ones:
 'Success' when nothing is declared or the two sets are equal, a 'Failure'
-naming both otherwise. Never a reason to act: see 'AccessScopes'.
+naming both otherwise, and a 'Failure' too when they could not be read.
+Under 'RefuseScopeChange' the node never repairs that failure; under
+'MayStopToChangeScopes' its @up@ does.
 -}
-interpretInstanceScopes :: AccessScopes -> ExitCode -> Text -> CheckResult
-interpretInstanceScopes DefaultScopes _ _ = Success
-interpretInstanceScopes scopes@(DeclaredScopes _) code out =
+interpretInstanceScopes :: ScopeChange -> AccessScopes -> ExitCode -> Text -> CheckResult
+interpretInstanceScopes change scopes code out =
+    case compareScopes scopes code out of
+        ScopesAsDeclared -> Success
+        ScopesDiffer live wanted -> Failure ("instance " <> scopesReason change live wanted)
+        ScopesUndetermined why -> Failure why
+
+{- | What 'gceInstance' may do about an existing instance holding other
+access scopes than the declared ones: the 'MachineTypeChange' of scopes.
+GCP only changes scopes on a stopped instance, so reconciling them is an
+outage of that machine, and that is the declaration's to permit.
+
+'RefuseScopeChange' is what every declaration starts from and what every
+instance did before this type existed: the difference is a 'Failure' for the
+check and a throw for @up@, naming both sets, and nothing is stopped,
+started or re-created. It renders nothing.
+
+'MayStopToChangeScopes' lets @up@ stop the instance if it runs, run
+@gcloud compute instances set-service-account@ with the declared scopes (and
+the declared service account, if any), and start it again when the
+declaration is 'PoweredOn' (a 'PoweredOff' one stays stopped). Like
+'MayStopToResize' it is a standing permission: while it is declared, any
+later change of 'instanceScopes' stops the machine again, under @run serve@
+as soon as the check notices. With 'DefaultScopes' there is nothing to
+compare, so it never stops anything.
+-}
+data ScopeChange
+    = -- | fail the node, naming both sets; never stop anything
+      RefuseScopeChange
+    | -- | stop, @set-service-account --scopes@, start
+      MayStopToChangeScopes
+    deriving (Eq, Show)
+
+-- | An existing instance's scopes against the declared ones.
+data ScopeVerdict
+    = -- | the same set, or nothing declared to compare with
+      ScopesAsDeclared
+    | -- | held, then declared
+      ScopesDiffer (Set Text) (Set Text)
+    | -- | the scopes could not be read, or cannot be declared: never a difference
+      ScopesUndetermined Text
+    deriving (Eq, Show)
+
+{- | The comparison behind both the check and @up@: 'DefaultScopes' is always
+as declared; an undeclarable declaration or a failed describe is
+'ScopesUndetermined'; otherwise the sets of URIs are compared exactly.
+-}
+compareScopes :: AccessScopes -> ExitCode -> Text -> ScopeVerdict
+compareScopes DefaultScopes _ _ = ScopesAsDeclared
+compareScopes scopes@(DeclaredScopes _) code out =
     case (declaredScopeUris scopes, code) of
-        (Nothing, _) -> Failure ("scopes cannot be declared: " <> Text.intercalate "; " (scopeProblems scopes))
-        (_, ExitFailure n) -> Failure ("could not describe instance scopes (exit " <> Text.pack (show n) <> ")")
+        (Nothing, _) -> ScopesUndetermined ("scopes cannot be declared: " <> Text.intercalate "; " (scopeProblems scopes))
+        (_, ExitFailure n) -> ScopesUndetermined ("could not describe instance scopes (exit " <> Text.pack (show n) <> ")")
         (Just wanted, ExitSuccess)
-            | wanted == live -> Success
-            | otherwise ->
-                Failure
-                    ( "instance holds scopes "
-                        <> renderSet live
-                        <> ", declared "
-                        <> renderSet wanted
-                        <> "; scopes only change on a stopped instance and this node does not stop one:"
-                        <> " stop it and run gcloud compute instances set-service-account, or re-create it"
-                    )
+            | wanted == live -> ScopesAsDeclared
+            | otherwise -> ScopesDiffer live wanted
           where
             live = parseLiveScopes out
-  where
-    renderSet s
-        | Set.null s = "(none)"
-        | otherwise = Text.intercalate "," (Set.toList s)
+
+{- | Why an instance's scopes are not as declared, worded to follow
+@instance NAME@, naming both sets. The 'RefuseScopeChange' wording is the
+one this node always had.
+-}
+scopesReason :: ScopeChange -> Set Text -> Set Text -> Text
+scopesReason change live wanted =
+    "holds scopes " <> renderScopeSet live <> ", declared " <> renderScopeSet wanted <> "; " <> case change of
+        RefuseScopeChange ->
+            "scopes only change on a stopped instance and this node does not stop one:"
+                <> " stop it and run gcloud compute instances set-service-account, or re-create it"
+        MayStopToChangeScopes -> "the declaration permits stopping it to change them"
+
+renderScopeSet :: Set Text -> Text
+renderScopeSet s
+    | Set.null s = "(none)"
+    | otherwise = Text.intercalate "," (Set.toList s)
 
 -- | A GCE instance.
 data Instance = Instance
@@ -681,9 +741,14 @@ data Instance = Instance
     -- address is not noticed and not changed.
     , instanceTags :: [Text]
     , instanceScopes :: AccessScopes
-    -- ^ the access scopes, or gcloud's defaults. Create-time only, and
+    -- ^ the access scopes, or gcloud's defaults. Set at create time, and
     -- unlike the addresses a difference on an existing instance /is/
-    -- noticed, as a 'Failure' the node never repairs: see 'AccessScopes'.
+    -- noticed, as a 'Failure' the node repairs only when
+    -- 'instanceScopeChange' permits it: see 'AccessScopes'.
+    , instanceScopeChange :: ScopeChange
+    -- ^ whether @up@ may stop an existing instance to give it the declared
+    -- scopes, or fails naming both sets ('RefuseScopeChange', which renders
+    -- nothing)
     , instanceMachineTypeChange :: MachineTypeChange
     -- ^ whether @up@ may stop an existing instance to give it the declared
     -- machine type, or fails naming both types ('RefuseMachineTypeChange',
@@ -711,8 +776,11 @@ data Instance = Instance
 -- stops it, sets the type and starts it again ('planExistingInstance').
 --
 -- Declared scopes that differ from an existing instance's are a 'Failure'
--- for the check and a throw for @up@, before it starts or stops anything;
--- undeclarable ones ('scopeProblems') are the same before any call.
+-- for the check. What @up@ does then is 'instanceScopeChange': it throws
+-- the same words before it starts or stops anything, or, permitted to,
+-- stops it, sets the scopes and starts it again
+-- ('planExistingInstanceScoped'). Undeclarable scopes ('scopeProblems') are
+-- a failure and a throw before any call.
 --
 -- With an 'instanceRunLimit', GCP stops the instance at its deadline and the
 -- node accepts that: after the deadline a @TERMINATED@ instance satisfies a
@@ -726,18 +794,19 @@ gceInstance r gcloudTrack inst =
             withBinary gcloudTrack computeCommand (InstancesResume inst) $ \resume ->
                 withBinary gcloudTrack computeCommand (InstancesStop inst) $ \stop ->
                     withBinary gcloudTrack computeCommand (InstancesSetMachineType inst) $ \setType ->
-                        withBinary gcloudTrack computeCommand (InstancesSetScheduling inst) $ \setScheduling ->
-                            withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
-                                op "gcp-instance" nodeps $ \actions ->
-                                    actions
-                                        { help = Text.unwords [verb, "GCE instance", inst.instanceName]
-                                        , notes = actions.notes <> scopeNotes <> resizeNotes <> runLimitNotes
-                                        , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
-                                        , up = bringUp create start resume stop setType setScheduling
-                                        , -- presence, not state: a stopped instance is still there to delete
-                                          down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
-                                        , check = checkInstance
-                                        }
+                        withBinary gcloudTrack computeCommand (InstancesSetScopes inst) $ \setScopes ->
+                            withBinary gcloudTrack computeCommand (InstancesSetScheduling inst) $ \setScheduling ->
+                                withBinary gcloudTrack computeCommand (InstancesDelete inst) $ \delete ->
+                                    op "gcp-instance" nodeps $ \actions ->
+                                        actions
+                                            { help = Text.unwords [verb, "GCE instance", inst.instanceName]
+                                            , notes = actions.notes <> scopeNotes <> rescopeNotes <> resizeNotes <> runLimitNotes
+                                            , ref = mkRef "gcp-instance" (inst.instanceProject.projectId, inst.instanceZone.zoneName, inst.instanceName)
+                                            , up = bringUp create start resume stop setType setScopes setScheduling
+                                            , -- presence, not state: a stopped instance is still there to delete
+                                              down = Core.downIfPresent (uncurry interpretInstancePresence <$> describeStatus) (delete (contramap (RunComputeCommand (InstancesDelete inst)) r))
+                                            , check = checkInstance
+                                            }
   where
     rFor cmd = contramap (RunComputeCommand cmd) r
 
@@ -747,6 +816,12 @@ gceInstance r gcloudTrack inst =
         DefaultScopes -> []
         DeclaredScopes [] -> ["scopes: none"]
         DeclaredScopes scopes -> ["scopes: " <> Text.intercalate "," scopes]
+
+    -- only with the permission, so that a declaration without it has the
+    -- notes it had (the declared scopes are already in 'scopeNotes')
+    rescopeNotes = case inst.instanceScopeChange of
+        RefuseScopeChange -> []
+        MayStopToChangeScopes -> ["scopes: may stop to change them"]
 
     -- only with the permission, so that a declaration without it has the
     -- notes it had; with it, a re-declared type is a changed node under
@@ -812,11 +887,16 @@ gceInstance r gcloudTrack inst =
 
     describeScopes :: IO CheckResult
     describeScopes = do
+        (code, out) <- describeScopesRaw
+        pure (interpretInstanceScopes inst.instanceScopeChange inst.instanceScopes code out)
+
+    describeScopesRaw :: IO (ExitCode, Text)
+    describeScopesRaw = do
         (code, out, _err) <-
             readCreateProcessWithExitCode
                 (prepare computeCommand (InstancesDescribeScopes inst))
                 ""
-        pure (interpretInstanceScopes inst.instanceScopes code (Text.decodeUtf8 out))
+        pure (code, Text.decodeUtf8 out)
 
     refuse reason = throwIO (userError ("instance " <> Text.unpack inst.instanceName <> ": " <> Text.unpack reason))
 
@@ -836,22 +916,25 @@ gceInstance r gcloudTrack inst =
     -- unrecoverable: the check says 'Failure', 'up' runs @create@, and
     -- @create@ refuses because the instance exists. Asking first costs one
     -- describe that the check has usually just done.
-    bringUp create start resume stop setType setScheduling = do
+    bringUp create start resume stop setType setScopes setScheduling = do
         case declarationProblems of
             [] -> pure ()
             problems -> refuse (Text.intercalate "; " problems)
         (code, status) <- describeStatus
         let plan = planInstanceUp inst.instancePower code status
-        -- an instance that exists with other scopes is left exactly as it
-        -- is: no start, no stop, and certainly no re-creation
-        case (plan, inst.instanceScopes) of
-            (CreateInstance, _) -> pure ()
-            (_, DefaultScopes) -> pure ()
-            (_, DeclaredScopes _) -> do
+        -- without the permission, an instance that exists with other scopes
+        -- is left exactly as it is: no start, no stop, and certainly no
+        -- re-creation. With it, the verdict goes to the plan below.
+        scopeVerdict <- case (plan, inst.instanceScopes, inst.instanceScopeChange) of
+            (CreateInstance, _, _) -> pure ScopesAsDeclared
+            (_, DefaultScopes, _) -> pure ScopesAsDeclared
+            (_, DeclaredScopes _, RefuseScopeChange) -> do
                 scopes <- describeScopes
                 case scopes of
                     Failure reason -> refuse reason
-                    _ -> pure ()
+                    _ -> pure ScopesAsDeclared
+            (_, DeclaredScopes _, MayStopToChangeScopes) ->
+                uncurry (compareScopes inst.instanceScopes) <$> describeScopesRaw
         -- the machine type is only asked of an instance that is there, and
         -- the whole sequence is decided before its first step: a refusal
         -- leaves the machine exactly as it is
@@ -859,7 +942,7 @@ gceInstance r gcloudTrack inst =
             CreateInstance -> planAbsentInstance inst.instanceRunLimit inst.instancePower <$> getCurrentTime
             _ -> do
                 typeVerdict <- uncurry (compareMachineType inst.instanceMachineType) <$> describeMachineType
-                planExistingInstance inst.instanceMachineTypeChange inst.instancePower status typeVerdict <$> judgeRun
+                planExistingInstanceScoped inst.instanceScopeChange scopeVerdict inst.instanceMachineTypeChange inst.instancePower status typeVerdict <$> judgeRun
         case steps of
             Left reason -> throwIO (userError ("instance " <> Text.unpack inst.instanceName <> " " <> Text.unpack reason))
             Right todo -> mapM_ runStep todo
@@ -870,6 +953,7 @@ gceInstance r gcloudTrack inst =
             ResumeStep -> resume (rFor (InstancesResume inst))
             StopStep -> stop (rFor (InstancesStop inst))
             SetMachineTypeStep -> setType (rFor (InstancesSetMachineType inst))
+            SetScopesStep -> setScopes (rFor (InstancesSetScopes inst))
             SetSchedulingStep -> setScheduling (rFor (InstancesSetScheduling inst))
 
 -- | The verdict drawn from @gcloud compute instances describe
@@ -973,6 +1057,8 @@ data InstanceStep
     | ResumeStep
     | StopStep
     | SetMachineTypeStep
+    | -- | @set-service-account@ with the declared scopes; only on a stopped instance
+      SetScopesStep
     | -- | @set-scheduling@ with the declared 'RunLimit'; only on a stopped instance
       SetSchedulingStep
     deriving (Eq, Show)
@@ -1046,7 +1132,29 @@ than that duration ago, the next pass reads it as expired and leaves it off
 (start it by hand, or declare another duration).
 -}
 planExistingInstance :: MachineTypeChange -> InstancePower -> Text -> MachineTypeVerdict -> RunLimitVerdict -> Either Text [InstanceStep]
-planExistingInstance change power status verdict run = case run of
+planExistingInstance = planExistingInstanceScoped RefuseScopeChange ScopesAsDeclared
+
+{- | 'planExistingInstance' given also the verdict on the instance's scopes
+and whether the declaration permits stopping it to change them. The scopes
+are decided with the machine type, before the run limit:
+
+* As declared: exactly 'planExistingInstance'.
+* Not read (or not declarable): nothing, and a reason.
+* Differing under 'RefuseScopeChange': nothing, and a reason naming both
+  sets. ('gceInstance' refuses before this is reached, with the words it
+  always had.)
+* Differing under 'MayStopToChangeScopes': whatever the machine type asks
+  (a refusal there is a refusal here), with @set-service-account@ added
+  where the machine is stopped: first on a @TERMINATED@ instance, right
+  after the stop on a @RUNNING@ one, which is stopped for it when nothing
+  else stops it and started again when the declaration is 'PoweredOn'. Any
+  other status is a reason and no call.
+
+A failed @set-service-account@ leaves the instance stopped; the next pass
+finds it @TERMINATED@ with the old scopes, sets them and starts it.
+-}
+planExistingInstanceScoped :: ScopeChange -> ScopeVerdict -> MachineTypeChange -> InstancePower -> Text -> MachineTypeVerdict -> RunLimitVerdict -> Either Text [InstanceStep]
+planExistingInstanceScoped scopeChange scopeVerdict change power status verdict run = case run of
     RunUnlimited -> typed
     RunWithin _ -> typed
     RunLimitUndetermined why -> Left ("is left as it is: " <> why)
@@ -1070,7 +1178,25 @@ planExistingInstance change power status verdict run = case run of
                         <> "); this node does not stop a machine declared running: stop it, or declare a later limit"
                     )
         (PoweredOn, _) -> Left ("is " <> status <> " past its deadline " <> renderDeadline deadline <> ": it is not started")
-    typed = case verdict of
+    typed = case scopeVerdict of
+        ScopesAsDeclared -> typedOnly
+        ScopesUndetermined why -> Left ("is left as it is: " <> why)
+        ScopesDiffer live wanted -> case scopeChange of
+            RefuseScopeChange -> Left (scopesReason scopeChange live wanted)
+            MayStopToChangeScopes -> case (status, typedOnly) of
+                (_, Left why) -> Left why
+                ("TERMINATED", Right steps) -> Right (SetScopesStep : steps)
+                ("RUNNING", Right (StopStep : steps)) -> Right (StopStep : SetScopesStep : steps)
+                ("RUNNING", Right steps) -> Right ([StopStep, SetScopesStep] <> steps <> restart)
+                _ ->
+                    Left
+                        ( "is "
+                            <> status
+                            <> " and "
+                            <> scopesReason scopeChange live wanted
+                            <> "; scopes are only set on an instance that is RUNNING (stopped first) or TERMINATED: retry once it settles"
+                        )
+    typedOnly = case verdict of
         MachineTypeAsDeclared -> instanceUpSteps power (planInstanceUp power ExitSuccess status)
         MachineTypeUndetermined why -> Left ("is left as it is: " <> why)
         MachineTypeDiffers live wanted -> case change of
@@ -1692,6 +1818,7 @@ data ComputeCommand
     | InstancesDescribeScopes Instance
     | InstancesDescribeMachineType Instance
     | InstancesSetMachineType Instance
+    | InstancesSetScopes Instance
     | InstancesDescribeRunLimit Instance
     | InstancesSetScheduling Instance
     | InstancesStart Instance
@@ -1812,6 +1939,28 @@ computeCommand = Command $ \cmd -> case cmd of
                     , "--machine-type"
                     , Text.unpack (renderMachineType inst.instanceMachineType)
                     ]
+                )
+    -- the declared scopes, and the declared service account when there is
+    -- one (gcloud otherwise gives the instance the project's default
+    -- account, which is also what it was created with). Only planned for
+    -- declared scopes on a stopped instance; with 'DefaultScopes' it names
+    -- no scope at all.
+    InstancesSetScopes inst ->
+        gcloudProc $
+            withProject inst.instanceProject
+                ( withZone inst.instanceZone
+                    ( [ "compute"
+                      , "instances"
+                      , "set-service-account"
+                      , Text.unpack inst.instanceName
+                      ]
+                        <> maybe [] (\sa -> ["--service-account", Text.unpack sa]) inst.instanceServiceAccount
+                        <> ( case inst.instanceScopes of
+                                DefaultScopes -> []
+                                DeclaredScopes [] -> ["--no-scopes"]
+                                DeclaredScopes scopes -> ["--scopes", Text.unpack (Text.intercalate "," scopes)]
+                           )
+                    )
                 )
     InstancesDescribeRunLimit inst ->
         gcloudProc $

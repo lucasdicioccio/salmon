@@ -77,6 +77,7 @@ tests =
         , testGroup "Compute.interpretInstanceStatus" instanceTests
         , testGroup "Compute.instanceScopes" instanceScopeTests
         , testGroup "Compute.instanceMachineType" instanceMachineTypeTests
+        , testGroup "Compute.instanceScopeChange" instanceScopeChangeTests
         , testGroup "Compute.instanceRunLimit" instanceRunLimitTests
         , testGroup "Storage.interpretBucketDescribe" bucketTests
         , testGroup "Storage bucket settings" bucketSettingsTests
@@ -242,6 +243,7 @@ instanceTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             , Compute.instanceRunLimit = Compute.NoRunLimit
             }
@@ -308,23 +310,23 @@ instanceScopeTests =
         assertEqual "no service account" Set.empty (Compute.parseLiveScopes "\n")
     , testCase "an instance holding the declared scopes is satisfied, in any order and spelling" $ do
         let declared = Compute.DeclaredScopes ["logging-write", rw]
-        assertEqual "" Success (Compute.interpretInstanceScopes declared ExitSuccess (rw <> ";" <> logging))
-        assertEqual "none, none" Success (Compute.interpretInstanceScopes (Compute.DeclaredScopes []) ExitSuccess "")
+        assertEqual "" Success (Compute.interpretInstanceScopes Compute.RefuseScopeChange declared ExitSuccess (rw <> ";" <> logging))
+        assertEqual "none, none" Success (Compute.interpretInstanceScopes Compute.RefuseScopeChange (Compute.DeclaredScopes []) ExitSuccess "")
     , testCase "an instance holding other scopes is a failure naming both sets" $
-        case Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ro of
+        case Compute.interpretInstanceScopes Compute.RefuseScopeChange (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ro of
             Failure t -> do
                 assertBool (Text.unpack t) (ro `Text.isInfixOf` t)
                 assertBool (Text.unpack t) (rw `Text.isInfixOf` t)
                 assertBool (Text.unpack t) ("stopped" `Text.isInfixOf` t)
             other -> assertBool (show other) False
     , testCase "more scopes than declared, or fewer, is not satisfied" $ do
-        assertBool "more" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess (rw <> ";" <> logging)))
-        assertBool "fewer" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw", "logging-write"]) ExitSuccess rw))
-        assertBool "none held" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ""))
+        assertBool "more" (isFailure (Compute.interpretInstanceScopes Compute.RefuseScopeChange (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess (rw <> ";" <> logging)))
+        assertBool "fewer" (isFailure (Compute.interpretInstanceScopes Compute.RefuseScopeChange (Compute.DeclaredScopes ["storage-rw", "logging-write"]) ExitSuccess rw))
+        assertBool "none held" (isFailure (Compute.interpretInstanceScopes Compute.RefuseScopeChange (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ""))
     , testCase "a failing describe is a failure, and nothing declared is never one" $ do
-        assertBool "" (isFailure (Compute.interpretInstanceScopes (Compute.DeclaredScopes ["storage-rw"]) (ExitFailure 1) ""))
-        assertEqual "" Success (Compute.interpretInstanceScopes Compute.DefaultScopes (ExitFailure 1) "")
-        assertEqual "" Success (Compute.interpretInstanceScopes Compute.DefaultScopes ExitSuccess ro)
+        assertBool "" (isFailure (Compute.interpretInstanceScopes Compute.RefuseScopeChange (Compute.DeclaredScopes ["storage-rw"]) (ExitFailure 1) ""))
+        assertEqual "" Success (Compute.interpretInstanceScopes Compute.RefuseScopeChange Compute.DefaultScopes (ExitFailure 1) "")
+        assertEqual "" Success (Compute.interpretInstanceScopes Compute.RefuseScopeChange Compute.DefaultScopes ExitSuccess ro)
     , testCase "an undeclarable scope fails the check and the up before any gcloud call" $ do
         let act = node (scoped ["storage-write"])
         verdict <- act.extension.check
@@ -361,6 +363,7 @@ instanceScopeTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             , Compute.instanceRunLimit = Compute.NoRunLimit
             }
@@ -645,6 +648,219 @@ instanceMachineTypeTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
+            , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
+            , Compute.instanceRunLimit = Compute.NoRunLimit
+            }
+
+-------------------------------------------------------------------------------
+
+{- | Changing the scopes of an existing instance: refused, as always, unless
+the declaration permits stopping it ('Compute.MayStopToChangeScopes').
+Everything here is the pure half -- the comparison, the plan and what is
+rendered; no gcloud, real or fake, is run.
+-}
+instanceScopeChangeTests :: [TestTree]
+instanceScopeChangeTests =
+    [ testCase "without the permission, a scope difference fails with the words it always had" $
+        assertEqual
+            ""
+            ( Failure
+                ( "instance holds scopes " <> ro <> ", declared " <> rw
+                    <> "; scopes only change on a stopped instance and this node does not stop one:"
+                    <> " stop it and run gcloud compute instances set-service-account, or re-create it"
+                )
+            )
+            (Compute.interpretInstanceScopes refuse (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ro)
+    , testCase "with the permission, the failure names both sets and says so" $
+        case Compute.interpretInstanceScopes mayStop (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ro of
+            Failure t -> do
+                assertBool (Text.unpack t) (ro `Text.isInfixOf` t)
+                assertBool (Text.unpack t) (rw `Text.isInfixOf` t)
+                assertBool (Text.unpack t) ("permits stopping it" `Text.isInfixOf` t)
+            other -> assertBool (show other) False
+    , testCase "the comparison: nothing declared, the same set, another set, unread" $ do
+        assertEqual "default" Compute.ScopesAsDeclared (Compute.compareScopes Compute.DefaultScopes (ExitFailure 1) "")
+        assertEqual "same" Compute.ScopesAsDeclared (Compute.compareScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess rw)
+        assertEqual "other" (Compute.ScopesDiffer (Set.singleton ro) (Set.singleton rw)) (Compute.compareScopes (Compute.DeclaredScopes ["storage-rw"]) ExitSuccess ro)
+        assertBool "describe failed" (undetermined (Compute.compareScopes (Compute.DeclaredScopes ["storage-rw"]) (ExitFailure 1) rw))
+        assertBool "undeclarable" (undetermined (Compute.compareScopes (Compute.DeclaredScopes ["storage-write"]) ExitSuccess rw))
+    , testCase "set-service-account names the declared scopes, the declared account if any, and never prompts" $ do
+        assertEqual
+            "default account"
+            ["compute", "instances", "set-service-account", "toy-vm", "--scopes", "storage-rw,logging-write", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (args (Compute.InstancesSetScopes (scoped ["storage-rw", "logging-write"])))
+        assertEqual
+            "declared account"
+            ["compute", "instances", "set-service-account", "toy-vm", "--service-account", "vm@p.iam.gserviceaccount.com", "--scopes", "storage-rw", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (args (Compute.InstancesSetScopes (scoped ["storage-rw"]){Compute.instanceServiceAccount = Just "vm@p.iam.gserviceaccount.com"}))
+        assertEqual
+            "no scope"
+            ["compute", "instances", "set-service-account", "toy-vm", "--no-scopes", "--zone", "europe-west1-b", "--project", "p", "--quiet"]
+            (args (Compute.InstancesSetScopes (scoped [])))
+    , testCase "with the permission, up stops, sets the scopes and starts again" $ do
+        assertEqual "running" (Right [Compute.StopStep, Compute.SetScopesStep, Compute.StartStep]) (plan mayStop differs on "RUNNING" asDeclared)
+        assertEqual "already stopped" (Right [Compute.SetScopesStep, Compute.StartStep]) (plan mayStop differs on "TERMINATED" asDeclared)
+        assertEqual "declared stopped, running" (Right [Compute.StopStep, Compute.SetScopesStep]) (plan mayStop differs off "RUNNING" asDeclared)
+        assertEqual "declared stopped, stopped" (Right [Compute.SetScopesStep]) (plan mayStop differs off "TERMINATED" asDeclared)
+    , testCase "with both permissions, one stop serves the type and the scopes" $
+        assertEqual
+            ""
+            (Right [Compute.StopStep, Compute.SetScopesStep, Compute.SetMachineTypeStep, Compute.StartStep])
+            (Compute.planExistingInstanceScoped mayStop differs Compute.MayStopToResize on "RUNNING" typeDiffers Compute.RunUnlimited)
+    , testCase "a refused machine type is still refused, whatever the scopes permit" $
+        assertBool "" (isLeft (Compute.planExistingInstanceScoped mayStop differs Compute.RefuseMachineTypeChange on "RUNNING" typeDiffers Compute.RunUnlimited))
+    , testCase "unread scopes, an unsettled instance, or no permission: no call" $ do
+        assertBool "unread" (isLeft (plan mayStop (Compute.ScopesUndetermined "unread") on "RUNNING" asDeclared))
+        assertBool "suspended" (isLeft (plan mayStop differs on "SUSPENDED" asDeclared))
+        assertBool "stopping" (isLeft (plan mayStop differs on "STOPPING" asDeclared))
+        assertBool "refused" (isLeft (plan refuse differs on "TERMINATED" asDeclared))
+    , testCase "the permission is a note; the node is the same node" $ do
+        let permitted = node (scoped ["storage-rw"]){Compute.instanceScopeChange = mayStop}
+        assertEqual "ref" (node inst).extension.ref permitted.extension.ref
+        assertEqual "help" (node inst).extension.help permitted.extension.help
+        assertEqual "notes" ["scopes: storage-rw", "scopes: may stop to change them"] permitted.extension.notes
+        assertEqual "without it, the notes it had" ["scopes: storage-rw"] (node (scoped ["storage-rw"])).extension.notes
+    , testProperty "scopes as declared plan exactly what up planned before, with or without the permission" $
+        forAll genScopeChange $ \sc ->
+            forAll genTypeChange $ \tc ->
+                forAll genPower $ \power ->
+                    forAll genStatus $ \status ->
+                        forAll genTypeVerdict $ \tv ->
+                            Compute.planExistingInstanceScoped sc Compute.ScopesAsDeclared tc power status tv Compute.RunUnlimited
+                                === Compute.planExistingInstance tc power status tv Compute.RunUnlimited
+    , testProperty "without the permission the scopes are never set, and a differing or unread set is a refusal" $
+        forAll genScopeVerdict $ \sv ->
+            forAll genTypeChange $ \tc ->
+                forAll genPower $ \power ->
+                    forAll genStatus $ \status ->
+                        forAll genTypeVerdict $ \tv ->
+                            case Compute.planExistingInstanceScoped refuse sv tc power status tv Compute.RunUnlimited of
+                                Left _ -> property True
+                                Right steps -> counterexample (show steps) (sv === Compute.ScopesAsDeclared .&&. Compute.SetScopesStep `notElem` steps)
+    , testProperty "a stop is only planned by a stopped declaration, a permitted resize or the permission meeting differing scopes" $
+        forAll genScopeChange $ \sc ->
+            forAll genScopeVerdict $ \sv ->
+                forAll genTypeChange $ \tc ->
+                    forAll genPower $ \power ->
+                        forAll genStatus $ \status ->
+                            forAll genTypeVerdict $ \tv ->
+                                case Compute.planExistingInstanceScoped sc sv tc power status tv Compute.RunUnlimited of
+                                    Right steps
+                                        | Compute.StopStep `elem` steps ->
+                                            counterexample
+                                                (show steps)
+                                                (power == off || (tc == Compute.MayStopToResize && typeDiffering tv) || (sc == mayStop && scopesDiffering sv))
+                                    _ -> property True
+    , testProperty "a permitted scope change sets them once, on a stopped machine, and ends in the declared power state" $
+        forAll genTypeChange $ \tc ->
+            forAll genPower $ \power ->
+                forAll (elements ["RUNNING", "TERMINATED"]) $ \status ->
+                    forAll (elements [asDeclared, typeDiffers]) $ \tv ->
+                        case Compute.planExistingInstanceScoped mayStop differs tc power status tv Compute.RunUnlimited of
+                            Left t -> counterexample (Text.unpack t) (tc == refuseType && tv /= asDeclared)
+                            Right steps ->
+                                counterexample (show steps) $
+                                    length (filter (== Compute.SetScopesStep) steps) === 1
+                                        .&&. simulate (status == "RUNNING") steps === Just (power == on)
+    , testProperty "the refusal renders nothing: no command, ref, help or note changes, and the permission only adds a note" $
+        forAll genInstance $ \i ->
+            let permitted = i{Compute.instanceScopeChange = mayStop}
+                refused = i{Compute.instanceScopeChange = refuse}
+             in conjoin
+                    [ args (Compute.InstancesCreate permitted) === args (Compute.InstancesCreate refused)
+                    , args (Compute.InstancesStop permitted) === args (Compute.InstancesStop refused)
+                    , args (Compute.InstancesStart permitted) === args (Compute.InstancesStart refused)
+                    , args (Compute.InstancesDescribeScopes permitted) === args (Compute.InstancesDescribeScopes refused)
+                    , (node permitted).extension.ref === (node refused).extension.ref
+                    , (node permitted).extension.help === (node refused).extension.help
+                    , (node refused).extension.notes === scopeNotes i <> resizeNotes i
+                    , (node permitted).extension.notes === scopeNotes i <> ["scopes: may stop to change them"] <> resizeNotes i
+                    ]
+    ]
+  where
+    on = Compute.PoweredOn
+    off = Compute.PoweredOff
+    refuse = Compute.RefuseScopeChange
+    mayStop = Compute.MayStopToChangeScopes
+    refuseType = Compute.RefuseMachineTypeChange
+    rw = "https://www.googleapis.com/auth/devstorage.read_write"
+    ro = "https://www.googleapis.com/auth/devstorage.read_only"
+    differs = Compute.ScopesDiffer (Set.singleton ro) (Set.singleton rw)
+    asDeclared = Compute.MachineTypeAsDeclared
+    typeDiffers = Compute.MachineTypeDiffers "e2-medium" "e2-standard-2"
+    plan sc sv power status tv = Compute.planExistingInstanceScoped sc sv refuseType power status tv Compute.RunUnlimited
+    args c = processArgs (prepare Compute.computeCommand c)
+    isLeft :: Either a b -> Bool
+    isLeft = either (const True) (const False)
+    undetermined v = case v of
+        Compute.ScopesUndetermined _ -> True
+        _ -> False
+    typeDiffering v = case v of
+        Compute.MachineTypeDiffers _ _ -> True
+        _ -> False
+    scopesDiffering v = case v of
+        Compute.ScopesDiffer _ _ -> True
+        _ -> False
+    resizeNotes :: Compute.Instance -> [Text.Text]
+    resizeNotes i = ["machine type: e2-micro (may stop to resize)" | i.instanceMachineTypeChange == Compute.MayStopToResize]
+    scopeNotes :: Compute.Instance -> [Text.Text]
+    scopeNotes i = case i.instanceScopes of
+        Compute.DefaultScopes -> []
+        Compute.DeclaredScopes [] -> ["scopes: none"]
+        Compute.DeclaredScopes ss -> ["scopes: " <> Text.intercalate "," ss]
+    genScopeChange = elements [refuse, mayStop]
+    genTypeChange = elements [refuseType, Compute.MayStopToResize]
+    genPower = elements [on, off]
+    genStatus :: Gen Text.Text
+    genStatus =
+        oneof
+            [ elements ["RUNNING", "TERMINATED", "SUSPENDED", "PROVISIONING", "STAGING", "STOPPING", "SUSPENDING", "REPAIRING", ""]
+            , Text.pack <$> arbitrary
+            ]
+    genTypeVerdict = elements [asDeclared, typeDiffers, Compute.MachineTypeUndetermined "unread"]
+    genScopeVerdict = elements [Compute.ScopesAsDeclared, differs, Compute.ScopesUndetermined "unread"]
+    genInstance :: Gen Compute.Instance
+    genInstance = do
+        scopes <- elements [Compute.DefaultScopes, Compute.DeclaredScopes [], Compute.DeclaredScopes ["storage-rw"], Compute.DeclaredScopes ["cloud-platform", "logging-write"]]
+        power <- genPower
+        account <- elements [Nothing, Just "vm@p.iam.gserviceaccount.com"]
+        tc <- genTypeChange
+        pure inst{Compute.instanceScopes = scopes, Compute.instancePower = power, Compute.instanceServiceAccount = account, Compute.instanceMachineTypeChange = tc}
+    -- a machine that is running or not: a step that GCP would refuse (the
+    -- scopes or the type set on a running machine, a stop of a stopped one)
+    -- is 'Nothing'
+    simulate :: Bool -> [Compute.InstanceStep] -> Maybe Bool
+    simulate running [] = Just running
+    simulate running (step : rest) = case (step, running) of
+        (Compute.StopStep, True) -> simulate False rest
+        (Compute.StartStep, False) -> simulate True rest
+        (Compute.SetScopesStep, False) -> simulate False rest
+        (Compute.SetMachineTypeStep, False) -> simulate False rest
+        _ -> Nothing
+    node i = only (Compute.gceInstance silent ignoreTrack i)
+    only o = case Map.elems (Dag.dagNodes (Dag.foldDag Dag.sameRepresentative (evalDeps o))) of
+        [act] -> act
+        acts -> error ("expected one node, got " <> show (length acts))
+    scoped scopes = inst{Compute.instanceScopes = Compute.DeclaredScopes scopes}
+    inst =
+        Compute.Instance
+            { Compute.instanceName = "toy-vm"
+            , Compute.instanceProject = Core.Project "p"
+            , Compute.instanceZone = Core.Zone "europe-west1-b"
+            , Compute.instanceMachineType = Compute.Custom "e2-micro"
+            , Compute.instanceBootDisk = Compute.BootDisk 10 Nothing (Just "ubuntu-2404-lts-amd64") (Just "ubuntu-os-cloud")
+            , Compute.instanceNetwork = "default"
+            , Compute.instanceSubnet = "default"
+            , Compute.instanceServiceAccount = Nothing
+            , Compute.instanceMetadata = Map.fromList [("enable-oslogin", "FALSE")]
+            , Compute.instanceMetadataFiles = Map.fromList [("startup-script", "/tmp/w/startup-script.sh")]
+            , Compute.instanceExternalAddress = Compute.ReservedExternal "toy-ip"
+            , Compute.instanceInternalAddress = Compute.EphemeralInternal
+            , Compute.instanceTags = ["toy-ssh"]
+            , Compute.instancePower = Compute.PoweredOn
+            , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             , Compute.instanceRunLimit = Compute.NoRunLimit
             }
@@ -1139,6 +1355,7 @@ instanceRunLimitTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             , Compute.instanceRunLimit = Compute.NoRunLimit
             }
@@ -4644,6 +4861,7 @@ vmTests =
             , Compute.instanceTags = ["toy-ssh"]
             , Compute.instancePower = Compute.PoweredOn
             , Compute.instanceScopes = Compute.DefaultScopes
+            , Compute.instanceScopeChange = Compute.RefuseScopeChange
             , Compute.instanceMachineTypeChange = Compute.RefuseMachineTypeChange
             , Compute.instanceRunLimit = Compute.NoRunLimit
             }

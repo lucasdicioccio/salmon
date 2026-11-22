@@ -2641,7 +2641,7 @@ captured); `salmon-cloudrun` is the one caller.
 `Gcp.Compute.Instance` carries `instanceScopes :: AccessScopes`: `DefaultScopes` passes nothing (the command, `ref`,
 `help` and empty `notes` every instance had), `DeclaredScopes` is `--scopes` with the scopes as written (gcloud aliases
 or full URIs; `[]` is `--no-scopes`) and a `scopes: ...` note. Load-bearing: **scopes are create-time only and the node
-never changes them** (GCP wants the instance stopped for that). With scopes declared, `check` runs a second `describe`
+never changes them** unless `instanceScopeChange` permits it, below (GCP wants the instance stopped for that). With scopes declared, `check` runs a second `describe`
 (`serviceAccounts[].scopes`) on an instance that exists and `interpretInstanceScopes` compares exact sets of URIs
 (`scopeAliases` expands the aliases); a difference is a `Failure` naming both sets, and `up` throws the same words
 *before* any start/stop/resume, so a running machine is neither stopped nor re-created. The remedy is the operator's
@@ -2649,6 +2649,30 @@ never changes them** (GCP wants the instance stopped for that). With scopes decl
 `Failure`/throw before any call. Layer 0 only (`Test/GcpSpec.hs`, "Compute.instanceScopes"): the alias table is from
 gcloud's documentation and the shape of that `describe` output has not been observed (the parser keeps the `https://`
 words whatever separates them); nothing was run against a real project.
+
+`Gcp.Compute.Instance` carries `instanceScopeChange :: ScopeChange`, the machine type's permission applied to the
+scopes (asked for by budgetz's GCP stack, whose machines keep gcloud's default scopes and so write backups with a
+delivered service-account key). `RefuseScopeChange` is exactly the behaviour above, kept byte-identical: no note, the
+same command/`ref`/`help`, `up` refuses *before* any other call with the words it always had (a test pins the failure
+text). `MayStopToChangeScopes` is the opt-in: `up` stops a `RUNNING` instance, runs
+`gcloud compute instances set-service-account NAME [--service-account SA] --scopes ...|--no-scopes`, and starts it
+again unless the declaration is `PoweredOff`, and the node carries a `scopes: may stop to change them` note. The pure
+`compareScopes` gives a `ScopeVerdict` and `planExistingInstanceScoped` (of which `planExistingInstance` is the
+`RefuseScopeChange`/`ScopesAsDeclared` case) decides the whole sequence with the machine type, before the run limit:
+one stop serves a permitted resize and a permitted scope change, a refused machine type stays a refusal whatever the
+scopes permit, and unread scopes or an unsettled/`SUSPENDED` instance are a reason and no call. Load-bearing:
+- `set-service-account` without `--service-account` gives the instance the project's default compute account (per
+  gcloud's help), which is also what `create` gave an instance declared with `instanceServiceAccount = Nothing`.
+- Standing permission, like `MayStopToResize`: under `serve` a later change of `instanceScopes` stops the machine
+  again. With `DefaultScopes` nothing is compared, so the permission never stops anything.
+- A failed `set-service-account` leaves the instance stopped; the next pass finds it `TERMINATED` with the old scopes,
+  sets them and starts it.
+- Adding the field is source-breaking for record constructions of `Instance` (every one in this repo declares
+  `RefuseScopeChange`); a construction that omits it is only a `-Wmissing-fields` warning and fails at `check`/`up`.
+Layer 0 only (`Test/GcpSpec.hs`, "Compute.instanceScopeChange": HUnit cases and QuickCheck properties over the
+comparison, the plan, the argv and what is rendered). **Not run**: the IO sequencing in `gceInstance`, with a real or a
+stand-in gcloud (same reason as the machine type); the `set-service-account` argv is from gcloud's documentation; no
+stop/rescope/start was ever run against a real project.
 
 `Gcp.Compute.gceInstance` compares an existing instance's **machine type** with `instanceMachineType` (it used to
 create with it and never look again, so a retyped declaration converged on the old machine). Both answers the request
