@@ -49,12 +49,12 @@ library
                     Migrator.Spec
 
     build-depends:    base >=4.16.3.0 && <4.22
-                    , aeson ^>=2.3.2.0
+                    , aeson >=2.2.5.1 && <2.4
                     , async ^>=2.2.6
                     , brick ^>=3.0
                     , bytestring ^>=0.12.2.0
                     , http-client ^>=0.7.19
-                    , containers ^>=0.7
+                    , containers >=0.6.8 && <0.8
                     , directory ^>=1.3.8.5
                     , filepath ^>=1.5.4.0
                     , layoutz-hs ^>=0.1.0.0
@@ -209,12 +209,12 @@ test-suite salmon-apps-test
                     , Test.ReportInboundSpec
                     , Test.ReportSpec
     build-depends:    base >=4.16.3.0 && <4.22
-                    , QuickCheck ^>=2.19.0.0
-                    , aeson ^>=2.3.2.0
+                    , QuickCheck >=2.18.0.0 && <2.20
+                    , aeson >=2.2.5.1 && <2.4
                     , bytestring ^>=0.12.2.0
                     , directory ^>=1.3.8.5
                     , filepath ^>=1.5.4.0
-                    , containers ^>=0.7
+                    , containers >=0.6.8 && <0.8
                     , process ^>=1.6.26.1
                     , network ^>=3.2.9.0
                     , salmon-apps

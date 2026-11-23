@@ -44,7 +44,8 @@ cabal build --project-file=cabal.perso.project salmon-ops-recipes-experimental s
 
 - GHC 9.10.3, no `source-repository-package` pins. `cabal.project.local` (tracked) carries
   `allow-newer` pins for `dhall-json`; do not remove without checking the build resolves.
-  Building the experimental package needs `allow-newer: acme-not-a-joke:filepath`.
+  The experimental package needs `acme-not-a-joke ^>=0.2` (no `allow-newer` since then), and
+  several external bounds are wide ranges so it resolves with `kitchen-sink` (`RELEASING.md`).
 - Test layers: Layer 0 is pure/in-process (graph shape, rendered scripts, parsers); Layer 2 runs
   real recipes in disposable podman containers or user-scope systemd (skipped loudly when the
   tool is missing); Layer 3 is qemu VMs. See `salmon-ops-recipes/test/Test/Harness.hs`.

@@ -8,7 +8,7 @@ import System.FilePath (takeDirectory, (</>))
 import Acme.NotAJoke.Api.Account (createAccount, fetchAccount, postCreateAccount)
 import Acme.NotAJoke.Api.CSR (CSR (..))
 import Acme.NotAJoke.Api.Directory (Directory (..), directory, fetchDirectory)
-import Acme.NotAJoke.Api.Endpoint (BaseUrl)
+import Acme.NotAJoke.Api.Endpoint (AcmeError, BaseUrl)
 import Acme.NotAJoke.Api.Nonce (getNonce)
 import Acme.NotAJoke.Api.Order (OrderIdentifier (..), OrderType (..), createOrder)
 import Acme.NotAJoke.CertManagement (loadDER)
@@ -45,9 +45,16 @@ acmeAccount acc =
     contacts = ["mailto:" <> getEmail acc.accountEmail]
     up = void $ do
         jwk <- fromJust <$> loadJWKFile (jwkfilepath acc.accountKey)
-        leDir <- fetchDirectory (directory acc.accountBaseUrl)
-        nonce <- fromJust <$> getNonce leDir.newNonce
-        postCreateAccount jwk leDir.newAccount nonce (createAccount contacts)
+        leDir <- orThrow "acme directory" =<< fetchDirectory (directory acc.accountBaseUrl)
+        nonce <- orThrow "acme nonce" =<< getNonce leDir.newNonce
+        orThrow "acme account creation" =<< postCreateAccount jwk leDir.newAccount nonce (createAccount contacts)
+
+{- | Since acme-not-a-joke 0.2, ACME calls return their errors (a rejected
+request, an unexpected response) as values; 0.1 threw them. Rethrowing keeps
+an 'up' that fails visibly.
+-}
+orThrow :: String -> Either AcmeError a -> IO a
+orThrow what = either (\e -> ioError $ userError $ what <> ": " <> show e) pure
 
 data Challenger
     = Challenger

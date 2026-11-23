@@ -200,19 +200,36 @@ alternate, heavier leaf (nothing in the default package set depends on it).
 
 `cabal.project` has no `source-repository-package` pins and no `with-compiler`: the author's other
 libraries (`acme-not-a-joke`, `prodapi-*`, `purescript-bridge`, `kitchen-sink`) resolve from Hackage,
-and the build is on GHC 9.10.3. Caveat: Hackage's `acme-not-a-joke-0.1.0.0` bounds `filepath <1.5`
-(GHC 9.10 ships 1.5), so a project building `salmon-ops-recipes-experimental` needs
-`allow-newer: acme-not-a-joke:filepath` until a new release. `cabal.perso.project` (untracked,
+and the build is on GHC 9.10.3. Hackage's `acme-not-a-joke-0.1.0.0` bounded `filepath <1.5` (GHC
+9.10 ships 1.5) and needed `allow-newer: acme-not-a-joke:filepath`; the experimental package now
+asks for `acme-not-a-joke ^>=0.2` (whose `filepath` bound admits 1.5, and whose API returns ACME
+errors as `Either AcmeError`: `Salmon.Builtin.Nodes.Acme` rethrows them, so a rejected request
+still fails `up` as the thrown exception of 0.1 did), so the pin is no longer needed, though
+harmless. `cabal.perso.project` (untracked,
 gitignored, alongside its `.perso.project.local`) carries an extra `salmon-personal-apps` package
 used only by the author's personal, non-public binaries.
 
 Every external `build-depends` of the four released packages (every component) is `^>=` the
 version the solver picked on GHC 9.10.3 on 2026-10-31 (`base` keeps its own range), so a new
 major on Hackage is excluded rather than tried. The lower bounds are therefore the versions that
-were built, not the oldest that would work; nothing older was tried. Policy and how to widen a
+were built, not the oldest that would work; nothing older was tried. Exception (2026-11-23): `kitchen-sink-0.2.0.0`
+(and the `prodapi-*` it pulls) caps `aeson <2.3`, `containers <0.7`, `crypton <1.1`, `tls <2.3`,
+and the TLS/JOSE stack under them, so with the tight bounds `cabal.perso.project` did not
+resolve. These are widened to explicit ranges whose lower end is what the perso plan resolved:
+`aeson >=2.2.5.1 && <2.4`, `containers >=0.6.8 && <0.8`, `crypton >=1.0.6 && <2.3`,
+`crypton-connection >=0.4.5 && <0.5`, `crypton-x509{,-store,-validation} >=1.8.0 && <1.11`,
+`http-client-tls >=0.3.6.4 && <0.5`, `jose >=0.11 && <0.14`, `jose-jwt >=0.10.0 && <0.12`,
+`tls >=2.2.2 && <2.5`, `QuickCheck >=2.18.0.0 && <2.20` (tests). Both ends were built: the main
+plan at the upper majors, the perso plan at exactly those lower versions; the majors in between
+(`crypton-x509 1.9`, `jose 0.12`, `tls 2.3`, `http-client-tls 0.3.x` above 0.3.6.4) were not. No source change was
+needed in the released packages for the older majors (salmon's keyed HMAC and JOSE code
+compiled unchanged against crypton 1.0.6 and jose 0.11). The ranges stay compatible with a
+kitchen-sink ported to the newer majors; they are not to be narrowed back while the experimental
+package depends on a kitchen-sink that needs the older ones. Policy and how to widen a
 bound are in `RELEASING.md` ("External bounds"). The 0.1.0.0/0.2.0.0 uploads on Hackage predate
 them; 0.3.0.0 is the first to carry them, and `salmon-core` 0.1.0.0 (not re-released) gets them
-only through a Hackage metadata revision. The experimental package has no bounds.
+only through a Hackage metadata revision. The experimental package has no bounds except
+`acme-not-a-joke ^>=0.2` (its code uses the 0.2 API).
 
 ## `rs/`: experimental Rust clients of `run serve --http`
 

@@ -30,9 +30,9 @@ library
                    , Salmon.Op.G
                    , Salmon.FoldBranch
     build-depends:    base >=4.16.3.0 && <4.22
-                    , aeson ^>=2.3.2.0
+                    , aeson >=2.2.5.1 && <2.4
                     , comonad ^>=5.0.10
-                    , containers ^>=0.7
+                    , containers >=0.6.8 && <0.8
                     , contravariant ^>=1.5.6
                     , free ^>=5.2
                     , text ^>=2.1.3
