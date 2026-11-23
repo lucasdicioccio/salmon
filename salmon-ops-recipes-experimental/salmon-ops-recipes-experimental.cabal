@@ -31,7 +31,7 @@ library
                    , Salmon.Builtin.Nodes.Acme
                    , Salmon.Builtin.Nodes.PgTurret
     build-depends:    base >=4.16.3.0
-                    , acme-not-a-joke
+                    , acme-not-a-joke ^>=0.2
                     , aeson
                     , base64-bytestring
                     , bytestring

@@ -93,11 +93,20 @@ executables, test suites, benchmark), carries a PVP major-version bound: `^>=` t
 `cabal build all` resolved on GHC 9.10.3 when the bound was last set, so the lower bound is
 what was built and the upper bound is that version's next major (`aeson ^>=2.3.2.0` is
 `>=2.3.2.0 && <2.4`). `base` keeps its explicit range. Internal dependencies are `--set-bounds`'s
-business, above. `salmon-ops-recipes-experimental` is not released and has no bounds.
+business, above. `salmon-ops-recipes-experimental` is not released and has no bounds (but `acme-not-a-joke ^>=0.2`).
 
 When a dependency's next major is out: build with it (`--allow-newer=PKG`), and if that passes,
 widen the bound to an explicit range (`>=OLD && <NEXT`) or move the `^>=` to the new version.
 `cabal check` warns of any external dependency left without an upper bound.
+
+Some bounds are explicit ranges rather than `^>=` because the unreleased
+`salmon-ops-recipes-experimental` must resolve against `kitchen-sink`, which still needs older
+majors (`aeson`, `containers`, `crypton`, `tls`, the `crypton-x509*`/`crypton-connection`/
+`http-client-tls`/`jose*` stack, `QuickCheck` in tests). Their lower ends are what the
+`cabal.perso.project` plan resolved; keep both plans building when touching them: `cabal build
+all`, and `cabal build --project-file=cabal.perso.project salmon-ops-recipes-experimental`
+(the list, and which versions were built, is in `resources/module-notes.md`, next to
+"Every external `build-depends`").
 
 These bounds reach Hackage only with a new version (or a Hackage metadata revision); the
 versions already published there were uploaded without them.
